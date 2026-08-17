@@ -1071,24 +1071,64 @@ impl SipSession {
         (handle, cmd_rx)
     }
 
-    /// Build the per-call Sipflow adapter over the server's shared backend when
-    /// caller leg A and its recording task are created.
-    fn sipflow_recorder(&self) -> Option<Box<dyn crate::media::media_recorder::MediaRecorder>> {
-        let recording = &self.context.dialplan.recording;
-        if !recording.enabled || recording.force_file {
-            return None;
+    /// Create the capture queue and task before constructing caller leg A.
+    /// The sender becomes immutable state on the leg's plaintext RTP tap.
+    fn setup_recording_capture(
+        &mut self,
+    ) -> Result<Option<crate::media::media_recorder::RecorderSender>> {
+        if !self.context.dialplan.recording.enabled {
+            return Ok(None);
         }
-        let call_id = self.context.session_id.clone();
-        self.server
+        let sender = self
+            .bridge_mut()
+            .ok_or_else(|| anyhow!("Recording requires MediaBridge"))?
+            .setup_recorder_task()?;
+        Ok(Some(sender))
+    }
+
+    /// Once caller media is negotiated, install the recorder implementation
+    /// selected by routing when automatic recording is enabled.
+    async fn set_auto_recorder(&mut self) -> Result<()> {
+        let recording = &self.context.dialplan.recording;
+        if !recording.enabled || !recording.auto_start {
+            return Ok(());
+        }
+
+        if recording.force_file || recording.option.is_some() {
+            let path = recording
+                .option
+                .as_ref()
+                .map(|option| option.recorder_file.clone())
+                .ok_or_else(|| anyhow!("file recording strategy has no output path"))?;
+            if path.trim().is_empty() {
+                return Err(anyhow!("file recording strategy has no output path"));
+            }
+            self.bridge_mut()
+                .ok_or_else(|| anyhow!("Recording requires MediaBridge"))?
+                .start_recording(path, 2, false, None)
+                .await?;
+            debug!(session_id = %self.id, backend = "file", "auto recorder activated at media setup");
+            return Ok(());
+        }
+
+        let sipflow_backend = self
+            .server
             .sip_flow
             .as_ref()
             .and_then(|flow| flow.backend())
-            .map(|backend| {
-                Box::new(crate::media::media_recorder::SipflowRecorder::new(
-                    backend, call_id,
-                )) as Box<dyn crate::media::media_recorder::MediaRecorder>
-            })
+            .ok_or_else(|| anyhow!("SipFlow recording strategy has no backend"))?;
+        let recorder = crate::media::media_recorder::SipflowRecorder::new(
+            sipflow_backend,
+            self.context.session_id.clone(),
+        );
+        self.bridge_mut()
+            .ok_or_else(|| anyhow!("Recording requires MediaBridge"))?
+            .set_recorder(Box::new(recorder), None)
+            .await?;
+        debug!(session_id = %self.id, backend = "sipflow", "auto recorder activated at media setup");
+        Ok(())
     }
+
     /// Put a leg on hold playing a file as hold music (looping).
     /// Ensure a conference exists — create it if missing.
 
@@ -2511,16 +2551,12 @@ impl SipSession {
         if mb.leg(side).is_some() {
             return Ok(());
         }
-        let sipflow_recorder = if side == crate::media::media_bridge::LegSide::A {
-            self.sipflow_recorder()
+        let recorder_sender = if side == crate::media::media_bridge::LegSide::A {
+            self.setup_recording_capture()?
         } else {
             None
         };
         let mb = self.bridge_mut().ok_or_else(|| anyhow!("No MediaBridge"))?;
-        let recorder_sender = match side {
-            crate::media::media_bridge::LegSide::A => Some(mb.start_recorder(sipflow_recorder)?),
-            crate::media::media_bridge::LegSide::B => None,
-        };
         let leg = crate::media::leg::LegInner::new(leg_label, &cfg, recorder_sender)?;
         mb.replace_leg(side, leg).await;
         Ok(())
@@ -2563,6 +2599,7 @@ impl SipSession {
                 warn!(session_id = %self.id, error = %e, "Failed to create caller MediaBridge leg");
                 return;
             }
+            let mut caller_media_ready = false;
             if let Some(mb) = self.bridge_mut() {
                 if let Some(leg) = mb.leg(crate::media::media_bridge::LegSide::A) {
                     if leg.negotiated().is_none() {
@@ -2572,8 +2609,15 @@ impl SipSession {
                     }
                     if let Err(e) = leg.apply_sdp(&sdp, rustrtc::SdpType::Answer).await {
                         warn!(session_id = %self.id, error = %e, "Failed to apply caller SDP to MediaBridge A leg");
+                    } else {
+                        caller_media_ready = true;
                     }
                 }
+            }
+            if caller_media_ready
+                && let Err(error) = self.set_auto_recorder().await
+            {
+                warn!(session_id = %self.id, %error, "Auto recorder activation at media setup failed");
             }
         }
 
@@ -4944,19 +4988,19 @@ impl SipSession {
         {
             return Ok(());
         }
-        let sipflow_recorder = self.sipflow_recorder();
+        let recorder_sender = self.setup_recording_capture()?;
         let mb = self.bridge_mut().ok_or_else(|| anyhow!("No MediaBridge"))?;
 
-        let leg = crate::media::leg::LegInner::new(
-            caller_label,
-            &cfg,
-            Some(mb.start_recorder(sipflow_recorder)?),
-        )?;
+        let leg = crate::media::leg::LegInner::new(caller_label, &cfg, recorder_sender)?;
         let answer = leg
             .apply_sdp(&caller_offer, rustrtc::SdpType::Offer)
             .await?;
         mb.replace_leg(crate::media::media_bridge::LegSide::A, leg)
             .await;
+
+        if let Err(error) = self.set_auto_recorder().await {
+            warn!(session_id = %self.id, %error, "Auto recorder activation at media setup failed");
+        }
 
         // Video policy = strip: disable video on the media path — the answer's
         // video m-line is forced inactive (port 0) so the caller can't send
@@ -6598,29 +6642,6 @@ impl SipSession {
                     entry.callee = callee.clone();
                 }
             });
-
-        // Auto-start recording when the call is answered if configured.
-        if self.context.dialplan.recording.enabled
-            && self.context.dialplan.recording.auto_start
-            && let Some(ref option) = self.context.dialplan.recording.option
-        {
-            let path = option.recorder_file.clone();
-            let result = if path.is_empty() {
-                Ok(())
-            } else {
-                match self.bridge_mut() {
-                    Some(bridge) => bridge.start_recording(path, 2, false, None).await,
-                    None => Err(anyhow!("Recording requires MediaBridge")),
-                }
-            };
-            if let Err(e) = result {
-                warn!(session_id = %self.id,
-                    session_id = %self.context.session_id,
-                    error = %e,
-                    "Auto-start recording failed"
-                );
-            }
-        }
 
         // Fire session lifecycle hooks.
         if !self.server.session_hooks.is_empty() {
@@ -8739,13 +8760,13 @@ impl SipSession {
 
             CallCommand::StartRecording { config } => {
                 let result = async {
-                    // Note: the dialplan `recording.enabled` flag governs only
-                    // *automatic* recording on answer (see call/mod.rs). An
-                    // explicit record.start command (e.g. from RWI on an
-                    // outbound-originated call, where the dialplan never sets
-                    // recording.enabled) must be honoured on demand — so we do
-                    // NOT gate on it here. Recording still requires a
-                    // MediaBridge (the actual media plane).
+                    // The recorder sender/task is attached only while building
+                    // an enabled recording call. An explicit start activates
+                    // that prepared task; it cannot retrofit capture onto a
+                    // call whose media leg was built with recording disabled.
+                    if !self.context.dialplan.recording.enabled {
+                        return Err(anyhow!("recording is not enabled for this call"));
+                    }
                     let bridge = self
                         .bridge_mut()
                         .ok_or_else(|| anyhow!("Recording requires MediaBridge"))?;

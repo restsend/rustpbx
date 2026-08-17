@@ -1,5 +1,6 @@
 use super::common::{
-    create_test_request, create_test_server, create_test_server_with_config, create_transaction,
+    create_test_request, create_test_server, create_test_server_with_config,
+    create_test_server_with_config_and_sipflow_backend, create_transaction,
 };
 use crate::call::domain::{CallCommand, Leg, LegId, LegState, MediaPathMode, ReturnAppSpec};
 use crate::call::runtime::{AppRuntime, AppRuntimeError, BridgeConfig};
@@ -22,6 +23,51 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+struct CountingSipflowBackend {
+    rtp_records: AtomicUsize,
+}
+
+#[async_trait]
+impl crate::sipflow::SipFlowBackend for CountingSipflowBackend {
+    fn record(
+        &self,
+        _call_id: std::borrow::Cow<'_, str>,
+        item: crate::sipflow::SipFlowItem,
+    ) -> anyhow::Result<()> {
+        if item.msg_type == crate::sipflow::SipFlowMsgType::Rtp {
+            self.rtp_records.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    async fn query_flow(
+        &self,
+        _call_id: &str,
+        _start_time: chrono::DateTime<chrono::Local>,
+        _end_time: chrono::DateTime<chrono::Local>,
+    ) -> anyhow::Result<Vec<crate::sipflow::SipFlowItem>> {
+        Ok(Vec::new())
+    }
+
+    async fn query_media_stats(
+        &self,
+        _call_id: &str,
+        _start_time: chrono::DateTime<chrono::Local>,
+        _end_time: chrono::DateTime<chrono::Local>,
+    ) -> anyhow::Result<Vec<crate::sipflow::SipFlowMediaStats>> {
+        Ok(Vec::new())
+    }
+
+    async fn query_media(
+        &self,
+        _call_id: &str,
+        _start_time: chrono::DateTime<chrono::Local>,
+        _end_time: chrono::DateTime<chrono::Local>,
+    ) -> anyhow::Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+}
 
 struct AlreadyRunningThenOkRuntime {
     start_calls: AtomicUsize,
@@ -265,6 +311,18 @@ async fn build_session_on_server(
     session
 }
 
+fn recording_test_offer() -> String {
+    "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 40000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n".to_string()
+}
+
+async fn setup_recording_test_media(session: &mut SipSession) {
+    session.media.caller_offer = Some(recording_test_offer());
+    session
+        .create_callee_track(false)
+        .await
+        .expect("create recording test media");
+}
+
 fn build_dialplan_with_mode(mode: MediaProxyMode) -> Dialplan {
     let request = create_test_request(
         rsipstack::sip::Method::Invite,
@@ -417,6 +475,208 @@ async fn test_media_proxy_auto_keeps_plain_targets_bypass_without_recording() {
 
     let session = build_session(dialplan).await;
     assert_eq!(session.media_profile.path, MediaPathMode::Bypass);
+}
+
+#[tokio::test]
+async fn recording_disabled_does_not_create_capture_task() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+        "ivr".to_string(),
+        None,
+        true,
+    );
+    let mut session = build_session(dialplan).await;
+
+    setup_recording_test_media(&mut session).await;
+
+    assert!(
+        !session
+            .media
+            .bridge
+            .as_ref()
+            .expect("media bridge")
+            .has_recorder_task(),
+        "disabled recording must not create a capture sender/task"
+    );
+    if let Some(mut bridge) = session.media.bridge.take() {
+        bridge.close();
+    }
+}
+
+#[tokio::test]
+async fn recording_enabled_manual_start_creates_idle_capture_task() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("manual.wav").to_string_lossy().into_owned();
+    let recording = crate::call::CallRecordingConfig {
+        enabled: true,
+        option: Some(crate::media::recorder::RecorderOption::new(path.clone())),
+        auto_start: false,
+        force_file: true,
+        stereo_swap: false,
+    };
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
+        .with_application("ivr".to_string(), None, true)
+        .with_recording(recording);
+    let mut session = build_session(dialplan).await;
+
+    setup_recording_test_media(&mut session).await;
+
+    assert!(
+        session
+            .media
+            .bridge
+            .as_ref()
+            .expect("media bridge")
+            .has_recorder_task(),
+        "enabled recording must prepare the capture sender/task"
+    );
+    assert!(
+        !std::path::Path::new(&path).exists(),
+        "auto_start=false must leave the recorder backend idle"
+    );
+    if let Some(mut bridge) = session.media.bridge.take() {
+        bridge.stop_recording().await.expect("stop idle recorder");
+        bridge.close();
+    }
+}
+
+#[tokio::test]
+async fn file_recording_auto_starts_at_media_setup() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("auto.wav").to_string_lossy().into_owned();
+    let recording = crate::call::CallRecordingConfig {
+        enabled: true,
+        option: Some(crate::media::recorder::RecorderOption::new(path.clone())),
+        auto_start: true,
+        force_file: true,
+        stereo_swap: false,
+    };
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
+        .with_application("ivr".to_string(), None, true)
+        .with_recording(recording);
+    let mut session = build_session(dialplan).await;
+
+    setup_recording_test_media(&mut session).await;
+
+    assert!(
+        std::path::Path::new(&path).exists(),
+        "file recorder must be initialized as soon as caller media setup completes"
+    );
+    if let Some(mut bridge) = session.media.bridge.take() {
+        assert!(
+            bridge
+                .stop_recording()
+                .await
+                .expect("stop file recorder")
+                .is_some(),
+            "active file recorder must return a finalized result"
+        );
+        bridge.close();
+    }
+}
+
+#[tokio::test]
+async fn sipflow_recording_auto_starts_at_media_setup() {
+    use rustrtc::peer_connection::RtpObserver;
+
+    let backend = Arc::new(CountingSipflowBackend {
+        rtp_records: AtomicUsize::new(0),
+    });
+    let (server, _) = create_test_server_with_config_and_sipflow_backend(
+        ProxyConfig::default(),
+        Some(backend.clone()),
+    )
+    .await;
+    let recording = crate::call::CallRecordingConfig {
+        enabled: true,
+        option: None,
+        auto_start: true,
+        force_file: false,
+        stereo_swap: false,
+    };
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
+        .with_application("ivr".to_string(), None, true)
+        .with_recording(recording);
+    let mut session = build_session_on_server(server, dialplan).await;
+
+    setup_recording_test_media(&mut session).await;
+    let packet = rustrtc::rtp::RtpPacket::new(
+        rustrtc::rtp::RtpHeader::new(0, 1, 160, 1234),
+        vec![0xff; 160],
+    );
+    session
+        .media
+        .bridge
+        .as_ref()
+        .expect("media bridge")
+        .leg(crate::media::media_bridge::LegSide::A)
+        .expect("caller leg")
+        .ingress_tap()
+        .on_ingress(&packet, "127.0.0.1:40000".parse().unwrap());
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while backend.rtp_records.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("SipFlow recorder did not receive RTP after media setup");
+
+    if let Some(mut bridge) = session.media.bridge.take() {
+        bridge.stop_recording().await.expect("stop SipFlow recorder");
+        bridge.close();
+    }
+}
+
+#[tokio::test]
+async fn sipflow_recording_auto_start_false_keeps_backend_idle() {
+    use rustrtc::peer_connection::RtpObserver;
+
+    let backend = Arc::new(CountingSipflowBackend {
+        rtp_records: AtomicUsize::new(0),
+    });
+    let (server, _) = create_test_server_with_config_and_sipflow_backend(
+        ProxyConfig::default(),
+        Some(backend.clone()),
+    )
+    .await;
+    let recording = crate::call::CallRecordingConfig {
+        enabled: true,
+        option: None,
+        auto_start: false,
+        force_file: false,
+        stereo_swap: false,
+    };
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
+        .with_application("ivr".to_string(), None, true)
+        .with_recording(recording);
+    let mut session = build_session_on_server(server, dialplan).await;
+
+    setup_recording_test_media(&mut session).await;
+    let bridge = session.media.bridge.as_ref().expect("media bridge");
+    assert!(
+        bridge.has_recorder_task(),
+        "enabled manual recording must prepare the capture sender/task"
+    );
+    let packet = rustrtc::rtp::RtpPacket::new(
+        rustrtc::rtp::RtpHeader::new(0, 1, 160, 1234),
+        vec![0xff; 160],
+    );
+    bridge
+        .leg(crate::media::media_bridge::LegSide::A)
+        .expect("caller leg")
+        .ingress_tap()
+        .on_ingress(&packet, "127.0.0.1:40000".parse().unwrap());
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert_eq!(
+        backend.rtp_records.load(Ordering::SeqCst),
+        0,
+        "auto_start=false must not activate the SipFlow backend"
+    );
+
+    if let Some(mut bridge) = session.media.bridge.take() {
+        bridge.stop_recording().await.expect("stop idle recorder");
+        bridge.close();
+    }
 }
 
 #[tokio::test]
@@ -1322,7 +1582,7 @@ async fn playable_bridge(session_id: &str) -> crate::media::media_bridge::MediaB
     use crate::media::leg::{LegConfig, LegInner};
     use crate::media::media_bridge::{LegSide, MediaBridge};
     let mut mb = MediaBridge::new(session_id);
-    let recorder_sender = mb.start_recorder(None).expect("recording task");
+    let recorder_sender = mb.setup_recorder_task().expect("recording task");
     let a = LegInner::new("a", &LegConfig::rtp_pcmu(), Some(recorder_sender)).expect("leg a");
     let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).expect("leg b");
     mb.replace_leg(LegSide::A, a).await;

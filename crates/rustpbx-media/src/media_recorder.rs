@@ -232,9 +232,7 @@ pub struct RecorderSender {
 pub type RecordingCompletion = Result<Option<RecordingResult>>;
 
 impl RecorderHandle {
-    pub(crate) fn new(
-        initial_recorder: Option<Box<dyn MediaRecorder>>,
-    ) -> (
+    pub(crate) fn new() -> (
         Self,
         RecorderSender,
         tokio::task::JoinHandle<RecordingCompletion>,
@@ -242,9 +240,7 @@ impl RecorderHandle {
         let (rtp_tx, rtp_rx) = mpsc::channel(DEFAULT_CAPTURE_QUEUE_CAPACITY);
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let join = tokio::spawn(async move {
-            let result = RecorderTask::new(rtp_rx, command_rx, initial_recorder)
-                .run()
-                .await;
+            let result = RecorderTask::new(rtp_rx, command_rx).run().await;
             if let Err(error) = &result {
                 warn!(%error, "recording task failed");
             }
@@ -338,12 +334,11 @@ impl RecorderTask {
     fn new(
         rtp_rx: mpsc::Receiver<CapturedRtp>,
         command_rx: mpsc::UnboundedReceiver<RecorderCommand>,
-        recorder: Option<Box<dyn MediaRecorder>>,
     ) -> Self {
         Self {
             rtp_rx,
             command_rx,
-            recorder,
+            recorder: None,
             paused: false,
             deadline: None,
             rtp_open: true,
@@ -351,10 +346,6 @@ impl RecorderTask {
     }
 
     async fn run(mut self) -> RecordingCompletion {
-        if let Some(recorder) = self.recorder.as_mut() {
-            recorder.initialize().await?;
-        }
-
         loop {
             tokio::select! {
                 biased;
@@ -543,7 +534,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_stop_returns_task_result() {
-        let (handle, sender, join) = RecorderHandle::new(None);
+        let (handle, sender, join) = RecorderHandle::new();
         let temp = tempfile::NamedTempFile::new().unwrap();
         let path = temp.path().to_string_lossy().into_owned();
         drop(temp);
@@ -567,7 +558,7 @@ mod tests {
 
     #[tokio::test]
     async fn max_duration_returns_task_result() {
-        let (handle, sender, join) = RecorderHandle::new(None);
+        let (handle, sender, join) = RecorderHandle::new();
         let temp = tempfile::NamedTempFile::new().unwrap();
         let path = temp.path().to_string_lossy().into_owned();
         drop(temp);
@@ -598,7 +589,11 @@ mod tests {
     async fn sipflow_does_not_flush_shared_backend_when_handle_is_dropped() {
         let backend = Arc::new(CountingBackend::new());
         let initial = SipflowRecorder::new(backend.clone(), "call-1");
-        let (handle, sender, _join) = RecorderHandle::new(Some(Box::new(initial)));
+        let (handle, sender, _join) = RecorderHandle::new();
+        handle
+            .set_recorder(Box::new(initial), None)
+            .await
+            .unwrap();
         sender.write_sample(PacketDirection::Ingress, &packet(0, 1, 160));
         drop(handle);
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -616,7 +611,11 @@ mod tests {
     async fn stop_without_file_recorder_finishes_with_no_file_result() {
         let backend = Arc::new(CountingBackend::new());
         let initial = SipflowRecorder::new(backend.clone(), "call-1");
-        let (handle, sender, join) = RecorderHandle::new(Some(Box::new(initial)));
+        let (handle, sender, join) = RecorderHandle::new();
+        handle
+            .set_recorder(Box::new(initial), None)
+            .await
+            .unwrap();
 
         sender.write_sample(PacketDirection::Ingress, &packet(0, 1, 160));
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -636,8 +635,11 @@ mod tests {
     async fn setting_file_recorder_finalizes_previous_sipflow_recorder() {
         let backend = Arc::new(CountingBackend::new());
         let initial = SipflowRecorder::new(backend.clone(), "call-1");
-        let (handle, _sender, join) =
-            RecorderHandle::new(Some(Box::new(initial)));
+        let (handle, _sender, join) = RecorderHandle::new();
+        handle
+            .set_recorder(Box::new(initial), None)
+            .await
+            .unwrap();
         let temp = tempfile::NamedTempFile::new().unwrap();
         let path = temp.path().to_string_lossy().into_owned();
         drop(temp);

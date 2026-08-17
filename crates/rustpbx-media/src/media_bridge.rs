@@ -94,8 +94,8 @@ pub struct MediaBridge {
     leg_a: Option<Leg>,
     leg_b: Option<Leg>,
     route_active: bool,
-    /// Control half of the call-scoped recording task, installed when the
-    /// caller-facing A leg is constructed.
+    /// Control half of the call-scoped recording task, installed only when
+    /// recording setup is enabled for the caller-facing A leg.
     recorder_handle: Option<RecorderHandle>,
     recorder_join: Option<tokio::task::JoinHandle<RecordingCompletion>>,
     dtmf_bus: broadcast::Sender<(LegSide, DtmfEvent)>,
@@ -183,17 +183,14 @@ impl MediaBridge {
         }
     }
 
-    /// Start the recording task while caller leg A is being constructed. The
-    /// bridge retains the control half and the caller receives the data-plane
-    /// sender directly.
-    pub fn start_recorder(
-        &mut self,
-        recorder: Option<Box<dyn MediaRecorder>>,
-    ) -> Result<RecorderSender> {
+    /// Create only the call-scoped capture task and return the sender that must
+    /// be supplied while constructing the caller leg. Recorder implementation
+    /// selection is a separate media-setup operation through `set_recorder`.
+    pub fn setup_recorder_task(&mut self) -> Result<RecorderSender> {
         if self.recorder_handle.is_some() {
             return Err(anyhow!("recording task is already started"));
         }
-        let (handle, sender, join) = RecorderHandle::new(recorder);
+        let (handle, sender, join) = RecorderHandle::new();
         self.recorder_handle = Some(handle);
         self.recorder_join = Some(join);
         Ok(sender)
@@ -213,11 +210,26 @@ impl MediaBridge {
             .and_then(|leg| leg.negotiated())
             .ok_or_else(|| anyhow!("no negotiated A-leg profile to record"))?;
         let recorder = FileRecorder::new(path, caller_profile, channels, mono_caller_only);
+        self.set_recorder(Box::new(recorder), max_duration)
+            .await
+    }
+
+    /// Install and initialize the selected recorder implementation in the
+    /// capture task that was prepared before caller-leg construction.
+    pub async fn set_recorder(
+        &mut self,
+        recorder: Box<dyn MediaRecorder>,
+        max_duration: Option<Duration>,
+    ) -> Result<()> {
         self.recorder_handle
             .as_ref()
             .ok_or_else(|| anyhow!("recording task is unavailable"))?
-            .set_recorder(Box::new(recorder), max_duration)
+            .set_recorder(recorder, max_duration)
             .await
+    }
+
+    pub fn has_recorder_task(&self) -> bool {
+        self.recorder_handle.is_some()
     }
 
     pub fn pause_recording(&self) -> Result<()> {

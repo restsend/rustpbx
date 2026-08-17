@@ -1175,6 +1175,14 @@ impl RwiCommandProcessor {
                 Dialplan::new(call_id.clone(), synthetic_request, DialDirection::Outbound)
                     .with_caller(caller_uri.clone())
                     .with_media(media.clone());
+            if record_on_answer.is_some() {
+                // Arm the capture sender/task before the caller media leg is
+                // constructed. The originate flow activates the file backend
+                // with StartRecording after the outbound call is answered.
+                dialplan.recording.enabled = true;
+                dialplan.recording.auto_start = false;
+                dialplan.recording.force_file = true;
+            }
             if let Some(hints) = routed_hints {
                 dialplan = dialplan.with_hints(hints);
             }

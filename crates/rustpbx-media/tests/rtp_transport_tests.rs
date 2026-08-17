@@ -321,7 +321,11 @@ impl TestMediaHarness {
         let codec_a = MediaNegotiator::codec_info_for_type(codec_a);
         let codec_b = MediaNegotiator::codec_info_for_type(codec_b);
         let mut mb = MediaBridge::new("rtp-test");
-        let recorder_sender = mb.start_recorder(recorder).unwrap();
+        let recorder_sender = if recorder.is_some() {
+            Some(mb.setup_recorder_task().unwrap())
+        } else {
+            None
+        };
 
         let leg_a = LegInner::from_rtc_config(
             "a",
@@ -329,7 +333,7 @@ impl TestMediaHarness {
             vec![codec_a.clone()],
             true,
             -35.0,
-            Some(recorder_sender),
+            recorder_sender,
         )
         .unwrap();
         let leg_b = LegInner::from_rtc_config(
@@ -366,6 +370,9 @@ impl TestMediaHarness {
 
         mb.replace_leg(LegSide::A, leg_a.clone()).await;
         mb.replace_leg(LegSide::B, leg_b.clone()).await;
+        if let Some(recorder) = recorder {
+            mb.set_recorder(recorder, None).await.unwrap();
+        }
 
         Self { mb, test_a, test_b }
     }

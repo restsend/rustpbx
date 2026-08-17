@@ -183,14 +183,15 @@ type = "extension"
 # video_policy = "pass_through"
 
 # ── Recording ─────────────────────────────────────────────────────────────────
-# IMPORTANT: [recording] and [sipflow] are mutually exclusive for RTP capture,
-# UNLESS force_file = true is set (see below).
+# [recording].enabled is the master switch for RTP capture, regardless of
+# whether the selected recorder is SipFlow or the legacy WAV file recorder.
+# auto_start starts that selected recorder when caller media setup completes.
 #
-#   • Default (recommended): Omit [recording]. SipFlow captures both SIP
-#     signalling and RTP audio.
+#   • Default (recommended): Configure both [recording] and [sipflow]. SipFlow
+#     captures SIP signalling and, when recording is enabled, RTP audio.
 #
 #   • Legacy: Configure [recording] WITHOUT [sipflow]. The live WAV recorder
-#     owns RTP recording. No SIP signalling capture.
+#     is selected as the fallback. No SIP signalling capture.
 #
 #   • Hybrid (force_file): Configure BOTH [recording] and [sipflow], then set
 #     force_file = true inside [recording]. The WAV file recorder captures
@@ -198,17 +199,16 @@ type = "extension"
 #     through [recording] (type = "http" or "s3"), signalling upload goes
 #     through [sipflow.upload] (signaling = true).
 #
-# Uncomment below when you need the legacy WAV recorder or the hybrid mode.
-# [recording]
-# enabled = true
-# auto_start = true
-# # Recording upload mode: "local" (default), "http", or "s3".
-# # type = "local"
-# # path = "./recordings"
-# # force_file = true   # Use WAV file recorder for media even when [sipflow]
-#                      # is active. SipFlow captures signalling only.
-#                      # Media upload is handled by [recording] (type = http/s3),
-#                      # not [sipflow.upload].
+[recording]
+enabled = true
+auto_start = true
+# Recording upload mode: "local" (default), "http", or "s3".
+# type = "local"
+# path = "./config/recorders"  # default when omitted or blank
+# force_file = true   # Use WAV file recorder for media even when [sipflow]
+#                     # is active. SipFlow captures signalling only.
+#                     # Media upload is handled by [recording] (type = http/s3),
+#                     # not [sipflow.upload].
 
 # ── Live transcription (streaming ASR) ───────────────────────────────────────
 # Real-time call transcription over a streaming ASR WebSocket. When configured,
@@ -287,9 +287,10 @@ type = "extension"
 
 # ── SipFlow ───────────────────────────────────────────────────────────────────
 # Unified SIP + RTP recording system (default).
-# When enabled WITHOUT a [recording] section, SipFlow captures both SIP
-# signalling and RTP audio. The console shows the SIP flow ladder and an
-# audio player for each call.
+# [sipflow] enables SIP signalling capture. RTP audio capture additionally
+# requires [recording].enabled = true; when auto_start is true, the SipFlow
+# recorder starts at caller media setup. The console then shows the SIP flow
+# ladder and an audio player for each recorded call.
 #
 # When [recording] force_file = true is also set, SipFlow captures SIP
 # signalling ONLY. Audio is recorded to a WAV file by the [recording]

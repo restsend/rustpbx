@@ -31,7 +31,14 @@ pub async fn create_test_server() -> (Arc<SipServerInner>, Arc<ProxyConfig>) {
 
 /// Creates a test SIP server with custom config
 pub async fn create_test_server_with_config(
+    config: ProxyConfig,
+) -> (Arc<SipServerInner>, Arc<ProxyConfig>) {
+    create_test_server_with_config_and_sipflow_backend(config, None).await
+}
+
+pub async fn create_test_server_with_config_and_sipflow_backend(
     mut config: ProxyConfig,
+    sipflow_backend: Option<Arc<dyn crate::sipflow::SipFlowBackend>>,
 ) -> (Arc<SipServerInner>, Arc<ProxyConfig>) {
     // Add rustpbx.com to the allowed realms for testing
     if config.realms.is_none() {
@@ -104,7 +111,9 @@ pub async fn create_test_server_with_config(
         ignore_out_of_dialog_request: true,
         locator_events: Some(locator_events_tx),
         sipflow_config: ArcSwap::new(Arc::new(None)),
-        sip_flow: None,
+        sip_flow: sipflow_backend.map(|backend| {
+            crate::callrecord::sipflow::SipFlow::new(Some(backend), Vec::new(), false)
+        }),
         active_call_registry: Arc::new(ActiveProxyCallRegistry::new()),
         frequency_limiter: None,
         call_record_hooks: Arc::new(Vec::new()),

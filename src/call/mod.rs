@@ -638,7 +638,7 @@ pub struct CallRecordingConfig {
     pub enabled: bool,
     /// Recording configuration
     pub option: Option<RecorderOption>,
-    /// Auto start recording when call is answered
+    /// Auto start the selected recorder when caller media setup completes.
     pub auto_start: bool,
     /// When true, use the legacy WAV file recorder instead of SipFlow for
     /// media capture. SipFlow captures SIP signalling only.

@@ -332,7 +332,7 @@ GET /ami/v1/sipflow/media/abc123?start=1713232800&end=1713234600
 
 ### Scenario D: Compliance Recording
 
-Two recording backends are available — a traditional local file recorder (`[recording]`) and sipflow (`[sipflow]`). When both are configured, sipflow takes precedence for media capture and upload, avoiding duplicate local WAV files.
+Two recording backends are available — a traditional local file recorder (`[recording]`) and sipflow (`[sipflow]`). `[recording].enabled` controls RTP capture for both backends. When `auto_start = true`, the selected backend starts after caller media negotiation completes. When both sections are configured, sipflow takes precedence unless `force_file = true`, avoiding duplicate media capture.
 
 #### Option 1: SipFlow recording (recommended)
 
@@ -358,7 +358,7 @@ media = true
 signaling = true
 ```
 
-When sipflow backend is present, `[recording]` enables media anchoring only; media capture and upload are handled by sipflow. The WAV is generated on-demand from stored RTP packets via `GET /sipflow/media/{call_id}` and uploaded to the sipflow S3/HTTP target. Signaling is uploaded as JSONL to the same target.
+When the sipflow backend is present, `[recording].enabled` enables both media anchoring and SipFlow RTP capture. Disabling recording stops RTP capture while `[sipflow]` may continue recording SIP signalling. The WAV is generated on-demand from stored RTP packets via `GET /sipflow/media/{call_id}` and uploaded to the sipflow S3/HTTP target. Signaling is uploaded as JSONL to the same target.
 
 #### Option 2: Local file recorder (legacy)
 

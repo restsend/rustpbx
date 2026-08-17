@@ -176,7 +176,7 @@ async fn recorder_sender_receives_ingress_via_tap() {
     let (recorder, mut rx) = recorder_capture("it-rec");
 
     let mut mb = MediaBridge::new("it-rec");
-    let recorder_sender = mb.start_recorder(Some(recorder)).unwrap();
+    let recorder_sender = mb.setup_recorder_task().unwrap();
     let a = LegInner::new(
         "a",
         &LegConfig::rtp_pcmu(),
@@ -184,6 +184,7 @@ async fn recorder_sender_receives_ingress_via_tap() {
     )
     .unwrap();
     mb.replace_leg(LegSide::A, a).await;
+    mb.set_recorder(recorder, None).await.unwrap();
 
     // Synthesize an ingress packet by calling the tap directly (the real RTP
     // path is covered by the transport tests).
@@ -216,7 +217,7 @@ async fn recorder_sender_receives_dtmf_rtp_packets() {
     let (recorder, mut rx) = recorder_capture("it-dtmf-rec");
 
     let mut mb = MediaBridge::new("it-dtmf-rec");
-    let recorder_sender = mb.start_recorder(Some(recorder)).unwrap();
+    let recorder_sender = mb.setup_recorder_task().unwrap();
     let a = LegInner::new(
         "a",
         &LegConfig::rtp_pcmu(),
@@ -224,6 +225,7 @@ async fn recorder_sender_receives_dtmf_rtp_packets() {
     )
     .unwrap();
     mb.replace_leg(LegSide::A, a).await;
+    mb.set_recorder(recorder, None).await.unwrap();
     let leg_a = mb.leg(LegSide::A).unwrap();
     let tap = leg_a.ingress_tap();
     tap.set_dtmf_payload_types(vec![101]);
@@ -426,7 +428,7 @@ async fn file_recorder_writes_wav() {
     let path = tmp.to_string_lossy().to_string();
 
     let mut mb = MediaBridge::new("it-rec-file");
-    let recorder_sender = mb.start_recorder(None).unwrap();
+    let recorder_sender = mb.setup_recorder_task().unwrap();
 
     // Create the caller and its recording task together, then install the
     // file backend through the bridge's control handle.

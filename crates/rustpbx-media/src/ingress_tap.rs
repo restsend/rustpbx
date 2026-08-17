@@ -96,9 +96,9 @@ pub struct IngressTap {
     dtmf_tx: broadcast::Sender<DtmfEvent>,
 
     // ── recording ───────────────────────────────────────────────────────
-    /// Immutable sender for the call-scoped recording task. The caller leg
-    /// receives it when this tap is constructed; both RTP directions can use
-    /// the sender concurrently without synchronization here.
+    /// Sender for the call-scoped recording task. Recording-enabled calls
+    /// supply it when the caller leg is constructed; it then remains immutable
+    /// for the tap's lifetime.
     recorder_sender: Option<RecorderSender>,
 }
 

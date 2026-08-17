@@ -1121,13 +1121,14 @@ impl CallModule {
         // sipflow for media capture and upload instead — unless force_file is
         // set, in which case the legacy WAV file recorder is used and sipflow
         // captures SIP signalling only.
-        let use_sipflow = self
-            .inner
-            .server
-            .sip_flow
-            .as_ref()
-            .and_then(|sf| sf.backend())
-            .is_some();
+        let use_sipflow = dialplan.enable_sipflow
+            && self
+                .inner
+                .server
+                .sip_flow
+                .as_ref()
+                .and_then(|sf| sf.backend())
+                .is_some();
 
         let force_file = policy.force_file.unwrap_or(false);
 
