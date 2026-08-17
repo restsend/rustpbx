@@ -519,15 +519,13 @@ impl MediaBridge {
             // destination is plain RTP.
             //
             // SSRC selection for relayed audio:
-            // Both directions use a distinct random SSRC to avoid timeline
-            // pollution on the playback SSRC. The rewrite bridge stamps the
-            // destination's SDES-MID extension header on forwarded packets
-            // (when the destination is WebRTC), so the browser attributes
-            // them to the correct audio track regardless of SSRC.
+            // A WebRTC destination must receive the sender SSRC advertised in
+            // its SDP. A plain RTP destination can keep the separate relay
+            // SSRC used to isolate later local playback from relayed media.
             let a_playback_ssrc = crate::leg::sender_ssrc_for_kind(la.pc(), MediaKind::Audio);
             let b_playback_ssrc = crate::leg::sender_ssrc_for_kind(lb.pc(), MediaKind::Audio);
-            let a_relay_ssrc = distinct_relay_ssrc(a_playback_ssrc);
-            let b_relay_ssrc = distinct_relay_ssrc(b_playback_ssrc);
+            let a_relay_ssrc = relay_audio_ssrc(&a_transport, a_playback_ssrc);
+            let b_relay_ssrc = relay_audio_ssrc(&b_transport, b_playback_ssrc);
             let a_video_ssrc = crate::leg::sender_ssrc_for_kind(la.pc(), rustrtc::MediaKind::Video);
             let b_video_ssrc = crate::leg::sender_ssrc_for_kind(lb.pc(), rustrtc::MediaKind::Video);
             // SDES-MID (ext id, value) per destination m-line: audio rules stamp
@@ -1348,7 +1346,10 @@ fn get_audio_recv_track(pc: &rustrtc::PeerConnection) -> Option<Arc<dyn MediaStr
         .map(|r| -> Arc<dyn MediaStreamTrack> { r.track() })
 }
 
-fn distinct_relay_ssrc(playback_ssrc: u32) -> u32 {
+fn relay_audio_ssrc(transport: &rustrtc::TransportMode, playback_ssrc: u32) -> u32 {
+    if *transport == rustrtc::TransportMode::WebRtc {
+        return playback_ssrc;
+    }
     loop {
         let ssrc = rand::random::<u32>();
         if ssrc != 0 && ssrc != playback_ssrc {

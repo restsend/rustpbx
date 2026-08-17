@@ -1195,8 +1195,7 @@ async fn fast_path_rtp_pcmu_uses_separate_relay_ssrc() {
 // Each test verifies audio flow in BOTH directions (caller→agent and
 // agent→caller) and asserts the SSRC attribution rule:
 //   - relay to a WebRTC destination must use the leg's sender (playback) SSRC
-//     so the browser can attribute it to the negotiated audio track (MID-based
-//     SSRC learning from prior playback/silence frames).
+//     because that is the SSRC advertised to the browser in the leg's SDP.
 //   - relay to a plain RTP destination uses a distinct random relay SSRC
 //     (RTP peers are SSRC-tolerant and don't need MID attribution).
 
@@ -1248,9 +1247,8 @@ async fn relay_full_duplex_rtp_rtp() {
     tokio::time::sleep(Duration::from_millis(80)).await;
 }
 
-/// WebRTC ↔ WebRTC: both legs use DTLS-SRTP. The rewrite bridge stamps the
-/// destination's SDES-MID on forwarded packets, so the browser attributes
-/// relayed audio to the track regardless of (distinct) relay SSRC.
+/// WebRTC ↔ WebRTC: both legs use DTLS-SRTP. Relayed packets use each
+/// destination leg's SDP-advertised sender SSRC and carry its SDES-MID.
 #[tokio::test]
 async fn relay_full_duplex_webrtc_webrtc() {
     let mut h = TestMediaHarness::create(
@@ -1271,9 +1269,9 @@ async fn relay_full_duplex_webrtc_webrtc() {
         .expect("A→B");
     assert!(!a_to_b.data.is_empty());
     let raw = a_to_b.raw_packet.as_ref().expect("raw packet");
-    assert_ne!(
+    assert_eq!(
         raw.header.ssrc, b_playback,
-        "WebRTC destination: relay SSRC must be distinct"
+        "WebRTC destination must receive its SDP-advertised sender SSRC"
     );
     assert_has_mid(
         raw,
@@ -1286,9 +1284,9 @@ async fn relay_full_duplex_webrtc_webrtc() {
         .expect("B→A");
     assert!(!b_to_a.data.is_empty());
     let raw = b_to_a.raw_packet.as_ref().expect("raw packet");
-    assert_ne!(
+    assert_eq!(
         raw.header.ssrc, a_playback,
-        "WebRTC destination: relay SSRC must be distinct"
+        "WebRTC destination must receive its SDP-advertised sender SSRC"
     );
     assert_has_mid(
         raw,
@@ -1301,7 +1299,7 @@ async fn relay_full_duplex_webrtc_webrtc() {
 
 /// WebRTC(A) ↔ RTP(B): caller uses WebRTC, agent is plain RTP.
 /// A→B: RTP destination → distinct SSRC, no MID.
-/// B→A: WebRTC destination → MID present (bridge-stamped), distinct SSRC.
+/// B→A: WebRTC destination → advertised sender SSRC and MID present.
 #[tokio::test]
 async fn relay_full_duplex_webrtc_rtp() {
     let mut h = TestMediaHarness::create(
@@ -1336,9 +1334,9 @@ async fn relay_full_duplex_webrtc_rtp() {
         .expect("B→A");
     assert!(!b_to_a.data.is_empty());
     let raw = b_to_a.raw_packet.as_ref().expect("raw packet");
-    assert_ne!(
+    assert_eq!(
         raw.header.ssrc, a_playback,
-        "WebRTC destination: relay SSRC must be distinct"
+        "WebRTC destination must receive the sender SSRC advertised in SDP"
     );
     assert_has_mid(
         raw,
@@ -1350,7 +1348,7 @@ async fn relay_full_duplex_webrtc_rtp() {
 }
 
 /// RTP(A) ↔ WebRTC(B): caller is plain RTP, agent is WebRTC.
-/// A→B: WebRTC destination → MID present, distinct SSRC.
+/// A→B: WebRTC destination → advertised sender SSRC and MID present.
 /// B→A: RTP destination → distinct SSRC, no MID.
 #[tokio::test]
 async fn relay_full_duplex_rtp_webrtc() {
@@ -1373,9 +1371,9 @@ async fn relay_full_duplex_rtp_webrtc() {
         .expect("A→B");
     assert!(!a_to_b.data.is_empty());
     let raw = a_to_b.raw_packet.as_ref().expect("raw packet");
-    assert_ne!(
+    assert_eq!(
         raw.header.ssrc, b_playback,
-        "WebRTC destination: relay SSRC must be distinct"
+        "WebRTC destination must receive its SDP-advertised sender SSRC"
     );
     assert_has_mid(raw, "WebRTC destination: relay must stamp MID");
 
