@@ -907,12 +907,10 @@ impl CallModule {
                 .or_else(|| cfg.audio_codecs.clone())
         };
 
-        // Failure-tone audio profile: the global `[proxy.audio]` default (or
-        // built-in tones) as the base, applied to EVERY call regardless of
-        // whether routing produced hints. A per-trunk `ringback` (carried in
-        // `hints`) overrides individual fields. This guarantees
-        // `reject_with_tone` always has a cue (e.g. an IVR/app start failure
-        // plays the service-unavailable prompt) even with zero configuration.
+        // Failure-tone audio profile: the global `[proxy.audio_profile]`
+        // profile (or built-in tones when the table is absent) is the base for
+        // every call. An explicitly declared empty table disables the built-in
+        // tones. A per-trunk `ringback` (carried in `hints`) overrides fields.
         let mut audio_profile = self
             .inner
             .server

@@ -19,7 +19,7 @@ Scenarios:
   1. Inbound trunk with ringback.ring   → caller hears 183 early media, call answers
   2. Inbound trunk with ringback.busy   → caller hears 183 early media, then 486
   3. Inbound trunk reject/offline/notfound tones → 183 early media + 603/480/404
-  4. Control: inbound trunk WITHOUT ringback → no 183, no early-media RTP, just 486
+  4. Inbound trunk WITHOUT ringback → global default 183 + busy tone, then 486
   5. Outbound trunk with ringback.busy  → internal caller hears 183 early media, then 486
 """
 

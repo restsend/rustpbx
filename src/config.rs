@@ -791,10 +791,10 @@ pub struct ProxyConfig {
     pub locator_webhook: Option<LocatorWebhookConfig>,
     #[serde(default)]
     pub media_proxy: MediaProxyMode,
-    /// Global failure-tone defaults (`[proxy.audio]`): the base `RingbackAudio`
-    /// applied to every call. Per-trunk `ringback` overrides individual fields.
-    /// When unset, built-in defaults (busy/offline/etc. → `tone://`, 5xx →
-    /// `sounds/service_unavailable_en.mp3`) are used so calls always get a tone.
+    /// Global failure-tone profile (`[proxy.audio_profile]`): the base
+    /// `RingbackAudio` applied to every call. Per-trunk `ringback` overrides
+    /// individual fields. When unset, built-in defaults are used. An explicitly
+    /// declared but empty table disables the built-in failure audio.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_profile: Option<crate::proxy::routing::RingbackAudio>,
     pub audio_codecs: Option<Vec<String>>,

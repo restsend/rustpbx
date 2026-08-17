@@ -295,7 +295,8 @@ pub struct RingbackAudio {
 
 impl RingbackAudio {
     /// Built-in failure-tone defaults, applied to every call unless a global
-    /// `[proxy.audio]` or a per-trunk `ringback` overrides them. `ring` is left
+    /// `[proxy.audio_profile]` or a per-trunk `ringback` overrides them. An
+    /// explicitly declared empty global profile disables them. `ring` is left
     /// `None` (custom ringback is operator-specific); every failure status gets
     /// a `tone://` beep, and 5xx (app/IVR start failures) announce the shipped
     /// English `sounds/service_unavailable_en.mp3`.

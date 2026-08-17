@@ -379,13 +379,15 @@ engine = "flowdb"
 # busy = "tone://480,3000"
 # noanswer = "tone://480,3000"
 
-# Global failure-tone defaults ([proxy.audio]). Applied to EVERY call as the
-# base audio profile; a per-trunk `ringback` overrides individual fields. When
-# unset, built-in defaults are used: busy/offline/noanswer/notfound/reject →
-# `tone://` beeps, and 5xx (IVR/app start failures) → sounds/service_unavailable_en.mp3,
-# so calls always hear a cue even with zero configuration.
+# Global failure-tone profile ([proxy.audio_profile]). Applied to EVERY call as
+# the base audio profile; a per-trunk `ringback` overrides individual fields.
+# When the table is unset, built-in defaults are used:
+# busy/offline/noanswer/notfound/reject → `tone://` beeps, and 5xx (IVR/app
+# start failures) → sounds/service_unavailable_en.mp3.
+# Declare the table but leave it empty to disable all built-in failure audio;
+# rejection responses are then sent without a RustPBX-generated 183 or tone.
 #
-# [proxy.audio]
+# [proxy.audio_profile]
 # error = "sounds/service_unavailable_en.mp3"
 # busy = "tone://480,3000"
 
