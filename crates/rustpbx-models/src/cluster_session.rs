@@ -42,11 +42,11 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Entity)
                     .if_not_exists()
-                    .col(string(Column::CallId).char_len(200).primary_key())
-                    .col(string(Column::NodeId).char_len(64))
-                    .col(string(Column::Caller).char_len(160))
-                    .col(string(Column::Callee).char_len(160))
-                    .col(string(Column::Direction).char_len(16))
+                    .col(string(Column::CallId).string_len(200).primary_key())
+                    .col(string(Column::NodeId).string_len(64))
+                    .col(string(Column::Caller).string_len(160))
+                    .col(string(Column::Callee).string_len(160))
+                    .col(string(Column::Direction).string_len(16))
                     .col(
                         timestamp(Column::StartedAt).default(Expr::current_timestamp()),
                     )
