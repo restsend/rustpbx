@@ -4,6 +4,7 @@ use super::cdr_capture::CdrCapture;
 use super::rtp_utils::{RtpReceiver, RtpSender};
 use super::test_helpers;
 use super::test_ua::{TestUa, TestUaConfig};
+use anyhow::Result;
 use rustpbx::config::{MediaProxyMode, ProxyConfig};
 use rustpbx::proxy::{
     active_call_registry::ActiveProxyCallRegistry,
@@ -11,7 +12,6 @@ use rustpbx::proxy::{
     server::{SipServerBuilder, SipServerRef},
     user::MemoryUserBackend,
 };
-use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;

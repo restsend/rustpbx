@@ -26,8 +26,8 @@ use crate::common::e2e_test_server::E2eTestServer;
 use crate::common::rtp_utils::{RtpPacket, RtpReceiver, RtpSender, extract_media_endpoint};
 use crate::common::test_helpers;
 use crate::common::test_ua::TestUaEvent;
-use rustpbx::config::MediaProxyMode;
 use anyhow::Result;
+use rustpbx::config::MediaProxyMode;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -101,7 +101,9 @@ async fn test_early_media_183_then_different_sdp_200ok_bridge_restarted() -> Res
     // ── 4. Concurrent call setup ─────────────────────────────────────────────
     let caller_ua_clone = caller_ua.clone();
     let caller_handle =
-        rustpbx::utils::spawn(async move { caller_ua_clone.make_call("bob", Some(alice_sdp)).await });
+        rustpbx::utils::spawn(
+            async move { caller_ua_clone.make_call("bob", Some(alice_sdp)).await },
+        );
 
     let mut bob_dialog_id = None;
     let mut bob_received_offer: Option<String> = None;

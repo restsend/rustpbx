@@ -248,15 +248,17 @@ async fn test_cc_call_event_webhook_carries_context() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Broadcast the cc_answered event (the path CC events take).
-    gateway.read().broadcast_event(&rustpbx::rwi::event::to_legacy_event(
-        &rustpbx::addons::cc::cc_events::CcCallAnswered {
-            call_id: "call-cc-1".to_string(),
-            agent_id: "1001".to_string(),
-            agent_name: Some("Agent 1001".to_string()),
-            queue_id: Some("support".to_string()),
-        },
-        None,
-    ));
+    gateway
+        .read()
+        .broadcast_event(&rustpbx::rwi::event::to_legacy_event(
+            &rustpbx::addons::cc::cc_events::CcCallAnswered {
+                call_id: "call-cc-1".to_string(),
+                agent_id: "1001".to_string(),
+                agent_name: Some("Agent 1001".to_string()),
+                queue_id: Some("support".to_string()),
+            },
+            None,
+        ));
 
     tokio::time::sleep(Duration::from_millis(800)).await;
 
@@ -282,5 +284,8 @@ async fn test_cc_call_event_webhook_carries_context() {
     assert_eq!(p["root"]["call_id"].as_str(), Some("call-cc-1"));
     assert_eq!(p["root"]["caller"].as_str(), Some("sip:alice@localhost"));
     assert_eq!(p["root"]["callee_name"].as_str(), Some("4000"));
-    assert_eq!(p["root"]["start_time"].as_str(), Some("2026-01-01T00:00:00Z"));
+    assert_eq!(
+        p["root"]["start_time"].as_str(),
+        Some("2026-01-01T00:00:00Z")
+    );
 }

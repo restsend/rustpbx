@@ -107,30 +107,28 @@ fn all_wholesale_templates_parse() {
     // never render, so the bodies are irrelevant — the signatures must simply
     // match what the templates call.
     env.add_filter("t", |_key: &str| -> String { String::new() });
-    env.add_filter(
-        "tvars",
-        |_key: &str, _vars: minijinja::Value| -> String { String::new() },
-    );
+    env.add_filter("tvars", |_key: &str, _vars: minijinja::Value| -> String {
+        String::new()
+    });
     env.add_filter(
         "format",
         |_format_str: &str, value: minijinja::Value| -> String { value.to_string() },
     );
-    env.add_filter(
-        "json",
-        |value: minijinja::Value| -> String { value.to_string() },
-    );
+    env.add_filter("json", |value: minijinja::Value| -> String {
+        value.to_string()
+    });
     env.add_function("url_for", |suffix: &str| -> String { suffix.to_string() });
 
     for name in TEMPLATES {
         let path = template_path(name);
         let src = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
-        env.add_template_owned(name.to_string(), src).unwrap_or_else(|e| {
-            panic!(
-                "wholesale template '{}' has a minijinja syntax error: {}",
-                name, e
-            )
-        });
+        env.add_template_owned(name.to_string(), src)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "wholesale template '{}' has a minijinja syntax error: {}",
+                    name, e
+                )
+            });
     }
 }
-

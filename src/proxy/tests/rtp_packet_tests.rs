@@ -8,15 +8,7 @@ async fn test_rtp_packet_integrity() -> Result<()> {
 
     let test_ssrc = 0xDEADBEEFu32;
     let test_seq_start = 1000u16;
-    let packets = RtpPacket::create_sequence(
-        50,
-        test_seq_start,
-        50000,
-        test_ssrc,
-        0,
-        160,
-        160,
-    );
+    let packets = RtpPacket::create_sequence(50, test_seq_start, 50000, test_ssrc, 0, 160, 160);
 
     for (i, packet) in packets.iter().enumerate() {
         let encoded = packet.encode();
@@ -85,7 +77,13 @@ async fn test_rtp_various_payload_sizes() -> Result<()> {
 
     for payload_size in [80, 160, 240, 320] {
         let packets = RtpPacket::create_sequence(
-            10, 1000, 50000, 0x12345678, 0, payload_size, payload_size as u32,
+            10,
+            1000,
+            50000,
+            0x12345678,
+            0,
+            payload_size,
+            payload_size as u32,
         );
 
         assert_eq!(packets.len(), 10);
@@ -112,20 +110,28 @@ async fn test_rtp_different_codecs() -> Result<()> {
 
     for (pt, name, frame_size) in codecs {
         let packets = RtpPacket::create_sequence(
-            10, 1000, 50000, 0x12345678, pt, frame_size, frame_size as u32,
+            10,
+            1000,
+            50000,
+            0x12345678,
+            pt,
+            frame_size,
+            frame_size as u32,
         );
 
         for packet in &packets {
             assert_eq!(
                 packet.payload_type, pt,
-                "Payload type mismatch for {}", name
+                "Payload type mismatch for {}",
+                name
             );
 
             let encoded = packet.encode();
             let decoded = RtpPacket::decode(&encoded)?;
             assert_eq!(
                 decoded.payload_type, pt,
-                "Payload type not preserved for {}", name
+                "Payload type not preserved for {}",
+                name
             );
         }
 

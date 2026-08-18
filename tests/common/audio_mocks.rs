@@ -7,9 +7,7 @@ use std::sync::Arc;
 use rustrtc::media::MediaSample;
 use tokio::sync::mpsc;
 
-use rustpbx::call::runtime::conference_media_bridge::{
-    AudioReceiver, AudioSender, PcmAudioFrame,
-};
+use rustpbx::call::runtime::conference_media_bridge::{AudioReceiver, AudioSender, PcmAudioFrame};
 
 /// Mock audio sender that records all sent samples.
 pub struct MockAudioSender {
@@ -41,10 +39,7 @@ impl Default for MockAudioSender {
 }
 
 impl AudioSender for MockAudioSender {
-    async fn send(
-        &self,
-        sample: MediaSample,
-    ) -> Result<(), mpsc::error::SendError<MediaSample>> {
+    async fn send(&self, sample: MediaSample) -> Result<(), mpsc::error::SendError<MediaSample>> {
         self.samples.lock().await.push(sample);
         Ok(())
     }

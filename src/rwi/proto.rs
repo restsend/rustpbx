@@ -216,10 +216,16 @@ mod tests {
         let json = serde_json::to_value(&ctx).unwrap();
         assert_eq!(json["root"]["caller"], "2001");
         assert_eq!(json["root"]["call_id"], "call-root-1");
-        assert!(json["root"]["callee_name"].is_null(), "None fields omitted or null");
+        assert!(
+            json["root"]["callee_name"].is_null(),
+            "None fields omitted or null"
+        );
 
         // root=None must be omitted entirely.
-        let ctx = EventCallContext { root: None, ..Default::default() };
+        let ctx = EventCallContext {
+            root: None,
+            ..Default::default()
+        };
         let json = serde_json::to_value(&ctx).unwrap();
         assert!(json.get("root").is_none());
     }

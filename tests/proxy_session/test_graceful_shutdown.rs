@@ -38,7 +38,9 @@ async fn test_call_hangup_writes_cdr() -> Result<()> {
                 break;
             }
         }
-        if bob_dialog_id.is_some() { break; }
+        if bob_dialog_id.is_some() {
+            break;
+        }
         sleep(Duration::from_millis(100)).await;
     }
 
@@ -99,7 +101,9 @@ async fn test_server_restart_after_stop() -> Result<()> {
                 break;
             }
         }
-        if bob_dialog_id.is_some() { break; }
+        if bob_dialog_id.is_some() {
+            break;
+        }
         sleep(Duration::from_millis(100)).await;
     }
 
@@ -107,7 +111,10 @@ async fn test_server_restart_after_stop() -> Result<()> {
         Ok(Ok(Ok(id))) => Some(id),
         _ => None,
     };
-    assert!(alice_id.is_some(), "Call should establish on restarted server");
+    assert!(
+        alice_id.is_some(),
+        "Call should establish on restarted server"
+    );
     server2.stop();
     Ok(())
 }

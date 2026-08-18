@@ -15,7 +15,7 @@ pub mod test_helpers;
 // E2E testing infrastructure
 pub mod cdr_capture;
 pub mod e2e_test_server;
-pub mod rtp_utils;
 mod rtp_packet_tests;
+pub mod rtp_utils;
 mod test_sip_session_regressions;
 mod test_trunk_config_tests;

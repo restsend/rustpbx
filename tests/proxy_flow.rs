@@ -18,6 +18,9 @@ mod test_recording_e2e;
 #[path = "proxy_flow/test_video_e2e.rs"]
 mod test_video_e2e;
 
+#[path = "proxy_flow/test_repro_recording.rs"]
+mod test_repro_recording;
+
 #[path = "proxy_flow/test_hold_e2e.rs"]
 mod test_hold_e2e;
 

@@ -1,7 +1,7 @@
 use crate::common::e2e_test_server::E2eTestServer;
 use crate::common::test_ua::{TestUa, TestUaConfig, TestUaEvent};
-use rustpbx::config::MediaProxyMode;
 use anyhow::Result;
+use rustpbx::config::MediaProxyMode;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -373,9 +373,9 @@ async fn test_webrtc_to_rtp_sdp_bridge() -> Result<()> {
 /// Verifies that the SDP bridge correctly converts RTP SDP to WebRTC SDP
 #[tokio::test]
 async fn test_rtp_to_webrtc_sdp_bridge() -> Result<()> {
+    use crate::common::test_ua::{TestUa, TestUaConfig};
     use rustpbx::call::SipUser;
     use rustpbx::config::MediaProxyMode;
-    use crate::common::test_ua::{TestUa, TestUaConfig};
 
     let _ = tracing_subscriber::fmt::try_init();
 

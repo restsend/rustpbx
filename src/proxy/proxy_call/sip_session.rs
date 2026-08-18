@@ -5036,9 +5036,7 @@ impl SipSession {
                 && recording.auto_start
                 && recording.auto_start_at == crate::config::RecordingAutoStartAt::Media
         };
-        if auto_start_on_media_setup
-            && let Err(error) = self.set_auto_recorder().await
-        {
+        if auto_start_on_media_setup && let Err(error) = self.set_auto_recorder().await {
             warn!(session_id = %self.id, %error, "Auto recorder installation after caller media setup failed");
         }
 
@@ -6556,9 +6554,7 @@ impl SipSession {
                 && recording.auto_start
                 && recording.auto_start_at == crate::config::RecordingAutoStartAt::Answer
         };
-        if auto_start_on_answer
-            && let Err(error) = self.set_auto_recorder().await
-        {
+        if auto_start_on_answer && let Err(error) = self.set_auto_recorder().await {
             warn!(session_id = %self.id, %error, "Auto recorder installation at final answer failed");
         }
 

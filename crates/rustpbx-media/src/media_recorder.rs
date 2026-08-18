@@ -13,9 +13,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use bytes::Bytes;
-use rustpbx_sipflow::{
-    SipFlowBackend, SipFlowItem as BackendSipFlowItem, SipFlowMsgType,
-};
+use rustpbx_sipflow::{SipFlowBackend, SipFlowItem as BackendSipFlowItem, SipFlowMsgType};
 use rustrtc::media::frame::{AudioFrame, MediaSample};
 use rustrtc::rtp::RtpPacket;
 use tokio::sync::{mpsc, oneshot};
@@ -612,10 +610,7 @@ mod tests {
         let backend = Arc::new(CountingBackend::new());
         let initial = SipflowRecorder::new(backend.clone(), "call-1");
         let (handle, sender, _join) = RecorderHandle::new();
-        handle
-            .set_recorder(Box::new(initial), None)
-            .await
-            .unwrap();
+        handle.set_recorder(Box::new(initial), None).await.unwrap();
         sender.write_sample(PacketDirection::Ingress, &packet(0, 1, 160));
         drop(handle);
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -634,10 +629,7 @@ mod tests {
         let backend = Arc::new(CountingBackend::new());
         let initial = SipflowRecorder::new(backend.clone(), "call-1");
         let (handle, sender, join) = RecorderHandle::new();
-        handle
-            .set_recorder(Box::new(initial), None)
-            .await
-            .unwrap();
+        handle.set_recorder(Box::new(initial), None).await.unwrap();
 
         sender.write_sample(PacketDirection::Ingress, &packet(0, 1, 160));
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -658,10 +650,7 @@ mod tests {
         let backend = Arc::new(CountingBackend::new());
         let initial = SipflowRecorder::new(backend.clone(), "call-1");
         let (handle, _sender, join) = RecorderHandle::new();
-        handle
-            .set_recorder(Box::new(initial), None)
-            .await
-            .unwrap();
+        handle.set_recorder(Box::new(initial), None).await.unwrap();
         let temp = tempfile::NamedTempFile::new().unwrap();
         let path = temp.path().to_string_lossy().into_owned();
         drop(temp);

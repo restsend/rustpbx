@@ -10,8 +10,8 @@ mod tests {
         EntryAction, IvrDefinition, IvrFileConfig, MenuEntry, MenuNode,
     };
     use crate::call::app::testing::MockCallStack;
-    use crate::call::domain::MediaSource;
     use crate::call::domain::CallCommand;
+    use crate::call::domain::MediaSource;
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -43,7 +43,8 @@ mod tests {
                         action: EntryAction::Transfer {
                             target: "2001".to_string(),
                             params: HashMap::new(),
-                            return_app: None, return_target: None,
+                            return_app: None,
+                            return_target: None,
                         },
                     },
                     MenuEntry {
@@ -91,12 +92,14 @@ mod tests {
                         timeout_action: Some(EntryAction::Transfer {
                             target: "3000".to_string(),
                             params: HashMap::new(),
-                            return_app: None, return_target: None,
+                            return_app: None,
+                            return_target: None,
                         }),
                         max_retries_action: Some(EntryAction::Transfer {
                             target: "3000".to_string(),
                             params: HashMap::new(),
-                            return_app: None, return_target: None,
+                            return_app: None,
+                            return_target: None,
                         }),
                         entries: vec![
                             MenuEntry {
@@ -105,7 +108,8 @@ mod tests {
                                 action: EntryAction::Transfer {
                                     target: "3001".to_string(),
                                     params: HashMap::new(),
-                                    return_app: None, return_target: None,
+                                    return_app: None,
+                                    return_target: None,
                                 },
                             },
                             MenuEntry {
@@ -731,7 +735,8 @@ action = { type = "transfer", target = "100" }
                         label: Some("Queue".to_string()),
                         action: EntryAction::Queue {
                             target: "sales".to_string(),
-                            return_app: None, return_target: None,
+                            return_app: None,
+                            return_target: None,
                         },
                     },
                 ],
@@ -892,7 +897,8 @@ action = { type = "transfer", target = "100" }
                         create_room_uri: "wss://voip.example.com/ws".to_string(),
                         headers: HashMap::from([("Authorization".into(), "Bearer token".into())]),
                         timeout_ms: Some(30000),
-                        return_app: Some("ivr".into()), return_target: Some("test-bridge".into()),
+                        return_app: Some("ivr".into()),
+                        return_target: Some("test-bridge".into()),
                         success: None,
                         failure: None,
                     },
@@ -1002,7 +1008,8 @@ action = { type = "transfer", target = "100" }
                         label: Some("Queue no return".to_string()),
                         action: EntryAction::Queue {
                             target: "normal_queue".to_string(),
-                            return_app: None, return_target: None,
+                            return_app: None,
+                            return_target: None,
                         },
                     },
                     MenuEntry {
@@ -1010,7 +1017,8 @@ action = { type = "transfer", target = "100" }
                         label: Some("Queue with return".to_string()),
                         action: EntryAction::Queue {
                             target: "support".to_string(),
-                            return_app: Some("ivr".into()), return_target: Some("test-queue-return".into()),
+                            return_app: Some("ivr".into()),
+                            return_target: Some("test-queue-return".into()),
                         },
                     },
                     MenuEntry {
@@ -1018,7 +1026,8 @@ action = { type = "transfer", target = "100" }
                         label: Some("Queue no return".to_string()),
                         action: EntryAction::Queue {
                             target: "overflow".to_string(),
-                            return_app: None, return_target: None,
+                            return_app: None,
+                            return_target: None,
                         },
                     },
                 ],
@@ -1393,7 +1402,8 @@ action = { type = "transfer", target = "100" }
                     action: EntryAction::Transfer {
                         target: "3001".to_string(),
                         params: HashMap::new(),
-                        return_app: None, return_target: None,
+                        return_app: None,
+                        return_target: None,
                     },
                 }],
                 ..Default::default()
@@ -1984,7 +1994,8 @@ action = { type = "transfer", target = "100" }
                     action: EntryAction::Transfer {
                         target: "2001".to_string(),
                         params: HashMap::new(),
-                        return_app: None, return_target: None,
+                        return_app: None,
+                        return_target: None,
                     },
                 }],
                 ..Default::default()
@@ -2090,7 +2101,8 @@ action = { type = "transfer", target = "100" }
                             action: EntryAction::Transfer {
                                 target: "3001".to_string(),
                                 params: HashMap::new(),
-                                return_app: None, return_target: None,
+                                return_app: None,
+                                return_target: None,
                             },
                         }],
                         ..Default::default()
@@ -2253,7 +2265,8 @@ action = { type = "transfer", target = "100" }
                     action: EntryAction::Transfer {
                         target: "2001".to_string(),
                         params: HashMap::new(),
-                        return_app: None, return_target: None,
+                        return_app: None,
+                        return_target: None,
                     },
                 }],
                 ..Default::default()
@@ -2344,7 +2357,8 @@ action = { type = "transfer", target = "100" }
                         action: EntryAction::Transfer {
                             target: "2001".to_string(),
                             params: HashMap::new(),
-                            return_app: None, return_target: None,
+                            return_app: None,
+                            return_target: None,
                         },
                     },
                 ],
@@ -2427,7 +2441,8 @@ action = { type = "transfer", target = "100" }
                     action: EntryAction::Transfer {
                         target: "2001".to_string(),
                         params: HashMap::new(),
-                        return_app: None, return_target: None,
+                        return_app: None,
+                        return_target: None,
                     },
                 }],
                 ..Default::default()
@@ -2500,7 +2515,8 @@ action = { type = "transfer", target = "100" }
                     action: EntryAction::Transfer {
                         target: "2001".to_string(),
                         params: HashMap::new(),
-                        return_app: None, return_target: None,
+                        return_app: None,
+                        return_target: None,
                     },
                 }],
                 ..Default::default()
@@ -2762,7 +2778,8 @@ action = { type = "transfer", target = "100" }
                     action: EntryAction::Transfer {
                         target: "2001".to_string(),
                         params: HashMap::new(),
-                        return_app: None, return_target: None,
+                        return_app: None,
+                        return_target: None,
                     },
                 }],
                 ..Default::default()
@@ -2826,7 +2843,8 @@ action = { type = "transfer", target = "100" }
                     action: EntryAction::Transfer {
                         target: "2001".to_string(),
                         params: HashMap::new(),
-                        return_app: None, return_target: None,
+                        return_app: None,
+                        return_target: None,
                     },
                 }],
                 ..Default::default()

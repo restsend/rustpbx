@@ -157,7 +157,8 @@ impl LocalBackend {
 
         for shard in 0..shards {
             // Spawn the dedicated SQLite flush thread for this shard.
-            let flusher = SipFlowFlusher::new(flush_count, flush_interval_secs, id_cache_size, shard);
+            let flusher =
+                SipFlowFlusher::new(flush_count, flush_interval_secs, id_cache_size, shard);
             let flusher_tx = flusher.sender();
             let dropped = flusher.dropped_count();
 

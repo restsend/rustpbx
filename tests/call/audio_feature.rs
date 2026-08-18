@@ -47,10 +47,9 @@ mod audio_feature_tests {
         create_dummy_raw(&audio_path).unwrap();
 
         // Non-looped source exhausts and returns 0.
-        let mut source =
-            FileAudioSource::new(audio_path.to_string_lossy().to_string(), false)
-                .await
-                .unwrap();
+        let mut source = FileAudioSource::new(audio_path.to_string_lossy().to_string(), false)
+            .await
+            .unwrap();
         let mut buf = [0i16; 3200];
         let first = source.read_samples(&mut buf);
         assert!(first > 0, "first read should return samples");
@@ -58,10 +57,9 @@ mod audio_feature_tests {
         assert_eq!(second, 0, "non-looped source must exhaust");
 
         // Looped source keeps serving samples.
-        let mut looped =
-            FileAudioSource::new(audio_path.to_string_lossy().to_string(), true)
-                .await
-                .unwrap();
+        let mut looped = FileAudioSource::new(audio_path.to_string_lossy().to_string(), true)
+            .await
+            .unwrap();
         let mut total = 0;
         for _ in 0..3 {
             total += looped.read_samples(&mut buf);

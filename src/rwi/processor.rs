@@ -839,13 +839,12 @@ impl RwiCommandProcessor {
         } else {
             media_track
         };
-        let media_track = if let (Some(start), Some(end)) =
-            (media.rtp_start_port, media.rtp_end_port)
-        {
-            media_track.with_rtp_range(start, end)
-        } else {
-            media_track
-        };
+        let media_track =
+            if let (Some(start), Some(end)) = (media.rtp_start_port, media.rtp_end_port) {
+                media_track.with_rtp_range(start, end)
+            } else {
+                media_track
+            };
         // If routing out a named carrier trunk, respect the trunk's codec configuration.
         // When no codecs are configured on the trunk, use the default full set (the
         // conference bridge now sends whatever codec was negotiated, so there is no
@@ -1115,8 +1114,7 @@ impl RwiCommandProcessor {
                 }
             };
 
-            let (caller_state_tx, mut caller_state_rx) =
-                tokio::sync::mpsc::unbounded_channel();
+            let (caller_state_tx, mut caller_state_rx) = tokio::sync::mpsc::unbounded_channel();
             let mut invitation = dialog_layer
                 .do_invite(invite_option, caller_state_tx)
                 .boxed();
@@ -1165,8 +1163,8 @@ impl RwiCommandProcessor {
                 && registry.get_agent(user).await.is_some()
             {
                 let dest_user = destination_uri.user().unwrap_or_default().to_string();
-                let dest_is_agent = !dest_user.is_empty()
-                    && registry.get_agent(&dest_user).await.is_some();
+                let dest_is_agent =
+                    !dest_user.is_empty() && registry.get_agent(&dest_user).await.is_some();
                 if !dest_is_agent {
                     metadata.insert("resolved_agent_id".to_string(), user.to_string());
                 }

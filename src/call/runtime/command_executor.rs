@@ -48,7 +48,6 @@ impl CommandResult {
             data: None,
         }
     }
-
 }
 
 /// Context for command execution

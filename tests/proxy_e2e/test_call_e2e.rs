@@ -11,8 +11,8 @@ use crate::common::cdr_capture::CdrExpectation;
 use crate::common::e2e_test_server::E2eTestServer;
 use crate::common::rtp_utils::extract_media_endpoint;
 use crate::common::test_ua::TestUaEvent;
-use rustpbx::config::MediaProxyMode;
 use anyhow::Result;
+use rustpbx::config::MediaProxyMode;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -112,7 +112,10 @@ async fn test_webrtc_to_rtp_with_transcoding() -> Result<()> {
     sleep(Duration::from_millis(500)).await;
 
     let all_records = server.cdr_capture.get_all_records().await;
-    assert!(!all_records.is_empty(), "CDR should be generated for transcoded call");
+    assert!(
+        !all_records.is_empty(),
+        "CDR should be generated for transcoded call"
+    );
 
     server.stop();
     Ok(())

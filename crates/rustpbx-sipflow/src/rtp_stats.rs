@@ -182,7 +182,12 @@ pub fn parse_rtp_stats_header(raw: &[u8]) -> Option<RtpStatsHeader> {
     }
 
     let (payload_type, sequence_number, rtp_timestamp, ssrc) = rtp_header_fields(raw);
-    Some(RtpStatsHeader { payload_type, sequence_number, rtp_timestamp, ssrc })
+    Some(RtpStatsHeader {
+        payload_type,
+        sequence_number,
+        rtp_timestamp,
+        ssrc,
+    })
 }
 
 pub fn rtp_clock_rate_for_payload_type(payload_type: u8) -> u32 {

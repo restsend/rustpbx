@@ -20,7 +20,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use super::{SidePcmFrame, TranscriptionEvent, TranscriptSegment, TranscriptSide, TranscriptionProvider};
+use super::{
+    SidePcmFrame, TranscriptSegment, TranscriptSide, TranscriptionEvent, TranscriptionProvider,
+};
 
 /// Bounded per-side PCM queue: a slow network send applies backpressure by
 /// dropping the oldest-unsent frames instead of blocking the media pump.
@@ -158,10 +160,7 @@ impl RemoteStreamingProvider {
             ));
         }
         Self {
-            inner: Arc::new(ProviderInner {
-                pcm_tx,
-                cancel,
-            }),
+            inner: Arc::new(ProviderInner { pcm_tx, cancel }),
         }
     }
 }
@@ -178,7 +177,8 @@ impl TranscriptionProvider for RemoteStreamingProvider {
         let pcm = resample_to_16k(&frame.frame.samples, frame.frame.sample_rate);
         // Bounded try_send: on backpressure drop the frame — live media must
         // never block on network I/O.
-        tx.try_send(pcm).map_err(|e| anyhow::anyhow!("pcm queue: {e}"))
+        tx.try_send(pcm)
+            .map_err(|e| anyhow::anyhow!("pcm queue: {e}"))
     }
 
     async fn stop(&self) {
@@ -200,19 +200,18 @@ async fn side_task(
     let url = config.effective_url();
     let api_key = config.effective_api_key();
 
-    let mut request = match tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
-        &url,
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            warn!(side = side.as_str(), %url, error = %e, "transcript ASR URL invalid");
-            let _ = events.send(TranscriptionEvent::Failed {
-                side: Some(side),
-                error: format!("invalid ASR url: {e}"),
-            });
-            return;
-        }
-    };
+    let mut request =
+        match tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(&url) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(side = side.as_str(), %url, error = %e, "transcript ASR URL invalid");
+                let _ = events.send(TranscriptionEvent::Failed {
+                    side: Some(side),
+                    error: format!("invalid ASR url: {e}"),
+                });
+                return;
+            }
+        };
     if let Some(key) = api_key.as_deref() {
         request.headers_mut().insert(
             "Authorization",
@@ -360,7 +359,9 @@ async fn side_task(
             ))
             .await;
         // Give the result task a moment to drain finals, then stop everything.
-        tokio::time::timeout(Duration::from_secs(2), result_task).await.ok();
+        tokio::time::timeout(Duration::from_secs(2), result_task)
+            .await
+            .ok();
     }
     cancel.cancel();
     debug!(side = side.as_str(), "transcript ASR stream closed");

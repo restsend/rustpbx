@@ -171,7 +171,6 @@ pub struct AgentRecord {
     pub custom_data: HashMap<String, String>,
 }
 
-
 impl AgentRecord {
     /// Check if agent has capacity for new call
     pub fn has_capacity(&self) -> bool {

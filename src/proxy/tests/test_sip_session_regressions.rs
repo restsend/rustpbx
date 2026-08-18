@@ -696,7 +696,10 @@ async fn sipflow_recording_default_starts_at_media_setup() {
     .expect("SipFlow recorder did not receive RTP after media setup");
 
     if let Some(mut bridge) = session.media.bridge.take() {
-        bridge.stop_recording().await.expect("stop SipFlow recorder");
+        bridge
+            .stop_recording()
+            .await
+            .expect("stop SipFlow recorder");
         bridge.close();
     }
 }

@@ -68,8 +68,10 @@ impl SipSession {
             // (the consult-merge-proven path). The legs-registry peer for an
             // anchor leg is a bare virtual MediaStreamBuilder with no PC /
             // tracks, which the _for_peer variant cannot bridge.
-            let is_anchor_leg = leg_id.0 == "caller" || leg_id.0 == "callee"
-                || leg_id.0.ends_with("-caller") || leg_id.0.ends_with("-callee");
+            let is_anchor_leg = leg_id.0 == "caller"
+                || leg_id.0 == "callee"
+                || leg_id.0.ends_with("-caller")
+                || leg_id.0.ends_with("-callee");
             // Anchor legs register under the session-scoped composite id
             // (consult-merge convention): every dial-in session's caller is
             // literally "caller", so the bare id collides across
@@ -80,9 +82,15 @@ impl SipSession {
                 leg_id.clone()
             };
             let joined = if let (false, Some(peer)) = (is_anchor_leg, peer) {
-                self.start_conference_media_bridge_for_peer(conf_id_str, &join_leg, &peer, None, None)
-                    .await
-                    .map(|_| ())
+                self.start_conference_media_bridge_for_peer(
+                    conf_id_str,
+                    &join_leg,
+                    &peer,
+                    None,
+                    None,
+                )
+                .await
+                .map(|_| ())
             } else {
                 self.start_conference_media_bridge(conf_id_str, &join_leg)
                     .await

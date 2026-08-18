@@ -56,7 +56,10 @@ async fn test_video_h264_passthrough_call_establishes() -> Result<()> {
         Ok(Ok(Ok(id))) => Some(id),
         _ => None,
     };
-    assert!(alice_dialog_id.is_some(), "Video call should be established");
+    assert!(
+        alice_dialog_id.is_some(),
+        "Video call should be established"
+    );
 
     server.stop();
     Ok(())
@@ -74,13 +77,15 @@ async fn test_video_and_audio_combined_call() -> Result<()> {
         m=audio 10000 RTP/AVP 0 101\r\n\
         a=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n\
         m=video 10001 RTP/AVP 96\r\n\
-        a=rtpmap:96 H264/90000\r\na=sendrecv\r\n".to_string();
+        a=rtpmap:96 H264/90000\r\na=sendrecv\r\n"
+        .to_string();
 
     let callee_sdp = "v=0\r\no=- 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
         m=audio 20000 RTP/AVP 0 101\r\n\
         a=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n\
         m=video 20001 RTP/AVP 96\r\n\
-        a=rtpmap:96 H264/90000\r\na=sendrecv\r\n".to_string();
+        a=rtpmap:96 H264/90000\r\na=sendrecv\r\n"
+        .to_string();
 
     let caller_handle = tokio::spawn({
         let a = alice.clone();
@@ -108,7 +113,10 @@ async fn test_video_and_audio_combined_call() -> Result<()> {
         Ok(Ok(Ok(id))) => Some(id),
         _ => None,
     };
-    assert!(alice_dialog_id.is_some(), "Audio+video call should establish");
+    assert!(
+        alice_dialog_id.is_some(),
+        "Audio+video call should establish"
+    );
     server.stop();
     Ok(())
 }

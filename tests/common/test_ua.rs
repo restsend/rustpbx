@@ -109,7 +109,8 @@ impl WebRtcRxTap {
 
     /// Count of outbound RTP packets observed before SRTP protect.
     pub fn egress_count(&self) -> u64 {
-        self.egress_packets.load(std::sync::atomic::Ordering::Relaxed)
+        self.egress_packets
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -191,9 +192,7 @@ impl TestUa {
         } else {
             None
         };
-        let webrtc_rx = webrtc_pc
-            .as_ref()
-            .map(|_| Arc::new(WebRtcRxTap::new(4096)));
+        let webrtc_rx = webrtc_pc.as_ref().map(|_| Arc::new(WebRtcRxTap::new(4096)));
         Self {
             config,
             cancel_token: CancellationToken::new(),
@@ -549,7 +548,8 @@ impl TestUa {
             .webrtc_pc
             .as_ref()
             .ok_or_else(|| anyhow!("not a webrtc UA"))?;
-        let mut header = rustrtc::rtp::RtpHeader::new(payload_type, sequence_number, timestamp, ssrc);
+        let mut header =
+            rustrtc::rtp::RtpHeader::new(payload_type, sequence_number, timestamp, ssrc);
         header.marker = marker;
         pc.send_raw_rtp(rustrtc::rtp::RtpPacket::new(header, payload))
             .await
@@ -922,9 +922,10 @@ impl TestUa {
                         if !resp.body().is_empty() {
                             if let Some(pc) = self.webrtc_pc.as_ref() {
                                 let body = String::from_utf8_lossy(resp.body()).to_string();
-                                if let Ok(desc) =
-                                    rustrtc::SessionDescription::parse(rustrtc::SdpType::Pranswer, &body)
-                                {
+                                if let Ok(desc) = rustrtc::SessionDescription::parse(
+                                    rustrtc::SdpType::Pranswer,
+                                    &body,
+                                ) {
                                     let _ = pc.set_remote_description(desc).await;
                                 }
                             }
@@ -1368,10 +1369,9 @@ mod tests {
             // Test call with SDP: spawn caller and handle callee events concurrently
             let sdp_offer = create_test_sdp("192.168.1.100", 5004, true);
             let alice_clone = alice.clone();
-            let caller_handle =
-                rustpbx::utils::spawn(
-                    async move { alice_clone.make_call("bob", Some(sdp_offer)).await },
-                );
+            let caller_handle = rustpbx::utils::spawn(async move {
+                alice_clone.make_call("bob", Some(sdp_offer)).await
+            });
 
             // Wait and answer incoming call by polling events (avoid draining issue)
             let mut answered = false;

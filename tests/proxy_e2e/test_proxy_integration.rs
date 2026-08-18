@@ -2,13 +2,13 @@ use crate::common::test_helpers;
 use crate::common::test_ua::{TestUa, TestUaConfig, TestUaEvent};
 use rustpbx::call::user::SipUser;
 
+use anyhow::Result;
 use rustpbx::config::ProxyConfig;
 use rustpbx::proxy::{
     locator::{Locator, MemoryLocator},
     server::SipServerBuilder,
     user::MemoryUserBackend,
 };
-use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;

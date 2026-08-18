@@ -1544,13 +1544,29 @@ mod tests {
     #[test]
     fn should_forward_header_allows_custom_and_excludes_standard() {
         use rsipstack::sip::Header;
-        assert!(Dialplan::should_forward_header(&custom_header("X-Smart2Agent", "v")));
-        assert!(Dialplan::should_forward_header(&custom_header("x-referred-id", "v")));
-        assert!(!Dialplan::should_forward_header(&Header::Via("SIP/2.0/UDP h:5060".into())));
-        assert!(!Dialplan::should_forward_header(&Header::From("sip:a@b".into())));
-        assert!(!Dialplan::should_forward_header(&Header::CallId("cid".into())));
-        assert!(!Dialplan::should_forward_header(&custom_header("Call-ID", "v")));
-        assert!(!Dialplan::should_forward_header(&custom_header("From", "v")));
+        assert!(Dialplan::should_forward_header(&custom_header(
+            "X-Smart2Agent",
+            "v"
+        )));
+        assert!(Dialplan::should_forward_header(&custom_header(
+            "x-referred-id",
+            "v"
+        )));
+        assert!(!Dialplan::should_forward_header(&Header::Via(
+            "SIP/2.0/UDP h:5060".into()
+        )));
+        assert!(!Dialplan::should_forward_header(&Header::From(
+            "sip:a@b".into()
+        )));
+        assert!(!Dialplan::should_forward_header(&Header::CallId(
+            "cid".into()
+        )));
+        assert!(!Dialplan::should_forward_header(&custom_header(
+            "Call-ID", "v"
+        )));
+        assert!(!Dialplan::should_forward_header(&custom_header(
+            "From", "v"
+        )));
     }
 
     #[test]
@@ -1654,7 +1670,15 @@ mod tests {
             );
         }
         // Standard SIP headers are never forwarded; existing names are not duplicated.
-        for excluded in ["From", "To", "Call-ID", "CSeq", "Contact", "Max-Forwards", "X-Agent"] {
+        for excluded in [
+            "From",
+            "To",
+            "Call-ID",
+            "CSeq",
+            "Contact",
+            "Max-Forwards",
+            "X-Agent",
+        ] {
             assert!(
                 !names.iter().any(|n| n.eq_ignore_ascii_case(excluded)),
                 "{excluded} must not be forwarded"

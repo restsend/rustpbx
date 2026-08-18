@@ -341,10 +341,7 @@ mod tests {
 
         let session_expires = result.unwrap();
         assert_eq!(session_expires.interval, Duration::from_secs(1800));
-        assert_eq!(
-            session_expires.refresher,
-            Some(SessionRefresherParam::Uac)
-        );
+        assert_eq!(session_expires.refresher, Some(SessionRefresherParam::Uac));
     }
 
     #[test]
@@ -354,10 +351,7 @@ mod tests {
 
         let session_expires = result.unwrap();
         assert_eq!(session_expires.interval, Duration::from_secs(3600));
-        assert_eq!(
-            session_expires.refresher,
-            Some(SessionRefresherParam::Uas)
-        );
+        assert_eq!(session_expires.refresher, Some(SessionRefresherParam::Uas));
     }
 
     #[test]
@@ -635,10 +629,8 @@ mod tests {
 
     #[test]
     fn test_build_session_expires_header() {
-        let header = build_session_expires_header(
-            Duration::from_secs(1800),
-            SessionRefresherParam::Uac,
-        );
+        let header =
+            build_session_expires_header(Duration::from_secs(1800), SessionRefresherParam::Uac);
         match header {
             rsipstack::sip::Header::Other(name, value) => {
                 assert_eq!(name, HEADER_SESSION_EXPIRES);
@@ -977,8 +969,7 @@ mod tests {
         timer.refresher = SessionRefresher::Local;
         timer.session_interval = Duration::from_secs(1800);
 
-        let headers =
-            rsipstack::sip::Headers::from(build_session_timer_headers(&timer, false));
+        let headers = rsipstack::sip::Headers::from(build_session_timer_headers(&timer, false));
 
         assert_eq!(
             get_header_value(&headers, HEADER_SESSION_EXPIRES),

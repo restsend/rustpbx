@@ -37,7 +37,9 @@ async fn test_caller_cancel_before_answer() -> Result<()> {
                 break;
             }
         }
-        if bob_dialog_id.is_some() { break; }
+        if bob_dialog_id.is_some() {
+            break;
+        }
         sleep(Duration::from_millis(100)).await;
     }
     assert!(bob_dialog_id.is_some(), "Bob should receive the call");
@@ -59,7 +61,9 @@ async fn test_caller_cancel_before_answer() -> Result<()> {
                 terminated = true;
             }
         }
-        if terminated { break; }
+        if terminated {
+            break;
+        }
         sleep(Duration::from_millis(100)).await;
     }
 

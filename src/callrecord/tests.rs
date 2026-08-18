@@ -1129,12 +1129,7 @@ async fn test_recording_metadata_filename_falls_back_to_call_id_wav() {
 
     let mut saw_metadata = false;
     loop {
-        match tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            event_rx.recv(),
-        )
-        .await
-        {
+        match tokio::time::timeout(std::time::Duration::from_millis(200), event_rx.recv()).await {
             Ok(Ok(entry)) => {
                 if entry.call_id != "call-no-filename" {
                     continue;
@@ -1162,8 +1157,8 @@ async fn test_recording_metadata_filename_falls_back_to_call_id_wav() {
 /// `recording_metadata_available.file_size` (not 0).
 #[tokio::test]
 async fn test_recording_metadata_file_size_uses_stashed_sipflow_size() {
-    use crate::callrecord::recording_upload::RecordingUploadHook;
     use crate::callrecord::RecordingFileSize;
+    use crate::callrecord::recording_upload::RecordingUploadHook;
     use crate::config::{RecordingPolicy, RecordingType};
     use crate::rwi::RwiGateway;
     use parking_lot::RwLock;
@@ -1206,12 +1201,7 @@ async fn test_recording_metadata_file_size_uses_stashed_sipflow_size() {
 
     let mut saw_metadata = false;
     loop {
-        match tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            event_rx.recv(),
-        )
-        .await
-        {
+        match tokio::time::timeout(std::time::Duration::from_millis(200), event_rx.recv()).await {
             Ok(Ok(entry)) => {
                 if entry.call_id != "call-with-size" {
                     continue;

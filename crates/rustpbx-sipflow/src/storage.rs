@@ -337,7 +337,9 @@ impl StorageManager {
         let Some(file) = self.raw_file.as_mut() else {
             return Ok(());
         };
-        let offset = self.current_offset.saturating_sub(self.write_buf.len() as u64);
+        let offset = self
+            .current_offset
+            .saturating_sub(self.write_buf.len() as u64);
         let write_start = Instant::now();
         if !self.pos_known {
             file.seek(SeekFrom::Start(offset)).await?;

@@ -973,8 +973,7 @@ impl SipServerBuilder {
             match self.cluster_config.as_ref() {
                 Some(cfg) if !cfg.peers.is_empty() => {
                     let ttl = Duration::from_secs(cfg.session_registry_ttl_secs);
-                    let heartbeat =
-                        Duration::from_secs(cfg.session_registry_heartbeat_secs);
+                    let heartbeat = Duration::from_secs(cfg.session_registry_heartbeat_secs);
                     let registry: crate::call::runtime::SessionRegistryRef =
                         match cfg.session_registry_backend.as_str() {
                             "memory" => MemorySessionRegistry::new(node_id.clone(), ttl),
@@ -1000,12 +999,11 @@ impl SipServerBuilder {
                         };
                     // Keep locally-owned sessions alive with a single batch
                     // update per tick.  Harmless for a noop registry (no-op).
-                    let heartbeat_task =
-                        crate::call::runtime::NodeHeartbeat::spawn(
-                            registry.clone(),
-                            node_id,
-                            heartbeat,
-                        );
+                    let heartbeat_task = crate::call::runtime::NodeHeartbeat::spawn(
+                        registry.clone(),
+                        node_id,
+                        heartbeat,
+                    );
                     (registry, Some(heartbeat_task))
                 }
                 _ => (Arc::new(NoopSessionRegistry), None),
@@ -1546,14 +1544,17 @@ impl SipServerInner {
         }
         self.rtp_config.store(Arc::new(new_rtp));
         self.media_proxy.store(Arc::new(config.proxy.media_proxy));
-        self.recording_policy.store(Arc::new(new_proxy.recording.clone()));
-        self.emergency_config.store(Arc::new(new_proxy.emergency.clone()));
+        self.recording_policy
+            .store(Arc::new(new_proxy.recording.clone()));
+        self.emergency_config
+            .store(Arc::new(new_proxy.emergency.clone()));
 
         // Push the new emergency config into the shared inspector so existing
         // inspections observe the updated numbers/trunk immediately.
         for inspector in &self.dialplan_inspectors {
             if let Some(emg) = inspector.as_any()
-                && let Some(inspector) = emg.downcast_ref::<crate::proxy::emergency::EmergencyInspector>()
+                && let Some(inspector) =
+                    emg.downcast_ref::<crate::proxy::emergency::EmergencyInspector>()
             {
                 inspector.reload_from(&new_proxy);
             }
@@ -1763,10 +1764,7 @@ impl SipServerInner {
                         }
                     }
                 }
-                let realms_empty = proxy_config
-                    .realms
-                    .as_ref()
-                    .map_or(true, |v| v.is_empty());
+                let realms_empty = proxy_config.realms.as_ref().map_or(true, |v| v.is_empty());
                 if self.endpoint.get_addrs().iter().any(|addr| {
                     let addr_host = addr.addr.host.to_string();
                     if addr_host == host {
@@ -2071,9 +2069,3 @@ max_ring_time = 45
         );
     }
 }
-
-
-
-
-
-

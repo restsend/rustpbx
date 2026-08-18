@@ -170,7 +170,10 @@ async fn test_pcmu_to_pcma_transcode() -> Result<()> {
     caller_sender.stop();
 
     let callee_stats = callee_receiver.get_stats().await;
-    assert!(callee_stats.packets_received > 0, "Callee should receive PCMA RTP");
+    assert!(
+        callee_stats.packets_received > 0,
+        "Callee should receive PCMA RTP"
+    );
     assert!(
         callee_stats.payload_types.contains(&8),
         "Callee should receive PCMA RTP (PT=8) after PCMU→PCMA transcode, got {:?}",
@@ -247,7 +250,10 @@ async fn test_g722_to_g729_transcode() -> Result<()> {
     caller_sender.stop();
 
     let callee_stats = callee_receiver.get_stats().await;
-    assert!(callee_stats.packets_received > 0, "Callee should receive G729 RTP after transcoding from G722");
+    assert!(
+        callee_stats.packets_received > 0,
+        "Callee should receive G729 RTP after transcoding from G722"
+    );
     assert!(
         callee_stats.payload_types.contains(&18),
         "Callee should receive G729 RTP (PT=18) after G722→G729 transcode, got {:?}",

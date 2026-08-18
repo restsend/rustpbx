@@ -503,14 +503,16 @@ pub fn build_session_timer_headers(
 pub fn build_session_timer_response_headers(
     timer: &SessionTimerState,
 ) -> Vec<rsipstack::sip::Header> {
-    let mut headers = vec![SessionExpires {
-        interval: timer.session_interval,
-        refresher: Some(match timer.refresher {
-            SessionRefresher::Local => SessionRefresherParam::Uas,
-            SessionRefresher::Remote => SessionRefresherParam::Uac,
-        }),
-    }
-    .into_header()];
+    let mut headers = vec![
+        SessionExpires {
+            interval: timer.session_interval,
+            refresher: Some(match timer.refresher {
+                SessionRefresher::Local => SessionRefresherParam::Uas,
+                SessionRefresher::Remote => SessionRefresherParam::Uac,
+            }),
+        }
+        .into_header(),
+    ];
 
     if timer.refresher == SessionRefresher::Remote {
         headers.push(rsipstack::sip::Header::Require(

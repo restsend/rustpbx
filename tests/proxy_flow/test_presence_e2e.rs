@@ -14,7 +14,11 @@ async fn test_presence_manager_initial_offline() -> Result<()> {
     let server = Arc::new(E2eTestServer::start_with_presence(MediaProxyMode::Auto).await?);
 
     let state = server.server_ref.presence_manager.get_state("bob");
-    assert_eq!(state.status, PresenceStatus::Offline, "No PUBLISH yet → offline");
+    assert_eq!(
+        state.status,
+        PresenceStatus::Offline,
+        "No PUBLISH yet → offline"
+    );
 
     server.stop();
     Ok(())
@@ -42,7 +46,11 @@ async fn test_presence_state_transition_offline_to_busy() -> Result<()> {
     sleep(Duration::from_millis(100)).await;
 
     let state = server.server_ref.presence_manager.get_state("bob");
-    assert_eq!(state.status, PresenceStatus::Busy, "should be busy after update");
+    assert_eq!(
+        state.status,
+        PresenceStatus::Busy,
+        "should be busy after update"
+    );
     assert_eq!(state.note.as_deref(), Some("in a call"));
 
     server.stop();

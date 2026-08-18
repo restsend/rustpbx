@@ -8,6 +8,8 @@
 
 use crate::common::test_helpers;
 use crate::common::test_ua::{TestUa, TestUaConfig, TestUaEvent};
+use anyhow::Result;
+use async_trait::async_trait;
 use rustpbx::call::domain::{CallCommand, LegId};
 use rustpbx::call::user::SipUser;
 use rustpbx::callrecord::CallRecordHangupReason;
@@ -23,8 +25,6 @@ use rustpbx::proxy::{
     server::SipServerBuilder,
     user::MemoryUserBackend,
 };
-use anyhow::Result;
-use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;

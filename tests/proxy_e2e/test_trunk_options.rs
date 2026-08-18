@@ -1,5 +1,3 @@
-use rustpbx::config::{MediaProxyMode, ProxyConfig};
-use rustpbx::proxy::routing::TrunkConfig;
 use crate::common::e2e_test_server::E2eTestServer;
 use anyhow::Result;
 use rsipstack::EndpointBuilder;
@@ -14,6 +12,8 @@ use rsipstack::transaction::key::{TransactionKey, TransactionRole};
 use rsipstack::transaction::transaction::Transaction;
 use rsipstack::transport::TransportLayer;
 use rsipstack::transport::udp::UdpConnection;
+use rustpbx::config::{MediaProxyMode, ProxyConfig};
+use rustpbx::proxy::routing::TrunkConfig;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::sleep;

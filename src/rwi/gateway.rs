@@ -449,8 +449,6 @@ impl RwiGateway {
             .collect()
     }
 
-
-
     /// Current sequence number of the event cache.
     pub fn current_sequence(&self) -> u64 {
         let cache_state = self.event_cache.lock();
@@ -825,7 +823,10 @@ mod tests {
         assert_eq!(v["root"]["call_id"].as_str(), Some("c1"));
         assert_eq!(v["root"]["caller"].as_str(), Some("sip:alice@localhost"));
         assert_eq!(v["root"]["callee_name"].as_str(), Some("4000"));
-        assert_eq!(v["root"]["start_time"].as_str(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(
+            v["root"]["start_time"].as_str(),
+            Some("2026-01-01T00:00:00Z")
+        );
     }
 
     /// When the event already carries its own `caller` field (e.g. cc_ringing
@@ -1032,9 +1033,7 @@ mod tests {
     #[tokio::test]
     async fn test_client_ip_not_overwritten() {
         let mut gw = RwiGateway::new();
-        gw.set_client_ip_lookup(Some(std::sync::Arc::new(|_| {
-            Some("10.9.9.9".to_string())
-        })));
+        gw.set_client_ip_lookup(Some(std::sync::Arc::new(|_| Some("10.9.9.9".to_string()))));
         let sid = gw.create_session(create_identity()).read().id.clone();
         let (tx, mut rx) = mpsc::unbounded_channel();
         gw.set_session_event_sender(&sid, tx);

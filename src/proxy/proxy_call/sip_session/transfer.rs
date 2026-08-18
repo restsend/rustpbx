@@ -541,9 +541,7 @@ impl SipSession {
                     self.media.callee_offer = None;
                     self.media.callee_offer_cached_webrtc = None;
                     let caller = from_user
-                        .map(|user| {
-                            format!("sip:{}@{}", user, refer_to_uri.host_with_port).parse()
-                        })
+                        .map(|user| format!("sip:{}@{}", user, refer_to_uri.host_with_port).parse())
                         .transpose()
                         .map_err(|e| anyhow!("Invalid transfer caller URI: {}", e))?;
                     let mut location = crate::call::Location {
@@ -1405,7 +1403,10 @@ impl SipSession {
                 reverse_handle,
             )
             .await;
-            if bridge_disconnected && has_return_app && let Some(tx) = tx {
+            if bridge_disconnected
+                && has_return_app
+                && let Some(tx) = tx
+            {
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => {}

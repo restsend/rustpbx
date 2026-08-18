@@ -1,8 +1,8 @@
+use chrono::{Datelike, Duration, TimeZone, Utc};
 use rustpbx::addons::wholesale::billing_service::BillingService;
 use rustpbx::addons::wholesale::migration::Migrator as WholesaleMigrator;
 use rustpbx::addons::wholesale::models::{bill, bill_setting, export_task, tenant, wholesale_cdr};
 use rustpbx::models::migration::Migrator as MainMigrator;
-use chrono::{Datelike, Duration, TimeZone, Utc};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter, Set,
 };
@@ -1304,4 +1304,3 @@ async fn test_generated_bill_has_draft_status() {
         "total_amount and actual_amount must be equal on creation"
     );
 }
-

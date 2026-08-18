@@ -49,7 +49,9 @@ async fn test_early_media_183_ringback() -> Result<()> {
                 break;
             }
         }
-        if got_ringing { break; }
+        if got_ringing {
+            break;
+        }
         sleep(Duration::from_millis(100)).await;
     }
     assert!(got_ringing, "Bob should send ringing");
@@ -91,7 +93,9 @@ async fn test_call_180_to_200_flow() -> Result<()> {
                 answered = true;
             }
         }
-        if answered { break; }
+        if answered {
+            break;
+        }
         sleep(Duration::from_millis(100)).await;
     }
     assert!(answered, "Bob should answer");

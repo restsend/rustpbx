@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 use crate::common::e2e_test_server::E2eTestServer;
-use crate::common::rtp_utils::{send_rtp_dtmf, RtpReceiver};
+use crate::common::rtp_utils::{RtpReceiver, send_rtp_dtmf};
 use crate::common::test_helpers::make_sdp;
 use crate::common::test_ua::TestUaEvent;
 
@@ -38,7 +38,9 @@ async fn test_dtmf_sip_info_caller_to_callee() -> Result<()> {
                 break;
             }
         }
-        if bob_dialog_id.is_some() { break; }
+        if bob_dialog_id.is_some() {
+            break;
+        }
         sleep(Duration::from_millis(100)).await;
     }
 
@@ -50,7 +52,13 @@ async fn test_dtmf_sip_info_caller_to_callee() -> Result<()> {
 
     // Alice sends DTMF '5' via SIP INFO
     let dtmf_body = "signal=5\nduration=160";
-    alice.send_info(&alice_id.clone().unwrap(), "application/dtmf-relay", dtmf_body.as_bytes().to_vec()).await?;
+    alice
+        .send_info(
+            &alice_id.clone().unwrap(),
+            "application/dtmf-relay",
+            dtmf_body.as_bytes().to_vec(),
+        )
+        .await?;
 
     // Bob should receive the DTMF INFO
     let mut received_dtmf = false;
@@ -63,7 +71,9 @@ async fn test_dtmf_sip_info_caller_to_callee() -> Result<()> {
                 received_dtmf = true;
             }
         }
-        if received_dtmf { break; }
+        if received_dtmf {
+            break;
+        }
         sleep(Duration::from_millis(100)).await;
     }
     assert!(received_dtmf, "Bob should receive DTMF INFO from Alice");
@@ -104,7 +114,9 @@ async fn test_rtp_rfc2833_dtmf_telephone_event() -> Result<()> {
                 break;
             }
         }
-        if bob_dialog_id.is_some() { break; }
+        if bob_dialog_id.is_some() {
+            break;
+        }
         sleep(Duration::from_millis(100)).await;
     }
 
@@ -122,11 +134,15 @@ async fn test_rtp_rfc2833_dtmf_telephone_event() -> Result<()> {
         0x11111111,
         1000,
         50000,
-    ).await?;
+    )
+    .await?;
 
     sleep(Duration::from_millis(500)).await;
     let stats = callee_receiver.get_stats().await;
-    assert!(stats.packets_received > 0, "Callee should receive RTP DTMF events");
+    assert!(
+        stats.packets_received > 0,
+        "Callee should receive RTP DTMF events"
+    );
 
     server.stop();
     Ok(())

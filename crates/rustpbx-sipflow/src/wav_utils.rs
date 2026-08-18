@@ -47,7 +47,6 @@ fn extract_codecs_from_sdp(sdp: &str) -> Vec<CodecInfo> {
     codecs
 }
 
-
 pub(crate) use rustpbx_record_common::PayloadDescriptor;
 
 pub(crate) type PayloadTypeMap = HashMap<u8, PayloadDescriptor>;
@@ -234,7 +233,6 @@ fn parse_dtmf_payload(payload: &[u8], clock_rate: u32) -> Option<(char, u32)> {
     Some((digit, duration_ms.max(20)))
 }
 
-
 fn encode_dtmf_tone(
     digit: char,
     duration_ms: u32,
@@ -273,7 +271,11 @@ fn insert_chunked(
 }
 
 fn mix_pcm_chunks(audio_chunk: &[u8], dtmf_chunk: &[u8]) -> Vec<u8> {
-    rustpbx_record_common::mix_pcm(audio_chunk, dtmf_chunk, rustpbx_record_common::MixMode::ClampSum)
+    rustpbx_record_common::mix_pcm(
+        audio_chunk,
+        dtmf_chunk,
+        rustpbx_record_common::MixMode::ClampSum,
+    )
 }
 
 pub fn write_wav_header<W: Write + Seek>(
@@ -285,7 +287,11 @@ pub fn write_wav_header<W: Write + Seek>(
 ) -> Result<()> {
     writer.seek(SeekFrom::Start(0))?;
     let header = rustpbx_record_common::wav_header(
-        &rustpbx_record_common::WavSpec { codec, sample_rate, channels },
+        &rustpbx_record_common::WavSpec {
+            codec,
+            sample_rate,
+            channels,
+        },
         data_size,
     );
     writer.write_all(&header)?;
@@ -522,8 +528,14 @@ pub(crate) fn generate_wav_to_writer_with_rate<W: Write + Seek>(
         let decoder_needed = target_codec.is_none();
 
         let processed_data: Vec<u8> = if decoder_needed {
-            let final_samples =
-                decode_pipeline.decode(rtp.leg, pt, codec, descriptor.clock_rate, payload, target_sample_rate);
+            let final_samples = decode_pipeline.decode(
+                rtp.leg,
+                pt,
+                codec,
+                descriptor.clock_rate,
+                payload,
+                target_sample_rate,
+            );
             audio_codec::samples_to_bytes(&final_samples)
         } else {
             payload.to_vec()

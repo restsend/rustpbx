@@ -73,7 +73,11 @@ impl CodecWavWriter {
         data_size: u32,
     ) -> [u8; 44] {
         rustpbx_record_common::wav_header(
-            &rustpbx_record_common::WavSpec { codec, sample_rate, channels },
+            &rustpbx_record_common::WavSpec {
+                codec,
+                sample_rate,
+                channels,
+            },
             data_size,
         )
     }

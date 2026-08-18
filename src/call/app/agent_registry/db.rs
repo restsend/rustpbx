@@ -41,7 +41,6 @@ impl DbRegistry {
         self.cache_ttl_secs = ttl_secs;
         self
     }
-
 }
 
 #[async_trait]

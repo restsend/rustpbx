@@ -37,7 +37,9 @@ async fn test_outbound_call_establishes() -> Result<()> {
                 answered = true;
             }
         }
-        if answered { break; }
+        if answered {
+            break;
+        }
         sleep(Duration::from_millis(100)).await;
     }
     assert!(answered, "Bob should answer");
@@ -81,7 +83,9 @@ async fn test_callee_hangup_after_call() -> Result<()> {
                 break;
             }
         }
-        if bob_dialog_id.is_some() { break; }
+        if bob_dialog_id.is_some() {
+            break;
+        }
         sleep(Duration::from_millis(100)).await;
     }
 

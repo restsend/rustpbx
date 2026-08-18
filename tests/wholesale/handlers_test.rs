@@ -245,4 +245,3 @@ mod tests {
         assert_eq!(q.bill_id, None);
     }
 }
-

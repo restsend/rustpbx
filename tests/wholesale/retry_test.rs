@@ -1,3 +1,4 @@
+use rsipstack::dialog::invitation::InviteOption;
 use rustpbx::addons::wholesale::data::{RateConfig, RateDeckConfig};
 use rustpbx::addons::wholesale::migration::Migrator as WholesaleMigrator;
 use rustpbx::addons::wholesale::models::{
@@ -7,7 +8,6 @@ use rustpbx::addons::wholesale::models::{
 use rustpbx::addons::wholesale::route::WholesaleRouteInvite;
 use rustpbx::call::{RouteInvite, TrunkContext};
 use rustpbx::models::{migration::Migrator as MainMigrator, sip_trunk};
-use rsipstack::dialog::invitation::InviteOption;
 use sea_orm::ActiveValue::Set;
 use sea_orm::{Database, DatabaseConnection, EntityTrait};
 use sea_orm_migration::MigratorTrait;
@@ -233,4 +233,3 @@ async fn test_wholesale_route_ignores_retry_configuration() {
     };
     assert!(option.destination.is_some());
 }
-

@@ -5,7 +5,6 @@ use rsipstack::transport::SipAddr;
 use std::net::IpAddr;
 use tracing::debug;
 
-
 pub struct NatInspector;
 
 impl Default for NatInspector {
@@ -43,7 +42,10 @@ impl NatInspector {
 ///
 /// `source_port` is the actual transport source port, used as a fallback when
 /// the Via has no `rport`.
-fn fix_nated_contact_in_request(req: &mut rsipstack::sip::Request, source_port: Option<u16>) -> bool {
+fn fix_nated_contact_in_request(
+    req: &mut rsipstack::sip::Request,
+    source_port: Option<u16>,
+) -> bool {
     if !matches!(
         req.method,
         rsipstack::sip::Method::Invite | rsipstack::sip::Method::Register
@@ -69,7 +71,11 @@ fn fix_nated_contact_in_request(req: &mut rsipstack::sip::Request, source_port: 
 
     let target = HostWithPort {
         host: rsipstack::sip::Host::IpAddr(received_ip),
-        port: typed.rport().and_then(|r| r).or(source_port).map(Into::into),
+        port: typed
+            .rport()
+            .and_then(|r| r)
+            .or(source_port)
+            .map(Into::into),
     };
 
     let mut changed = false;
@@ -181,7 +187,10 @@ fn rewrite_nated_uri(uri: &str, target: &HostWithPort) -> Option<String> {
             Some(ref p) => format!("{}:{}", host, p),
             None => host.to_string(),
         };
-        return Some(format!("{}{}{}{}", scheme, user_part, new_authority, suffix));
+        return Some(format!(
+            "{}{}{}{}",
+            scheme, user_part, new_authority, suffix
+        ));
     }
 
     let new_host = match &target.host {
@@ -193,7 +202,10 @@ fn rewrite_nated_uri(uri: &str, target: &HostWithPort) -> Option<String> {
         Some(ref p) => format!("{}:{}", new_host, p),
         None => new_host,
     };
-    Some(format!("{}{}{}{}", scheme, user_part, new_authority, suffix))
+    Some(format!(
+        "{}{}{}{}",
+        scheme, user_part, new_authority, suffix
+    ))
 }
 
 impl MessageInspector for NatInspector {
@@ -240,8 +252,8 @@ impl MessageInspector for NatInspector {
 #[cfg(test)]
 mod tests {
     use super::NatInspector;
-    use rsipstack::sip::{HeadersExt, ToTypedHeader};
     use rsipstack::sip::SipMessage;
+    use rsipstack::sip::{HeadersExt, ToTypedHeader};
     use rsipstack::transaction::endpoint::MessageInspector;
     use rsipstack::transport::SipAddr;
 
@@ -314,7 +326,8 @@ mod tests {
             "Content-Length: 0\r\n",
             "\r\n"
         );
-        let rsipstack::sip::SipMessage::Request(req) = rsipstack::sip::SipMessage::try_from(raw).unwrap()
+        let rsipstack::sip::SipMessage::Request(req) =
+            rsipstack::sip::SipMessage::try_from(raw).unwrap()
         else {
             panic!("expected request")
         };
@@ -388,7 +401,12 @@ mod tests {
         let mut via = req.via_header().unwrap().clone();
         via.update_first_value(|v| {
             let mut typed = v.typed()?;
-            typed.params.retain(|p| !matches!(p, rsipstack::sip::Param::Rport(_) | rsipstack::sip::Param::Received(_)));
+            typed.params.retain(|p| {
+                !matches!(
+                    p,
+                    rsipstack::sip::Param::Rport(_) | rsipstack::sip::Param::Received(_)
+                )
+            });
             typed.params.push(rsipstack::sip::Param::Received(
                 rsipstack::sip::param::Received::new("10.10.10.10"),
             ));

@@ -191,5 +191,4 @@ mod tests {
             panic!("Expected Remote initiator");
         }
     }
-
 }

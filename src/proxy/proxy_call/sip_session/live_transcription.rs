@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use super::SipSession;
 use crate::call::transcription::remote::RemoteStreamingProvider;
 use crate::call::transcription::{
-    SidePcmFrame, TranscriptionEvent, TranscriptSide, TranscriptionProvider,
+    SidePcmFrame, TranscriptSide, TranscriptionEvent, TranscriptionProvider,
 };
 use crate::media::media_bridge::LegSide;
 use crate::rwi::{TranscriptEnded, TranscriptError, TranscriptSegmentEvent, TranscriptStarted};
@@ -117,9 +117,8 @@ impl SipSession {
 
         let call_id = self.context.session_id.clone();
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<TranscriptionEvent>();
-        let provider: std::sync::Arc<dyn TranscriptionProvider> = std::sync::Arc::new(
-            RemoteStreamingProvider::new(remote, &sides, event_tx),
-        );
+        let provider: std::sync::Arc<dyn TranscriptionProvider> =
+            std::sync::Arc::new(RemoteStreamingProvider::new(remote, &sides, event_tx));
 
         // PCM pump: one task per side, forwarding non-silence frames.
         let cancel = CancellationToken::new();

@@ -30,7 +30,6 @@ impl MemoryRegistry {
             rr_counter: RwLock::new(0),
         }
     }
-
 }
 
 impl Default for MemoryRegistry {
@@ -70,7 +69,6 @@ impl AgentRegistry for MemoryRegistry {
 
         self.agents.insert(agent_id.clone(), record.clone());
         info!(agent_id = %agent_id, "Agent registered in memory");
-
 
         Ok(())
     }

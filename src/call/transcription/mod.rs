@@ -64,7 +64,10 @@ pub enum TranscriptionEvent {
     Segment(TranscriptSegment),
     /// The provider could not start or has died. `side` is `None` when the
     /// whole provider is affected.
-    Failed { side: Option<TranscriptSide>, error: String },
+    Failed {
+        side: Option<TranscriptSide>,
+        error: String,
+    },
 }
 
 /// A PCM frame tagged with the call side it came from.

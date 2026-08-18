@@ -22,8 +22,7 @@ impl EmergencyInspector {
     /// Hot-reload the emergency config (numbers/trunk) from the live proxy
     /// config. Called by the server during `reload_proxy_config`.
     pub fn reload_from(&self, proxy_config: &crate::config::ProxyConfig) {
-        self.config
-            .store(Arc::new(proxy_config.emergency.clone()));
+        self.config.store(Arc::new(proxy_config.emergency.clone()));
     }
 }
 

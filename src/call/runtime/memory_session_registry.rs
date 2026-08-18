@@ -208,8 +208,16 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await; // age node-1 rows
         r.heartbeat_node("node-1").await.unwrap();
 
-        assert_eq!(r.last_heartbeat_within("node-1", Duration::from_millis(5)).await, 2);
-        assert_eq!(r.last_heartbeat_within("node-2", Duration::from_millis(5)).await, 0);
+        assert_eq!(
+            r.last_heartbeat_within("node-1", Duration::from_millis(5))
+                .await,
+            2
+        );
+        assert_eq!(
+            r.last_heartbeat_within("node-2", Duration::from_millis(5))
+                .await,
+            0
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

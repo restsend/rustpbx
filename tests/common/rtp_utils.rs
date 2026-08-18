@@ -399,14 +399,13 @@ pub fn extract_dtmf_payload_type(sdp: &str) -> Option<u8> {
         let pt = parts.next()?.parse::<u8>().ok()?;
         // codec name is the part before the clock rate, e.g. "telephone-event/8000"
         let codec = parts.next()?.split('/').next()?;
-        codec
-            .eq_ignore_ascii_case("telephone-event")
-            .then_some(pt)
+        codec.eq_ignore_ascii_case("telephone-event").then_some(pt)
     })
 }
 
 /// Extract media endpoint from SDP
-pub fn extract_media_endpoint(sdp: &str) -> Option<SocketAddr> {    let mut connection_ip: Option<String> = None;
+pub fn extract_media_endpoint(sdp: &str) -> Option<SocketAddr> {
+    let mut connection_ip: Option<String> = None;
     let mut media_port: Option<u16> = None;
 
     for line in sdp.lines() {

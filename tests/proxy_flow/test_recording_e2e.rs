@@ -39,7 +39,9 @@ async fn test_recording_cdr_generated() -> Result<()> {
                 answered = true;
             }
         }
-        if answered { break; }
+        if answered {
+            break;
+        }
         sleep(Duration::from_millis(100)).await;
     }
     assert!(answered);

@@ -183,7 +183,9 @@ impl LegRegistry {
         &mut self,
         id: &LegId,
     ) -> Option<ConferenceBridgeHandle> {
-        self.legs.get_mut(id).and_then(|d| d.conference_bridge.take())
+        self.legs
+            .get_mut(id)
+            .and_then(|d| d.conference_bridge.take())
     }
 
     pub fn stop_all_conference_bridge_handles(&mut self) {

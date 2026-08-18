@@ -241,8 +241,9 @@ impl ConsoleState {
                     serde_json::Value::String("community".to_string())
                 }
             });
-            map.entry("site_name")
-                .or_insert_with(|| serde_json::Value::String(crate::config::BRAND_NAME.to_string()));
+            map.entry("site_name").or_insert_with(|| {
+                serde_json::Value::String(crate::config::BRAND_NAME.to_string())
+            });
             map.entry("page_title")
                 .or_insert_with(|| serde_json::Value::String("RustPBX admin".to_string()));
             map.entry("site_description").or_insert_with(|| {

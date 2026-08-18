@@ -177,12 +177,7 @@ async fn recorder_sender_receives_ingress_via_tap() {
 
     let mut mb = MediaBridge::new("it-rec");
     let recorder_sender = mb.setup_recorder_task().unwrap();
-    let a = LegInner::new(
-        "a",
-        &LegConfig::rtp_pcmu(),
-        Some(recorder_sender),
-    )
-    .unwrap();
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), Some(recorder_sender)).unwrap();
     mb.replace_leg(LegSide::A, a).await;
     mb.set_recorder(recorder, None).await.unwrap();
 
@@ -218,12 +213,7 @@ async fn recorder_sender_receives_dtmf_rtp_packets() {
 
     let mut mb = MediaBridge::new("it-dtmf-rec");
     let recorder_sender = mb.setup_recorder_task().unwrap();
-    let a = LegInner::new(
-        "a",
-        &LegConfig::rtp_pcmu(),
-        Some(recorder_sender),
-    )
-    .unwrap();
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), Some(recorder_sender)).unwrap();
     mb.replace_leg(LegSide::A, a).await;
     mb.set_recorder(recorder, None).await.unwrap();
     let leg_a = mb.leg(LegSide::A).unwrap();
@@ -246,7 +236,8 @@ async fn recorder_sender_receives_dtmf_rtp_packets() {
     // via write_sample — this is what wav_utils parses to synthesize the tone.
     assert_eq!(captured_direction(&item), PacketDirection::Ingress);
     assert_eq!(
-        captured_payload_type(&item), 101,
+        captured_payload_type(&item),
+        101,
         "DTMF telephone-event PT must be preserved"
     );
     // Verify the raw RTP payload contains the RFC 4733 event data.
@@ -599,7 +590,10 @@ async fn rtp_timeout_app_paused_suppresses_even_when_rearmed() {
         .arm_rtp_timeout(LegSide::A, std::time::Duration::from_millis(150))
         .expect("re-armed while app-paused");
     let slept2 = tokio::time::timeout(std::time::Duration::from_millis(400), &mut rx2).await;
-    assert!(slept2.is_err(), "timeout must NOT fire after re-arm while app-paused");
+    assert!(
+        slept2.is_err(),
+        "timeout must NOT fire after re-arm while app-paused"
+    );
 
     // App releases the session → the timeout must fire now.
     mb.set_app_paused(LegSide::A, false);
@@ -769,9 +763,9 @@ async fn rtp_timeout_fires_on_inactive_webrtc_leg() {
             clock_rate: 48000,
             channels: 2,
             fmtp: None,
-            }],
-            video_codecs: Vec::new(),
-            rtp_port_range: None,
+        }],
+        video_codecs: Vec::new(),
+        rtp_port_range: None,
         external_ip: None,
         bind_ip: None,
         cname: Some("rtp-timeout-webrtc".to_string()),

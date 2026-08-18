@@ -1,11 +1,11 @@
 #[cfg(test)]
 mod tests {
+    use arc_swap::ArcSwap;
+    use axum::{Json, Router, routing::post};
     use rustpbx::call::{DialStrategy, DialplanFlow, SipUser, TransactionCookie};
     use rustpbx::config::{HttpRouterConfig, MediaProxyMode, RtpConfig};
     use rustpbx::proxy::call::CallRouter;
     use rustpbx::proxy::routing::http::HttpCallRouter;
-    use arc_swap::ArcSwap;
-    use axum::{Json, Router, routing::post};
     use serde_json::json;
     use std::sync::Arc;
     use tokio::net::TcpListener;

@@ -283,7 +283,10 @@ async fn diagnostics_bootstrap(state: &Arc<ConsoleState>) -> JsonValue {
                 .unwrap_or_else(|| crate::config::DEFAULT_ICE_SERVERS_PATH.to_string()),
         )
     } else {
-        (crate::config::DEFAULT_WS_PATH.to_string(), crate::config::DEFAULT_ICE_SERVERS_PATH.to_string())
+        (
+            crate::config::DEFAULT_WS_PATH.to_string(),
+            crate::config::DEFAULT_ICE_SERVERS_PATH.to_string(),
+        )
     };
 
     #[allow(unused_mut)]

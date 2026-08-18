@@ -15,12 +15,14 @@
 //! - Multiple concurrent trunk calls
 
 use crate::common::e2e_test_server::E2eTestServer;
-use crate::common::rtp_utils::{RtpPacket, RtpReceiver, RtpSender, RtpStats, extract_media_endpoint};
+use crate::common::rtp_utils::{
+    RtpPacket, RtpReceiver, RtpSender, RtpStats, extract_media_endpoint,
+};
 use crate::common::test_helpers;
 use crate::common::test_ua::TestUaEvent;
+use anyhow::Result;
 use rustpbx::callrecord::CallRecordHangupReason;
 use rustpbx::config::MediaProxyMode;
-use anyhow::Result;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -57,10 +59,9 @@ async fn establish_call(
 
     let caller_clone = caller_ua.clone();
     let callee_str = callee.to_string();
-    let caller_handle =
-        rustpbx::utils::spawn(
-            async move { caller_clone.make_call(&callee_str, Some(caller_sdp)).await },
-        );
+    let caller_handle = rustpbx::utils::spawn(async move {
+        caller_clone.make_call(&callee_str, Some(caller_sdp)).await
+    });
 
     let mut callee_dialog_id = None;
     let mut callee_offer_sdp: Option<String> = None;
@@ -1026,7 +1027,8 @@ async fn test_trunk_b2bua_rtp_timeout_no_bye_tears_down() -> Result<()> {
         "CDR hangup reason must be RtpTimeout after proxy-initiated teardown"
     );
     assert_eq!(
-        cdr_status_code, Some(200),
+        cdr_status_code,
+        Some(200),
         "An established call keeps the INVITE's 200 final status"
     );
 
@@ -1069,7 +1071,10 @@ async fn test_trunk_b2bua_callee_reject_486_stress() -> Result<()> {
         let callee_reject = callee_ua.clone();
         let reject_handle = rustpbx::utils::spawn(async move {
             for _ in 0..50 {
-                let events = callee_reject.process_dialog_events().await.unwrap_or_default();
+                let events = callee_reject
+                    .process_dialog_events()
+                    .await
+                    .unwrap_or_default();
                 for event in events {
                     if let TestUaEvent::IncomingCall(dialog_id, _) = event {
                         info!(attempt, "Callee rejecting with 486");
@@ -1093,9 +1098,10 @@ async fn test_trunk_b2bua_callee_reject_486_stress() -> Result<()> {
 
         let caller_sdp = dummy_sdp.clone();
         let caller_clone = caller_ua.clone();
-        let call_handle = rustpbx::utils::spawn(async move {
-            caller_clone.make_call("bob", Some(caller_sdp)).await
-        });
+        let call_handle =
+            rustpbx::utils::spawn(
+                async move { caller_clone.make_call("bob", Some(caller_sdp)).await },
+            );
 
         let (call_result, _) = tokio::join!(call_handle, reject_handle);
 

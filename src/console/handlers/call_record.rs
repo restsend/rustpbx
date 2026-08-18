@@ -1886,11 +1886,25 @@ async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<
         crate::utils::count_when(cond)
     }
 
-    let (sum_cast, avg_cast) = match db.get_database_backend() {
-        DatabaseBackend::Sqlite => ("INTEGER", "REAL"),
-        DatabaseBackend::MySql => ("SIGNED", "REAL"),
-        DatabaseBackend::Postgres => ("BIGINT", "FLOAT8"),
-        _ => ("BIGINT", "FLOAT8"),
+    let sum_cast = match db.get_database_backend() {
+        DatabaseBackend::Sqlite => "INTEGER",
+        DatabaseBackend::MySql => "SIGNED",
+        DatabaseBackend::Postgres => "BIGINT",
+        _ => "BIGINT",
+    };
+    // MySQL 5.7 CAST() has no DOUBLE/REAL/FLOAT, and sqlx cannot decode DECIMAL
+    // as f64. Promoting AVG(...) with + 0E0 yields a DOUBLE.
+    let avg_expr = match db.get_database_backend() {
+        DatabaseBackend::Sqlite => {
+            SimpleExpr::from(Func::avg(Expr::col(CallRecordColumn::DurationSecs))).cast_as("REAL")
+        }
+        DatabaseBackend::MySql => Expr::cust_with_expr(
+            "? + 0E0",
+            Func::avg(Expr::col(CallRecordColumn::DurationSecs)),
+        ),
+        _ => {
+            SimpleExpr::from(Func::avg(Expr::col(CallRecordColumn::DurationSecs))).cast_as("FLOAT8")
+        }
     };
 
     #[derive(sea_orm::FromQueryResult)]
@@ -1911,22 +1925,30 @@ async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<
         .filter(condition.clone())
         .select_only()
         .column_as(CallRecordColumn::Id.count(), "total")
-        .column_as(count_when(CallRecordColumn::Status.eq("completed")), "answered")
+        .column_as(
+            count_when(CallRecordColumn::Status.eq("completed")),
+            "answered",
+        )
         .column_as(count_when(CallRecordColumn::Status.eq("missed")), "missed")
         .column_as(count_when(CallRecordColumn::Status.eq("failed")), "failed")
-        .column_as(count_when(CallRecordColumn::Direction.eq("inbound")), "inbound")
-        .column_as(count_when(CallRecordColumn::Direction.eq("outbound")), "outbound")
-        .column_as(count_when(CallRecordColumn::HasTranscript.eq(true)), "transcribed")
+        .column_as(
+            count_when(CallRecordColumn::Direction.eq("inbound")),
+            "inbound",
+        )
+        .column_as(
+            count_when(CallRecordColumn::Direction.eq("outbound")),
+            "outbound",
+        )
+        .column_as(
+            count_when(CallRecordColumn::HasTranscript.eq(true)),
+            "transcribed",
+        )
         .column_as(
             SimpleExpr::from(Func::sum(Expr::col(CallRecordColumn::DurationSecs)))
                 .cast_as(sum_cast),
             "total_secs",
         )
-        .column_as(
-            SimpleExpr::from(Func::avg(Expr::col(CallRecordColumn::DurationSecs)))
-                .cast_as(avg_cast),
-            "avg_secs",
-        )
+        .column_as(avg_expr, "avg_secs")
         .column_as(
             Expr::col(CallRecordColumn::FromNumber).count_distinct(),
             "unique_dids",
@@ -2050,10 +2072,7 @@ mod tests {
         assert!(parse_recording_stream_selector(Some("foobar")).is_err());
     }
 
-    #[tokio::test]
-    async fn build_summary_aggregates_durations() {
-        let db = setup_db().await;
-
+    async fn insert_summary_fixture(db: &DatabaseConnection) {
         for (call_id, duration_secs) in [("summary-call-1", 60), ("summary-call-2", 30)] {
             call_record::ActiveModel {
                 call_id: Set(call_id.into()),
@@ -2067,18 +2086,54 @@ mod tests {
                 updated_at: Set(Utc::now()),
                 ..Default::default()
             }
-            .insert(&db)
+            .insert(db)
             .await
             .expect("insert call record");
         }
+    }
 
-        let summary = build_summary(&db, Condition::all())
+    async fn assert_summary_aggregates(db: &DatabaseConnection) {
+        let summary = build_summary(db, Condition::all())
             .await
             .expect("build summary");
 
         assert_eq!(summary["total"], 2);
         assert_eq!(summary["avg_duration"], 45.0);
         assert_eq!(summary["total_minutes"], 1.5);
+    }
+
+    #[tokio::test]
+    async fn build_summary_aggregates_durations() {
+        let db = setup_db().await;
+        insert_summary_fixture(&db).await;
+        assert_summary_aggregates(&db).await;
+    }
+
+    #[tokio::test]
+    async fn build_summary_aggregates_durations_on_mysql57() {
+        // Example: mysql://root:pass@127.0.0.1:13357/rustpbx_avg_cast_test?ssl-mode=DISABLED
+        let Ok(url) = std::env::var("MYSQL57_URL") else {
+            eprintln!("skipping: MYSQL57_URL not set");
+            return;
+        };
+        if url.trim().is_empty() {
+            eprintln!("skipping: MYSQL57_URL empty");
+            return;
+        }
+
+        let db = Database::connect(url.trim())
+            .await
+            .expect("connect mysql 5.7");
+        Migrator::up(&db, None)
+            .await
+            .expect("mysql 5.7 migrations succeed");
+        call_record::Entity::delete_many()
+            .filter(CallRecordColumn::CallId.is_in(["summary-call-1", "summary-call-2"]))
+            .exec(&db)
+            .await
+            .expect("cleanup previous mysql fixture");
+        insert_summary_fixture(&db).await;
+        assert_summary_aggregates(&db).await;
     }
 
     #[tokio::test]

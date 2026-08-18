@@ -13,10 +13,10 @@ mod audio_feature;
 mod conference_server_test;
 #[path = "call/conference_strategy_test.rs"]
 mod conference_strategy_test;
-#[path = "call/mcu_three_way.rs"]
-mod mcu_three_way;
 #[path = "call/mcu_perf_leak.rs"]
 mod mcu_perf_leak;
+#[path = "call/mcu_three_way.rs"]
+mod mcu_three_way;
 #[path = "call/media_task_leak.rs"]
 mod media_task_leak;
 #[path = "call/ringback_mode.rs"]

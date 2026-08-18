@@ -107,7 +107,9 @@ impl StatsLogger {
         let locator = sip.inner.locator.online_stats().await.ok();
 
         let mut sip_tx_received = self.prev_sip_tx_received.lock().unwrap();
-        let tx_received_d = SipTelemetry::snapshot().tx_received_total.saturating_sub(*sip_tx_received);
+        let tx_received_d = SipTelemetry::snapshot()
+            .tx_received_total
+            .saturating_sub(*sip_tx_received);
         *sip_tx_received += tx_received_d;
 
         let mut prev_finished = self.prev_endpoint_finished.lock().unwrap();
@@ -262,9 +264,19 @@ fn read_meminfo() -> serde_json::Value {
     let mut available = 0u64;
     for line in text.lines() {
         if let Some(v) = line.strip_prefix("MemTotal:") {
-            total = v.trim().split_whitespace().next().and_then(|p| p.parse().ok()).unwrap_or(0);
+            total = v
+                .trim()
+                .split_whitespace()
+                .next()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(0);
         } else if let Some(v) = line.strip_prefix("MemAvailable:") {
-            available = v.trim().split_whitespace().next().and_then(|p| p.parse().ok()).unwrap_or(0);
+            available = v
+                .trim()
+                .split_whitespace()
+                .next()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(0);
         }
     }
     let used_pct = if total > 0 {
@@ -303,7 +315,9 @@ fn media_delta(cur: &MediaTelemetrySnapshot, prev: &MediaTelemetrySnapshot) -> s
               p: &crate::media::telemetry::DirectionSnapshot| {
         let packets_d = c.packets_total.saturating_sub(p.packets_total);
         let lost_d = c.lost_total.saturating_sub(p.lost_total);
-        let idrop_d = c.internal_drops_total.saturating_sub(p.internal_drops_total);
+        let idrop_d = c
+            .internal_drops_total
+            .saturating_sub(p.internal_drops_total);
         let loss_pct = if lost_d + packets_d > 0 {
             lost_d as f64 / (lost_d + packets_d) as f64 * 100.0
         } else {

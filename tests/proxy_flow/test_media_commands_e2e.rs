@@ -38,7 +38,9 @@ async fn test_media_play_stop_via_sip_info() -> Result<()> {
                 break;
             }
         }
-        if bob_dialog_id.is_some() { break; }
+        if bob_dialog_id.is_some() {
+            break;
+        }
         sleep(Duration::from_millis(100)).await;
     }
 
@@ -49,11 +51,23 @@ async fn test_media_play_stop_via_sip_info() -> Result<()> {
     assert!(alice_id.is_some(), "Call should establish");
 
     let body = r#"{"action":"media.play","params":{"url":"https://example.com/audio.wav","leg":"caller"}}"#;
-    alice.send_info(&alice_id.clone().unwrap(), "application/json", body.as_bytes().to_vec()).await?;
+    alice
+        .send_info(
+            &alice_id.clone().unwrap(),
+            "application/json",
+            body.as_bytes().to_vec(),
+        )
+        .await?;
     sleep(Duration::from_millis(500)).await;
 
     let body = r#"{"action":"media.stop","params":{"leg_id":"caller"}}"#;
-    alice.send_info(&alice_id.clone().unwrap(), "application/json", body.as_bytes().to_vec()).await?;
+    alice
+        .send_info(
+            &alice_id.clone().unwrap(),
+            "application/json",
+            body.as_bytes().to_vec(),
+        )
+        .await?;
     sleep(Duration::from_millis(300)).await;
 
     server.stop();

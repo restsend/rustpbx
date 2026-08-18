@@ -237,11 +237,7 @@ pub struct NodeHeartbeat {
 }
 
 impl NodeHeartbeat {
-    pub fn spawn(
-        registry: SessionRegistryRef,
-        node_id: String,
-        interval: Duration,
-    ) -> Self {
+    pub fn spawn(registry: SessionRegistryRef, node_id: String, interval: Duration) -> Self {
         let cancel = tokio_util::sync::CancellationToken::new();
         let c = cancel.clone();
         let handle = utils::spawn(async move {
@@ -306,12 +302,9 @@ mod tests {
             "node-1",
             Duration::from_secs(3600),
         );
-        let guard = SessionGuard::register(
-            reg.clone(),
-            SessionInfo::new("call-1", "node-1"),
-        )
-        .await
-        .unwrap();
+        let guard = SessionGuard::register(reg.clone(), SessionInfo::new("call-1", "node-1"))
+            .await
+            .unwrap();
         assert_eq!(reg.active_count().await, 1);
         assert_eq!(reg.lookup_owner("call-1").await.as_deref(), Some("node-1"));
 
@@ -327,12 +320,10 @@ mod tests {
             Duration::from_secs(3600),
         );
         {
-            let _guard = SessionGuard::register(
-                reg.clone(),
-                SessionInfo::new("call-drop", "node-1"),
-            )
-            .await
-            .unwrap();
+            let _guard =
+                SessionGuard::register(reg.clone(), SessionInfo::new("call-drop", "node-1"))
+                    .await
+                    .unwrap();
             assert_eq!(reg.active_count().await, 1);
         }
         // Drop is fire-and-forget: give the spawned task a beat to run.
@@ -346,12 +337,9 @@ mod tests {
             "node-1",
             Duration::from_secs(3600),
         );
-        let guard = SessionGuard::register(
-            reg.clone(),
-            SessionInfo::new("call-x", "node-1"),
-        )
-        .await
-        .unwrap();
+        let guard = SessionGuard::register(reg.clone(), SessionInfo::new("call-x", "node-1"))
+            .await
+            .unwrap();
         // release marks released=true, Drop later is a no-op — no panic/dupe.
         guard.release().await.unwrap();
         assert_eq!(reg.active_count().await, 0);
@@ -375,7 +363,9 @@ mod tests {
 
         // Batch heartbeat touches only node-1's rows.
         reg.heartbeat_node("node-1").await.unwrap();
-        let refreshed = reg.last_heartbeat_within("node-1", Duration::from_secs(5)).await;
+        let refreshed = reg
+            .last_heartbeat_within("node-1", Duration::from_secs(5))
+            .await;
         assert_eq!(refreshed, 2, "only node-1's own sessions are refreshed");
     }
 }

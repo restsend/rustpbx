@@ -1,5 +1,7 @@
 use crate::common::test_helpers;
 use crate::common::test_ua::{TestUa, TestUaEvent};
+use anyhow::Result;
+use async_trait::async_trait;
 use rustpbx::call::user::SipUser;
 use rustpbx::config::ProxyConfig;
 use rustpbx::proxy::{
@@ -12,8 +14,6 @@ use rustpbx::proxy::{
     server::SipServerBuilder,
     user::MemoryUserBackend,
 };
-use anyhow::Result;
-use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -76,7 +76,14 @@ struct TestQueueServer {
     cancel_token: CancellationToken,
     port: u16,
     events: Arc<Mutex<Vec<CallSessionContext>>>,
-    ended_events: Arc<Mutex<Vec<(CallSessionContext, Option<rustpbx::callrecord::CallRecordHangupReason>)>>>,
+    ended_events: Arc<
+        Mutex<
+            Vec<(
+                CallSessionContext,
+                Option<rustpbx::callrecord::CallRecordHangupReason>,
+            )>,
+        >,
+    >,
 }
 
 impl TestQueueServer {
@@ -135,7 +142,12 @@ impl TestQueueServer {
         });
         sleep(Duration::from_millis(100)).await;
 
-        Ok(Self { cancel_token, port, events, ended_events })
+        Ok(Self {
+            cancel_token,
+            port,
+            events,
+            ended_events,
+        })
     }
 
     fn get_addr(&self) -> std::net::SocketAddr {
@@ -152,7 +164,14 @@ impl Drop for TestQueueServer {
 #[derive(Clone)]
 struct QueueTestHook {
     connected: Arc<Mutex<Vec<CallSessionContext>>>,
-    ended: Arc<Mutex<Vec<(CallSessionContext, Option<rustpbx::callrecord::CallRecordHangupReason>)>>>,
+    ended: Arc<
+        Mutex<
+            Vec<(
+                CallSessionContext,
+                Option<rustpbx::callrecord::CallRecordHangupReason>,
+            )>,
+        >,
+    >,
 }
 
 #[async_trait]
@@ -213,12 +232,13 @@ async fn test_call_queue_routing() {
     caller.start().await.unwrap();
 
     // 4. Caller dials "support" (triggers routing to queue)
-    let call_task: tokio::task::JoinHandle<anyhow::Result<()>> = rustpbx::utils::spawn(async move {
-        info!("Caller dialing support...");
+    let call_task: tokio::task::JoinHandle<anyhow::Result<()>> =
+        rustpbx::utils::spawn(async move {
+            info!("Caller dialing support...");
 
-        // Generate a minimal SDP offer from caller
-        let sdp_offer = format!(
-            "v=0\r\n\
+            // Generate a minimal SDP offer from caller
+            let sdp_offer = format!(
+                "v=0\r\n\
              o=caller {} 0 IN IP4 127.0.0.1\r\n\
              s=caller\r\n\
              c=IN IP4 127.0.0.1\r\n\
@@ -227,35 +247,36 @@ async fn test_call_queue_routing() {
              a=rtpmap:0 PCMU/8000\r\n\
              a=rtpmap:101 telephone-event/8000\r\n\
              a=sendrecv\r\n",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            caller_port + 100 // Use a different port for RTP
-        );
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                caller_port + 100 // Use a different port for RTP
+            );
 
-        let dialog_id = caller.make_call("support", Some(sdp_offer)).await?;
-        info!("Caller connected, dialog_id: {}", dialog_id);
+            let dialog_id = caller.make_call("support", Some(sdp_offer)).await?;
+            info!("Caller connected, dialog_id: {}", dialog_id);
 
-        // Hold the call for a short duration
-        sleep(Duration::from_millis(500)).await;
+            // Hold the call for a short duration
+            sleep(Duration::from_millis(500)).await;
 
-        info!("Caller hanging up...");
-        caller.hangup(&dialog_id).await?;
-        Ok::<_, anyhow::Error>(())
-    });
+            info!("Caller hanging up...");
+            caller.hangup(&dialog_id).await?;
+            Ok::<_, anyhow::Error>(())
+        });
 
     // 5. Agent waits for incoming call, answers, waits for CallEstablished (ACK)
-    let agent_task: tokio::task::JoinHandle<anyhow::Result<()>> = rustpbx::utils::spawn(async move {
-        let mut agent_dialog_id = None;
-        for _ in 0..50 {
-            let events = agent.process_dialog_events().await.unwrap_or_default();
-            for event in events {
-                if let TestUaEvent::IncomingCall(dialog_id, _) = event {
-                    info!("Agent received call: {}", dialog_id);
+    let agent_task: tokio::task::JoinHandle<anyhow::Result<()>> =
+        rustpbx::utils::spawn(async move {
+            let mut agent_dialog_id = None;
+            for _ in 0..50 {
+                let events = agent.process_dialog_events().await.unwrap_or_default();
+                for event in events {
+                    if let TestUaEvent::IncomingCall(dialog_id, _) = event {
+                        info!("Agent received call: {}", dialog_id);
 
-                    let sdp_answer = format!(
-                        "v=0\r\n\
+                        let sdp_answer = format!(
+                            "v=0\r\n\
                          o=agent {} 0 IN IP4 127.0.0.1\r\n\
                          s=agent\r\n\
                          c=IN IP4 127.0.0.1\r\n\
@@ -264,38 +285,44 @@ async fn test_call_queue_routing() {
                          a=rtpmap:0 PCMU/8000\r\n\
                          a=rtpmap:101 telephone-event/8000\r\n\
                          a=sendrecv\r\n",
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs(),
-                        agent_port + 100
-                    );
-                    agent.answer_call(&dialog_id, Some(sdp_answer)).await.unwrap();
-                    agent_dialog_id = Some(dialog_id);
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs(),
+                            agent_port + 100
+                        );
+                        agent
+                            .answer_call(&dialog_id, Some(sdp_answer))
+                            .await
+                            .unwrap();
+                        agent_dialog_id = Some(dialog_id);
+                        break;
+                    }
+                }
+                if agent_dialog_id.is_some() {
                     break;
                 }
+                sleep(Duration::from_millis(100)).await;
             }
-            if agent_dialog_id.is_some() {
-                break;
-            }
-            sleep(Duration::from_millis(100)).await;
-        }
-        let _agent_dialog_id = agent_dialog_id
-            .ok_or_else(|| anyhow::anyhow!("Agent did not receive call"))?;
-        info!("Agent answered, keeping dialog alive for teardown");
+            let _agent_dialog_id =
+                agent_dialog_id.ok_or_else(|| anyhow::anyhow!("Agent did not receive call"))?;
+            info!("Agent answered, keeping dialog alive for teardown");
 
-        // Wait for CallEstablished (ACK from proxy), then keep alive for BYE
-        for _ in 0..50 {
-            let events = agent.process_dialog_events().await.unwrap_or_default();
-            if events.iter().any(|e| matches!(e, TestUaEvent::CallEstablished(_))) {
-                break;
+            // Wait for CallEstablished (ACK from proxy), then keep alive for BYE
+            for _ in 0..50 {
+                let events = agent.process_dialog_events().await.unwrap_or_default();
+                if events
+                    .iter()
+                    .any(|e| matches!(e, TestUaEvent::CallEstablished(_)))
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(100)).await;
             }
-            sleep(Duration::from_millis(100)).await;
-        }
-        // Let cleanup happen (caller hangs up, BYE received)
-        sleep(Duration::from_millis(1500)).await;
-        Ok(())
-    });
+            // Let cleanup happen (caller hangs up, BYE received)
+            sleep(Duration::from_millis(1500)).await;
+            Ok(())
+        });
 
     let (call_res, agent_res) = tokio::join!(call_task, agent_task);
 
@@ -309,26 +336,43 @@ async fn test_call_queue_routing() {
     // Verify session hooks: on_call_connected and on_call_ended must have fired
     {
         let connected_events = server.events.lock().await;
-        assert!(!connected_events.is_empty(), "on_call_connected hook should have fired");
+        assert!(
+            !connected_events.is_empty(),
+            "on_call_connected hook should have fired"
+        );
         let connected_ctx = &connected_events[0];
-        assert!(!connected_ctx.session_id.is_empty(), "session_id should be populated");
-        assert!(connected_ctx.callee.contains("support"), "callee should contain 'support', got: {}", connected_ctx.callee);
+        assert!(
+            !connected_ctx.session_id.is_empty(),
+            "session_id should be populated"
+        );
+        assert!(
+            connected_ctx.callee.contains("support"),
+            "callee should contain 'support', got: {}",
+            connected_ctx.callee
+        );
     }
 
     // Give the session a moment to flush on_call_ended
     sleep(Duration::from_millis(500)).await;
     {
         let ended_events = server.ended_events.lock().await;
-        assert!(!ended_events.is_empty(), "on_call_ended hook should have fired after caller hangup");
+        assert!(
+            !ended_events.is_empty(),
+            "on_call_ended hook should have fired after caller hangup"
+        );
         let (ended_ctx, hangup_reason) = &ended_events[0];
-        assert!(!ended_ctx.session_id.is_empty(), "ended session_id should be populated");
+        assert!(
+            !ended_ctx.session_id.is_empty(),
+            "ended session_id should be populated"
+        );
         assert!(
             matches!(
                 hangup_reason,
                 Some(rustpbx::callrecord::CallRecordHangupReason::ByCaller)
                     | Some(rustpbx::callrecord::CallRecordHangupReason::Abandoned)
             ),
-            "hangup_reason should be ByCaller or Abandoned, got: {:?}", hangup_reason
+            "hangup_reason should be ByCaller or Abandoned, got: {:?}",
+            hangup_reason
         );
     }
     info!("Queue e2e verification passed: call connected and ended with caller hangup");

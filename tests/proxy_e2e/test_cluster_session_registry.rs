@@ -6,16 +6,16 @@
 //! record must disappear after the call ends (RAII unregister).
 
 use crate::common::test_ua::{TestUa, TestUaConfig, TestUaEvent};
+use anyhow::Result;
+use async_trait::async_trait;
+use rsipstack::transaction::endpoint::MessageInspector;
+use rsipstack::transaction::transaction::Transaction;
 use rustpbx::config::{ClusterConfig, ClusterPeer, ProxyConfig};
 use rustpbx::proxy::call::CallModule;
 use rustpbx::proxy::registrar::RegistrarModule;
 use rustpbx::proxy::server::SipServerBuilder;
 use rustpbx::proxy::user::MemoryUserBackend;
 use rustpbx::proxy::{ProxyModule, locator_db::DbLocator};
-use anyhow::Result;
-use async_trait::async_trait;
-use rsipstack::transaction::transaction::Transaction;
-use rsipstack::transaction::endpoint::MessageInspector;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -255,13 +255,21 @@ async fn test_cluster_session_registry_publishes_and_clears_call_ownership() -> 
     let session_id = entries[0].session_id.clone();
 
     // Ownership record visible from BOTH nodes via the shared db backend.
-    let owner_from_a = server_a.inner.session_registry.lookup_owner(&session_id).await;
+    let owner_from_a = server_a
+        .inner
+        .session_registry
+        .lookup_owner(&session_id)
+        .await;
     assert_eq!(
         owner_from_a.as_deref(),
         Some(expected_owner.as_str()),
         "node A must see itself as owner"
     );
-    let owner_from_b = server_b.inner.session_registry.lookup_owner(&session_id).await;
+    let owner_from_b = server_b
+        .inner
+        .session_registry
+        .lookup_owner(&session_id)
+        .await;
     assert_eq!(
         owner_from_b.as_deref(),
         Some(expected_owner.as_str()),
@@ -279,7 +287,11 @@ async fn test_cluster_session_registry_publishes_and_clears_call_ownership() -> 
     tokio::time::timeout(Duration::from_secs(5), caller.hangup(&dialog_id)).await??;
     sleep(Duration::from_millis(800)).await;
 
-    let owner_after = server_b.inner.session_registry.lookup_owner(&session_id).await;
+    let owner_after = server_b
+        .inner
+        .session_registry
+        .lookup_owner(&session_id)
+        .await;
     assert!(
         owner_after.is_none(),
         "registry record must be cleared after call end (got {owner_after:?})"

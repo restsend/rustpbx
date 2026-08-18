@@ -578,19 +578,11 @@ impl AppStateBuilder {
         }
 
         // ── Local stats log (optional; Prometheus-independent summary) ─────
-        if let Some(path) = config
-            .stats_log
-            .as_deref()
-            .filter(|p| !p.trim().is_empty())
-        {
+        if let Some(path) = config.stats_log.as_deref().filter(|p| !p.trim().is_empty()) {
             let interval = std::time::Duration::from_secs(config.stats_interval.max(1));
             let cancel = core.token.child_token();
-            match crate::stats_log::StatsLogger::try_new(
-                path,
-                app_state.clone(),
-                cancel,
-                interval,
-            ) {
+            match crate::stats_log::StatsLogger::try_new(path, app_state.clone(), cancel, interval)
+            {
                 Ok(logger) => {
                     logger.spawn();
                     tracing::info!(
@@ -599,7 +591,9 @@ impl AppStateBuilder {
                         "local stats log enabled"
                     );
                 }
-                Err(e) => tracing::warn!(path, error = %e, "local stats log disabled: cannot open file"),
+                Err(e) => {
+                    tracing::warn!(path, error = %e, "local stats log disabled: cannot open file")
+                }
             }
         }
 

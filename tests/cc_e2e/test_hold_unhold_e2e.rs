@@ -7,8 +7,8 @@
 
 use crate::common::e2e_test_server::E2eTestServer;
 use crate::common::test_ua::{TestUaEvent, create_test_sdp};
-use rustpbx::config::MediaProxyMode;
 use rsipstack::dialog::DialogId;
+use rustpbx::config::MediaProxyMode;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;

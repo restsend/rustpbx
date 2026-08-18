@@ -71,5 +71,3 @@ pub async fn call_sync_webhook(
         Err(e) => WebhookOutcome::Err(format!("webhook request failed: {e}")),
     }
 }
-
-

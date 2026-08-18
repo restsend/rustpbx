@@ -318,10 +318,7 @@ fn recording_filename(record: &CallRecord, url: &str) -> String {
     }) {
         return name;
     }
-    match url
-        .split(['/', '\\', '?', '#'])
-        .rfind(|s| !s.is_empty())
-    {
+    match url.split(['/', '\\', '?', '#']).rfind(|s| !s.is_empty()) {
         Some(segment) => {
             let stem = segment.rsplit('.').next_back().unwrap_or(segment);
             format!("{stem}.wav")

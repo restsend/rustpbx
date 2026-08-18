@@ -432,5 +432,4 @@ mod tests {
         let result = rwi_to_call_command(payload, None);
         assert!(result.is_err());
     }
-
 }

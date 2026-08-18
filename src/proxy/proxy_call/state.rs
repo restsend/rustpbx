@@ -84,7 +84,6 @@ pub struct CallContext {
     pub metadata: Option<std::collections::HashMap<String, String>>,
 }
 
-
 /// Delivers [`crate::call::app::ControllerEvent`]s to the running `CallApp`
 /// event loop. Cloneable/shareable: the sender slot has interior mutability.
 #[derive(Clone)]
@@ -135,9 +134,11 @@ mod tests {
     #[test]
     fn test_registry_cleanup() {
         use crate::call::runtime::SessionId;
-        use crate::proxy::active_call_registry::{ActiveProxyCallEntry, ActiveProxyCallRegistry, ActiveProxyCallStatus};
-        use std::sync::Arc;
+        use crate::proxy::active_call_registry::{
+            ActiveProxyCallEntry, ActiveProxyCallRegistry, ActiveProxyCallStatus,
+        };
         use chrono::Utc;
+        use std::sync::Arc;
 
         let registry = Arc::new(ActiveProxyCallRegistry::new());
 

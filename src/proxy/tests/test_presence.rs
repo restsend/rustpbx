@@ -257,13 +257,15 @@ async fn test_presence_publish_away_to_idle_transition() {
 
     let (mut tx, _) = create_transaction(away_pub).await;
     module
-        .on_transaction_begin(CancellationToken::new(), &mut tx, TransactionCookie::default())
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
 
-    assert!(
-        matches!(manager.get_state("bob").status, PresenceStatus::Away(ref d) if d == "lunch")
-    );
+    assert!(matches!(manager.get_state("bob").status, PresenceStatus::Away(ref d) if d == "lunch"));
 
     // Then go idle (no away activity)
     let mut idle_pub = create_test_request(
@@ -277,7 +279,11 @@ async fn test_presence_publish_away_to_idle_transition() {
 
     let (mut tx2, _) = create_transaction(idle_pub).await;
     module
-        .on_transaction_begin(CancellationToken::new(), &mut tx2, TransactionCookie::default())
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx2,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
 
@@ -303,7 +309,11 @@ async fn test_presence_publish_away_custom_detail_legacy() {
 
     let (mut tx, _) = create_transaction(publish).await;
     module
-        .on_transaction_begin(CancellationToken::new(), &mut tx, TransactionCookie::default())
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
 

@@ -47,12 +47,8 @@ impl MigrationTrait for Migration {
                     .col(string(Column::Caller).string_len(160))
                     .col(string(Column::Callee).string_len(160))
                     .col(string(Column::Direction).string_len(16))
-                    .col(
-                        timestamp(Column::StartedAt).default(Expr::current_timestamp()),
-                    )
-                    .col(
-                        timestamp(Column::LastUpdatedAt).default(Expr::current_timestamp()),
-                    )
+                    .col(timestamp(Column::StartedAt).default(Expr::current_timestamp()))
+                    .col(timestamp(Column::LastUpdatedAt).default(Expr::current_timestamp()))
                     .to_owned(),
             )
             .await?;

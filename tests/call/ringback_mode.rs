@@ -181,13 +181,31 @@ mod ringback_audio_tests {
         );
         assert!(audio.has_failure_tone());
         // Every failure status resolves to a built-in cue.
-        assert_eq!(audio.for_status(&StatusCode::BusyHere), Some("tone://480,3000"));
-        assert_eq!(audio.for_status(&StatusCode::Decline), Some("tone://480,2000"));
-        assert_eq!(audio.for_status(&StatusCode::TemporarilyUnavailable), Some("tone://480,2000"));
-        assert_eq!(audio.for_status(&StatusCode::NotFound), Some("tone://480,1500"));
-        assert_eq!(audio.for_status(&StatusCode::RequestTimeout), Some("tone://480,3000"));
         assert_eq!(
-            audio.for_status(&StatusCode::Other(500, "Failed to start ivr application".to_string())),
+            audio.for_status(&StatusCode::BusyHere),
+            Some("tone://480,3000")
+        );
+        assert_eq!(
+            audio.for_status(&StatusCode::Decline),
+            Some("tone://480,2000")
+        );
+        assert_eq!(
+            audio.for_status(&StatusCode::TemporarilyUnavailable),
+            Some("tone://480,2000")
+        );
+        assert_eq!(
+            audio.for_status(&StatusCode::NotFound),
+            Some("tone://480,1500")
+        );
+        assert_eq!(
+            audio.for_status(&StatusCode::RequestTimeout),
+            Some("tone://480,3000")
+        );
+        assert_eq!(
+            audio.for_status(&StatusCode::Other(
+                500,
+                "Failed to start ivr application".to_string()
+            )),
             Some("sounds/service_unavailable_en.mp3")
         );
     }

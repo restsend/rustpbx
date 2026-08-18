@@ -6,7 +6,6 @@ use std::time::Duration;
 
 pub mod add_leg_timeline_column;
 pub mod add_metadata_column;
-pub mod cluster_session;
 pub mod add_outbound_sip_trunk_id;
 pub mod add_rewrite_columns;
 pub mod add_sip_trunk_register_columns;
@@ -18,6 +17,7 @@ pub mod call_record_dashboard_index;
 pub mod call_record_from_number_index;
 pub mod call_record_indices;
 pub mod call_record_optimization_indices;
+pub mod cluster_session;
 pub mod config_entry;
 pub mod department;
 pub mod extension;
@@ -157,8 +157,8 @@ pub async fn connect_db(
 pub async fn prune_stale_migrations<M: MigratorTrait>(
     db: &DatabaseConnection,
 ) -> Result<usize, sea_orm::DbErr> {
-    use sea_orm::sea_query::{Expr, ExprTrait, Query};
     use sea_orm::ConnectionTrait;
+    use sea_orm::sea_query::{Expr, ExprTrait, Query};
 
     let table_name = M::migration_table_name();
     let registered: std::collections::HashSet<String> = M::migrations()
@@ -196,8 +196,7 @@ pub async fn migrate_with_stale_recovery<M: MigratorTrait>(
         Ok(()) => Ok(0),
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("is missing, this migration has been applied but its file is missing")
-            {
+            if msg.contains("is missing, this migration has been applied but its file is missing") {
                 let removed = prune_stale_migrations::<M>(db).await.map_err(|pe| {
                     anyhow::anyhow!("failed to prune stale migration records: {pe}")
                 })?;
@@ -205,9 +204,9 @@ pub async fn migrate_with_stale_recovery<M: MigratorTrait>(
                     removed,
                     "pruned stale migration records that blocked startup migrations; retrying"
                 );
-                M::up(db, None)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("database migration failed after pruning stale records: {e}"))?;
+                M::up(db, None).await.map_err(|e| {
+                    anyhow::anyhow!("database migration failed after pruning stale records: {e}")
+                })?;
                 Ok(removed)
             } else {
                 Err(anyhow::anyhow!("failed to run database migrations: {e}"))
@@ -236,10 +235,12 @@ pub async fn create_db(
         anyhow::anyhow!(msg)
     })?;
 
-    migrate_with_stale_recovery::<migration::Migrator>(&db).await.map_err(|e| {
-        tracing::error!("failed to run database migrations on {:?}", e);
-        anyhow::anyhow!("failed to run database migrations on {database_url}: {e}")
-    })?;
+    migrate_with_stale_recovery::<migration::Migrator>(&db)
+        .await
+        .map_err(|e| {
+            tracing::error!("failed to run database migrations on {:?}", e);
+            anyhow::anyhow!("failed to run database migrations on {database_url}: {e}")
+        })?;
     Ok(db)
 }
 

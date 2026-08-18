@@ -1,8 +1,8 @@
+use chrono::Utc;
 use rustpbx::addons::wholesale::data::{RateDeckConfig, RoutingProfileConfig, WholesaleState};
 use rustpbx::addons::wholesale::models::{
     rate, rate_deck, routing_profile, routing_profile_item, wholesale_trunk_config,
 };
-use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter,
 };

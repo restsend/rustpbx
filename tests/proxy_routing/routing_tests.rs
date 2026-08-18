@@ -1,3 +1,6 @@
+use async_trait::async_trait;
+use rsipstack::dialog::invitation::InviteOption;
+use rsipstack::sip::StatusCode;
 use rustpbx::call::{
     DialDirection, DialStrategy, RoutingState, concurrent_call_limiter::ConcurrentCallLimiter,
     cps_limiter::CpsLimiter,
@@ -11,9 +14,6 @@ use rustpbx::proxy::routing::{
     RouteQueueTargetConfig, RouteRule, SourceTrunk, TrunkConfig, TrunkDirection, VideoPolicy,
     candidate_matches_ip,
 };
-use async_trait::async_trait;
-use rsipstack::dialog::invitation::InviteOption;
-use rsipstack::sip::StatusCode;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::{collections::HashMap, net::IpAddr};
@@ -3108,7 +3108,10 @@ async fn test_no_limits_means_no_holds() {
 fn header_passthrough_default_all_allows_everything() {
     use rustpbx::proxy::routing::HeaderPassthrough;
     let rule = HeaderPassthrough::default();
-    assert_eq!(rule.mode, rustpbx::proxy::routing::HeaderPassthroughMode::All);
+    assert_eq!(
+        rule.mode,
+        rustpbx::proxy::routing::HeaderPassthroughMode::All
+    );
     assert!(rule.allows("X-Smart2Agent"));
     assert!(rule.allows("X-Referred-Id"));
     assert!(rule.allows("x-smart2agent"));
@@ -3216,7 +3219,10 @@ fn trunk_config_deserializes_header_passthrough() {
     "#;
     let trunk: TrunkConfig = toml::from_str(toml_str).unwrap();
     let hp = trunk.header_passthrough.unwrap();
-    assert_eq!(hp.mode, rustpbx::proxy::routing::HeaderPassthroughMode::Whitelist);
+    assert_eq!(
+        hp.mode,
+        rustpbx::proxy::routing::HeaderPassthroughMode::Whitelist
+    );
     assert!(hp.allows("x-smart2agent"));
     assert!(!hp.allows("X-SmartBridgeType"));
 }

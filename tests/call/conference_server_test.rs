@@ -32,7 +32,10 @@ async fn test_server_construction() {
         .await
         .unwrap();
     assert!(
-        manager.get_conference(&"shared-mgr-check".into()).await.is_some(),
+        manager
+            .get_conference(&"shared-mgr-check".into())
+            .await
+            .is_some(),
         "server and manager must share the same ConferenceManager"
     );
     server
@@ -46,7 +49,10 @@ async fn test_create_conference_and_list() {
     let (server, _manager) = test_server();
     let conf_id = ConferenceId::from("test-server-conf");
 
-    let conf = server.create_conference(conf_id.clone(), Some(10)).await.unwrap();
+    let conf = server
+        .create_conference(conf_id.clone(), Some(10))
+        .await
+        .unwrap();
     assert_eq!(conf.participant_count(), 0);
 
     let list = server.list_conferences().await;
@@ -61,7 +67,10 @@ async fn test_create_conference_duplicate_rejected() {
     let (server, _manager) = test_server();
     let conf_id = ConferenceId::from("test-dup-conf");
 
-    server.create_conference(conf_id.clone(), None).await.unwrap();
+    server
+        .create_conference(conf_id.clone(), None)
+        .await
+        .unwrap();
     let result = server.create_conference(conf_id.clone(), None).await;
     assert!(result.is_err(), "Duplicate create should fail");
 
@@ -73,7 +82,10 @@ async fn test_destroy_conference_idempotent() {
     let (server, _manager) = test_server();
     let conf_id = ConferenceId::from("test-idem-conf");
 
-    server.create_conference(conf_id.clone(), None).await.unwrap();
+    server
+        .create_conference(conf_id.clone(), None)
+        .await
+        .unwrap();
     server.destroy_conference(&conf_id).await.unwrap();
     let second = server.destroy_conference(&conf_id).await;
     assert!(second.is_ok(), "Double destroy should be idempotent");
@@ -85,7 +97,10 @@ async fn test_join_and_leave_with_media() {
     let (server, manager) = test_server();
     let conf_id = ConferenceId::from("test-media-conf");
 
-    server.create_conference(conf_id.clone(), None).await.unwrap();
+    server
+        .create_conference(conf_id.clone(), None)
+        .await
+        .unwrap();
 
     // Bridge a leg via the production path (ConferenceMediaBridge directly).
     let leg_a = LegId::new("leg-a");
@@ -111,7 +126,10 @@ async fn test_join_and_leave_with_media() {
 
     // Stopping the session-owned handle + leaving removes the participant.
     handle.stop();
-    server.leave_conference("test-media-conf", &leg_a).await.unwrap();
+    server
+        .leave_conference("test-media-conf", &leg_a)
+        .await
+        .unwrap();
     let conf = server.get_conference(&conf_id).await.unwrap();
     assert!(!conf.participants.contains_key(&leg_a));
 
@@ -123,7 +141,10 @@ async fn test_join_same_leg_twice_rejected() {
     let (server, _manager) = test_server();
     let conf_id = ConferenceId::from("test-dup-leg");
 
-    server.create_conference(conf_id.clone(), None).await.unwrap();
+    server
+        .create_conference(conf_id.clone(), None)
+        .await
+        .unwrap();
 
     let leg = LegId::new("leg-1");
     server.add_participant(&conf_id, leg.clone()).await.unwrap();
@@ -139,13 +160,13 @@ async fn test_mute_unmute_via_server() {
     let (server, _manager) = test_server();
     let conf_id = ConferenceId::from("test-server-mute");
 
-    server.create_conference(conf_id.clone(), None).await.unwrap();
-
-    let leg = LegId::new("leg-mute");
     server
-        .add_participant(&conf_id, leg.clone())
+        .create_conference(conf_id.clone(), None)
         .await
         .unwrap();
+
+    let leg = LegId::new("leg-mute");
+    server.add_participant(&conf_id, leg.clone()).await.unwrap();
 
     server.mute_participant(&conf_id, &leg).await.unwrap();
     let conf = server.get_conference(&conf_id).await.unwrap();
@@ -211,7 +232,10 @@ async fn test_cross_conference_isolation() {
 #[tokio::test]
 async fn test_end_to_end_audio_flow() {
     let (server, manager) = test_server();
-    server.create_conference("flow-conf".into(), None).await.unwrap();
+    server
+        .create_conference("flow-conf".into(), None)
+        .await
+        .unwrap();
 
     // Leg A speaks: provides PCM frames to the mixer
     let sender_a = MockAudioSender::new();
@@ -278,15 +302,27 @@ async fn test_auto_destroy_on_last_leave() {
     let (server, _manager) = test_server();
     let conf_id = ConferenceId::from("auto-destroy-conf");
 
-    server.create_conference(conf_id.clone(), None).await.unwrap();
+    server
+        .create_conference(conf_id.clone(), None)
+        .await
+        .unwrap();
 
     let leg_a = LegId::new("auto-a");
     let leg_b = LegId::new("auto-b");
-    server.add_participant(&conf_id, leg_a.clone()).await.unwrap();
-    server.add_participant(&conf_id, leg_b.clone()).await.unwrap();
+    server
+        .add_participant(&conf_id, leg_a.clone())
+        .await
+        .unwrap();
+    server
+        .add_participant(&conf_id, leg_b.clone())
+        .await
+        .unwrap();
 
     // Leave one → 1 remains, conference stays alive
-    server.leave_conference("auto-destroy-conf", &leg_a).await.unwrap();
+    server
+        .leave_conference("auto-destroy-conf", &leg_a)
+        .await
+        .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert!(
         server.get_conference(&conf_id).await.is_some(),
@@ -294,7 +330,10 @@ async fn test_auto_destroy_on_last_leave() {
     );
 
     // Leave last → auto-destroy
-    server.leave_conference("auto-destroy-conf", &leg_b).await.unwrap();
+    server
+        .leave_conference("auto-destroy-conf", &leg_b)
+        .await
+        .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(
         server.get_conference(&conf_id).await.is_none(),
@@ -307,7 +346,10 @@ async fn test_concurrent_join_leave_no_panic() {
     let (server, _manager) = test_server();
     let conf_id = ConferenceId::from("concurrent-conf");
 
-    server.create_conference(conf_id.clone(), None).await.unwrap();
+    server
+        .create_conference(conf_id.clone(), None)
+        .await
+        .unwrap();
 
     let mut handles = vec![];
     for i in 0..5 {

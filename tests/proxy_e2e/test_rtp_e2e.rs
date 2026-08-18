@@ -8,8 +8,8 @@ use crate::common::e2e_test_server::E2eTestServer;
 use crate::common::rtp_utils::{RtpPacket, RtpReceiver, RtpSender, RtpStats};
 use crate::common::test_ua::{TestUa, TestUaEvent};
 
-use rustpbx::config::MediaProxyMode;
 use anyhow::{Result, anyhow};
+use rustpbx::config::MediaProxyMode;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;

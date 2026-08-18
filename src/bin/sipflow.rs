@@ -294,8 +294,10 @@ async fn main() -> Result<()> {
         let perf = perf_counters.clone();
         rustpbx::utils::spawn(async move {
             if args.perf_log_interval > 0 {
-                let mut dumper =
-                    PerfDumper::with_interval(perf, std::time::Duration::from_secs(args.perf_log_interval));
+                let mut dumper = PerfDumper::with_interval(
+                    perf,
+                    std::time::Duration::from_secs(args.perf_log_interval),
+                );
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     if let Some(msg) = dumper.try_dump() {

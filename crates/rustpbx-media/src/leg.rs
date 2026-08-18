@@ -863,12 +863,25 @@ impl Drop for LegInner {
 // ── helpers ──────────────────────────────────────────────────────────────
 
 fn build_rtc_config(cfg: &LegConfig) -> RtcConfiguration {
+    let sdp_compatibility = match cfg.transport {
+        rustrtc::TransportMode::WebRtc => rustrtc::config::SdpCompatibilityMode::Standard,
+        rustrtc::TransportMode::Rtp | rustrtc::TransportMode::Srtp => {
+            rustrtc::config::SdpCompatibilityMode::LegacySip
+        }
+    };
     RtcConfiguration {
         transport_mode: cfg.transport.clone(),
         external_ip: cfg.external_ip.clone(),
         rtp_start_port: cfg.rtp_port_range.map(|(start, _)| start),
         rtp_end_port: cfg.rtp_port_range.map(|(_, end)| end),
         buffer_drop_strategy: BufferDropStrategy::DropOldest,
+        // Plain SIP/RTP peers (and SDES-SRTP trunks) do not understand BUNDLE:
+        // they expect one distinct UDP port per m-line, no `a=rtcp-mux` and no
+        // `a=mid`. Without this a plain-RTP audio+video leg emits an offer with
+        // audio and video sharing a single port + rtcp-mux (WebRTC-style), which
+        // strict SIP video phones reject with 488 Not Acceptable Here. This
+        // mirrors the legacy `RtpTrackBuilder` path (rtp_track_builder.rs).
+        sdp_compatibility,
         // ICE pre-ready buffering: packets are buffered only until the RTP
         // transport is set up, and DropOldest means depth stays tiny in steady
         // state. 500 reserved ~5x the rustrtc default (100) and is almost never
@@ -878,7 +891,9 @@ fn build_rtc_config(cfg: &LegConfig) -> RtcConfiguration {
         media_capabilities: Some(rustrtc::config::MediaCapabilities {
             audio: cfg.codecs.iter().map(audio_capability_from_codec).collect(),
             video: cfg.video_codecs.clone(),
-            application: Some(rustrtc::config::ApplicationCapability::default()),
+            // Match `RtpTrackBuilder`: plain SIP peers reject datachannel
+            // `m=application` sections with 488 Not Acceptable Here.
+            application: None,
             image: vec![],
         }),
         ..Default::default()
@@ -1334,5 +1349,65 @@ mod p24_uac_test {
         assert_eq!(send_state.dtmf_pt, Some(101));
         assert_eq!(send_state.sequence, 0);
         assert_eq!(send_state.timestamp, 0);
+    }
+
+    /// Field-report repro fingerprint: recording-anchored MediaBridge builds
+    /// plain-RTP legs via `LegInner` (not `RtpTrackBuilder`). The offer must be
+    /// acceptable to strict SIP softphones — no BUNDLE/rtcp-mux, distinct
+    /// ports, and no `m=application` datachannel.
+    #[tokio::test]
+    async fn plain_rtp_av_offer_must_be_legacy_sip_compatible() {
+        let cfg = LegConfig {
+            transport: TransportMode::Rtp,
+            codecs: vec![CodecInfo {
+                payload_type: 0,
+                codec: CodecType::PCMU,
+                clock_rate: 8000,
+                channels: 1,
+                fmtp: None,
+            }],
+            video_codecs: vec![rustrtc::config::VideoCapability {
+                payload_type: 99,
+                codec_name: "H264".to_string(),
+                clock_rate: 90000,
+                fmtp: Some("packetization-mode=1;profile-level-id=42e01f".to_string()),
+                rtcp_fbs: vec![],
+                rtx_payload_type: None,
+            }],
+            rtp_port_range: Some((20000, 20100)),
+            external_ip: Some("127.0.0.1".to_string()),
+            bind_ip: Some("127.0.0.1".to_string()),
+            cname: Some("repro".to_string()),
+            comfort_noise: false,
+            comfort_noise_level_db: -35.0,
+        };
+        let leg = LegInner::new("plain-rtp-av", &cfg, None).expect("leg");
+        let offer = leg.create_offer().await.expect("offer");
+        println!("plain RTP A/V offer:\n{offer}");
+        assert!(
+            !offer.contains("a=group:BUNDLE"),
+            "BUNDLE causes 488 on strict SIP phones:\n{offer}"
+        );
+        assert!(
+            !offer.contains("a=rtcp-mux"),
+            "rtcp-mux causes 488 on strict SIP phones:\n{offer}"
+        );
+        assert!(
+            !offer.contains("m=application"),
+            "m=application causes 488 on strict SIP phones:\n{offer}"
+        );
+        let audio_port = offer
+            .lines()
+            .find(|l| l.starts_with("m=audio "))
+            .and_then(|l| l.split_whitespace().nth(1));
+        let video_port = offer
+            .lines()
+            .find(|l| l.starts_with("m=video "))
+            .and_then(|l| l.split_whitespace().nth(1));
+        assert!(
+            audio_port.is_some() && video_port.is_some() && audio_port != video_port,
+            "audio/video must use distinct ports:\n{offer}"
+        );
+        leg.stop();
     }
 }

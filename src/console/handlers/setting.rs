@@ -2355,7 +2355,8 @@ pub(crate) async fn update_rwi_settings(
             reload_applied = true;
             reload_message = "RWI settings applied (auth tokens/contexts updated).".to_string();
         } else {
-            reload_message = "Saved to disk. RWI gateway is not running; restart to apply.".to_string();
+            reload_message =
+                "Saved to disk. RWI gateway is not running; restart to apply.".to_string();
         }
     }
 

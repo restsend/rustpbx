@@ -5,6 +5,8 @@
 /// 2. `route_*` 系列：路由层集成测试，验证 `route_wholesale()` 正确返回 503
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
+    use rsipstack::dialog::invitation::InviteOption;
     use rustpbx::addons::wholesale::{
         data::{RateConfig, RateDeckConfig, RoutingSnapshot, Tenant, WholesaleState},
         migration::Migrator as WholesaleMigrator,
@@ -20,8 +22,6 @@ mod tests {
     };
     use rustpbx::config::RouteResult;
     use rustpbx::models::{migration::Migrator as MainMigrator, sip_trunk};
-    use chrono::Utc;
-    use rsipstack::dialog::invitation::InviteOption;
     use sea_orm::{ActiveModelTrait, ActiveValue::Set, Database, DatabaseConnection};
     use sea_orm_migration::MigratorTrait;
     use std::num::NonZeroU32;
@@ -1162,4 +1162,3 @@ mod tests {
         );
     }
 }
-

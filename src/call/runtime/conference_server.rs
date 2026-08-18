@@ -52,7 +52,9 @@ impl ConferenceServer {
         conf_id: ConferenceId,
         max_participants: Option<usize>,
     ) -> Result<ConferenceRoom> {
-        self.manager.create_conference(conf_id, max_participants).await
+        self.manager
+            .create_conference(conf_id, max_participants)
+            .await
     }
 
     pub async fn create_conference_ex(

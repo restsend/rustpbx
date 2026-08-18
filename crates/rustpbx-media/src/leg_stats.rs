@@ -8,7 +8,7 @@
 //! so a stats listener can coexist with the relay forwarder.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use rustrtc::rtp::{ReportBlock, RtcpPacket};
 use rustrtc::{RtpSender, RtpSenderInterceptor};
@@ -178,7 +178,9 @@ fn update_from_report_blocks(
                 let dlsr = block.delay_since_last_sender_report as f64 / 65536.0;
                 let rtt = sent_instant.elapsed().as_secs_f64() - dlsr;
                 if rtt > 0.0 {
-                    stats.rtt_us.store((rtt * 1_000_000.0) as u64, Ordering::Relaxed);
+                    stats
+                        .rtt_us
+                        .store((rtt * 1_000_000.0) as u64, Ordering::Relaxed);
                 }
             }
         }
@@ -205,7 +207,11 @@ pub fn spawn_rtcp_listener(
             match rx.recv().await {
                 Ok(RtcpPacket::ReceiverReport(rr)) => {
                     update_from_report_blocks(
-                        &rr.report_blocks, ssrc, &stats, &sr_times, clock_rate,
+                        &rr.report_blocks,
+                        ssrc,
+                        &stats,
+                        &sr_times,
+                        clock_rate,
                     );
                 }
                 Ok(RtcpPacket::SenderReport(sr)) => {
@@ -222,7 +228,11 @@ pub fn spawn_rtcp_listener(
                         .store(sr.packet_count as u64, Ordering::Relaxed);
                     stats.has_sr.store(true, Ordering::Relaxed);
                     update_from_report_blocks(
-                        &sr.report_blocks, ssrc, &stats, &sr_times, clock_rate,
+                        &sr.report_blocks,
+                        ssrc,
+                        &stats,
+                        &sr_times,
+                        clock_rate,
                     );
                 }
                 Err(_) => break,

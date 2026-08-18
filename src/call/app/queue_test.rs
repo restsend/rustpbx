@@ -1015,7 +1015,10 @@ mod tests {
             play_path(&transfer_cmd).ends_with("queue-transfer-zh.wav"),
             "expected the ZH transfer prompt"
         );
-        assert!(play_is_side_only(&transfer_cmd), "transfer prompt must be caller-only");
+        assert!(
+            play_is_side_only(&transfer_cmd),
+            "transfer prompt must be caller-only"
+        );
         let transfer_tid = play_track_id(&transfer_cmd);
 
         // Agent answers mid-prompt → prompt cut, caller-only service prompt next.
@@ -1033,7 +1036,10 @@ mod tests {
             play_path(&service_cmd).ends_with("queue-service-zh.wav"),
             "expected the ZH service prompt"
         );
-        assert!(play_is_side_only(&service_cmd), "service prompt must be caller-only");
+        assert!(
+            play_is_side_only(&service_cmd),
+            "service prompt must be caller-only"
+        );
         let service_tid = play_track_id(&service_cmd);
 
         // Late natural completion of the cut transfer prompt must be ignored.
@@ -1098,7 +1104,10 @@ mod tests {
         let service_tid = play_track_id(&service_cmd);
         stack.audio_complete(service_tid);
 
-        stack.join().await.expect("should exit after service prompt");
+        stack
+            .join()
+            .await
+            .expect("should exit after service prompt");
     }
 
     #[tokio::test]
@@ -1840,9 +1849,7 @@ mod tests {
 
     fn play_is_side_only(cmd: &CallCommand) -> bool {
         match cmd {
-            CallCommand::Play { options, .. } => {
-                options.as_ref().is_some_and(|o| o.side_only)
-            }
+            CallCommand::Play { options, .. } => options.as_ref().is_some_and(|o| o.side_only),
             other => panic!("expected CallCommand::Play, got {other:?}"),
         }
     }
@@ -2438,7 +2445,9 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
@@ -2449,7 +2458,10 @@ mod tests {
         assert!(play_is_side_only(&service_cmd));
 
         stack.audio_complete(play_track_id(&service_cmd));
-        stack.join().await.expect("should exit after service prompt");
+        stack
+            .join()
+            .await
+            .expect("should exit after service prompt");
     }
 
     #[tokio::test]
@@ -2475,7 +2487,9 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
@@ -2493,7 +2507,10 @@ mod tests {
         );
 
         stack.audio_complete(play_track_id(&service_cmd));
-        stack.join().await.expect("should exit after service prompt");
+        stack
+            .join()
+            .await
+            .expect("should exit after service prompt");
     }
 
     #[tokio::test]
@@ -2503,7 +2520,9 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
@@ -2513,7 +2532,10 @@ mod tests {
         assert_eq!(play_path(&service_cmd), "sounds/agents/agent1-service.wav");
 
         stack.audio_complete(play_track_id(&service_cmd));
-        stack.join().await.expect("should exit after service prompt");
+        stack
+            .join()
+            .await
+            .expect("should exit after service prompt");
     }
 
     #[tokio::test]
@@ -2523,7 +2545,9 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
@@ -2539,7 +2563,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         stack.audio_complete(service_tid);
-        stack.join().await.expect("should exit after service prompt");
+        stack
+            .join()
+            .await
+            .expect("should exit after service prompt");
     }
 
     #[tokio::test]
@@ -2553,17 +2580,23 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         stack
-            .assert_cmd(200, "LegAdd-agent1", |c| matches!(c, CallCommand::LegAdd { .. }))
+            .assert_cmd(200, "LegAdd-agent1", |c| {
+                matches!(c, CallCommand::LegAdd { .. })
+            })
             .await;
         stack
-            .assert_cmd(200, "LegAdd-agent2", |c| matches!(c, CallCommand::LegAdd { .. }))
+            .assert_cmd(200, "LegAdd-agent2", |c| {
+                matches!(c, CallCommand::LegAdd { .. })
+            })
             .await;
 
         stack
@@ -2576,7 +2609,10 @@ mod tests {
 
         // No further prompt commands while both agents ring.
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(stack.drain_cmds().is_empty(), "transfer prompt must play once");
+        assert!(
+            stack.drain_cmds().is_empty(),
+            "transfer prompt must play once"
+        );
 
         // First answer connects; the other leg is cancelled, prompt cut.
         stack.custom(
@@ -2597,6 +2633,9 @@ mod tests {
         assert!(play_is_side_only(&service_cmd));
 
         stack.audio_complete(play_track_id(&service_cmd));
-        stack.join().await.expect("should exit after service prompt");
+        stack
+            .join()
+            .await
+            .expect("should exit after service prompt");
     }
 }

@@ -146,7 +146,9 @@ async fn test_session_hook_connected_and_ended() -> Result<()> {
                 break;
             }
         }
-        if bob_dialog.is_some() { break; }
+        if bob_dialog.is_some() {
+            break;
+        }
         sleep(Duration::from_millis(100)).await;
     }
     assert!(bob_dialog.is_some(), "Bob should receive call");
@@ -155,7 +157,10 @@ async fn test_session_hook_connected_and_ended() -> Result<()> {
     sleep(Duration::from_millis(500)).await;
 
     let connected_events = connected.lock().await;
-    assert!(!connected_events.is_empty(), "on_call_connected should fire");
+    assert!(
+        !connected_events.is_empty(),
+        "on_call_connected should fire"
+    );
     assert!(
         connected_events[0].callee.contains("bob"),
         "callee should contain bob, got {}",
@@ -163,7 +168,10 @@ async fn test_session_hook_connected_and_ended() -> Result<()> {
     );
 
     let ended_events = ended.lock().await;
-    assert!(!ended_events.is_empty(), "on_call_ended should fire after hangup");
+    assert!(
+        !ended_events.is_empty(),
+        "on_call_ended should fire after hangup"
+    );
 
     serve_task.abort();
     Ok(())

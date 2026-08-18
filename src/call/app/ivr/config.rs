@@ -510,18 +510,22 @@ impl WebhookResponse {
         match self {
             WebhookResponse::Transfer {
                 target,
-                return_app, return_target,
+                return_app,
+                return_target,
             } => EntryAction::Transfer {
                 target,
                 params: HashMap::new(),
-                return_app, return_target,
+                return_app,
+                return_target,
             },
             WebhookResponse::Queue {
                 target,
-                return_app, return_target,
+                return_app,
+                return_target,
             } => EntryAction::Queue {
                 target,
-                return_app, return_target,
+                return_app,
+                return_target,
             },
             WebhookResponse::Menu { menu } => EntryAction::Menu { menu },
             WebhookResponse::Voicemail { target } => EntryAction::Voicemail { target },
@@ -679,12 +683,14 @@ fn deserialize_input_phone_timeout_ms<'de, D>(deserializer: D) -> Result<u64, D:
 where
     D: Deserializer<'de>,
 {
-    deserialize_bounded_u64(deserializer, MAX_INPUT_PHONE_TIMEOUT_MS, "input_phone timeout_ms")
+    deserialize_bounded_u64(
+        deserializer,
+        MAX_INPUT_PHONE_TIMEOUT_MS,
+        "input_phone timeout_ms",
+    )
 }
 
-fn deserialize_input_phone_inter_digit_timeout_ms<'de, D>(
-    deserializer: D,
-) -> Result<u64, D::Error>
+fn deserialize_input_phone_inter_digit_timeout_ms<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -695,11 +701,7 @@ where
     )
 }
 
-fn deserialize_bounded_u64<'de, D>(
-    deserializer: D,
-    max: u64,
-    field: &str,
-) -> Result<u64, D::Error>
+fn deserialize_bounded_u64<'de, D>(deserializer: D, max: u64, field: &str) -> Result<u64, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -707,7 +709,9 @@ where
     if (1..=max).contains(&value) {
         Ok(value)
     } else {
-        Err(D::Error::custom(format!("{field} must be between 1 and {max}")))
+        Err(D::Error::custom(format!(
+            "{field} must be between 1 and {max}"
+        )))
     }
 }
 
@@ -832,7 +836,8 @@ action = { type = "menu", menu = "root" }
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
                 params: HashMap::new(),
-                return_app: None, return_target: None,
+                return_app: None,
+                return_target: None,
             }),
         );
         let json = serde_json::to_value(&node).unwrap();
@@ -905,14 +910,16 @@ action = { type = "menu", menu = "root" }
                     ActionNode::new(EntryAction::Transfer {
                         target: "2001".into(),
                         params: HashMap::new(),
-                        return_app: None, return_target: None,
+                        return_app: None,
+                        return_target: None,
                     }),
                 ),
                 (
                     "2".into(),
                     ActionNode::new(EntryAction::Queue {
                         target: "support".into(),
-                        return_app: None, return_target: None,
+                        return_app: None,
+                        return_target: None,
                     }),
                 ),
             ]),
@@ -933,7 +940,8 @@ action = { type = "menu", menu = "root" }
             create_room_uri: "https://voip.example.com/rooms".into(),
             headers: HashMap::from([("Authorization".into(), "Bearer token123".into())]),
             timeout_ms: Some(30000),
-            return_app: None, return_target: None,
+            return_app: None,
+            return_target: None,
             success: None,
             failure: None,
         });
@@ -956,7 +964,11 @@ action = { type = "menu", menu = "root" }
         let json = r#"{"type":"bridge","create_room_uri":"wss://voip.example.com/ws","return_to_ivr":"step-ivr"}"#;
         let node: ActionNode = serde_json::from_str(json).unwrap();
         match node.action {
-            EntryAction::Bridge { return_app, return_target, .. } => {
+            EntryAction::Bridge {
+                return_app,
+                return_target,
+                ..
+            } => {
                 assert_eq!(return_app, None);
                 assert_eq!(return_target.as_deref(), Some("step-ivr"));
             }
@@ -1180,7 +1192,8 @@ action = { type = "bridge", create_room_uri = "wss://voip.example.com/ws", heade
                 create_room_uri,
                 headers,
                 timeout_ms,
-                return_app: _, return_target,
+                return_app: _,
+                return_target,
                 ..
             } => {
                 assert_eq!(create_room_uri, "wss://voip.example.com/ws");

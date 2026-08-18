@@ -60,7 +60,9 @@ async fn test_hold_unhold_via_reinvite() -> Result<()> {
          m=audio 10000 RTP/AVP 0 101\r\n\
          a=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendonly\r\n"
     );
-    alice.send_reinvite(&alice_dialog_id.clone().unwrap(), Some(hold_sdp)).await?;
+    alice
+        .send_reinvite(&alice_dialog_id.clone().unwrap(), Some(hold_sdp))
+        .await?;
     sleep(Duration::from_millis(500)).await;
 
     // Send unhold re-INVITE: a=sendrecv
@@ -69,7 +71,9 @@ async fn test_hold_unhold_via_reinvite() -> Result<()> {
          m=audio 10002 RTP/AVP 0 101\r\n\
          a=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n"
     );
-    alice.send_reinvite(&alice_dialog_id.clone().unwrap(), Some(unhold_sdp)).await?;
+    alice
+        .send_reinvite(&alice_dialog_id.clone().unwrap(), Some(unhold_sdp))
+        .await?;
     sleep(Duration::from_millis(500)).await;
 
     server.stop();

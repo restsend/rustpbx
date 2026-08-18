@@ -83,7 +83,6 @@ pub struct ExtractedCodecs {
     pub dtmf: Vec<CodecInfo>,
 }
 
-
 /// A single negotiated codec with its RTP parameters from SDP answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NegotiatedCodec {
@@ -165,7 +164,6 @@ impl Default for NegotiatedLegProfile {
 }
 
 impl NegotiatedLegProfile {
-
     /// All telephone-event PTs configured for this leg.
     pub fn dtmf_pts(&self) -> std::collections::HashSet<u8> {
         let mut pts: std::collections::HashSet<u8> = self.dtmf_pts.iter().copied().collect();
@@ -175,7 +173,6 @@ impl NegotiatedLegProfile {
         pts
     }
 }
-
 
 /// Media negotiator for SDP parsing and codec selection
 pub struct MediaNegotiator;
@@ -345,9 +342,6 @@ impl MediaNegotiator {
     pub fn extract_dtmf_codecs(sdp_str: &str) -> Vec<CodecInfo> {
         Self::extract_codec_params(sdp_str).dtmf
     }
-
-
-
 
     /// Build default codec list for RTP endpoints
     pub fn default_rtp_codecs() -> Vec<CodecType> {
@@ -726,7 +720,6 @@ impl MediaNegotiator {
         }
     }
 
-
     pub fn build_codec_list_from_offer(
         offer_sdp: &str,
         preferred_codecs: &[CodecType],
@@ -800,7 +793,10 @@ mod tests {
         assert_eq!(video[0].name, "H264");
         assert_eq!(video[0].payload_type, 96);
         assert_eq!(video[0].clock_rate, 90000);
-        assert_eq!(video[0].fmtp.as_deref(), Some("packetization-mode=1;profile-level-id=42e01f"));
+        assert_eq!(
+            video[0].fmtp.as_deref(),
+            Some("packetization-mode=1;profile-level-id=42e01f")
+        );
         assert_eq!(video[1].name, "VP8");
         assert_eq!(video[1].payload_type, 98);
     }
@@ -813,7 +809,10 @@ mod tests {
 
     #[test]
     fn extract_leg_profile_populates_video_list() {
-        let sdp = format!("v=0\r\nm=audio 4000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n{}", video_sdp());
+        let sdp = format!(
+            "v=0\r\nm=audio 4000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n{}",
+            video_sdp()
+        );
         let profile = MediaNegotiator::extract_leg_profile(&sdp);
         assert_eq!(profile.video.len(), 2);
         assert_eq!(profile.video[0].name, "H264");
@@ -823,12 +822,28 @@ mod tests {
     fn find_common_video_codec_matches_by_name_case_insensitive() {
         // a[0]=H264 doesn't match b=[vp8]; the common codec is a[1]=VP8.
         let a = vec![
-            NegotiatedVideoCodec { name: "H264".into(), payload_type: 96, clock_rate: 90000, fmtp: None, rtx_payload_type: None },
-            NegotiatedVideoCodec { name: "VP8".into(), payload_type: 98, clock_rate: 90000, fmtp: None, rtx_payload_type: None },
+            NegotiatedVideoCodec {
+                name: "H264".into(),
+                payload_type: 96,
+                clock_rate: 90000,
+                fmtp: None,
+                rtx_payload_type: None,
+            },
+            NegotiatedVideoCodec {
+                name: "VP8".into(),
+                payload_type: 98,
+                clock_rate: 90000,
+                fmtp: None,
+                rtx_payload_type: None,
+            },
         ];
-        let b = vec![
-            NegotiatedVideoCodec { name: "vp8".into(), payload_type: 102, clock_rate: 90000, fmtp: None, rtx_payload_type: None },
-        ];
+        let b = vec![NegotiatedVideoCodec {
+            name: "vp8".into(),
+            payload_type: 102,
+            clock_rate: 90000,
+            fmtp: None,
+            rtx_payload_type: None,
+        }];
         let matched = MediaNegotiator::find_common_video_codec(&a, &b);
         assert!(matched.is_some());
         let (ca, cb) = matched.unwrap();
@@ -840,8 +855,20 @@ mod tests {
 
     #[test]
     fn find_common_video_codec_none_when_disjoint() {
-        let a = vec![NegotiatedVideoCodec { name: "H264".into(), payload_type: 96, clock_rate: 90000, fmtp: None, rtx_payload_type: None }];
-        let b = vec![NegotiatedVideoCodec { name: "VP8".into(), payload_type: 98, clock_rate: 90000, fmtp: None, rtx_payload_type: None }];
+        let a = vec![NegotiatedVideoCodec {
+            name: "H264".into(),
+            payload_type: 96,
+            clock_rate: 90000,
+            fmtp: None,
+            rtx_payload_type: None,
+        }];
+        let b = vec![NegotiatedVideoCodec {
+            name: "VP8".into(),
+            payload_type: 98,
+            clock_rate: 90000,
+            fmtp: None,
+            rtx_payload_type: None,
+        }];
         assert!(MediaNegotiator::find_common_video_codec(&a, &b).is_none());
     }
 
@@ -864,14 +891,29 @@ mod tests {
                 fmtp: Some("packetization-mode=1;profile-level-id=640c1f".into()),
                 rtx_payload_type: None,
             },
-            NegotiatedVideoCodec { name: "VP8".into(), payload_type: 104, clock_rate: 90000, fmtp: None, rtx_payload_type: None },
+            NegotiatedVideoCodec {
+                name: "VP8".into(),
+                payload_type: 104,
+                clock_rate: 90000,
+                fmtp: None,
+                rtx_payload_type: None,
+            },
             // Not in the local policy → dropped.
-            NegotiatedVideoCodec { name: "H265".into(), payload_type: 106, clock_rate: 90000, fmtp: None, rtx_payload_type: None },
+            NegotiatedVideoCodec {
+                name: "H265".into(),
+                payload_type: 106,
+                clock_rate: 90000,
+                fmtp: None,
+                rtx_payload_type: None,
+            },
         ];
         let caps = MediaNegotiator::video_caps_for_config(&from);
         assert_eq!(caps.len(), 2);
         assert_eq!(caps[0].payload_type, 102, "remote H264 PT preserved");
-        assert_eq!(caps[0].fmtp.as_deref(), Some("packetization-mode=1;profile-level-id=640c1f"));
+        assert_eq!(
+            caps[0].fmtp.as_deref(),
+            Some("packetization-mode=1;profile-level-id=640c1f")
+        );
         assert_eq!(caps[1].codec_name, "VP8");
         assert_eq!(caps[1].payload_type, 104, "remote VP8 PT preserved");
     }
@@ -893,8 +935,14 @@ mod tests {
             a=rtpmap:96 H264/90000\r\n\
             a=sendrecv\r\n";
         let stripped = MediaNegotiator::strip_video_from_sdp(sdp).expect("parses");
-        assert!(stripped.contains("m=video 0 "), "video port must be 0:\n{stripped}");
-        assert!(stripped.contains("a=inactive"), "video must be inactive:\n{stripped}");
+        assert!(
+            stripped.contains("m=video 0 "),
+            "video port must be 0:\n{stripped}"
+        );
+        assert!(
+            stripped.contains("a=inactive"),
+            "video must be inactive:\n{stripped}"
+        );
         // Audio untouched.
         assert!(stripped.contains("m=audio 4000"));
     }
@@ -992,8 +1040,6 @@ mod tests {
             vec![(110, 48000), (126, 8000)]
         );
     }
-
-
 
     #[test]
     fn test_default_codecs() {
@@ -1103,8 +1149,6 @@ mod tests {
         );
     }
 
-
-
     #[test]
     fn test_g722_clock_rate_preserves_sdp_value() {
         let sdp = "v=0\r\n\
@@ -1141,7 +1185,6 @@ mod tests {
         assert!(g729_info.is_some());
         assert_eq!(g729_info.unwrap().clock_rate, 8000);
     }
-
 
     // ── Bridge codec list tests ──────────────────────────────────
 
@@ -1649,10 +1692,6 @@ a=rtpmap:101 telephone-event/8000\r\n";
         assert_eq!(callee_audio.len(), 3);
     }
 
-
-
-
-
     /// to_audio_capability converts all known codecs
     #[test]
     fn test_codec_info_to_audio_capability() {
@@ -2101,10 +2140,6 @@ a=rtpmap:0 PCMU/8000\r\n";
         assert!(rewritten.contains("a=fmtp:102 0-16\r\n"));
     }
 
-
-
-
-
     /// A WebRTC answer can negotiate TWO telephone-event payload types — e.g.
     /// `110 telephone-event/48000` alongside `126 telephone-event/8000`.
     /// Browsers send DTMF on the 8 kHz PT (126); rustpbx must keep BOTH so the
@@ -2302,5 +2337,4 @@ a=rtpmap:0 PCMU/8000\r\n";
         assert!(!codecs.iter().any(|c| c.codec == CodecType::G729));
         assert!(!codecs.iter().any(|c| c.codec == CodecType::G722));
     }
-
 }

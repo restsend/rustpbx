@@ -36,7 +36,6 @@ use tracing::{debug, info, warn};
 // Queue Statistics (built-in)
 // ===================================================================
 
-
 // ===================================================================
 // Queue Configuration Extensions
 // ===================================================================
@@ -1107,8 +1106,7 @@ impl CallApp for QueueApp {
                     .originate_call(&agent.uri, Some(self.call_id.clone()))
                     .await?;
 
-                self.pending_agents
-                    .push((agent.uri.clone(), call_id));
+                self.pending_agents.push((agent.uri.clone(), call_id));
 
                 self.maybe_start_transfer_prompt(ctrl).await?;
 
@@ -1249,7 +1247,9 @@ impl CallApp for QueueApp {
                     // The prompt finished while the agent is still ringing —
                     // resume hold music and keep waiting for the answer.
                     None => {
-                        info!("Queue: transfer prompt completed before agent answered, resuming hold music");
+                        info!(
+                            "Queue: transfer prompt completed before agent answered, resuming hold music"
+                        );
                         self.state = QueueState::DialingAgents {
                             attempt: self.dial_attempts,
                         };
@@ -1390,7 +1390,9 @@ impl CallApp for QueueApp {
                         // swallowed by the event loop, and any late natural
                         // completion is ignored via track-id matching.
                         if matches!(self.state, QueueState::PlayingTransferPrompt { .. }) {
-                            info!("Queue: agent answered during transfer prompt — cutting prompt and connecting");
+                            info!(
+                                "Queue: agent answered during transfer prompt — cutting prompt and connecting"
+                            );
                             ctrl.stop_audio().await?;
                         }
 
@@ -1489,11 +1491,10 @@ impl CallApp for QueueApp {
                 // Look up the canonical agent_id via the registry so URI
                 // user-parts that differ from the registered agent_id are
                 // handled correctly (e.g. DbRegistry custom URIs).
-                let timed_out_uris: Vec<String> =
-                    std::mem::take(&mut self.pending_agents)
-                        .into_iter()
-                        .map(|(uri, _)| uri)
-                        .collect();
+                let timed_out_uris: Vec<String> = std::mem::take(&mut self.pending_agents)
+                    .into_iter()
+                    .map(|(uri, _)| uri)
+                    .collect();
 
                 if let Some(ref registry) = self.agent_registry {
                     let all_agents = registry.list_agents().await;
@@ -1611,4 +1612,3 @@ impl CallApp for QueueApp {
         Ok(())
     }
 }
-

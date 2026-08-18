@@ -475,7 +475,12 @@ impl ProxyModule for RegistrarModule {
             }
         };
 
-        let default_expires = self.server.proxy_config.load().registrar_expires.unwrap_or(30);
+        let default_expires = self
+            .server
+            .proxy_config
+            .load()
+            .registrar_expires
+            .unwrap_or(30);
         let global_expires = tx
             .original
             .expires_header()
@@ -539,7 +544,12 @@ impl ProxyModule for RegistrarModule {
         let path_uris = parse_route_header(&tx.original, "Path");
         let service_routes = parse_route_header(&tx.original, "Service-Route");
 
-        let max_expires = self.server.proxy_config.load().max_registrar_expires.unwrap_or(50);
+        let max_expires = self
+            .server
+            .proxy_config
+            .load()
+            .max_registrar_expires
+            .unwrap_or(50);
 
         let mut response_headers = Vec::new();
         let mut max_contact_expires = 0u32;

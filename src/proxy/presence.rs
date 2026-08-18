@@ -74,7 +74,11 @@ struct RpidEmpty {}
 struct PidfPresence {
     #[serde(rename = "@xmlns")]
     xmlns: String,
-    #[serde(rename = "@xmlns:rpid", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "@xmlns:rpid",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     xmlns_rpid: Option<String>,
     #[serde(rename = "@entity")]
     entity: String,
@@ -91,7 +95,11 @@ struct PidfTuple {
     note: Option<String>,
     #[serde(rename = "contact", skip_serializing_if = "Option::is_none")]
     contact: Option<String>,
-    #[serde(rename = "rpid:activities", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "rpid:activities",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     activities: Option<OutputActivities>,
 }
 
@@ -106,7 +114,11 @@ struct OutputActivities {
     away: Option<RpidEmptySer>,
     #[serde(rename = "rpid:busy", default, skip_serializing_if = "Option::is_none")]
     busy: Option<RpidEmptySer>,
-    #[serde(rename = "rpid:on-the-phone", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "rpid:on-the-phone",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     on_the_phone: Option<RpidEmptySer>,
 }
 
@@ -769,12 +781,7 @@ impl PresenceModule {
             let mut activity_note = None;
 
             for tuple in &pidf.tuples {
-                if tuple
-                    .status
-                    .as_ref()
-                    .and_then(|s| s.basic.as_deref())
-                    == Some("open")
-                {
+                if tuple.status.as_ref().and_then(|s| s.basic.as_deref()) == Some("open") {
                     status = PresenceStatus::Idle;
 
                     // Try to refine status from RPID activities
@@ -1067,12 +1074,7 @@ pub(crate) fn build_pidf_body(identity: &str, domain: &str, state: &PresenceStat
                 // Away states carry the canonical status string in the note
                 // (e.g. "away:lunch") so subscribers see one consistent
                 // vocabulary regardless of what the publisher sent.
-                PresenceStatus::Away(_) => {
-                    state
-                        .note
-                        .clone()
-                        .or_else(|| Some("away".to_string()))
-                }
+                PresenceStatus::Away(_) => state.note.clone().or_else(|| Some("away".to_string())),
                 _ => state
                     .note
                     .clone()
@@ -1324,11 +1326,13 @@ mod tests {
             Some("open")
         );
         assert_eq!(pidf.tuples[0].note.as_deref(), Some("away:meeting"));
-        assert!(pidf.tuples[0]
-            .activities
-            .as_ref()
-            .and_then(|a| a.away.as_ref())
-            .is_some());
+        assert!(
+            pidf.tuples[0]
+                .activities
+                .as_ref()
+                .and_then(|a| a.away.as_ref())
+                .is_some()
+        );
         // Verify the detail extraction logic matches
         let note = pidf.tuples[0].note.clone().unwrap_or_default();
         let detail = note
@@ -1342,8 +1346,8 @@ mod tests {
     #[test]
     fn test_parse_publish_away_bare() {
         let body = r#"<?xml version="1.0" encoding="UTF-8"?><presence><tuple id="presence"><status><basic>open</basic></status><note>away:lunch</note></tuple></presence>"#;
-        let pidf = quick_xml::de::from_str::<IncomingPresence>(body)
-            .expect("should parse minimal PIDF");
+        let pidf =
+            quick_xml::de::from_str::<IncomingPresence>(body).expect("should parse minimal PIDF");
         assert_eq!(pidf.tuples[0].note.as_deref(), Some("away:lunch"));
         assert!(pidf.tuples[0].status.as_ref().is_some());
     }
@@ -1352,13 +1356,15 @@ mod tests {
     #[test]
     fn test_parse_publish_busy_with_rpid() {
         let body = r#"<?xml version="1.0" encoding="UTF-8"?><presence xmlns="urn:ietf:params:xml:ns:pidf" xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid"><tuple id="presence"><status><basic>open</basic></status><rpid:activities><rpid:busy/></rpid:activities></tuple></presence>"#;
-        let pidf = quick_xml::de::from_str::<IncomingPresence>(body)
-            .expect("should parse RPID busy");
-        assert!(pidf.tuples[0]
-            .activities
-            .as_ref()
-            .and_then(|a| a.busy.as_ref())
-            .is_some());
+        let pidf =
+            quick_xml::de::from_str::<IncomingPresence>(body).expect("should parse RPID busy");
+        assert!(
+            pidf.tuples[0]
+                .activities
+                .as_ref()
+                .and_then(|a| a.busy.as_ref())
+                .is_some()
+        );
     }
 
     /// `<rpid:on-the-phone/>` maps correctly.
@@ -1367,11 +1373,13 @@ mod tests {
         let body = r#"<?xml version="1.0" encoding="UTF-8"?><presence xmlns="urn:ietf:params:xml:ns:pidf" xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid"><tuple id="presence"><status><basic>open</basic></status><rpid:activities><rpid:on-the-phone/></rpid:activities></tuple></presence>"#;
         let pidf = quick_xml::de::from_str::<IncomingPresence>(body)
             .expect("should parse RPID on-the-phone");
-        assert!(pidf.tuples[0]
-            .activities
-            .as_ref()
-            .and_then(|a| a.on_the_phone.as_ref())
-            .is_some());
+        assert!(
+            pidf.tuples[0]
+                .activities
+                .as_ref()
+                .and_then(|a| a.on_the_phone.as_ref())
+                .is_some()
+        );
     }
 
     /// The full Publish flow strips the `away:` prefix from the note and
@@ -1386,12 +1394,7 @@ mod tests {
         let mut activity_note: Option<String> = None;
 
         for tuple in &pidf.tuples {
-            if tuple
-                .status
-                .as_ref()
-                .and_then(|s| s.basic.as_deref())
-                == Some("open")
-            {
+            if tuple.status.as_ref().and_then(|s| s.basic.as_deref()) == Some("open") {
                 status = PresenceStatus::Idle;
                 if let Some(activities) = &tuple.activities {
                     if activities.busy.is_some() || activities.on_the_phone.is_some() {

@@ -484,7 +484,9 @@ async fn test_guest_call_allowed_extension() {
     // Share ONE ConferenceManager between the conference_manager field and the
     // ConferenceServer so tests that cross between them observe the same state.
     let conf_mgr = Arc::new(crate::call::runtime::ConferenceManager::new());
-    let conf_server = Arc::new(crate::call::runtime::ConferenceServer::new(conf_mgr.clone()));
+    let conf_server = Arc::new(crate::call::runtime::ConferenceServer::new(
+        conf_mgr.clone(),
+    ));
 
     let server_inner = Arc::new(SipServerInner {
         rtp_config: ArcSwap::new(Arc::new(RtpConfig::default())),

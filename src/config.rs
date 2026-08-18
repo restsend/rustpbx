@@ -25,7 +25,6 @@ pub const DEFAULT_IVR_MODE: &str = "tree";
 /// Product brand name.
 pub const BRAND_NAME: &str = "RustPBX";
 
-
 #[derive(Parser, Debug)]
 #[command(version)]
 pub(crate) struct Cli {
@@ -1277,6 +1276,10 @@ impl ProxyConfig {
 
     pub fn generated_acl_dir(&self) -> PathBuf {
         self.generated_root_dir().join("acl")
+    }
+
+    pub fn generated_cc_dir(&self) -> PathBuf {
+        self.generated_root_dir().join("cc")
     }
 
     pub fn all_udp_ports(&self) -> Vec<u16> {

@@ -214,7 +214,10 @@ fn sniff_audio_format(bytes: &[u8]) -> Option<&'static str> {
         let layer = (bytes[1] >> 1) & 0x03;
         let bitrate_idx = (bytes[2] >> 4) & 0x0F;
         let sample_rate_idx = (bytes[2] >> 2) & 0x03;
-        if version != 0b01 && layer != 0b00 && bitrate_idx != 0 && bitrate_idx != 0x0F
+        if version != 0b01
+            && layer != 0b00
+            && bitrate_idx != 0
+            && bitrate_idx != 0x0F
             && sample_rate_idx != 0b11
         {
             return Some("mp3");
@@ -384,7 +387,10 @@ pub struct ChannelAudioSource {
 
 impl ChannelAudioSource {
     pub fn new(rx: mpsc::Receiver<Vec<i16>>, sample_rate: u32) -> Self {
-        Self { rx: parking_lot::Mutex::new(rx), rate: sample_rate }
+        Self {
+            rx: parking_lot::Mutex::new(rx),
+            rate: sample_rate,
+        }
     }
 }
 
@@ -400,8 +406,12 @@ impl AudioSource for ChannelAudioSource {
         }
     }
 
-    fn sample_rate(&self) -> u32 { self.rate }
-    fn channels(&self) -> u16 { 1 }
+    fn sample_rate(&self) -> u32 {
+        self.rate
+    }
+    fn channels(&self) -> u16 {
+        1
+    }
 
     fn has_data(&self) -> bool {
         // Always true: the source is "alive" as long as the sender exists.
@@ -410,7 +420,9 @@ impl AudioSource for ChannelAudioSource {
         true
     }
 
-    fn reset(&mut self) -> Result<()> { Ok(()) }
+    fn reset(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub struct ResamplingAudioSource {
@@ -484,7 +496,6 @@ impl AudioSource for ResamplingAudioSource {
         self.source.reset()
     }
 }
-
 
 pub fn estimate_audio_duration(file_path: &str) -> std::time::Duration {
     use std::path::Path;
@@ -911,7 +922,9 @@ mod tests {
         // return the real duration so the prompt plays in full before a reject.
         let path = Path::new("config/sounds/service_unavailable_en.mp3");
         if !path.exists() {
-            eprintln!("skipping: config/sounds/service_unavailable_en.mp3 absent (not in workspace root)");
+            eprintln!(
+                "skipping: config/sounds/service_unavailable_en.mp3 absent (not in workspace root)"
+            );
             return;
         }
         let dur = estimate_audio_duration(path.to_str().unwrap());
@@ -980,7 +993,9 @@ mod tests {
     fn test_decode_bytes_unknown_extension_sniffs_mp3() {
         let path = Path::new("config/sounds/service_unavailable_en.mp3");
         if !path.exists() {
-            eprintln!("skipping: config/sounds/service_unavailable_en.mp3 absent (not in workspace root)");
+            eprintln!(
+                "skipping: config/sounds/service_unavailable_en.mp3 absent (not in workspace root)"
+            );
             return;
         }
         let bytes = std::fs::read(path).unwrap();
@@ -1031,12 +1046,12 @@ mod tests {
 
         // Filesystem paths (absolute and relative) pass through unchanged.
         assert_eq!(path_without_query("/tmp/announce.wav"), "/tmp/announce.wav");
-        assert_eq!(path_without_query("sounds/announce.wav"), "sounds/announce.wav");
-        // A bare relative name with '?' is not a URL: leave it untouched.
         assert_eq!(
-            path_without_query("announce.wav?x=1"),
-            "announce.wav?x=1"
+            path_without_query("sounds/announce.wav"),
+            "sounds/announce.wav"
         );
+        // A bare relative name with '?' is not a URL: leave it untouched.
+        assert_eq!(path_without_query("announce.wav?x=1"), "announce.wav?x=1");
         // Extensionless URL paths yield an empty extension (triggers sniffing).
         assert_eq!(
             path_without_query("https://cdn.example.com/audio?token=abc"),
@@ -1047,10 +1062,16 @@ mod tests {
     #[test]
     fn test_is_raw_codec_extension() {
         for ext in ["pcmu", "pcma", "ulaw", "alaw", "u", "a", "g722", "g729"] {
-            assert!(is_raw_codec_extension(ext), "{ext} should be a raw codec ext");
+            assert!(
+                is_raw_codec_extension(ext),
+                "{ext} should be a raw codec ext"
+            );
         }
         for ext in ["wav", "mp3", "xyz", "", "WAV"] {
-            assert!(!is_raw_codec_extension(ext), "{ext} should not be a raw codec ext");
+            assert!(
+                !is_raw_codec_extension(ext),
+                "{ext} should not be a raw codec ext"
+            );
         }
     }
 
@@ -1120,9 +1141,16 @@ mod tests {
 
         let mut buf = vec![0i16; pcm.len()];
         let read = src.read_samples(&mut buf);
-        assert_eq!(read, pcm.len(), "extensionless URL wav must decode all samples");
+        assert_eq!(
+            read,
+            pcm.len(),
+            "extensionless URL wav must decode all samples"
+        );
         for (decoded, original) in buf.iter().zip(pcm.iter()) {
-            assert_eq!(decoded, original, "extensionless URL wav must decode exact PCM");
+            assert_eq!(
+                decoded, original,
+                "extensionless URL wav must decode exact PCM"
+            );
         }
     }
 
@@ -1199,10 +1227,13 @@ mod tests {
         // Non-G.711 format tag → never flagged.
         assert!(!looks_like_pcm_bytes_under_g711(WavFormat::Pcm, &samples));
         // Too few samples → never flagged.
-        assert!(!looks_like_pcm_bytes_under_g711(WavFormat::Pcmu, &samples[..100]));
+        assert!(!looks_like_pcm_bytes_under_g711(
+            WavFormat::Pcmu,
+            &samples[..100]
+        ));
     }
 
-        // ── ChannelAudioSource ────────────────────────────────────────────
+    // ── ChannelAudioSource ────────────────────────────────────────────
 
     #[test]
     fn channel_source_empty_returns_zero() {
@@ -1224,13 +1255,16 @@ mod tests {
         tx.try_send(vec![3i16; 160]).unwrap();
         let n = src.read_samples(&mut buf);
         assert_eq!(n, 160);
-        assert_eq!(buf[0], 1); assert_eq!(buf[159], 1);
+        assert_eq!(buf[0], 1);
+        assert_eq!(buf[159], 1);
         let n = src.read_samples(&mut buf);
         assert_eq!(n, 160);
-        assert_eq!(buf[0], 2); assert_eq!(buf[159], 2);
+        assert_eq!(buf[0], 2);
+        assert_eq!(buf[159], 2);
         let n = src.read_samples(&mut buf);
         assert_eq!(n, 160);
-        assert_eq!(buf[0], 3); assert_eq!(buf[159], 3);
+        assert_eq!(buf[0], 3);
+        assert_eq!(buf[159], 3);
         let n = src.read_samples(&mut buf);
         assert_eq!(n, 0);
         drop(tx);
@@ -1268,8 +1302,6 @@ mod tests {
         let n = src.read_samples(&mut buf);
         assert_eq!(n, 0);
     }
-
-
 }
 
 #[cfg(test)]

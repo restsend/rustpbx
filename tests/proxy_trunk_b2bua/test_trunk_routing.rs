@@ -1,8 +1,6 @@
 use anyhow::Result;
 use rustpbx::config::{MediaProxyMode, ProxyConfig};
-use rustpbx::proxy::routing::{
-    DestConfig, MatchConditions, RouteAction, RouteRule, TrunkConfig,
-};
+use rustpbx::proxy::routing::{DestConfig, MatchConditions, RouteAction, RouteRule, TrunkConfig};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;

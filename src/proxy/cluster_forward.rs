@@ -21,9 +21,9 @@ fn peer_ami_base(peer: &ClusterPeer, ami_path: &str) -> String {
 
 /// Find the peer matching a registry `node_id` (`"addr:sip_port"`).
 fn peer_for_node_id<'a>(peers: &'a [ClusterPeer], node_id: &str) -> Option<&'a ClusterPeer> {
-    peers.iter().find(|p| {
-        node_id == format!("{}:{}", p.addr, p.sip_port) || node_id == p.addr
-    })
+    peers
+        .iter()
+        .find(|p| node_id == format!("{}:{}", p.addr, p.sip_port) || node_id == p.addr)
 }
 
 /// Issue a JSON request to one peer's AMI cluster endpoint.
@@ -183,7 +183,8 @@ mod tests {
             peer_for_node_id(&peers, "10.0.0.3:5060").map(|p| p.ami_port),
             Some(8082)
         );
-        assert_eq!(peer_for_node_id(&peers, "10.0.0.2:5060").map(|p| p.addr.clone()),
+        assert_eq!(
+            peer_for_node_id(&peers, "10.0.0.2:5060").map(|p| p.addr.clone()),
             Some("10.0.0.2".to_string())
         );
         assert!(peer_for_node_id(&peers, "10.9.9.9:5060").is_none());

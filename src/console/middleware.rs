@@ -50,7 +50,6 @@ where
     }
 }
 
-
 pub fn extract_session_cookie(headers: &HeaderMap) -> Option<String> {
     if let Some(auth_header) = headers.get(axum::http::header::AUTHORIZATION)
         && let Ok(auth_str) = auth_header.to_str()
@@ -198,4 +197,3 @@ impl IntoResponse for RenderTemplate<'_> {
         }
     }
 }
-

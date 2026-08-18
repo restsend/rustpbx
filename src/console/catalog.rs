@@ -141,7 +141,10 @@ pub async fn scan_ivr_catalog_opt(
                 } else {
                     ivr.name.clone()
                 };
-                let ivr_mode = ivr.ivr_mode.clone().unwrap_or_else(|| crate::config::DEFAULT_IVR_MODE.to_string());
+                let ivr_mode = ivr
+                    .ivr_mode
+                    .clone()
+                    .unwrap_or_else(|| crate::config::DEFAULT_IVR_MODE.to_string());
                 let lookup_key = sanitize_filename(&ivr_name);
 
                 let existing_is_generated = seen.get(&lookup_key).map(|e| e.generated);
@@ -226,7 +229,10 @@ pub async fn scan_ivr_catalog_opt(
             } else {
                 ivr.name.clone()
             };
-            let ivr_mode = ivr.ivr_mode.clone().unwrap_or_else(|| crate::config::DEFAULT_IVR_MODE.to_string());
+            let ivr_mode = ivr
+                .ivr_mode
+                .clone()
+                .unwrap_or_else(|| crate::config::DEFAULT_IVR_MODE.to_string());
             let lookup_key = sanitize_filename(&ivr_name);
 
             let existing_is_generated = seen.get(&lookup_key).map(|e| e.generated);

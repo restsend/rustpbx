@@ -45,8 +45,8 @@ mod db_session_registry;
 mod default_app_runtime;
 mod media_path_strategy;
 mod memory_session_registry;
-mod session_runtime;
 pub mod session_registry;
+mod session_runtime;
 #[cfg(test)]
 pub(crate) mod test_utils;
 

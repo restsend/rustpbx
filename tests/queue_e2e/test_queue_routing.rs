@@ -192,7 +192,10 @@ async fn test_call_queue_routing_e2e() -> Result<()> {
         }
         sleep(Duration::from_millis(100)).await;
     }
-    assert!(agent_dialog_id.is_some(), "Agent should receive queued call");
+    assert!(
+        agent_dialog_id.is_some(),
+        "Agent should receive queued call"
+    );
 
     let _ = tokio::time::timeout(Duration::from_secs(10), call_task).await;
     sleep(Duration::from_millis(500)).await;

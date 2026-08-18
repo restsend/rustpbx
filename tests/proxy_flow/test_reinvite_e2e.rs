@@ -43,7 +43,9 @@ async fn test_reinvite_codec_change_pcmu_to_pcma() -> Result<()> {
                 break;
             }
         }
-        if bob_dialog_id.is_some() { break; }
+        if bob_dialog_id.is_some() {
+            break;
+        }
         sleep(Duration::from_millis(100)).await;
     }
 
@@ -73,7 +75,9 @@ async fn test_reinvite_codec_change_pcmu_to_pcma() -> Result<()> {
     // Mid-call re-INVITE: switch to PCMA (PT=8)
     let new_caller_port = RtpReceiver::bind(0).await?.port()?;
     let pcma_offer = pcma_sdp("127.0.0.1", new_caller_port);
-    let reinvite_result = alice.send_reinvite(&alice_id.clone().unwrap(), Some(pcma_offer)).await;
+    let reinvite_result = alice
+        .send_reinvite(&alice_id.clone().unwrap(), Some(pcma_offer))
+        .await;
     assert!(reinvite_result.is_ok(), "re-INVITE should be accepted");
 
     sleep(Duration::from_millis(500)).await;
@@ -113,7 +117,9 @@ async fn test_reinvite_hold_unhold_via_sdp_direction() -> Result<()> {
                 break;
             }
         }
-        if bob_dialog_id.is_some() { break; }
+        if bob_dialog_id.is_some() {
+            break;
+        }
         sleep(Duration::from_millis(100)).await;
     }
 
@@ -129,7 +135,9 @@ async fn test_reinvite_hold_unhold_via_sdp_direction() -> Result<()> {
          m=audio {caller_port} RTP/AVP 0 101\r\n\
          a=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendonly\r\n"
     );
-    let hold_result = alice.send_reinvite(&alice_id.clone().unwrap(), Some(hold_sdp)).await;
+    let hold_result = alice
+        .send_reinvite(&alice_id.clone().unwrap(), Some(hold_sdp))
+        .await;
     assert!(hold_result.is_ok(), "Hold re-INVITE should be accepted");
     sleep(Duration::from_millis(300)).await;
 
@@ -139,7 +147,9 @@ async fn test_reinvite_hold_unhold_via_sdp_direction() -> Result<()> {
          m=audio {caller_port} RTP/AVP 0 101\r\n\
          a=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n"
     );
-    let unhold_result = alice.send_reinvite(&alice_id.clone().unwrap(), Some(unhold_sdp)).await;
+    let unhold_result = alice
+        .send_reinvite(&alice_id.clone().unwrap(), Some(unhold_sdp))
+        .await;
     assert!(unhold_result.is_ok(), "Unhold re-INVITE should be accepted");
     sleep(Duration::from_millis(300)).await;
 

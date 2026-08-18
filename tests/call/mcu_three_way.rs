@@ -298,5 +298,3 @@ async fn test_full_duplex_media_bridge() {
     // Cleanup
     manager.destroy_conference(&"conf4".into()).await.unwrap();
 }
-
-

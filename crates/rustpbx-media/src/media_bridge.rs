@@ -210,8 +210,7 @@ impl MediaBridge {
             .and_then(|leg| leg.negotiated())
             .ok_or_else(|| anyhow!("no negotiated A-leg profile to record"))?;
         let recorder = FileRecorder::new(path, caller_profile, channels, mono_caller_only);
-        self.set_recorder(Box::new(recorder), max_duration)
-            .await
+        self.set_recorder(Box::new(recorder), max_duration).await
     }
 
     /// Install and initialize the selected recorder implementation in the

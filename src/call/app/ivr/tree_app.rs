@@ -553,9 +553,7 @@ impl IvrApp {
                     }
                     query.push_str(&format!("{}={}", k, urlencoding::encode(v)));
                 }
-                if let Some(app) =
-                    super::common::effective_return_app(return_app, return_target)
-                {
+                if let Some(app) = super::common::effective_return_app(return_app, return_target) {
                     if !query.is_empty() {
                         query.push('&');
                     }
@@ -592,9 +590,7 @@ impl IvrApp {
                 self.ivr_flow_completed(ctx, "transferred", "queue", Some(target))
                     .await;
                 self.state = IvrState::Done;
-                if let Some(app) =
-                    super::common::effective_return_app(return_app, return_target)
-                {
+                if let Some(app) = super::common::effective_return_app(return_app, return_target) {
                     let mut query = format!("return_app={}", urlencoding::encode(app));
                     if let Some(rt) = return_target.as_ref().filter(|s| !s.is_empty()) {
                         query.push_str(&format!("&return_target={}", urlencoding::encode(rt)));
@@ -652,9 +648,7 @@ impl IvrApp {
                     ctx.session_vars
                         .insert("bridge_branch".into(), "true".into());
                 }
-                if let Some(app) =
-                    super::common::effective_return_app(return_app, return_target)
-                {
+                if let Some(app) = super::common::effective_return_app(return_app, return_target) {
                     let sep = if uri.contains('?') { "&" } else { "?" };
                     uri = format!("{}{}return_app={}", uri, sep, urlencoding::encode(app));
                     if let Some(rt) = return_target.as_ref().filter(|s| !s.is_empty()) {
@@ -1670,8 +1664,8 @@ impl CallApp for IvrApp {
                 .get::<crate::proxy::proxy_call::ivr_exec_hook::IvrExecState>()
                 .is_some();
             if is_exec {
-                ext.write().insert(
-                    crate::proxy::proxy_call::ivr_exec_hook::IvrExecResult {
+                ext.write()
+                    .insert(crate::proxy::proxy_call::ivr_exec_hook::IvrExecResult {
                         status: end_reason_label.to_string(),
                         reason: end_reason_label.to_string(),
                         routing_target: None,
@@ -1679,8 +1673,7 @@ impl CallApp for IvrApp {
                         trace: vec![],
                         duration_ms: total_duration_ms,
                         completion_time: chrono::Utc::now().to_rfc3339(),
-                    },
-                );
+                    });
             }
         }
 
@@ -1745,10 +1738,8 @@ mod tests {
         gw.set_webhook_tx(tx);
         ctx.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gw)));
 
-        let mut stack = MockCallStack::run_with_context(
-            Box::new(IvrApp::new(test_definition())),
-            ctx.clone(),
-        );
+        let mut stack =
+            MockCallStack::run_with_context(Box::new(IvrApp::new(test_definition())), ctx.clone());
         stack.enter().await;
 
         // Simulate sip_session termination: the event loop's cancel token fires
@@ -1801,10 +1792,8 @@ mod tests {
         gw.set_webhook_tx(tx);
         ctx.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gw)));
 
-        let mut stack = MockCallStack::run_with_context(
-            Box::new(IvrApp::new(test_definition())),
-            ctx.clone(),
-        );
+        let mut stack =
+            MockCallStack::run_with_context(Box::new(IvrApp::new(test_definition())), ctx.clone());
         stack.enter().await;
 
         // A remote hangup pushes ControllerEvent::Hangup → on_exit(RemoteHangup).

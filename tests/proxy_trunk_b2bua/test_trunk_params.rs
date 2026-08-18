@@ -72,7 +72,10 @@ async fn test_trunk_max_cps_loaded() -> Result<()> {
     let trunks = server.server_ref.data_context.trunks_snapshot();
     let trunk = trunks.get("test_trunk").unwrap();
     assert_eq!(trunk.max_cps, Some(10), "max_cps should be set");
-    assert!(trunk.cps_limiter.is_some(), "cps_limiter should be built from max_cps");
+    assert!(
+        trunk.cps_limiter.is_some(),
+        "cps_limiter should be built from max_cps"
+    );
 
     server.stop();
     Ok(())
@@ -122,7 +125,11 @@ async fn test_trunk_register_headers_loaded() -> Result<()> {
     assert_eq!(trunk.register_enabled, Some(true));
     assert_eq!(trunk.register_expires, Some(120));
     assert!(
-        trunk.register_extra_headers.as_ref().unwrap().contains_key("X-Custom"),
+        trunk
+            .register_extra_headers
+            .as_ref()
+            .unwrap()
+            .contains_key("X-Custom"),
         "register_extra_headers should be set"
     );
 
