@@ -317,9 +317,7 @@ async fn handle_text_message(
             req.call_id.clone(),
             crate::rwi::session::OwnershipMode::Control,
         )),
-        RwiCommandPayload::AttachCall { call_id, mode } => {
-            Some((call_id.clone(), mode.clone()))
-        }
+        RwiCommandPayload::AttachCall { call_id, mode } => Some((call_id.clone(), mode.clone())),
         _ => None,
     };
     let (ownership_claimed, ownership_error) = match ownership_claim.as_ref() {

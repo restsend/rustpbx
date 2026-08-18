@@ -979,10 +979,8 @@ impl RwiCommandProcessor {
         // guard in the originate task first, then move it into the CallRecord.
         // Dropping either the task or the record releases ownership, including
         // setup failures that abort before a CDR can be queued.
-        let rwi_call_record_guard = crate::rwi::RwiCallRecordGuard::new(
-            &self.gateway,
-            call_id.clone(),
-        );
+        let rwi_call_record_guard =
+            crate::rwi::RwiCallRecordGuard::new(&self.gateway, call_id.clone());
 
         // CDR data for call completion reporting
         let cdr_sender = server.callrecord_sender.clone();
@@ -1345,10 +1343,8 @@ impl RwiCommandProcessor {
                         match send_result {
                             Ok(()) => match handle.query_recorder_status().await {
                                 Ok(status) if status.active => {
-                                    record_files.insert(
-                                        call_id.clone(),
-                                        status.file_path.unwrap_or(path),
-                                    );
+                                    record_files
+                                        .insert(call_id.clone(), status.file_path.unwrap_or(path));
                                     let gw = gateway.read();
                                     gw.send_to_owner(&crate::rwi::RecordStarted {
                                         call_id: call_id.clone(),
@@ -1968,9 +1964,7 @@ impl RwiCommandProcessor {
         }
 
         let path = req.storage.path.clone();
-        let channels = req
-            .channels()
-            .map_err(CommandError::CommandFailed)?;
+        let channels = req.channels().map_err(CommandError::CommandFailed)?;
         handle
             .send_command(CallCommand::StartRecording {
                 config: RecordConfig {

@@ -555,9 +555,7 @@ mod tests {
             .expect("recorder finalization failed")
     }
 
-    async fn assert_recorder_task_stopped(
-        rx: &mut mpsc::UnboundedReceiver<RecordingCompletion>,
-    ) {
+    async fn assert_recorder_task_stopped(rx: &mut mpsc::UnboundedReceiver<RecordingCompletion>) {
         let result = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .expect("recorder task did not stop");
@@ -646,12 +644,19 @@ mod tests {
         let status = handle.status().await.unwrap();
         assert!(!status.active);
         assert!(status.file_path.is_none());
-        assert!(handle.pause().is_ok(), "stopping a recorder must keep its task alive");
+        assert!(
+            handle.pause().is_ok(),
+            "stopping a recorder must keep its task alive"
+        );
         assert_eq!(result.path, path);
         assert!(result.file_size > 44);
 
         drop(handle);
-        assert!(recv_recorder_finished(&mut recorder_finished_rx).await.is_none());
+        assert!(
+            recv_recorder_finished(&mut recorder_finished_rx)
+                .await
+                .is_none()
+        );
         assert_recorder_task_stopped(&mut recorder_finished_rx).await;
         let _ = std::fs::remove_file(path);
     }
@@ -676,12 +681,19 @@ mod tests {
             .await
             .unwrap();
         assert!(!handle.status().await.unwrap().active);
-        assert!(handle.pause().is_ok(), "max duration must not stop the capture task");
+        assert!(
+            handle.pause().is_ok(),
+            "max duration must not stop the capture task"
+        );
         assert_eq!(result.path, path);
         assert!(result.file_size > 44);
 
         drop(handle);
-        assert!(recv_recorder_finished(&mut recorder_finished_rx).await.is_none());
+        assert!(
+            recv_recorder_finished(&mut recorder_finished_rx)
+                .await
+                .is_none()
+        );
         assert_recorder_task_stopped(&mut recorder_finished_rx).await;
         let _ = std::fs::remove_file(path);
     }
@@ -739,10 +751,7 @@ mod tests {
         let backend = Arc::new(CountingBackend::new());
         let initial = SipflowRecorder::new(backend.clone(), "call-1");
         let (handle, sender, mut recorder_finished_rx) = RecorderHandle::new();
-        handle
-            .set_recorder(Box::new(initial), None)
-            .await
-            .unwrap();
+        handle.set_recorder(Box::new(initial), None).await.unwrap();
         sender.write_sample(PacketDirection::Ingress, &packet(0, 1, 160));
         drop(handle);
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -752,7 +761,11 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(recv_recorder_finished(&mut recorder_finished_rx).await.is_none());
+        assert!(
+            recv_recorder_finished(&mut recorder_finished_rx)
+                .await
+                .is_none()
+        );
         assert_recorder_task_stopped(&mut recorder_finished_rx).await;
         assert_eq!(backend.recorded.load(Ordering::SeqCst), 1);
         assert!(!backend.flushed.load(Ordering::SeqCst));
@@ -763,10 +776,7 @@ mod tests {
         let backend = Arc::new(CountingBackend::new());
         let initial = SipflowRecorder::new(backend.clone(), "call-1");
         let (handle, sender, mut recorder_finished_rx) = RecorderHandle::new();
-        handle
-            .set_recorder(Box::new(initial), None)
-            .await
-            .unwrap();
+        handle.set_recorder(Box::new(initial), None).await.unwrap();
 
         sender.write_sample(PacketDirection::Ingress, &packet(0, 1, 160));
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -780,7 +790,11 @@ mod tests {
         assert!(handle.stop_recorder().await.unwrap().is_none());
         assert!(handle.pause().is_ok());
         drop(handle);
-        assert!(recv_recorder_finished(&mut recorder_finished_rx).await.is_none());
+        assert!(
+            recv_recorder_finished(&mut recorder_finished_rx)
+                .await
+                .is_none()
+        );
         assert_recorder_task_stopped(&mut recorder_finished_rx).await;
         assert!(!backend.flushed.load(Ordering::SeqCst));
     }
@@ -790,10 +804,7 @@ mod tests {
         let backend = Arc::new(CountingBackend::new());
         let initial = SipflowRecorder::new(backend.clone(), "call-1");
         let (handle, _sender, mut recorder_finished_rx) = RecorderHandle::new();
-        handle
-            .set_recorder(Box::new(initial), None)
-            .await
-            .unwrap();
+        handle.set_recorder(Box::new(initial), None).await.unwrap();
         let temp = tempfile::NamedTempFile::new().unwrap();
         let path = temp.path().to_string_lossy().into_owned();
         drop(temp);
@@ -820,7 +831,11 @@ mod tests {
         let result = handle.stop_recorder().await.unwrap().unwrap();
         assert_eq!(result.path, path);
         drop(handle);
-        assert!(recv_recorder_finished(&mut recorder_finished_rx).await.is_none());
+        assert!(
+            recv_recorder_finished(&mut recorder_finished_rx)
+                .await
+                .is_none()
+        );
         assert_recorder_task_stopped(&mut recorder_finished_rx).await;
         let _ = std::fs::remove_file(path);
     }

@@ -784,14 +784,12 @@ mod tests {
         };
         let guard = RwiCallRecordGuard::new(&gateway, "c1".into());
 
-        gateway
-            .read()
-            .send_to_owner(&crate::rwi::RecordEnd {
-                call_id: "c1".into(),
-                url: Some("sipflow://c1".into()),
-                duration_secs: 12,
-                file_size: 1024,
-            });
+        gateway.read().send_to_owner(&crate::rwi::RecordEnd {
+            call_id: "c1".into(),
+            url: Some("sipflow://c1".into()),
+            duration_secs: 12,
+            file_size: 1024,
+        });
 
         let event = rx.recv().await.expect("final event must reach RWI session");
         assert_eq!(event["event_type"], "record_end");

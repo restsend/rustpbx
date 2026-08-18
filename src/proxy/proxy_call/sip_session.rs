@@ -2684,9 +2684,7 @@ impl SipSession {
             let recording = &self.context.dialplan.recording;
             recording.enabled && recording.auto_start
         };
-        if auto_start_on_answer
-            && let Err(error) = self.set_auto_recorder().await
-        {
+        if auto_start_on_answer && let Err(error) = self.set_auto_recorder().await {
             warn!(session_id = %self.id, %error, "Auto recorder installation at final answer failed");
         }
         // The caller dialog is already answered when it is attached. Its
@@ -12090,8 +12088,8 @@ mod tests {
             "one-target originate must not synthesize a B leg"
         );
 
-        let remote = LegInner::new("rwi-remote", &LegConfig::rtp_pcmu(), None)
-            .expect("remote RTP leg");
+        let remote =
+            LegInner::new("rwi-remote", &LegConfig::rtp_pcmu(), None).expect("remote RTP leg");
         let answer = remote.answer(&offer).await.expect("remote SDP answer");
         let caller_leg = session
             .bridge()

@@ -235,7 +235,9 @@ impl MediaBridge {
     /// Whether the recording task currently owns an initialized recorder
     /// implementation.
     pub async fn has_recorder(&self) -> bool {
-        self.recorder_status().await.is_ok_and(|status| status.active)
+        self.recorder_status()
+            .await
+            .is_ok_and(|status| status.active)
     }
 
     pub async fn recorder_status(&self) -> Result<RecorderStatus> {

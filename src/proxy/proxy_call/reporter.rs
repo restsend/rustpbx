@@ -304,10 +304,12 @@ impl CallReporter {
         // call-record completion hook has finished. Dropping the record (also
         // on channel failure or task cancellation) performs the cleanup.
         if let Some(ref gateway) = self.server.rwi_gateway {
-            record.extensions.insert(crate::rwi::RwiCallRecordGuard::new(
-                gateway,
-                record.call_id.clone(),
-            ));
+            record
+                .extensions
+                .insert(crate::rwi::RwiCallRecordGuard::new(
+                    gateway,
+                    record.call_id.clone(),
+                ));
         }
 
         if let Some(ref sender) = self.call_record_sender {

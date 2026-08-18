@@ -187,9 +187,7 @@ pub enum CallCommand {
     /// This is an internal request/reply command and is never serialized.
     #[serde(skip)]
     QueryRecorderStatus {
-        reply: oneshot::Sender<
-            anyhow::Result<crate::media::media_recorder::RecorderStatus>,
-        >,
+        reply: oneshot::Sender<anyhow::Result<crate::media::media_recorder::RecorderStatus>>,
     },
 
     /// Start live transcription. Reference-counted: the transcription pump
