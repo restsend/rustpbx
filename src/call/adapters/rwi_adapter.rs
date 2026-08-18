@@ -231,16 +231,19 @@ pub fn rwi_to_call_command(
         // ========================================================================
         // Recording
         // ========================================================================
-        RwiCommandPayload::RecordStart(req) => Ok(CallCommand::StartRecording {
-            config: RecordConfig {
-                path: req.storage.path,
-                max_duration_secs: req.max_duration_secs,
-                beep: req.beep.unwrap_or(false),
-                format: None, // RWI doesn't have a format field in RecordStartRequest
-                channels: None,
-                mono_caller_only: None,
-            },
-        }),
+        RwiCommandPayload::RecordStart(req) => {
+            let channels = req.channels().map_err(anyhow::Error::msg)?;
+            Ok(CallCommand::StartRecording {
+                config: RecordConfig {
+                    path: req.storage.path,
+                    max_duration_secs: req.max_duration_secs,
+                    beep: req.beep.unwrap_or(false),
+                    format: None, // RWI doesn't have a format field in RecordStartRequest
+                    channels: Some(channels),
+                    mono_caller_only: Some(false),
+                },
+            })
+        }
 
         RwiCommandPayload::RecordPause { call_id: _ } => Ok(CallCommand::PauseRecording),
 
@@ -399,6 +402,28 @@ mod tests {
             assert!(matches!(music, Some(MediaSource::File { .. })));
         } else {
             panic!("Expected Hold command");
+        }
+    }
+
+    #[test]
+    fn test_record_mode_selects_output_channels() {
+        for (mode, channels) in [("mixed", 1), ("separate_legs", 2)] {
+            let payload: RwiCommandPayload = serde_json::from_value(serde_json::json!({
+                "action": "record.start",
+                "params": {
+                    "call_id": "call-123",
+                    "mode": mode,
+                    "storage": { "path": "/tmp/record.wav" }
+                }
+            }))
+            .unwrap();
+            let command = rwi_to_call_command(payload, None).unwrap();
+            assert!(matches!(
+                command,
+                CallCommand::StartRecording { config }
+                    if config.channels == Some(channels)
+                        && config.mono_caller_only == Some(false)
+            ));
         }
     }
 

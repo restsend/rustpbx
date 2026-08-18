@@ -367,7 +367,10 @@ An empty `storage.path` uses the default location
 }
 ```
 
-Valid `mode` values: `mixed`, `separate_legs`
+Valid `mode` values:
+
+- `mixed`: mix both call directions into a one-channel WAV.
+- `separate_legs`: write the two call directions as separate stereo channels.
 
 ### 5.5 Queue Commands
 

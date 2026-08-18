@@ -968,6 +968,11 @@ impl RwiCommandProcessor {
         let caller_display = req.caller_id.unwrap_or_else(|| caller_str.clone());
         let callee_display = req.destination.clone();
         let record_on_answer = req.record.clone();
+        let record_channels = record_on_answer
+            .as_ref()
+            .map(RecordStartRequest::channels)
+            .transpose()
+            .map_err(CommandError::CommandFailed)?;
         let record_files = self.record_files.clone();
 
         // CDR data for call completion reporting
@@ -1319,8 +1324,8 @@ impl RwiCommandProcessor {
                                 max_duration_secs: rec.max_duration_secs,
                                 beep: rec.beep.unwrap_or(false),
                                 format: None,
-                                channels: None,
-                                mono_caller_only: None,
+                                channels: record_channels,
+                                mono_caller_only: Some(false),
                             },
                         });
                         match send_result {
@@ -1949,6 +1954,9 @@ impl RwiCommandProcessor {
         }
 
         let path = req.storage.path.clone();
+        let channels = req
+            .channels()
+            .map_err(CommandError::CommandFailed)?;
         handle
             .send_command(CallCommand::StartRecording {
                 config: RecordConfig {
@@ -1956,8 +1964,8 @@ impl RwiCommandProcessor {
                     max_duration_secs: req.max_duration_secs,
                     beep: req.beep.unwrap_or(false),
                     format: None,
-                    channels: None,
-                    mono_caller_only: None,
+                    channels: Some(channels),
+                    mono_caller_only: Some(false),
                 },
             })
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;

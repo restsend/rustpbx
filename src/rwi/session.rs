@@ -602,6 +602,16 @@ pub struct RecordStartRequest {
     pub storage: RecordStorage,
 }
 
+impl RecordStartRequest {
+    pub fn channels(&self) -> Result<u16, String> {
+        match self.mode.trim().to_ascii_lowercase().as_str() {
+            "mixed" => Ok(1),
+            "separate_legs" => Ok(2),
+            mode => Err(format!("unsupported recording mode: {mode}")),
+        }
+    }
+}
+
 fn default_mode() -> String {
     "mixed".to_string()
 }
@@ -872,5 +882,22 @@ mod tests {
         assert!(session.owns_call("call-001"));
         assert!(session.owns_call("call-002"));
         assert!(!session.owns_call("call-003"));
+    }
+
+    #[test]
+    fn test_record_modes_map_to_output_channels() {
+        let mut request: RecordStartRequest = serde_json::from_value(serde_json::json!({
+            "call_id": "call-001",
+            "mode": "mixed",
+            "storage": { "path": "/tmp/call.wav" }
+        }))
+        .unwrap();
+        assert_eq!(request.channels().unwrap(), 1);
+
+        request.mode = "separate_legs".to_string();
+        assert_eq!(request.channels().unwrap(), 2);
+
+        request.mode = "unknown".to_string();
+        assert!(request.channels().is_err());
     }
 }

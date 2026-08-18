@@ -1169,7 +1169,7 @@ async fn test_record_start_success() {
         .process_command(RwiCommandPayload::RecordStart(
             rustpbx::rwi::session::RecordStartRequest {
                 call_id: "call-rec".into(),
-                mode: "local".into(),
+                mode: "mixed".into(),
                 beep: Some(true),
                 max_duration_secs: Some(3600),
                 storage: rustpbx::rwi::session::RecordStorage {
@@ -1194,7 +1194,7 @@ async fn test_record_start_not_found() {
         .process_command(RwiCommandPayload::RecordStart(
             rustpbx::rwi::session::RecordStartRequest {
                 call_id: "nonexistent".into(),
-                mode: "local".into(),
+                mode: "mixed".into(),
                 beep: Some(true),
                 max_duration_secs: Some(3600),
                 storage: rustpbx::rwi::session::RecordStorage {
@@ -1223,7 +1223,7 @@ async fn test_record_pause_success() {
         .process_command(RwiCommandPayload::RecordStart(
             rustpbx::rwi::session::RecordStartRequest {
                 call_id: "call-rec-p".into(),
-                mode: "local".into(),
+                mode: "mixed".into(),
                 beep: Some(false),
                 max_duration_secs: None,
                 storage: rustpbx::rwi::session::RecordStorage {
@@ -1282,7 +1282,7 @@ async fn test_record_resume_success() {
         .process_command(RwiCommandPayload::RecordStart(
             rustpbx::rwi::session::RecordStartRequest {
                 call_id: "call-rec-r".into(),
-                mode: "local".into(),
+                mode: "mixed".into(),
                 beep: Some(false),
                 max_duration_secs: None,
                 storage: rustpbx::rwi::session::RecordStorage {
@@ -1348,7 +1348,7 @@ async fn test_record_stop_success() {
         .process_command(RwiCommandPayload::RecordStart(
             rustpbx::rwi::session::RecordStartRequest {
                 call_id: "call-rec-s".into(),
-                mode: "local".into(),
+                mode: "mixed".into(),
                 beep: Some(false),
                 max_duration_secs: None,
                 storage: rustpbx::rwi::session::RecordStorage {
