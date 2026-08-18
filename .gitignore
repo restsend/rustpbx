@@ -62,6 +62,7 @@ demo/
 dist/
 package-lock.json
 tests/bench/
+!scripts/run_bench_report.sh
 todo_lists/
 recordings/
 e2e-artifacts/

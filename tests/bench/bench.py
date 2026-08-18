@@ -2401,7 +2401,7 @@ class P2PBenchmark:
         tasks_series.append(tail["tasks_total"])
 
         # 5. Analysis + save
-        self._memleak_analyze(
+        analysis = self._memleak_analyze(
             rss_series, base_rss, comp_total, canc_total, rows, cancel_prob, tail,
             tasks_series=tasks_series,
             base_tasks=base_tasks,
@@ -2411,6 +2411,7 @@ class P2PBenchmark:
             rows, base_rss, rss_series, cancel_prob, cps, duration, batch_size, total,
             tasks_series=tasks_series,
             base_tasks=base_tasks,
+            analysis=analysis,
         )
         return 0
 
@@ -2426,7 +2427,7 @@ class P2PBenchmark:
         tasks_series: list[int] | None = None,
         base_tasks: int = 0,
         base_task_loc: dict[str, int] | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
         tasks_series = tasks_series or [base_tasks]
         base_task_loc = base_task_loc or {}
 
@@ -2504,6 +2505,30 @@ class P2PBenchmark:
             print(f"  No task location above baseline — all per-call tasks reclaimed.")
         print(f"{'='*74}")
 
+        # Return the analysis so callers can persist it (e.g. to the report JSON).
+        return {
+            "baseline_tasks": base_tasks,
+            "final_tasks": final_tasks,
+            "task_growth": task_growth,
+            "task_slope": round(task_slope, 2),
+            "max_tasks_drained": max_tasks_drained,
+            "min_tasks_drained": min_tasks_drained,
+            "baseline_rss_mb": round(base_rss, 2),
+            "final_rss_mb": round(rss_series[-1], 2),
+            "peak_rss_mb": round(peak, 2),
+            "peak_delta_mb": round(peak_delta, 2),
+            "rss_slope_mb_per_batch": round(slope, 2),
+            "calls_completed": comp_total,
+            "calls_cancelled_487": canc_total,
+            "cancel_prob": cancel_prob,
+            "final_calls": tail.get("calls", 0),
+            "final_dialogs": tail.get("dialogs", 0),
+            "final_running_tx": tail.get("running_tx", 0),
+            "verdict": verdict,
+            "leak_sites": [{"location": loc, "now": cnt, "diff": diff}
+                           for loc, cnt, diff in loc_growth[:12]],
+        }
+
         # Mini trend bars
         print("\n  tasks.total trend:")
         tlo = min(tasks_series)
@@ -2540,6 +2565,7 @@ class P2PBenchmark:
         total: int,
         tasks_series: list[int] | None = None,
         base_tasks: int = 0,
+        analysis: dict[str, Any] | None = None,
     ) -> None:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
         detail = {
@@ -2557,6 +2583,7 @@ class P2PBenchmark:
             "baseline_tasks": base_tasks,
             "tasks_series": list(tasks_series or [base_tasks]),
             "batches": rows,
+            "analysis": analysis or {},
         }
         jf = os.path.join(self.log_dir, f"memleak_{ts}.json")
         with open(jf, "w") as f:
