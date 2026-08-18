@@ -310,7 +310,8 @@ path = "src/bin/sipflow.rs"
 
 [profile.dev]
 opt-level = 0
-codegen-units = 16
+debug = 0
+panic = "abort"
 
 # `cargo test` inherits from dev; line-tables-only debuginfo cuts test-link
 # time/disk while keeping useful backtraces.
