@@ -35,7 +35,8 @@ use crate::egress::EgressSource;
 use crate::ingress_tap::{DtmfEvent, PacketDirection};
 use crate::leg::Leg;
 use crate::media_recorder::{
-    FileRecorder, MediaRecorder, RecorderHandle, RecorderSender, RecordingCompletion,
+    FileRecorder, MediaRecorder, RecorderHandle, RecorderSender, RecorderStatus,
+    RecordingCompletion,
 };
 use crate::negotiate::{NegotiatedLegProfile, NegotiatedVideoCodec};
 
@@ -234,10 +235,15 @@ impl MediaBridge {
     /// Whether the recording task currently owns an initialized recorder
     /// implementation.
     pub async fn has_recorder(&self) -> bool {
-        match self.recorder_handle.as_ref() {
-            Some(handle) => handle.has_recorder().await,
-            None => false,
-        }
+        self.recorder_status().await.is_ok_and(|status| status.active)
+    }
+
+    pub async fn recorder_status(&self) -> Result<RecorderStatus> {
+        self.recorder_handle
+            .as_ref()
+            .ok_or_else(|| anyhow!("recording task is unavailable"))?
+            .status()
+            .await
     }
 
     pub fn pause_recording(&self) -> Result<()> {

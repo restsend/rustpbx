@@ -46,6 +46,11 @@ pub struct RecordingResult {
 /// packet processing, and finalization all execute serially inside the task.
 #[async_trait]
 pub trait MediaRecorder: Send {
+    /// Local output path when this recorder produces a file.
+    fn file_path(&self) -> Option<&str> {
+        None
+    }
+
     /// Perform backend setup inside the recording task.
     async fn initialize(&mut self) -> Result<()> {
         Ok(())
@@ -92,6 +97,10 @@ impl FileRecorder {
 
 #[async_trait]
 impl MediaRecorder for FileRecorder {
+    fn file_path(&self) -> Option<&str> {
+        Some(&self.path)
+    }
+
     async fn initialize(&mut self) -> Result<()> {
         let output_codec = self
             .caller_profile
@@ -211,8 +220,8 @@ enum RecorderCommand {
         max_duration: Option<Duration>,
         reply: oneshot::Sender<Result<()>>,
     },
-    HasRecorder {
-        reply: oneshot::Sender<bool>,
+    QueryStatus {
+        reply: oneshot::Sender<RecorderStatus>,
     },
     Pause,
     Resume,
@@ -234,6 +243,17 @@ pub struct RecorderSender {
 
 pub type RecordingCompletion = Result<Option<RecordingResult>>;
 
+/// Recorder state exposed to session-control adapters such as RWI.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecorderStatus {
+    /// Whether the task currently owns an initialized recorder.
+    pub active: bool,
+    /// Whether RTP writes to the current recorder are paused.
+    pub paused: bool,
+    /// Local file path owned by the active recorder, when it writes a file.
+    pub file_path: Option<String>,
+}
+
 impl RecorderHandle {
     pub(crate) fn new() -> (
         Self,
@@ -252,16 +272,14 @@ impl RecorderHandle {
         (Self { tx: command_tx }, sender, recorder_finished_rx)
     }
 
-    pub(crate) async fn has_recorder(&self) -> bool {
+    pub(crate) async fn status(&self) -> Result<RecorderStatus> {
         let (reply, response) = oneshot::channel();
-        if self
-            .tx
-            .send(RecorderCommand::HasRecorder { reply })
-            .is_err()
-        {
-            return false;
-        }
-        response.await.unwrap_or(false)
+        self.tx
+            .send(RecorderCommand::QueryStatus { reply })
+            .map_err(|_| anyhow!("recording task stopped"))?;
+        response
+            .await
+            .map_err(|_| anyhow!("recording task stopped"))
     }
 
     pub(crate) async fn set_recorder(
@@ -382,8 +400,8 @@ impl RecorderTask {
                             let result = self.set_recorder(recorder, max_duration).await;
                             let _ = reply.send(result);
                         }
-                        RecorderCommand::HasRecorder { reply } => {
-                            let _ = reply.send(self.recorder.is_some());
+                        RecorderCommand::QueryStatus { reply } => {
+                            let _ = reply.send(self.status());
                         }
                         RecorderCommand::Pause => self.paused = true,
                         RecorderCommand::Resume => self.paused = false,
@@ -429,6 +447,19 @@ impl RecorderTask {
         self.paused = false;
         self.deadline = max_duration.map(|duration| tokio::time::Instant::now() + duration);
         Ok(())
+    }
+
+    fn status(&self) -> RecorderStatus {
+        let active = self.recorder.is_some();
+        RecorderStatus {
+            active,
+            paused: active && self.paused,
+            file_path: self
+                .recorder
+                .as_ref()
+                .and_then(|recorder| recorder.file_path())
+                .map(ToOwned::to_owned),
+        }
     }
 
     async fn write_rtp(&mut self, captured: &CapturedRtp) {
@@ -590,7 +621,7 @@ mod tests {
     #[tokio::test]
     async fn file_stop_returns_recorder_result() {
         let (handle, sender, mut recorder_finished_rx) = RecorderHandle::new();
-        assert!(!handle.has_recorder().await);
+        assert!(!handle.status().await.unwrap().active);
         let temp = tempfile::NamedTempFile::new().unwrap();
         let path = temp.path().to_string_lossy().into_owned();
         drop(temp);
@@ -602,10 +633,19 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(handle.has_recorder().await);
+        let status = handle.status().await.unwrap();
+        assert!(status.active);
+        assert!(!status.paused);
+        assert_eq!(status.file_path.as_deref(), Some(path.as_str()));
+        handle.pause().unwrap();
+        assert!(handle.status().await.unwrap().paused);
+        handle.resume().unwrap();
+        assert!(!handle.status().await.unwrap().paused);
         sender.write_sample(PacketDirection::Ingress, &packet(0, 1, 160));
         let result = handle.stop_recorder().await.unwrap().unwrap();
-        assert!(!handle.has_recorder().await);
+        let status = handle.status().await.unwrap();
+        assert!(!status.active);
+        assert!(status.file_path.is_none());
         assert!(handle.pause().is_ok(), "stopping a recorder must keep its task alive");
         assert_eq!(result.path, path);
         assert!(result.file_size > 44);
@@ -635,7 +675,7 @@ mod tests {
         let result = recv_recorder_finished(&mut recorder_finished_rx)
             .await
             .unwrap();
-        assert!(!handle.has_recorder().await);
+        assert!(!handle.status().await.unwrap().active);
         assert!(handle.pause().is_ok(), "max duration must not stop the capture task");
         assert_eq!(result.path, path);
         assert!(result.file_size > 44);

@@ -14,7 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::{HangupCommand, LegId, MediaSource, RingbackPolicy};
 
@@ -31,7 +31,7 @@ pub type CallCommandTx = mpsc::Sender<CallCommand>;
 pub type CallCommandRx = mpsc::Receiver<CallCommand>;
 
 /// Unified command for session control
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CallCommand {
     // ============================================================================
@@ -182,6 +182,15 @@ pub enum CallCommand {
 
     /// Stop recording
     StopRecording,
+
+    /// Query the session-owned media bridge for its current recorder state.
+    /// This is an internal request/reply command and is never serialized.
+    #[serde(skip)]
+    QueryRecorderStatus {
+        reply: oneshot::Sender<
+            anyhow::Result<crate::media::media_recorder::RecorderStatus>,
+        >,
+    },
 
     /// Start live transcription. Reference-counted: the transcription pump
     /// starts on the first request and runs until the matching number of

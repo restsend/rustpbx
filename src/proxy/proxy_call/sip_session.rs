@@ -106,7 +106,7 @@ fn sip_status_to_hangup_reason(status_code: u16) -> CallRecordHangupReason {
 }
 
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use tokio_util::{
     sync::CancellationToken,
@@ -397,6 +397,19 @@ impl SipSessionHandle {
             .send(cmd)
             .await
             .map_err(|e| anyhow::anyhow!("channel closed: {}", e))
+    }
+
+    pub(crate) async fn query_recorder_status(
+        &self,
+    ) -> anyhow::Result<crate::media::media_recorder::RecorderStatus> {
+        let (reply, response) = oneshot::channel();
+        self.cmd_tx
+            .send(CallCommand::QueryRecorderStatus { reply })
+            .await?;
+        tokio::time::timeout(Duration::from_secs(5), response)
+            .await
+            .map_err(|_| anyhow::anyhow!("timed out waiting for recorder query"))?
+            .map_err(|_| anyhow::anyhow!("session closed before answering recorder query"))?
     }
 
     pub fn session_id(&self) -> &str {
@@ -8817,6 +8830,19 @@ impl SipSession {
                     Ok(None) => CommandResult::success(),
                     Err(error) => CommandResult::failure(error.to_string()),
                 }
+            }
+
+            CallCommand::QueryRecorderStatus { reply } => {
+                let result = match self.bridge() {
+                    Some(bridge) => bridge.recorder_status().await,
+                    None => Err(anyhow!("Recording requires MediaBridge")),
+                };
+                let command_result = match &result {
+                    Ok(_) => CommandResult::success(),
+                    Err(error) => CommandResult::failure(error.to_string()),
+                };
+                let _ = reply.send(result);
+                command_result
             }
 
             CallCommand::Trace { event } => {

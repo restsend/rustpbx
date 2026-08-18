@@ -13,7 +13,7 @@ use crate::rwi::session::{
     RecordStartRequest, RwiCommandPayload,
 };
 use crate::rwi::transfer::TransferController;
-use dashmap::{DashMap, DashSet};
+use dashmap::DashMap;
 use futures::FutureExt;
 use std::collections::HashMap;
 
@@ -79,7 +79,6 @@ pub struct RwiCommandProcessor {
     gateway: RwiGatewayRef,
     sip_server: Option<SipServerRef>,
     queue_states: Arc<DashMap<String, QueueState>>,
-    record_states: Arc<DashSet<String>>,
     /// call_id → recorder file path for recordings started via RWI (either a
     /// mid-call `record.start` or `call.originate` with a `record` option).
     /// The originate task reads this when it emits its CDR so the call record
@@ -127,7 +126,6 @@ impl RwiCommandProcessor {
             gateway,
             sip_server: None,
             queue_states: Arc::new(DashMap::new()),
-            record_states: Arc::new(DashSet::new()),
             record_files: Arc::new(DashMap::new()),
             conference_manager,
             transfer_controller,
@@ -970,7 +968,6 @@ impl RwiCommandProcessor {
         let caller_display = req.caller_id.unwrap_or_else(|| caller_str.clone());
         let callee_display = req.destination.clone();
         let record_on_answer = req.record.clone();
-        let record_states = self.record_states.clone();
         let record_files = self.record_files.clone();
 
         // CDR data for call completion reporting
@@ -997,6 +994,7 @@ impl RwiCommandProcessor {
             let cdr_answered_for_store = cdr_answered.clone();
             let cdr_record_files = record_files.clone();
             let cleanup = move || {
+                let recorder_file = cdr_record_files.remove(&cdr_call_id).map(|(_, path)| path);
                 if let Some(ref sender) = cdr_sender_owned.as_ref() {
                     use crate::callrecord::CallRecordHangupReason;
                     let end_time = chrono::Utc::now();
@@ -1006,10 +1004,8 @@ impl RwiCommandProcessor {
                     // record.start) so the CDR carries recording_url and the
                     // call-record hooks can emit recording_metadata_available /
                     // record_end.
-                    let recorder: Vec<crate::callrecord::CallRecordMedia> = cdr_record_files
-                        .get(&cdr_call_id)
-                        .map(|entry| {
-                            let path = entry.value().clone();
+                    let recorder: Vec<crate::callrecord::CallRecordMedia> = recorder_file
+                        .map(|path| {
                             let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                             crate::callrecord::CallRecordMedia {
                                 track_id: "mixed".to_string(),
@@ -1114,14 +1110,13 @@ impl RwiCommandProcessor {
                 Dialplan::new(call_id.clone(), synthetic_request, DialDirection::Outbound)
                     .with_caller(caller_uri.clone())
                     .with_media(media.clone());
-            if record_on_answer.is_some() {
-                // Arm the capture sender/task before the caller media leg is
-                // constructed. The originate flow activates the file backend
-                // with StartRecording after the outbound call is answered.
-                dialplan.recording.enabled = true;
-                dialplan.recording.auto_start = false;
-                dialplan.recording.force_file = true;
-            }
+            // Every RWI-originated call prepares the capture sender/task before
+            // constructing its caller media leg. A `record` option activates
+            // the file recorder on answer; otherwise record.start may activate
+            // it later without rebuilding the media leg.
+            dialplan.recording.enabled = true;
+            dialplan.recording.auto_start = false;
+            dialplan.recording.force_file = true;
             if let Some(hints) = routed_hints {
                 dialplan = dialplan.with_hints(hints);
             }
@@ -1328,15 +1323,28 @@ impl RwiCommandProcessor {
                                 mono_caller_only: None,
                             },
                         });
-                        if send_result.is_ok() {
-                            record_states.insert(call_id.clone());
-                            record_files.insert(call_id.clone(), path);
-                            let gw = gateway.read();
-                            gw.send_to_owner(&crate::rwi::RecordStarted {
-                                call_id: call_id.clone(),
-                            });
-                        } else {
-                            tracing::warn!(call_id = %call_id, "originate record option: failed to send StartRecording");
+                        match send_result {
+                            Ok(()) => match handle.query_recorder_status().await {
+                                Ok(status) if status.active => {
+                                    record_files.insert(
+                                        call_id.clone(),
+                                        status.file_path.unwrap_or(path),
+                                    );
+                                    let gw = gateway.read();
+                                    gw.send_to_owner(&crate::rwi::RecordStarted {
+                                        call_id: call_id.clone(),
+                                    });
+                                }
+                                Ok(_) => {
+                                    tracing::warn!(call_id = %call_id, "originate record option: recorder did not start");
+                                }
+                                Err(error) => {
+                                    tracing::warn!(call_id = %call_id, %error, "originate record option: failed to query recorder");
+                                }
+                            },
+                            Err(error) => {
+                                tracing::warn!(call_id = %call_id, %error, "originate record option: failed to send StartRecording");
+                            }
                         }
                     }
 
@@ -1930,6 +1938,16 @@ impl RwiCommandProcessor {
         use crate::call::domain::RecordConfig;
 
         let handle = self.get_handle(&req.call_id).await?;
+        let status = handle
+            .query_recorder_status()
+            .await
+            .map_err(|error| CommandError::CommandFailed(error.to_string()))?;
+        if status.active {
+            return Err(CommandError::CommandFailed(
+                "Recording is already in progress".to_string(),
+            ));
+        }
+
         let path = req.storage.path.clone();
         handle
             .send_command(CallCommand::StartRecording {
@@ -1943,9 +1961,19 @@ impl RwiCommandProcessor {
                 },
             })
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
-        self.record_states.insert(req.call_id.clone());
-        if !path.trim().is_empty() {
-            self.record_files.insert(req.call_id.clone(), path.clone());
+        let status = handle
+            .query_recorder_status()
+            .await
+            .map_err(|error| CommandError::CommandFailed(error.to_string()))?;
+        if !status.active {
+            return Err(CommandError::CommandFailed(
+                "Recording failed to start".to_string(),
+            ));
+        }
+        if let Some(path) = status.file_path {
+            self.record_files.insert(req.call_id.clone(), path);
+        } else if !path.trim().is_empty() {
+            self.record_files.insert(req.call_id.clone(), path);
         }
         let gw = self.gateway.read();
         gw.send_to_owner(&crate::rwi::RecordStarted {
@@ -1956,7 +1984,11 @@ impl RwiCommandProcessor {
 
     async fn record_pause(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
-        if !self.record_states.contains(call_id) {
+        let status = handle
+            .query_recorder_status()
+            .await
+            .map_err(|error| CommandError::CommandFailed(error.to_string()))?;
+        if !status.active {
             return Err(CommandError::CommandFailed(
                 "No recording in progress".to_string(),
             ));
@@ -1964,6 +1996,15 @@ impl RwiCommandProcessor {
         handle
             .send_command(CallCommand::PauseRecording)
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
+        let status = handle
+            .query_recorder_status()
+            .await
+            .map_err(|error| CommandError::CommandFailed(error.to_string()))?;
+        if !status.paused {
+            return Err(CommandError::CommandFailed(
+                "Recording failed to pause".to_string(),
+            ));
+        }
         let gw = self.gateway.read();
         gw.send_to_owner(&crate::rwi::RecordPaused {
             call_id: call_id.to_string(),
@@ -1973,7 +2014,11 @@ impl RwiCommandProcessor {
 
     async fn record_resume(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
-        if !self.record_states.contains(call_id) {
+        let status = handle
+            .query_recorder_status()
+            .await
+            .map_err(|error| CommandError::CommandFailed(error.to_string()))?;
+        if !status.active {
             return Err(CommandError::CommandFailed(
                 "No recording in progress".to_string(),
             ));
@@ -1981,6 +2026,15 @@ impl RwiCommandProcessor {
         handle
             .send_command(CallCommand::ResumeRecording)
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
+        let status = handle
+            .query_recorder_status()
+            .await
+            .map_err(|error| CommandError::CommandFailed(error.to_string()))?;
+        if !status.active || status.paused {
+            return Err(CommandError::CommandFailed(
+                "Recording failed to resume".to_string(),
+            ));
+        }
         let gw = self.gateway.read();
         gw.send_to_owner(&crate::rwi::RecordResumed {
             call_id: call_id.to_string(),
@@ -1990,10 +2044,31 @@ impl RwiCommandProcessor {
 
     async fn record_stop(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
-        self.record_states.remove(call_id);
+        let status = handle
+            .query_recorder_status()
+            .await
+            .map_err(|error| CommandError::CommandFailed(error.to_string()))?;
+        if !status.active {
+            return Err(CommandError::CommandFailed(
+                "No recording in progress".to_string(),
+            ));
+        }
+        let file_path = status.file_path;
         handle
             .send_command(CallCommand::StopRecording)
             .map_err(|error| CommandError::CommandFailed(error.to_string()))?;
+        let status = handle
+            .query_recorder_status()
+            .await
+            .map_err(|error| CommandError::CommandFailed(error.to_string()))?;
+        if status.active {
+            return Err(CommandError::CommandFailed(
+                "Recording failed to stop".to_string(),
+            ));
+        }
+        if let Some(path) = status.file_path.or(file_path) {
+            self.record_files.insert(call_id.to_string(), path);
+        }
         Ok(CommandResult::Success)
     }
 
