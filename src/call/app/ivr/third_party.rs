@@ -267,9 +267,17 @@ impl ThirdPartyTreeProvider {
         let action = convert_node_static(node);
         let next_id = Self::get_next_linear_child(node);
         let next = next_id.and_then(|id| {
-            tree.nodes
-                .get(&id)
-                .map(|n| Box::new(Self::build_linear_chain(tree, n)))
+            tree.nodes.get(&id).and_then(|n| {
+                // Stop before menu/terminal nodes so they are fetched via
+                // AudioComplete / Dtmf. Chaining a menu as `next` would skip
+                // `awaiting_dtmf_menu_children` and treat DTMF key "0" as a
+                // linear successor.
+                if Self::is_menu_nodetype(&n.nodetype) || Self::is_terminal_nodetype(&n.nodetype) {
+                    None
+                } else {
+                    Some(Box::new(Self::build_linear_chain(tree, n)))
+                }
+            })
         });
         ActionNode {
             action,
@@ -289,55 +297,39 @@ impl ThirdPartyTreeProvider {
         matches!(nodetype, "menu" | "menu_tts" | "menu_tts_api")
     }
 
-    fn build_menu_action_with_entries(
-        provider: &ThirdPartyTreeProvider,
+    /// Convert a tree node for step execution. Menus are always provider-driven
+    /// (empty `entries`) so DTMF is pushed via `next_action(Dtmf)`.
+    fn action_for_node(
+        &self,
         tree: &ThirdPartyTree,
-        menu_node: &ThirdPartyNode,
+        node: &ThirdPartyNode,
+        state: &mut ProviderState,
     ) -> ActionNode {
-        let base_action = provider.convert_node(menu_node);
-        let mut entries = HashMap::new();
-        for (key, child_id) in &menu_node.children {
-            if child_id.is_empty() {
-                continue;
-            }
-            if let Some(child) = tree.nodes.get(child_id) {
-                let child_node = if !Self::is_menu_nodetype(&child.nodetype)
-                    && !Self::is_terminal_nodetype(&child.nodetype)
-                {
-                    Self::build_linear_chain(tree, child)
-                } else {
-                    ActionNode::new(provider.convert_node(child))
-                };
-                entries.insert(key.clone(), child_node);
+        if Self::is_menu_nodetype(&node.nodetype) {
+            state.awaiting_dtmf_menu_children = Some(node.children.clone());
+            ActionNode::new(self.convert_node(node))
+        } else if Self::is_terminal_nodetype(&node.nodetype) {
+            ActionNode::new(self.convert_node(node))
+        } else {
+            Self::build_linear_chain(tree, node)
+        }
+    }
+
+    fn replay_current_menu(&self, state: &mut ProviderState) -> ActionNode {
+        let tree = self.tree.lock();
+        if let Some(id) = state.current_node_id.as_ref() {
+            if let Some(node) = tree.nodes.get(id) {
+                if Self::is_menu_nodetype(&node.nodetype) {
+                    state.awaiting_dtmf_menu_children = Some(node.children.clone());
+                    return ActionNode::new(self.convert_node(node));
+                }
             }
         }
-        let action_with_entries = match base_action {
-            EntryAction::DtmfMenu {
-                greeting,
-                greeting_text,
-                greeting_record_list,
-                greeting_voice,
-                timeout_ms,
-                max_retries,
-                timeout_action,
-                invalid_action,
-                greeting_api_url,
-                ..
-            } => EntryAction::DtmfMenu {
-                greeting,
-                greeting_text,
-                greeting_record_list,
-                greeting_voice,
-                timeout_ms,
-                max_retries,
-                entries,
-                timeout_action,
-                invalid_action,
-                greeting_api_url,
-            },
-            other => other,
-        };
-        ActionNode::new(action_with_entries)
+        ActionNode::new(EntryAction::Hangup {
+            prompt: None,
+            prompt_text: None,
+            prompt_voice: None,
+        })
     }
 
     fn resolve_branch_key(body: &serde_json::Value) -> String {
@@ -525,18 +517,8 @@ impl ActionProvider for ThirdPartyTreeProvider {
                     "ThirdPartyTree: starting tree traversal"
                 );
 
-                if Self::is_menu_nodetype(&node.nodetype) {
-                    state.awaiting_dtmf_menu_children = Some(node.children.clone());
-                    let tree = self.tree.lock();
-                    return Ok(Self::build_menu_action_with_entries(self, &tree, &node));
-                }
-
-                if Self::is_terminal_nodetype(&node.nodetype) {
-                    return Ok(ActionNode::new(self.convert_node(&node)));
-                }
-
                 let tree = self.tree.lock();
-                Ok(Self::build_linear_chain(&tree, &node))
+                Ok(self.action_for_node(&tree, &node, &mut state))
             }
 
             Some(ProviderEvent::Dtmf { ref digit }) => {
@@ -560,22 +542,21 @@ impl ActionProvider for ThirdPartyTreeProvider {
                                 digit = %digit,
                                 "ThirdPartyTree: DTMF matched"
                             );
-
-                            if Self::is_menu_nodetype(&child.nodetype) {
-                                state.awaiting_dtmf_menu_children = Some(child.children.clone());
-                                return Ok(Self::build_menu_action_with_entries(
-                                    self, &tree, &child,
-                                ));
-                            }
-                            if Self::is_terminal_nodetype(&child.nodetype) {
-                                return Ok(ActionNode::new(self.convert_node(&child)));
-                            }
-                            return Ok(Self::build_linear_chain(&tree, &child));
+                            return Ok(self.action_for_node(&tree, &child, &mut state));
                         }
                     }
+
+                    // Unmatched key: restore the menu and re-offer it. Repeat
+                    // would crash the step executor.
+                    state.awaiting_dtmf_menu_children = Some(children);
+                    info!(
+                        digit = %digit,
+                        "ThirdPartyTree: unmatched DTMF, replaying menu"
+                    );
+                    return Ok(self.replay_current_menu(&mut state));
                 }
 
-                Ok(ActionNode::new(EntryAction::Repeat))
+                Ok(self.replay_current_menu(&mut state))
             }
 
             Some(ProviderEvent::ApiResponse { ref body, .. }) => {
@@ -616,17 +597,7 @@ impl ActionProvider for ThirdPartyTreeProvider {
                             if let Some(nid) = next_id {
                                 if let Some(next) = tree.nodes.get(&nid).cloned() {
                                     state.current_node_id = Some(nid.clone());
-                                    if Self::is_menu_nodetype(&next.nodetype) {
-                                        state.awaiting_dtmf_menu_children =
-                                            Some(next.children.clone());
-                                        return Ok(Self::build_menu_action_with_entries(
-                                            self, &tree, &next,
-                                        ));
-                                    }
-                                    if Self::is_terminal_nodetype(&next.nodetype) {
-                                        return Ok(ActionNode::new(self.convert_node(&next)));
-                                    }
-                                    return Ok(Self::build_linear_chain(&tree, &next));
+                                    return Ok(self.action_for_node(&tree, &next, &mut state));
                                 }
                             }
                             return Ok(ActionNode::new(EntryAction::Hangup {
@@ -655,14 +626,7 @@ impl ActionProvider for ThirdPartyTreeProvider {
                             branch = %branch_key,
                             "ThirdPartyTree: API response branch"
                         );
-                        if Self::is_menu_nodetype(&child.nodetype) {
-                            state.awaiting_dtmf_menu_children = Some(child.children.clone());
-                            return Ok(Self::build_menu_action_with_entries(self, &tree, &child));
-                        }
-                        if Self::is_terminal_nodetype(&child.nodetype) {
-                            return Ok(ActionNode::new(self.convert_node(&child)));
-                        }
-                        return Ok(Self::build_linear_chain(&tree, &child));
+                        return Ok(self.action_for_node(&tree, &child, &mut state));
                     }
                 }
 
@@ -673,7 +637,9 @@ impl ActionProvider for ThirdPartyTreeProvider {
                 }))
             }
 
-            Some(ProviderEvent::DtmfTimeout) => Ok(ActionNode::new(EntryAction::Repeat)),
+            Some(ProviderEvent::DtmfTimeout) | Some(ProviderEvent::DtmfMenuTimeout) => {
+                Ok(self.replay_current_menu(&mut state))
+            }
 
             Some(ProviderEvent::AudioComplete { .. }) => {
                 let tree = self.tree.lock();
@@ -713,14 +679,7 @@ impl ActionProvider for ThirdPartyTreeProvider {
 
                 state.current_node_id = Some(nid.clone());
 
-                if Self::is_menu_nodetype(&next.nodetype) {
-                    state.awaiting_dtmf_menu_children = Some(next.children.clone());
-                    return Ok(Self::build_menu_action_with_entries(self, &tree, &next));
-                }
-                if Self::is_terminal_nodetype(&next.nodetype) {
-                    return Ok(ActionNode::new(self.convert_node(&next)));
-                }
-                Ok(Self::build_linear_chain(&tree, &next))
+                Ok(self.action_for_node(&tree, &next, &mut state))
             }
 
             _ => Ok(ActionNode::new(EntryAction::Repeat)),
@@ -852,10 +811,15 @@ mod tests {
             EntryAction::DtmfMenu {
                 greeting_text,
                 timeout_ms,
+                entries,
                 ..
             } => {
                 assert_eq!(greeting_text.as_deref(), Some("主菜单请按1，人工请按0"));
                 assert_eq!(timeout_ms, 3000);
+                assert!(
+                    entries.is_empty(),
+                    "menu_tts must convert to provider-driven empty entries"
+                );
             }
             _ => panic!("expected DtmfMenu"),
         }
@@ -917,10 +881,240 @@ mod tests {
             }
             _ => panic!("expected Prompt"),
         }
-        let next = chain.next.as_ref().expect("should have next");
-        match &next.action {
-            EntryAction::DtmfMenu { .. } => {}
-            _ => panic!("expected DtmfMenu as next"),
+        assert!(
+            chain.next.is_none(),
+            "linear chain must stop before menu_tts so DTMF is provider-driven"
+        );
+    }
+
+    fn test_provider_ctx(event: ProviderEvent) -> ProviderContext {
+        ProviderContext {
+            session_id: "s1".into(),
+            caller: "1001".into(),
+            callee: "2000".into(),
+            direction: "inbound".into(),
+            tenant_id: None,
+            ivr_id: None,
+            variables: HashMap::new(),
+            sip_headers: None,
+            event: Some(event),
+            route_name: None,
+            custom_data: None,
+            step_start_time: None,
+            step_end_time: None,
+            step_duration_ms: None,
+            step_index: None,
+            transferred_from: None,
         }
+    }
+
+    async fn drive_to_menu_tts(provider: &ThirdPartyTreeProvider) -> ActionNode {
+        let start = provider
+            .next_action(test_provider_ctx(ProviderEvent::SessionStart))
+            .await
+            .unwrap();
+        assert!(
+            matches!(start.action, EntryAction::Api { .. }),
+            "entry child should be api"
+        );
+
+        let after_api = provider
+            .next_action(test_provider_ctx(ProviderEvent::ApiResponse {
+                status: 200,
+                body: serde_json::json!("0"),
+            }))
+            .await
+            .unwrap();
+        assert!(
+            matches!(after_api.action, EntryAction::Prompt { .. }),
+            "api branch 0 should be prompt_break"
+        );
+        assert!(after_api.next.is_none(), "prompt must not chain menu_tts");
+
+        let menu = provider
+            .next_action(test_provider_ctx(ProviderEvent::AudioComplete {
+                interrupted: false,
+            }))
+            .await
+            .unwrap();
+        match &menu.action {
+            EntryAction::DtmfMenu {
+                greeting_text,
+                entries,
+                ..
+            } => {
+                assert_eq!(greeting_text.as_deref(), Some("主菜单请按1，人工请按0"));
+                assert!(
+                    entries.is_empty(),
+                    "menu_tts must be provider-driven (empty entries)"
+                );
+            }
+            other => panic!("expected DtmfMenu, got {other:?}"),
+        }
+        menu
+    }
+
+    #[tokio::test]
+    async fn test_menu_tts_dtmf_matched_pushes_digit() {
+        let provider =
+            ThirdPartyTreeProvider::from_json(&sample_tree_json(), "http://localhost".into())
+                .unwrap();
+        drive_to_menu_tts(&provider).await;
+
+        let next = provider
+            .next_action(test_provider_ctx(ProviderEvent::Dtmf { digit: "1".into() }))
+            .await
+            .unwrap();
+        match next.action {
+            EntryAction::RouteToAgent { ref target, .. } => {
+                assert_eq!(target, "39257");
+            }
+            other => panic!("expected RouteToAgent, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_menu_tts_unmatched_dtmf_replays_menu() {
+        let provider =
+            ThirdPartyTreeProvider::from_json(&sample_tree_json(), "http://localhost".into())
+                .unwrap();
+        drive_to_menu_tts(&provider).await;
+
+        let replayed = provider
+            .next_action(test_provider_ctx(ProviderEvent::Dtmf { digit: "9".into() }))
+            .await
+            .unwrap();
+        match &replayed.action {
+            EntryAction::DtmfMenu {
+                greeting_text,
+                entries,
+                ..
+            } => {
+                assert_eq!(greeting_text.as_deref(), Some("主菜单请按1，人工请按0"));
+                assert!(entries.is_empty());
+            }
+            other => panic!("expected replayed DtmfMenu, got {other:?}"),
+        }
+
+        let matched = provider
+            .next_action(test_provider_ctx(ProviderEvent::Dtmf { digit: "1".into() }))
+            .await
+            .unwrap();
+        assert!(
+            matches!(matched.action, EntryAction::RouteToAgent { .. }),
+            "menu must still accept a valid key after unmatched DTMF"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_menu_tts_timeout_replays_menu() {
+        let provider =
+            ThirdPartyTreeProvider::from_json(&sample_tree_json(), "http://localhost".into())
+                .unwrap();
+        drive_to_menu_tts(&provider).await;
+
+        let replayed = provider
+            .next_action(test_provider_ctx(ProviderEvent::DtmfMenuTimeout))
+            .await
+            .unwrap();
+        match replayed.action {
+            EntryAction::DtmfMenu { greeting_text, .. } => {
+                assert_eq!(greeting_text.as_deref(), Some("主菜单请按1，人工请按0"));
+            }
+            other => panic!("expected replayed DtmfMenu, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_menu_tts_digit_zero_jumps_ivr() {
+        let provider =
+            ThirdPartyTreeProvider::from_json(&sample_tree_json(), "http://localhost".into())
+                .unwrap();
+        drive_to_menu_tts(&provider).await;
+
+        let next = provider
+            .next_action(test_provider_ctx(ProviderEvent::Dtmf { digit: "0".into() }))
+            .await
+            .unwrap();
+        match next.action {
+            EntryAction::JumpIvr {
+                ref route_point, ..
+            } => {
+                assert_eq!(route_point, "39299");
+            }
+            other => panic!("DTMF 0 must be a menu key to toivr, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_menu_tts_dtmf_timeout_replays_menu() {
+        let provider =
+            ThirdPartyTreeProvider::from_json(&sample_tree_json(), "http://localhost".into())
+                .unwrap();
+        drive_to_menu_tts(&provider).await;
+
+        let replayed = provider
+            .next_action(test_provider_ctx(ProviderEvent::DtmfTimeout))
+            .await
+            .unwrap();
+        assert!(
+            matches!(replayed.action, EntryAction::DtmfMenu { .. }),
+            "DtmfTimeout must replay menu_tts, not Repeat"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_start_on_menu_tts_is_provider_driven() {
+        let json = r#"{
+            "entry_1": {
+                "nodename": "",
+                "nodetype": "entry",
+                "nodevalue": "",
+                "businessnodeid": "1",
+                "children": {"0": "menu_1"},
+                "controltype": ""
+            },
+            "menu_1": {
+                "nodename": "请按1",
+                "nodetype": "menu_tts",
+                "nodevalue": "5",
+                "businessnodeid": "2",
+                "children": {"1": "hangup_1"},
+                "controltype": ""
+            },
+            "hangup_1": {
+                "nodename": "",
+                "nodetype": "syshangup",
+                "nodevalue": "",
+                "businessnodeid": "3",
+                "children": {"0": ""},
+                "controltype": ""
+            }
+        }"#;
+        let provider = ThirdPartyTreeProvider::from_json(json, "http://localhost".into()).unwrap();
+        let menu = provider
+            .next_action(test_provider_ctx(ProviderEvent::SessionStart))
+            .await
+            .unwrap();
+        match &menu.action {
+            EntryAction::DtmfMenu {
+                greeting_text,
+                entries,
+                ..
+            } => {
+                assert_eq!(greeting_text.as_deref(), Some("请按1"));
+                assert!(entries.is_empty());
+            }
+            other => panic!("expected menu_tts DtmfMenu, got {other:?}"),
+        }
+
+        let hangup = provider
+            .next_action(test_provider_ctx(ProviderEvent::Dtmf { digit: "1".into() }))
+            .await
+            .unwrap();
+        assert!(
+            matches!(hangup.action, EntryAction::Hangup { .. }),
+            "matched DTMF must execute the child node"
+        );
     }
 }

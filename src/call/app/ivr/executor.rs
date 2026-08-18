@@ -1263,6 +1263,13 @@ impl CallApp for StepIvrApp {
             if let Some(ref menu) = self.pending_menu {
                 self.awaiting_dtmf = true;
                 ctrl.set_timeout("ivr_dtmf_timeout", Duration::from_millis(menu.timeout_ms));
+                if let Some(digit) = self.pending_dtmf.pop_front() {
+                    tracing::info!(
+                        digit = %digit,
+                        "StepIvrApp: delivering buffered DTMF after menu greeting"
+                    );
+                    return self.on_dtmf(digit, ctrl, context).await;
+                }
                 return Ok(AppAction::Continue);
             }
         }
@@ -2019,6 +2026,270 @@ mod tests {
         assert!(
             events.iter().any(|e| e == "dtmf:1"),
             "provider should have received Dtmf{{digit:\"1\"}}, got: {:?}",
+            events
+        );
+    }
+
+    struct GreetingTextMenuProvider {
+        captured_events: Arc<std::sync::Mutex<Vec<Option<ProviderEvent>>>>,
+    }
+
+    #[async_trait]
+    impl ActionProvider for GreetingTextMenuProvider {
+        async fn next_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode> {
+            self.captured_events.lock().unwrap().push(ctx.event.clone());
+            if matches!(&ctx.event, Some(ProviderEvent::Dtmf { .. })) {
+                return Ok(ActionNode::new(EntryAction::Transfer {
+                    target: "2001".into(),
+                    params: HashMap::new(),
+                    return_app: None,
+                    return_target: None,
+                }));
+            }
+            Ok(ActionNode::new(EntryAction::DtmfMenu {
+                greeting: Some("menu.wav".into()),
+                greeting_text: Some("请按1转坐席".into()),
+                greeting_record_list: None,
+                greeting_voice: None,
+                timeout_ms: 5000,
+                max_retries: 3,
+                entries: HashMap::new(),
+                timeout_action: None,
+                invalid_action: None,
+                greeting_api_url: None,
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_provider_driven_menu_tts_dtmf_forwards_digit() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = GreetingTextMenuProvider {
+            captured_events: captured.clone(),
+        };
+        let app = StepIvrApp::with_provider(Box::new(provider)).with_name("menu-tts-ivr");
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "play", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path },
+                        ..
+                    } if path == "menu.wav"
+                )
+            })
+            .await;
+
+        stack.audio_complete("ivr_menu_greeting");
+        let _ = stack.drain_cmds();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        stack.dtmf("1");
+
+        stack
+            .assert_cmd(200, "stop", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        let events: Vec<String> = captured
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                Some(ProviderEvent::Dtmf { digit }) => Some(format!("dtmf:{digit}")),
+                Some(ProviderEvent::SessionStart) => Some("session_start".into()),
+                Some(other) => Some(format!("{other:?}")),
+                None => Some("none".into()),
+            })
+            .collect();
+        assert!(
+            events.iter().any(|e| e == "dtmf:1"),
+            "greeting_text DtmfMenu must POST digit to provider, got: {:?}",
+            events
+        );
+    }
+
+    #[tokio::test]
+    async fn test_menu_tts_dtmf_during_greeting_forwards_digit() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = GreetingTextMenuProvider {
+            captured_events: captured.clone(),
+        };
+        let app = StepIvrApp::with_provider(Box::new(provider)).with_name("menu-tts-bargein");
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "play", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path },
+                        ..
+                    } if path == "menu.wav"
+                )
+            })
+            .await;
+
+        // Barge-in while the TTS/file greeting is still playing.
+        let _ = stack.drain_cmds();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        stack.dtmf("2");
+
+        stack
+            .assert_cmd(200, "stop", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        let events: Vec<String> = captured
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                Some(ProviderEvent::Dtmf { digit }) => Some(format!("dtmf:{digit}")),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            events.iter().any(|e| e == "dtmf:2"),
+            "DTMF during menu_tts greeting must be pushed to provider, got: {:?}",
+            events
+        );
+    }
+
+    struct FlushBufferedDtmfProvider {
+        captured_events: Arc<std::sync::Mutex<Vec<Option<ProviderEvent>>>>,
+    }
+
+    #[async_trait]
+    impl ActionProvider for FlushBufferedDtmfProvider {
+        async fn next_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode> {
+            self.captured_events.lock().unwrap().push(ctx.event.clone());
+            if matches!(&ctx.event, Some(ProviderEvent::Dtmf { .. })) {
+                return Ok(ActionNode::new(EntryAction::Transfer {
+                    target: "2001".into(),
+                    params: HashMap::new(),
+                    return_app: None,
+                    return_target: None,
+                }));
+            }
+            let menu = ActionNode::new(EntryAction::DtmfMenu {
+                greeting: Some("menu.wav".into()),
+                greeting_text: Some("请按1".into()),
+                greeting_record_list: None,
+                greeting_voice: None,
+                timeout_ms: 5000,
+                max_retries: 3,
+                entries: HashMap::new(),
+                timeout_action: None,
+                invalid_action: None,
+                greeting_api_url: None,
+            });
+            Ok(ActionNode::with_next(
+                EntryAction::Prompt {
+                    file: Some("announce.wav".into()),
+                    tts_text: None,
+                    tts_voice: None,
+                    record_name_list: None,
+                    interruptible: false,
+                    tts_api_url: None,
+                },
+                menu,
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_buffered_dtmf_flushed_after_menu_greeting() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = FlushBufferedDtmfProvider {
+            captured_events: captured.clone(),
+        };
+        let app = StepIvrApp::with_provider(Box::new(provider)).with_name("flush-dtmf-ivr");
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "play", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path },
+                        ..
+                    } if path == "announce.wav"
+                )
+            })
+            .await;
+
+        // Digit during the non-interruptible announcement is buffered.
+        stack.dtmf("1");
+        stack.audio_complete("ivr_prompt");
+
+        stack
+            .assert_cmd(200, "play", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path },
+                        ..
+                    } if path == "menu.wav"
+                )
+            })
+            .await;
+
+        // Greeting complete must flush the buffered digit to the provider.
+        stack.audio_complete("ivr_menu_greeting");
+        stack
+            .assert_cmd(200, "stop", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        let events: Vec<String> = captured
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                Some(ProviderEvent::Dtmf { digit }) => Some(format!("dtmf:{digit}")),
+                Some(ProviderEvent::SessionStart) => Some("session_start".into()),
+                Some(other) => Some(format!("{other:?}")),
+                None => Some("none".into()),
+            })
+            .collect();
+        assert!(
+            events.iter().any(|e| e == "dtmf:1"),
+            "buffered DTMF must be delivered after menu greeting, got: {:?}",
             events
         );
     }

@@ -70,6 +70,9 @@ pub struct WebhookPayload {
     /// Collected variables from Collect actions.
     #[serde(default)]
     pub variables: std::collections::HashMap<String, String>,
+    /// Last DTMF digit that triggered this webhook, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digit: Option<String>,
 }
 
 /// A built-in IVR application driven by TOML configuration.
@@ -90,6 +93,8 @@ pub struct IvrApp {
     collected_variables: std::collections::HashMap<String, String>,
     /// First digit collected for unknown_key_action (direct dial scenario).
     pending_unknown_digit: Option<String>,
+    /// Last DTMF digit that triggered an action (for IvrNodeExited / webhook).
+    last_dtmf_digit: Option<String>,
     /// Optional TTS service synthesized from the IVR's own TTS config.
     tts_service: Option<Arc<crate::tts::TtsService>>,
     /// Menu to start from on `on_enter` (used by return-to-IVR resume).
@@ -130,6 +135,7 @@ impl IvrApp {
             pending_retry_count: 0,
             collected_variables: std::collections::HashMap::new(),
             pending_unknown_digit: None,
+            last_dtmf_digit: None,
             tts_service,
             nodes_traversed: 0,
             flow_started_at: None,
@@ -502,6 +508,7 @@ impl IvrApp {
         action: &EntryAction,
         ctrl: &mut CallController,
         ctx: &ApplicationContext,
+        dtmf_digit: Option<&str>,
     ) -> anyhow::Result<AppAction> {
         ctrl.cancel_timeout("ivr_dtmf_timeout");
 
@@ -522,19 +529,22 @@ impl IvrApp {
                 EntryAction::RouteToAgent { .. } => "route_to_agent",
                 _ => "other",
             };
+            let result_value = dtmf_digit
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| action_type.to_string());
             self.emit_rwi_event_typed(
                 ctx,
                 &crate::rwi::IvrNodeExited {
                     call_id: ctx.call_info.session_id.clone(),
                     node_id: menu_key.clone(),
                     node_name,
-                    result_value: Some(action_type.to_string()),
+                    result_value: Some(result_value),
                     duration_ms: duration_ms as u32,
                     exit_time: chrono::Utc::now().to_rfc3339(),
                     next_node_id: None,
                     hangup_reason: None,
                     call_result: None,
-                    extra: None,
+                    extra: Some(serde_json::json!({ "action_type": action_type })),
                 },
             );
         }
@@ -935,7 +945,7 @@ impl IvrApp {
                         // Convert WebhookResponse into an EntryAction and execute it
                         let derived_action = response.into_entry_action();
                         // Use Box::pin to avoid recursion issues with async fn
-                        Box::pin(self.execute_action(&derived_action, ctrl, ctx)).await
+                        Box::pin(self.execute_action(&derived_action, ctrl, ctx, None)).await
                     }
                     Err(e) => {
                         error!(
@@ -1008,6 +1018,9 @@ impl IvrApp {
                 ("ivr_name", self.definition.name.as_str()),
                 ("menu", self.current_menu_key()),
             ];
+            if let Some(digit) = self.last_dtmf_digit.as_deref() {
+                params.push(("digit", digit));
+            }
             // Add collected variables as query params
             for (k, v) in &filtered_vars {
                 params.push((k, v));
@@ -1022,6 +1035,7 @@ impl IvrApp {
                 ivr_name: self.definition.name.clone(),
                 menu: self.current_menu_key().to_string(),
                 variables: filtered_vars,
+                digit: self.last_dtmf_digit.clone(),
             };
             ctx.http_client.post(url).json(&payload)
         };
@@ -1073,7 +1087,7 @@ impl IvrApp {
                     retries = new_retry,
                     "IVR max retries exceeded (timeout), executing fallback action"
                 );
-                return self.execute_action(&action, ctrl, ctx).await;
+                return self.execute_action(&action, ctrl, ctx, None).await;
             } else {
                 info!(
                     ivr = %self.definition.name,
@@ -1117,7 +1131,7 @@ impl IvrApp {
                     }
                     Ok(AppAction::Continue)
                 }
-                other => self.execute_action(&other, ctrl, ctx).await,
+                other => self.execute_action(&other, ctrl, ctx, None).await,
             }
         } else {
             // No timeout_action defined; replay the greeting
@@ -1191,7 +1205,7 @@ impl IvrApp {
                     retries = new_retry,
                     "IVR max retries exceeded after invalid key, executing fallback"
                 );
-                return self.execute_action(&action, ctrl, ctx).await;
+                return self.execute_action(&action, ctrl, ctx, None).await;
             } else {
                 info!(
                     ivr = %self.definition.name,
@@ -1290,7 +1304,7 @@ impl CallApp for IvrApp {
 
         if let Some(action) = closed_action {
             if let Some(action) = action {
-                return self.execute_action(&action, ctrl, ctx).await;
+                return self.execute_action(&action, ctrl, ctx, None).await;
             }
             // Default: hang up
             self.state = IvrState::Done;
@@ -1356,7 +1370,8 @@ impl CallApp for IvrApp {
                 );
                 ctrl.cancel_timeout("ivr_dtmf_timeout");
                 let _ = ctrl.stop_audio().await;
-                self.execute_action(&action, ctrl, ctx).await
+                self.last_dtmf_digit = Some(digit.clone());
+                self.execute_action(&action, ctrl, ctx, Some(&digit)).await
             } else {
                 info!(
                     ivr = %self.definition.name,
@@ -1390,7 +1405,8 @@ impl CallApp for IvrApp {
                     digit = %digit,
                     "IVR DTMF matched entry, executing action"
                 );
-                self.execute_action(&action, ctrl, ctx).await
+                self.last_dtmf_digit = Some(digit.clone());
+                self.execute_action(&action, ctrl, ctx, Some(&digit)).await
             } else if let Some(menu) = self.definition.get_menu(&menu_key) {
                 // Check for unknown_key_action (e.g., direct extension dial)
                 let unknown_action = menu.unknown_key_action.clone();
@@ -1403,7 +1419,9 @@ impl CallApp for IvrApp {
                     );
                     // Store the first digit for Collect actions
                     self.pending_unknown_digit = Some(digit.to_string());
-                    self.execute_action(&unknown_action, ctrl, ctx).await
+                    self.last_dtmf_digit = Some(digit.clone());
+                    self.execute_action(&unknown_action, ctrl, ctx, Some(&digit))
+                        .await
                 } else {
                     info!(
                         ivr = %self.definition.name,
@@ -1686,7 +1704,7 @@ impl CallApp for IvrApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::call::app::ivr::config::MenuNode;
+    use crate::call::app::ivr::config::{MenuEntry, MenuNode};
     use crate::call::app::testing::MockCallStack;
     use crate::call::app::{CallInfo, ControllerEvent, ExitReason};
     use crate::config::Config;
@@ -1863,6 +1881,232 @@ mod tests {
         assert!(
             matches!(app.state, IvrState::Done),
             "unknown-menu hangup must set state to Done"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dtmf_match_emits_digit_as_result_value() {
+        use crate::rwi::gateway::EventCacheEntry;
+
+        let mut def = test_definition();
+        def.root = Some(MenuNode {
+            greeting: String::new(),
+            greeting_text: None,
+            entries: vec![MenuEntry {
+                key: "1".into(),
+                label: Some("agent".into()),
+                action: EntryAction::Transfer {
+                    target: "2001".into(),
+                    params: HashMap::new(),
+                    return_app: None,
+                    return_target: None,
+                },
+            }],
+            ..MenuNode::default()
+        });
+
+        let mut ctx = test_context();
+        let mut gw = crate::rwi::gateway::RwiGateway::new();
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<EventCacheEntry>(16);
+        gw.set_webhook_tx(tx);
+        ctx.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gw)));
+
+        let mut stack = MockCallStack::run_with_context(Box::new(IvrApp::new(def)), ctx.clone());
+        stack.enter().await;
+        stack
+            .assert_cmd(200, "accept", |c| {
+                matches!(c, crate::call::domain::CallCommand::Answer { .. })
+            })
+            .await;
+
+        // Empty greeting file + failed TTS → wait for DTMF immediately.
+        let _ = stack.drain_cmds();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        stack.dtmf("1");
+        stack
+            .assert_cmd(
+                500,
+                "transfer",
+                |c| matches!(c, crate::call::domain::CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        let mut result_value = None;
+        let mut action_type = None;
+        for _ in 0..20 {
+            while let Ok(entry) = rx.try_recv() {
+                if entry.event.event_type == "ivr_node_exited" {
+                    result_value = entry
+                        .event
+                        .payload
+                        .get("result_value")
+                        .and_then(|v| v.as_str().map(|s| s.to_string()));
+                    action_type = entry
+                        .event
+                        .payload
+                        .get("extra")
+                        .and_then(|v| v.get("action_type"))
+                        .and_then(|v| v.as_str().map(|s| s.to_string()));
+                }
+            }
+            if result_value.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        assert_eq!(
+            result_value.as_deref(),
+            Some("1"),
+            "ivr_node_exited.result_value must be the pressed digit"
+        );
+        assert_eq!(
+            action_type.as_deref(),
+            Some("transfer"),
+            "ivr_node_exited.extra.action_type must keep the action kind"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dtmf_bargein_during_greeting_emits_digit() {
+        use crate::rwi::gateway::EventCacheEntry;
+
+        let mut def = test_definition();
+        def.root = Some(MenuNode {
+            greeting: "sounds/welcome.wav".into(),
+            greeting_text: Some("请按1转坐席".into()),
+            entries: vec![MenuEntry {
+                key: "1".into(),
+                label: Some("agent".into()),
+                action: EntryAction::Transfer {
+                    target: "2001".into(),
+                    params: HashMap::new(),
+                    return_app: None,
+                    return_target: None,
+                },
+            }],
+            ..MenuNode::default()
+        });
+
+        let mut ctx = test_context();
+        let mut gw = crate::rwi::gateway::RwiGateway::new();
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<EventCacheEntry>(16);
+        gw.set_webhook_tx(tx);
+        ctx.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gw)));
+
+        let mut stack = MockCallStack::run_with_context(Box::new(IvrApp::new(def)), ctx.clone());
+        stack.enter().await;
+        stack
+            .assert_cmd(200, "accept", |c| {
+                matches!(c, crate::call::domain::CallCommand::Answer { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "play", |c| {
+                matches!(c, crate::call::domain::CallCommand::Play { .. })
+            })
+            .await;
+
+        stack.dtmf("1");
+        stack
+            .assert_cmd(200, "stop", |c| {
+                matches!(c, crate::call::domain::CallCommand::StopPlayback { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, crate::call::domain::CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        let mut result_value = None;
+        for _ in 0..20 {
+            while let Ok(entry) = rx.try_recv() {
+                if entry.event.event_type == "ivr_node_exited" {
+                    result_value = entry
+                        .event
+                        .payload
+                        .get("result_value")
+                        .and_then(|v| v.as_str().map(|s| s.to_string()));
+                }
+            }
+            if result_value.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        assert_eq!(
+            result_value.as_deref(),
+            Some("1"),
+            "barge-in during TTS greeting must still emit the digit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_timeout_without_digit_keeps_action_type() {
+        use crate::rwi::gateway::EventCacheEntry;
+
+        let mut def = test_definition();
+        def.root = Some(MenuNode {
+            greeting: String::new(),
+            timeout_ms: 5000,
+            max_retries: 1,
+            timeout_action: Some(EntryAction::Transfer {
+                target: "2001".into(),
+                params: HashMap::new(),
+                return_app: None,
+                return_target: None,
+            }),
+            entries: vec![],
+            ..MenuNode::default()
+        });
+
+        let mut ctx = test_context();
+        let mut gw = crate::rwi::gateway::RwiGateway::new();
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<EventCacheEntry>(16);
+        gw.set_webhook_tx(tx);
+        ctx.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gw)));
+
+        let mut stack = MockCallStack::run_with_context(Box::new(IvrApp::new(def)), ctx.clone());
+        stack.enter().await;
+        stack
+            .assert_cmd(200, "accept", |c| {
+                matches!(c, crate::call::domain::CallCommand::Answer { .. })
+            })
+            .await;
+        stack.timeout("ivr_dtmf_timeout");
+        stack
+            .assert_cmd(
+                500,
+                "transfer",
+                |c| matches!(c, crate::call::domain::CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        let mut result_value = None;
+        for _ in 0..20 {
+            while let Ok(entry) = rx.try_recv() {
+                if entry.event.event_type == "ivr_node_exited" {
+                    result_value = entry
+                        .event
+                        .payload
+                        .get("result_value")
+                        .and_then(|v| v.as_str().map(|s| s.to_string()));
+                }
+            }
+            if result_value.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        assert_eq!(
+            result_value.as_deref(),
+            Some("transfer"),
+            "timeout exit without a keypress must keep action type as result_value"
         );
     }
 }
