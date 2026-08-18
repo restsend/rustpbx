@@ -282,7 +282,7 @@ impl CallReporter {
             details.recording_duration_secs = Some((now - start_time).num_seconds().max(0) as i32);
         }
 
-        let record = CallRecord {
+        let mut record = CallRecord {
             call_id: self.context.session_id.clone(),
             start_time,
             ring_time,
@@ -299,6 +299,16 @@ impl CallReporter {
             details,
             extensions: snapshot.extensions,
         };
+
+        // Keep RWI ownership and CallMeta alive until every asynchronous
+        // call-record completion hook has finished. Dropping the record (also
+        // on channel failure or task cancellation) performs the cleanup.
+        if let Some(ref gateway) = self.server.rwi_gateway {
+            record.extensions.insert(crate::rwi::RwiCallRecordGuard::new(
+                gateway,
+                record.call_id.clone(),
+            ));
+        }
 
         if let Some(ref sender) = self.call_record_sender {
             // Bounded channel: drop new records (with a warn log) if the

@@ -7,7 +7,7 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Arc as StdArc};
+use std::sync::{Arc, Arc as StdArc, Weak as StdWeak};
 use tokio::sync::{broadcast, mpsc};
 use tracing::warn;
 
@@ -27,6 +27,39 @@ pub struct EventCacheEntry {
 pub type WsEventSender = mpsc::UnboundedSender<serde_json::Value>;
 
 pub type RwiGatewayRef = StdArc<RwLock<RwiGateway>>;
+
+/// Keeps gateway-owned call state alive until the `CallRecord` and all of its
+/// completion hooks have finished. `CallRecord.extensions` requires cloneable
+/// values, so cleanup belongs to the shared inner value and runs exactly once
+/// when its final guard is dropped.
+#[derive(Clone)]
+pub struct RwiCallRecordGuard {
+    _inner: StdArc<RwiCallRecordGuardInner>,
+}
+
+struct RwiCallRecordGuardInner {
+    gateway: StdWeak<RwLock<RwiGateway>>,
+    call_id: CallId,
+}
+
+impl RwiCallRecordGuard {
+    pub fn new(gateway: &RwiGatewayRef, call_id: CallId) -> Self {
+        Self {
+            _inner: StdArc::new(RwiCallRecordGuardInner {
+                gateway: StdArc::downgrade(gateway),
+                call_id,
+            }),
+        }
+    }
+}
+
+impl Drop for RwiCallRecordGuardInner {
+    fn drop(&mut self) {
+        if let Some(gateway) = self.gateway.upgrade() {
+            gateway.write().call_finished(&self.call_id);
+        }
+    }
+}
 
 pub struct RwiGateway {
     sessions: HashMap<SessionId, Arc<RwLock<RwiSession>>>,
@@ -280,9 +313,8 @@ impl RwiGateway {
         false
     }
 
-    /// Handle the per-call notification emitted when a SipSession has
-    /// completed its synchronous teardown. All gateway-owned per-call state
-    /// is removed here so a long-lived RWI WebSocket does not retain calls.
+    /// Remove all gateway-owned state after the call-record completion guard
+    /// is dropped, or immediately when ownership is explicitly detached.
     pub fn call_finished(&mut self, call_id: &CallId) -> bool {
         let owner_id = self.call_ownership.remove(call_id);
         let released = owner_id
@@ -728,6 +760,56 @@ mod tests {
         assert!(!gw.sessions[&sid].read().owns_call("c1"));
         assert!(gw.meta_store.get_sync("c1").is_none());
         assert!(!gw.call_finished(&"c1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_call_record_guard_defers_cleanup_until_drop() {
+        let gateway = StdArc::new(RwLock::new(RwiGateway::new()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sid = {
+            let mut gateway = gateway.write();
+            let sid = gateway.create_session(create_identity()).read().id.clone();
+            gateway.set_session_event_sender(&sid, tx);
+            gateway
+                .claim_call_ownership(&sid, "c1".into(), OwnershipMode::Control)
+                .unwrap();
+            gateway.meta_store.insert(
+                "c1".into(),
+                crate::rwi::proto::CallMeta {
+                    caller: Some("sip:caller@example.com".into()),
+                    ..Default::default()
+                },
+            );
+            sid
+        };
+        let guard = RwiCallRecordGuard::new(&gateway, "c1".into());
+
+        gateway
+            .read()
+            .send_to_owner(&crate::rwi::RecordEnd {
+                call_id: "c1".into(),
+                url: Some("sipflow://c1".into()),
+                duration_secs: 12,
+                file_size: 1024,
+            });
+
+        let event = rx.recv().await.expect("final event must reach RWI session");
+        assert_eq!(event["event_type"], "record_end");
+        assert_eq!(event["caller"], "sip:caller@example.com");
+
+        {
+            let gateway = gateway.read();
+            assert!(gateway.call_ownership.contains_key("c1"));
+            assert!(gateway.sessions[&sid].read().owns_call("c1"));
+            assert!(gateway.meta_store.get_sync("c1").is_some());
+        }
+
+        drop(guard);
+
+        let gateway = gateway.read();
+        assert!(!gateway.call_ownership.contains_key("c1"));
+        assert!(!gateway.sessions[&sid].read().owns_call("c1"));
+        assert!(gateway.meta_store.get_sync("c1").is_none());
     }
 
     /// `send_to_owner` must enrich the event payload with `agent_id` /

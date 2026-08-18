@@ -975,6 +975,15 @@ impl RwiCommandProcessor {
             .map_err(CommandError::CommandFailed)?;
         let record_files = self.record_files.clone();
 
+        // RWI UAC sessions use the cleanup closure below for their CDR. Keep a
+        // guard in the originate task first, then move it into the CallRecord.
+        // Dropping either the task or the record releases ownership, including
+        // setup failures that abort before a CDR can be queued.
+        let rwi_call_record_guard = crate::rwi::RwiCallRecordGuard::new(
+            &self.gateway,
+            call_id.clone(),
+        );
+
         // CDR data for call completion reporting
         let cdr_sender = server.callrecord_sender.clone();
         let cdr_answered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -998,7 +1007,11 @@ impl RwiCommandProcessor {
             let cdr_answered = cdr_answered.clone();
             let cdr_answered_for_store = cdr_answered.clone();
             let cdr_record_files = record_files.clone();
-            let cleanup = move || {
+            let mut cdr_rwi_call_record_guard = Some(rwi_call_record_guard);
+            let mut cleanup = move || {
+                let Some(rwi_call_record_guard) = cdr_rwi_call_record_guard.take() else {
+                    return;
+                };
                 let recorder_file = cdr_record_files.remove(&cdr_call_id).map(|(_, path)| path);
                 if let Some(ref sender) = cdr_sender_owned.as_ref() {
                     use crate::callrecord::CallRecordHangupReason;
@@ -1021,7 +1034,7 @@ impl RwiCommandProcessor {
                         })
                         .into_iter()
                         .collect();
-                    let record = crate::callrecord::CallRecord {
+                    let mut record = crate::callrecord::CallRecord {
                         call_id: cdr_call_id.clone(),
                         caller: cdr_caller.clone(),
                         callee: cdr_callee.clone(),
@@ -1052,6 +1065,7 @@ impl RwiCommandProcessor {
                         },
                         extensions: http::Extensions::new(),
                     };
+                    record.extensions.insert(rwi_call_record_guard);
                     if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
                         sender.try_send(record)
                     {

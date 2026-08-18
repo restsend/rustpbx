@@ -7682,11 +7682,8 @@ impl SipSession {
             mb.close();
         }
 
-        // Notify RWI after every final call event has been emitted. The
-        // gateway removes CallMeta and both ownership indexes together.
-        if let Some(ref gw) = self.server.rwi_gateway {
-            gw.write().call_finished(&self.context.session_id);
-        }
+        // RWI ownership and CallMeta are released by the guard carried in the
+        // CallRecord, after every asynchronous completion hook has finished.
     }
 
     /// Enrich `meta.hangup_reason` with higher-level context before emitting
@@ -11119,10 +11116,8 @@ impl Drop for SipSession {
             }
         }
 
-        // Safety net for abnormal exits that bypassed cleanup().
-        if let Some(ref gw) = self.server.rwi_gateway {
-            gw.write().call_finished(&self.context.session_id);
-        }
+        // RWI cleanup is owned by the CallRecord guard created by the reporter
+        // above, or by the originate task for UAC sessions without a reporter.
     }
 }
 
