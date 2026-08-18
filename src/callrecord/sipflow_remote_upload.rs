@@ -45,10 +45,6 @@ impl SipFlowRemoteUploadHook {
 #[async_trait]
 impl CallRecordHook for SipFlowRemoteUploadHook {
     async fn on_record_completed(&self, record: &mut CallRecord) -> Result<()> {
-        if record.answer_time.is_none() {
-            return Ok(());
-        }
-
         let call_id = record.call_id.as_str();
         let start = Local.from_utc_datetime(&record.start_time.naive_utc());
         let end = Local.from_utc_datetime(&record.end_time.naive_utc());
@@ -145,5 +141,72 @@ impl CallRecordHook for SipFlowRemoteUploadHook {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Json, Router, routing::post};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[tokio::test]
+    async fn delegates_upload_for_unanswered_early_media_call() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let request_count = requests.clone();
+        let app = Router::new().route(
+            "/upload",
+            post(move |Json(_request): Json<SipFlowUploadRequest>| {
+                let request_count = request_count.clone();
+                async move {
+                    request_count.fetch_add(1, Ordering::Relaxed);
+                    Json(SipFlowUploadResponse {
+                        media_url: None,
+                        media_size: 0,
+                        signaling_uploaded: false,
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upload server");
+        let address = listener.local_addr().expect("upload server address");
+        crate::utils::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let hook = SipFlowRemoteUploadHook::new(
+            vec![SipFlowClusterNode {
+                udp: "127.0.0.1:0".to_string(),
+                http: format!("http://{address}"),
+            }],
+            SipFlowUploadConfig::Http {
+                url: "http://recording-upload.invalid".to_string(),
+                headers: None,
+                signaling: Some(true),
+                media: Some(true),
+                force_pcm: None,
+                pcm_sample_rate: None,
+            },
+            None,
+        )
+        .expect("remote upload hook");
+        let now = chrono::Utc::now();
+        let mut record = CallRecord {
+            call_id: "remote-early-media".to_string(),
+            start_time: now - chrono::Duration::seconds(5),
+            answer_time: None,
+            end_time: now,
+            ..Default::default()
+        };
+
+        hook.on_record_completed(&mut record)
+            .await
+            .expect("delegate early media upload");
+
+        assert_eq!(requests.load(Ordering::Relaxed), 1);
     }
 }

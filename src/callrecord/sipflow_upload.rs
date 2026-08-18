@@ -49,10 +49,6 @@ impl SipFlowUploadHook {
 #[async_trait]
 impl CallRecordHook for SipFlowUploadHook {
     async fn on_record_completed(&self, record: &mut CallRecord) -> anyhow::Result<()> {
-        if record.answer_time.is_none() {
-            return Ok(());
-        }
-
         let call_id = record.call_id.as_str();
         let start = Local.from_utc_datetime(&record.start_time.naive_utc());
         let end = Local.from_utc_datetime(&record.end_time.naive_utc());
@@ -555,6 +551,33 @@ mod tests {
         let mut record = make_record();
         hook.on_record_completed(&mut record).await.unwrap();
         assert!(record.details.recording_url.is_none());
+        assert_eq!(flush_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_hook_checks_backend_for_unanswered_early_media() {
+        let flush_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook = SipFlowUploadHook::new(
+            Arc::new(MockBackend {
+                media: vec![],
+                flush_count: flush_count.clone(),
+            }),
+            SipFlowUploadConfig::Http {
+                url: "http://localhost:9999/upload".to_string(),
+                headers: None,
+                signaling: Some(false),
+                media: Some(false),
+                force_pcm: None,
+                pcm_sample_rate: None,
+            },
+            None,
+        )
+        .unwrap();
+        let mut record = make_record();
+        record.answer_time = None;
+
+        hook.on_record_completed(&mut record).await.unwrap();
+
         assert_eq!(flush_count.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 

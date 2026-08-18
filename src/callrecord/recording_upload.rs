@@ -169,10 +169,8 @@ impl RecordingUploadHook {
 #[async_trait]
 impl CallRecordHook for RecordingUploadHook {
     async fn on_record_completed(&self, record: &mut CallRecord) -> anyhow::Result<()> {
-        if record.answer_time.is_none() {
-            return Ok(());
-        }
-
+        // File entries are finalized recording artifacts. Upload every one of
+        // them regardless of whether SIP ever reached a final 200 response.
         let mut first_uploaded_url = None;
         for index in 0..record.recorder.len() {
             let (track_id, path) = {
@@ -237,32 +235,28 @@ impl CallRecordHook for RecordingUploadHook {
             }
         }
 
-        // Determine the url/path for RecordEnd (upload URL or local file path).
-        // When sipflow captured media without upload, use the call_id as
-        // a sipflow reference so consumers can locate the recording via
-        // the sipflow backend.
+        // Determine the URL/path from concrete recording evidence only.
         let recording_url = first_uploaded_url
             .clone()
             .or_else(|| record.details.recording_url.clone())
-            .or_else(|| record.recorder.first().map(|m| m.path.clone()))
-            .or_else(|| {
-                if record.answer_time.is_some() {
-                    Some(format!("sipflow://{}", record.call_id))
-                } else {
-                    None
-                }
-            });
+            .or_else(|| record.recorder.first().map(|m| m.path.clone()));
+
+        // No file was recorded/uploaded and no SipFlow upload URL was supplied.
+        if recording_url.is_none() {
+            return Ok(());
+        }
 
         let emit_url = first_uploaded_url.as_deref().or_else(|| {
-            // Sipflow captured the media without upload — emit with sipflow reference.
-            (record.recorder.is_empty() && record.answer_time.is_some())
+            // A recorder entry denotes the file path handled above. With no
+            // file entry, require a URL supplied by a successful SipFlow upload.
+            (record.recorder.is_empty() && record.details.recording_url.is_some())
                 .then(|| recording_url.as_deref().unwrap_or(""))
         });
 
         if let Some(url) = emit_url {
+            let duration_secs = (record.end_time - record.start_time).num_seconds().max(0) as i32;
             record.details.recording_url = Some(url.to_string());
-            record.details.recording_duration_secs =
-                Some((record.end_time - record.start_time).num_seconds().max(0) as i32);
+            record.details.recording_duration_secs = Some(duration_secs);
 
             if let Some(ref gw) = self.rwi_gateway {
                 use crate::rwi::proto::RecordingMetadata;
@@ -342,4 +336,87 @@ fn recording_file_size(record: &CallRecord) -> u64 {
                 .map(|s| s.0)
         })
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::callrecord::{CallDetails, CallRecordMedia};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[tokio::test]
+    async fn uploads_file_recording_from_unanswered_early_media_call() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let request_count = requests.clone();
+        let app = axum::Router::new().route(
+            "/recording",
+            axum::routing::post(move |_request: axum::extract::Request| {
+                let request_count = request_count.clone();
+                async move {
+                    request_count.fetch_add(1, Ordering::Relaxed);
+                    "https://recordings.example/early-media.wav"
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upload server");
+        let address = listener.local_addr().expect("upload server address");
+        crate::utils::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("early-media.wav");
+        tokio::fs::write(&path, b"recorded early media")
+            .await
+            .expect("write recording");
+        let path = path.to_string_lossy().into_owned();
+        let policy = RecordingPolicy {
+            enabled: Some(true),
+            recording_type: Some(RecordingType::Http),
+            url: Some(format!("http://{address}/recording")),
+            ..Default::default()
+        };
+        let hook = RecordingUploadHook::new(policy).expect("recording hook");
+        let now = chrono::Utc::now();
+        let mut record = CallRecord {
+            call_id: "early-media-call".to_string(),
+            start_time: now - chrono::Duration::seconds(8),
+            answer_time: None,
+            end_time: now,
+            recorder: vec![CallRecordMedia {
+                track_id: "mixed".to_string(),
+                path: path.clone(),
+                size: 20,
+                extra: None,
+            }],
+            details: CallDetails {
+                status: "failed".to_string(),
+                recording_url: Some(path.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        hook.on_record_completed(&mut record)
+            .await
+            .expect("upload early media");
+
+        assert_eq!(requests.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            record.details.recording_url.as_deref(),
+            Some("https://recordings.example/early-media.wav")
+        );
+        assert_eq!(record.details.recording_duration_secs, Some(8));
+        assert_eq!(
+            record.recorder[0]
+                .extra
+                .as_ref()
+                .and_then(|extra| extra.get("uploadUrl"))
+                .and_then(|url| url.as_str()),
+            Some("https://recordings.example/early-media.wav")
+        );
+    }
 }

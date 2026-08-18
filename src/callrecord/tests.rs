@@ -983,14 +983,15 @@ async fn test_recording_upload_uses_sipflow_stashed_url() {
     let mut record = CallRecord {
         call_id: "test-call-123".to_string(),
         start_time: now - chrono::Duration::seconds(60),
-        answer_time: Some(now - chrono::Duration::seconds(45)),
+        // Early media can be uploaded even when the call never reaches 200.
+        answer_time: None,
         end_time: now,
         caller: "+1234567890".to_string(),
         callee: "+0987654321".to_string(),
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
         details: CallDetails {
             direction: "inbound".to_string(),
-            status: "completed".to_string(),
+            status: "failed".to_string(),
             from_number: Some("+1234567890".to_string()),
             to_number: Some("+0987654321".to_string()),
             caller_name: Some("Alice".to_string()),

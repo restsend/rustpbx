@@ -167,20 +167,20 @@ impl CallReporter {
             });
         let outbound_sip_trunk_id = outbound_trunk_context.as_ref().and_then(|ctx| ctx.id);
 
+        // The session flushes the file recorder before reporting. Collect the
+        // resulting artifact regardless of whether SIP reached a final 200.
         let mut recorder = Vec::new();
-
-        if call_was_accepted
-            && self.context.dialplan.recording.enabled
-            && let Some(recorder_config) = self.context.dialplan.recording.option.as_ref()
-            && !recorder_config.recorder_file.is_empty()
+        if self.context.dialplan.recording.enabled
+            && let Some(option) = self.context.dialplan.recording.option.as_ref()
+            && !option.recorder_file.trim().is_empty()
+            && let Ok(metadata) = fs::metadata(&option.recorder_file)
+            && metadata.is_file()
+            && metadata.len() > 0
         {
-            let size = fs::metadata(&recorder_config.recorder_file)
-                .map(|meta| meta.len())
-                .unwrap_or(0);
             recorder.push(CallRecordMedia {
                 track_id: "mixed".to_string(),
-                path: recorder_config.recorder_file.clone(),
-                size,
+                path: option.recorder_file.clone(),
+                size: metadata.len(),
                 extra: None,
             });
         }
