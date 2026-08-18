@@ -93,6 +93,11 @@ impl LegConfig {
 pub struct LegInner {
     id: LegId,
     pc: PeerConnection,
+    /// Persistent primary relay source used by the transport rewrite fast
+    /// path. WebRTC advertises this SSRC as the one audio source in SDP. Local
+    /// playback/DTMF keeps the sender SSRC as a secondary source and carries
+    /// SDES-MID so it does not share the relay timeline.
+    relay_audio_ssrc: u32,
     tap: Arc<IngressTap>,
     /// Egress pipeline — always alive; the source is switched via the command
     /// channel. For [`EgressSource::RewriteRelay`] the pacing loop parks.
@@ -277,6 +282,8 @@ impl LegInner {
             let _ = pc.add_track(video_track, video_params);
         }
 
+        let relay_audio_ssrc = distinct_relay_audio_ssrc(&pc);
+
         // Plaintext bidirectional observer (stats / DTMF / recording).
         // 8 DTMF-event slots is plenty: digits are rare and lagged receivers
         // are dropped, never blocking the hot path.
@@ -335,6 +342,7 @@ impl LegInner {
         Ok(Arc::new(LegInner {
             id: LegId::from(label),
             pc,
+            relay_audio_ssrc,
             tap,
             egress,
             was_relay: AtomicBool::new(false),
@@ -451,7 +459,8 @@ impl LegInner {
         // RTP mode returns instantly; WebRTC/SRTP need the wait.
         let _ = self.pc.create_offer().await?;
         self.pc.wait_for_gathering_complete().await;
-        let offer = self.pc.create_offer().await?;
+        let mut offer = self.pc.create_offer().await?;
+        self.advertise_relay_audio_ssrc(&mut offer);
         let sdp = set_local(&self.pc, offer)?;
         debug!(
             leg = %self.id,
@@ -490,6 +499,7 @@ impl LegInner {
             self.pc.wait_for_gathering_complete().await;
             let mut answer = self.pc.create_answer().await?;
             answer.sdp_type = SdpType::Answer;
+            self.advertise_relay_audio_ssrc(&mut answer);
             set_local(&self.pc, answer)?
         } else {
             // Applying a remote answer (UAC): no local SDP to emit.
@@ -591,6 +601,46 @@ impl LegInner {
     pub async fn apply_profile_from_sdp(&self, sdp: &str) -> Result<()> {
         let profile = negotiate::MediaNegotiator::extract_leg_profile(sdp);
         self.sync_negotiated_profile(&profile).await
+    }
+
+    /// Stable, call-lifetime SSRC used by fast-path audio toward this leg.
+    pub fn relay_audio_ssrc(&self) -> u32 {
+        self.relay_audio_ssrc
+    }
+
+    /// rustrtc's paced sender owns the playback SSRC, so its generated SDP
+    /// initially advertises that source. Fast-path audio deliberately uses a
+    /// separate timeline and SSRC. For WebRTC, make that relay SSRC the sole
+    /// signaled audio source by replacing (not adding) the generated SSRC in
+    /// the local description. Adding both as ordinary sources for one m-line
+    /// makes browsers interpret them as two tracks and reject the SDP.
+    fn advertise_relay_audio_ssrc(&self, desc: &mut SessionDescription) {
+        if self.pc.config().transport_mode != TransportMode::WebRtc {
+            return;
+        }
+
+        for section in &mut desc.media_sections {
+            if section.kind != rustrtc::sdp::MediaKind::Audio {
+                continue;
+            }
+            for attribute in &mut section.attributes {
+                if attribute.key != "ssrc" {
+                    continue;
+                }
+                let Some(value) = attribute.value.as_deref() else {
+                    continue;
+                };
+                let suffix = value
+                    .split_once(' ')
+                    .map(|(_, suffix)| suffix)
+                    .unwrap_or_default();
+                attribute.value = Some(if suffix.is_empty() {
+                    self.relay_audio_ssrc.to_string()
+                } else {
+                    format!("{} {}", self.relay_audio_ssrc, suffix)
+                });
+            }
+        }
     }
 
     // ── Egress control ───────────────────────────────────────────────────
@@ -965,6 +1015,21 @@ pub fn sender_ssrc_for_kind(pc: &PeerConnection, kind: rustrtc::MediaKind) -> u3
         .unwrap_or(0)
 }
 
+fn distinct_relay_audio_ssrc(pc: &PeerConnection) -> u32 {
+    let sender_ssrcs: Vec<u32> = pc
+        .get_transceivers()
+        .into_iter()
+        .filter_map(|transceiver| transceiver.sender())
+        .map(|sender| sender.ssrc())
+        .collect();
+    loop {
+        let ssrc = rand::random::<u32>();
+        if ssrc != 0 && !sender_ssrcs.contains(&ssrc) {
+            return ssrc;
+        }
+    }
+}
+
 /// The audio sender SSRC of a PC.
 fn sender_ssrc(pc: &PeerConnection) -> u32 {
     sender_ssrc_for_kind(pc, rustrtc::MediaKind::Audio)
@@ -973,6 +1038,22 @@ fn sender_ssrc(pc: &PeerConnection) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn audio_ssrc_suffixes(sdp: &str, ssrc: u32) -> Vec<String> {
+        let desc = SessionDescription::parse(SdpType::Offer, sdp).expect("parse local SDP");
+        let prefix = format!("{} ", ssrc);
+        desc.media_sections
+            .iter()
+            .find(|section| section.kind == rustrtc::sdp::MediaKind::Audio)
+            .expect("audio m-line")
+            .attributes
+            .iter()
+            .filter(|attribute| attribute.key == "ssrc")
+            .filter_map(|attribute| attribute.value.as_deref())
+            .filter_map(|value| value.strip_prefix(&prefix))
+            .map(str::to_string)
+            .collect()
+    }
 
     #[tokio::test]
     async fn leg_config_network_settings_reach_rtc_configuration() {
@@ -1129,7 +1210,36 @@ mod tests {
             "offer lacks opus rtpmap:\n{}",
             offer
         );
+
+        let playback_ssrc = sender_ssrc_for_kind(a.pc(), rustrtc::MediaKind::Audio);
+        let relay_ssrc = a.relay_audio_ssrc();
+        assert_ne!(relay_ssrc, playback_ssrc);
+        let playback_attributes = audio_ssrc_suffixes(&offer, playback_ssrc);
+        let relay_attributes = audio_ssrc_suffixes(&offer, relay_ssrc);
+        assert!(
+            playback_attributes.is_empty(),
+            "playback SSRC must not be WebRTC's primary advertised source"
+        );
+        assert_eq!(
+            relay_attributes.len(),
+            2,
+            "relay SSRC must be the single WebRTC source with cname + msid"
+        );
         a.stop();
+    }
+
+    #[tokio::test]
+    async fn rtp_leg_does_not_advertise_secondary_audio_ssrc() {
+        let leg = LegInner::new("rtp-relay-ssrc", &LegConfig::rtp_pcmu(), None).expect("leg");
+        let offer = leg.create_offer().await.expect("create offer");
+        let playback_ssrc = sender_ssrc_for_kind(leg.pc(), rustrtc::MediaKind::Audio);
+
+        assert_eq!(audio_ssrc_suffixes(&offer, playback_ssrc).len(), 1);
+        assert!(
+            audio_ssrc_suffixes(&offer, leg.relay_audio_ssrc()).is_empty(),
+            "plain RTP SDP should not signal the relay SSRC"
+        );
+        leg.stop();
     }
 
     #[tokio::test]
@@ -1259,6 +1369,18 @@ mod tests {
             answer.contains("a=ssrc:"),
             "answer lacks any a=ssrc (video demux delay):\n{}",
             answer
+        );
+        let playback_ssrc = sender_ssrc_for_kind(leg.pc(), rustrtc::MediaKind::Audio);
+        let playback_attributes = audio_ssrc_suffixes(&answer, playback_ssrc);
+        let relay_attributes = audio_ssrc_suffixes(&answer, leg.relay_audio_ssrc());
+        assert!(
+            playback_attributes.is_empty(),
+            "playback SSRC must not be WebRTC's primary advertised source"
+        );
+        assert_eq!(
+            relay_attributes.len(),
+            2,
+            "relay SSRC must be the single WebRTC source with cname + msid"
         );
         leg.stop();
     }

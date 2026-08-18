@@ -175,8 +175,8 @@ impl TestPeer {
 /// assert RFC 2833 telephone-event packets arrive from a leg's `send_dtmf`.
 #[derive(Default)]
 struct DtmfCapture {
-    /// (payload_type, digit_code, end_flag) of each inbound telephone-event.
-    events: std::sync::Mutex<Vec<(u8, u8, bool)>>,
+    /// (payload_type, digit_code, end_flag, ssrc) of each telephone-event.
+    events: std::sync::Mutex<Vec<(u8, u8, bool, u32)>>,
 }
 
 impl RtpObserver for DtmfCapture {
@@ -187,7 +187,7 @@ impl RtpObserver for DtmfCapture {
             self.events
                 .lock()
                 .unwrap()
-                .push((packet.header.payload_type, payload[0], end));
+                .push((packet.header.payload_type, payload[0], end, packet.header.ssrc));
         }
     }
 
@@ -198,7 +198,7 @@ impl RtpObserver for DtmfCapture {
             self.events
                 .lock()
                 .unwrap()
-                .push((packet.header.payload_type, payload[0], end));
+                .push((packet.header.payload_type, payload[0], end, packet.header.ssrc));
         }
     }
 }
@@ -663,6 +663,9 @@ async fn local_playback_to_webrtc_carries_mid() {
     )
     .await;
     h.bridge_and_accept().await;
+    let playback_ssrc = playback_ssrc(&h, LegSide::A);
+    let relay_ssrc = relay_ssrc(&h, LegSide::A);
+    assert_ne!(playback_ssrc, relay_ssrc);
 
     h.mb.leg(LegSide::A)
         .unwrap()
@@ -686,6 +689,11 @@ async fn local_playback_to_webrtc_carries_mid() {
         panic!("expected audio");
     };
     let raw = frame.raw_packet.as_ref().expect("raw packet");
+    assert_eq!(
+        raw.header.ssrc, playback_ssrc,
+        "local playback must stay on the sender SSRC"
+    );
+    assert_ne!(raw.header.ssrc, relay_ssrc);
     assert!(
         raw.header.extension.is_some(),
         "local playback to WebRTC must carry the MID header extension for browser attribution"
@@ -1201,8 +1209,7 @@ async fn fast_path_rtp_pcmu_uses_separate_relay_ssrc() {
 //
 // Each test verifies audio flow in BOTH directions (caller→agent and
 // agent→caller) and asserts the SSRC attribution rule:
-//   - relay to a WebRTC destination must use the leg's sender (playback) SSRC
-//     because that is the SSRC advertised to the browser in the leg's SDP.
+//   - relay to a WebRTC destination uses the leg's separate relay SSRC and MID.
 //   - relay to a plain RTP destination uses a distinct random relay SSRC
 //     (RTP peers are SSRC-tolerant and don't need MID attribution).
 
@@ -1254,8 +1261,8 @@ async fn relay_full_duplex_rtp_rtp() {
     tokio::time::sleep(Duration::from_millis(80)).await;
 }
 
-/// WebRTC ↔ WebRTC: both legs use DTLS-SRTP. Relayed packets use each
-/// destination leg's SDP-advertised sender SSRC and carry its SDES-MID.
+/// WebRTC ↔ WebRTC: relayed packets use each destination leg's separate audio
+/// SSRC and carry its SDES-MID.
 #[tokio::test]
 async fn relay_full_duplex_webrtc_webrtc() {
     let mut h = TestMediaHarness::create(
@@ -1267,6 +1274,8 @@ async fn relay_full_duplex_webrtc_webrtc() {
     .await;
     let a_playback = playback_ssrc(&h, LegSide::A);
     let b_playback = playback_ssrc(&h, LegSide::B);
+    let a_relay = relay_ssrc(&h, LegSide::A);
+    let b_relay = relay_ssrc(&h, LegSide::B);
     h.bridge_and_accept().await;
     h.assert_relay(true);
 
@@ -1276,10 +1285,8 @@ async fn relay_full_duplex_webrtc_webrtc() {
         .expect("A→B");
     assert!(!a_to_b.data.is_empty());
     let raw = a_to_b.raw_packet.as_ref().expect("raw packet");
-    assert_eq!(
-        raw.header.ssrc, b_playback,
-        "WebRTC destination must receive its SDP-advertised sender SSRC"
-    );
+    assert_ne!(raw.header.ssrc, b_playback);
+    assert_eq!(raw.header.ssrc, b_relay);
     assert_has_mid(
         raw,
         "WebRTC destination: relay must stamp MID for browser attribution",
@@ -1291,10 +1298,8 @@ async fn relay_full_duplex_webrtc_webrtc() {
         .expect("B→A");
     assert!(!b_to_a.data.is_empty());
     let raw = b_to_a.raw_packet.as_ref().expect("raw packet");
-    assert_eq!(
-        raw.header.ssrc, a_playback,
-        "WebRTC destination must receive its SDP-advertised sender SSRC"
-    );
+    assert_ne!(raw.header.ssrc, a_playback);
+    assert_eq!(raw.header.ssrc, a_relay);
     assert_has_mid(
         raw,
         "WebRTC destination: relay must stamp MID for browser attribution",
@@ -1306,7 +1311,7 @@ async fn relay_full_duplex_webrtc_webrtc() {
 
 /// WebRTC(A) ↔ RTP(B): caller uses WebRTC, agent is plain RTP.
 /// A→B: RTP destination → distinct SSRC, no MID.
-/// B→A: WebRTC destination → advertised sender SSRC and MID present.
+/// B→A: WebRTC destination → separate relay SSRC and MID present.
 #[tokio::test]
 async fn relay_full_duplex_webrtc_rtp() {
     let mut h = TestMediaHarness::create(
@@ -1318,6 +1323,7 @@ async fn relay_full_duplex_webrtc_rtp() {
     .await;
     let a_playback = playback_ssrc(&h, LegSide::A);
     let b_playback = playback_ssrc(&h, LegSide::B);
+    let a_relay = relay_ssrc(&h, LegSide::A);
     h.bridge_and_accept().await;
     h.assert_relay(true);
 
@@ -1341,10 +1347,8 @@ async fn relay_full_duplex_webrtc_rtp() {
         .expect("B→A");
     assert!(!b_to_a.data.is_empty());
     let raw = b_to_a.raw_packet.as_ref().expect("raw packet");
-    assert_eq!(
-        raw.header.ssrc, a_playback,
-        "WebRTC destination must receive the sender SSRC advertised in SDP"
-    );
+    assert_ne!(raw.header.ssrc, a_playback);
+    assert_eq!(raw.header.ssrc, a_relay);
     assert_has_mid(
         raw,
         "WebRTC destination: relay must stamp MID (the original 'bitrate but no audio' bug)",
@@ -1355,7 +1359,7 @@ async fn relay_full_duplex_webrtc_rtp() {
 }
 
 /// RTP(A) ↔ WebRTC(B): caller is plain RTP, agent is WebRTC.
-/// A→B: WebRTC destination → advertised sender SSRC and MID present.
+/// A→B: WebRTC destination → separate relay SSRC and MID present.
 /// B→A: RTP destination → distinct SSRC, no MID.
 #[tokio::test]
 async fn relay_full_duplex_rtp_webrtc() {
@@ -1368,6 +1372,7 @@ async fn relay_full_duplex_rtp_webrtc() {
     .await;
     let a_playback = playback_ssrc(&h, LegSide::A);
     let b_playback = playback_ssrc(&h, LegSide::B);
+    let b_relay = relay_ssrc(&h, LegSide::B);
     h.bridge_and_accept().await;
     h.assert_relay(true);
 
@@ -1378,10 +1383,8 @@ async fn relay_full_duplex_rtp_webrtc() {
         .expect("A→B");
     assert!(!a_to_b.data.is_empty());
     let raw = a_to_b.raw_packet.as_ref().expect("raw packet");
-    assert_eq!(
-        raw.header.ssrc, b_playback,
-        "WebRTC destination must receive its SDP-advertised sender SSRC"
-    );
+    assert_ne!(raw.header.ssrc, b_playback);
+    assert_eq!(raw.header.ssrc, b_relay);
     assert_has_mid(raw, "WebRTC destination: relay must stamp MID");
 
     // B→A: WebRTC agent → plain RTP caller
@@ -1424,6 +1427,10 @@ fn playback_ssrc(h: &TestMediaHarness, side: LegSide) -> u32 {
         h.mb.leg(side).unwrap().pc(),
         rustrtc::MediaKind::Audio,
     )
+}
+
+fn relay_ssrc(h: &TestMediaHarness, side: LegSide) -> u32 {
+    h.mb.leg(side).unwrap().relay_audio_ssrc()
 }
 
 /// Outbound RFC 2833 telephone-event (DTMF) from a leg must reach the facing
@@ -1531,12 +1538,18 @@ async fn leg_send_dtmf_emits_telephone_events_to_peer() {
         "expected >=4 DTMF packets, got {:?}",
         *events
     );
-    for &(pt, code, _end) in events.iter() {
+    let playback_ssrc = rustpbx_media::leg::sender_ssrc_for_kind(
+        leg.pc(),
+        rustrtc::MediaKind::Audio,
+    );
+    for &(pt, code, _end, ssrc) in events.iter() {
         assert_eq!(pt, 101, "telephone-event must use negotiated PT 101");
         assert!(code == 1 || code == 2, "digit code must be 1 or 2");
+        assert_eq!(ssrc, playback_ssrc, "local DTMF follows playback SSRC");
+        assert_ne!(ssrc, leg.relay_audio_ssrc());
     }
-    let starts: Vec<_> = events.iter().filter(|(_, _, e)| !e).collect();
-    let ends: Vec<_> = events.iter().filter(|(_, _, e)| *e).collect();
+    let starts: Vec<_> = events.iter().filter(|(_, _, e, _)| !e).collect();
+    let ends: Vec<_> = events.iter().filter(|(_, _, e, _)| *e).collect();
     assert_eq!(starts.len(), 2, "2 start packets expected");
     assert_eq!(ends.len(), 2, "2 end packets expected");
 

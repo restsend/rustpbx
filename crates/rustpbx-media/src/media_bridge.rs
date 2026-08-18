@@ -531,14 +531,16 @@ impl MediaBridge {
             // negotiated SSRC / PT, and strip WebRTC extension headers when the
             // destination is plain RTP.
             //
-            // SSRC selection for relayed audio:
-            // A WebRTC destination must receive the sender SSRC advertised in
-            // its SDP. A plain RTP destination can keep the separate relay
-            // SSRC used to isolate later local playback from relayed media.
+            // SSRC selection for relayed audio: WebRTC uses the persistent
+            // relay SSRC advertised as the m-line's sole primary source. Local
+            // playback/DTMF remains on the sender SSRC as a secondary source.
+            // Plain RTP needs no source signaling.
             let a_playback_ssrc = crate::leg::sender_ssrc_for_kind(la.pc(), MediaKind::Audio);
             let b_playback_ssrc = crate::leg::sender_ssrc_for_kind(lb.pc(), MediaKind::Audio);
-            let a_relay_ssrc = relay_audio_ssrc(&a_transport, a_playback_ssrc);
-            let b_relay_ssrc = relay_audio_ssrc(&b_transport, b_playback_ssrc);
+            let a_relay_ssrc =
+                relay_audio_ssrc(&a_transport, a_playback_ssrc, la.relay_audio_ssrc());
+            let b_relay_ssrc =
+                relay_audio_ssrc(&b_transport, b_playback_ssrc, lb.relay_audio_ssrc());
             let a_video_ssrc = crate::leg::sender_ssrc_for_kind(la.pc(), rustrtc::MediaKind::Video);
             let b_video_ssrc = crate::leg::sender_ssrc_for_kind(lb.pc(), rustrtc::MediaKind::Video);
             // SDES-MID (ext id, value) per destination m-line: audio rules stamp
@@ -1359,9 +1361,13 @@ fn get_audio_recv_track(pc: &rustrtc::PeerConnection) -> Option<Arc<dyn MediaStr
         .map(|r| -> Arc<dyn MediaStreamTrack> { r.track() })
 }
 
-fn relay_audio_ssrc(transport: &rustrtc::TransportMode, playback_ssrc: u32) -> u32 {
+fn relay_audio_ssrc(
+    transport: &rustrtc::TransportMode,
+    playback_ssrc: u32,
+    relay_ssrc: u32,
+) -> u32 {
     if *transport == rustrtc::TransportMode::WebRtc {
-        return playback_ssrc;
+        return relay_ssrc;
     }
     loop {
         let ssrc = rand::random::<u32>();
