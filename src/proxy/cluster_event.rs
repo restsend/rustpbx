@@ -7,11 +7,13 @@ use crate::proxy::locator::LocatorEvent;
 use crate::proxy::presence::{PresenceManager, PresenceState, PresenceStatus};
 use async_trait::async_trait;
 use parking_lot::{Mutex, RwLock};
+use rsipstack::dialog::DialogId;
+use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::sip::Uri;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::warn;
+use tracing::{debug, warn};
 
 // ── Event source ────────────────────────────────────────────────────────────
 
@@ -218,6 +220,9 @@ pub struct ClusterEventHub {
     handlers: RwLock<Vec<Arc<dyn ClusterEventHandler>>>,
     /// Cluster AMI sync for non-presence events (locator, agent_status, queue).
     cluster_sync: parking_lot::RwLock<Option<crate::proxy::cluster_sync::ClusterSync>>,
+    /// Optional dialog layer used to free subscription dialogs when a remote
+    /// Offline/Unregistered event prunes presence/MWI watchers on this node.
+    dialog_layer: parking_lot::RwLock<Option<Arc<DialogLayer>>>,
     /// Child of the SIP server's cancel token; used to stop the dispatcher.
     cancel: tokio_util::sync::CancellationToken,
     /// Handle to the background dispatcher task (aborted on drop).
@@ -235,6 +240,7 @@ impl ClusterEventHub {
             presence_manager,
             handlers: RwLock::new(Vec::new()),
             cluster_sync: parking_lot::RwLock::new(None),
+            dialog_layer: parking_lot::RwLock::new(None),
             cancel,
             task_handle: Mutex::new(None),
         }
@@ -242,6 +248,28 @@ impl ClusterEventHub {
 
     pub fn set_cluster_sync(&self, sync: crate::proxy::cluster_sync::ClusterSync) {
         *self.cluster_sync.write() = Some(sync);
+    }
+
+    /// Attach the SIP dialog layer so remote unregister/offline can free
+    /// subscription dialogs that were pruned from PresenceManager.
+    pub fn set_dialog_layer(&self, dialog_layer: Arc<DialogLayer>) {
+        *self.dialog_layer.write() = Some(dialog_layer);
+    }
+
+    fn remove_subscription_dialogs(&self, dialog_ids: Vec<DialogId>) {
+        if dialog_ids.is_empty() {
+            return;
+        }
+        let Some(layer) = self.dialog_layer.read().clone() else {
+            debug!(
+                count = dialog_ids.len(),
+                "Pruned presence subscriptions without dialog_layer; dialogs may linger until expiry"
+            );
+            return;
+        };
+        for id in dialog_ids {
+            layer.remove_dialog(&id);
+        }
     }
 
     pub fn register_handler(&self, handler: Arc<dyn ClusterEventHandler>) {
@@ -308,9 +336,11 @@ impl ClusterEventHub {
 
     /// Remote locator event (from peer MESSAGE).
     pub async fn on_remote_locator_event(&self, event: LocatorEvent, source: EventSource) {
-        self.presence_manager
+        let pruned = self
+            .presence_manager
             .handle_locator_event(event.clone(), &source)
             .await;
+        self.remove_subscription_dialogs(pruned);
         self.notify_locator_handlers(&event, &source).await;
     }
 
@@ -1023,6 +1053,43 @@ mod tests {
         // After receipt, presence should be Idle (Registered from peer)
         let stored = hub.presence_manager.get_state("3001");
         assert_eq!(stored.status, PresenceStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn test_hub_remote_offline_prunes_watcher_subscriptions() {
+        let hub = make_test_hub();
+        let watcher: Uri = "sip:4001@pbx.local".parse().unwrap();
+        hub.presence_manager.add_subscriber(
+            "4001",
+            crate::proxy::presence::Subscriber {
+                aor: watcher.clone(),
+                dialog_id: rsipstack::dialog::DialogId {
+                    call_id: "remote-sub".into(),
+                    local_tag: "l".into(),
+                    remote_tag: "r".into(),
+                },
+                expires: std::time::Instant::now() + std::time::Duration::from_secs(3600),
+            },
+        );
+        assert_eq!(hub.presence_manager.subscriber_bindings_len(), 1);
+
+        let loc = Location {
+            aor: watcher.clone(),
+            registered_aor: Some(watcher),
+            ..Default::default()
+        };
+        let remote_source = EventSource::Remote(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)),
+            5060,
+        ));
+        hub.on_remote_locator_event(LocatorEvent::Unregistered(loc), remote_source)
+            .await;
+
+        assert_eq!(hub.presence_manager.subscriber_bindings_len(), 0);
+        assert_eq!(
+            hub.presence_manager.get_state("4001").status,
+            PresenceStatus::Offline
+        );
     }
 
     #[tokio::test]

@@ -4,6 +4,7 @@ mod test_acl;
 mod test_auth;
 mod test_presence;
 mod test_presence_e2e;
+mod test_presence_subscription_leak;
 mod test_proxy;
 mod test_registrar;
 pub mod test_ua;

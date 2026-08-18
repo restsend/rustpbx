@@ -9,13 +9,14 @@ use crate::proxy::locator::LocatorEvent;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use rsipstack::dialog::DialogId;
+use rsipstack::dialog::dialog::DialogState;
 use rsipstack::sip::prelude::{HeadersExt, ToTypedHeader};
 use rsipstack::transaction::transaction::Transaction;
 use sea_orm::{DatabaseConnection, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 // ── PIDF-XML (RFC 3863) and RPID (RFC 4480) support ─────────────────────
 //
@@ -302,8 +303,28 @@ impl PresenceManager {
         self.subscribers.read().unwrap().len()
     }
 
+    /// Total presence subscription bindings (sum of all identity buckets).
+    pub fn subscriber_bindings_len(&self) -> usize {
+        self.subscribers
+            .read()
+            .unwrap()
+            .values()
+            .map(|v| v.len())
+            .sum()
+    }
+
     pub fn mwi_subscribers_len(&self) -> usize {
         self.mwi_subscribers.read().unwrap().len()
+    }
+
+    /// Total MWI subscription bindings (sum of all extension buckets).
+    pub fn mwi_subscriber_bindings_len(&self) -> usize {
+        self.mwi_subscribers
+            .read()
+            .unwrap()
+            .values()
+            .map(|v| v.len())
+            .sum()
     }
 
     pub fn get_state(&self, identity: &str) -> PresenceState {
@@ -374,12 +395,25 @@ impl PresenceManager {
         old_state
     }
 
-    pub fn add_subscriber(&self, identity: &str, sub: Subscriber) {
+    pub fn add_subscriber(&self, identity: &str, sub: Subscriber) -> Vec<DialogId> {
         let mut map = self.subscribers.write().unwrap();
         let subs = map.entry(identity.to_string()).or_default();
-        // Remove old sub with same dialog_id or similar if needed
-        subs.retain(|s| s.dialog_id != sub.dialog_id);
+        let mut replaced = Vec::new();
+        let sub_key = Self::watcher_key(&sub.aor);
+        subs.retain(|s| {
+            let same_dialog = s.dialog_id == sub.dialog_id;
+            let same_watcher = Self::watcher_key(&s.aor) == sub_key;
+            if same_dialog || same_watcher {
+                if s.dialog_id != sub.dialog_id {
+                    replaced.push(s.dialog_id.clone());
+                }
+                false
+            } else {
+                true
+            }
+        });
         subs.push(sub);
+        replaced
     }
 
     pub fn get_subscribers(&self, identity: &str) -> Vec<Subscriber> {
@@ -387,12 +421,64 @@ impl PresenceManager {
         map.get(identity).cloned().unwrap_or_default()
     }
 
+    /// Remove a presence subscription by dialog id. Returns true if removed.
+    pub fn remove_subscriber_by_dialog(&self, dialog_id: &DialogId) -> bool {
+        let mut map = self.subscribers.write().unwrap();
+        let mut removed = false;
+        map.retain(|_, subs| {
+            let before = subs.len();
+            subs.retain(|s| &s.dialog_id != dialog_id);
+            if subs.len() != before {
+                removed = true;
+            }
+            !subs.is_empty()
+        });
+        removed
+    }
+
+    /// Remove all presence subscriptions whose watcher (From) matches `user`.
+    /// Returns dialog ids that were dropped so callers can free dialog_layer entries.
+    pub fn remove_subscribers_for_watcher(&self, user: &str) -> Vec<DialogId> {
+        let user = user.trim().to_ascii_lowercase();
+        if user.is_empty() {
+            return Vec::new();
+        }
+        let mut map = self.subscribers.write().unwrap();
+        let mut removed = Vec::new();
+        map.retain(|_, subs| {
+            subs.retain(|s| {
+                let watcher = s
+                    .aor
+                    .user()
+                    .map(|u| u.to_ascii_lowercase())
+                    .unwrap_or_default();
+                if watcher == user {
+                    removed.push(s.dialog_id.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            !subs.is_empty()
+        });
+        removed
+    }
+
     pub fn cleanup_expired(&self) {
         let mut subscribers = self.subscribers.write().unwrap();
         let now = std::time::Instant::now();
-        for subs in subscribers.values_mut() {
+        subscribers.retain(|_, subs| {
             subs.retain(|s| s.expires > now);
-        }
+            !subs.is_empty()
+        });
+    }
+
+    fn watcher_key(uri: &rsipstack::sip::Uri) -> String {
+        format!(
+            "{}@{}",
+            uri.user().unwrap_or_default().to_ascii_lowercase(),
+            uri.host().to_string().to_ascii_lowercase()
+        )
     }
 
     // ── MWI (RFC 3842 message-summary) ────────────────────────────────────────
@@ -411,11 +497,26 @@ impl PresenceManager {
     }
 
     /// Add (or refresh) an MWI subscription for `extension`.
-    pub fn add_mwi_subscriber(&self, extension: &str, sub: MwiSubscriber) {
+    /// Returns dialog ids replaced by the same watcher AOR.
+    pub fn add_mwi_subscriber(&self, extension: &str, sub: MwiSubscriber) -> Vec<DialogId> {
         let mut map = self.mwi_subscribers.write().unwrap();
         let subs = map.entry(extension.to_string()).or_default();
-        subs.retain(|s| s.dialog_id != sub.dialog_id);
+        let mut replaced = Vec::new();
+        let sub_key = Self::watcher_key(&sub.aor);
+        subs.retain(|s| {
+            let same_dialog = s.dialog_id == sub.dialog_id;
+            let same_watcher = Self::watcher_key(&s.aor) == sub_key;
+            if same_dialog || same_watcher {
+                if s.dialog_id != sub.dialog_id {
+                    replaced.push(s.dialog_id.clone());
+                }
+                false
+            } else {
+                true
+            }
+        });
         subs.push(sub);
+        replaced
     }
 
     /// Return all live MWI subscribers for `extension`.
@@ -424,13 +525,56 @@ impl PresenceManager {
         map.get(extension).cloned().unwrap_or_default()
     }
 
+    /// Remove an MWI subscription by dialog id. Returns true if removed.
+    pub fn remove_mwi_subscriber_by_dialog(&self, dialog_id: &DialogId) -> bool {
+        let mut map = self.mwi_subscribers.write().unwrap();
+        let mut removed = false;
+        map.retain(|_, subs| {
+            let before = subs.len();
+            subs.retain(|s| &s.dialog_id != dialog_id);
+            if subs.len() != before {
+                removed = true;
+            }
+            !subs.is_empty()
+        });
+        removed
+    }
+
+    /// Remove all MWI subscriptions whose watcher matches `user`.
+    pub fn remove_mwi_subscribers_for_watcher(&self, user: &str) -> Vec<DialogId> {
+        let user = user.trim().to_ascii_lowercase();
+        if user.is_empty() {
+            return Vec::new();
+        }
+        let mut map = self.mwi_subscribers.write().unwrap();
+        let mut removed = Vec::new();
+        map.retain(|_, subs| {
+            subs.retain(|s| {
+                let watcher = s
+                    .aor
+                    .user()
+                    .map(|u| u.to_ascii_lowercase())
+                    .unwrap_or_default();
+                if watcher == user {
+                    removed.push(s.dialog_id.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            !subs.is_empty()
+        });
+        removed
+    }
+
     /// Remove expired MWI subscriptions.
     pub fn cleanup_expired_mwi(&self) {
         let mut map = self.mwi_subscribers.write().unwrap();
         let now = std::time::Instant::now();
-        for subs in map.values_mut() {
+        map.retain(|_, subs| {
             subs.retain(|s| s.expires > now);
-        }
+            !subs.is_empty()
+        });
     }
 
     /// Enqueue an MWI trigger so the SIP layer sends NOTIFY to all subscribers
@@ -457,11 +601,42 @@ impl PresenceManager {
     }
 
     fn get_user(loc: &Location) -> Option<String> {
-        loc.aor.user().map(|u| u.to_string())
+        // Prefer canonical registered AoR (sip:1001@realm). WebRTC/WS contacts
+        // often use ephemeral Contact users (e.g. sip:vsfbt0co@.invalid).
+        if let Some(registered) = &loc.registered_aor
+            && let Some(user) = registered.user()
+        {
+            let user = user.trim();
+            if !user.is_empty() {
+                return Some(user.to_string());
+            }
+        }
+        loc.aor.user().map(|u| u.to_string()).filter(|u| !u.is_empty())
     }
 
-    // Process locator events
-    pub async fn handle_locator_event(&self, event: LocatorEvent, source: &EventSource) {
+    /// Drop subscription dialogs owned by a watcher that just went offline.
+    fn prune_watcher_subscriptions(&self, user: &str) -> Vec<DialogId> {
+        let mut removed = self.remove_subscribers_for_watcher(user);
+        removed.extend(self.remove_mwi_subscribers_for_watcher(user));
+        if !removed.is_empty() {
+            debug!(
+                watcher = %user,
+                count = removed.len(),
+                "Pruned presence/MWI subscriptions for offline watcher"
+            );
+        }
+        removed
+    }
+
+    // Process locator events.
+    // Returns dialog ids whose subscriptions were dropped (caller should
+    // `dialog_layer.remove_dialog`).
+    pub async fn handle_locator_event(
+        &self,
+        event: LocatorEvent,
+        source: &EventSource,
+    ) -> Vec<DialogId> {
+        let mut pruned = Vec::new();
         match event {
             LocatorEvent::Registered(loc) => {
                 if let Some(user) = Self::get_user(&loc) {
@@ -490,7 +665,7 @@ impl PresenceManager {
                     let new_status = match header_status {
                         Some(s) => PresenceStatus::normalize(s),
                         None if current.status == PresenceStatus::Offline => PresenceStatus::Idle,
-                        None => return,
+                        None => return pruned,
                     };
 
                     self.update_state(
@@ -507,6 +682,9 @@ impl PresenceManager {
             }
             LocatorEvent::Unregistered(loc) => {
                 if let Some(user) = Self::get_user(&loc) {
+                    // Drop this watcher's subscriptions before broadcasting Offline
+                    // so we do not keep retrying NOTIFY on a dead transport.
+                    pruned.extend(self.prune_watcher_subscriptions(&user));
                     self.update_state(
                         &user,
                         PresenceState {
@@ -522,6 +700,7 @@ impl PresenceManager {
             LocatorEvent::Offline(locs) => {
                 for loc in locs {
                     if let Some(user) = Self::get_user(&loc) {
+                        pruned.extend(self.prune_watcher_subscriptions(&user));
                         self.update_state(
                             &user,
                             PresenceState {
@@ -536,6 +715,7 @@ impl PresenceManager {
                 }
             }
         }
+        pruned
     }
 }
 
@@ -584,7 +764,13 @@ impl ProxyModule for PresenceModule {
                         let state = module_clone.manager.get_state(&identity);
                         let subscribers = module_clone.manager.get_subscribers(&identity);
                         for sub in subscribers {
-                            let _ = module_clone.send_notify(&identity, &sub, &state).await;
+                            if let Err(e) = module_clone.send_notify(&identity, &sub, &state).await {
+                                debug!(
+                                    dialog_id = %sub.dialog_id,
+                                    error = %e,
+                                    "Presence NOTIFY failed; subscription pruned"
+                                );
+                            }
                         }
                     }
                 }
@@ -604,7 +790,13 @@ impl ProxyModule for PresenceModule {
                         let Some(trigger) = trigger else { break };
                         let subscribers = mwi_module.manager.get_mwi_subscribers(&trigger.extension);
                         for sub in subscribers {
-                            let _ = mwi_module.send_mwi_notify(&trigger, &sub).await;
+                            if let Err(e) = mwi_module.send_mwi_notify(&trigger, &sub).await {
+                                debug!(
+                                    dialog_id = %sub.dialog_id,
+                                    error = %e,
+                                    "MWI NOTIFY failed; subscription pruned"
+                                );
+                            }
                         }
                     }
                 }
@@ -613,6 +805,7 @@ impl ProxyModule for PresenceModule {
 
         // Spawn listener for locator events
         let manager = self.manager.clone();
+        let dialog_layer = self.server.dialog_layer.clone();
         let cancel_locator = cancel.clone();
         if let Some(mut rx) = self.server.locator_events.as_ref().map(|tx| tx.subscribe()) {
             crate::utils::spawn(async move {
@@ -622,7 +815,10 @@ impl ProxyModule for PresenceModule {
                         _ = cancel_locator.cancelled() => break,
                         res = rx.recv() => {
                             if let Ok(event) = res {
-                                manager.handle_locator_event(event, &source).await;
+                                let pruned = manager.handle_locator_event(event, &source).await;
+                                for id in pruned {
+                                    dialog_layer.remove_dialog(&id);
+                                }
                             } else {
                                 // channel closed; exit gracefully
                                 break;
@@ -701,6 +897,65 @@ impl ProxyModule for PresenceModule {
 }
 
 impl PresenceModule {
+    /// Watch subscription dialog termination and free both the subscriber
+    /// record and the dialog_layer entry (rsipstack requires explicit remove).
+    fn spawn_subscription_guard(
+        &self,
+        mut state_rx: tokio::sync::mpsc::UnboundedReceiver<DialogState>,
+        dialog_id: DialogId,
+        is_mwi: bool,
+        dialog_cancel: tokio_util::sync::CancellationToken,
+    ) {
+        let manager = self.manager.clone();
+        let dialog_layer = self.server.dialog_layer.clone();
+        let server_cancel = self.server.cancel_token.child_token();
+        crate::utils::spawn(async move {
+            let prune = |id: &DialogId| {
+                if is_mwi {
+                    manager.remove_mwi_subscriber_by_dialog(id);
+                } else {
+                    manager.remove_subscriber_by_dialog(id);
+                }
+                dialog_layer.remove_dialog(id);
+            };
+            loop {
+                tokio::select! {
+                    _ = server_cancel.cancelled() => break,
+                    _ = dialog_cancel.cancelled() => {
+                        prune(&dialog_id);
+                        break;
+                    }
+                    state = state_rx.recv() => {
+                        match state {
+                            Some(DialogState::Terminated(id, reason)) => {
+                                debug!(
+                                    dialog_id = %id,
+                                    ?reason,
+                                    is_mwi,
+                                    "Subscription dialog terminated; pruning"
+                                );
+                                prune(&id);
+                                break;
+                            }
+                            Some(_) => {}
+                            None => {
+                                prune(&dialog_id);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    fn drop_replaced_dialogs(&self, replaced: Vec<DialogId>) {
+        for id in replaced {
+            // `on_remove` cancels the dialog token so the matching guard exits.
+            self.server.dialog_layer.remove_dialog(&id);
+        }
+    }
+
     async fn handle_subscribe(
         &self,
         tx: &mut Transaction,
@@ -716,7 +971,7 @@ impl PresenceModule {
 
         debug!("Handle SUBSCRIBE for {}", identity);
 
-        let (state_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (state_tx, state_rx) = tokio::sync::mpsc::unbounded_channel();
         let dialog = self
             .server
             .dialog_layer
@@ -729,20 +984,57 @@ impl PresenceModule {
             .and_then(|h| h.value().parse::<u32>().ok())
             .unwrap_or(3600);
 
+        // Confirm the dialog so subsequent NOTIFY requests are allowed.
+        // `accept` also sends the 200 OK via the transaction unit.
+        if let Err(e) = dialog.accept(None, None) {
+            warn!(error = %e, "Failed to accept presence SUBSCRIBE; falling back to tx.reply");
+            tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
+        }
+
+        let dialog_id = dialog.id().clone();
+        self.spawn_subscription_guard(
+            state_rx,
+            dialog_id.clone(),
+            false,
+            dialog.cancel_token().clone(),
+        );
+
+        if expires == 0 {
+            // Explicit unsubscribe: drop any prior bindings for this watcher.
+            let removed = self
+                .manager
+                .remove_subscribers_for_watcher(from.uri.user().unwrap_or_default());
+            for id in removed {
+                self.server.dialog_layer.remove_dialog(&id);
+            }
+            self.manager.remove_subscriber_by_dialog(&dialog_id);
+            self.server.dialog_layer.remove_dialog(&dialog_id);
+            return Ok(());
+        }
+
         let sub = Subscriber {
             aor: from.uri.clone(),
-            dialog_id: dialog.id().clone(),
+            dialog_id: dialog_id.clone(),
             expires: std::time::Instant::now() + std::time::Duration::from_secs(expires as u64),
         };
 
-        self.manager.add_subscriber(&identity, sub.clone());
+        let replaced = self.manager.add_subscriber(&identity, sub.clone());
+        self.drop_replaced_dialogs(replaced);
 
-        // Send 200 OK
-        tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
-
-        // Send initial NOTIFY
-        let state = self.manager.get_state(&identity);
-        self.send_notify(&identity, &sub, &state).await?;
+        // Initial NOTIFY must not block the SUBSCRIBE transaction (unit tests
+        // have no UA to answer, and a stuck NOTIFY would stall dialplan events).
+        let module = self.clone();
+        let identity_notify = identity.clone();
+        crate::utils::spawn(async move {
+            let state = module.manager.get_state(&identity_notify);
+            if let Err(e) = module.send_notify(&identity_notify, &sub, &state).await {
+                debug!(
+                    dialog_id = %sub.dialog_id,
+                    error = %e,
+                    "Initial presence NOTIFY failed; subscription pruned"
+                );
+            }
+        });
 
         Ok(())
     }
@@ -889,11 +1181,14 @@ impl PresenceModule {
         let domain = sub.aor.host().to_string();
         let body = build_pidf_body(identity, &domain, state);
 
-        let dialog = self
-            .server
-            .dialog_layer
-            .get_dialog(&sub.dialog_id)
-            .ok_or_else(|| anyhow!("Dialog not found"))?;
+        let dialog = match self.server.dialog_layer.get_dialog(&sub.dialog_id) {
+            Some(d) if !d.state().is_terminated() => d,
+            _ => {
+                self.manager.remove_subscriber_by_dialog(&sub.dialog_id);
+                self.server.dialog_layer.remove_dialog(&sub.dialog_id);
+                return Err(anyhow!("Dialog not found or terminated"));
+            }
+        };
 
         let expires_left = sub
             .expires
@@ -912,16 +1207,28 @@ impl PresenceModule {
             )),
         ];
 
-        dialog
-            .request(
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            dialog.request(
                 rsipstack::sip::Method::Notify,
                 Some(headers),
                 Some(body.into_bytes()),
-            )
-            .await
-            .map_err(|e| anyhow!("{:?}", e))?;
-
-        Ok(())
+            ),
+        )
+        .await
+        {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => {
+                self.manager.remove_subscriber_by_dialog(&sub.dialog_id);
+                self.server.dialog_layer.remove_dialog(&sub.dialog_id);
+                Err(anyhow!("{:?}", e))
+            }
+            Err(_) => {
+                self.manager.remove_subscriber_by_dialog(&sub.dialog_id);
+                self.server.dialog_layer.remove_dialog(&sub.dialog_id);
+                Err(anyhow!("presence NOTIFY timed out"))
+            }
+        }
     }
 
     // ── MWI (RFC 3842 message-summary) ────────────────────────────────────────
@@ -955,31 +1262,63 @@ impl PresenceModule {
             .and_then(|h| h.value().parse::<u32>().ok())
             .unwrap_or(3600);
 
-        let (state_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (state_tx, state_rx) = tokio::sync::mpsc::unbounded_channel();
         let dialog = self
             .server
             .dialog_layer
             .get_or_create_server_subscription(tx, state_tx, None, None)
             .map_err(|e| anyhow!("{:?}", e))?;
 
+        if let Err(e) = dialog.accept(None, None) {
+            warn!(error = %e, "Failed to accept MWI SUBSCRIBE; falling back to tx.reply");
+            tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
+        }
+
+        let dialog_id = dialog.id().clone();
+        self.spawn_subscription_guard(
+            state_rx,
+            dialog_id.clone(),
+            true,
+            dialog.cancel_token().clone(),
+        );
+
+        if expires == 0 {
+            let removed = self
+                .manager
+                .remove_mwi_subscribers_for_watcher(from.uri.user().unwrap_or_default());
+            for id in removed {
+                self.server.dialog_layer.remove_dialog(&id);
+            }
+            self.manager.remove_mwi_subscriber_by_dialog(&dialog_id);
+            self.server.dialog_layer.remove_dialog(&dialog_id);
+            return Ok(());
+        }
+
         let sub = MwiSubscriber {
             aor: from.uri.clone(),
-            dialog_id: dialog.id().clone(),
+            dialog_id: dialog_id.clone(),
             account_uri: account_uri.clone(),
             expires: std::time::Instant::now() + std::time::Duration::from_secs(expires as u64),
         };
 
-        self.manager.add_mwi_subscriber(&extension, sub.clone());
+        let replaced = self.manager.add_mwi_subscriber(&extension, sub.clone());
+        self.drop_replaced_dialogs(replaced);
 
-        // Send 200 OK then an immediate NOTIFY with 0 new messages.
-        tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
-
-        let initial_trigger = MwiTrigger {
-            extension: extension.clone(),
-            new_messages: 0,
-            old_messages: 0,
-        };
-        let _ = self.send_mwi_notify(&initial_trigger, &sub).await;
+        let module = self.clone();
+        crate::utils::spawn(async move {
+            let initial_trigger = MwiTrigger {
+                extension: extension.clone(),
+                new_messages: 0,
+                old_messages: 0,
+            };
+            if let Err(e) = module.send_mwi_notify(&initial_trigger, &sub).await {
+                debug!(
+                    dialog_id = %sub.dialog_id,
+                    error = %e,
+                    "Initial MWI NOTIFY failed; subscription pruned"
+                );
+            }
+        });
 
         Ok(())
     }
@@ -1005,11 +1344,14 @@ impl PresenceModule {
             waiting, sub.account_uri, trigger.new_messages, trigger.old_messages,
         );
 
-        let dialog = self
-            .server
-            .dialog_layer
-            .get_dialog(&sub.dialog_id)
-            .ok_or_else(|| anyhow!("MWI dialog not found for {}", trigger.extension))?;
+        let dialog = match self.server.dialog_layer.get_dialog(&sub.dialog_id) {
+            Some(d) if !d.state().is_terminated() => d,
+            _ => {
+                self.manager.remove_mwi_subscriber_by_dialog(&sub.dialog_id);
+                self.server.dialog_layer.remove_dialog(&sub.dialog_id);
+                return Err(anyhow!("MWI dialog not found for {}", trigger.extension));
+            }
+        };
 
         let expires_left = sub
             .expires
@@ -1029,16 +1371,28 @@ impl PresenceModule {
             )),
         ];
 
-        dialog
-            .request(
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            dialog.request(
                 rsipstack::sip::Method::Notify,
                 Some(headers),
                 Some(body.into_bytes()),
-            )
-            .await
-            .map_err(|e| anyhow!("{:?}", e))?;
-
-        Ok(())
+            ),
+        )
+        .await
+        {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => {
+                self.manager.remove_mwi_subscriber_by_dialog(&sub.dialog_id);
+                self.server.dialog_layer.remove_dialog(&sub.dialog_id);
+                Err(anyhow!("{:?}", e))
+            }
+            Err(_) => {
+                self.manager.remove_mwi_subscriber_by_dialog(&sub.dialog_id);
+                self.server.dialog_layer.remove_dialog(&sub.dialog_id);
+                Err(anyhow!("MWI NOTIFY timed out"))
+            }
+        }
     }
 }
 
@@ -1177,6 +1531,158 @@ mod tests {
         let subs = manager.get_subscribers(ext);
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].aor, sub_uri);
+        assert_eq!(manager.subscriber_bindings_len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_subscriber_replaced_by_same_watcher() {
+        let manager = PresenceManager::new(None);
+        let ext = "1003";
+        let sub_uri = Uri::try_from("sip:1001@192.168.3.227").unwrap();
+
+        let old = Subscriber {
+            aor: sub_uri.clone(),
+            dialog_id: rsipstack::dialog::DialogId {
+                call_id: "old-call".into(),
+                local_tag: "l1".into(),
+                remote_tag: "r1".into(),
+            },
+            expires: std::time::Instant::now() + std::time::Duration::from_secs(3600),
+        };
+        let new = Subscriber {
+            aor: sub_uri.clone(),
+            dialog_id: rsipstack::dialog::DialogId {
+                call_id: "new-call".into(),
+                local_tag: "l2".into(),
+                remote_tag: "r2".into(),
+            },
+            expires: std::time::Instant::now() + std::time::Duration::from_secs(3600),
+        };
+
+        manager.add_subscriber(ext, old);
+        let replaced = manager.add_subscriber(ext, new.clone());
+        assert_eq!(replaced.len(), 1);
+        assert_eq!(replaced[0].call_id, "old-call");
+        let subs = manager.get_subscribers(ext);
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].dialog_id.call_id, "new-call");
+    }
+
+    #[tokio::test]
+    async fn test_remove_subscribers_for_watcher() {
+        let manager = PresenceManager::new(None);
+        let watcher = Uri::try_from("sip:1001@pbx.local").unwrap();
+        let other = Uri::try_from("sip:2002@pbx.local").unwrap();
+
+        manager.add_subscriber(
+            "1001",
+            Subscriber {
+                aor: watcher.clone(),
+                dialog_id: rsipstack::dialog::DialogId {
+                    call_id: "c1".into(),
+                    local_tag: "l1".into(),
+                    remote_tag: "r1".into(),
+                },
+                expires: std::time::Instant::now() + std::time::Duration::from_secs(60),
+            },
+        );
+        manager.add_subscriber(
+            "1001",
+            Subscriber {
+                aor: other,
+                dialog_id: rsipstack::dialog::DialogId {
+                    call_id: "c2".into(),
+                    local_tag: "l2".into(),
+                    remote_tag: "r2".into(),
+                },
+                expires: std::time::Instant::now() + std::time::Duration::from_secs(60),
+            },
+        );
+
+        let removed = manager.remove_subscribers_for_watcher("1001");
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].call_id, "c1");
+        assert_eq!(manager.get_subscribers("1001").len(), 1);
+        assert_eq!(manager.subscriber_bindings_len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_user_prefers_registered_aor() {
+        let contact = Uri::try_from("sip:vsfbt0co@gc1g9pmgn89n.invalid;transport=ws").unwrap();
+        let registered = Uri::try_from("sip:1001@192.168.3.227").unwrap();
+        let loc = Location {
+            aor: contact,
+            expires: 50,
+            destination: None,
+            last_modified: None,
+            supports_webrtc: true,
+            credential: None,
+            headers: None,
+            registered_aor: Some(registered),
+            contact_raw: None,
+            contact_params: None,
+            path: None,
+            service_route: None,
+            instance_id: None,
+            gruu: None,
+            temp_gruu: None,
+            reg_id: None,
+            transport: None,
+            user_agent: None,
+            home_proxy: None,
+        };
+        assert_eq!(
+            PresenceManager::get_user(&loc).as_deref(),
+            Some("1001"),
+            "WebRTC Contact user must not become the presence identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_offline_prunes_watcher_subscriptions() {
+        let manager = PresenceManager::new(None);
+        let watcher = Uri::try_from("sip:1001@192.168.3.227").unwrap();
+        manager.add_subscriber(
+            "1001",
+            Subscriber {
+                aor: watcher.clone(),
+                dialog_id: rsipstack::dialog::DialogId {
+                    call_id: "sub1".into(),
+                    local_tag: "l".into(),
+                    remote_tag: "r".into(),
+                },
+                expires: std::time::Instant::now() + std::time::Duration::from_secs(3600),
+            },
+        );
+        assert_eq!(manager.subscriber_bindings_len(), 1);
+
+        let loc = Location {
+            aor: Uri::try_from("sip:vsfbt0co@gc1g9pmgn89n.invalid").unwrap(),
+            expires: 0,
+            destination: None,
+            last_modified: None,
+            supports_webrtc: true,
+            credential: None,
+            headers: None,
+            registered_aor: Some(watcher),
+            contact_raw: None,
+            contact_params: None,
+            path: None,
+            service_route: None,
+            instance_id: None,
+            gruu: None,
+            temp_gruu: None,
+            reg_id: None,
+            transport: None,
+            user_agent: None,
+            home_proxy: None,
+        };
+        let pruned = manager
+            .handle_locator_event(LocatorEvent::Offline(vec![loc]), &EventSource::Local)
+            .await;
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(manager.subscriber_bindings_len(), 0);
+        assert_eq!(manager.get_state("1001").status, PresenceStatus::Offline);
     }
 
     // ── build_pidf_body tests ──────────────────────────────────────────────

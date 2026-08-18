@@ -890,6 +890,7 @@ impl SipServerBuilder {
             presence_manager.clone(),
             cancel_token.child_token(),
         ));
+        cluster_event_hub.set_dialog_layer(dialog_layer.clone());
         // Start the local event-dispatch loop.
         cluster_event_hub.clone().start().await;
         let cluster_event_hub: Option<Arc<ClusterEventHub>> = Some(cluster_event_hub);
