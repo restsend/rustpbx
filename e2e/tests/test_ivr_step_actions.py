@@ -327,3 +327,239 @@ entries = []
         )
     finally:
         await cleanup()
+
+
+# ---------------------------------------------------------------------------
+# wait_for_result: application-owned (awaited) transfers
+# ---------------------------------------------------------------------------
+
+def _find_transfer_result(hits: list[dict]) -> dict:
+    """Return the latest `transfer_result` event seen by a step provider."""
+    result: dict = {}
+    for body in hits:
+        ev = (body or {}).get("event") or {}
+        if ev.get("type") == "transfer_result":
+            result = ev
+    return result
+
+
+async def _wait_transfer_result(hits: list[dict], timeout: float = 25) -> dict:
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        ev = _find_transfer_result(hits)
+        if ev:
+            return ev
+        await asyncio.sleep(0.5)
+    raise AssertionError(
+        f"provider never received transfer_result; events: "
+        f"{[ (b or {}).get('event') for b in hits ]}"
+    )
+
+
+def _assert_caller_hears_tone(caller_rec: Path, target_hz: float) -> None:
+    """Best-effort: the caller recording must contain a run of `target_hz`."""
+    from helpers import read_wav_mono, find_dominant_frequency, compute_rms_db
+
+    if not caller_rec.exists() or caller_rec.stat().st_size < 1000:
+        pytest.skip("caller recording too small or missing")
+
+    rx, sr = read_wav_mono(caller_rec)
+    rx = rx.ravel()
+    W = sr // 50  # 20 ms window
+    tone_windows = 0
+    for i in range(0, len(rx) - W, W):
+        chunk = rx[i:i + W]
+        if compute_rms_db(chunk) > -40.0:
+            f, _mag = find_dominant_frequency(chunk, sr, 200, 450, 5)
+            if abs(f - target_hz) < 50.0:
+                tone_windows += 1
+    assert tone_windows >= 5, (
+        f"caller never heard the {target_hz:.0f} Hz post-transfer prompt "
+        f"({tone_windows} windows) — the IVR may have lost media control"
+    )
+
+
+@pytest.mark.asyncio
+async def test_step_ivr_await_result_target_ended_returns_to_app(pbx, sipbot_pool, tmp_path):
+    """`transfer` with `wait_for_result=true`: the target answers then hangs up.
+
+    The provider must receive a typed `transfer_result` event with outcome
+    `target_ended`, the caller must survive the target hangup (returned to the
+    IVR app, NOT hung up with it), and the IVR must regain media control —
+    playing a fresh post-transfer prompt the caller actually hears.
+    """
+    from helpers import generate_sine_wav
+
+    after = tmp_path / "await_after.wav"
+    generate_sine_wav(after, 330.0, 2.0, 8000, 0.5)
+    caller_rec = tmp_path / "await_caller.wav"
+
+    def handler(body):
+        ev = (body or {}).get("event") or {}
+        if ev.get("type") == "session_start":
+            return {"type": "transfer", "target": "1002", "wait_for_result": True}
+        if ev.get("type") == "transfer_result":
+            return {"type": "prompt", "file": str(after), "interruptible": False}
+        if ev.get("type") == "audio_complete":
+            return {"type": "hangup"}
+        return {"type": "hangup"}
+
+    _runner, hits, start, cleanup = _start_step_provider(handler)
+    try:
+        url = await start()
+        _add_step_route(pbx, "to-ivr-await", "ivr-await", url)
+        h.boot_pbx(pbx)
+
+        agent = sipbot_pool.callee(
+            host=pbx.host, port=h.ua_port(15144), username="1002", password="123456",
+            register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
+            ring_secs=1, answer_mode="echo", hangup_after=5,
+        )
+        await h.wait_registered(agent)
+
+        caller = sipbot_pool.caller(
+            target=f"sip:ivr-await@{pbx.sip_addr}", username="1001", password="123456",
+            hangup=20, record_file=str(caller_rec), audio_quality=True,
+        )
+        assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
+        assert await agent.wait_output_async(r"200 OK|Call established", timeout=25), (
+            f"agent 1002 never received the awaited transfer:\n{agent.output[-1500:]}"
+        )
+
+        # Agent hangs up after ~5 s → provider must get target_ended.
+        outcome = await _wait_transfer_result(hits)
+        assert outcome.get("outcome") == "target_ended", f"unexpected outcome: {outcome}"
+
+        # The caller must NOT have been hung up along with the target — the
+        # app owns the call again and now plays the post-transfer prompt.
+        assert caller.is_alive, (
+            f"caller hung up when the transfer target ended:\n{caller.output[-1500:]}"
+        )
+        caller.wait(timeout=25)
+    finally:
+        await cleanup()
+
+    _assert_caller_hears_tone(caller_rec, 330.0)
+
+
+@pytest.mark.asyncio
+async def test_step_ivr_await_result_not_connected(pbx, sipbot_pool, tmp_path):
+    """`transfer` with `wait_for_result=true`: the target rejects (486 Busy).
+
+    The provider must receive outcome `not_connected`, the caller must NOT be
+    hung up, and the IVR must continue normally — playing a fresh prompt the
+    caller actually hears — before the provider hangs the call up.
+    """
+    from helpers import generate_sine_wav
+
+    after = tmp_path / "nc_after.wav"
+    generate_sine_wav(after, 330.0, 2.0, 8000, 0.5)
+    caller_rec = tmp_path / "nc_caller.wav"
+
+    def handler(body):
+        ev = (body or {}).get("event") or {}
+        if ev.get("type") == "session_start":
+            return {"type": "transfer", "target": "1002", "wait_for_result": True}
+        if ev.get("type") == "transfer_result":
+            return {"type": "prompt", "file": str(after), "interruptible": False}
+        if ev.get("type") == "audio_complete":
+            return {"type": "hangup"}
+        return {"type": "hangup"}
+
+    _runner, hits, start, cleanup = _start_step_provider(handler)
+    try:
+        url = await start()
+        _add_step_route(pbx, "to-ivr-nc", "ivr-nc", url)
+        h.boot_pbx(pbx)
+
+        agent = sipbot_pool.callee(
+            host=pbx.host, port=h.ua_port(15145), username="1002", password="123456",
+            register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
+            ring_secs=1, answer_mode="none", reject_code=486, reject_prob=100,
+        )
+        await h.wait_registered(agent)
+
+        caller = sipbot_pool.caller(
+            target=f"sip:ivr-nc@{pbx.sip_addr}", username="1001", password="123456",
+            hangup=15, record_file=str(caller_rec), audio_quality=True,
+        )
+        assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
+
+        outcome = await _wait_transfer_result(hits)
+        assert outcome.get("outcome") == "not_connected", f"unexpected outcome: {outcome}"
+
+        # The caller was never handed off and must still be alive while the IVR
+        # plays the post-transfer prompt.
+        assert caller.is_alive, (
+            f"caller hung up after a not_connected awaited transfer:\n{caller.output[-1500:]}"
+        )
+        caller.wait(timeout=25)
+    finally:
+        await cleanup()
+
+    _assert_caller_hears_tone(caller_rec, 330.0)
+
+
+# ---------------------------------------------------------------------------
+# input_phone: validated timing options
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_step_ivr_input_phone_custom_terminator(pbx, sipbot_pool, tmp_path):
+    """`input_phone` honors a custom `terminator` (here `*` instead of `#`).
+
+    The caller presses `7` then `*`; the `*` must end collection so the
+    provider receives `phone_collected` with number `7`.
+    """
+    from helpers import generate_sine_wav
+
+    prompt = tmp_path / "term_prompt.wav"
+    generate_sine_wav(prompt, 440.0, 1.0, 8000, 0.4)
+
+    collected: list[str] = []
+
+    def handler(body):
+        ev = (body or {}).get("event") or {}
+        if ev.get("type") == "session_start":
+            return {
+                "type": "input_phone",
+                "prompt": str(prompt),
+                "min_digits": 1,
+                "max_digits": 11,
+                "terminator": "*",
+            }
+        if ev.get("type") == "phone_collected":
+            collected.append(ev.get("number", ""))
+            return {"type": "transfer", "target": "1002"}
+        return {"type": "hangup"}
+
+    _runner, hits, start, cleanup = _start_step_provider(handler)
+    try:
+        url = await start()
+        _add_step_route(pbx, "to-ivr-term", "ivr-term", url)
+        h.boot_pbx(pbx)
+
+        agent = await _reg_callee(sipbot_pool, pbx, 15146, "1002")
+        caller = sipbot_pool.caller(
+            target=f"sip:ivr-term@{pbx.sip_addr}",
+            username="1001",
+            password="123456",
+            hangup=15,
+            dtmf_flows="3s:7*",
+        )
+        assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
+
+        deadline = asyncio.get_event_loop().time() + 15
+        while asyncio.get_event_loop().time() < deadline and not collected:
+            await asyncio.sleep(0.5)
+        assert collected, (
+            f"provider never received phone_collected; events: "
+            f"{[ (b or {}).get('event') for b in hits ]}"
+        )
+        assert collected == ["7"], f"expected '7', got {collected}"
+
+        assert await agent.wait_output_async(r"200 OK|Call established", timeout=25), (
+            f"agent 1002 never received the transferred call:\n{agent.output[-1500:]}"
+        )
+    finally:
+        await cleanup()
