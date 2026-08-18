@@ -179,7 +179,7 @@ async def test_tree_ivr_bridge_audio_accuracy(pbx, sipbot_pool, tmp_path, ws_bri
 
 @pytest.mark.asyncio
 async def test_tree_ivr_bridge_dtmf_json(pbx, sipbot_pool, tmp_path, ws_bridge_server):
-    """Caller DTMF during bridge → forwarded as JSON text frames over the WS."""
+    """Each caller DTMF press is forwarded once over the bridge WebSocket."""
     greeting = tmp_path / "bridge_greeting.wav"
     h.generate_sine_wav(greeting, 440.0, 2.0, 8000, 0.5)
     pbx.config_builder.add_ivr(
@@ -209,7 +209,24 @@ async def test_tree_ivr_bridge_dtmf_json(pbx, sipbot_pool, tmp_path, ws_bridge_s
     deadline = asyncio.get_event_loop().time() + 12
     while asyncio.get_event_loop().time() < deadline:
         frames = ws_bridge_server.capture.dtmf_frames()
-        if any("dtmf" in f and ("5" in f) for f in frames):
+        matching = [
+            json.loads(frame)
+            for frame in frames
+            if json.loads(frame).get("type") == "dtmf"
+            and json.loads(frame).get("digit") == "5"
+        ]
+        if matching:
+            await asyncio.sleep(0.5)
+            frames = ws_bridge_server.capture.dtmf_frames()
+            matching = [
+                json.loads(frame)
+                for frame in frames
+                if json.loads(frame).get("type") == "dtmf"
+                and json.loads(frame).get("digit") == "5"
+            ]
+            assert len(matching) == 1, (
+                f"one DTMF press produced {len(matching)} bridge frames: {matching}"
+            )
             return
         await asyncio.sleep(0.5)
     frames = ws_bridge_server.capture.dtmf_frames()

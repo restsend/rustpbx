@@ -1,4 +1,4 @@
-use crate::call::domain::{ReturnAppSpec, RtpTimeoutSide};
+use crate::call::domain::{ReturnAppSpec, RtpTimeoutSide, TransferOutcome};
 use crate::callrecord::CallRecordHangupReason;
 use crate::proxy::proxy_call::state::SessionHangupMessage;
 use rsipstack::dialog::DialogId;
@@ -45,6 +45,7 @@ pub struct CallMeta {
     /// Consumed once by the `CallCommand::StartReturnApp` handler so the
     /// return is one-shot.
     pub transfer_return_app: Option<ReturnAppSpec>,
+    pub pending_transfer_outcome: Option<TransferOutcome>,
     /// Ordered diagnostic timeline of the call (ring → answer → ivr → queue →
     /// transfer → bridge → hold/resume → plays → hangup). Persisted into the
     /// call-record `metadata["trace"]` array by `record_snapshot`.

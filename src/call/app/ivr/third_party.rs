@@ -200,6 +200,9 @@ impl ThirdPartyTreeProvider {
                 prompt_voice: None,
                 min_digits: 11,
                 max_digits: 11,
+                timeout_ms: 10_000,
+                inter_digit_timeout_ms: 3_000,
+                terminator: "#".into(),
             },
 
             "input_voice" => EntryAction::InputVoice {
@@ -270,6 +273,7 @@ impl ThirdPartyTreeProvider {
         });
         ActionNode {
             action,
+            wait_for_result: false,
             next,
             step_id: None,
             step_name: None,
@@ -468,6 +472,9 @@ fn convert_node_static(node: &ThirdPartyNode) -> EntryAction {
             prompt_voice: None,
             min_digits: 11,
             max_digits: 11,
+            timeout_ms: 10_000,
+            inter_digit_timeout_ms: 3_000,
+            terminator: "#".into(),
         },
         "input_voice" => EntryAction::InputVoice {
             scene: node.nodename.clone(),

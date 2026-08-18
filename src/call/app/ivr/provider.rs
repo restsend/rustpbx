@@ -1,4 +1,5 @@
 use crate::call::app::ivr::config::{ActionNode, EntryAction, IvrProviderConfig};
+use crate::call::domain::TransferOutcome;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -132,6 +133,9 @@ pub enum ProviderEvent {
         digit: String,
     },
     DtmfMenuTimeout,
+    TransferResult {
+        outcome: TransferOutcome,
+    },
 }
 
 /// Why an IVR session ended.
@@ -206,6 +210,7 @@ impl Default for RetryConfig {
                     prompt_text: None,
                     prompt_voice: None,
                 },
+                wait_for_result: false,
                 next: None,
                 step_id: None,
                 step_name: None,
@@ -444,6 +449,18 @@ impl ActionProvider for StepProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transfer_result_uses_minimal_wire_contract() {
+        let event = ProviderEvent::TransferResult {
+            outcome: TransferOutcome::NotConnected,
+        };
+
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({"type": "transfer_result", "outcome": "not_connected"})
+        );
+    }
 
     #[test]
     fn test_step_provider_endpoint_url_trims_whitespace_and_slash() {

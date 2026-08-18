@@ -698,6 +698,10 @@ impl IvrApp {
                 info!(ivr = %self.definition.name, menu = %current, "IVR repeating menu");
                 self.enter_menu(&current, ctrl, ctx).await
             }
+            EntryAction::Exit => {
+                self.state = IvrState::Done;
+                Ok(AppAction::Exit)
+            }
             EntryAction::Hangup {
                 prompt,
                 prompt_text,

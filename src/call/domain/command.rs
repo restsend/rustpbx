@@ -18,6 +18,13 @@ use tokio::sync::mpsc;
 
 use super::{HangupCommand, LegId, MediaSource, RingbackPolicy};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferOutcome {
+    NotConnected,
+    TargetEnded,
+}
+
 /// Type alias for CallCommand sender.
 pub type CallCommandTx = mpsc::Sender<CallCommand>;
 /// Type alias for CallCommand receiver.
@@ -92,6 +99,11 @@ pub enum CallCommand {
         target: String,
         /// Whether this is an attended transfer
         attended: bool,
+    },
+
+    TransferAwaitResult {
+        leg_id: LegId,
+        target: String,
     },
 
     /// Complete an attended transfer
@@ -549,6 +561,7 @@ impl CallCommand {
                 | CallCommand::Reject { .. }
                 | CallCommand::Hangup(_)
                 | CallCommand::Transfer { .. }
+                | CallCommand::TransferAwaitResult { .. }
                 | CallCommand::Hold { music: None, .. }
                 | CallCommand::Unhold { .. }
                 | CallCommand::Trace { .. }
