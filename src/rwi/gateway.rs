@@ -264,14 +264,37 @@ impl RwiGateway {
             return false;
         }
 
-        if let Some(session) = self.sessions.get(session_id) {
-            let mut session = session.write();
-            if session.release_call(call_id) {
-                self.call_ownership.remove(call_id);
-                return true;
-            }
+        if self.call_ownership.contains_key(call_id) {
+            return self.call_finished(call_id);
+        }
+
+        let released = self
+            .sessions
+            .get(session_id)
+            .is_some_and(|session| session.write().release_call(call_id));
+        if released {
+            self.remove_call_vars(call_id);
+            self.dtmf_taps.remove(call_id);
+            return true;
         }
         false
+    }
+
+    /// Handle the per-call notification emitted when a SipSession has
+    /// completed its synchronous teardown. All gateway-owned per-call state
+    /// is removed here so a long-lived RWI WebSocket does not retain calls.
+    pub fn call_finished(&mut self, call_id: &CallId) -> bool {
+        let owner_id = self.call_ownership.remove(call_id);
+        let released = owner_id
+            .as_ref()
+            .and_then(|session_id| self.sessions.get(session_id))
+            .is_some_and(|session| session.write().release_call(call_id));
+
+        self.remove_call_vars(call_id);
+        self.dtmf_taps.remove(call_id);
+        self.meta_store.remove(call_id);
+
+        owner_id.is_some() || released
     }
 
     /// Fan an event entry out to the RWI webhook handler (if configured) and
@@ -673,11 +696,38 @@ mod tests {
         gw.set_session_event_sender(&sid, tx);
         gw.claim_call_ownership(&sid, "c1".into(), OwnershipMode::Control)
             .unwrap();
+        gw.meta_store.insert("c1".into(), Default::default());
         gw.send_to_owner(&crate::rwi::CallAnswered {
             call_id: "c1".into(),
         });
         let v = rx.recv().await.unwrap();
         assert!(v.to_string().contains("call_answered"));
+    }
+
+    #[tokio::test]
+    async fn test_call_finished_releases_both_ownership_indexes() {
+        let mut gw = RwiGateway::new();
+        let sid = gw.create_session(create_identity()).read().id.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, tx);
+        gw.claim_call_ownership(&sid, "c1".into(), OwnershipMode::Control)
+            .unwrap();
+
+        // The final SipSession event is routed before the finished
+        // notification removes ownership.
+        gw.send_to_owner(&crate::rwi::CallHangup {
+            call_id: "c1".into(),
+            reason: Some("normal".into()),
+            hangup_by: Some("callee".into()),
+            sip_status: None,
+        });
+        assert_eq!(rx.recv().await.unwrap()["event_type"], "call_hangup");
+
+        assert!(gw.call_finished(&"c1".to_string()));
+        assert!(!gw.call_ownership.contains_key("c1"));
+        assert!(!gw.sessions[&sid].read().owns_call("c1"));
+        assert!(gw.meta_store.get_sync("c1").is_none());
+        assert!(!gw.call_finished(&"c1".to_string()));
     }
 
     /// `send_to_owner` must enrich the event payload with `agent_id` /

@@ -7682,11 +7682,10 @@ impl SipSession {
             mb.close();
         }
 
-        // Remove this session's RWI CallMetaStore entry now that every call
-        // event has been emitted and enriched. Without this the store grows
-        // one entry per call, unbounded.
+        // Notify RWI after every final call event has been emitted. The
+        // gateway removes CallMeta and both ownership indexes together.
         if let Some(ref gw) = self.server.rwi_gateway {
-            gw.read().meta_store.remove(&self.context.session_id);
+            gw.write().call_finished(&self.context.session_id);
         }
     }
 
@@ -11120,9 +11119,9 @@ impl Drop for SipSession {
             }
         }
 
-        // Remove the RWI CallMetaStore entry (parking_lot read guard — sync).
+        // Safety net for abnormal exits that bypassed cleanup().
         if let Some(ref gw) = self.server.rwi_gateway {
-            gw.read().meta_store.remove(&self.context.session_id);
+            gw.write().call_finished(&self.context.session_id);
         }
     }
 }

@@ -309,11 +309,30 @@ async fn handle_text_message(
 
     let call_id = command.dispatch_call_id().map(|s| s.to_string());
 
-    // For originate/attach, remember whether we should claim ownership on success
-    let should_claim_ownership = matches!(
-        &command,
-        RwiCommandPayload::Originate(_) | RwiCommandPayload::AttachCall { .. }
-    );
+    // Claim before dispatch: an asynchronously spawned originate can finish
+    // immediately, so its SipSession-finished notification must never run
+    // before ownership exists.
+    let ownership_claim = match &command {
+        RwiCommandPayload::Originate(req) => Some((
+            req.call_id.clone(),
+            crate::rwi::session::OwnershipMode::Control,
+        )),
+        RwiCommandPayload::AttachCall { call_id, mode } => {
+            Some((call_id.clone(), mode.clone()))
+        }
+        _ => None,
+    };
+    let (ownership_claimed, ownership_error) = match ownership_claim.as_ref() {
+        Some((call_id, mode)) => match gateway.write().claim_call_ownership(
+            &session_id.to_string(),
+            call_id.clone(),
+            mode.clone(),
+        ) {
+            Ok(()) => (true, None),
+            Err(error) => (false, Some(error)),
+        },
+        None => (false, None),
+    };
 
     tracing::info!(
         audit_event = "call_command",
@@ -323,28 +342,22 @@ async fn handle_text_message(
         result = "received",
         "RWI command received"
     );
-    let result = processor.process_command(command).await;
+    let result = match ownership_error {
+        Some(error) => Err(CommandError::CommandFailed(format!(
+            "cannot claim call ownership: {error:?}"
+        ))),
+        None => processor.process_command(command).await,
+    };
 
-    // Auto-claim call ownership when originate or attach succeeds
-    if should_claim_ownership
-        && let Ok(
-            CommandResult::Originated { call_id: ref cid }
-            | CommandResult::CallFound { call_id: ref cid },
-        ) = result
+    // Synchronous validation/startup failures have no SipSession to emit the
+    // finished notification, so release their pre-claimed ownership here.
+    if ownership_claimed
+        && result.is_err()
+        && let Some((claimed_call_id, _)) = ownership_claim.as_ref()
     {
-        let mut gw = gateway.write();
-        if let Err(e) = gw.claim_call_ownership(
-            &session_id.to_string(),
-            cid.clone(),
-            crate::rwi::session::OwnershipMode::Control,
-        ) {
-            tracing::warn!(
-                call_id = %cid,
-                session_id = %session_id,
-                error = ?e,
-                "originate succeeded but call ownership claim failed"
-            );
-        }
+        gateway
+            .write()
+            .release_call_ownership(&session_id.to_string(), claimed_call_id);
     }
 
     let outcome = match &result {
