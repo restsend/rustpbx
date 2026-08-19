@@ -194,6 +194,19 @@ pub struct QueueEnrichContext<'a> {
     pub session_id: &'a str,
     /// Canonical queue key / name.
     pub queue_name: &'a str,
+    /// Queue identifier (may equal `queue_name` when the PBX keys queues by
+    /// name — the CC addon treats the skill-group id as the queue id).
+    pub queue_id: &'a str,
+    /// Caller user part (RFC 3261 `From` user) as the desk sees it.
+    pub caller: &'a str,
+    /// Callee user part (RFC 3261 `To` user).
+    pub callee: &'a str,
+    /// Call direction ("inbound" | "outbound").
+    pub direction: &'a str,
+    /// Optional CC skill-group id (overrides `queue_id` for the `sg` UUI key).
+    pub skill_group_id: Option<&'a str>,
+    /// Optional IVR / flow node id the call entered the queue from (UUI `ivr`).
+    pub ivr_node_id: Option<&'a str>,
     /// Raw SIP headers from the *caller's* INVITE (e.g. `X-CRM-*`).
     pub caller_headers: &'a [rsipstack::sip::Header],
 }

@@ -835,6 +835,9 @@ impl SipSession {
     ) -> Result<()> {
         let ivr_file = self.server.data_context.resolve_ivr_file(ivr_name).await;
         info!(session_id = %self.id, ivr = %ivr_name, file = %ivr_file, "Starting IVR application");
+        // Remember the IVR short code so a later queue dispatch can inject
+        // `User-to-User` `ivr=` (desk_rustpbx.md §3.2).
+        self.session_ext_set("ivr", ivr_name);
         let mut app_params = serde_json::json!({"file": ivr_file});
         if !query_params.is_empty() {
             app_params["ivr_params"] = serde_json::json!(query_params);

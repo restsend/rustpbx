@@ -765,6 +765,10 @@ impl QueueApp {
         // Contact header value (a `contact-addr` with `<...>` and contact-params)
         // and is not valid as a dial target; `aor` is the registered URI.
         let uri = agents[self.current_agent_idx].aor.to_string();
+        let leg_headers = agents[self.current_agent_idx]
+            .headers
+            .clone()
+            .unwrap_or_default();
         info!(
             "Queue: dialing next agent {} (idx={})",
             uri, self.current_agent_idx
@@ -774,7 +778,10 @@ impl QueueApp {
         if !self.is_parallel() {
             self.pending_agents.clear();
         }
-        match ctrl.originate_call(&uri, Some(self.call_id.clone())).await {
+        match ctrl
+            .originate_call_with_headers(&uri, Some(self.call_id.clone()), leg_headers)
+            .await
+        {
             Ok(call_id) => {
                 self.pending_agents.push((uri, call_id));
             }
@@ -1170,7 +1177,11 @@ impl CallApp for QueueApp {
                 let mut pending = Vec::with_capacity(agents.len());
                 for (idx, agent) in agents.iter().enumerate() {
                     let uri = agent.aor.to_string();
-                    match ctrl.originate_call(&uri, Some(self.call_id.clone())).await {
+                    let leg_headers = agent.headers.clone().unwrap_or_default();
+                    match ctrl
+                        .originate_call_with_headers(&uri, Some(self.call_id.clone()), leg_headers)
+                        .await
+                    {
                         Ok(call_id) => {
                             info!(
                                 index = idx,

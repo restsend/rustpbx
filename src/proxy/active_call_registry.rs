@@ -30,11 +30,31 @@ pub struct ActiveProxyCallEntry {
     pub status: ActiveProxyCallStatus,
 }
 
+/// CC / desk call context stored alongside the active session so
+/// `GET /cc/calls/{call_id}/context` can return queue / skill / IVR / CRM
+/// fields after the queue-location enricher has run (contract §3.1).
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ActiveCallContextMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_group_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ivr_node_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ticket_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub customer_id: Option<String>,
+}
+
 pub struct ActiveProxyCallRegistry {
     entries: DashMap<String, ActiveProxyCallEntry>,
     handles: DashMap<String, SipSessionHandle>,
     handles_by_dialog: DashMap<String, SipSessionHandle>,
     dialog_by_session: DashMap<String, Vec<String>>,
+    context_meta: DashMap<String, ActiveCallContextMeta>,
     change_notify: Notify,
 }
 
@@ -51,6 +71,7 @@ impl ActiveProxyCallRegistry {
             handles: DashMap::new(),
             handles_by_dialog: DashMap::new(),
             dialog_by_session: DashMap::new(),
+            context_meta: DashMap::new(),
             change_notify: Notify::new(),
         }
     }
@@ -115,11 +136,20 @@ impl ActiveProxyCallRegistry {
     pub fn remove(&self, session_id: &str) {
         self.entries.remove(session_id);
         self.handles.remove(session_id);
+        self.context_meta.remove(session_id);
         if let Some((_, dialogs)) = self.dialog_by_session.remove(session_id) {
             for dialog_id in dialogs {
                 self.handles_by_dialog.remove(&dialog_id);
             }
         }
+    }
+
+    pub fn set_context_meta(&self, session_id: String, meta: ActiveCallContextMeta) {
+        self.context_meta.insert(session_id, meta);
+    }
+
+    pub fn get_context_meta(&self, session_id: &str) -> Option<ActiveCallContextMeta> {
+        self.context_meta.get(session_id).map(|e| e.clone())
     }
 
     pub fn count(&self) -> usize {
@@ -223,6 +253,7 @@ impl ActiveProxyCallRegistry {
         for id in stale_ids {
             self.entries.remove(&id);
             self.handles.remove(&id);
+            self.context_meta.remove(&id);
             if let Some((_, dialogs)) = self.dialog_by_session.remove(&id) {
                 for dialog_id in dialogs {
                     self.handles_by_dialog.remove(&dialog_id);
@@ -389,5 +420,26 @@ mod tests {
         registry.remove("s2");
         assert_eq!(registry.count(), 0);
         assert_eq!(registry.handles_by_dialog_count(), 0);
+    }
+
+    #[test]
+    fn test_context_meta_set_get_remove() {
+        let registry = ActiveProxyCallRegistry::new();
+        let session = "session-ctx";
+        registry.upsert(make_entry(session), make_handle(session));
+        registry.set_context_meta(
+            session.to_string(),
+            ActiveCallContextMeta {
+                queue_id: Some("support".into()),
+                queue_name: Some("Support".into()),
+                skill_group_id: Some("support".into()),
+                ..Default::default()
+            },
+        );
+        let meta = registry.get_context_meta(session).expect("meta");
+        assert_eq!(meta.queue_id.as_deref(), Some("support"));
+        assert_eq!(meta.queue_name.as_deref(), Some("Support"));
+        registry.remove(session);
+        assert!(registry.get_context_meta(session).is_none());
     }
 }
