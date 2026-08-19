@@ -947,6 +947,7 @@ impl SipSession {
         // channel source — the leg's egress pipeline encodes to the negotiated
         // codec (same "filetrack" mode as play_file).
         let ws_sample_rate = if sample_rate == 0 { 8000 } else { sample_rate };
+        let mut pcm_ended_rx: Option<tokio::sync::oneshot::Receiver<()>> = None;
         if forward_sink.is_none() || pc.is_none() {
             if let Some(mb) = self.media.bridge.as_ref()
                 && let Some(leg) = mb.leg(crate::media::media_bridge::LegSide::A)
@@ -954,11 +955,28 @@ impl SipSession {
                 info!(session_id = %self.id, %leg_id, rate = ws_sample_rate,
                     "Bridge sourcing caller media from MediaBridge A leg (raw PCM channel)");
                 if forward_sink.is_none() {
+                    let (end_tx, end_rx) = tokio::sync::oneshot::channel();
+                    let end_tx = std::sync::Mutex::new(Some(end_tx));
+                    let on_end: crate::media::egress::EgressEndCallback =
+                        std::sync::Arc::new(move |_interrupted| {
+                            if let Ok(mut slot) = end_tx.lock() {
+                                if let Some(tx) = slot.take() {
+                                    let _ = tx.send(());
+                                }
+                            }
+                        });
                     match mb
-                        .bridge_play_pcm(crate::media::media_bridge::LegSide::A, ws_sample_rate)
+                        .bridge_play_pcm(
+                            crate::media::media_bridge::LegSide::A,
+                            ws_sample_rate,
+                            Some(on_end),
+                        )
                         .await
                     {
-                        Ok(tx) => forward_sink = Some(BridgeForwardSink::Pcm(tx)),
+                        Ok(tx) => {
+                            forward_sink = Some(BridgeForwardSink::Pcm(tx));
+                            pcm_ended_rx = Some(end_rx);
+                        }
                         Err(e) => warn!(session_id = %self.id, %leg_id, error = %e,
                             "Failed to set up raw PCM channel for bridge forward"),
                     }
@@ -1300,6 +1318,16 @@ impl SipSession {
                         _ = cancel.cancelled() => {}
                         _ = async {
                             let _ = forward_handle.await;
+                            // Wait for ChannelAudioSource to drain remaining PCM
+                            // after the WS sender drops, so return-app does not
+                            // cut off the tail / leave a CNG gap in recordings.
+                            if let Some(rx) = pcm_ended_rx {
+                                let _ = tokio::time::timeout(
+                                    std::time::Duration::from_secs(5),
+                                    rx,
+                                )
+                                .await;
+                            }
                             let _ = reverse_handle.await;
                         } => {
                             if !cancel.is_cancelled() {

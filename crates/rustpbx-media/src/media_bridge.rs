@@ -699,6 +699,7 @@ impl MediaBridge {
                 decoder: b_decoder,
                 src_sample_rate: b_src_rate,
                 source_audio_payload_type: cb.payload_type,
+                primed: false,
             })
             .await?;
             lb.set_egress_source(EgressSource::TranscodePeer {
@@ -706,6 +707,7 @@ impl MediaBridge {
                 decoder: a_decoder,
                 src_sample_rate: a_src_rate,
                 source_audio_payload_type: ca.payload_type,
+                primed: false,
             })
             .await?;
             info!(
@@ -984,16 +986,21 @@ impl MediaBridge {
     }
 
     /// Set up a raw-PCM channel audio source on the given leg. The returned
-    /// sender feeds the egress pipeline via [`ChannelAudioSource`]; on empty
-    /// ticks the egress emits comfort-noise (CNG) instead of dead silence,
-    /// courtesy of `loop_playback=true`.
+    /// sender feeds the egress pipeline via [`ChannelAudioSource`]. Underruns
+    /// while the sender is alive emit comfort-noise; when the sender is
+    /// dropped and the buffer drains, the source EOFs (`loop_playback=false`)
+    /// so IVR return-app can start without an infinite CNG tail.
     ///
     /// The source does NOT pre-encode — the leg's egress encoder converts
     /// PCM→codec at its own 20 ms cadence ("filetrack mode").
+    ///
+    /// `on_end` (if provided) fires when playback stops: `false` on natural
+    /// EOF after the channel drains, `true` if interrupted.
     pub async fn bridge_play_pcm(
         &self,
         side: LegSide,
         sample_rate: u32,
+        on_end: Option<crate::egress::EgressEndCallback>,
     ) -> Result<tokio::sync::mpsc::Sender<Vec<i16>>> {
         let leg = self
             .leg(side)
@@ -1003,7 +1010,7 @@ impl MediaBridge {
             rx,
             sample_rate,
         ));
-        leg.play(source, true, None).await?;
+        leg.play(source, false, on_end).await?;
         Ok(tx)
     }
 
@@ -1956,9 +1963,109 @@ mod tests {
         mb.close();
     }
 
-    /// A same-codec WebRTC↔RTP bridge uses the fast-path relay and must not
-    /// wait for the WebRTC DTLS/SRTP transport before call setup can continue
+    /// WebRTC Opus ↔ plain-RTP Opus uses the same-codec fast-path rewrite relay
+    /// (with `strip_extensions` toward the RTP leg).
+    ///
+    /// Dual Opus PeerConnections need a larger stack than the default test thread.
+    #[test]
+    fn webrtc_rtp_opus_cross_transport_uses_fast_path() {
+        let handle = std::thread::Builder::new()
+            .name("opus-xport-test".into())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime");
+                rt.block_on(async {
+                    use rustrtc::SdpType;
+
+                    let webrtc_cfg = LegConfig {
+                        transport: rustrtc::TransportMode::WebRtc,
+                        codecs: vec![CodecInfo {
+                            payload_type: 111,
+                            codec: audio_codec::CodecType::Opus,
+                            clock_rate: 48000,
+                            channels: 2,
+                            fmtp: None,
+                        }],
+                        video_codecs: Vec::new(),
+                        rtp_port_range: None,
+                        external_ip: None,
+                        bind_ip: None,
+                        cname: Some("x-opus-webrtc".to_string()),
+                        comfort_noise: true,
+                        comfort_noise_level_db: -35.0,
+                    };
+                    let rtp_opus_cfg = LegConfig {
+                        transport: rustrtc::TransportMode::Rtp,
+                        codecs: vec![CodecInfo {
+                            payload_type: 111,
+                            codec: audio_codec::CodecType::Opus,
+                            clock_rate: 48000,
+                            channels: 2,
+                            fmtp: None,
+                        }],
+                        video_codecs: Vec::new(),
+                        rtp_port_range: None,
+                        external_ip: None,
+                        bind_ip: None,
+                        cname: Some("x-opus-rtp".to_string()),
+                        comfort_noise: true,
+                        comfort_noise_level_db: -35.0,
+                    };
+
+                    let a = LegInner::new("a", &webrtc_cfg, None).unwrap();
+                    let a2 = LegInner::new("a2", &webrtc_cfg, None).unwrap();
+                    let a_offer = a.create_offer().await.expect("a offer");
+                    let a2_answer = a2
+                        .apply_sdp(&a_offer, SdpType::Offer)
+                        .await
+                        .expect("a2 answers a");
+                    a.apply_sdp(&a2_answer, SdpType::Answer)
+                        .await
+                        .expect("a applies answer");
+                    drop(a2);
+
+                    let b = LegInner::new("b", &rtp_opus_cfg, None).unwrap();
+                    let b2 = LegInner::new("b2", &rtp_opus_cfg, None).unwrap();
+                    let b_offer = b.create_offer().await.expect("b offer");
+                    let b2_answer = b2
+                        .apply_sdp(&b_offer, SdpType::Offer)
+                        .await
+                        .expect("b2 answers b");
+                    b.apply_sdp(&b2_answer, SdpType::Answer)
+                        .await
+                        .expect("b applies answer");
+                    drop(b2);
+
+                    let mut mb = MediaBridge::new("s-opus-xport");
+                    mb.replace_leg(LegSide::A, a).await;
+                    mb.replace_leg(LegSide::B, b).await;
+                    mb.accept(LegSide::A).await;
+                    mb.accept(LegSide::B).await;
+
+                    assert!(mb.is_bridged());
+                    assert!(
+                        mb.leg(LegSide::A).unwrap().egress_is_relay(),
+                        "WebRTC↔RTP Opus should use RewriteRelay"
+                    );
+                    assert!(
+                        mb.leg(LegSide::B).unwrap().egress_is_relay(),
+                        "leg B should use RewriteRelay"
+                    );
+                    mb.close();
+                });
+            })
+            .expect("spawn");
+        handle.join().expect("join");
+    }
+
+    /// A same-codec WebRTC↔RTP PCMU bridge uses the fast-path relay and must
+    /// not wait for the WebRTC DTLS/SRTP transport before call setup can continue
     /// (the deferred-arming path arms the rewrite bridge in the background).
+    /// Opus cross-transport also uses this fast path (see
+    /// `webrtc_rtp_opus_cross_transport_uses_fast_path`).
     #[tokio::test]
     async fn fastpath_relay_does_not_block_on_unready_webrtc_transport() {
         use rustrtc::SdpType;
@@ -1966,10 +2073,10 @@ mod tests {
         let webrtc_cfg = LegConfig {
             transport: rustrtc::TransportMode::WebRtc,
             codecs: vec![CodecInfo {
-                payload_type: 111,
-                codec: audio_codec::CodecType::Opus,
-                clock_rate: 48000,
-                channels: 2,
+                payload_type: 0,
+                codec: audio_codec::CodecType::PCMU,
+                clock_rate: 8000,
+                channels: 1,
                 fmtp: None,
             }],
             video_codecs: Vec::new(),
@@ -1980,20 +2087,20 @@ mod tests {
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
         };
-        let rtp_opus_cfg = LegConfig {
+        let rtp_pcmu_cfg = LegConfig {
             transport: rustrtc::TransportMode::Rtp,
             codecs: vec![CodecInfo {
-                payload_type: 111,
-                codec: audio_codec::CodecType::Opus,
-                clock_rate: 48000,
-                channels: 2,
+                payload_type: 0,
+                codec: audio_codec::CodecType::PCMU,
+                clock_rate: 8000,
+                channels: 1,
                 fmtp: None,
             }],
             video_codecs: Vec::new(),
             rtp_port_range: None,
             external_ip: None,
             bind_ip: None,
-            cname: Some("rtp-opus".to_string()),
+            cname: Some("rtp-pcmu".to_string()),
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
         };
@@ -2005,8 +2112,8 @@ mod tests {
             s=-\r\n\
             c=IN IP4 127.0.0.1\r\n\
             t=0 0\r\n\
-            m=audio 5000 UDP/TLS/RTP/SAVPF 111\r\n\
-            a=rtpmap:111 opus/48000/2\r\n\
+            m=audio 5000 UDP/TLS/RTP/SAVPF 0\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
             a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5B:B6:2F:AD:D3:77:DA:F5:09:2C:9E:DF:8B\r\n\
             a=setup:actpass\r\n\
             a=ice-ufrag:uv50\r\n\
@@ -2021,10 +2128,10 @@ mod tests {
             "leg A profile should be negotiated"
         );
 
-        // Leg B: RTP/opus — negotiated, transport ready.
-        let b2 = LegInner::new("b2", &rtp_opus_cfg, None).unwrap();
+        // Leg B: RTP/PCMU — negotiated, transport ready.
+        let b2 = LegInner::new("b2", &rtp_pcmu_cfg, None).unwrap();
         let b_offer = b2.create_offer().await.expect("b2 offer");
-        let b = LegInner::new("b", &rtp_opus_cfg, None).unwrap();
+        let b = LegInner::new("b", &rtp_pcmu_cfg, None).unwrap();
         b.apply_sdp(&b_offer, SdpType::Offer)
             .await
             .expect("b answers rtp offer");

@@ -107,8 +107,12 @@ async def test_sbc_rewrite_call_established(pbx, sbc_upstream, sipbot_pool):
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456", hangup=6,
     )
     assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
+    # Count at answer time: a stray INVITE to 1002 from another UA on the host
+    # can hit the same SBC rule near hangup and inflate the counter.
+    assert len(sbc_upstream.calls) == 1, (
+        f"expected 1 upstream call at answer, got {len(sbc_upstream.calls)}"
+    )
     await h.wait_rtp(caller, "caller", 20)
-    assert len(sbc_upstream.calls) == 1, f"expected 1 upstream call, got {len(sbc_upstream.calls)}"
 
 
 @pytest.mark.asyncio
@@ -146,5 +150,7 @@ async def test_sbc_header_injection(pbx, sbc_upstream, sipbot_pool):
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456", hangup=6,
     )
     assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
+    assert len(sbc_upstream.calls) == 1, (
+        f"expected 1 upstream call at answer, got {len(sbc_upstream.calls)}"
+    )
     await h.wait_rtp(caller, "caller", 20)
-    assert len(sbc_upstream.calls) == 1
