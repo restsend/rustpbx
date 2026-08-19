@@ -536,10 +536,10 @@ async fn test_webrtc_pcmu_rtp_fastpath_recording_both_legs_audio_impl() -> Resul
 
     let proxy_config = ProxyConfig {
         media_proxy: MediaProxyMode::All,
-        // Sequential dial: mirrors the field call (trunk/route path), which
-        // forwards the callee's 183 early-media SDP to the caller. The
-        // parallel-fork path only sends a bare 180 and swallows the 183.
-        parallel_fork: false,
+        // Exercise the registered-contact parallel-fork path. The fork loop
+        // must consume provisional dialog events and forward the callee's 183
+        // SDP so the WebRTC caller can establish ICE/DTLS before the 200 OK.
+        parallel_fork: true,
         recording: Some(RecordingPolicy {
             enabled: Some(true),
             auto_start: Some(true),
@@ -606,16 +606,22 @@ async fn test_webrtc_pcmu_rtp_fastpath_recording_both_legs_audio_impl() -> Resul
     // which would swallow the 183 body on the harness side)
 
     // JsSIP applies the 183 SDP as pranswer; wait for it on alice.
+    let mut early_media_received = false;
     for _ in 0..200 {
         let events = alice.process_dialog_events().await?;
         if events
             .iter()
             .any(|e| matches!(e, TestUaEvent::EarlyMedia(_)))
         {
+            early_media_received = true;
             break;
         }
         sleep(Duration::from_millis(25)).await;
     }
+    anyhow::ensure!(
+        early_media_received,
+        "parallel fork did not forward the callee's 183 SDP to the WebRTC caller"
+    );
     // Chrome connects ICE/DTLS during early media and STARTS SENDING the
     // microphone right away — mirror that with a pre-answer audio burst.
     alice.wait_webrtc_connected(Duration::from_secs(15)).await?;

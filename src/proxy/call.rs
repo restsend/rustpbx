@@ -126,14 +126,15 @@ fn resolve_unhandled_targets(
         // so dialplan inspectors (e.g. zhongan inbound, HTTP router) can attempt
         // alternative routing before rejecting.
         Ok(DialStrategy::Sequential(vec![]))
-    } else if parallel_fork {
-        // Parallel-fork: ring every registered device at once. The fork logic
-        // (fork_targets_parallel) races the INVITEs and cancels the losers once
-        // the first 200 OK arrives.
+    } else if parallel_fork && locs.len() > 1 {
+        // Parallel-fork only when there is something to fork. The fork logic
+        // races all registered devices and cancels the losers once the first
+        // 200 OK arrives.
         Ok(DialStrategy::Parallel(locs))
     } else {
-        // Legacy "last alive" behavior: locs are sorted most-recent first, so
-        // dial only the newest registration.
+        // A single target uses the simpler sequential dialer. When parallel
+        // forking is disabled and several bindings exist, locs are sorted
+        // most-recent first, so dial only the newest registration.
         Ok(DialStrategy::Sequential(locs.into_iter().take(1).collect()))
     }
 }
@@ -2681,13 +2682,24 @@ mod tests {
 
     #[test]
     fn resolve_unhandled_targets_external_callee_retains_locs() {
-        // external callee (same_realm=false) keeps the original locs unchanged
+        // A single external target is retained but uses the simple dialer.
         let locs = make_loc();
         let result = resolve_unhandled_targets(false, false, locs.clone(), true);
         let strategy = result.unwrap();
         match strategy {
-            DialStrategy::Parallel(l) => assert_eq!(l.len(), locs.len()),
-            _ => panic!("expected Parallel"),
+            DialStrategy::Sequential(l) => assert_eq!(l.len(), locs.len()),
+            _ => panic!("expected Sequential"),
+        }
+    }
+
+    #[test]
+    fn resolve_unhandled_targets_single_registration_does_not_fork() {
+        let locs = make_loc();
+        let result = resolve_unhandled_targets(true, false, locs.clone(), true);
+        let strategy = result.unwrap();
+        match strategy {
+            DialStrategy::Sequential(l) => assert_eq!(l.len(), 1),
+            _ => panic!("one registration must use the sequential dialer"),
         }
     }
 
