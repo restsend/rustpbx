@@ -179,14 +179,14 @@ type = "extension"
 # Audio codec allowlist (e.g. PCMU, PCMA, G722, OPUS).
 # audio_codecs = ["pcma","pcmu","g722","opus"]
 
-# Video codec allowlist for re-INVITEs sent to RTP/PSTN/IMS trunks.
-# WebRTC-only codecs (VP8, VP9, AV1, …) and all rtcp-fb feedback attributes
-# are stripped automatically.  Defaults to ["H264"] when not set.
-# video_codecs = ["H264"]
+# Video codec allowlist for pass-through relay. Only codecs present in the
+# peer's SDP are retained; this setting does not create a video section.
+# H264 and VP8 are enabled by default and are the only supported values.
+# video_codecs = ["H264", "VP8"]
 
 # Media-plane video relay policy for proxied calls:
 #   - "pass_through" (default when unset): relay video between legs when both
-#     sides negotiate a common codec (H264/VP8). No transcoding.
+#     sides negotiate a common configured codec. No transcoding.
 #   - "strip": drop video from the media path entirely (audio-only).
 #   - "transcode": same as pass_through for now (video transcoding not yet
 #     implemented); reserved for future H264↔VP8 conversion.

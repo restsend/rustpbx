@@ -1088,6 +1088,14 @@ impl SipSession {
         )
     }
 
+    fn video_caps_from_sdp(&self, sdp: &str) -> Vec<rustrtc::VideoCapability> {
+        let proxy_config = self.server.proxy_config.load();
+        crate::media::negotiate::MediaNegotiator::video_caps_for_config(
+            &crate::media::negotiate::MediaNegotiator::extract_video_codecs(sdp),
+            &proxy_config.video_codecs,
+        )
+    }
+
     fn build_leg_config(
         &self,
         transport: rustrtc::TransportMode,
@@ -2207,114 +2215,6 @@ impl SipSession {
                 .unwrap_or_else(|| "unknown".to_string()),
         }
     }
-    #[cfg(test)]
-    fn filter_video_caps_for_rtp(
-        caps: &[rustrtc::VideoCapability],
-        allowed_codecs: &[String],
-    ) -> Vec<rustrtc::VideoCapability> {
-        let defaults = &["H264".to_string()];
-        let effective_allow: &[String] = if allowed_codecs.is_empty() {
-            defaults
-        } else {
-            allowed_codecs
-        };
-
-        if !effective_allow
-            .iter()
-            .any(|allowed| allowed.eq_ignore_ascii_case("H264"))
-        {
-            return vec![];
-        }
-
-        if let Some(cap) = caps
-            .iter()
-            .find(|cap| cap.codec_name.eq_ignore_ascii_case("H264"))
-        {
-            return vec![rustrtc::VideoCapability {
-                payload_type: cap.payload_type,
-                codec_name: cap.codec_name.clone(),
-                clock_rate: cap.clock_rate,
-                fmtp: cap.fmtp.clone(),
-                rtcp_fbs: vec![],
-                ..Default::default()
-            }];
-        }
-
-        vec![]
-    }
-
-    #[cfg(test)]
-    fn apply_video_caps_from_source(
-        sdp_type: rustrtc::SdpType,
-        sdp: &str,
-        context: &str,
-        caps: &[rustrtc::VideoCapability],
-    ) -> Result<String> {
-        let mut desc = Self::parse_sdp(sdp_type, sdp, context)?;
-        let local_video_caps = desc.to_video_capabilities();
-        if let Some(video_section) = desc
-            .media_sections
-            .iter_mut()
-            .find(|s| s.kind == rustrtc::MediaKind::Video)
-        {
-            let selected_cap = caps.iter().find_map(|source_cap| {
-                local_video_caps
-                    .iter()
-                    .find(|local_cap| {
-                        local_cap
-                            .codec_name
-                            .eq_ignore_ascii_case(&source_cap.codec_name)
-                            && local_cap.clock_rate == source_cap.clock_rate
-                    })
-                    .map(|local_cap| {
-                        if sdp_type == rustrtc::SdpType::Answer {
-                            source_cap.clone()
-                        } else {
-                            rustrtc::VideoCapability {
-                                payload_type: local_cap.payload_type,
-                                codec_name: source_cap.codec_name.clone(),
-                                clock_rate: source_cap.clock_rate,
-                                fmtp: source_cap.fmtp.clone(),
-                                rtcp_fbs: local_cap.rtcp_fbs.clone(),
-                                ..Default::default()
-                            }
-                        }
-                    })
-            });
-            let ordered_caps: Vec<_> = selected_cap.into_iter().collect();
-
-            video_section.formats = ordered_caps
-                .iter()
-                .map(|cap| cap.payload_type.to_string())
-                .collect();
-            video_section
-                .attributes
-                .retain(|attr| !matches!(attr.key.as_str(), "rtpmap" | "fmtp" | "rtcp-fb"));
-            for cap in ordered_caps {
-                video_section.attributes.push(rustrtc::Attribute::new(
-                    "rtpmap",
-                    Some(format!(
-                        "{} {}/{}",
-                        cap.payload_type, cap.codec_name, cap.clock_rate
-                    )),
-                ));
-                if let Some(fmtp) = &cap.fmtp {
-                    video_section.attributes.push(rustrtc::Attribute::new(
-                        "fmtp",
-                        Some(format!("{} {}", cap.payload_type, fmtp)),
-                    ));
-                }
-                for fb in &cap.rtcp_fbs {
-                    video_section.attributes.push(rustrtc::Attribute::new(
-                        "rtcp-fb",
-                        Some(format!("{} {}", cap.payload_type, fb)),
-                    ));
-                }
-            }
-        }
-        Ok(desc.to_sdp_string())
-    }
-
     /// Adapter that makes an optional caller-dialog receiver behave like a
     /// real one in `run_main_loop`. When `None` (UAC mode) it parks forever so
     /// the corresponding `select!` arm never fires.
@@ -2731,9 +2631,7 @@ impl SipSession {
         // carries video (rustrtc's answer builder requires a transceiver per
         // remote section), so the caps are always derived from `sdp`. The video
         // policy (strip) is enforced when the answer SDP is assembled.
-        let video_codecs = crate::media::negotiate::MediaNegotiator::video_caps_for_config(
-            &crate::media::negotiate::MediaNegotiator::extract_video_codecs(sdp),
-        );
+        let video_codecs = self.video_caps_from_sdp(sdp);
         let cfg = self.build_leg_config(transport, codecs, video_codecs);
         // Use a meaningful per-side leg name for observability. The label is
         // prefixed with the session id so rustrtc's per-PC logs correlate to a
@@ -3041,6 +2939,160 @@ impl SipSession {
         Ok((status, answer_sdp))
     }
 
+    /// Negotiate a video m-line with the opposite anchored leg before
+    /// answering a re-INVITE that adds video. The outgoing SDP is generated by
+    /// that leg's own PeerConnection, so it advertises RustPBX's transport
+    /// addresses rather than leaking the source endpoint's addresses through
+    /// the B2BUA.
+    async fn negotiate_added_video_with_peer(
+        &mut self,
+        source_side: DialogSide,
+        method: rsipstack::sip::Method,
+        offered_caps: &[rustrtc::VideoCapability],
+    ) -> Result<Vec<rustrtc::VideoCapability>> {
+        let Some(first_cap) = offered_caps.first() else {
+            return Ok(Vec::new());
+        };
+        let target_side = match source_side {
+            DialogSide::Caller => DialogSide::Callee,
+            DialogSide::Callee => DialogSide::Caller,
+        };
+        let target_bridge_side = match target_side {
+            DialogSide::Caller => crate::media::media_bridge::LegSide::A,
+            DialogSide::Callee => crate::media::media_bridge::LegSide::B,
+        };
+        let target_leg = self
+            .media
+            .bridge
+            .as_ref()
+            .and_then(|bridge| bridge.leg(target_bridge_side))
+            .ok_or_else(|| anyhow!("opposite media leg is unavailable for video re-INVITE"))?;
+
+        crate::media::leg::ensure_video_sender_for_pc(
+            target_leg.pc(),
+            first_cap,
+        )?;
+        if let Some(transceiver) = target_leg
+            .pc()
+            .get_transceivers()
+            .into_iter()
+            .find(|transceiver| transceiver.kind() == rustrtc::MediaKind::Video)
+        {
+            transceiver.set_direction(rustrtc::TransceiverDirection::SendRecv);
+        }
+        let generated_offer = target_leg.prepare_offer().await?;
+        let mut target_offer_sdp = MediaNegotiator::rewrite_video_capabilities(
+            rustrtc::SdpType::Offer,
+            &generated_offer.to_sdp_string(),
+            offered_caps,
+        )
+        .map_err(|error| anyhow!("failed to build opposite-leg video offer: {error}"))?;
+
+        // A video-only change must not reorder or expand the already selected
+        // audio codec. Keep the target leg's current audio and DTMF entries.
+        if let Some(profile) = target_leg.negotiated() {
+            let mut selected_audio = Vec::new();
+            if let Some(audio) = profile.audio {
+                selected_audio.push(audio.to_codec_info());
+            }
+            if let Some(dtmf) = profile.dtmf {
+                selected_audio.push(dtmf.to_codec_info());
+            }
+            if !selected_audio.is_empty()
+                && let Some(rewritten) =
+                    crate::media::negotiate::MediaNegotiator::rewrite_sdp_codec_list(
+                        &target_offer_sdp,
+                        &selected_audio,
+                    )
+            {
+                target_offer_sdp = rewritten;
+            }
+        }
+
+        let target_offer = Self::parse_sdp(
+            rustrtc::SdpType::Offer,
+            &target_offer_sdp,
+            "opposite-leg video re-INVITE offer",
+        )?;
+        let offered_codec_names: Vec<_> = offered_caps
+            .iter()
+            .map(|cap| cap.codec_name.as_str())
+            .collect();
+        info!(
+            session_id = %self.id,
+            source_side = ?source_side,
+            target_side = ?target_side,
+            codecs = ?offered_codec_names,
+            "propagating added video to opposite anchored leg"
+        );
+        let response = self
+            .send_mid_dialog_request_to_side(
+                target_side,
+                method,
+                Self::sdp_headers(),
+                Some(target_offer_sdp.as_bytes().to_vec()),
+            )
+            .await?
+            .ok_or_else(|| anyhow!("opposite-leg video re-INVITE timed out"))?;
+
+        if response.status_code.kind()
+            != rsipstack::sip::status_code::StatusCodeKind::Successful
+        {
+            warn!(
+                session_id = %self.id,
+                side = ?target_side,
+                status = %response.status_code,
+                "opposite leg rejected video re-INVITE"
+            );
+            return Ok(Vec::new());
+        }
+        let peer_answer_sdp = Self::extract_sdp(response.body())
+            .ok_or_else(|| anyhow!("opposite-leg video re-INVITE returned no SDP"))?;
+        let accepted_caps =
+            MediaNegotiator::accepted_video_capabilities(offered_caps, &peer_answer_sdp);
+        let accepted_codec_names: Vec<_> = accepted_caps
+            .iter()
+            .map(|cap| cap.codec_name.as_str())
+            .collect();
+        info!(
+            session_id = %self.id,
+            target_side = ?target_side,
+            codecs = ?accepted_codec_names,
+            "opposite anchored leg answered added-video negotiation"
+        );
+
+        // Commit the prepared local offer only after the peer accepted it. A
+        // rejection therefore leaves rustrtc in Stable instead of requiring a
+        // rollback (which it does not support).
+        target_leg
+            .pc()
+            .set_local_description(target_offer)
+            .map_err(|error| anyhow!("failed to commit opposite-leg video offer: {error}"))?;
+        target_leg
+            .apply_sdp(&peer_answer_sdp, rustrtc::SdpType::Answer)
+            .await?;
+        target_leg.refresh_observer();
+
+        let target_leg_id = match target_side {
+            DialogSide::Caller => LegId::from("caller"),
+            DialogSide::Callee => LegId::from("callee"),
+        };
+        self.legs
+            .set_video_state(&target_leg_id, !accepted_caps.is_empty());
+        match target_side {
+            DialogSide::Caller => {
+                self.media.caller_offer = Some(peer_answer_sdp);
+                self.media.answer = Some(target_offer_sdp);
+            }
+            DialogSide::Callee => {
+                self.media.callee_offer = Some(target_offer_sdp);
+                self.media.callee_answer_sdp = Some(peer_answer_sdp);
+            }
+        }
+
+        Ok(accepted_caps)
+    }
+
     fn parse_sdp(
         sdp_type: rustrtc::SdpType,
         sdp: &str,
@@ -3330,16 +3382,20 @@ impl SipSession {
                         )
                     })
             } else {
-                self.build_local_dialog_answer(side, &offer_sdp)
-                    .await
-                    .map(|answer_sdp| (status.clone(), Some(answer_sdp)))
-                    .map_err(|e| {
-                        (
-                            rsipstack::sip::StatusCode::NotAcceptableHere,
-                            "Failed to build local answer for re-INVITE",
-                            e,
-                        )
-                    })
+                self.build_local_dialog_answer(
+                    side,
+                    request.method.clone(),
+                    &offer_sdp,
+                )
+                .await
+                .map(|answer_sdp| (status.clone(), Some(answer_sdp)))
+                .map_err(|e| {
+                    (
+                        rsipstack::sip::StatusCode::NotAcceptableHere,
+                        "Failed to build local answer for re-INVITE",
+                        e,
+                    )
+                })
             };
 
             match answer_result {
@@ -5250,9 +5306,7 @@ impl SipSession {
         // requires a transceiver per remote section). The transceiver is added
         // from the offered caps regardless of the video policy; when the policy
         // strips video, the video m-line is forced inactive in the answer below.
-        let video_codecs = crate::media::negotiate::MediaNegotiator::video_caps_for_config(
-            &crate::media::negotiate::MediaNegotiator::extract_video_codecs(&caller_offer),
-        );
+        let video_codecs = self.video_caps_from_sdp(&caller_offer);
 
         let cfg = self.build_leg_config(transport.clone(), codecs, video_codecs);
         let caller_label = format!("{}-caller", self.id.0);
@@ -5324,15 +5378,16 @@ impl SipSession {
     /// Final audio codec normalization for answers generated by PeerConnection.
     /// This keeps answer audio as an offer subset, ordered by the peer answer
     /// when available, while preserving the caller-offered payload types.
-    fn rewrite_answer_to_selected_codecs(
+    fn rewrite_answer_to_selected_audio_codecs(
         &self,
         answer_sdp: &str,
         offer_sdp: &str,
         preferred_peer_sdp: Option<&str>,
+        previous_negotiated_codec: Option<CodecType>,
         context: &str,
     ) -> String {
         let allow_codecs = self.resolve_effective_codecs();
-        let preferred_codecs: Vec<CodecType> = preferred_peer_sdp
+        let preferred_audio_codecs: Vec<CodecType> = preferred_peer_sdp
             .map(|sdp| {
                 MediaNegotiator::extract_codec_params(sdp)
                     .audio
@@ -5342,9 +5397,19 @@ impl SipSession {
             })
             .filter(|codecs: &Vec<CodecType>| !codecs.is_empty())
             .unwrap_or(allow_codecs);
-        let selected_codecs =
-            MediaNegotiator::build_codec_list_from_offer(offer_sdp, &preferred_codecs);
-        if selected_codecs.is_empty() {
+        let offered_audio_codecs = MediaNegotiator::extract_codec_params(offer_sdp);
+        let previous_offered = previous_negotiated_codec.filter(|previous_codec| {
+            offered_audio_codecs
+                .audio
+                .iter()
+                .any(|codec| codec.codec == *previous_codec)
+        });
+        let selected_audio_codecs = if let Some(previous_codec) = previous_offered {
+            MediaNegotiator::build_codec_list_from_offer(offer_sdp, &[previous_codec])
+        } else {
+            MediaNegotiator::build_codec_list_from_offer(offer_sdp, &preferred_audio_codecs)
+        };
+        if selected_audio_codecs.is_empty() {
             warn!(session_id = %self.id,
                 session_id = %self.context.session_id,
                 context,
@@ -5355,18 +5420,20 @@ impl SipSession {
         debug!(
             session_id = %self.context.session_id,
             context,
-            selected_codecs = ?selected_codecs.iter().map(|c| (c.payload_type, &c.codec, c.clock_rate)).collect::<Vec<_>>(),
+            previous_negotiated_codec = ?previous_negotiated_codec,
+            selected_audio_codecs = ?selected_audio_codecs.iter().map(|c| (c.payload_type, &c.codec, c.clock_rate)).collect::<Vec<_>>(),
             "SDP answer codec selection before rewrite"
         );
 
-        MediaNegotiator::rewrite_sdp_codec_list(answer_sdp, &selected_codecs).unwrap_or_else(|| {
-            warn!(session_id = %self.id,
-                session_id = %self.context.session_id,
-                context,
-                "Failed to rewrite SDP answer to selected audio codec"
-            );
-            answer_sdp.to_string()
-        })
+        MediaNegotiator::rewrite_sdp_codec_list(answer_sdp, &selected_audio_codecs)
+            .unwrap_or_else(|| {
+                warn!(session_id = %self.id,
+                    session_id = %self.context.session_id,
+                    context,
+                    "Failed to rewrite SDP answer to selected audio codec"
+                );
+                answer_sdp.to_string()
+            })
     }
 
     async fn resolve_custom_targets(
@@ -5907,11 +5974,7 @@ impl SipSession {
                         self.media
                             .caller_offer
                             .as_ref()
-                            .map(|offer| {
-                                MediaNegotiator::video_caps_for_config(
-                                    &MediaNegotiator::extract_video_codecs(offer),
-                                )
-                            })
+                            .map(|offer| self.video_caps_from_sdp(offer))
                             .unwrap_or_default()
                     } else {
                         Vec::new()
@@ -6091,22 +6154,35 @@ impl SipSession {
             if has_bridge && has_callee_leg {
                 let cmd_tx = self.cmd_tx.clone();
                 let session_id = self.context.session_id.clone();
-                // The configured codec policy controls the offer sent to the
-                // callee. Once the callee answers, answer the caller with the
-                // callee-selected codec when it was present in the caller's
-                // offer. With no intersection, the rewrite helper falls back
-                // to the caller's offer order and MediaBridge transcodes.
+                // Once the callee answers, normalize caller audio to the
+                // selected audio codec and answer caller video with only the
+                // video capabilities accepted by the callee.
                 let caller_answer = match (
                     self.media.answer.as_deref(),
                     self.media.caller_offer.as_deref(),
                 ) {
                     (Some(answer), Some(caller_offer)) => {
-                        Some(self.rewrite_answer_to_selected_codecs(
+                        let answer = self.rewrite_answer_to_selected_audio_codecs(
                             answer,
                             caller_offer,
                             Some(callee_sdp_value),
+                            None,
                             "MediaBridge caller answer",
-                        ))
+                        );
+                        let caller_video_caps = self.video_caps_from_sdp(caller_offer);
+                        let accepted_video_caps = MediaNegotiator::accepted_video_capabilities(
+                            &caller_video_caps,
+                            callee_sdp_value,
+                        );
+                        let answer = MediaNegotiator::rewrite_video_capabilities(
+                            rustrtc::SdpType::Answer,
+                            &answer,
+                            &accepted_video_caps,
+                        )
+                        .map_err(|error| {
+                            anyhow!("failed to build MediaBridge caller video answer: {error}")
+                        })?;
+                        Some(answer)
                     }
                     _ => self.media.answer.clone(),
                 };
@@ -6297,10 +6373,11 @@ impl SipSession {
                 if let Some(track) = existing_caller_track {
                     match track.handshake(caller_offer.clone(), callee_sdp_type).await {
                         Ok(answer_sdp) => {
-                            let answer_sdp = self.rewrite_answer_to_selected_codecs(
+                            let answer_sdp = self.rewrite_answer_to_selected_audio_codecs(
                                 &answer_sdp,
                                 &caller_offer,
                                 Some(&callee_sdp_value),
+                                None,
                                 "anchored caller answer",
                             );
                             debug!(session_id = %self.id,
@@ -6353,10 +6430,11 @@ impl SipSession {
                     let track = track_builder.build();
                     match track.handshake(caller_offer.clone(), callee_sdp_type).await {
                         Ok(answer_sdp) => {
-                            let answer_sdp = self.rewrite_answer_to_selected_codecs(
+                            let answer_sdp = self.rewrite_answer_to_selected_audio_codecs(
                                 &answer_sdp,
                                 &caller_offer,
                                 Some(&callee_sdp_value),
+                                None,
                                 "anchored caller answer",
                             );
                             debug!(session_id = %self.id,
@@ -6554,18 +6632,14 @@ impl SipSession {
                 })
                 .unwrap_or_default();
 
-            // Video: prefer the caller's negotiated video codecs (preserving
-            // their PTs) so the callee offer steers toward the caller's codec —
-            // relay-only means the two legs must agree on the same video codec.
+            // Build the callee's video capabilities from the caller's offer,
+            // preserving its PTs. Video is relay-only, so the callee must
+            // select a codec that the caller offered.
             let video_codecs = if self.video_relay_enabled() {
                 self.media
                     .caller_offer
                     .as_ref()
-                    .map(|offer| {
-                        crate::media::negotiate::MediaNegotiator::video_caps_for_config(
-                            &crate::media::negotiate::MediaNegotiator::extract_video_codecs(offer),
-                        )
-                    })
+                    .map(|offer| self.video_caps_from_sdp(offer))
                     .unwrap_or_default()
             } else {
                 Vec::new()
@@ -6621,9 +6695,7 @@ impl SipSession {
             }
 
             let video_caps = if self.video_relay_enabled() {
-                MediaNegotiator::video_caps_for_config(&MediaNegotiator::extract_video_codecs(
-                    caller_offer,
-                ))
+                self.video_caps_from_sdp(caller_offer)
             } else {
                 Vec::new()
             };
@@ -6685,9 +6757,7 @@ impl SipSession {
         }
 
         let video_caps = if self.video_relay_enabled() {
-            MediaNegotiator::video_caps_for_config(&MediaNegotiator::extract_video_codecs(
-                &caller_offer,
-            ))
+            self.video_caps_from_sdp(&caller_offer)
         } else {
             Vec::new()
         };
@@ -6708,9 +6778,10 @@ impl SipSession {
             .await
         {
             Ok(answer_sdp) => {
-                let answer_sdp = self.rewrite_answer_to_selected_codecs(
+                let answer_sdp = self.rewrite_answer_to_selected_audio_codecs(
                     &answer_sdp,
                     &caller_offer,
+                    None,
                     None,
                     "local caller answer",
                 );
@@ -6948,17 +7019,22 @@ impl SipSession {
             return true;
         }
         // Per RFC 4317, c=IN IP4 0.0.0.0 also signals hold even when
-        // direction is sendrecv (some endpoints use this convention).
+        // direction is sendrecv (some endpoints use this convention). WebRTC
+        // uses the same zero C-line with ICE for active media, so do not treat
+        // an ICE media section as held.
         if let Some(offer) = offer {
-            for section in &offer.media_sections {
+            for section in offer
+                .media_sections
+                .iter()
+                .filter(|section| section.kind == rustrtc::MediaKind::Audio)
+            {
                 if section.port == 0 {
                     return true;
                 }
-                let conn = section
-                    .connection
-                    .as_deref()
-                    .or(offer.session.connection.as_deref());
-                if conn.is_some_and(|c| Self::is_zero_connection(c)) {
+                if Self::section_has_zero_hold_connection(
+                    section,
+                    offer.session.connection.as_deref(),
+                ) {
                     return true;
                 }
             }
@@ -6989,16 +7065,43 @@ impl SipSession {
     async fn build_local_answer_from_pc(
         pc: &rustrtc::PeerConnection,
         offer_sdp: &str,
+        video_caps: Option<&[rustrtc::VideoCapability]>,
     ) -> Result<String> {
         let offer = Self::parse_sdp(rustrtc::SdpType::Offer, offer_sdp, "re-INVITE offer")?;
+        let has_video = offer
+            .media_sections
+            .iter()
+            .any(|section| section.kind == rustrtc::MediaKind::Video);
         pc.set_remote_description(offer)
             .await
             .map_err(|e| anyhow!("Failed to apply re-INVITE offer: {}", e))?;
+
+        if has_video
+            && let Some(first_cap) = video_caps.and_then(|caps| caps.first())
+        {
+            crate::media::leg::ensure_video_sender_for_pc(pc, first_cap)?;
+        }
 
         let answer = pc
             .create_answer()
             .await
             .map_err(|e| anyhow!("Failed to create re-INVITE answer: {}", e))?;
+
+        let answer = if let Some(caps) = video_caps {
+            let rewritten = MediaNegotiator::rewrite_video_capabilities(
+                rustrtc::SdpType::Answer,
+                &answer.to_sdp_string(),
+                caps,
+            )
+            .map_err(|error| anyhow!("failed to build re-INVITE video answer: {error}"))?;
+            Self::parse_sdp(
+                rustrtc::SdpType::Answer,
+                &rewritten,
+                "filtered re-INVITE answer",
+            )?
+        } else {
+            answer
+        };
 
         pc.set_local_description(answer)
             .map_err(|e| anyhow!("Failed to set re-INVITE local answer: {}", e))?;
@@ -7017,9 +7120,10 @@ impl SipSession {
             return Ok(());
         }
 
-        // With MediaBridge the SDP change is picked up by re-running bridge():
-        // it re-reads both legs' negotiated profiles and re-selects
-        // fast-path (same codec) vs transcoding (different codec).
+        // Re-read both legs' negotiated profiles and re-select fast-path vs
+        // transcoding. Adding video changes the bridge key from no video to a
+        // negotiated codec, so `bridge()` installs the new video routes while
+        // same-profile direction updates keep the existing bidirectional route.
         if self.media.bridge.is_some() {
             if let Some(mb) = self.bridge_mut() {
                 if let Err(e) = mb.bridge().await {
@@ -7045,6 +7149,23 @@ impl SipSession {
     fn is_zero_connection(c: &str) -> bool {
         let trimmed = c.trim();
         trimmed == "IN IP4 0.0.0.0" || trimmed == "IN IP6 ::" || trimmed == "IN IP6 0:0:0:0:0:0:0:0"
+    }
+
+    fn section_has_zero_hold_connection(
+        section: &rustrtc::MediaSection,
+        session_connection: Option<&str>,
+    ) -> bool {
+        let uses_ice = section.protocol.contains("UDP/TLS")
+            || section
+                .attributes
+                .iter()
+                .any(|attribute| matches!(attribute.key.as_str(), "ice-ufrag" | "candidate"));
+        !uses_ice
+            && section
+                .connection
+                .as_deref()
+                .or(session_connection)
+                .is_some_and(Self::is_zero_connection)
     }
 
     /// Align the answer SDP direction per media section to the mirror of the
@@ -7077,11 +7198,10 @@ impl SipSession {
                 if s.port == 0 {
                     return Some("inactive");
                 }
-                let conn = s
-                    .connection
-                    .as_deref()
-                    .or(offer.session.connection.as_deref());
-                if conn.is_some_and(|c| Self::is_zero_connection(c)) {
+                if Self::section_has_zero_hold_connection(
+                    s,
+                    offer.session.connection.as_deref(),
+                ) {
                     return Some("inactive");
                 }
                 match s.direction {
@@ -7126,6 +7246,7 @@ impl SipSession {
     async fn build_local_dialog_answer(
         &mut self,
         side: DialogSide,
+        method: rsipstack::sip::Method,
         offer_sdp: &str,
     ) -> Result<String> {
         let parsed = Self::parse_sdp(rustrtc::SdpType::Offer, offer_sdp, "re-INVITE offer")?;
@@ -7144,35 +7265,96 @@ impl SipSession {
             .media_sections
             .iter()
             .find(|s| s.kind == rustrtc::MediaKind::Video);
-        let offer_video_direction = offer_video_section.map(|section| {
-            if section.port == 0 {
-                rustrtc::Direction::Inactive
+        let offer_video_active = offer_video_section.is_some_and(|section| {
+            section.port != 0 && section.direction != rustrtc::Direction::Inactive
+        });
+        let mut offered_video_caps = offer_video_active.then(|| {
+            if self.video_relay_enabled() {
+                self.video_caps_from_sdp(offer_sdp)
             } else {
-                section.direction
+                Vec::new()
             }
         });
-        let offer_video_active = offer_video_direction
-            .map(|direction| direction != rustrtc::Direction::Inactive)
-            .unwrap_or(false);
+
         let leg_key = match side {
             DialogSide::Caller => LegId::from("caller"),
             DialogSide::Callee => LegId::from("callee"),
         };
         let had_video = self.legs.leg_has_video(&leg_key);
+        if offered_video_caps
+            .as_ref()
+            .is_some_and(|caps| !caps.is_empty())
+        {
+            let peer_key = match side {
+                DialogSide::Caller => LegId::from("callee"),
+                DialogSide::Callee => LegId::from("caller"),
+            };
+            if !self.legs.leg_has_video(&peer_key) {
+                let accepted_by_peer = self
+                    .negotiate_added_video_with_peer(
+                        side,
+                        method,
+                        offered_video_caps.as_deref().unwrap_or_default(),
+                    )
+                    .await?;
+                offered_video_caps = Some(accepted_by_peer);
+            } else if let Some(peer_profile) = self
+                .media
+                .bridge
+                .as_ref()
+                .and_then(|bridge| match side {
+                    DialogSide::Caller => bridge.leg(crate::media::media_bridge::LegSide::B),
+                    DialogSide::Callee => bridge.leg(crate::media::media_bridge::LegSide::A),
+                })
+                .and_then(|leg| leg.negotiated())
+            {
+                let peer_video = peer_profile.video;
+                if let Some(caps) = offered_video_caps.as_mut() {
+                    caps.retain(|offered_cap| {
+                        peer_video.iter().any(|peer_cap| {
+                            offered_cap
+                                .codec_name
+                                .eq_ignore_ascii_case(&peer_cap.name)
+                                && offered_cap.clock_rate == peer_cap.clock_rate
+                        })
+                    });
+                }
+            }
+        }
+        let accepted_video_active = offered_video_caps
+            .as_ref()
+            .is_some_and(|caps| !caps.is_empty());
+        // Capture the active codec before applying the re-INVITE. If the new
+        // offer still contains it, keep that codec instead of allowing a
+        // reordered m-line to force an unnecessary transcode path.
+        let previous_negotiated_codec = self
+            .media
+            .bridge
+            .as_ref()
+            .and_then(|bridge| match side {
+                DialogSide::Caller => {
+                    bridge.leg(crate::media::media_bridge::LegSide::A)
+                }
+                DialogSide::Callee => {
+                    bridge.leg(crate::media::media_bridge::LegSide::B)
+                }
+            })
+            .and_then(|leg| leg.negotiated())
+            .and_then(|profile| profile.audio.map(|codec| codec.codec));
 
-        // Track video state. Legs are created with video capabilities when the
-        // remote offers video, so the video m-line / relay rules are usually
-        // established at call setup; a mid-call video add/remove just flips the
-        // flag and lets `build_local_answer_from_pc` re-emit the m-line from
-        // the leg's (already present) video transceiver.
-        self.legs.set_video_state(&leg_key, offer_video_active);
-        if offer_video_active && !had_video {
-            use crate::media::negotiate::MediaNegotiator;
-            let video = MediaNegotiator::extract_video_codecs(offer_sdp);
-            if let Some(video_codec) = video.first() {
+        // Track whether this leg accepted active video. A later re-INVITE may
+        // transition the leg from audio-only to video and create the video
+        // transceiver while building the local answer below.
+        self.legs
+            .set_video_state(&leg_key, accepted_video_active);
+        if accepted_video_active && !had_video {
+            if let Some(video_codec) = offered_video_caps
+                .as_ref()
+                .and_then(|caps| caps.first())
+            {
                 info!(session_id = %self.id,
                     "Dynamically adding video m-line (codec={}, PT={}, clock={}) for leg {:?}",
-                    video_codec.name, video_codec.payload_type, video_codec.clock_rate, side
+                    video_codec.codec_name, video_codec.payload_type, video_codec.clock_rate, side
                 );
             }
         }
@@ -7181,7 +7363,12 @@ impl SipSession {
             .get_local_reinvite_pc(side)
             .await
             .ok_or_else(|| anyhow!("No local PeerConnection available for {:?}", side))?;
-        let mut answer_sdp = Self::build_local_answer_from_pc(&pc, offer_sdp).await?;
+        let mut answer_sdp = Self::build_local_answer_from_pc(
+            &pc,
+            offer_sdp,
+            offered_video_caps.as_deref(),
+        )
+        .await?;
         if has_audio {
             let (preferred_peer_sdp, context) = match side {
                 DialogSide::Caller => (
@@ -7190,10 +7377,11 @@ impl SipSession {
                 ),
                 DialogSide::Callee => (self.media.answer.as_deref(), "callee re-INVITE answer"),
             };
-            answer_sdp = self.rewrite_answer_to_selected_codecs(
+            answer_sdp = self.rewrite_answer_to_selected_audio_codecs(
                 &answer_sdp,
                 offer_sdp,
                 preferred_peer_sdp,
+                previous_negotiated_codec,
                 context,
             );
         }
@@ -7212,6 +7400,7 @@ impl SipSession {
                 DialogSide::Callee => mb.leg(crate::media::media_bridge::LegSide::B),
             };
             if let Some(leg) = side_leg {
+                leg.refresh_observer();
                 if let Err(error) = leg.apply_profile_from_sdp(&answer_sdp).await {
                     warn!(
                         session_id = %self.id,
@@ -7232,11 +7421,6 @@ impl SipSession {
                 self.media.callee_answer_sdp = Some(answer_sdp.clone());
             }
         }
-        // Hold transition is applied in handle_updated_dialog for all branches
-        if offer_video_direction.is_some() && (had_video || offer_video_active) {
-            self.legs.set_video_state(&leg_key, true);
-        }
-
         self.update_anchored_forwarding_from_sdp(side, &answer_sdp)
             .await?;
 
@@ -13017,87 +13201,100 @@ mod tests {
         }
     }
 
+    fn filter_video_caps_for_rtp(
+        caps: &[rustrtc::VideoCapability],
+        allowed_codecs: &[String],
+    ) -> Vec<rustrtc::VideoCapability> {
+        let defaults = crate::config::default_video_codecs();
+        let effective_allow: &[String] = if allowed_codecs.is_empty() {
+            &defaults
+        } else {
+            allowed_codecs
+        };
+
+        caps
+            .iter()
+            .filter(|cap| {
+                effective_allow
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(&cap.codec_name))
+            })
+            .map(|cap| rustrtc::VideoCapability {
+                payload_type: cap.payload_type,
+                codec_name: cap.codec_name.clone(),
+                clock_rate: cap.clock_rate,
+                fmtp: cap.fmtp.clone(),
+                rtcp_fbs: vec![],
+                ..Default::default()
+            })
+            .collect()
+    }
+
     #[test]
-    fn test_apply_video_caps_from_source_keeps_one_source_h264_configuration() {
-        let generated_offer = "v=0\r\n\
+    fn test_initial_caller_answer_video_follows_callee_selection() {
+        let caller_offer = "v=0\r\n\
 o=- 1 1 IN IP4 127.0.0.1\r\n\
 s=-\r\n\
 t=0 0\r\n\
-m=video 9 UDP/TLS/RTP/SAVPF 96 103 107 104\r\n\
+m=video 4000 UDP/TLS/RTP/SAVPF 96 102 118\r\n\
 a=mid:1\r\n\
 a=sendrecv\r\n\
 a=rtpmap:96 VP8/90000\r\n\
-a=rtcp-fb:96 nack\r\n\
-a=rtpmap:103 H264/90000\r\n\
-a=fmtp:103 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f\r\n\
-a=rtcp-fb:103 nack pli\r\n\
-a=rtpmap:107 H264/90000\r\n\
-a=fmtp:107 level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42001f\r\n\
-a=rtcp-fb:107 nack pli\r\n\
-a=rtpmap:104 VP9/90000\r\n\
-a=rtcp-fb:104 nack\r\n";
-        let source_caps = vec![
-            make_video_cap(96, "H264", Some("profile-level-id=42801F"), &[]),
-            make_video_cap(97, "VP8", None, &[]),
-        ];
-
-        let reordered = SipSession::apply_video_caps_from_source(
-            rustrtc::SdpType::Offer,
-            generated_offer,
-            "test offer",
-            &source_caps,
-        )
-        .unwrap();
-
-        assert!(reordered.contains("m=video 9 UDP/TLS/RTP/SAVPF 103\r\n"));
-        assert!(reordered.contains("a=rtpmap:103 H264/90000\r\n"));
-        assert!(reordered.contains("a=fmtp:103 profile-level-id=42801F\r\n"));
-        assert!(!reordered.contains("a=rtpmap:107 H264/90000\r\n"));
-        assert!(!reordered.contains("a=rtpmap:96 VP8/90000\r\n"));
-        assert!(!reordered.contains("a=rtpmap:104 VP9/90000\r\n"));
-        assert!(!reordered.contains("a=rtcp-fb:104 "));
-    }
-
-    #[test]
-    fn test_apply_video_caps_to_answer_preserves_offer_payload_and_fmtp() {
+a=rtpmap:102 H264/90000\r\n\
+a=fmtp:102 packetization-mode=1;profile-level-id=42001f\r\n\
+a=rtpmap:118 H264/90000\r\n\
+a=fmtp:118 packetization-mode=1;profile-level-id=64001f\r\n";
         let generated_answer = "v=0\r\n\
-o=- 1 1 IN IP4 127.0.0.1\r\n\
+o=- 2 2 IN IP4 127.0.0.1\r\n\
 s=-\r\n\
 t=0 0\r\n\
-m=video 4000 UDP/TLS/RTP/SAVPF 96\r\n\
+a=group:BUNDLE 1\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96 102 118\r\n\
+c=IN IP4 0.0.0.0\r\n\
+a=ice-ufrag:caller-ice\r\n\
+a=mid:1\r\n\
 a=sendrecv\r\n\
-a=rtpmap:96 H264/90000\r\n\
-a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
-        let source_caps = vec![
-            make_video_cap(96, "H265", None, &[]),
-            make_video_cap(
-                97,
-                "H264",
-                Some("profile-level-id=42801F"),
-                &["nack pli", "ccm fir"],
-            ),
-        ];
+a=rtpmap:96 VP8/90000\r\n\
+a=rtpmap:102 H264/90000\r\n\
+a=fmtp:102 packetization-mode=1;profile-level-id=42001f\r\n\
+a=rtpmap:118 H264/90000\r\n\
+a=fmtp:118 packetization-mode=1;profile-level-id=64001f\r\n\
+a=ssrc:1234 cname:test\r\n";
+        let callee_answer = "v=0\r\n\
+o=- 3 3 IN IP4 192.0.2.10\r\n\
+s=-\r\n\
+t=0 0\r\n\
+m=video 5000 RTP/AVP 102\r\n\
+a=recvonly\r\n\
+a=rtpmap:102 H264/90000\r\n\
+a=fmtp:102 profile-level-id=42801F;packetization-mode=1\r\n";
 
-        let answer = SipSession::apply_video_caps_from_source(
+        let caller_video_caps = MediaNegotiator::video_caps_for_config(
+            &MediaNegotiator::extract_video_codecs(caller_offer),
+            &crate::config::default_video_codecs(),
+        );
+        let accepted_video_caps =
+            MediaNegotiator::accepted_video_capabilities(&caller_video_caps, callee_answer);
+        let answer = MediaNegotiator::rewrite_video_capabilities(
             rustrtc::SdpType::Answer,
             generated_answer,
-            "test answer",
-            &source_caps,
+            &accepted_video_caps,
         )
         .unwrap();
 
-        assert!(answer.contains("m=video 4000 UDP/TLS/RTP/SAVPF 97\r\n"));
-        assert!(answer.contains("a=rtpmap:97 H264/90000\r\n"));
-        assert!(answer.contains("a=fmtp:97 profile-level-id=42801F\r\n"));
-        assert!(answer.contains("a=rtcp-fb:97 nack pli\r\n"));
-        assert!(answer.contains("a=rtcp-fb:97 ccm fir\r\n"));
-        assert!(!answer.contains("a=rtpmap:96 H264/90000\r\n"));
-        assert!(!answer.contains("packetization-mode=1"));
+        assert!(answer.contains("m=video 9 UDP/TLS/RTP/SAVPF 102\r\n"));
+        assert!(answer.contains("a=rtpmap:102 H264/90000\r\n"));
+        assert!(!answer.contains("VP8/90000"));
+        assert!(!answer.contains("a=rtpmap:118 H264/90000"));
+        assert!(answer.contains("a=ice-ufrag:caller-ice\r\n"));
+        assert!(answer.contains("a=mid:1\r\n"));
+        assert!(answer.contains("a=ssrc:1234 cname:test\r\n"));
     }
 
-    /// Default allowlist keeps one H264 and strips feedback from the RTP leg.
+    /// Default allowlist keeps peer-offered H264 and VP8 and strips feedback
+    /// from the RTP leg.
     #[test]
-    fn test_filter_video_caps_default_keeps_h264_only() {
+    fn test_filter_video_caps_default_keeps_h264_and_vp8() {
         let caps = vec![
             make_video_cap(
                 96,
@@ -13109,16 +13306,19 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
             make_video_cap(98, "VP9", None, &["goog-remb"]),
         ];
 
-        let result = SipSession::filter_video_caps_for_rtp(&caps, &[]);
+        let result = filter_video_caps_for_rtp(&caps, &[]);
 
-        assert_eq!(result.len(), 1, "only H264 should survive");
+        assert_eq!(result.len(), 2, "H264 and VP8 should survive by default");
         assert_eq!(result[0].codec_name, "H264");
         assert_eq!(result[0].payload_type, 96);
+        assert_eq!(result[1].codec_name, "VP8");
+        assert_eq!(result[1].payload_type, 97);
         assert!(result[0].rtcp_fbs.is_empty());
+        assert!(result[1].rtcp_fbs.is_empty());
         assert!(result[0].fmtp.is_some(), "fmtp should be preserved");
     }
 
-    /// An explicit allowlist permits H264 but cannot enable another video codec.
+    /// An explicit allowlist controls the codecs accepted for relay.
     #[test]
     fn test_filter_video_caps_explicit_allowlist() {
         let caps = vec![
@@ -13127,25 +13327,27 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
             make_video_cap(98, "H265", None, &[]),
         ];
 
-        let allowed = vec!["h265".to_string(), "H264".to_string()];
-        let result = SipSession::filter_video_caps_for_rtp(&caps, &allowed);
+        let allowed = vec!["H264".to_string(), "vp8".to_string()];
+        let result = filter_video_caps_for_rtp(&caps, &allowed);
 
-        assert_eq!(result.len(), 1);
+        assert_eq!(result.len(), 2);
         assert_eq!(result[0].codec_name, "H264");
+        assert_eq!(result[1].codec_name, "VP8");
         assert!(result.iter().all(|c| c.rtcp_fbs.is_empty()));
     }
 
     #[test]
-    fn test_filter_video_caps_rejects_allowlist_without_h264() {
+    fn test_filter_video_caps_respects_h264_only_configuration() {
         let caps = vec![
             make_video_cap(96, "H264", Some("profile-level-id=42e01f"), &[]),
-            make_video_cap(98, "H265", None, &[]),
+            make_video_cap(97, "VP8", None, &[]),
         ];
-        let allowed = vec!["H265".to_string()];
+        let allowed = vec!["H264".to_string()];
 
-        let result = SipSession::filter_video_caps_for_rtp(&caps, &allowed);
+        let result = filter_video_caps_for_rtp(&caps, &allowed);
 
-        assert!(result.is_empty());
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].codec_name, "H264");
     }
 
     /// The RTP/AVP leg does not advertise AVPF feedback.
@@ -13158,28 +13360,32 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
             &["nack", "nack pli", "ccm fir", "goog-remb", "transport-cc"],
         )];
 
-        let result = SipSession::filter_video_caps_for_rtp(&caps, &[]);
+        let result = filter_video_caps_for_rtp(&caps, &[]);
 
         assert!(result[0].rtcp_fbs.is_empty());
     }
 
-    /// Default allowlist does not fall back to non-H264 codecs.
+    /// VP8 is accepted when configured while unsupported VP9 is discarded.
     #[test]
-    fn test_filter_video_caps_default_does_not_fallback_when_no_match() {
+    fn test_filter_video_caps_configured_vp8_but_not_vp9() {
         let caps = vec![
             make_video_cap(97, "VP8", None, &["goog-remb", "transport-cc"]),
             make_video_cap(98, "VP9", None, &["goog-remb"]),
         ];
 
-        let result = SipSession::filter_video_caps_for_rtp(&caps, &[]);
+        let result = filter_video_caps_for_rtp(
+            &caps,
+            &["H264".to_string(), "VP8".to_string()],
+        );
 
-        assert!(result.is_empty(), "default should not accept VP8/VP9");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].codec_name, "VP8");
     }
 
     /// Empty caps slice produces empty result (no panic).
     #[test]
     fn test_filter_video_caps_empty_input() {
-        let result = SipSession::filter_video_caps_for_rtp(&[], &[]);
+        let result = filter_video_caps_for_rtp(&[], &[]);
         assert!(result.is_empty());
     }
 
@@ -13191,7 +13397,10 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
         ];
 
         // Allowlist uses uppercase "H264"
-        let result = SipSession::filter_video_caps_for_rtp(&caps, &[]);
+        let result = filter_video_caps_for_rtp(
+            &caps,
+            &["H264".to_string(), "VP8".to_string()],
+        );
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].codec_name, "h264");
     }
@@ -13202,31 +13411,106 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
         let fmtp = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640032";
         let caps = vec![make_video_cap(96, "H264", Some(fmtp), &["goog-remb"])];
 
-        let result = SipSession::filter_video_caps_for_rtp(&caps, &[]);
+        let result = filter_video_caps_for_rtp(&caps, &[]);
         assert_eq!(result[0].fmtp.as_deref(), Some(fmtp));
     }
 
-    /// Multiple H264 profiles are reduced to the first offered profile.
+    /// Preserve peer SDP order and every supported profile; do not sort or
+    /// deduplicate the pass-through capability list.
     #[test]
-    fn test_filter_video_caps_keeps_first_h264_profile_only() {
+    fn test_filter_video_caps_preserves_supported_offer_order() {
         let caps = vec![
             make_video_cap(96, "H264", Some("profile-level-id=42e01f"), &["goog-remb"]),
             make_video_cap(97, "VP8", None, &["transport-cc"]),
             make_video_cap(98, "H264", Some("profile-level-id=640032"), &["nack"]),
         ];
 
-        let result = SipSession::filter_video_caps_for_rtp(&caps, &[]);
-        assert_eq!(result.len(), 1);
+        let result = filter_video_caps_for_rtp(
+            &caps,
+            &["H264".to_string(), "VP8".to_string()],
+        );
+        assert_eq!(result.len(), 3);
         assert_eq!(result[0].payload_type, 96);
         assert_eq!(result[0].fmtp.as_deref(), Some("profile-level-id=42e01f"));
-        assert!(result[0].rtcp_fbs.is_empty());
+        assert_eq!(result[1].payload_type, 97);
+        assert_eq!(result[2].payload_type, 98);
+        assert_eq!(result[2].fmtp.as_deref(), Some("profile-level-id=640032"));
+        assert!(result.iter().all(|cap| cap.rtcp_fbs.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn audio_only_leg_accepts_later_h264_video_without_inventing_vp8() {
+        let leg = crate::media::leg::LegInner::new(
+            "audio-then-video",
+            &crate::media::leg::LegConfig::rtp_pcmu(),
+            None,
+        )
+        .expect("audio-only leg");
+
+        let initial_offer = leg.create_offer().await.expect("initial audio offer");
+        assert!(
+            !initial_offer.contains("m=video"),
+            "audio-only call must not invent video:\n{initial_offer}"
+        );
+        let initial_answer = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 127.0.0.1\r\n\
+t=0 0\r\n\
+m=audio 41000 RTP/AVP 0\r\n\
+a=sendrecv\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=rtcp:41001\r\n";
+        leg.apply_sdp(initial_answer, rustrtc::SdpType::Answer)
+            .await
+            .expect("initial answer");
+
+        let reinvite = "v=0\r\n\
+o=- 1 2 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 127.0.0.1\r\n\
+t=0 0\r\n\
+m=audio 41000 RTP/AVP 0\r\n\
+a=sendrecv\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=rtcp:41001\r\n\
+m=video 42000 RTP/AVP 102\r\n\
+a=sendrecv\r\n\
+a=rtpmap:102 H264/90000\r\n\
+a=fmtp:102 packetization-mode=1;profile-level-id=42801f\r\n\
+a=rtcp:42001\r\n";
+        let video_caps = crate::media::negotiate::MediaNegotiator::video_caps_for_config(
+            &crate::media::negotiate::MediaNegotiator::extract_video_codecs(reinvite),
+            &crate::config::default_video_codecs(),
+        );
+        let answer = SipSession::build_local_answer_from_pc(
+            leg.pc(),
+            reinvite,
+            Some(&video_caps),
+        )
+        .await
+        .expect("video re-INVITE answer");
+
+        assert!(answer.contains("m=video "));
+        assert!(answer.contains("a=rtpmap:102 H264/90000"));
+        assert!(!answer.contains("VP8/90000"), "answer invented VP8:\n{answer}");
+        assert!(
+            answer.contains("a=sendrecv"),
+            "video answer must remain bidirectional:\n{answer}"
+        );
+        assert_ne!(
+            crate::media::leg::sender_ssrc_for_kind(leg.pc(), rustrtc::MediaKind::Video),
+            0,
+            "re-INVITE video needs a relay destination SSRC"
+        );
+        leg.stop();
     }
 
     // ── MediaBridge caller leg: video SDP ─────────────────────────────────
 
-    /// A WebRTC caller offer carrying audio + H264 video. The MediaBridge
+    /// A WebRTC caller offer carrying audio + H264/VP8 video. The MediaBridge
     /// caller leg must answer with a video m-line that (a) preserves the
-    /// offered video PTs/fmtp, (b) carries the leg's video sender `a=ssrc`
+    /// peer-offered H264 and VP8 capabilities, (b) carries the leg's video sender `a=ssrc`
     /// (eliminating the browser's 2–3 s unsignaled-SSRC demux delay), and
     /// (c) is sendrecv so the caller can send AND receive video.
     #[tokio::test]
@@ -13238,6 +13522,9 @@ a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
         };
 
         let (server, _) = create_test_server().await;
+        let mut proxy_config = (*server.proxy_config.load_full()).clone();
+        proxy_config.video_codecs = vec!["H264".to_string(), "VP8".to_string()];
+        server.proxy_config.store(Arc::new(proxy_config));
         let request = create_test_request(
             rsipstack::sip::Method::Invite,
             "alice",
@@ -13333,8 +13620,8 @@ a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5
             "answer lacks H264 rtpmap:\n{answer}"
         );
         assert!(
-            answer.contains("rtpmap:98 VP8/90000"),
-            "answer lacks VP8 rtpmap:\n{answer}"
+            answer.contains("VP8/90000"),
+            "answer discarded peer-offered VP8:\n{answer}"
         );
 
         drop(session);
@@ -14303,6 +14590,30 @@ max_retries = 3
             "unhold offer sendrecv → answer keep sendrecv:\n{}",
             result
         );
+    }
+
+    #[test]
+    fn test_webrtc_zero_connection_is_not_hold() {
+        let offer = "v=0\r\n\
+o=- 123 456 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+c=IN IP4 0.0.0.0\r\n\
+a=ice-ufrag:test\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+a=sendrecv\r\n";
+        let answer = offer.replace("a=ice-ufrag:test", "a=ice-ufrag:answer");
+        let parsed = SipSession::parse_sdp(rustrtc::SdpType::Offer, offer, "test")
+            .expect("parse WebRTC offer");
+
+        assert!(!SipSession::is_hold_direction(
+            rustrtc::Direction::SendRecv,
+            Some(&parsed),
+        ));
+        let aligned = SipSession::align_answer_direction_with_offer(offer, &answer);
+        assert!(aligned.contains("a=sendrecv"));
+        assert!(!aligned.contains("a=inactive"));
     }
 
     #[test]

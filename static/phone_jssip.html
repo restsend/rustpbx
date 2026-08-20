@@ -707,6 +707,7 @@
         const videoPreviewDiv = document.getElementById('videoPreviewDiv');
 
         let localMediaStream = null;
+        let reinviteVideoTracks = [];
         let videoCanvasInterval = null;
         const logs = document.getElementById('logs');
         const iceStatsPanel = document.getElementById('iceStats');
@@ -1913,6 +1914,7 @@
             session.on('reinvite', (data) => {
                 log('Received re-INVITE');
                 logSipMessage('RECEIVED', 're-INVITE', JSON.stringify(data.request && data.request.body ? data.request.body.substring(0, 200) : 'no body'));
+                prepareVideoSenderForReinvite(session, data.request && data.request.body);
             });
             session.on('peerconnection', (data) => {
                 attachMedia(data.peerconnection);
@@ -1947,6 +1949,94 @@
                 if (track.kind === 'audio') { remoteAudioStream.addTrack(track); remoteAudio.srcObject = remoteAudioStream; log('Remote audio track attached'); }
                 else if (track.kind === 'video') { remoteVideoStream.addTrack(track); remoteVideo.srcObject = remoteVideoStream; videoContainer.classList.add('active'); log('Remote video track attached'); }
             });
+        }
+
+        function remoteOfferAcceptsLocalVideo(sdp) {
+            if (!sdp || typeof sdp !== 'string') return false;
+
+            const videos = [];
+            let sessionDirection = 'sendrecv';
+            let currentMedia = null;
+            for (const rawLine of sdp.split(/\r?\n/)) {
+                const line = rawLine.trim();
+                if (line.startsWith('m=')) {
+                    const parts = line.substring(2).split(/\s+/);
+                    currentMedia = {
+                        kind: parts[0] || '',
+                        rejected: !parts[1] || parts[1] === '0',
+                        direction: null,
+                    };
+                    if (currentMedia.kind === 'video') videos.push(currentMedia);
+                    continue;
+                }
+
+                const direction = line.match(/^a=(sendrecv|sendonly|recvonly|inactive)$/);
+                if (!direction) continue;
+                if (currentMedia) currentMedia.direction = direction[1];
+                else sessionDirection = direction[1];
+            }
+
+            return videos.some((video) => {
+                if (video.rejected) return false;
+                const direction = video.direction || sessionDirection;
+                return direction === 'sendrecv' || direction === 'recvonly';
+            });
+        }
+
+        function prepareVideoSenderForReinvite(session, sdp) {
+            if (!remoteOfferAcceptsLocalVideo(sdp)) return false;
+
+            const peerconnection = session && session.connection;
+            if (!peerconnection) {
+                log('re-INVITE offers video, but PeerConnection is not available');
+                return false;
+            }
+
+            const sourceTrack = localMediaStream && localMediaStream
+                .getVideoTracks()
+                .find((track) => track.readyState === 'live');
+            if (!sourceTrack) {
+                log('re-INVITE offers video, but no live local video track is available');
+                return false;
+            }
+
+            const transceivers = peerconnection.getTransceivers();
+            const videoTransceivers = transceivers.filter((transceiver) => {
+                const senderKind = transceiver.sender && transceiver.sender.track && transceiver.sender.track.kind;
+                const receiverKind = transceiver.receiver && transceiver.receiver.track && transceiver.receiver.track.kind;
+                return senderKind === 'video' || receiverKind === 'video';
+            });
+            const liveVideoSender = videoTransceivers.find((transceiver) => {
+                const stopped = transceiver.stopped === true ||
+                    transceiver.currentDirection === 'stopped' ||
+                    transceiver.direction === 'stopped';
+                const track = transceiver.sender && transceiver.sender.track;
+                return !stopped && track && track.readyState === 'live';
+            });
+
+            if (liveVideoSender) {
+                if (liveVideoSender.direction !== 'sendrecv') liveVideoSender.direction = 'sendrecv';
+                log('re-INVITE video sender is already active');
+                return true;
+            }
+
+            try {
+                const sourceAlreadyAttached = peerconnection.getSenders()
+                    .some((sender) => sender.track === sourceTrack);
+                const sendingTrack = sourceAlreadyAttached ? sourceTrack.clone() : sourceTrack;
+                // addTrack() deliberately creates a reusable, unassociated
+                // transceiver. When JsSIP applies the remote offer below,
+                // Chromium associates that transceiver with the revived
+                // video m-line. addTransceiver(track) would remain separate
+                // and the offered m-line would still be answered recvonly.
+                peerconnection.addTrack(sendingTrack, localMediaStream);
+                if (sendingTrack !== sourceTrack) reinviteVideoTracks.push(sendingTrack);
+                log(`re-INVITE added replacement video sender (${sourceAlreadyAttached ? 'cloned' : 'existing'} camera track)`);
+                return true;
+            } catch (error) {
+                log(`Failed to add re-INVITE video sender: ${error.message}`);
+                return false;
+            }
         }
 
         function sdpHasTelephoneEvent(sdp) {
@@ -2227,6 +2317,8 @@
         }
 
         function stopLocalVideoSource() {
+            reinviteVideoTracks.forEach((track) => track.stop());
+            reinviteVideoTracks = [];
             if (localMediaStream) { localMediaStream.getTracks().forEach((t) => t.stop()); localMediaStream = null; }
             if (localVideo) localVideo.srcObject = null;
         }

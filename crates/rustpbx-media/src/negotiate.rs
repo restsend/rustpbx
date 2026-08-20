@@ -107,7 +107,7 @@ impl NegotiatedCodec {
 
 /// A single negotiated video codec extracted from SDP.
 ///
-/// The codec name is kept verbatim (`H264`, `VP8`, …) — unlike the audio-only
+/// The codec name is kept verbatim (`H264`, etc.) — unlike the audio-only
 /// [`CodecType`] used by [`NegotiatedCodec`], which cannot represent video
 /// codecs. Used only for relay matching (same name → transport-level relay) and
 /// rewrite-rule construction; video is never transcoded.
@@ -117,6 +117,7 @@ pub struct NegotiatedVideoCodec {
     pub payload_type: u8,
     pub clock_rate: u32,
     pub fmtp: Option<String>,
+    pub rtcp_fbs: Vec<String>,
     pub rtx_payload_type: Option<u8>,
 }
 
@@ -127,6 +128,7 @@ impl From<rustrtc::config::VideoCapability> for NegotiatedVideoCodec {
             payload_type: cap.payload_type,
             clock_rate: cap.clock_rate,
             fmtp: cap.fmtp,
+            rtcp_fbs: cap.rtcp_fbs,
             rtx_payload_type: cap.rtx_payload_type,
         }
     }
@@ -515,22 +517,28 @@ impl MediaNegotiator {
     /// Extract the video codecs advertised in an SDP (offer or answer), in SDP
     /// order. Unlike [`Self::extract_codec_params`] (which drops unknown codec
     /// names through the audio-only [`CodecType`] conversion), video codec
-    /// names are preserved verbatim so H264/VP8 can be matched for relay.
+    /// names are preserved verbatim so the supported relay codecs can be
+    /// matched and unsupported codecs can be filtered explicitly.
     pub fn extract_video_codecs(sdp: &str) -> Vec<NegotiatedVideoCodec> {
         SessionDescription::parse(SdpType::Answer, sdp)
             .or_else(|_| SessionDescription::parse(SdpType::Offer, sdp))
             .map(|desc| {
-                desc.to_video_capabilities()
+                desc.media_sections
                     .into_iter()
+                    .filter(|section| {
+                        section.kind == rustrtc::MediaKind::Video
+                            && section.port != 0
+                            && section.direction != rustrtc::Direction::Inactive
+                    })
+                    .flat_map(|section| section.to_video_capabilities())
                     .map(NegotiatedVideoCodec::from)
                     .collect()
             })
             .unwrap_or_default()
     }
 
-    /// Find a video codec common to both legs by case-insensitive codec name.
-    /// Returns the matched codec for each side; the caller relays that codec.
-    /// Returns `None` when the legs share no video codec (→ audio-only fallback).
+    /// Find a common pass-through video codec on both negotiated legs. Codec
+    /// policy has already been applied while building each leg's SDP.
     pub fn find_common_video_codec(
         a: &[NegotiatedVideoCodec],
         b: &[NegotiatedVideoCodec],
@@ -545,33 +553,9 @@ impl MediaNegotiator {
         None
     }
 
-    /// Default video capabilities advertised when the local policy allows video
-    /// but the remote offer carries none (used for the callee offer). H264
-    /// first for SIP-hardphone interop, then VP8 for browser interop.
-    pub fn default_video_codecs() -> Vec<rustrtc::config::VideoCapability> {
-        vec![
-            rustrtc::config::VideoCapability {
-                payload_type: 96,
-                codec_name: "H264".to_string(),
-                clock_rate: 90000,
-                fmtp: Some("packetization-mode=1;profile-level-id=42e01f".to_string()),
-                rtcp_fbs: vec!["nack".to_string(), "nack pli".to_string()],
-                rtx_payload_type: None,
-            },
-            rustrtc::config::VideoCapability {
-                payload_type: 98,
-                codec_name: "VP8".to_string(),
-                clock_rate: 90000,
-                fmtp: None,
-                rtcp_fbs: vec!["nack".to_string(), "nack pli".to_string()],
-                rtx_payload_type: None,
-            },
-        ]
-    }
-
-    /// Build the video capabilities for a leg config from the remote side's
-    /// video codecs, restricted to the local relay policy (H264 + VP8) and
-    /// preserving the remote's payload types and fmtp.
+    /// Build video capabilities for a leg from the remote side's offer,
+    /// restricted to the configured codec allow-list while preserving the
+    /// remote's payload types, fmtp, and RTCP feedback.
     ///
     /// Preserving the payload types matters: `restrict_sdp_to_reference_codecs`
     /// filters a generated answer's video PTs by (name, clock) but does NOT
@@ -581,24 +565,143 @@ impl MediaNegotiator {
     /// remote has no video or none of its codecs are in the local policy.
     pub fn video_caps_for_config(
         from: &[NegotiatedVideoCodec],
+        allowed_codecs: &[String],
     ) -> Vec<rustrtc::config::VideoCapability> {
         let mut caps = Vec::new();
         for c in from {
-            let name = match c.name.to_ascii_uppercase().as_str() {
-                "H264" => "H264",
-                "VP8" => "VP8",
-                _ => continue,
-            };
+            if !allowed_codecs
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(&c.name))
+            {
+                continue;
+            }
             caps.push(rustrtc::config::VideoCapability {
                 payload_type: c.payload_type,
-                codec_name: name.to_string(),
+                codec_name: c.name.clone(),
                 clock_rate: c.clock_rate,
                 fmtp: c.fmtp.clone(),
-                rtcp_fbs: vec!["nack".to_string(), "nack pli".to_string()],
+                rtcp_fbs: c.rtcp_fbs.clone(),
                 rtx_payload_type: None,
             });
         }
         caps
+    }
+
+    /// Return the original offered capabilities accepted by a peer's SDP
+    /// answer. Preserve the offer-side payload types because the caller uses
+    /// this result to build the corresponding answer on the other leg.
+    pub fn accepted_video_capabilities(
+        offered: &[rustrtc::config::VideoCapability],
+        peer_answer_sdp: &str,
+    ) -> Vec<rustrtc::config::VideoCapability> {
+        let accepted = Self::extract_video_codecs(peer_answer_sdp);
+        accepted
+            .iter()
+            .filter_map(|accepted_cap| {
+                offered
+                    .iter()
+                    .find(|offered_cap| {
+                        offered_cap.payload_type == accepted_cap.payload_type
+                            && offered_cap
+                                .codec_name
+                                .eq_ignore_ascii_case(&accepted_cap.name)
+                            && offered_cap.clock_rate == accepted_cap.clock_rate
+                    })
+                    .or_else(|| {
+                        offered.iter().find(|offered_cap| {
+                            offered_cap
+                                .codec_name
+                                .eq_ignore_ascii_case(&accepted_cap.name)
+                                && offered_cap.clock_rate == accepted_cap.clock_rate
+                                && offered_cap.fmtp == accepted_cap.fmtp
+                        })
+                    })
+                    .or_else(|| {
+                        offered.iter().find(|offered_cap| {
+                            offered_cap
+                                .codec_name
+                                .eq_ignore_ascii_case(&accepted_cap.name)
+                                && offered_cap.clock_rate == accepted_cap.clock_rate
+                        })
+                    })
+                    .cloned()
+            })
+            .collect()
+    }
+
+    /// Replace an SDP's video formats and codec attributes with `caps`.
+    /// Offers may remap video payload types that collide with another bundled
+    /// media section; answers retain the payload types selected by the offer.
+    pub fn rewrite_video_capabilities(
+        sdp_type: SdpType,
+        sdp: &str,
+        caps: &[rustrtc::config::VideoCapability],
+    ) -> anyhow::Result<String> {
+        let mut desc = SessionDescription::parse(sdp_type, sdp)
+            .map_err(|error| anyhow::anyhow!("failed to parse SDP: {error}"))?;
+        let mut used_payload_types: HashSet<u8> = desc
+            .media_sections
+            .iter()
+            .filter(|section| section.kind != MediaKind::Video)
+            .flat_map(|section| section.formats.iter())
+            .filter_map(|format| format.parse::<u8>().ok())
+            .collect();
+        if let Some(video_section) = desc
+            .media_sections
+            .iter_mut()
+            .find(|section| section.kind == MediaKind::Video)
+        {
+            let mut ordered_caps = caps.to_vec();
+
+            if sdp_type == SdpType::Offer {
+                for cap in &mut ordered_caps {
+                    if used_payload_types.contains(&cap.payload_type) {
+                        cap.payload_type = (96..=127)
+                            .find(|payload_type| !used_payload_types.contains(payload_type))
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("no free dynamic video payload type")
+                            })?;
+                    }
+                    used_payload_types.insert(cap.payload_type);
+                }
+            }
+
+            if ordered_caps.is_empty() {
+                video_section.port = 0;
+                video_section.direction = rustrtc::Direction::Inactive;
+                return Ok(desc.to_sdp_string());
+            }
+
+            video_section.formats = ordered_caps
+                .iter()
+                .map(|cap| cap.payload_type.to_string())
+                .collect();
+            video_section
+                .attributes
+                .retain(|attr| !matches!(attr.key.as_str(), "rtpmap" | "fmtp" | "rtcp-fb"));
+            for cap in ordered_caps {
+                video_section.attributes.push(Attribute::new(
+                    "rtpmap",
+                    Some(format!(
+                        "{} {}/{}",
+                        cap.payload_type, cap.codec_name, cap.clock_rate
+                    )),
+                ));
+                if let Some(fmtp) = &cap.fmtp {
+                    video_section.attributes.push(Attribute::new(
+                        "fmtp",
+                        Some(format!("{} {}", cap.payload_type, fmtp)),
+                    ));
+                }
+                for feedback in &cap.rtcp_fbs {
+                    video_section.attributes.push(Attribute::new(
+                        "rtcp-fb",
+                        Some(format!("{} {}", cap.payload_type, feedback)),
+                    ));
+                }
+            }
+        }
+        Ok(desc.to_sdp_string())
     }
 
     /// Build codec list for an outgoing offer to the callee.
@@ -790,8 +893,164 @@ impl MediaNegotiator {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    pub(crate) fn test_video_codecs() -> Vec<rustrtc::config::VideoCapability> {
+        vec![rustrtc::config::VideoCapability {
+            payload_type: 96,
+            codec_name: "H264".to_string(),
+            clock_rate: 90000,
+            fmtp: Some("packetization-mode=1;profile-level-id=42e01f".to_string()),
+            rtcp_fbs: vec!["nack".to_string(), "nack pli".to_string()],
+            rtx_payload_type: None,
+        }]
+    }
+
+    fn video_cap(
+        payload_type: u8,
+        codec_name: &str,
+        fmtp: Option<&str>,
+        rtcp_fbs: &[&str],
+    ) -> rustrtc::config::VideoCapability {
+        rustrtc::config::VideoCapability {
+            payload_type,
+            codec_name: codec_name.to_string(),
+            clock_rate: 90000,
+            fmtp: fmtp.map(str::to_string),
+            rtcp_fbs: rtcp_fbs.iter().map(|feedback| feedback.to_string()).collect(),
+            rtx_payload_type: None,
+        }
+    }
+
+    #[test]
+    fn rewrite_video_capabilities_preserves_offer_order() {
+        let generated_offer = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96 103 107 104\r\n\
+a=mid:1\r\n\
+a=sendrecv\r\n\
+a=rtpmap:96 VP8/90000\r\n\
+a=rtcp-fb:96 nack\r\n\
+a=rtpmap:103 H264/90000\r\n\
+a=fmtp:103 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f\r\n\
+a=rtcp-fb:103 nack pli\r\n\
+a=rtpmap:107 H264/90000\r\n\
+a=fmtp:107 level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42001f\r\n\
+a=rtcp-fb:107 nack pli\r\n\
+a=rtpmap:104 VP9/90000\r\n\
+a=rtcp-fb:104 nack\r\n";
+        let source_caps = vec![
+            video_cap(96, "H264", Some("profile-level-id=42801F"), &[]),
+            video_cap(97, "VP8", None, &[]),
+        ];
+
+        let rewritten = MediaNegotiator::rewrite_video_capabilities(
+            SdpType::Offer,
+            generated_offer,
+            &source_caps,
+        )
+        .unwrap();
+
+        assert!(rewritten.contains("m=video 9 UDP/TLS/RTP/SAVPF 96 97\r\n"));
+        assert!(rewritten.contains("a=rtpmap:96 H264/90000\r\n"));
+        assert!(rewritten.contains("a=fmtp:96 profile-level-id=42801F\r\n"));
+        assert!(rewritten.contains("a=rtpmap:97 VP8/90000\r\n"));
+        assert!(!rewritten.contains("a=rtpmap:107 H264/90000\r\n"));
+        assert!(!rewritten.contains("a=rtpmap:104 VP9/90000\r\n"));
+        assert!(!rewritten.contains("a=rtcp-fb:104 "));
+    }
+
+    #[test]
+    fn rewrite_video_capabilities_preserves_answer_payload_and_fmtp() {
+        let generated_answer = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+m=video 4000 UDP/TLS/RTP/SAVPF 96\r\n\
+a=sendrecv\r\n\
+a=rtpmap:96 H264/90000\r\n\
+a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
+        let source_caps = vec![video_cap(
+            97,
+            "H264",
+            Some("profile-level-id=42801F"),
+            &["nack pli", "ccm fir"],
+        )];
+
+        let answer = MediaNegotiator::rewrite_video_capabilities(
+            SdpType::Answer,
+            generated_answer,
+            &source_caps,
+        )
+        .unwrap();
+
+        assert!(answer.contains("m=video 4000 UDP/TLS/RTP/SAVPF 97\r\n"));
+        assert!(answer.contains("a=rtpmap:97 H264/90000\r\n"));
+        assert!(answer.contains("a=fmtp:97 profile-level-id=42801F\r\n"));
+        assert!(answer.contains("a=rtcp-fb:97 nack pli\r\n"));
+        assert!(answer.contains("a=rtcp-fb:97 ccm fir\r\n"));
+        assert!(!answer.contains("a=rtpmap:96 H264/90000\r\n"));
+        assert!(!answer.contains("packetization-mode=1"));
+    }
+
+    #[test]
+    fn accepted_video_capabilities_keep_offer_payload_types() {
+        let offered = vec![
+            video_cap(96, "H264", Some("profile-level-id=42801F"), &[]),
+            video_cap(98, "VP8", None, &[]),
+        ];
+        let peer_answer = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+m=video 5000 RTP/AVP 110\r\n\
+a=sendrecv\r\n\
+a=rtpmap:110 VP8/90000\r\n";
+
+        let accepted =
+            MediaNegotiator::accepted_video_capabilities(&offered, peer_answer);
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].codec_name, "VP8");
+        assert_eq!(accepted[0].payload_type, 98);
+
+        let rejected_answer = peer_answer
+            .replace("m=video 5000", "m=video 0")
+            .replace("a=sendrecv", "a=inactive");
+        assert!(
+            MediaNegotiator::accepted_video_capabilities(&offered, &rejected_answer).is_empty()
+        );
+    }
+
+    #[test]
+    fn rewrite_video_offer_remaps_audio_payload_collision() {
+        let generated_offer = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+m=audio 4000 RTP/AVP 96\r\n\
+a=rtpmap:96 opus/48000/2\r\n\
+m=video 4002 RTP/AVP 96\r\n\
+a=rtpmap:96 VP8/90000\r\n";
+        let source_caps = vec![
+            video_cap(96, "H264", None, &[]),
+            video_cap(97, "VP8", None, &[]),
+        ];
+
+        let offer = MediaNegotiator::rewrite_video_capabilities(
+            SdpType::Offer,
+            generated_offer,
+            &source_caps,
+        )
+        .expect("video offer rewrite");
+
+        assert!(offer.contains("m=audio 4000 RTP/AVP 96\r\n"));
+        assert!(offer.contains("m=video 4002 RTP/AVP 97 98\r\n"));
+        assert!(offer.contains("a=rtpmap:97 H264/90000\r\n"));
+        assert!(offer.contains("a=rtpmap:98 VP8/90000\r\n"));
+    }
 
     fn video_sdp() -> &'static str {
         "v=0\r\n\
@@ -828,6 +1087,17 @@ mod tests {
     }
 
     #[test]
+    fn extract_video_codecs_ignores_rejected_video_section() {
+        let sdp = "v=0\r\n\
+m=audio 4000 RTP/AVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+m=video 0 RTP/AVP 96\r\n\
+a=inactive\r\n\
+a=rtpmap:96 VP8/90000\r\n";
+        assert!(MediaNegotiator::extract_video_codecs(sdp).is_empty());
+    }
+
+    #[test]
     fn extract_leg_profile_populates_video_list() {
         let sdp = format!(
             "v=0\r\nm=audio 4000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n{}",
@@ -839,37 +1109,29 @@ mod tests {
     }
 
     #[test]
-    fn find_common_video_codec_matches_by_name_case_insensitive() {
-        // a[0]=H264 doesn't match b=[vp8]; the common codec is a[1]=VP8.
-        let a = vec![
-            NegotiatedVideoCodec {
-                name: "H264".into(),
-                payload_type: 96,
-                clock_rate: 90000,
-                fmtp: None,
-                rtx_payload_type: None,
-            },
-            NegotiatedVideoCodec {
-                name: "VP8".into(),
-                payload_type: 98,
-                clock_rate: 90000,
-                fmtp: None,
-                rtx_payload_type: None,
-            },
-        ];
+    fn find_common_video_codec_matches_h264_case_insensitive() {
+        let a = vec![NegotiatedVideoCodec {
+            name: "H264".into(),
+            payload_type: 96,
+            clock_rate: 90000,
+            fmtp: None,
+            rtcp_fbs: vec![],
+            rtx_payload_type: None,
+        }];
         let b = vec![NegotiatedVideoCodec {
-            name: "vp8".into(),
+            name: "h264".into(),
             payload_type: 102,
             clock_rate: 90000,
             fmtp: None,
+            rtcp_fbs: vec![],
             rtx_payload_type: None,
         }];
         let matched = MediaNegotiator::find_common_video_codec(&a, &b);
         assert!(matched.is_some());
         let (ca, cb) = matched.unwrap();
-        assert_eq!(ca.name, "VP8");
-        assert_eq!(ca.payload_type, 98);
-        assert_eq!(cb.name, "vp8");
+        assert_eq!(ca.name, "H264");
+        assert_eq!(ca.payload_type, 96);
+        assert_eq!(cb.name, "h264");
         assert_eq!(cb.payload_type, 102);
     }
 
@@ -880,6 +1142,7 @@ mod tests {
             payload_type: 96,
             clock_rate: 90000,
             fmtp: None,
+            rtcp_fbs: vec![],
             rtx_payload_type: None,
         }];
         let b = vec![NegotiatedVideoCodec {
@@ -887,18 +1150,35 @@ mod tests {
             payload_type: 98,
             clock_rate: 90000,
             fmtp: None,
+            rtcp_fbs: vec![],
             rtx_payload_type: None,
         }];
         assert!(MediaNegotiator::find_common_video_codec(&a, &b).is_none());
     }
 
     #[test]
-    fn default_video_codecs_offers_h264_first_then_vp8() {
-        let caps = MediaNegotiator::default_video_codecs();
-        assert_eq!(caps.len(), 2);
-        assert_eq!(caps[0].codec_name, "H264");
-        assert_eq!(caps[1].codec_name, "VP8");
-        assert!(caps.iter().all(|c| c.rtx_payload_type.is_none()));
+    fn find_common_video_codec_matches_vp8() {
+        let a = vec![NegotiatedVideoCodec {
+            name: "VP8".into(),
+            payload_type: 96,
+            clock_rate: 90000,
+            fmtp: None,
+            rtcp_fbs: vec![],
+            rtx_payload_type: None,
+        }];
+        let b = vec![NegotiatedVideoCodec {
+            name: "vp8".into(),
+            payload_type: 110,
+            clock_rate: 90000,
+            fmtp: None,
+            rtcp_fbs: vec![],
+            rtx_payload_type: None,
+        }];
+
+        let matched = MediaNegotiator::find_common_video_codec(&a, &b)
+            .expect("VP8 must be relay-compatible");
+        assert_eq!(matched.0.payload_type, 96);
+        assert_eq!(matched.1.payload_type, 110);
     }
 
     #[test]
@@ -909,6 +1189,7 @@ mod tests {
                 payload_type: 102,
                 clock_rate: 90000,
                 fmtp: Some("packetization-mode=1;profile-level-id=640c1f".into()),
+                rtcp_fbs: vec!["nack pli".into()],
                 rtx_payload_type: None,
             },
             NegotiatedVideoCodec {
@@ -916,31 +1197,41 @@ mod tests {
                 payload_type: 104,
                 clock_rate: 90000,
                 fmtp: None,
+                rtcp_fbs: vec!["nack".into()],
                 rtx_payload_type: None,
             },
-            // Not in the local policy → dropped.
+            // Not in this test's configured allow-list → dropped.
             NegotiatedVideoCodec {
                 name: "H265".into(),
                 payload_type: 106,
                 clock_rate: 90000,
                 fmtp: None,
+                rtcp_fbs: vec![],
                 rtx_payload_type: None,
             },
         ];
-        let caps = MediaNegotiator::video_caps_for_config(&from);
-        assert_eq!(caps.len(), 2);
+        let allowed = vec!["H264".to_string(), "VP8".to_string()];
+        let caps = MediaNegotiator::video_caps_for_config(&from, &allowed);
+        assert_eq!(caps.len(), 2, "H264 and VP8 are configured");
         assert_eq!(caps[0].payload_type, 102, "remote H264 PT preserved");
         assert_eq!(
             caps[0].fmtp.as_deref(),
             Some("packetization-mode=1;profile-level-id=640c1f")
         );
+        assert_eq!(caps[0].rtcp_fbs, vec!["nack pli"]);
         assert_eq!(caps[1].codec_name, "VP8");
         assert_eq!(caps[1].payload_type, 104, "remote VP8 PT preserved");
+
+        let h265 = vec!["H265".to_string()];
+        let caps = MediaNegotiator::video_caps_for_config(&from, &h265);
+        assert_eq!(caps.len(), 1, "the media helper follows its allow-list");
+        assert_eq!(caps[0].codec_name, "H265");
     }
 
     #[test]
     fn video_caps_for_config_empty_when_no_remote_video() {
-        assert!(MediaNegotiator::video_caps_for_config(&[]).is_empty());
+        let allowed = vec!["H264".to_string(), "VP8".to_string()];
+        assert!(MediaNegotiator::video_caps_for_config(&[], &allowed).is_empty());
     }
 
     #[test]
@@ -2357,4 +2648,5 @@ a=rtpmap:0 PCMU/8000\r\n";
         assert!(!codecs.iter().any(|c| c.codec == CodecType::G729));
         assert!(!codecs.iter().any(|c| c.codec == CodecType::G722));
     }
+
 }

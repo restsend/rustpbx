@@ -11,7 +11,7 @@ use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::sip::StatusCode;
 use rustpbx_models::DatabasePoolConfig;
 use rustrtc::IceServer;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::{collections::HashMap, net::IpAddr, path::PathBuf};
 
 /// Default AMI HTTP endpoint path.
@@ -923,8 +923,13 @@ pub struct ProxyConfig {
     pub addons: Option<Vec<String>>,
     #[serde(default = "default_passthrough_failure")]
     pub passthrough_failure: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub video_codecs: Option<Vec<String>>,
+    /// Video codecs allowed for pass-through relay. Only H264 and VP8 are
+    /// accepted; both are enabled when this setting is omitted.
+    #[serde(
+        default = "default_video_codecs",
+        deserialize_with = "deserialize_video_codecs"
+    )]
+    pub video_codecs: Vec<String>,
     #[serde(default = "default_dialog_auth_cache")]
     pub dialog_auth_cache: Option<AuthCacheConfig>,
     #[serde(default)]
@@ -1084,6 +1089,25 @@ impl Default for AuthCacheConfig {
 
 fn default_passthrough_failure() -> bool {
     true
+}
+
+pub(crate) fn default_video_codecs() -> Vec<String> {
+    vec!["H264".to_string(), "VP8".to_string()]
+}
+
+fn deserialize_video_codecs<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let codecs = Vec::<String>::deserialize(deserializer)?;
+    if let Some(codec) = codecs.iter().find(|codec| {
+        !codec.eq_ignore_ascii_case("H264") && !codec.eq_ignore_ascii_case("VP8")
+    }) {
+        return Err(serde::de::Error::custom(format!(
+            "unsupported video codec `{codec}`; supported codecs are H264 and VP8"
+        )));
+    }
+    Ok(codecs)
 }
 
 #[derive(Default)]
@@ -1427,7 +1451,7 @@ impl Default for ProxyConfig {
             nat_fix: true,
             addons: None,
             passthrough_failure: true,
-            video_codecs: None,
+            video_codecs: default_video_codecs(),
             dialog_auth_cache: default_dialog_auth_cache(),
             blind_transfer_use_refer: false,
             route_originated_calls: false,
@@ -1614,6 +1638,30 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_video_codecs_default_and_override() {
+        let default_config: ProxyConfig = toml::from_str("addr = \"::\"").unwrap();
+        assert_eq!(default_config.video_codecs, vec!["H264", "VP8"]);
+
+        let configured: ProxyConfig = toml::from_str(
+            r#"
+            addr = "::"
+            video_codecs = ["H264", "VP8"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(configured.video_codecs, vec!["H264", "VP8"]);
+
+        let unsupported = toml::from_str::<ProxyConfig>(
+            r#"
+            addr = "::"
+            video_codecs = ["H265"]
+            "#,
+        )
+        .expect_err("unsupported video codec must fail configuration parsing");
+        assert!(unsupported.to_string().contains("supported codecs are H264 and VP8"));
+    }
 
     #[test]
     fn test_all_udp_ports_preserves_default_primary_port() {

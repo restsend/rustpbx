@@ -75,9 +75,14 @@ impl TestPeer {
 
     /// Add a video sender track (so the peer can relay video end-to-end). The
     /// PC is rebuilt with video capabilities so the offer carries a video m-line.
-    fn with_video(mut self, caps: &[rustrtc::config::VideoCapability]) -> Self {
+    fn with_video(
+        mut self,
+        caps: &[rustrtc::config::VideoCapability],
+        sdp_compatibility: SdpCompatibilityMode,
+    ) -> Self {
         let mut cfg = rtc_config(self.pc.config().transport_mode.clone(), &self.codec);
         cfg.media_capabilities.as_mut().unwrap().video = caps.to_vec();
+        cfg.sdp_compatibility = sdp_compatibility;
         self.pc.close();
         self.pc = PeerConnection::new(cfg);
         let (tx, track, _) = sample_track(rustrtc::media::MediaKind::Audio, 500);
@@ -791,23 +796,55 @@ impl VideoTestHarness {
     }
 }
 
+fn media_transports_are_bundled(pc: &PeerConnection) -> bool {
+    let transport_for = |kind| {
+        pc.get_transceivers()
+            .into_iter()
+            .find(|transceiver| transceiver.kind() == kind)
+            .and_then(|transceiver| transceiver.sender())
+            .and_then(|sender| sender.transport())
+            .expect("negotiated media transport")
+    };
+    let audio = transport_for(rustrtc::MediaKind::Audio);
+    let video = transport_for(rustrtc::MediaKind::Video);
+    std::sync::Arc::ptr_eq(&audio, &video)
+}
+
 async fn create_video_harness(
     transport_a: TransportMode,
     transport_b: TransportMode,
     caps_a: Vec<rustrtc::config::VideoCapability>,
     caps_b: Vec<rustrtc::config::VideoCapability>,
+    sdp_compatibility_a: SdpCompatibilityMode,
+    sdp_compatibility_b: SdpCompatibilityMode,
 ) -> VideoTestHarness {
     let codec = MediaNegotiator::codec_info_for_type(CodecType::PCMU);
-    let mk_leg = |name: &str, t: TransportMode, caps: Vec<rustrtc::config::VideoCapability>| {
-        let mut cfg = rtc_config(t, &codec);
+    let mk_leg = |name: &str,
+                  transport: TransportMode,
+                  caps: Vec<rustrtc::config::VideoCapability>,
+                  sdp_compatibility: SdpCompatibilityMode| {
+        let mut cfg = rtc_config(transport, &codec);
         cfg.media_capabilities.as_mut().unwrap().video = caps;
+        cfg.sdp_compatibility = sdp_compatibility;
         LegInner::from_rtc_config(name, cfg, vec![codec.clone()], true, -35.0, None).unwrap()
     };
-    let leg_a = mk_leg("a", transport_a.clone(), caps_a.clone());
-    let leg_b = mk_leg("b", transport_b.clone(), caps_b.clone());
+    let leg_a = mk_leg(
+        "a",
+        transport_a.clone(),
+        caps_a.clone(),
+        sdp_compatibility_a.clone(),
+    );
+    let leg_b = mk_leg(
+        "b",
+        transport_b.clone(),
+        caps_b.clone(),
+        sdp_compatibility_b.clone(),
+    );
 
-    let test_a = TestPeer::new(transport_a.clone(), codec.clone()).with_video(&caps_a);
-    let test_b = TestPeer::new(transport_b.clone(), codec.clone()).with_video(&caps_b);
+    let test_a = TestPeer::new(transport_a.clone(), codec.clone())
+        .with_video(&caps_a, sdp_compatibility_a);
+    let test_b = TestPeer::new(transport_b.clone(), codec.clone())
+        .with_video(&caps_b, sdp_compatibility_b);
     negotiate(&test_a, &leg_a).await;
     negotiate(&test_b, &leg_b).await;
 
@@ -921,10 +958,8 @@ impl VideoTestHarness {
     }
 }
 
-/// H264 video relay over RTP: both legs negotiate audio + video, and the
-/// bridge's payload-type-aware rewrite relay must carry video to the far peer
-/// with the destination leg's video SSRC/PT. This is what eliminates the
-/// browser's 2–3 s unsignaled-SSRC demux delay.
+/// H264 video relay over non-BUNDLE RTP: audio and video use separate sockets,
+/// so each source leg must install independent audio and video bridges.
 #[tokio::test]
 async fn fast_path_rtp_h264_rtp_h264_video_relay() {
     let mut h = create_video_harness(
@@ -932,8 +967,18 @@ async fn fast_path_rtp_h264_rtp_h264_video_relay() {
         TransportMode::Rtp,
         h264_caps(96),
         h264_caps(96),
+        SdpCompatibilityMode::LegacySip,
+        SdpCompatibilityMode::LegacySip,
     )
     .await;
+    assert!(
+        !media_transports_are_bundled(&h.test_a.pc),
+        "RTP source A must exercise separate audio/video transports"
+    );
+    assert!(
+        !media_transports_are_bundled(&h.test_b.pc),
+        "RTP source B must exercise separate audio/video transports"
+    );
     h.assert_relay(true);
     assert!(
         h.relay_video(&h.test_a, &h.test_b).await,
@@ -949,6 +994,34 @@ async fn fast_path_rtp_h264_rtp_h264_video_relay() {
     tokio::time::sleep(Duration::from_millis(80)).await;
 }
 
+/// VP8 is also a pass-through codec: when both RTP legs offered it, the
+/// non-BUNDLE video sockets must be bridged exactly like H264.
+#[tokio::test]
+async fn fast_path_rtp_vp8_rtp_vp8_video_relay() {
+    let mut h = create_video_harness(
+        TransportMode::Rtp,
+        TransportMode::Rtp,
+        vp8_caps(96),
+        vp8_caps(110),
+        SdpCompatibilityMode::LegacySip,
+        SdpCompatibilityMode::LegacySip,
+    )
+    .await;
+    assert!(!media_transports_are_bundled(&h.test_a.pc));
+    assert!(!media_transports_are_bundled(&h.test_b.pc));
+    h.assert_relay(true);
+    assert!(
+        h.relay_video(&h.test_a, &h.test_b).await,
+        "B must receive A's VP8 video"
+    );
+    assert!(
+        h.relay_video(&h.test_b, &h.test_a).await,
+        "A must receive B's VP8 video"
+    );
+    h.close();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+}
+
 /// WebRTC (DTLS-SRTP) video relay: the same payload-type-aware rewrite relay
 /// must carry video over SRTP once ICE+DTLS complete, and the deferred relay
 /// arming (background task waiting for the SRTP transport) must come up.
@@ -959,8 +1032,18 @@ async fn fast_path_webrtc_h264_webrtc_h264_video_relay() {
         TransportMode::WebRtc,
         h264_caps(96),
         h264_caps(96),
+        SdpCompatibilityMode::Standard,
+        SdpCompatibilityMode::Standard,
     )
     .await;
+    assert!(
+        media_transports_are_bundled(&h.test_a.pc),
+        "WebRTC source must exercise a bundled audio/video transport"
+    );
+    assert!(
+        media_transports_are_bundled(&h.test_b.pc),
+        "WebRTC source B must exercise a bundled audio/video transport"
+    );
     h.assert_relay(true);
     assert!(
         h.relay_video(&h.test_a, &h.test_b).await,
@@ -974,9 +1057,9 @@ async fn fast_path_webrtc_h264_webrtc_h264_video_relay() {
     tokio::time::sleep(Duration::from_millis(80)).await;
 }
 
-/// Cross-transport video relay (browser → SIP phone): WebRTC leg to RTP leg.
-/// Exercises the SRTP→plaintext direction and `strip_extensions` (WebRTC
-/// extension headers must be stripped before the RTP peer sees them).
+/// Cross-transport BUNDLE ↔ non-BUNDLE video relay (browser ↔ SIP phone).
+/// Exercises optional video-target dispatch from the bundled WebRTC source,
+/// and two independent source bridges in the reverse RTP direction.
 #[tokio::test]
 async fn fast_path_webrtc_h264_rtp_h264_video_relay() {
     let mut h = create_video_harness(
@@ -984,8 +1067,18 @@ async fn fast_path_webrtc_h264_rtp_h264_video_relay() {
         TransportMode::Rtp,
         h264_caps(96),
         h264_caps(96),
+        SdpCompatibilityMode::Standard,
+        SdpCompatibilityMode::LegacySip,
     )
     .await;
+    assert!(
+        media_transports_are_bundled(&h.test_a.pc),
+        "WebRTC source must exercise a bundled audio/video transport"
+    );
+    assert!(
+        !media_transports_are_bundled(&h.test_b.pc),
+        "Legacy SIP RTP source must exercise separate audio/video transports"
+    );
     h.assert_relay(true);
     assert!(
         h.relay_video(&h.test_a, &h.test_b).await,
@@ -1008,6 +1101,8 @@ async fn video_codec_mismatch_degrades_to_audio_only() {
         TransportMode::Rtp,
         h264_caps(96),
         vp8_caps(98),
+        SdpCompatibilityMode::LegacySip,
+        SdpCompatibilityMode::LegacySip,
     )
     .await;
     h.assert_video_not_relayed().await;

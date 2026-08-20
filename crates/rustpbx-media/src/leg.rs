@@ -389,6 +389,20 @@ impl LegInner {
         *self.observer_task.lock() = Some(handle);
     }
 
+    /// Attach the existing ingress observer to transports created by a later
+    /// SDP update (notably a non-BUNDLE video transport added to an initially
+    /// audio-only call). `RtpTransport::add_observer` is idempotent for the
+    /// same observer, so transports that already existed are left with one
+    /// registration while the new video transport starts feeding SSRC/PT
+    /// tracking, recording, and statistics.
+    pub fn refresh_observer(&self) {
+        if self.observer_attached.load(Ordering::Acquire) {
+            self.pc.add_observer(self.tap.clone());
+        } else {
+            self.ensure_observer();
+        }
+    }
+
     /// Create a leg from a simplified [`LegConfig`] (builds the
     /// [`RtcConfiguration`] internally). Prefer [`Self::from_rtc_config`] when
     /// you already have a fully-configured `RtcConfiguration`.
@@ -451,9 +465,10 @@ impl LegInner {
 
     // ── SDP ──────────────────────────────────────────────────────────────
 
-    /// Create an offer SDP (as UAC). `prefer` reorders the codec preference
-    /// (use the peer leg's codecs to maximize same-codec relay).
-    pub async fn create_offer(&self) -> Result<String> {
+    /// Prepare an offer without committing it as the local description.
+    /// This lets SIP signaling obtain the peer's answer before moving the
+    /// PeerConnection out of `Stable`.
+    pub async fn prepare_offer(&self) -> Result<SessionDescription> {
         // rustrtc gathering pattern: first create_offer primes ICE gathering,
         // wait for candidates, then the second call includes them in the SDP.
         // RTP mode returns instantly; WebRTC/SRTP need the wait.
@@ -461,6 +476,12 @@ impl LegInner {
         self.pc.wait_for_gathering_complete().await;
         let mut offer = self.pc.create_offer().await?;
         self.advertise_relay_audio_ssrc(&mut offer);
+        Ok(offer)
+    }
+
+    /// Create and commit an offer SDP (as UAC).
+    pub async fn create_offer(&self) -> Result<String> {
+        let offer = self.prepare_offer().await?;
         let sdp = set_local(&self.pc, offer)?;
         debug!(
             leg = %self.id,
@@ -656,6 +677,9 @@ impl LegInner {
     /// other sources go to the always-alive [`EgressPipeline`].
     pub async fn set_egress_source(&self, source: EgressSource) -> Result<()> {
         let is_relay = matches!(&source, EgressSource::RewriteRelay { .. });
+        if let Some(previous) = self.relay_arm_task.lock().take() {
+            previous.abort();
+        }
         let prev_was_relay = self.was_relay.swap(is_relay, Ordering::SeqCst);
 
         match &source {
@@ -664,13 +688,14 @@ impl LegInner {
                 peer_pc,
                 options,
                 rules,
+                video_payload_types,
                 on_arm_failed,
             } => {
-                // The rewrite bridge needs both RTP transports ready (they are
-                // created during SDP negotiation / DTLS start). Block until
-                // they exist instead of proceeding and failing
-                // bridge_rtp_with_rewrite_rules, which previously left the relay
-                // un-armed with only a WARN in MediaBridge::accept.
+                // The rewrite bridge needs the exact per-kind sender
+                // transports, not merely PeerConnection's primary transport.
+                // In WebRTC mode the primary transport is created by
+                // start_dtls(), while sender.transport() is assigned later by
+                // setup_srtp() after DTLS/SRTP completes.
                 //
                 // Exception: a WebRTC peer's SRTP transport only exists after
                 // the remote has received our answer (200 OK) and completed
@@ -679,7 +704,6 @@ impl LegInner {
                 // defer the arming to a background task and return
                 // immediately. RTP-mode transports are created during SDP
                 // application and are ready synchronously.
-                let timeout = std::time::Duration::from_secs(2);
                 let has_webrtc_peer = self.pc.config().transport_mode == TransportMode::WebRtc
                     || peer_pc.config().transport_mode == TransportMode::WebRtc;
                 if has_webrtc_peer {
@@ -687,42 +711,34 @@ impl LegInner {
                     let peer = peer_pc.clone();
                     let options = options.clone();
                     let rules = rules.clone();
+                    let video_payload_types = video_payload_types.clone();
                     let on_arm_failed = on_arm_failed.clone();
                     let handle = tokio::spawn(async move {
-                        let result =
-                            tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                                pc.wait_for_rtp_transport_ready(timeout).await?;
-                                peer.wait_for_rtp_transport_ready(timeout).await?;
-                                pc.clear_rtp_rewrite_bridge();
-                                pc.bridge_rtp_with_rewrite_rules(&peer, options, &rules)?;
-                                Ok::<_, anyhow::Error>(())
-                            })
-                            .await;
-                        match result {
-                            Ok(Ok(())) => {}
-                            Ok(Err(_)) => {
-                                if let Some(cb) = on_arm_failed.as_ref() {
-                                    cb();
-                                }
-                            }
-                            Err(_) => {
-                                if let Some(cb) = on_arm_failed.as_ref() {
-                                    cb();
-                                }
+                        if let Err(error) = wait_and_arm_rewrite_relay(
+                            &pc,
+                            &peer,
+                            options,
+                            &rules,
+                            &video_payload_types,
+                        )
+                        .await
+                        {
+                            tracing::warn!(%error, "fast-path relay arming failed");
+                            if let Some(cb) = on_arm_failed.as_ref() {
+                                cb();
                             }
                         }
                     });
-                    // Replace any previous arming task: a stale task must not
-                    // arm a rewrite bridge on a PC we've since re-purposed.
-                    if let Some(prev) = self.relay_arm_task.lock().replace(handle) {
-                        prev.abort();
-                    }
+                    *self.relay_arm_task.lock() = Some(handle);
                 } else {
-                    self.pc.wait_for_rtp_transport_ready(timeout).await?;
-                    peer_pc.wait_for_rtp_transport_ready(timeout).await?;
-                    self.pc.clear_rtp_rewrite_bridge();
-                    self.pc
-                        .bridge_rtp_with_rewrite_rules(peer_pc, options.clone(), rules)?;
+                    wait_and_arm_rewrite_relay(
+                        &self.pc,
+                        peer_pc,
+                        *options,
+                        rules,
+                        video_payload_types,
+                    )
+                    .await?;
                 }
             }
             // Switching FROM RewriteRelay: tear the rewrite bridge down so the
@@ -912,6 +928,106 @@ impl Drop for LegInner {
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
+fn rtp_transport_for_kind(
+    pc: &PeerConnection,
+    kind: rustrtc::MediaKind,
+) -> Option<Arc<rustrtc::transports::rtp::RtpTransport>> {
+    pc.get_transceivers()
+        .into_iter()
+        .find(|transceiver| transceiver.kind() == kind)
+        .and_then(|transceiver| transceiver.sender())
+        .and_then(|sender| sender.transport())
+}
+
+const WEBRTC_RELAY_READY_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn wait_and_arm_rewrite_relay(
+    source_pc: &PeerConnection,
+    destination_pc: &PeerConnection,
+    options: rustrtc::RtpRewriteBridgeOptions,
+    rules: &[rustrtc::RtpRewriteRule],
+    video_payload_types: &[u8],
+) -> Result<()> {
+    let webrtc_pc = if source_pc.config().transport_mode == TransportMode::WebRtc {
+        Some(source_pc)
+    } else if destination_pc.config().transport_mode == TransportMode::WebRtc {
+        Some(destination_pc)
+    } else {
+        None
+    };
+
+    if let Some(pc) = webrtc_pc {
+        tokio::time::timeout(WEBRTC_RELAY_READY_TIMEOUT, pc.wait_for_connected())
+            .await
+            .map_err(|_| anyhow!("timed out waiting for WebRTC DTLS/SRTP setup"))??;
+    }
+
+    let audio_source = rtp_transport_for_kind(source_pc, rustrtc::MediaKind::Audio)
+        .ok_or_else(|| anyhow!("source audio RTP transport missing"))?;
+    let audio_target = rtp_transport_for_kind(destination_pc, rustrtc::MediaKind::Audio)
+        .ok_or_else(|| anyhow!("destination audio RTP transport missing"))?;
+
+    if video_payload_types.is_empty() {
+        // Audio-only relay: remove any stale routes from an earlier
+        // negotiation, then install the single audio route.
+        source_pc.clear_rtp_rewrite_bridge();
+        audio_source.bridge_rewrite_rules_to(audio_target, options, rules.to_vec());
+        debug!(video = false, "fast-path relay armed");
+        return Ok(());
+    }
+
+    // Resolve both video transports before clearing the old routes. A missing
+    // late WebRTC video transport must not tear down working audio.
+    let video_source = rtp_transport_for_kind(source_pc, rustrtc::MediaKind::Video)
+        .ok_or_else(|| anyhow!("source video RTP transport missing"))?;
+    let video_target = rtp_transport_for_kind(destination_pc, rustrtc::MediaKind::Video)
+        .ok_or_else(|| anyhow!("destination video RTP transport missing"))?;
+
+    source_pc.clear_rtp_rewrite_bridge();
+
+    if Arc::ptr_eq(&audio_source, &video_source) {
+        // BUNDLE source: one receive loop handles both media kinds. Only a
+        // non-BUNDLE destination needs the optional video dispatch target.
+        let destination_is_non_bundle = !Arc::ptr_eq(&audio_target, &video_target);
+        debug!(
+            source_bundle = true,
+            destination_bundle = !destination_is_non_bundle,
+            video_payload_types = ?video_payload_types,
+            "arming bundled RTP rewrite bridge"
+        );
+        let separate_video_target = destination_is_non_bundle.then_some(video_target);
+        audio_source.bridge_rewrite_rules_to_with_video(
+            audio_target,
+            separate_video_target,
+            video_payload_types.iter().copied().collect(),
+            options,
+            rules.to_vec(),
+        );
+    } else {
+        // Non-BUNDLE source: audio and video have independent receive loops,
+        // so install one ordinary one-target bridge on each source transport.
+        let (video_rules, audio_rules): (Vec<_>, Vec<_>) = rules
+            .iter()
+            .cloned()
+            .partition(|rule| {
+                rule.match_payload_type
+                    .is_some_and(|pt| video_payload_types.contains(&pt))
+            });
+        debug!(
+            source_bundle = false,
+            destination_bundle = Arc::ptr_eq(&audio_target, &video_target),
+            audio_rules = audio_rules.len(),
+            video_rules = video_rules.len(),
+            "arming separate audio/video RTP rewrite bridges"
+        );
+        audio_source.bridge_rewrite_rules_to(audio_target, options, audio_rules);
+        video_source.bridge_rewrite_rules_to(video_target, options, video_rules);
+    }
+
+    debug!(video = true, "fast-path relay armed");
+    Ok(())
+}
+
 fn build_rtc_config(cfg: &LegConfig) -> RtcConfiguration {
     let sdp_compatibility = match cfg.transport {
         rustrtc::TransportMode::WebRtc => rustrtc::config::SdpCompatibilityMode::Standard,
@@ -1015,6 +1131,40 @@ pub fn sender_ssrc_for_kind(pc: &PeerConnection, kind: rustrtc::MediaKind) -> u3
         .unwrap_or(0)
 }
 
+/// Ensure an idle video sender exists for a video m-line introduced by a
+/// re-INVITE. Audio-only legs have no video transceiver/sender at call setup;
+/// after the remote offer creates the receiver transceiver, adding this dummy
+/// sender reuses it, allocates the SSRC advertised in the answer, and gives the
+/// fast-path relay a destination transport. The track itself remains idle —
+/// relayed RTP bypasses it. Transceiver direction remains owned by SDP
+/// negotiation in `PeerConnection`.
+pub fn ensure_video_sender_for_pc(
+    pc: &PeerConnection,
+    capability: &rustrtc::config::VideoCapability,
+) -> Result<()> {
+    let params = RtpCodecParameters {
+        payload_type: capability.payload_type,
+        name: capability.codec_name.clone(),
+        clock_rate: capability.clock_rate,
+        channels: 0,
+    };
+
+    if let Some(transceiver) = pc
+        .get_transceivers()
+        .into_iter()
+        .find(|transceiver| transceiver.kind() == rustrtc::MediaKind::Video)
+    {
+        if let Some(sender) = transceiver.sender() {
+            sender.set_params(params);
+            return Ok(());
+        }
+    }
+
+    let (_, video_track, _) = sample_track(MediaKind::Video, 8);
+    pc.add_track(video_track, params)?;
+    Ok(())
+}
+
 fn distinct_relay_audio_ssrc(pc: &PeerConnection) -> u32 {
     let sender_ssrcs: Vec<u32> = pc
         .get_transceivers()
@@ -1039,6 +1189,37 @@ fn sender_ssrc(pc: &PeerConnection) -> u32 {
 mod tests {
     use super::*;
 
+    async fn test_rtp_transport() -> Arc<rustrtc::transports::rtp::RtpTransport> {
+        use rustrtc::transports::ice::IceSocketWrapper;
+        use rustrtc::transports::ice::conn::IceConn;
+        use tokio::net::UdpSocket;
+        use tokio::sync::watch;
+
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("bind UDP"));
+        let (_socket_tx, socket_rx) = watch::channel(Some(IceSocketWrapper::Udp(socket)));
+        let connection = IceConn::new(
+            socket_rx,
+            "127.0.0.1:9".parse().expect("remote address"),
+            None,
+        );
+        Arc::new(rustrtc::transports::rtp::RtpTransport::new(
+            connection, false,
+        ))
+    }
+
+    fn set_test_sender_transport(
+        pc: &PeerConnection,
+        kind: rustrtc::MediaKind,
+        transport: Arc<rustrtc::transports::rtp::RtpTransport>,
+    ) {
+        pc.get_transceivers()
+            .into_iter()
+            .find(|transceiver| transceiver.kind() == kind)
+            .and_then(|transceiver| transceiver.sender())
+            .expect("sender for media kind")
+            .set_transport(transport);
+    }
+
     fn audio_ssrc_suffixes(sdp: &str, ssrc: u32) -> Vec<String> {
         let desc = SessionDescription::parse(SdpType::Offer, sdp).expect("parse local SDP");
         let prefix = format!("{} ", ssrc);
@@ -1053,6 +1234,77 @@ mod tests {
             .filter_map(|value| value.strip_prefix(&prefix))
             .map(str::to_string)
             .collect()
+    }
+
+    #[tokio::test]
+    async fn relay_arming_requires_both_video_transports() {
+        let mut config = LegConfig::rtp_pcmu();
+        config.video_codecs = vec![rustrtc::config::VideoCapability::default()];
+        let source = LegInner::new("relay-source", &config, None).expect("source leg");
+        let target = LegInner::new("relay-target", &config, None).expect("target leg");
+
+        let source_audio = test_rtp_transport().await;
+        let target_audio = test_rtp_transport().await;
+        set_test_sender_transport(
+            source.pc(),
+            rustrtc::MediaKind::Audio,
+            source_audio.clone(),
+        );
+        set_test_sender_transport(
+            target.pc(),
+            rustrtc::MediaKind::Audio,
+            target_audio.clone(),
+        );
+
+        let missing_video = wait_and_arm_rewrite_relay(
+            source.pc(),
+            target.pc(),
+            Default::default(),
+            &[],
+            &[96],
+        )
+        .await;
+        assert!(missing_video.is_err(), "video transports must be required");
+
+        let source_video = test_rtp_transport().await;
+        set_test_sender_transport(
+            source.pc(),
+            rustrtc::MediaKind::Video,
+            source_video.clone(),
+        );
+
+        let missing_target_video = wait_and_arm_rewrite_relay(
+            source.pc(),
+            target.pc(),
+            Default::default(),
+            &[],
+            &[96],
+        )
+        .await;
+        assert!(
+            missing_target_video.is_err(),
+            "target video transport must be required"
+        );
+
+        let target_video = test_rtp_transport().await;
+        set_test_sender_transport(
+            target.pc(),
+            rustrtc::MediaKind::Video,
+            target_video.clone(),
+        );
+
+        wait_and_arm_rewrite_relay(
+            source.pc(),
+            target.pc(),
+            Default::default(),
+            &[],
+            &[96],
+        )
+        .await
+        .expect("relay should arm once all transports are ready");
+
+        source.stop();
+        target.stop();
     }
 
     #[tokio::test]
@@ -1244,11 +1496,9 @@ mod tests {
 
     #[tokio::test]
     async fn leg_with_video_caps_emits_video_mline_with_ssrc() {
-        // A leg configured with H264+VP8 video capabilities must include a
-        // video m-line in its offer carrying both codecs AND an `a=ssrc`
-        // attribute. The a=ssrc is what lets the remote browser demux relayed
-        // video immediately instead of waiting out the 2–3 s unsignaled-SSRC
-        // demux timeout.
+        // A leg configured from a peer-offered H264 capability must carry that
+        // codec. The `a=ssrc` lets the remote browser demux relayed video
+        // immediately instead of waiting out the 2–3 s unsignaled-SSRC timeout.
         let cfg = LegConfig {
             transport: TransportMode::WebRtc,
             codecs: vec![CodecInfo {
@@ -1258,7 +1508,7 @@ mod tests {
                 channels: 2,
                 fmtp: None,
             }],
-            video_codecs: negotiate::MediaNegotiator::default_video_codecs(),
+            video_codecs: negotiate::tests::test_video_codecs(),
             rtp_port_range: None,
             external_ip: None,
             bind_ip: None,
@@ -1279,11 +1529,7 @@ mod tests {
             "offer lacks H264 rtpmap:\n{}",
             offer
         );
-        assert!(
-            offer.contains("rtpmap:98 VP8/90000"),
-            "offer lacks VP8 rtpmap:\n{}",
-            offer
-        );
+        assert!(!offer.contains("VP8/90000"));
         assert!(
             offer.contains("a=ssrc:"),
             "offer lacks any a=ssrc:\n{}",
@@ -1316,7 +1562,7 @@ mod tests {
                 channels: 2,
                 fmtp: None,
             }],
-            video_codecs: negotiate::MediaNegotiator::default_video_codecs(),
+            video_codecs: negotiate::tests::test_video_codecs(),
             rtp_port_range: None,
             external_ip: None,
             bind_ip: None,
@@ -1363,6 +1609,11 @@ mod tests {
         assert!(
             answer.contains("rtpmap:96 H264/90000"),
             "answer lacks H264 rtpmap:\n{}",
+            answer
+        );
+        assert!(
+            !answer.contains("VP8/90000"),
+            "answer must apply the H264-only policy:\n{}",
             answer
         );
         assert!(

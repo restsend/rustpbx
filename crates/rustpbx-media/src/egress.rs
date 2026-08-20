@@ -82,6 +82,9 @@ pub enum EgressSource {
         peer_pc: PeerConnection,
         options: RtpRewriteBridgeOptions,
         rules: Vec<RtpRewriteRule>,
+        /// Original video PTs received from this source leg. These distinguish
+        /// video only when a bundled source must fan out to a separate target.
+        video_payload_types: Vec<u8>,
         on_arm_failed: Option<Arc<dyn Fn() + Send + Sync>>,
     },
     /// Emit silence frames (mute / hold placeholder / idle).
@@ -786,6 +789,7 @@ mod tests {
                 peer_pc: peer_pc.clone(),
                 options: RtpRewriteBridgeOptions::default(),
                 rules: Vec::new(),
+                video_payload_types: Vec::new(),
                 on_arm_failed: None,
             },
             Some(20),
@@ -825,6 +829,7 @@ mod tests {
             peer_pc: peer_pc.clone(),
             options: RtpRewriteBridgeOptions::default(),
             rules: Vec::new(),
+            video_payload_types: Vec::new(),
             on_arm_failed: None,
         })
         .await
