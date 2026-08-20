@@ -149,14 +149,41 @@ def _artifact_root() -> Path:
 
 ARTIFACT_ROOT = _artifact_root()
 RWI_TOKEN = os.environ.get("RUSTPBX_RWI_TOKEN", "test-api-key-e2e")
-DEFAULT_ADDONS = os.environ.get("RUSTPBX_E2E_ADDONS", "cc").split(",")
+
+
+def _parse_addon_list(raw: str) -> list[str]:
+    return [a.strip() for a in raw.split(",") if a.strip()]
+
+
+# Default runtime addons for the PBX fixture. Keep this to CC-core routing
+# (file-based IVR/queue/p2p). Do NOT put wholesale here: WholesaleRouteInvite
+# replaces DefaultRouteInvite and returns NotHandled for non-wholesale trunks,
+# which makes every IVR/queue/app route look like "user offline" (480).
+# Wholesale / SBC / voicemail tests opt in via ConfigBuilder.set_wholesale(),
+# add_sbc_jsonrpc(), add_voicemail().
+_raw_addons = os.environ.get("RUSTPBX_E2E_ADDONS", "cc")
+DEFAULT_ADDONS = _parse_addon_list(_raw_addons)
+if "wholesale" in DEFAULT_ADDONS:
+    logger.warning(
+        "RUSTPBX_E2E_ADDONS includes 'wholesale' (%r); stripping it from the "
+        "default fixture. Wholesale routing replaces file-based routes and "
+        "breaks IVR/queue/p2p. Wholesale tests call set_wholesale() themselves. "
+        "Use: ./run.sh wholesale  (or ./run.sh scenarios).",
+        _raw_addons,
+    )
+    DEFAULT_ADDONS = [a for a in DEFAULT_ADDONS if a != "wholesale"]
+if not DEFAULT_ADDONS:
+    DEFAULT_ADDONS = ["cc"]
+
 # The full-featured binary is built once (see `FULL_E2E_FEATURES` in
 # helpers.pbx_server) and reused by every session/worker, so no per-run build
 # is needed and no feature plumbing is required beyond that.
-DEFAULT_FEATURES = os.environ.get(
-    "RUSTPBX_E2E_FEATURES",
-    "addon-cc,addon-sbc,addon-voicemail,addon-wholesale",
-).split(",")
+DEFAULT_FEATURES = _parse_addon_list(
+    os.environ.get(
+        "RUSTPBX_E2E_FEATURES",
+        "addon-cc,addon-sbc,addon-voicemail,addon-wholesale",
+    )
+)
 
 
 @pytest.fixture(scope="session", autouse=True)

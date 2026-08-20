@@ -45,13 +45,30 @@ Both suites spawn `sipbot` as a subprocess (the external CLI) and drive a real
 ```bash
 cd e2e
 python3 -m pip install -r requirements.txt
-./run.sh                  # all tests
-./run.sh fast             # everything except `slow`-marked tests
-./run.sh p2p              # p2p-marked tests
+./run.sh                  # recommended: scenarios (core then wholesale)
+./run.sh scenarios        # same as above — separated addon scenarios
+./run.sh core             # CC-core file routes: IVR/queue/p2p/... (no wholesale)
+./run.sh wholesale        # wholesale billing only (opt-in via set_wholesale)
+./run.sh fast             # core, excluding `slow`
+./run.sh p2p              # p2p-marked tests (still CC-core addons)
 ./run.sh -m "queue or ivr"
-./run.sh all -- -n 2      # forward extra pytest args (e.g. -n for xdist; PBX uses fixed ports so keep `-n 1`)
+./run.sh all -- -n 2      # single session; keep `-n 1` when PBX uses fixed ports
 ```
-Runs default to `--tb=short --durations=15` and write an HTML report to `$RUSTPBX_E2E_REPORT_DIR/index.html` when `pytest-html` is installed.
+
+**Do not** put `wholesale` in `RUSTPBX_E2E_ADDONS` for core/IVR runs.
+`WholesaleRouteInvite` replaces default file routing; IVR/queue then fail with
+SIP 480 (user offline). Wholesale tests call `ConfigBuilder.set_wholesale()`
+themselves — use `./run.sh wholesale` or `./run.sh scenarios`.
+
+Full multi-suite regression (cargo + core + wholesale + CC e2e-regression):
+
+```bash
+./scripts/run_full_regression.sh
+./scripts/run_full_regression.sh --only core
+```
+
+Runs default to `--tb=short --durations=15` and write an HTML report under
+`$RUSTPBX_E2E_REPORT_DIR/` when `pytest-html` is installed.
 
 Feature areas (pytest markers): `p2p`, `queue`, `ivr`, `cdr`, `record`,
 `sipflow`, `voicemail`, `wholesale`, `http_router`, `sbc`.
@@ -60,7 +77,7 @@ Requirements:
 1. `rustpbx` built with community addons: `cargo build --features "addon-cc addon-sbc addon-voicemail addon-wholesale"` (the suite also builds it automatically on first run).
 2. `sipbot` installed: `cargo install sipbot`.
 
-Env overrides: `RUSTPBX_E2E_ADDONS`, `RUSTPBX_SIP_PORT` (15070),
+Env overrides: `RUSTPBX_E2E_ADDONS` (core only; default `cc`), `RUSTPBX_SIP_PORT` (15070),
 `RUSTPBX_HTTP_PORT` (18080), `RUSTPBX_E2E_REPORT_DIR`.
 
 ## CC e2e-regression suite
