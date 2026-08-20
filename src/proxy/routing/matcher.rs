@@ -586,6 +586,14 @@ async fn match_invite_impl(
                 if queue_plan.label.is_none() {
                     queue_plan.label = Some(queue_ref.clone());
                 }
+                // The queue file keeps `name` at the top level (outside the
+                // `[queue]` section), so `QueueConfig.name` is empty and the
+                // plan's queue_name would be lost. Fill it from the route ref
+                // so downstream consumers (CC queue-location enricher → UUI
+                // short codes) see the real queue id.
+                if queue_plan.queue_name.is_empty() {
+                    queue_plan.queue_name = queue_ref.clone();
+                }
                 let needs_trunk = queue_plan.dial_strategy.is_none();
                 if needs_trunk {
                     let dest_config = rule.action.dest.as_ref().ok_or_else(|| {

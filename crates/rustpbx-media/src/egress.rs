@@ -112,6 +112,10 @@ pub enum EgressSource {
         source_audio_payload_type: u8,
         /// Source codec sample rate (for auto-resampling to `EgressCodec`).
         src_sample_rate: u32,
+        /// Once the first real audio frame has been decoded, timeouts fall
+        /// back to comfort-noise / PLC silence. Before that we emit nothing
+        /// so ICE/DTLS setup does not inflate the callee's silence_frames.
+        primed: bool,
     },
 }
 
@@ -427,7 +431,14 @@ impl EgressTask {
             } => {
                 let n = audio.read_samples(&mut self.pcm_buf);
                 let encoded: Bytes = if n == 0 {
-                    if *loop_playback {
+                    if !audio.has_data() {
+                        // True EOF (file ended / channel sender dropped + drained).
+                        if let Some(cb) = on_end.take() {
+                            cb(false);
+                        }
+                        source = EgressSource::Silence;
+                        self.encode_silence().into()
+                    } else if *loop_playback {
                         let _ = audio.reset();
                         let n2 = audio.read_samples(&mut self.pcm_buf);
                         if n2 == 0 {
@@ -436,10 +447,8 @@ impl EgressTask {
                             self.encoder.encode(&self.pcm_buf[..n2]).into()
                         }
                     } else {
-                        if let Some(cb) = on_end.take() {
-                            cb(false);
-                        }
-                        source = EgressSource::Silence;
+                        // Live source underrun (e.g. ChannelAudioSource between
+                        // WS chunks) — keep cadence with CNG, do not EOF.
                         self.encode_silence().into()
                     }
                 } else {
@@ -467,11 +476,13 @@ impl EgressTask {
                 peer,
                 decoder,
                 source_audio_payload_type,
+                primed,
                 ..
             } => {
                 // Wait up to one ptime for the next frame from the peer's
-                // receiver track. On timeout/error emit silence to keep cadence
-                // (the remote decoder's PLC handles the gap).
+                // receiver track. Before the first real audio frame, skip the
+                // tick entirely (ICE/DTLS setup). After priming, timeouts
+                // emit comfort-noise so the remote PLC covers gaps.
                 match tokio::time::timeout(self.ptime, peer.recv()).await {
                     Ok(Ok(MediaSample::Audio(input)))
                         if input
@@ -483,6 +494,7 @@ impl EgressTask {
                             pcm = rs.resample(&pcm);
                         }
                         let encoded: Bytes = self.encoder.encode(&pcm).into();
+                        *primed = true;
                         self.build_frame(encoded)
                     }
                     Ok(Ok(MediaSample::Audio(input))) => {
@@ -492,7 +504,14 @@ impl EgressTask {
                             "transcode: non-audio PT frame (telephone-event?)"
                         );
                         match self.build_dtmf_frame(&input) {
-                            Some(frame) => frame,
+                            Some(frame) => {
+                                *primed = true;
+                                frame
+                            }
+                            None if !*primed => {
+                                self.source = source;
+                                return None;
+                            }
                             None => {
                                 let encoded = self.encode_silence();
                                 self.build_frame(encoded)
@@ -500,16 +519,32 @@ impl EgressTask {
                         }
                     }
                     Ok(Err(e)) => {
+                        if !*primed {
+                            tracing::debug!(error = %e, "transcode: peer.recv() error before first audio");
+                            self.source = source;
+                            return None;
+                        }
                         tracing::debug!(error = %e, "transcode: peer.recv() error, emitting silence");
                         let encoded = self.encode_silence();
                         self.build_frame(encoded)
                     }
                     Err(_) => {
+                        if !*primed {
+                            tracing::trace!(
+                                "transcode: peer.recv() timeout before first audio, skipping tick"
+                            );
+                            self.source = source;
+                            return None;
+                        }
                         tracing::trace!(
-                            "transcode: peer.recv() timeout (no audio yet), emitting silence"
+                            "transcode: peer.recv() timeout, emitting silence"
                         );
                         let encoded = self.encode_silence();
                         self.build_frame(encoded)
+                    }
+                    _ if !*primed => {
+                        self.source = source;
+                        return None;
                     }
                     _ => {
                         let encoded = self.encode_silence();
@@ -1002,6 +1037,7 @@ mod tests {
                 decoder: audio_codec::create_decoder(CodecType::Opus),
                 source_audio_payload_type: 111,
                 src_sample_rate: 48_000,
+                primed: true,
             },
             resampler: Some(Resampler::new(48_000, 8000)),
             ptime: Duration::from_millis(20),

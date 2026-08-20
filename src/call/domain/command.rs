@@ -358,6 +358,13 @@ pub enum CallCommand {
         target: String,
         /// Optional leg ID (auto-generated if not provided)
         leg_id: Option<LegId>,
+        /// Extra SIP headers (name, value) to inject into the outgoing INVITE
+        /// (e.g. CC `Call-Info` / `User-to-User` screen-pop context from the
+        /// queue location enricher). Kept as plain pairs because `rsipstack`
+        /// headers are not serde-serializable and `CallCommand` is serialized
+        /// for cluster forwarding.
+        #[serde(default)]
+        headers: Vec<(String, String)>,
     },
 
     /// Remove a leg from the session

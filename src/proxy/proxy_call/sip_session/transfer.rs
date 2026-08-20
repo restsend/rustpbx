@@ -29,6 +29,7 @@ async fn wait_for_bridge_disconnect(
     bridge_cancel: tokio_util::sync::CancellationToken,
     mut forward_handle: tokio::task::JoinHandle<()>,
     mut reverse_handle: tokio::task::JoinHandle<()>,
+    mut pcm_ended_rx: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> bool {
     enum CompletedTask {
         Session,
@@ -43,17 +44,27 @@ async fn wait_for_bridge_disconnect(
         _ = &mut reverse_handle => CompletedTask::Reverse,
     };
 
-    bridge_cancel.cancel();
     match completed {
         CompletedTask::Session => {
+            bridge_cancel.cancel();
             let _ = forward_handle.await;
             let _ = reverse_handle.await;
         }
         CompletedTask::Forward => {
+            // Drain ChannelAudioSource before cancelling reverse so return-app
+            // does not cut off the PCM tail / leave a CNG gap in recordings.
+            if let Some(rx) = pcm_ended_rx.take() {
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await;
+            }
+            bridge_cancel.cancel();
             let _ = reverse_handle.await;
         }
         CompletedTask::Reverse => {
+            bridge_cancel.cancel();
             let _ = forward_handle.await;
+            if let Some(rx) = pcm_ended_rx.take() {
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await;
+            }
         }
     }
     !session_cancel.is_cancelled()
@@ -934,6 +945,9 @@ impl SipSession {
     ) -> Result<()> {
         let ivr_file = self.server.data_context.resolve_ivr_file(ivr_name).await;
         info!(session_id = %self.id, ivr = %ivr_name, file = %ivr_file, "Starting IVR application");
+        // Remember the IVR short code so a later queue dispatch can inject
+        // `User-to-User` `ivr=` (desk_rustpbx.md §3.2).
+        self.session_ext_set("ivr", ivr_name);
         let mut app_params = serde_json::json!({"file": ivr_file});
         if !query_params.is_empty() {
             app_params["ivr_params"] = serde_json::json!(query_params);
@@ -1043,6 +1057,7 @@ impl SipSession {
         // channel source — the leg's egress pipeline encodes to the negotiated
         // codec (same "filetrack" mode as play_file).
         let ws_sample_rate = if sample_rate == 0 { 8000 } else { sample_rate };
+        let mut pcm_ended_rx: Option<tokio::sync::oneshot::Receiver<()>> = None;
         if forward_sink.is_none() || pc.is_none() {
             if let Some(mb) = self.media.bridge.as_ref()
                 && let Some(leg) = mb.leg(crate::media::media_bridge::LegSide::A)
@@ -1050,11 +1065,28 @@ impl SipSession {
                 info!(session_id = %self.id, %leg_id, rate = ws_sample_rate,
                     "Bridge sourcing caller media from MediaBridge A leg (raw PCM channel)");
                 if forward_sink.is_none() {
+                    let (end_tx, end_rx) = tokio::sync::oneshot::channel();
+                    let end_tx = std::sync::Mutex::new(Some(end_tx));
+                    let on_end: crate::media::egress::EgressEndCallback =
+                        std::sync::Arc::new(move |_interrupted| {
+                            if let Ok(mut slot) = end_tx.lock() {
+                                if let Some(tx) = slot.take() {
+                                    let _ = tx.send(());
+                                }
+                            }
+                        });
                     match mb
-                        .bridge_play_pcm(crate::media::media_bridge::LegSide::A, ws_sample_rate)
+                        .bridge_play_pcm(
+                            crate::media::media_bridge::LegSide::A,
+                            ws_sample_rate,
+                            Some(on_end),
+                        )
                         .await
                     {
-                        Ok(tx) => forward_sink = Some(BridgeForwardSink::Pcm(tx)),
+                        Ok(tx) => {
+                            forward_sink = Some(BridgeForwardSink::Pcm(tx));
+                            pcm_ended_rx = Some(end_rx);
+                        }
                         Err(e) => warn!(session_id = %self.id, %leg_id, error = %e,
                             "Failed to set up raw PCM channel for bridge forward"),
                     }
@@ -1403,6 +1435,7 @@ impl SipSession {
                 cancel_token,
                 forward_handle,
                 reverse_handle,
+                pcm_ended_rx,
             )
             .await;
             if bridge_disconnected
@@ -1717,7 +1750,7 @@ mod tests {
 
         let disconnected = tokio::time::timeout(
             Duration::from_secs(1),
-            wait_for_bridge_disconnect(session_cancel, bridge_cancel, forward, reverse),
+            wait_for_bridge_disconnect(session_cancel, bridge_cancel, forward, reverse, None),
         )
         .await
         .expect("bridge monitor must cancel the blocked peer task");

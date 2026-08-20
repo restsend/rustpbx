@@ -1520,6 +1520,7 @@ impl RwiCommandProcessor {
             .send_command(CallCommand::LegAdd {
                 target: target.to_string(),
                 leg_id: leg_id_opt,
+                headers: Vec::new(),
             })
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
 

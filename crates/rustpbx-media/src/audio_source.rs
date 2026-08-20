@@ -375,35 +375,63 @@ impl AudioSource for SilenceSource {
 /// The sender (bridge forward loop) pushes chunks of arbitrary size; the
 /// egress pipeline reads at its own 20 ms cadence.
 ///
-/// When the channel is momentarily empty (sender still alive) the source
-/// returns 0.  With `loop_playback=true` on the leg, the egress's
-/// `encode_silence` path takes over — emitting comfort-noise (CNG) for
-/// codecs that support it — so the caller experiences smooth continuity
-/// instead of dead-silence gaps.
+/// Chunks larger than one egress frame are buffered in `remainder` so tails
+/// are never dropped. When the sender is dropped and the buffer is empty,
+/// [`AudioSource::has_data`] becomes false so the egress can EOF (with
+/// `loop_playback=false`) instead of emitting comfort-noise forever.
 pub struct ChannelAudioSource {
     rx: parking_lot::Mutex<mpsc::Receiver<Vec<i16>>>,
+    remainder: Vec<i16>,
     rate: u32,
+    disconnected: bool,
 }
 
 impl ChannelAudioSource {
     pub fn new(rx: mpsc::Receiver<Vec<i16>>, sample_rate: u32) -> Self {
         Self {
             rx: parking_lot::Mutex::new(rx),
+            remainder: Vec::new(),
             rate: sample_rate,
+            disconnected: false,
+        }
+    }
+
+    fn pull_into_remainder(&mut self) {
+        if self.disconnected {
+            return;
+        }
+        match self.rx.lock().try_recv() {
+            Ok(chunk) => {
+                if self.remainder.is_empty() {
+                    self.remainder = chunk;
+                } else {
+                    self.remainder.extend_from_slice(&chunk);
+                }
+            }
+            Err(mpsc::error::TryRecvError::Empty) => {}
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                self.disconnected = true;
+            }
         }
     }
 }
 
 impl AudioSource for ChannelAudioSource {
     fn read_samples(&mut self, buffer: &mut [i16]) -> usize {
-        match self.rx.lock().try_recv() {
-            Ok(chunk) => {
-                let n = chunk.len().min(buffer.len());
-                buffer[..n].copy_from_slice(&chunk[..n]);
-                n
-            }
-            Err(_) => 0,
+        if self.remainder.is_empty() {
+            self.pull_into_remainder();
         }
+        if self.remainder.is_empty() {
+            return 0;
+        }
+        let n = self.remainder.len().min(buffer.len());
+        buffer[..n].copy_from_slice(&self.remainder[..n]);
+        self.remainder.drain(..n);
+        // Opportunistically pull more while the sender is ahead of us.
+        if self.remainder.is_empty() {
+            self.pull_into_remainder();
+        }
+        n
     }
 
     fn sample_rate(&self) -> u32 {
@@ -414,10 +442,7 @@ impl AudioSource for ChannelAudioSource {
     }
 
     fn has_data(&self) -> bool {
-        // Always true: the source is "alive" as long as the sender exists.
-        // EOF is signalled by read_samples→0 at the bottom of the egress
-        // next_frame, and loop_playback=true keeps the source active (CNG).
-        true
+        !self.remainder.is_empty() || !self.disconnected
     }
 
     fn reset(&mut self) -> Result<()> {
@@ -1242,7 +1267,7 @@ mod tests {
         let mut buf = vec![0i16; 160];
         let n = src.read_samples(&mut buf);
         assert_eq!(n, 0, "empty channel → 0 (egress uses CNG)");
-        assert!(src.has_data());
+        assert!(src.has_data(), "sender still alive → has_data");
     }
 
     #[test]
@@ -1268,6 +1293,9 @@ mod tests {
         let n = src.read_samples(&mut buf);
         assert_eq!(n, 0);
         drop(tx);
+        let n = src.read_samples(&mut buf);
+        assert_eq!(n, 0);
+        assert!(!src.has_data(), "sender dropped + empty → EOF");
     }
 
     #[test]
@@ -1290,6 +1318,27 @@ mod tests {
     }
 
     #[test]
+    fn channel_source_remainder_preserves_oversized_chunk() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<i16>>(64);
+        let mut src = ChannelAudioSource::new(rx, 8000);
+        let mut buf = vec![0i16; 160];
+        // One 320-sample chunk must become two 160-sample reads (no drop).
+        let mut big = vec![9i16; 320];
+        big[160] = 8;
+        tx.try_send(big).unwrap();
+        drop(tx);
+        let n = src.read_samples(&mut buf);
+        assert_eq!(n, 160);
+        assert_eq!(buf[0], 9);
+        let n = src.read_samples(&mut buf);
+        assert_eq!(n, 160);
+        assert_eq!(buf[0], 8);
+        let n = src.read_samples(&mut buf);
+        assert_eq!(n, 0);
+        assert!(!src.has_data());
+    }
+
+    #[test]
     fn channel_source_disconnected_returns_zero() {
         let (tx, rx) = tokio::sync::mpsc::channel::<Vec<i16>>(64);
         let mut src = ChannelAudioSource::new(rx, 8000);
@@ -1301,6 +1350,7 @@ mod tests {
         assert_eq!(buf[0], 1);
         let n = src.read_samples(&mut buf);
         assert_eq!(n, 0);
+        assert!(!src.has_data());
     }
 }
 
