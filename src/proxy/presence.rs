@@ -987,20 +987,45 @@ impl PresenceModule {
             .and_then(|h| h.value().parse::<u32>().ok())
             .unwrap_or(3600);
 
-        // Confirm the dialog so subsequent NOTIFY requests are allowed.
-        // `accept` also sends the 200 OK via the transaction unit.
-        if let Err(e) = dialog.accept(None, None) {
-            warn!(error = %e, "Failed to accept presence SUBSCRIBE; falling back to tx.reply");
-            tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
-        }
-
         let dialog_id = dialog.id().clone();
-        self.spawn_subscription_guard(
-            state_rx,
-            dialog_id.clone(),
-            false,
-            dialog.cancel_token().clone(),
-        );
+        if matches!(dialog.state(), DialogState::Calling(_)) {
+            // Confirm the dialog so subsequent NOTIFY requests are allowed.
+            // `accept` also sends the 200 OK via the transaction unit.
+            if let Err(e) = dialog.accept(None, None) {
+                warn!(error = %e, "Failed to accept presence SUBSCRIBE; falling back to tx.reply");
+                tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
+            } else {
+                tx.receive().await;
+            }
+            // The fresh state channel is only wired into a newly created
+            // dialog; on an in-dialog refresh it is dropped, and a guard
+            // spawned here would prune the live subscription.
+            self.spawn_subscription_guard(
+                state_rx,
+                dialog_id.clone(),
+                false,
+                dialog.cancel_token().clone(),
+            );
+        } else {
+            // In-dialog refresh or unsubscribe: reply on the current
+            // transaction; the initial guard still owns this dialog.
+            let reply = tx.reply(rsipstack::sip::StatusCode::OK).await;
+            if let Err(error) = reply {
+                if expires == 0
+                    && matches!(
+                        &error,
+                        rsipstack::Error::Error(message) if message == "channel closed"
+                    )
+                {
+                    debug!(
+                        identity,
+                        "SUBSCRIBE termination completed after the client transport closed"
+                    );
+                } else {
+                    return Err(error.into());
+                }
+            }
+        }
 
         if expires == 0 {
             // Explicit unsubscribe: drop any prior bindings for this watcher.
@@ -1272,18 +1297,24 @@ impl PresenceModule {
             .get_or_create_server_subscription(tx, state_tx, None, None)
             .map_err(|e| anyhow!("{:?}", e))?;
 
-        if let Err(e) = dialog.accept(None, None) {
-            warn!(error = %e, "Failed to accept MWI SUBSCRIBE; falling back to tx.reply");
+        let dialog_id = dialog.id().clone();
+        if matches!(dialog.state(), DialogState::Calling(_)) {
+            if let Err(e) = dialog.accept(None, None) {
+                warn!(error = %e, "Failed to accept MWI SUBSCRIBE; falling back to tx.reply");
+                tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
+            }
+            // Guard only newly created dialogs; on an in-dialog refresh the
+            // fresh state channel is dropped (see handle_subscribe).
+            self.spawn_subscription_guard(
+                state_rx,
+                dialog_id.clone(),
+                true,
+                dialog.cancel_token().clone(),
+            );
+        } else {
+            // In-dialog refresh or unsubscribe on the current transaction.
             tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
         }
-
-        let dialog_id = dialog.id().clone();
-        self.spawn_subscription_guard(
-            state_rx,
-            dialog_id.clone(),
-            true,
-            dialog.cancel_token().clone(),
-        );
 
         if expires == 0 {
             let removed = self
