@@ -169,9 +169,19 @@ impl RecordingUploadHook {
 #[async_trait]
 impl CallRecordHook for RecordingUploadHook {
     async fn on_record_completed(&self, record: &mut CallRecord) -> anyhow::Result<()> {
-        // File entries are finalized recording artifacts. Upload every one of
-        // them regardless of whether SIP ever reached a final 200 response.
+        use crate::callrecord::{
+            RecordingSubdir, local_archive_path, write_upload_failed_marker,
+        };
+        use std::time::Instant;
+
+        let recording_type = self.policy.recording_type.unwrap_or_default();
+        let subdir = RecordingSubdir::parse(self.policy.subdir.as_deref());
+        let root = self.policy.recorder_path();
+
+        // File entries are finalized recording artifacts (wav + optional jsonl).
         let mut first_uploaded_url = None;
+        let mut segment_summaries = Vec::new();
+
         for index in 0..record.recorder.len() {
             let (track_id, path) = {
                 let media = &record.recorder[index];
@@ -201,36 +211,136 @@ impl CallRecordHook for RecordingUploadHook {
             };
             let data_len = data.len();
             let key = self.storage_key(record, &track_id, &path);
-            let upload = match self.policy.recording_type.unwrap_or_default() {
-                RecordingType::Local => Ok(path.clone()),
-                RecordingType::Http => self.upload_http(record, &track_id, &path, data).await,
-                RecordingType::S3 => self.upload_s3(&key, data).await,
-            };
+            let started = Instant::now();
 
-            match upload {
-                Ok(url) => {
+            match recording_type {
+                RecordingType::Local => {
+                    let dest = local_archive_path(
+                        &root,
+                        Path::new(&path),
+                        subdir,
+                        record.start_time,
+                    );
+                    if let Some(parent) = dest.parent() {
+                        let _ = tokio::fs::create_dir_all(parent).await;
+                    }
+                    let archived = if dest.as_path() != Path::new(&path) {
+                        match tokio::fs::rename(&path, &dest).await {
+                            Ok(()) => dest.to_string_lossy().into_owned(),
+                            Err(err) => {
+                                warn!(
+                                    call_id = %record.call_id,
+                                    from = %path,
+                                    to = %dest.display(),
+                                    %err,
+                                    "local recording archive failed; keeping original path"
+                                );
+                                path.clone()
+                            }
+                        }
+                    } else {
+                        path.clone()
+                    };
                     info!(
                         call_id = %record.call_id,
                         track_id,
-                        url,
+                        path = %archived,
                         bytes = data_len,
-                        "recording uploaded"
+                        "recording archived locally"
                     );
-                    if first_uploaded_url.is_none() {
-                        first_uploaded_url = Some(url.clone());
+                    if first_uploaded_url.is_none() && track_id != "signaling" {
+                        first_uploaded_url = Some(archived.clone());
                     }
                     if let Some(media) = record.recorder.get_mut(index) {
+                        media.path = archived.clone();
                         let extra = media.extra.get_or_insert_with(HashMap::new);
-                        extra.insert("uploadUrl".to_string(), json!(url));
+                        extra.insert("uploadUrl".to_string(), json!(archived));
                     }
+                    segment_summaries.push(json!({
+                        "path": archived,
+                        "track_id": track_id,
+                        "size": data_len,
+                    }));
                 }
-                Err(err) => {
-                    warn!(
-                        call_id = %record.call_id,
-                        track_id,
-                        path,
-                        "recording upload failed: {err}"
-                    );
+                RecordingType::Http | RecordingType::S3 => {
+                    let address = match recording_type {
+                        RecordingType::S3 => key.clone(),
+                        RecordingType::Http => self
+                            .policy
+                            .url
+                            .clone()
+                            .unwrap_or_else(|| "http".to_string()),
+                        RecordingType::Local => unreachable!(),
+                    };
+                    let upload = match recording_type {
+                        RecordingType::Http => {
+                            self.upload_http(record, &track_id, &path, data).await
+                        }
+                        RecordingType::S3 => self.upload_s3(&key, data).await,
+                        RecordingType::Local => unreachable!(),
+                    };
+                    let elapsed_ms = started.elapsed().as_millis() as u64;
+                    match upload {
+                        Ok(url) => {
+                            info!(
+                                call_id = %record.call_id,
+                                track_id,
+                                url,
+                                bytes = data_len,
+                                "recording uploaded"
+                            );
+                            if first_uploaded_url.is_none() && track_id != "signaling" {
+                                first_uploaded_url = Some(url.clone());
+                            }
+                            if let Some(media) = record.recorder.get_mut(index) {
+                                let extra = media.extra.get_or_insert_with(HashMap::new);
+                                extra.insert("uploadUrl".to_string(), json!(url));
+                            }
+                            // Only delete local file after a successful remote upload.
+                            if let Err(err) = tokio::fs::remove_file(&path).await {
+                                warn!(
+                                    call_id = %record.call_id,
+                                    path,
+                                    %err,
+                                    "failed to remove local recording after upload"
+                                );
+                            } else {
+                                // Drop companion failure marker if a prior attempt left one.
+                                let marker =
+                                    crate::callrecord::upload_failed_marker_path(Path::new(&path));
+                                let _ = tokio::fs::remove_file(marker).await;
+                            }
+                            segment_summaries.push(json!({
+                                "path": path,
+                                "track_id": track_id,
+                                "size": data_len,
+                                "upload_url": url,
+                            }));
+                        }
+                        Err(err) => {
+                            warn!(
+                                call_id = %record.call_id,
+                                track_id,
+                                path,
+                                "recording upload failed: {err}"
+                            );
+                            if let Err(write_err) = write_upload_failed_marker(
+                                Path::new(&path),
+                                &address,
+                                elapsed_ms,
+                                &err.to_string(),
+                            )
+                            .await
+                            {
+                                warn!(
+                                    call_id = %record.call_id,
+                                    path,
+                                    %write_err,
+                                    "failed to write upload failure marker"
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -239,7 +349,13 @@ impl CallRecordHook for RecordingUploadHook {
         let recording_url = first_uploaded_url
             .clone()
             .or_else(|| record.details.recording_url.clone())
-            .or_else(|| record.recorder.first().map(|m| m.path.clone()));
+            .or_else(|| {
+                record
+                    .recorder
+                    .iter()
+                    .find(|m| m.track_id != "signaling")
+                    .map(|m| m.path.clone())
+            });
 
         // No file was recorded/uploaded and no SipFlow upload URL was supplied.
         if recording_url.is_none() {
@@ -247,8 +363,6 @@ impl CallRecordHook for RecordingUploadHook {
         }
 
         let emit_url = first_uploaded_url.as_deref().or_else(|| {
-            // A recorder entry denotes the file path handled above. With no
-            // file entry, require a URL supplied by a successful SipFlow upload.
             (record.recorder.is_empty() && record.details.recording_url.is_some())
                 .then(|| recording_url.as_deref().unwrap_or(""))
         });
@@ -258,8 +372,27 @@ impl CallRecordHook for RecordingUploadHook {
             record.details.recording_url = Some(url.to_string());
             record.details.recording_duration_secs = Some(duration_secs);
 
+            if !segment_summaries.is_empty() {
+                let meta = record.details.metadata.get_or_insert_with(HashMap::new);
+                meta.insert(
+                    "recording_segments".to_string(),
+                    json!(segment_summaries),
+                );
+            }
+
             if let Some(ref gw) = self.rwi_gateway {
                 use crate::rwi::proto::RecordingMetadata;
+                let mut extra = record.details.metadata.clone().map(|m| {
+                    m.into_iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
+                        .collect::<HashMap<_, _>>()
+                });
+                if !segment_summaries.is_empty() {
+                    let bag = extra.get_or_insert_with(HashMap::new);
+                    if let Ok(s) = serde_json::to_string(&segment_summaries) {
+                        bag.insert("recording_segments".to_string(), s);
+                    }
+                }
                 let metadata = RecordingMetadata {
                     filename: recording_filename(record, url),
                     file_size: recording_file_size(record),
@@ -270,11 +403,7 @@ impl CallRecordHook for RecordingUploadHook {
                     call_start_time: Some(record.start_time.to_rfc3339()),
                     call_end_time: Some(record.end_time.to_rfc3339()),
                     upload_time: Some(chrono::Utc::now().to_rfc3339()),
-                    extra: record.details.metadata.clone().map(|m| {
-                        m.into_iter()
-                            .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
-                            .collect()
-                    }),
+                    extra,
                 };
                 let gw_ref = gw.read();
                 gw_ref.send_to_owner(&crate::rwi::RecordingMetadataAvailable {
@@ -291,7 +420,12 @@ impl CallRecordHook for RecordingUploadHook {
                 call_id: record.call_id.clone(),
                 url: recording_url,
                 duration_secs: (record.end_time - record.start_time).num_seconds().max(0) as u64,
-                file_size: record.recorder.first().map(|m| m.size).unwrap_or(0),
+                file_size: record
+                    .recorder
+                    .iter()
+                    .find(|m| m.track_id != "signaling")
+                    .map(|m| m.size)
+                    .unwrap_or(0),
             });
         }
 
@@ -417,6 +551,208 @@ mod tests {
                 .and_then(|extra| extra.get("uploadUrl"))
                 .and_then(|url| url.as_str()),
             Some("https://recordings.example/early-media.wav")
+        );
+        assert!(
+            !Path::new(&path).exists(),
+            "local wav should be deleted after successful HTTP upload"
+        );
+    }
+
+    #[tokio::test]
+    async fn writes_upload_failed_marker_and_keeps_local_file() {
+        use crate::callrecord::upload_failed_marker_path;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("fail.wav");
+        tokio::fs::write(&path, b"wav-bytes")
+            .await
+            .expect("write recording");
+        let path_str = path.to_string_lossy().into_owned();
+        let policy = RecordingPolicy {
+            enabled: Some(true),
+            recording_type: Some(RecordingType::Http),
+            url: Some("http://127.0.0.1:1/recording".to_string()),
+            ..Default::default()
+        };
+        let hook = RecordingUploadHook::new(policy).expect("recording hook");
+        let now = chrono::Utc::now();
+        let mut record = CallRecord {
+            call_id: "upload-fail-call".to_string(),
+            start_time: now - chrono::Duration::seconds(5),
+            answer_time: Some(now - chrono::Duration::seconds(4)),
+            end_time: now,
+            recorder: vec![CallRecordMedia {
+                track_id: "mixed".to_string(),
+                path: path_str.clone(),
+                size: 9,
+                extra: None,
+            }],
+            details: CallDetails::default(),
+            ..Default::default()
+        };
+        hook.on_record_completed(&mut record)
+            .await
+            .expect("hook should not fail hard");
+
+        assert!(path.exists(), "local file kept after upload failure");
+        let marker = upload_failed_marker_path(&path);
+        assert!(marker.exists(), "failure marker written");
+        let body = tokio::fs::read_to_string(&marker).await.expect("read marker");
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("marker json");
+        assert!(parsed.get("time").is_some());
+        assert!(parsed.get("address").is_some());
+        assert!(parsed.get("duration_ms").is_some());
+        assert!(parsed.get("error").is_some());
+    }
+
+    #[tokio::test]
+    async fn local_type_archives_into_daily_subdir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_string_lossy().into_owned();
+        let path = dir.path().join("sess.wav");
+        tokio::fs::write(&path, b"wav").await.expect("write");
+        let path_str = path.to_string_lossy().into_owned();
+        let policy = RecordingPolicy {
+            enabled: Some(true),
+            recording_type: Some(RecordingType::Local),
+            path: Some(root.clone()),
+            subdir: Some("daily".into()),
+            ..Default::default()
+        };
+        let hook = RecordingUploadHook::new(policy).expect("hook");
+        let now = chrono::Utc::now();
+        let mut record = CallRecord {
+            call_id: "local-archive".into(),
+            start_time: now,
+            answer_time: Some(now),
+            end_time: now,
+            recorder: vec![CallRecordMedia {
+                track_id: "mixed".into(),
+                path: path_str,
+                size: 3,
+                extra: None,
+            }],
+            details: CallDetails::default(),
+            ..Default::default()
+        };
+        hook.on_record_completed(&mut record).await.expect("archive");
+        let day = now.format("%Y%m%d").to_string();
+        let archived = Path::new(&root).join(&day).join("sess.wav");
+        assert!(archived.exists(), "archived under daily subdir");
+        assert_eq!(
+            record.details.recording_url.as_deref(),
+            Some(archived.to_string_lossy().as_ref())
+        );
+    }
+
+    #[tokio::test]
+    async fn local_type_archives_into_hourly_subdir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_string_lossy().into_owned();
+        let path = dir.path().join("sess.wav");
+        tokio::fs::write(&path, b"wav").await.expect("write");
+        let path_str = path.to_string_lossy().into_owned();
+        let policy = RecordingPolicy {
+            enabled: Some(true),
+            recording_type: Some(RecordingType::Local),
+            path: Some(root.clone()),
+            subdir: Some("hourly".into()),
+            ..Default::default()
+        };
+        let hook = RecordingUploadHook::new(policy).expect("hook");
+        let now = chrono::Utc::now();
+        let mut record = CallRecord {
+            call_id: "local-hourly".into(),
+            start_time: now,
+            answer_time: Some(now),
+            end_time: now,
+            recorder: vec![CallRecordMedia {
+                track_id: "mixed".into(),
+                path: path_str,
+                size: 3,
+                extra: None,
+            }],
+            details: CallDetails::default(),
+            ..Default::default()
+        };
+        hook.on_record_completed(&mut record).await.expect("archive");
+        let day = now.format("%Y%m%d").to_string();
+        let hour = now.format("%H").to_string();
+        let archived = Path::new(&root).join(&day).join(&hour).join("sess.wav");
+        assert!(archived.exists(), "archived under hourly subdir");
+    }
+
+    #[tokio::test]
+    async fn uploads_wav_and_jsonl_then_deletes_both() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let request_count = requests.clone();
+        let app = axum::Router::new().route(
+            "/recording",
+            axum::routing::post(move |_request: axum::extract::Request| {
+                let request_count = request_count.clone();
+                async move {
+                    let n = request_count.fetch_add(1, Ordering::Relaxed);
+                    format!("https://recordings.example/file-{n}")
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("addr");
+        crate::utils::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wav = dir.path().join("a.wav");
+        let jsonl = dir.path().join("a.jsonl");
+        tokio::fs::write(&wav, b"wav").await.unwrap();
+        tokio::fs::write(&jsonl, b"{}\n").await.unwrap();
+        let wav_s = wav.to_string_lossy().into_owned();
+        let jsonl_s = jsonl.to_string_lossy().into_owned();
+
+        let policy = RecordingPolicy {
+            enabled: Some(true),
+            recording_type: Some(RecordingType::Http),
+            url: Some(format!("http://{address}/recording")),
+            ..Default::default()
+        };
+        let hook = RecordingUploadHook::new(policy).unwrap();
+        let now = chrono::Utc::now();
+        let mut record = CallRecord {
+            call_id: "multi-artifact".into(),
+            start_time: now - chrono::Duration::seconds(3),
+            answer_time: Some(now - chrono::Duration::seconds(2)),
+            end_time: now,
+            recorder: vec![
+                CallRecordMedia {
+                    track_id: "segment:ivr:1".into(),
+                    path: wav_s.clone(),
+                    size: 3,
+                    extra: None,
+                },
+                CallRecordMedia {
+                    track_id: "signaling".into(),
+                    path: jsonl_s.clone(),
+                    size: 3,
+                    extra: None,
+                },
+            ],
+            details: CallDetails::default(),
+            ..Default::default()
+        };
+        hook.on_record_completed(&mut record).await.unwrap();
+
+        assert_eq!(requests.load(Ordering::Relaxed), 2);
+        assert!(!Path::new(&wav_s).exists());
+        assert!(!Path::new(&jsonl_s).exists());
+        assert!(
+            record
+                .details
+                .recording_url
+                .as_deref()
+                .is_some_and(|u| u.starts_with("https://recordings.example/"))
         );
     }
 }

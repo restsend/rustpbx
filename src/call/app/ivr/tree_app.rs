@@ -968,6 +968,8 @@ impl IvrApp {
             | EntryAction::InputVoice { .. }
             | EntryAction::Api { .. }
             | EntryAction::Torecord { .. }
+            | EntryAction::RecordStart { .. }
+            | EntryAction::RecordStop { .. }
             | EntryAction::JumpIvr { .. }
             | EntryAction::RouteToAgent { .. } => {
                 error!(ivr = %self.definition.name, action = ?std::mem::discriminant(action),

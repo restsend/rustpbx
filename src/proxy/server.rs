@@ -89,6 +89,9 @@ pub struct SipServerInner {
     pub sipflow_config: ArcSwap<Option<SipFlowConfig>>,
     pub recording_policy: ArcSwap<Option<RecordingPolicy>>,
     pub sip_flow: Option<SipFlow>,
+    /// Lightweight SIP JSONL sidecar used when `[recording]` is on without a
+    /// full `[sipflow]` backend (or with `force_file`).
+    pub signaling_sidecar: Option<crate::callrecord::SignalingSidecar>,
     pub active_call_registry: Arc<ActiveProxyCallRegistry>,
     pub frequency_limiter: Option<Arc<dyn FrequencyLimiter>>,
     pub call_record_hooks: Arc<Vec<Box<dyn crate::callrecord::CallRecordHook>>>,
@@ -782,6 +785,15 @@ impl SipServerBuilder {
             inspectors.push(Box::new(sflow));
         }
 
+        // Recording sidecar: sessions with recording enabled register their
+        // Call-ID so SIP messages are appended to a local JSONL without
+        // requiring a full `[sipflow]` backend.
+        let signaling_sidecar = {
+            let sc = crate::callrecord::SignalingSidecar::new();
+            inspectors.push(Box::new(sc.clone()));
+            Some(sc)
+        };
+
         endpoint_builder =
             endpoint_builder.with_inspector(
                 Box::new(CompositeMessageInspector { inspectors }) as Box<dyn MessageInspector>
@@ -1041,6 +1053,7 @@ impl SipServerBuilder {
             sipflow_config: ArcSwap::new(Arc::new(self.sipflow_config.clone())),
             recording_policy: ArcSwap::new(Arc::new(self.config.recording.clone())),
             sip_flow,
+            signaling_sidecar,
             active_call_registry,
             frequency_limiter: self.frequency_limiter,
             call_record_hooks: Arc::new(self.call_record_hooks),

@@ -40,6 +40,10 @@ pub struct CallSessionRecordSnapshot {
     /// MediaBridge at call end. Persisted into the call-record `metadata` under
     /// `media_quality`.
     pub media_quality: Option<serde_json::Value>,
+    /// Completed recording segments (full-call + mid-call slices) for CDR.
+    pub recording_segments: Vec<crate::callrecord::RecordingSegment>,
+    /// Local signaling JSONL sidecar path (when recording without sipflow).
+    pub signaling_jsonl_path: Option<String>,
     pub extensions: http::Extensions,
 }
 

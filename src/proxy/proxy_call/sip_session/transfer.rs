@@ -938,7 +938,90 @@ impl SipSession {
         if !query_params.is_empty() {
             app_params["ivr_params"] = serde_json::json!(query_params);
         }
-        self.ensure_app_running("ivr", Some(app_params), &format!("IVR '{}'", ivr_name))
+        match self
+            .ensure_app_running("ivr", Some(app_params), &format!("IVR '{}'", ivr_name))
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.try_ivr_fallback_after_start_failure(e, ivr_name, &query_params)
+                    .await
+            }
+        }
+    }
+
+    /// When starting a named IVR fails, try once more with `[proxy.ivr_fallback]`.
+    async fn try_ivr_fallback_after_start_failure(
+        &self,
+        original: anyhow::Error,
+        failed_ivr: &str,
+        query_params: &HashMap<String, String>,
+    ) -> Result<()> {
+        use crate::call::app::ivr::fallback::{self, IVR_FALLBACK_USED_KEY};
+
+        let already_used = query_params
+            .get(IVR_FALLBACK_USED_KEY)
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+            || self
+                .app_runtime
+                .app_context()
+                .and_then(|ctx| {
+                    ctx.session_vars
+                        .get(IVR_FALLBACK_USED_KEY)
+                        .map(|e| e.value().clone())
+                })
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+        if already_used {
+            return Err(original);
+        }
+
+        let proxy_cfg = self.server.proxy_config.load();
+        let Some(fb) = proxy_cfg.ivr_fallback.as_ref().filter(|c| c.is_configured()) else {
+            return Err(original);
+        };
+
+        let (caller, callee, headers) = self
+            .app_runtime
+            .app_context()
+            .map(|ctx| {
+                (
+                    ctx.call_info.caller.clone(),
+                    ctx.call_info.callee.clone(),
+                    Some(ctx.call_info.sip_headers.clone()),
+                )
+            })
+            .unwrap_or_default();
+
+        let Some(target) =
+            fallback::resolve_fallback_target(fb, &caller, &callee, headers.as_ref())
+        else {
+            return Err(original);
+        };
+
+        if target == failed_ivr {
+            return Err(original);
+        }
+
+        warn!(
+            session_id = %self.id,
+            error = %original,
+            target = %target,
+            "IVR start failed, retrying with ivr_fallback target"
+        );
+
+        if let Some(ctx) = self.app_runtime.app_context() {
+            ctx.session_vars
+                .insert(IVR_FALLBACK_USED_KEY.into(), "1".into());
+        }
+
+        let mut qp = query_params.clone();
+        qp.insert(IVR_FALLBACK_USED_KEY.into(), "1".into());
+        let ivr_file = self.server.data_context.resolve_ivr_file(&target).await;
+        let mut app_params = serde_json::json!({"file": ivr_file});
+        app_params["ivr_params"] = serde_json::json!(qp);
+        self.ensure_app_running("ivr", Some(app_params), &format!("IVR fallback '{}'", target))
             .await
     }
 

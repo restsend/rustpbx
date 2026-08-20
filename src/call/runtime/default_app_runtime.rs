@@ -5,6 +5,7 @@
 
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -38,6 +39,8 @@ pub struct DefaultAppRuntime {
     running: RwLock<Option<RunningApp>>,
     /// App factory function
     app_factory: Option<Arc<dyn AppFactory>>,
+    /// Incremented on every successful `start_app`.
+    app_generation: Arc<AtomicU64>,
 }
 
 /// Factory trait for creating CallApp instances.
@@ -63,6 +66,7 @@ impl DefaultAppRuntime {
             context: config.context,
             running: RwLock::new(None),
             app_factory: None,
+            app_generation: Arc::new(AtomicU64::new(0)),
         }
     }
     pub fn with_factory(mut self, factory: Arc<dyn AppFactory>) -> Self {
@@ -107,6 +111,14 @@ impl AppRuntime for DefaultAppRuntime {
             }
         }
 
+        // Claim the next generation *before* installing the event sender.
+        // Transfer → stop_app → start_app races with the predecessor event-loop
+        // teardown: if we only bump after `create_app` awaits, the predecessor
+        // can still see its own generation as current and call
+        // `set_app_event_sender(None)`, dropping the successor's channel and
+        // killing the new IVR with ExitReason::Normal.
+        let generation = self.app_generation.fetch_add(1, Ordering::SeqCst) + 1;
+
         // Create event channel for app events (DTMF, hangup, etc.)
         let (event_tx, event_rx) = mpsc::unbounded_channel::<ControllerEvent>();
 
@@ -146,7 +158,6 @@ impl AppRuntime for DefaultAppRuntime {
             }
         };
 
-        // Store running state
         {
             let mut running = self.running.write().await;
             *running = Some(RunningApp {
@@ -169,6 +180,7 @@ impl AppRuntime for DefaultAppRuntime {
         let app_name_owned = app_name.to_string();
         let context = self.context.clone();
         let handle = self.handle.clone();
+        let generation_counter = self.app_generation.clone();
 
         crate::utils::spawn(async move {
             let event_loop = crate::call::app::AppEventLoop::new(
@@ -188,17 +200,27 @@ impl AppRuntime for DefaultAppRuntime {
                 );
             }
 
-            // Clear the app event sender so the session knows the app has exited.
-            handle.set_app_event_sender(None);
+            // A Transfer that starts a successor app (JumpIvr / toivr) runs
+            // `start_app` before this task resumes. Clearing the event sender
+            // unconditionally would drop the successor's DTMF/timeout channel
+            // and kill the new IVR immediately. Only tear down when we are
+            // still the current generation.
+            let still_current =
+                generation_counter.load(Ordering::SeqCst) == generation;
+            if still_current {
+                handle.set_app_event_sender(None);
 
-            // Notify the session that the app has exited so it can run
-            // post-exit hooks (e.g. IVR-exec unhold + result delivery).
-            if let Err(e) = handle.send_command(CallCommand::AppExited) {
-                tracing::warn!(
-                    "Failed to send AppExited for session {}: {}",
-                    session_id_for_log,
-                    e
-                );
+                // Notify the session that the app has exited so it can run
+                // post-exit hooks (e.g. IVR-exec unhold + result delivery).
+                // Skip when a successor app already replaced us (Transfer /
+                // JumpIvr) — that generation owns the session now.
+                if let Err(e) = handle.send_command(CallCommand::AppExited) {
+                    tracing::warn!(
+                        "Failed to send AppExited for session {}: {}",
+                        session_id_for_log,
+                        e
+                    );
+                }
             }
         });
 

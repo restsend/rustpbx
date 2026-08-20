@@ -1348,6 +1348,9 @@ impl RwiCommandProcessor {
                                 format: None,
                                 channels: record_channels,
                                 mono_caller_only: Some(false),
+                                segment_type: rec.segment_type.clone(),
+                                segment_id: rec.id.clone(),
+                                notify_app: Some(false),
                             },
                         });
                         match send_result {
@@ -1984,6 +1987,9 @@ impl RwiCommandProcessor {
                     format: None,
                     channels: Some(channels),
                     mono_caller_only: Some(false),
+                    segment_type: req.segment_type.clone(),
+                    segment_id: req.id.clone(),
+                    notify_app: Some(false),
                 },
             })
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;

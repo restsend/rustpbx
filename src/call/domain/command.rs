@@ -506,7 +506,8 @@ impl Default for PlayOptions {
 /// Recording configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordConfig {
-    /// Output file path
+    /// Output file path. Empty → SipSession generates a segment path from
+    /// `segment_type` / `segment_id` and the root session id.
     pub path: String,
     /// Maximum recording duration
     pub max_duration_secs: Option<u32>,
@@ -523,6 +524,33 @@ pub struct RecordConfig {
     /// voicemail, where the egress leg is silence during the message.
     #[serde(default)]
     pub mono_caller_only: Option<bool>,
+    /// Segment kind for mid-call slices (`ivr`, `consult`, `full`, …).
+    #[serde(default)]
+    pub segment_type: Option<String>,
+    /// Segment id (short uuid when omitted by the caller).
+    #[serde(default)]
+    pub segment_id: Option<String>,
+    /// Deliver `RecordingComplete` to the CallApp (default true). Mid-call
+    /// IVR `record_start` sets this false so `record_stop` does not advance
+    /// the step provider.
+    #[serde(default)]
+    pub notify_app: Option<bool>,
+}
+
+impl Default for RecordConfig {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            max_duration_secs: None,
+            beep: false,
+            format: None,
+            channels: None,
+            mono_caller_only: None,
+            segment_type: None,
+            segment_id: None,
+            notify_app: None,
+        }
+    }
 }
 
 /// Application event for injection

@@ -356,6 +356,28 @@ pub enum EntryAction {
         max_duration_secs: Option<u32>,
     },
 
+    /// Start a mid-call recording segment (call must have recording enabled;
+    /// typically `auto_start = false`). Does not wait for completion.
+    RecordStart {
+        /// Segment kind (`ivr`, `consult`, …). Defaults to `ivr`.
+        #[serde(default, alias = "type_id")]
+        segment_type: Option<String>,
+        /// Optional stable id; a short uuid is generated when omitted.
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        beep: bool,
+        #[serde(default)]
+        max_duration_secs: Option<u32>,
+    },
+
+    /// Stop the active mid-call recording segment. Prefer this before
+    /// `transfer` / REFER so the slice is closed cleanly.
+    RecordStop {
+        #[serde(default)]
+        reason: Option<String>,
+    },
+
     JumpIvr {
         route_point: String,
         #[serde(default)]
@@ -1122,6 +1144,28 @@ action = { type = "menu", menu = "root" }
         assert!(matches!(
             node.action,
             EntryAction::Torecord { beep: true, .. }
+        ));
+
+        // record_start / record_stop
+        let node: ActionNode = serde_json::from_str(
+            r#"{"type":"record_start","segment_type":"ivr","id":"seg1"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            node.action,
+            EntryAction::RecordStart {
+                segment_type: Some(ref t),
+                id: Some(ref i),
+                ..
+            } if t == "ivr" && i == "seg1"
+        ));
+        let node: ActionNode =
+            serde_json::from_str(r#"{"type":"record_stop","reason":"before_transfer"}"#).unwrap();
+        assert!(matches!(
+            node.action,
+            EntryAction::RecordStop {
+                reason: Some(ref r)
+            } if r == "before_transfer"
         ));
 
         // bridge (with legacy alias)

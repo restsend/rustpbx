@@ -41,6 +41,11 @@ pub enum WaitEvent {
         url: String,
         duration_secs: u64,
     },
+    /// Mid-call `record_start` / `record_stop` finished sending the command;
+    /// the executor immediately asks the provider for the next action.
+    RecordControlDone {
+        started: bool,
+    },
     InputVoice {
         text: String,
         confidence: f32,
@@ -658,6 +663,36 @@ pub async fn execute_action(
             Ok(ActionResult::WaitFor(WaitEvent::RecordingComplete {
                 url: String::new(),
                 duration_secs: 0,
+            }))
+        }
+
+        EntryAction::RecordStart {
+            segment_type,
+            id,
+            beep,
+            max_duration_secs,
+        } => {
+            let segment_type = segment_type
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("ivr");
+            ctrl.start_recording_segment(
+                segment_type,
+                id.clone(),
+                max_duration_secs.map(|s| Duration::from_secs(s as u64)),
+                *beep,
+            )
+            .await?;
+            // Fire-and-forget: executor immediately requests the next action.
+            Ok(ActionResult::WaitFor(WaitEvent::RecordControlDone {
+                started: true,
+            }))
+        }
+
+        EntryAction::RecordStop { .. } => {
+            ctrl.stop_recording_nowait()?;
+            Ok(ActionResult::WaitFor(WaitEvent::RecordControlDone {
+                started: false,
             }))
         }
 

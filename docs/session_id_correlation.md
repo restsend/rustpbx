@@ -65,7 +65,12 @@ UUI 丢失不影响事件链路的 session_id 关联。
 
 - `call_id` 保持唯一索引(每腿一条记录)
 - `session_id` 用于按逻辑呼叫聚合查询,替代已退役的 `root_call_id` 机制
-- 录音/sipflow 文件主键仍按 `call_id`,避免同名碰撞
+- 录音/sipflow 制品命名优先使用根 `session_id`(全通 `{session_id}.wav`,
+  片段 `{session_id}_{timestamp}_{type}_{id}.wav`; 信令旁路
+  `{session_id}.jsonl` / `{session_id}_{call_id}.jsonl`),腿级 `call_id`
+  仍写入 CDR/`extra` 以防碰撞
+- Console/API:`GET /call-records/by-session/{session_id}/artifacts` 按
+  `session_id` 聚合各腿录音片段与 sipflow jsonl
 
 ## 迁移说明
 

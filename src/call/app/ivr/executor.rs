@@ -1,5 +1,6 @@
 use super::common::{self, ActionResult, SessionData, TerminalAction, WaitEvent};
 use super::config::{ActionNode, EntryAction};
+use super::fallback::{self, IVR_FALLBACK_USED_KEY};
 use super::provider::{
     ActionProvider, ProviderContext, ProviderEvent, SessionContext, SessionEndReason, SessionEndTag,
 };
@@ -7,6 +8,7 @@ use super::trace::{IvrTraceCollector, IvrTraceEntry, IvrTraceSession};
 use crate::call::app::{
     AppAction, AppEvent, ApplicationContext, CallApp, CallAppType, CallController, RecordingInfo,
 };
+use crate::config::IvrFallbackConfig;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use std::collections::{HashMap, VecDeque};
@@ -97,6 +99,9 @@ pub struct StepIvrApp {
     no_input_prompts: u32,
     /// Whether a `DtmfMenuTimeout` probe was already sent and ignored.
     probe_pending: bool,
+    /// Global `[proxy.ivr_fallback]` — when set, provider `/step` failures jump
+    /// to a built-in IVR instead of the hardcoded error.wav hangup.
+    ivr_fallback: Option<Arc<IvrFallbackConfig>>,
 }
 
 #[derive(Clone)]
@@ -147,6 +152,7 @@ impl StepIvrApp {
             max_repeat_prompts: DEFAULT_MAX_REPEAT_PROMPTS,
             no_input_prompts: 0,
             probe_pending: false,
+            ivr_fallback: None,
         }
     }
 
@@ -186,6 +192,7 @@ impl StepIvrApp {
             max_repeat_prompts: DEFAULT_MAX_REPEAT_PROMPTS,
             no_input_prompts: 0,
             probe_pending: false,
+            ivr_fallback: None,
         }
     }
 
@@ -249,6 +256,12 @@ impl StepIvrApp {
     /// if it is still ignored. `0` disables the guard.
     pub fn with_max_repeat_prompts(mut self, n: u32) -> Self {
         self.max_repeat_prompts = n;
+        self
+    }
+
+    /// Attach global `[proxy.ivr_fallback]` for session-level recovery.
+    pub fn with_ivr_fallback(mut self, config: Option<Arc<IvrFallbackConfig>>) -> Self {
+        self.ivr_fallback = config;
         self
     }
 
@@ -421,6 +434,8 @@ impl StepIvrApp {
             EntryAction::InputVoice { .. } => "InputVoice",
             EntryAction::Api { .. } => "Api",
             EntryAction::Torecord { .. } => "Torecord",
+            EntryAction::RecordStart { .. } => "RecordStart",
+            EntryAction::RecordStop { .. } => "RecordStop",
             EntryAction::JumpIvr { .. } => "JumpIvr",
             EntryAction::RouteToAgent { .. } => "RouteToAgent",
             EntryAction::Bridge { .. } => "Bridge",
@@ -598,6 +613,60 @@ impl StepIvrApp {
                             return Box::pin(self.__exec_node(ctrl, ctx)).await;
                         }
 
+                        // Mid-call record_start / record_stop: do not wait; ask
+                        // provider for the next action immediately.
+                        if let WaitEvent::RecordControlDone { started } = wait_event {
+                            let provider_event = match &node.action {
+                                EntryAction::RecordStart {
+                                    segment_type, id, ..
+                                } => ProviderEvent::RecordingStarted {
+                                    segment_type: segment_type
+                                        .clone()
+                                        .unwrap_or_else(|| "ivr".into()),
+                                    segment_id: id.clone().unwrap_or_default(),
+                                },
+                                EntryAction::RecordStop { reason } => {
+                                    ProviderEvent::RecordingStopped {
+                                        reason: reason.clone(),
+                                    }
+                                }
+                                _ => ProviderEvent::RecordingStopped { reason: None },
+                            };
+                            let _ = started;
+                            self.step_index += 1;
+                            self.increment_total_steps();
+                            self.record_trace(IvrTraceEntry {
+                                session_id: session_id.clone(),
+                                caller: caller.clone(),
+                                callee: callee.clone(),
+                                step_index: self.step_index,
+                                trigger: trigger.clone(),
+                                provider_url: None,
+                                action_type: node_type_str,
+                                action_json,
+                                error: None,
+                                step_id: step_id.clone(),
+                                step_name: step_name.clone(),
+                                step_start_time: self.current_step_start_time.clone(),
+                                step_end_time: Some(step_end),
+                                duration_ms: elapsed_ms,
+                                extra: self.extra.clone(),
+                                end_reason: None,
+                                end_detail: None,
+                            });
+                            if let Some(ref next) = node.next {
+                                self.current_trigger =
+                                    Some(crate::rwi::TriggerInfo::new("record_control"));
+                                self.current_node = Some(*next.clone());
+                            } else {
+                                self.current_trigger =
+                                    Some(crate::rwi::TriggerInfo::new("record_control"));
+                                self.current_node =
+                                    Some(self.request_next(Some(provider_event)).await?);
+                            }
+                            return Box::pin(self.__exec_node(ctrl, ctx)).await;
+                        }
+
                         let step_trigger = match wait_event {
                             WaitEvent::DtmfCollected { digit } => {
                                 crate::rwi::TriggerInfo::with_detail(
@@ -652,7 +721,10 @@ impl StepIvrApp {
                     end_reason: None,
                     end_detail: None,
                 });
-                return Err(e);
+                // Recover via /fail → IVR fallback instead of ending the session.
+                let recovery = self.recover_from_execute_failure(e).await?;
+                self.current_node = Some(recovery);
+                return Box::pin(self.__exec_node(ctrl, ctx)).await;
             }
         }
     }
@@ -662,6 +734,186 @@ impl StepIvrApp {
             None
         } else {
             Some(self.sess.sip_headers.clone())
+        }
+    }
+
+    fn fallback_already_used(&self) -> bool {
+        self.sess
+            .variables
+            .get(IVR_FALLBACK_USED_KEY)
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+            || self
+                .runtime_vars
+                .as_ref()
+                .and_then(|v| v.get(IVR_FALLBACK_USED_KEY).map(|e| e.value().clone()))
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+    }
+
+    fn mark_fallback_used(&mut self) {
+        self.sess
+            .variables
+            .insert(IVR_FALLBACK_USED_KEY.into(), "1".into());
+        if let Some(ref runtime) = self.runtime_vars {
+            runtime.insert(IVR_FALLBACK_USED_KEY.into(), "1".into());
+        }
+    }
+
+    fn hangup_error_node() -> ActionNode {
+        ActionNode::with_next(
+            EntryAction::Prompt {
+                file: Some("sounds/error.wav".into()),
+                tts_text: None,
+                tts_voice: None,
+                record_name_list: None,
+                interruptible: false,
+                tts_api_url: None,
+            },
+            ActionNode::new(EntryAction::Hangup {
+                prompt: None,
+                prompt_text: None,
+                prompt_voice: None,
+            }),
+        )
+    }
+
+    /// Session-level recovery: match `[proxy.ivr_fallback]` → JumpIvr, else hangup.
+    fn enter_ivr_fallback_node(&mut self, reason: &str) -> ActionNode {
+        if self.fallback_already_used() {
+            tracing::warn!(
+                reason = %reason,
+                "StepIvrApp: IVR fallback already used, hanging up"
+            );
+            return Self::hangup_error_node();
+        }
+
+        let Some(config) = self.ivr_fallback.as_ref().filter(|c| c.is_configured()) else {
+            tracing::warn!(
+                reason = %reason,
+                "StepIvrApp: no ivr_fallback configured, hanging up"
+            );
+            return Self::hangup_error_node();
+        };
+
+        let caller = self
+            .sess
+            .variables
+            .get("caller")
+            .cloned()
+            .unwrap_or_default();
+        let callee = self
+            .sess
+            .variables
+            .get("callee")
+            .cloned()
+            .unwrap_or_default();
+        let headers = self.get_sip_headers();
+
+        let Some(target) = fallback::resolve_fallback_target(
+            config.as_ref(),
+            &caller,
+            &callee,
+            headers.as_ref(),
+        ) else {
+            tracing::warn!(
+                reason = %reason,
+                "StepIvrApp: ivr_fallback resolved to none, hanging up"
+            );
+            return Self::hangup_error_node();
+        };
+
+        self.mark_fallback_used();
+        tracing::warn!(
+            reason = %reason,
+            target = %target,
+            "StepIvrApp: entering IVR fallback via toivr"
+        );
+        let mut params = HashMap::new();
+        params.insert(IVR_FALLBACK_USED_KEY.into(), "1".into());
+        ActionNode::new(EntryAction::JumpIvr {
+            route_point: target,
+            params,
+        })
+    }
+
+    fn build_fail_provider_context(&self, reason: String) -> ProviderContext {
+        let now_rfc3339 = chrono::Utc::now().to_rfc3339();
+        ProviderContext {
+            session_id: self
+                .sess
+                .variables
+                .get("session_id")
+                .cloned()
+                .unwrap_or_default(),
+            caller: self
+                .sess
+                .variables
+                .get("caller")
+                .cloned()
+                .unwrap_or_default(),
+            callee: self
+                .sess
+                .variables
+                .get("callee")
+                .cloned()
+                .unwrap_or_default(),
+            direction: self
+                .sess
+                .variables
+                .get("direction")
+                .cloned()
+                .unwrap_or_default(),
+            tenant_id: self.sess.variables.get("tenant_id").cloned(),
+            ivr_id: self.sess.variables.get("ivr_id").cloned(),
+            variables: self.sess.variables.clone(),
+            sip_headers: self.get_sip_headers(),
+            event: Some(ProviderEvent::Fail {
+                reason,
+                failed_step_id: self.current_step_id.clone(),
+                failed_step_name: self.current_step_name.clone(),
+                failed_action: self
+                    .current_node
+                    .as_ref()
+                    .map(|n| Self::action_type_label(&n.action).to_string()),
+            }),
+            route_name: self.route_name.clone(),
+            custom_data: self.custom_data.clone(),
+            step_start_time: self.step_prev_start_time.clone(),
+            step_end_time: Some(now_rfc3339),
+            step_duration_ms: if self.step_prev_duration_ms > 0 {
+                Some(self.step_prev_duration_ms)
+            } else {
+                None
+            },
+            step_index: Some(self.step_index),
+            transferred_from: self.transferred_from.clone(),
+        }
+    }
+
+    /// Node execute failed → POST `/fail`; on failure escalate to IVR fallback.
+    async fn recover_from_execute_failure(
+        &mut self,
+        err: anyhow::Error,
+    ) -> anyhow::Result<ActionNode> {
+        let reason = err.to_string();
+        tracing::warn!(error = %reason, "StepIvrApp: node execute failed, calling /fail");
+        self.set_runtime_error_shared(&reason);
+        self.set_runtime_status_shared("execute_error");
+
+        let ctx = self.build_fail_provider_context(reason.clone());
+        match self.provider.fail_action(ctx).await {
+            Ok(node) => {
+                tracing::info!("StepIvrApp: /fail returned recovery action");
+                Ok(node)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "StepIvrApp: /fail failed, entering IVR fallback"
+                );
+                Ok(self.enter_ivr_fallback_node(&format!("fail:{e}")))
+            }
         }
     }
 
@@ -835,6 +1087,22 @@ impl StepIvrApp {
                     serde_json::json!({ "url": url, "duration_secs": duration_secs }),
                 )
             }
+            Some(ProviderEvent::RecordingStarted {
+                segment_type,
+                segment_id,
+            }) => crate::rwi::TriggerInfo::with_detail(
+                "recording_started",
+                serde_json::json!({
+                    "segment_type": segment_type,
+                    "segment_id": segment_id,
+                }),
+            ),
+            Some(ProviderEvent::RecordingStopped { reason }) => {
+                crate::rwi::TriggerInfo::with_detail(
+                    "recording_stopped",
+                    serde_json::json!({ "reason": reason }),
+                )
+            }
             Some(ProviderEvent::InputVoice { text, confidence }) => {
                 crate::rwi::TriggerInfo::with_detail(
                     "input_voice",
@@ -844,6 +1112,20 @@ impl StepIvrApp {
             Some(ProviderEvent::Error { reason }) => crate::rwi::TriggerInfo::with_detail(
                 "error",
                 serde_json::json!({ "reason": reason }),
+            ),
+            Some(ProviderEvent::Fail {
+                reason,
+                failed_step_id,
+                failed_step_name,
+                failed_action,
+            }) => crate::rwi::TriggerInfo::with_detail(
+                "fail",
+                serde_json::json!({
+                    "reason": reason,
+                    "failed_step_id": failed_step_id,
+                    "failed_step_name": failed_step_name,
+                    "failed_action": failed_action,
+                }),
             ),
             Some(ProviderEvent::DtmfMenuInvalid { digit }) => crate::rwi::TriggerInfo::with_detail(
                 "dtmf_menu_invalid",
@@ -865,7 +1147,7 @@ impl StepIvrApp {
         match result {
             Ok(node) => Ok(node),
             Err(e) => {
-                tracing::warn!(error = %e, "StepIvrApp: provider request failed, using fallback");
+                tracing::warn!(error = %e, "StepIvrApp: provider /step failed, using IVR fallback");
                 let error_text = e.to_string();
                 if self.step_index <= 1 {
                     self.set_runtime_status_shared("startup_error");
@@ -873,21 +1155,7 @@ impl StepIvrApp {
                     self.set_runtime_status_shared("provider_error");
                 }
                 self.set_runtime_error_shared(&error_text);
-                Ok(ActionNode::with_next(
-                    EntryAction::Prompt {
-                        file: Some("sounds/error.wav".into()),
-                        tts_text: None,
-                        tts_voice: None,
-                        record_name_list: None,
-                        interruptible: false,
-                        tts_api_url: None,
-                    },
-                    ActionNode::new(EntryAction::Hangup {
-                        prompt: None,
-                        prompt_text: None,
-                        prompt_voice: None,
-                    }),
-                ))
+                Ok(self.enter_ivr_fallback_node(&format!("step:{error_text}")))
             }
         }
     }
@@ -1589,6 +1857,17 @@ impl CallApp for StepIvrApp {
         ctrl: &mut CallController,
         context: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
+        // Only advance the provider when we were waiting on a torecord-style
+        // capture. Mid-call record_start/stop sets notify_app=false but hangup
+        // finalize may still deliver RecordingComplete — ignore those.
+        let waiting_for_recording = self
+            .pending_trace
+            .as_ref()
+            .map(|t| t.action_type == "Torecord")
+            .unwrap_or(false);
+        if !waiting_for_recording {
+            return Ok(AppAction::Continue);
+        }
         let duration_secs = info.duration.as_secs();
         self.current_node = Some(
             self.request_next(Some(ProviderEvent::RecordingComplete {
@@ -2755,6 +3034,227 @@ mod tests {
             axum::serve(listener, app).await.ok();
         });
         format!("http://{}:{}/ivr/step", addr.ip(), addr.port())
+    }
+
+    /// Mock provider with separate `/step` and `/fail` scripted responses.
+    async fn spawn_mock_provider_with_fail(
+        step_responses: Vec<serde_json::Value>,
+        fail_responses: Vec<Result<serde_json::Value, u16>>,
+    ) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use axum::{
+            Json, Router,
+            http::StatusCode,
+            response::IntoResponse,
+            routing::post,
+        };
+        use std::sync::Mutex;
+
+        let paths = Arc::new(Mutex::new(Vec::<String>::new()));
+        let paths_step = paths.clone();
+        let paths_fail = paths.clone();
+        let step_q = Arc::new(Mutex::new(step_responses.into_iter()));
+        let fail_q = Arc::new(Mutex::new(fail_responses.into_iter()));
+
+        let app = Router::new()
+            .route(
+                "/ivr/step",
+                post(move |Json(_body): Json<serde_json::Value>| {
+                    paths_step.lock().unwrap().push("step".into());
+                    let resp = {
+                        let mut it = step_q.lock().unwrap();
+                        it.next()
+                            .unwrap_or(serde_json::json!({"type": "hangup"}))
+                    };
+                    async move { Json(resp) }
+                }),
+            )
+            .route(
+                "/ivr/step/fail",
+                post(move |Json(_body): Json<serde_json::Value>| {
+                    paths_fail.lock().unwrap().push("fail".into());
+                    let next = {
+                        let mut it = fail_q.lock().unwrap();
+                        it.next()
+                    };
+                    async move {
+                        match next {
+                            Some(Ok(body)) => Json(body).into_response(),
+                            Some(Err(code)) => StatusCode::from_u16(code)
+                                .unwrap_or(StatusCode::SERVICE_UNAVAILABLE)
+                                .into_response(),
+                            None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/ivr/step/start",
+                post(|| async { Json(serde_json::json!({"ok": true})) }),
+            )
+            .route(
+                "/ivr/step/end",
+                post(|| async { Json(serde_json::json!({"ok": true})) }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        crate::utils::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        (
+            format!("http://{}:{}/ivr/step", addr.ip(), addr.port()),
+            paths,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_http_e2e_fail_recovers_with_transfer() {
+        // /step returns tree-only `repeat` → execute fails → /fail returns transfer.
+        let (url, paths) = spawn_mock_provider_with_fail(
+            vec![serde_json::json!({"type": "repeat"})],
+            vec![Ok(serde_json::json!({"type": "transfer", "target": "2001"}))],
+        )
+        .await;
+
+        let provider = StepProvider::new(&url).with_retry(RetryConfig {
+            max_retries: 1,
+            timeout_ms: 2000,
+            retry_delay_ms: 10,
+            fallback_action: None,
+        });
+        let mut stack = MockCallStack::run(
+            Box::new(StepIvrApp::with_provider(Box::new(provider)).with_name("fail-ok")),
+            "1001",
+            "2000",
+        );
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(
+                2000,
+                "transfer after /fail",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        let seen = paths.lock().unwrap().clone();
+        assert!(
+            seen.iter().any(|p| p == "fail"),
+            "expected /fail hit, paths={seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_e2e_fail_down_jumps_ivr_fallback() {
+        let (url, paths) = spawn_mock_provider_with_fail(
+            vec![serde_json::json!({"type": "repeat"})],
+            vec![Err(503)],
+        )
+        .await;
+
+        let fb = Arc::new(crate::config::IvrFallbackConfig {
+            default: Some("default_ivr".into()),
+            rules: vec![crate::config::IvrFallbackRule {
+                name: Some("vip".into()),
+                priority: 10,
+                match_conditions: crate::proxy::routing::MatchConditions {
+                    from_user: Some("1001".into()),
+                    ..Default::default()
+                },
+                target: "builtin_vip".into(),
+            }],
+        });
+        let provider = StepProvider::new(&url)
+            .with_retry(RetryConfig {
+                max_retries: 1,
+                timeout_ms: 500,
+                retry_delay_ms: 10,
+                fallback_action: None,
+            })
+            .with_prefer_ivr_fallback(true);
+        let mut stack = MockCallStack::run(
+            Box::new(
+                StepIvrApp::with_provider(Box::new(provider))
+                    .with_name("fail-fb")
+                    .with_ivr_fallback(Some(fb)),
+            ),
+            "1001",
+            "2000",
+        );
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(2000, "toivr fallback", |c| {
+                matches!(
+                    c,
+                    CallCommand::Transfer { target, .. }
+                        if target.starts_with("toivr:builtin_vip")
+                )
+            })
+            .await;
+
+        let seen = paths.lock().unwrap().clone();
+        assert!(
+            seen.iter().any(|p| p == "fail"),
+            "expected /fail before fallback, paths={seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_e2e_step_down_jumps_default_fallback() {
+        use axum::{Router, http::StatusCode, response::IntoResponse, routing::post};
+
+        let app = Router::new().route(
+            "/ivr/step",
+            post(|| async { StatusCode::SERVICE_UNAVAILABLE.into_response() }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        crate::utils::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let url = format!("http://{}:{}/ivr/step", addr.ip(), addr.port());
+
+        let fb = Arc::new(crate::config::IvrFallbackConfig {
+            default: Some("default_ivr".into()),
+            rules: vec![],
+        });
+        let provider = StepProvider::new(&url)
+            .with_retry(RetryConfig {
+                max_retries: 1,
+                timeout_ms: 200,
+                retry_delay_ms: 10,
+                fallback_action: Some(ActionNode::new(EntryAction::Hangup {
+                    prompt: Some("sounds/error.wav".into()),
+                    prompt_text: None,
+                    prompt_voice: None,
+                })),
+            })
+            .with_prefer_ivr_fallback(true);
+        let mut stack = MockCallStack::run(
+            Box::new(
+                StepIvrApp::with_provider(Box::new(provider))
+                    .with_name("step-down")
+                    .with_ivr_fallback(Some(fb)),
+            ),
+            "1001",
+            "2000",
+        );
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        // prefer_ivr_fallback must skip retry.fallback hangup and JumpIvr instead.
+        stack
+            .assert_cmd(2000, "toivr default", |c| {
+                matches!(
+                    c,
+                    CallCommand::Transfer { target, .. }
+                        if target.starts_with("toivr:default_ivr")
+                )
+            })
+            .await;
     }
 
     #[tokio::test]
@@ -4407,6 +4907,118 @@ mod tests {
             .await;
     }
 
+    // ── Mid-call record_start / record_stop ──────────────────────────────
+
+    #[tokio::test]
+    async fn test_record_start_stop_continues_without_waiting() {
+        let start = ActionNode::new(EntryAction::RecordStart {
+            segment_type: Some("ivr".into()),
+            id: Some("seg1".into()),
+            beep: false,
+            max_duration_secs: None,
+        });
+        let stop = ActionNode::new(EntryAction::RecordStop {
+            reason: Some("before_transfer".into()),
+        });
+        let followup = ActionNode::new(EntryAction::Transfer {
+            target: "2001".into(),
+            params: HashMap::new(),
+            return_app: None,
+            return_target: None,
+        });
+
+        let mut stack = MockCallStack::run(
+            Box::new(mock_app(vec![start, stop, followup])),
+            "1001",
+            "2000",
+        );
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "start_record", |c| {
+                matches!(
+                    c,
+                    CallCommand::StartRecording { config }
+                        if config.segment_type.as_deref() == Some("ivr")
+                            && config.segment_id.as_deref() == Some("seg1")
+                            && config.notify_app == Some(false)
+                            && config.path.is_empty()
+                )
+            })
+            .await;
+        stack
+            .assert_cmd(200, "stop_record", |c| matches!(c, CallCommand::StopRecording))
+            .await;
+        stack
+            .assert_cmd(
+                500,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_segment_recording_complete_does_not_hijack_flow() {
+        // record_start then prompt; a late RecordingComplete must not replace
+        // the prompt with a provider RecordingComplete branch.
+        let start = ActionNode::new(EntryAction::RecordStart {
+            segment_type: Some("ivr".into()),
+            id: Some("s1".into()),
+            beep: false,
+            max_duration_secs: None,
+        });
+        let prompt = ActionNode::new(EntryAction::Prompt {
+            file: Some("hello.wav".into()),
+            tts_text: None,
+            tts_voice: None,
+            record_name_list: None,
+            interruptible: false,
+            tts_api_url: None,
+        });
+        let hangup = ActionNode::new(EntryAction::Hangup {
+            prompt: None,
+            prompt_text: None,
+            prompt_voice: None,
+        });
+
+        let mut stack = MockCallStack::run(
+            Box::new(mock_app(vec![start, prompt, hangup])),
+            "1001",
+            "2000",
+        );
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "start_record", |c| {
+                matches!(c, CallCommand::StartRecording { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "play", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path },
+                        ..
+                    } if path == "hello.wav"
+                )
+            })
+            .await;
+
+        // Spurious RecordingComplete while waiting for audio — must be ignored
+        // (pending action is Prompt, not Torecord).
+        stack.record_complete("/tmp/seg.wav", Duration::from_secs(1), 100);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        stack.audio_complete("ivr_prompt");
+        stack
+            .assert_cmd(500, "hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .await;
+    }
+
     // ── StepProvider ↔ HTTP contract test ────────────────────────────────
     //
     // Exercises the StepProvider HTTP client end-to-end against an in-process
@@ -4823,5 +5435,159 @@ mod tests {
         stack
             .assert_cmd(500, "hangup", |c| matches!(c, CallCommand::Hangup { .. }))
             .await;
+    }
+
+    struct FailRecoveryProvider {
+        fail_called: Arc<std::sync::Mutex<u32>>,
+    }
+
+    #[async_trait]
+    impl ActionProvider for FailRecoveryProvider {
+        async fn next_action(&self, _ctx: ProviderContext) -> anyhow::Result<ActionNode> {
+            Ok(ActionNode::new(EntryAction::Prompt {
+                file: Some("welcome.wav".into()),
+                tts_text: None,
+                tts_voice: None,
+                record_name_list: None,
+                interruptible: false,
+                tts_api_url: None,
+            }))
+        }
+
+        async fn fail_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode> {
+            *self.fail_called.lock().unwrap() += 1;
+            assert!(
+                matches!(ctx.event, Some(ProviderEvent::Fail { .. })),
+                "fail_action must receive Fail event"
+            );
+            Ok(ActionNode::new(EntryAction::Hangup {
+                prompt: Some("sounds/recovered.wav".into()),
+                prompt_text: None,
+                prompt_voice: None,
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_failure_calls_fail_then_continues() {
+        let fail_called = Arc::new(std::sync::Mutex::new(0u32));
+        let mut app = StepIvrApp::with_provider(Box::new(FailRecoveryProvider {
+            fail_called: fail_called.clone(),
+        }));
+        app.sess
+            .variables
+            .insert("session_id".into(), "s1".into());
+        app.sess.variables.insert("caller".into(), "1001".into());
+        app.sess.variables.insert("callee".into(), "4000".into());
+
+        let node = app
+            .recover_from_execute_failure(anyhow::anyhow!("transfer start failed"))
+            .await
+            .expect("fail recovery");
+        assert_eq!(*fail_called.lock().unwrap(), 1);
+        match node.action {
+            EntryAction::Hangup {
+                prompt: Some(p), ..
+            } => assert_eq!(p, "sounds/recovered.wav"),
+            other => panic!("expected recovered hangup, got {other:?}"),
+        }
+    }
+
+    struct FailThenEscalateProvider;
+
+    #[async_trait]
+    impl ActionProvider for FailThenEscalateProvider {
+        async fn next_action(&self, _ctx: ProviderContext) -> anyhow::Result<ActionNode> {
+            Err(anyhow::anyhow!("step unreachable"))
+        }
+
+        async fn fail_action(&self, _ctx: ProviderContext) -> anyhow::Result<ActionNode> {
+            Err(anyhow::anyhow!("fail unreachable"))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_step_fail_with_ivr_fallback_jumps_to_target() {
+        let fb = Arc::new(crate::config::IvrFallbackConfig {
+            default: Some("default_ivr".into()),
+            rules: vec![crate::config::IvrFallbackRule {
+                name: Some("vip".into()),
+                priority: 10,
+                match_conditions: crate::proxy::routing::MatchConditions {
+                    from_user: Some("1001".into()),
+                    ..Default::default()
+                },
+                target: "builtin_vip".into(),
+            }],
+        });
+        let mut app = StepIvrApp::with_provider(Box::new(FailThenEscalateProvider))
+            .with_ivr_fallback(Some(fb));
+        app.sess
+            .variables
+            .insert("session_id".into(), "s1".into());
+        app.sess.variables.insert("caller".into(), "1001".into());
+        app.sess.variables.insert("callee".into(), "4000".into());
+
+        let node = app
+            .request_next(Some(ProviderEvent::SessionStart))
+            .await
+            .expect("fallback node");
+        match node.action {
+            EntryAction::JumpIvr { route_point, params } => {
+                assert_eq!(route_point, "builtin_vip");
+                assert_eq!(
+                    params
+                        .get(crate::call::app::ivr::fallback::IVR_FALLBACK_USED_KEY)
+                        .map(String::as_str),
+                    Some("1")
+                );
+            }
+            other => panic!("expected JumpIvr fallback, got {other:?}"),
+        }
+        assert!(app.fallback_already_used());
+    }
+
+    #[tokio::test]
+    async fn test_ivr_fallback_uses_default_when_no_rule() {
+        let fb = Arc::new(crate::config::IvrFallbackConfig {
+            default: Some("default_ivr".into()),
+            rules: vec![crate::config::IvrFallbackRule {
+                name: Some("vip".into()),
+                priority: 10,
+                match_conditions: crate::proxy::routing::MatchConditions {
+                    from_user: Some("^9".into()),
+                    ..Default::default()
+                },
+                target: "vip_ivr".into(),
+            }],
+        });
+        let mut app = StepIvrApp::with_provider(Box::new(FailThenEscalateProvider))
+            .with_ivr_fallback(Some(fb));
+        app.sess.variables.insert("caller".into(), "1001".into());
+        app.sess.variables.insert("callee".into(), "4000".into());
+
+        let node = app.enter_ivr_fallback_node("step:test");
+        match node.action {
+            EntryAction::JumpIvr { route_point, .. } => assert_eq!(route_point, "default_ivr"),
+            other => panic!("expected default JumpIvr, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ivr_fallback_rejected_when_already_used() {
+        let fb = Arc::new(crate::config::IvrFallbackConfig {
+            default: Some("default_ivr".into()),
+            rules: vec![],
+        });
+        let mut app = StepIvrApp::with_provider(Box::new(FailThenEscalateProvider))
+            .with_ivr_fallback(Some(fb));
+        app.mark_fallback_used();
+        let node = app.enter_ivr_fallback_node("again");
+        match node.action {
+            EntryAction::Prompt {
+                file: Some(f), ..
+            } => assert_eq!(f, "sounds/error.wav"),
+            other => panic!("expected error hangup chain, got {other:?}"),
+        }
     }
 }

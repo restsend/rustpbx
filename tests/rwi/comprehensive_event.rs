@@ -118,7 +118,7 @@ impl TestCtx {
                         enabled: Some(true),
                         auto_start: Some(false),
                         ..Default::default()
-                    }),
+        }),
                     ..Default::default()
                 }),
                 ..Default::default()

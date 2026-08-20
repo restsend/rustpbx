@@ -54,6 +54,7 @@ POST {url}/end            ──→ your provider (session cleanup, fire‑and�
 | `POST {url}` | Every IVR step | ✅ `ActionNode` |
 | `POST {url}/start` | Session starts | ❌ fire-and-forget (headers are sent, body is `SessionContext`) |
 | `POST {url}/end` | Session ends (any reason) | ❌ fire-and-forget (body: `{"reason": "...", "detail": "..."}` — see §6 End Reason Tags) |
+| `POST {url}/fail` | Node execute failure (still in IVR) | ✅ recovery `ActionNode` (see §8) |
 
 ---
 
@@ -102,6 +103,8 @@ POST {url}/end            ──→ your provider (session cleanup, fire‑and�
 | `api_response` | `status: u16`, `body: json` | `api` action returned. `body` is a raw JSON value. |
 | `phone_collected` | `number: string` | Phone number input collection complete |
 | `recording_complete` | `url: string`, `duration_secs: u64` | Recording/voicemail capture finished |
+| `recording_started` | `segment_type: string`, `segment_id: string` | Mid-call `record_start` accepted; ask for next action immediately |
+| `recording_stopped` | `reason: string?` | Mid-call `record_stop` accepted; ask for next action immediately |
 | `input_voice` | `text: string`, `confidence: f32` | ASR recognition result (confidence 0.0–1.0) |
 | `error` | `reason: string` | An execution error occurred, e.g. TTS playback failed (TTS service not configured and edge-cli fallback unavailable) — see §Error Handling |
 | `dtmf_menu_invalid` | `digit: string` | Menu mode: user pressed a key not in `entries`, and no `invalid_action` was set |
@@ -137,7 +140,16 @@ Every response is a JSON object with a `"type"` field. Two categories:
 { "type": "input_voice",   "scene": "order",       "timeout_ms": 8000 }
 { "type": "api",           "url": "https://api.example.com", "method": "POST", "timeout": 10 }
 { "type": "torecord",      "prompt": "leave_msg.wav", "beep": true }
+{ "type": "record_start",  "segment_type": "ivr", "id": "seg1", "beep": false }
+{ "type": "record_stop" }
 ```
+
+> Mid-call recording: use `record_start` / `record_stop` when
+> `[recording].enabled = true` and `auto_start = false`. Segments are named
+> `{session_id}_{timestamp}_{type}_{id}.wav` and recorded in CDR
+> `metadata.recording_segments`. Call `record_stop` before `transfer` / REFER
+> so the current slice closes cleanly. `torecord` remains the voicemail-style
+> capture that waits for `recording_complete`.
 
 ### Transparent Passthrough Fields
 
@@ -221,6 +233,8 @@ RustPBX plays the prompt → on audio complete → automatically executes the dt
 | `input_voice` | ASR voice input | `scene: string` | `timeout_ms: u64` (default: 5000) | If ASR is unavailable, returns a `WaitFor` to the IVR executor, which then sends an `error` event to the provider. Next event: `input_voice` |
 | `api` | Call an external HTTP API | `url: string` | `method: string` (default: `"GET"`), `headers: Map<string,string>`, `variables: string` (comma‑separated variable names to pass), `timeout: u64` (default: 10, seconds), `get_dynamic_tree: bool` | The response body is returned as `api_response.body`. Next event: `api_response` |
 | `torecord` | Capture a voice recording / voicemail message | — | `prompt: string`, `beep: bool` (default: false), `max_duration_secs: u32 or null` | Recording is saved to `recordings/{session_id}/{timestamp}.wav`. Next event: `recording_complete` |
+| `record_start` | Start a mid-call recording segment (no wait) | — | `segment_type` / `type_id: string` (default `ivr`), `id: string`, `beep: bool`, `max_duration_secs: u32` | Requires `[recording].enabled`; typically `auto_start=false`. File: `{session_id}_{ts}_{type}_{id}.wav`. Next: provider asked immediately (`recording_started`) |
+| `record_stop` | Stop the active mid-call segment | — | `reason: string` | Prefer before `transfer`/REFER. Next: provider asked immediately (`recording_stopped`) |
 
 ### DtmfMenu local resolution (in step mode)
 
@@ -437,9 +451,48 @@ When an IVR is entered via `transfer` (with `target="ivr:other_ivr"`) or `jump_i
 |----------|----------|
 | **Provider HTTP timeout** (per‑request timeout = `retry.timeout_ms`, default 1000ms) | Retry, up to `retry.max_retries` (default 3). Between retries: wait `retry.delay_ms` (default 100ms). |
 | **Provider returns 5xx** | Same as timeout — retry loop. |
-| **All retries exhausted** | Execute `retry.fallback` (default: `{"type":"hangup","prompt":"sounds/error.wav"}`). |
-| **Provider returns invalid JSON / unknown action type** | Record trace error → play `sounds/error.wav` → hangup. |
-| **Provider returns tree‑mode only action** (`repeat`/`back`/`play`/`menu`/`collect_extension`/`collect`/`webhook`) | Not executed, returns error. |
+| **All `/step` retries exhausted** | If `[proxy.ivr_fallback]` is configured → session IVR fallback (see below). Otherwise execute `retry.fallback` (default: `{"type":"hangup","prompt":"sounds/error.wav"}`). |
+| **Node execute failure** (transfer/bridge start error, tree-only action, etc.) | `POST {url}/fail` with a `fail` event; provider returns a recovery `ActionNode`. If `/fail` also fails → session IVR fallback. |
+| **Provider returns invalid JSON / unknown action type** | Treated as `/step` failure → same as exhausted retries. |
+| **Provider returns tree‑mode only action** (`repeat`/`back`/`play`/`menu`/`collect_extension`/`collect`/`webhook`) | Not executed → `/fail` path. |
+
+### `/fail` endpoint
+
+When a node fails while the call is still in the Step IVR session, RustPBX posts the same `ProviderContext` shape as `/step`, with:
+
+```json
+{
+  "type": "fail",
+  "reason": "transfer start failed",
+  "failed_step_id": "optional",
+  "failed_step_name": "optional",
+  "failed_action": "Transfer"
+}
+```
+
+Respond with an `ActionNode` to continue the **same** provider session. Do not rely on `/fail` for TTS `error` recovery — that still uses `POST {url}` with `{"type":"error",...}`.
+
+### Session IVR fallback (`[proxy.ivr_fallback]`)
+
+Used when the current Step provider cannot continue (`/step` exhausted, `/fail` failed, or starting a target IVR failed). Match rules use the same `from`/`to`/`header.*` semantics as dialplan routes; first match (by `priority` desc) wins, else `default`.
+
+```toml
+[proxy.ivr_fallback]
+default = "default"
+
+[[proxy.ivr_fallback.rules]]
+name = "vip"
+priority = 100
+match = { "from.user" = "^9", "to.user" = "4000" }
+target = "builtin_vip_step"
+
+[[proxy.ivr_fallback.rules]]
+priority = 50
+match = { "header.X-Tenant" = "acme" }
+target = "acme_ivr"
+```
+
+RustPBX jumps via `toivr:{target}` and sets `ivr_fallback_used=1` so fallback is applied at most once per call. A second failure plays `sounds/error.wav` and hangs up.
 
 ### TTS Audio Fallback
 
@@ -476,12 +529,12 @@ When a `prompt` action contains `tts_text` but no TTS service is configured:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `url` | string | — | Provider HTTP endpoint (POST) |
+| `url` | string | — | Provider HTTP endpoint (POST); `/start`, `/end`, `/fail` are derived from it |
 | `headers` | `Map<string,string>` | `{}` | Custom HTTP headers sent on every provider call |
 | `retry.max_retries` | u32 | `3` | Max retry attempts |
 | `retry.timeout_ms` | u64 | `1000` | Per‑request timeout in **milliseconds** |
 | `retry.delay_ms` | u64 | `100` | Delay between failed attempts in **milliseconds** |
-| `retry.fallback` | ActionNode | `{"type":"hangup","prompt":"sounds/error.wav"}` | Action to execute when all retries fail |
+| `retry.fallback` | ActionNode | `{"type":"hangup","prompt":"sounds/error.wav"}` | Same-session action when `/step` retries fail **and** `[proxy.ivr_fallback]` is not configured |
 | `name` | string | `"step_ivr"` | Display name for tracing |
 
 ### Published step.json (IVR Editor creates this, for reference)

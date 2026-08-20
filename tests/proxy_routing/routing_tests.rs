@@ -369,7 +369,7 @@ async fn test_match_invite_exact_match() {
                 enabled: Some(true),
                 auto_start: Some(false),
                 ..Default::default()
-            }),
+        }),
             ..Default::default()
         },
     );

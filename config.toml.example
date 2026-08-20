@@ -116,6 +116,17 @@ generated_dir = "./config"
 routes_files = ["config/routes/*.toml"]
 trunks_files = ["config/trunks/*.toml"]
 addons = ["acme", "wholesale"]
+
+# Step IVR session recovery when the external provider cannot continue.
+# Match rules use the same from/to/header.* semantics as dialplan routes.
+# First matching rule (priority desc) wins; otherwise `default` is used.
+# [proxy.ivr_fallback]
+# default = "default"
+# [[proxy.ivr_fallback.rules]]
+# name = "vip"
+# priority = 100
+# match = { "from.user" = "^9" }
+# target = "builtin_vip_step"
 # Don't responed the request when user not existed (slience for spam scanner)
 ensure_user = true
 
@@ -213,6 +224,22 @@ auto_start_at = "media" # default; use "answer" to wait for 200
 #                     # is active. SipFlow captures signalling only.
 #                     # Media upload is handled by [recording] (type = http/s3),
 #                     # not [sipflow.upload].
+#
+# Mid-call / IVR segmented recording: set auto_start = false so the call does
+# not record by default; IVR `record_start`/`record_stop` (or RWI
+# record.start/stop) open slices named
+# {session_id}_{YYYYMMDDHHMMSS}_{type}_{id}.wav. CDR metadata.recording_segments
+# lists every slice. Prefer record_stop before transfer/REFER.
+#
+# Without [sipflow], a lightweight SIP JSONL sidecar is still written next to
+# the recording ({session_id}.jsonl / {session_id}_{call_id}.jsonl) and uploaded
+# with the same type=http|s3 path. On upload failure a sibling
+# .upload_failed.{filename} JSON marker is written (time/address/duration_ms/error);
+# local files are deleted only after a successful remote upload.
+#
+# type = "local" archival layout under path:
+# subdir = "daily"   # default — {path}/YYYYMMDD/{file}
+# # subdir = "hourly"  # {path}/YYYYMMDD/HH/{file}
 
 # ── Live transcription (streaming ASR) ───────────────────────────────────────
 # Real-time call transcription over a streaming ASR WebSocket. When configured,

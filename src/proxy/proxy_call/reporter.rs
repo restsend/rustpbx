@@ -167,29 +167,30 @@ impl CallReporter {
             });
         let outbound_sip_trunk_id = outbound_trunk_context.as_ref().and_then(|ctx| ctx.id);
 
-        // The session flushes the file recorder before reporting. Collect the
-        // resulting artifact regardless of whether SIP reached a final 200.
-        let mut recorder = Vec::new();
-        if self.context.dialplan.recording.enabled
-            && let Some(option) = self.context.dialplan.recording.option.as_ref()
-            && !option.recorder_file.trim().is_empty()
-            && let Ok(metadata) = fs::metadata(&option.recorder_file)
-            && metadata.is_file()
-            && metadata.len() > 0
-        {
-            recorder.push(CallRecordMedia {
-                track_id: "mixed".to_string(),
-                path: option.recorder_file.clone(),
-                size: metadata.len(),
-                extra: None,
-            });
-        }
+        // The session flushes the file recorder before reporting. Prefer
+        // completed mid-call / full-call segments; fall back to dialplan path.
+        let root_session = snapshot
+            .root_session_id
+            .clone()
+            .unwrap_or_else(|| self.context.session_id.clone());
+        let (recorder, mut metadata_map) = collect_recording_artifacts(
+            &snapshot,
+            &root_session,
+            self.context.dialplan.recording.enabled,
+            self.context
+                .dialplan
+                .recording
+                .option
+                .as_ref()
+                .map(|o| o.recorder_file.as_str()),
+        );
         // Copy values from cookie to extras_map
         // (Removed as TransactionCookie no longer has values)
 
-        let recording_path_for_db = recorder.first().map(|media| media.path.clone());
-
-        let mut metadata_map = snapshot.metadata.clone();
+        let recording_path_for_db = recorder
+            .iter()
+            .find(|m| m.track_id != "signaling")
+            .map(|media| media.path.clone());
 
         if let Some(ctx) = &outbound_trunk_context {
             metadata_map.insert(
@@ -338,6 +339,119 @@ impl CallReporter {
 /// This function is addon-agnostic. Addon-specific error codes (e.g. wholesale
 /// `reject_code`) are injected by each addon's own `CallRecordHook::on_record_enrich`
 /// implementation to keep the core free of addon dependencies.
+/// Build `CallRecord.recorder` entries and recording-related metadata keys
+/// from a session snapshot. Extracted so unit tests can cover segment +
+/// sidecar JSONL aggregation without constructing a full `CallReporter`.
+fn collect_recording_artifacts(
+    snapshot: &CallSessionRecordSnapshot,
+    root_session: &str,
+    dialplan_recording_enabled: bool,
+    dialplan_recorder_file: Option<&str>,
+) -> (Vec<CallRecordMedia>, HashMap<String, serde_json::Value>) {
+    let mut recorder = Vec::new();
+    let mut metadata_map = snapshot.metadata.clone();
+
+    if !snapshot.recording_segments.is_empty() {
+        for seg in &snapshot.recording_segments {
+            if seg.path.trim().is_empty() {
+                continue;
+            }
+            let size = if seg.size > 0 {
+                seg.size
+            } else {
+                fs::metadata(&seg.path)
+                    .ok()
+                    .filter(|m| m.is_file())
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+            };
+            if size == 0 {
+                continue;
+            }
+            let mut extra = HashMap::new();
+            extra.insert(
+                "session_id".to_string(),
+                serde_json::Value::String(root_session.to_string()),
+            );
+            extra.insert(
+                "segment_type".to_string(),
+                serde_json::Value::String(seg.segment_type.clone()),
+            );
+            extra.insert(
+                "segment_id".to_string(),
+                serde_json::Value::String(seg.segment_id.clone()),
+            );
+            if let Some(ref started) = seg.started_at {
+                extra.insert(
+                    "started_at".to_string(),
+                    serde_json::Value::String(started.clone()),
+                );
+            }
+            if let Some(ref ended) = seg.ended_at {
+                extra.insert(
+                    "ended_at".to_string(),
+                    serde_json::Value::String(ended.clone()),
+                );
+            }
+            recorder.push(CallRecordMedia {
+                track_id: format!("segment:{}:{}", seg.segment_type, seg.segment_id),
+                path: seg.path.clone(),
+                size,
+                extra: Some(extra),
+            });
+        }
+    } else if dialplan_recording_enabled
+        && let Some(recorder_file) = dialplan_recorder_file
+        && !recorder_file.trim().is_empty()
+        && let Ok(metadata) = fs::metadata(recorder_file)
+        && metadata.is_file()
+        && metadata.len() > 0
+    {
+        recorder.push(CallRecordMedia {
+            track_id: "mixed".to_string(),
+            path: recorder_file.to_string(),
+            size: metadata.len(),
+            extra: None,
+        });
+    }
+
+    if let Some(ref jsonl) = snapshot.signaling_jsonl_path
+        && let Ok(metadata) = fs::metadata(jsonl)
+        && metadata.is_file()
+        && metadata.len() > 0
+    {
+        let mut extra = HashMap::new();
+        extra.insert(
+            "session_id".to_string(),
+            serde_json::Value::String(root_session.to_string()),
+        );
+        extra.insert(
+            "artifact".to_string(),
+            serde_json::Value::String("sipflow_jsonl".to_string()),
+        );
+        recorder.push(CallRecordMedia {
+            track_id: "signaling".to_string(),
+            path: jsonl.clone(),
+            size: metadata.len(),
+            extra: Some(extra),
+        });
+    }
+
+    if !snapshot.recording_segments.is_empty() {
+        if let Ok(value) = serde_json::to_value(&snapshot.recording_segments) {
+            metadata_map.insert("recording_segments".to_string(), value);
+        }
+    }
+    if let Some(ref jsonl) = snapshot.signaling_jsonl_path {
+        metadata_map.insert(
+            "sipflow_jsonl".to_string(),
+            serde_json::Value::String(jsonl.clone()),
+        );
+    }
+
+    (recorder, metadata_map)
+}
+
 fn enrich_error_metadata(
     metadata: &mut HashMap<String, serde_json::Value>,
     route_ext: Option<&HashMap<String, String>>,
@@ -620,6 +734,8 @@ mod tests {
             extensions: http::Extensions::new(),
             metadata: std::collections::HashMap::new(),
             media_quality: None,
+            recording_segments: Vec::new(),
+            signaling_jsonl_path: None,
         };
 
         let roles = build_sip_leg_roles(&snapshot);
@@ -705,5 +821,112 @@ mod tests {
         enrich_error_metadata(&mut meta, Some(&route), 503, None, None);
         // pre-existing value is preserved (entry().or_insert)
         assert_eq!(meta_str(&meta, "error_code"), "wholesale.cps_limit");
+    }
+
+    fn empty_snapshot() -> CallSessionRecordSnapshot {
+        CallSessionRecordSnapshot {
+            ring_time: None,
+            answer_time: None,
+            last_error: None,
+            root_session_id: Some("root-sess".into()),
+            invite_final_status: None,
+            hangup_reason: None,
+            hangup_messages: vec![],
+            original_caller: None,
+            original_callee: None,
+            routed_caller: None,
+            routed_callee: None,
+            connected_callee: None,
+            routed_contact: None,
+            routed_destination: None,
+            last_queue_name: None,
+            callee_call_ids: vec![],
+            server_dialog_id: rsipstack::dialog::DialogId {
+                call_id: "leg-call".into(),
+                local_tag: "l".into(),
+                remote_tag: "r".into(),
+            },
+            extensions: http::Extensions::new(),
+            metadata: HashMap::new(),
+            media_quality: None,
+            recording_segments: Vec::new(),
+            signaling_jsonl_path: None,
+        }
+    }
+
+    #[test]
+    fn collect_recording_artifacts_includes_segments_and_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("root_20260101010101_ivr_ab.wav");
+        let jsonl = dir.path().join("root_leg.jsonl");
+        std::fs::write(&wav, b"wavdata").unwrap();
+        std::fs::write(&jsonl, b"{\"msg_type\":\"sip\"}\n").unwrap();
+
+        let mut snapshot = empty_snapshot();
+        snapshot.recording_segments = vec![crate::callrecord::RecordingSegment {
+            path: wav.to_string_lossy().into_owned(),
+            size: 7,
+            segment_type: "ivr".into(),
+            segment_id: "ab".into(),
+            started_at: Some("t0".into()),
+            ended_at: Some("t1".into()),
+            duration_secs: 1.5,
+        }];
+        snapshot.signaling_jsonl_path = Some(jsonl.to_string_lossy().into_owned());
+
+        let (recorder, meta) =
+            collect_recording_artifacts(&snapshot, "root-sess", false, None);
+
+        assert_eq!(recorder.len(), 2);
+        assert_eq!(recorder[0].track_id, "segment:ivr:ab");
+        assert_eq!(
+            recorder[0]
+                .extra
+                .as_ref()
+                .and_then(|e| e.get("session_id"))
+                .and_then(|v| v.as_str()),
+            Some("root-sess")
+        );
+        assert_eq!(recorder[1].track_id, "signaling");
+        assert!(meta.get("recording_segments").is_some());
+        assert_eq!(
+            meta.get("sipflow_jsonl").and_then(|v| v.as_str()),
+            Some(jsonl.to_string_lossy().as_ref())
+        );
+        // Prefer non-signaling for primary recording path selection.
+        assert_ne!(recorder[0].track_id, "signaling");
+    }
+
+    #[test]
+    fn collect_recording_artifacts_falls_back_to_dialplan_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("full.wav");
+        std::fs::write(&wav, b"abcdef").unwrap();
+        let snapshot = empty_snapshot();
+        let (recorder, meta) = collect_recording_artifacts(
+            &snapshot,
+            "root-sess",
+            true,
+            Some(wav.to_str().unwrap()),
+        );
+        assert_eq!(recorder.len(), 1);
+        assert_eq!(recorder[0].track_id, "mixed");
+        assert!(meta.get("recording_segments").is_none());
+    }
+
+    #[test]
+    fn collect_recording_artifacts_skips_zero_size_segments() {
+        let mut snapshot = empty_snapshot();
+        snapshot.recording_segments = vec![crate::callrecord::RecordingSegment {
+            path: "/tmp/missing-segment.wav".into(),
+            size: 0,
+            segment_type: "ivr".into(),
+            segment_id: "x".into(),
+            started_at: None,
+            ended_at: None,
+            duration_secs: 0.0,
+        }];
+        let (recorder, _) = collect_recording_artifacts(&snapshot, "root", false, None);
+        assert!(recorder.is_empty());
     }
 }

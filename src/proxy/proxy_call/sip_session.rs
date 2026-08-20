@@ -361,6 +361,13 @@ pub struct SipSession {
 
     /// Live transcription state; `None` while nobody subscribes.
     live_transcription: Option<live_transcription::LiveTranscription>,
+
+    /// Currently active mid-call / auto recording (if any).
+    active_recording: Option<crate::callrecord::ActiveRecording>,
+    /// Completed recording segments for this leg (full-call + mid-call slices).
+    completed_recording_segments: Vec<crate::callrecord::RecordingSegment>,
+    /// Local signaling JSONL path when the recording sidecar is active.
+    signaling_jsonl_path: Option<String>,
 }
 
 #[derive(Clone)]
@@ -476,6 +483,27 @@ impl AppFactory for BuiltinAppFactory {
 }
 
 impl BuiltinAppFactory {
+    fn ivr_fallback_configured(context: &ApplicationContext) -> bool {
+        context
+            .config
+            .proxy
+            .ivr_fallback
+            .as_ref()
+            .is_some_and(|c| c.is_configured())
+    }
+
+    fn ivr_fallback_arc(
+        context: &ApplicationContext,
+    ) -> Option<std::sync::Arc<crate::config::IvrFallbackConfig>> {
+        context
+            .config
+            .proxy
+            .ivr_fallback
+            .as_ref()
+            .filter(|c| c.is_configured())
+            .map(|c| std::sync::Arc::new(c.clone()))
+    }
+
     async fn build_app(
         &self,
         app_name: &str,
@@ -542,6 +570,9 @@ impl BuiltinAppFactory {
                             fallback_action: fallback,
                         });
                     }
+                    if Self::ivr_fallback_configured(context) {
+                        provider = provider.with_prefer_ivr_fallback(true);
+                    }
 
                     let mut app =
                         crate::call::app::ivr::StepIvrApp::with_provider(Box::new(provider));
@@ -572,6 +603,7 @@ impl BuiltinAppFactory {
                             app = app.with_transferred_from(Some(tf.to_string()));
                         }
                     }
+                    app = app.with_ivr_fallback(Self::ivr_fallback_arc(context));
                     Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
                 } else {
                     // File-based: read TOML and detect mode from content.
@@ -638,6 +670,9 @@ impl BuiltinAppFactory {
                         }
                         provider = provider
                             .with_retry(crate::call::app::ivr::RetryConfig::from(provider_cfg));
+                        if Self::ivr_fallback_configured(context) {
+                            provider = provider.with_prefer_ivr_fallback(true);
+                        }
 
                         let mut app =
                             crate::call::app::ivr::StepIvrApp::with_provider(Box::new(provider));
@@ -663,6 +698,7 @@ impl BuiltinAppFactory {
                                 app = app.with_transferred_from(Some(tf.to_string()));
                             }
                         }
+                        app = app.with_ivr_fallback(Self::ivr_fallback_arc(context));
                         Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
                     } else {
                         // Tree mode from TOML
@@ -1140,8 +1176,16 @@ impl SipSession {
             }
             self.bridge_mut()
                 .ok_or_else(|| anyhow!("Recording requires MediaBridge"))?
-                .start_recording(path, 2, false, None)
+                .start_recording(path.clone(), 2, false, None)
                 .await?;
+            self.active_recording = Some(crate::callrecord::ActiveRecording {
+                path,
+                segment_type: "full".to_string(),
+                segment_id: "full".to_string(),
+                started_at: chrono::Utc::now(),
+                notify_app: false,
+            });
+            self.ensure_signaling_sidecar();
             debug!(session_id = %self.id, backend = "file", "auto recorder installed");
             return Ok(());
         }
@@ -1162,6 +1206,87 @@ impl SipSession {
             .await?;
         debug!(session_id = %self.id, backend = "sipflow", "auto recorder installed");
         Ok(())
+    }
+
+    fn root_session_id_str(&self) -> String {
+        self.meta
+            .root_session_id
+            .clone()
+            .unwrap_or_else(|| self.context.session_id.clone())
+    }
+
+    fn recording_root_dir(&self) -> String {
+        self.server
+            .recording_policy
+            .load()
+            .as_ref()
+            .as_ref()
+            .map(|p| p.recorder_path())
+            .unwrap_or_else(|| "recordings".to_string())
+    }
+
+    /// Register the SIP signaling JSONL sidecar when recording is enabled and
+    /// there is no full SipFlow backend (or force_file is on).
+    fn ensure_signaling_sidecar(&mut self) {
+        if self.signaling_jsonl_path.is_some() {
+            return;
+        }
+        if !self.context.dialplan.recording.enabled {
+            return;
+        }
+        let has_sipflow_backend = self
+            .server
+            .sip_flow
+            .as_ref()
+            .and_then(|sf| sf.backend())
+            .is_some();
+        let force_file = self.context.dialplan.recording.force_file;
+        // Full sipflow already captures signaling; skip unless force_file (WAV
+        // path) wants a local jsonl next to the recording.
+        if has_sipflow_backend && !force_file {
+            return;
+        }
+        let Some(sidecar) = self.server.signaling_sidecar.as_ref() else {
+            return;
+        };
+        let root = self.recording_root_dir();
+        let path = crate::callrecord::signaling_jsonl_path(
+            &root,
+            &self.root_session_id_str(),
+            &self.context.session_id,
+        );
+        let path_str = path.to_string_lossy().into_owned();
+        sidecar.register(self.context.session_id.clone(), path.clone());
+        self.signaling_jsonl_path = Some(path_str);
+    }
+
+    fn finalize_active_recording_segment(
+        &mut self,
+        result: &crate::media::media_recorder::RecordingResult,
+    ) -> bool {
+        let ended_at = chrono::Utc::now();
+        let (segment_type, segment_id, started_at, notify_app) =
+            if let Some(active) = self.active_recording.take() {
+                (
+                    active.segment_type,
+                    active.segment_id,
+                    Some(active.started_at.to_rfc3339()),
+                    active.notify_app,
+                )
+            } else {
+                ("full".to_string(), "full".to_string(), None, false)
+            };
+        self.completed_recording_segments
+            .push(crate::callrecord::RecordingSegment {
+                path: result.path.clone(),
+                size: result.file_size,
+                segment_type,
+                segment_id,
+                started_at,
+                ended_at: Some(ended_at.to_rfc3339()),
+                duration_secs: result.duration_secs,
+            });
+        notify_app
     }
 
     /// Put a leg on hold playing a file as hold music (looping).
@@ -1577,6 +1702,9 @@ impl SipSession {
             dtmf_digits: Vec::new(),
             active_plays: std::collections::HashMap::new(),
             live_transcription: None,
+            active_recording: None,
+            completed_recording_segments: Vec::new(),
+            signaling_jsonl_path: None,
         };
 
         // Phase 0: Initialize MediaBridge eagerly when media is anchored.
@@ -3482,6 +3610,17 @@ impl SipSession {
                         .and_then(|v| v.as_u64().map(|c| c as u16)),
                     mono_caller_only: params
                         .and_then(|p| p.get("mono_caller_only"))
+                        .and_then(|v| v.as_bool()),
+                    segment_type: params
+                        .and_then(|p| p.get("type").or_else(|| p.get("segment_type")))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    segment_id: params
+                        .and_then(|p| p.get("id").or_else(|| p.get("segment_id")))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    notify_app: params
+                        .and_then(|p| p.get("notify_app"))
                         .and_then(|v| v.as_bool()),
                 },
             }),
@@ -7398,7 +7537,8 @@ impl SipSession {
         }
     }
 
-    fn publish_recording_complete(&self, result: crate::media::media_recorder::RecordingResult) {
+    fn publish_recording_complete(&mut self, result: crate::media::media_recorder::RecordingResult) {
+        let notify_app = self.finalize_active_recording_segment(&result);
         let path = result.path;
         let duration = Duration::from_secs_f64(result.duration_secs);
         let file_size = result.file_size;
@@ -7408,9 +7548,11 @@ impl SipSession {
             duration,
             size_bytes: file_size,
         };
-        let _ = self.app_event_bridge.send_app_event(
-            crate::call::app::ControllerEvent::RecordingComplete(info.clone()),
-        );
+        if notify_app {
+            let _ = self.app_event_bridge.send_app_event(
+                crate::call::app::ControllerEvent::RecordingComplete(info.clone()),
+            );
+        }
         if let Some(gateway) = self.server.rwi_gateway.as_ref() {
             let call_id = self.context.session_id.clone();
             let meta = gateway.read().meta_store.get_sync(&call_id);
@@ -7575,6 +7717,10 @@ impl SipSession {
         self.server
             .active_call_registry
             .remove(&self.context.session_id);
+
+        if let Some(ref sidecar) = self.server.signaling_sidecar {
+            let _ = sidecar.unregister(&self.context.session_id);
+        }
 
         // Resolve the final hangup reason BEFORE the CDR snapshot is reported:
         // enrich with IVR end reason and queue abandon detection so the call
@@ -8573,6 +8719,8 @@ impl SipSession {
             server_dialog_id: self.caller_dialog_id(),
             metadata,
             media_quality,
+            recording_segments: self.completed_recording_segments.clone(),
+            signaling_jsonl_path: self.signaling_jsonl_path.clone(),
             extensions,
         }
     }
@@ -8804,12 +8952,41 @@ impl SipSession {
                     if !self.context.dialplan.recording.enabled {
                         return Err(anyhow!("recording is not enabled for this call"));
                     }
+                    let segment_type = config
+                        .segment_type
+                        .clone()
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or_else(|| "segment".to_string());
+                    let segment_id = config
+                        .segment_id
+                        .clone()
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or_else(|| {
+                            uuid::Uuid::new_v4().to_string()[..8].to_string()
+                        });
+                    let path = if config.path.trim().is_empty() {
+                        crate::callrecord::segment_wav_path(
+                            &self.recording_root_dir(),
+                            &self.root_session_id_str(),
+                            &segment_type,
+                            &segment_id,
+                            chrono::Utc::now(),
+                        )
+                        .to_string_lossy()
+                        .into_owned()
+                    } else {
+                        config.path.clone()
+                    };
+                    if let Some(parent) = std::path::Path::new(&path).parent() {
+                        let _ = tokio::fs::create_dir_all(parent).await;
+                    }
+                    let notify_app = config.notify_app.unwrap_or(true);
                     let bridge = self
                         .bridge_mut()
                         .ok_or_else(|| anyhow!("Recording requires MediaBridge"))?;
                     bridge
                         .start_recording(
-                            config.path,
+                            path.clone(),
                             config.channels.unwrap_or(2),
                             config.mono_caller_only.unwrap_or(false),
                             config
@@ -8817,6 +8994,14 @@ impl SipSession {
                                 .map(|seconds| Duration::from_secs(seconds as u64)),
                         )
                         .await?;
+                    self.active_recording = Some(crate::callrecord::ActiveRecording {
+                        path,
+                        segment_type,
+                        segment_id,
+                        started_at: chrono::Utc::now(),
+                        notify_app,
+                    });
+                    self.ensure_signaling_sidecar();
                     if config.beep {
                         self.handle_play(
                             None,
@@ -13771,6 +13956,26 @@ a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5
         assert!(
             matches!(&cmd, CallCommand::StartRecording { config } if config.path == "/tmp/rec.wav" && !config.beep)
         );
+    }
+
+    #[test]
+    fn test_parse_info_record_start_with_segment_fields() {
+        let json = serde_json::json!({
+            "beep": false,
+            "type": "ivr",
+            "id": "seg9",
+            "notify_app": false
+        });
+        let cmd = SipSession::parse_info_command("record.start", Some(&json), &json).unwrap();
+        match cmd {
+            CallCommand::StartRecording { config } => {
+                assert_eq!(config.segment_type.as_deref(), Some("ivr"));
+                assert_eq!(config.segment_id.as_deref(), Some("seg9"));
+                assert_eq!(config.notify_app, Some(false));
+                assert!(config.path.is_empty());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]

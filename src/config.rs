@@ -1,7 +1,7 @@
 use crate::rwi::auth::RwiConfig;
 use crate::{
     call::{CallRecordingConfig, DialDirection, QueuePlan, user::SipUser},
-    proxy::routing::{RouteQueueConfig, RouteRule, TrunkConfig},
+    proxy::routing::{MatchConditions, RouteQueueConfig, RouteRule, TrunkConfig},
     storage::StorageConfig,
 };
 use anyhow::{Error, Result};
@@ -198,6 +198,10 @@ pub struct RecordingPolicy {
     /// Swap stereo channels in recording: callee→left, caller→right.
     #[serde(default)]
     pub stereo_swap: Option<bool>,
+    /// Local archival layout when `type = "local"`: `daily` (default) or
+    /// `hourly`. Files are moved under `{path}/YYYYMMDD[/HH]/` after the call.
+    #[serde(default)]
+    pub subdir: Option<String>,
 }
 
 impl RecordingPolicy {
@@ -735,6 +739,40 @@ pub struct LocatorWebhookConfig {
     pub timeout_ms: Option<u64>,
 }
 
+/// Global recovery for Step IVR when the external provider cannot continue.
+///
+/// Rules are evaluated in descending `priority` order using the same
+/// [`MatchConditions`] semantics as dialplan routes (`from.user`, `to.user`,
+/// `header.X-Foo`, …). The first full match wins; otherwise `default` is used.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct IvrFallbackConfig {
+    /// IVR name (resolved via `resolve_ivr_file`) when no rule matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<IvrFallbackRule>,
+}
+
+impl IvrFallbackConfig {
+    /// True when at least one recovery target is configured.
+    pub fn is_configured(&self) -> bool {
+        self.default.as_ref().is_some_and(|s| !s.is_empty()) || !self.rules.is_empty()
+    }
+}
+
+/// One match → target IVR entry for [`IvrFallbackConfig`].
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct IvrFallbackRule {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub priority: i32,
+    #[serde(default, rename = "match")]
+    pub match_conditions: MatchConditions,
+    /// Built-in IVR name to jump to (`toivr:{target}`).
+    pub target: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct JwtAuthConfig {
     #[serde(default)]
@@ -858,6 +896,11 @@ pub struct ProxyConfig {
     pub ivr_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ivr_files: Vec<String>,
+    /// Global Step-IVR recovery: when `/step` or `/fail` cannot continue the
+    /// current provider session, match `from`/`to`/`headers` rules and jump to
+    /// a built-in IVR; if no rule matches, use `default`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ivr_fallback: Option<IvrFallbackConfig>,
     #[serde(default)]
     pub recording: Option<RecordingPolicy>,
     /// Transcription settings (`[proxy.transcript]`). Only the `remote`
@@ -1371,6 +1414,7 @@ impl Default for ProxyConfig {
             queue_dir: None,
             ivr_dir: None,
             ivr_files: Vec::new(),
+            ivr_fallback: None,
             recording: None,
             transcript: None,
             generated_dir: default_generated_config_dir(),

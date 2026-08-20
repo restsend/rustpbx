@@ -17,6 +17,15 @@ pub trait ActionProvider: Send + Sync {
 
     async fn next_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode>;
 
+    /// Request a recovery action after a node failed to execute.
+    ///
+    /// HTTP providers `POST {url}/fail`. Default: return `Err` so the caller
+    /// can escalate to session-level IVR fallback.
+    async fn fail_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode> {
+        let _ = ctx;
+        Err(anyhow::anyhow!("provider does not support /fail"))
+    }
+
     async fn on_session_start(&self, ctx: &SessionContext) -> anyhow::Result<()> {
         let _ = ctx;
         Ok(())
@@ -122,12 +131,32 @@ pub enum ProviderEvent {
         url: String,
         duration_secs: u64,
     },
+    /// Mid-call `record_start` completed (recording is active).
+    RecordingStarted {
+        segment_type: String,
+        segment_id: String,
+    },
+    /// Mid-call `record_stop` completed (segment finalized asynchronously).
+    RecordingStopped {
+        #[serde(default)]
+        reason: Option<String>,
+    },
     InputVoice {
         text: String,
         confidence: f32,
     },
     Error {
         reason: String,
+    },
+    /// Node execution failed; posted to `POST {url}/fail` (not `/step`).
+    Fail {
+        reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failed_step_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failed_step_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failed_action: Option<String>,
     },
     DtmfMenuInvalid {
         digit: String,
@@ -238,6 +267,9 @@ pub struct StepProvider {
     headers: HashMap<String, String>,
     http_client: reqwest::Client,
     retry: RetryConfig,
+    /// When true, exhausted `/step` retries return `Err` instead of
+    /// `retry.fallback_action` so the executor can jump to session IVR fallback.
+    prefer_ivr_fallback: bool,
 }
 
 impl StepProvider {
@@ -248,6 +280,7 @@ impl StepProvider {
             http_client: crate::http_util::build_keepalive_client(None, None)
                 .unwrap_or_else(|_| reqwest::Client::new()),
             retry: RetryConfig::default(),
+            prefer_ivr_fallback: false,
         }
     }
 
@@ -258,6 +291,11 @@ impl StepProvider {
 
     pub fn with_retry(mut self, retry: RetryConfig) -> Self {
         self.retry = retry;
+        self
+    }
+
+    pub fn with_prefer_ivr_fallback(mut self, prefer: bool) -> Self {
+        self.prefer_ivr_fallback = prefer;
         self
     }
 
@@ -289,18 +327,15 @@ impl StepProvider {
             _ => base.to_string(),
         }
     }
-}
 
-#[async_trait]
-impl ActionProvider for StepProvider {
-    fn name(&self) -> &str {
-        "step"
-    }
-
-    async fn next_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode> {
+    async fn post_action_node(
+        &self,
+        url: &str,
+        ctx: &ProviderContext,
+        label: &str,
+    ) -> anyhow::Result<ActionNode> {
         let mut last_err = anyhow::anyhow!("no retry attempted");
-        let body_str = serde_json::to_string(&ctx).unwrap_or_default();
-        let url = self.endpoint_url(None);
+        let body_str = serde_json::to_string(ctx).unwrap_or_default();
         for attempt in 0..self.retry.max_retries {
             let start = std::time::Instant::now();
             info!(
@@ -309,9 +344,9 @@ impl ActionProvider for StepProvider {
                 headers = ?self.headers,
                 body = %body_str,
                 attempt = attempt,
-                "StepProvider next_action request"
+                "{label} request"
             );
-            let req = self.http_client.post(&url).json(&ctx);
+            let req = self.http_client.post(url).json(ctx);
             match crate::http_util::execute_request(
                 req,
                 &self.headers,
@@ -328,7 +363,7 @@ impl ActionProvider for StepProvider {
                         status = %status,
                         duration_ms = %elapsed.as_millis(),
                         response_body = %body,
-                        "StepProvider next_action response"
+                        "{label} response"
                     );
                     return serde_json::from_str(&body)
                         .map_err(|e| anyhow::anyhow!("failed to parse ActionNode: {}", e));
@@ -340,7 +375,7 @@ impl ActionProvider for StepProvider {
                         url = %url,
                         error = %last_err,
                         duration_ms = %elapsed.as_millis(),
-                        "StepProvider next_action error"
+                        "{label} error"
                     );
                 }
             }
@@ -348,11 +383,38 @@ impl ActionProvider for StepProvider {
                 tokio::time::sleep(Duration::from_millis(self.retry.retry_delay_ms)).await;
             }
         }
-        // All retries exhausted → fallback
-        match &self.retry.fallback_action {
-            Some(node) => Ok(node.clone()),
-            None => Err(last_err),
+        Err(last_err)
+    }
+}
+
+#[async_trait]
+impl ActionProvider for StepProvider {
+    fn name(&self) -> &str {
+        "step"
+    }
+
+    async fn next_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode> {
+        let url = self.endpoint_url(None);
+        match self.post_action_node(&url, &ctx, "StepProvider next_action").await {
+            Ok(node) => Ok(node),
+            Err(last_err) => {
+                // Prefer session-level IVR fallback when configured.
+                if self.prefer_ivr_fallback {
+                    return Err(last_err);
+                }
+                match &self.retry.fallback_action {
+                    Some(node) => Ok(node.clone()),
+                    None => Err(last_err),
+                }
+            }
         }
+    }
+
+    async fn fail_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode> {
+        let url = self.endpoint_url(Some("fail"));
+        // Do not apply retry.fallback_action — escalate to IVR fallback instead.
+        self.post_action_node(&url, &ctx, "StepProvider fail_action")
+            .await
     }
 
     async fn on_session_start(&self, ctx: &SessionContext) -> anyhow::Result<()> {
@@ -477,6 +539,30 @@ mod tests {
         assert_eq!(
             provider.endpoint_url(Some("end")),
             "http://127.0.0.1:28080/ivr/step/end"
+        );
+        assert_eq!(
+            provider.endpoint_url(Some("fail")),
+            "http://127.0.0.1:28080/ivr/step/fail"
+        );
+    }
+
+    #[test]
+    fn fail_event_serializes_type_fail() {
+        let event = ProviderEvent::Fail {
+            reason: "transfer failed".into(),
+            failed_step_id: Some("n1".into()),
+            failed_step_name: Some("xfer".into()),
+            failed_action: Some("Transfer".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "type": "fail",
+                "reason": "transfer failed",
+                "failed_step_id": "n1",
+                "failed_step_name": "xfer",
+                "failed_action": "Transfer",
+            })
         );
     }
 

@@ -111,6 +111,9 @@ pub fn console_to_call_command(
                 format,
                 channels: None,
                 mono_caller_only: None,
+                segment_type: None,
+                segment_id: None,
+                notify_app: None,
             },
         }),
 

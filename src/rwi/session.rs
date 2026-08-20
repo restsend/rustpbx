@@ -600,6 +600,12 @@ pub struct RecordStartRequest {
     pub max_duration_secs: Option<u32>,
     #[serde(default)]
     pub storage: RecordStorage,
+    /// Segment kind for mid-call slices (`ivr`, `consult`, `full`, …).
+    #[serde(default, alias = "segment_type")]
+    pub segment_type: Option<String>,
+    /// Optional segment id; generated when empty and path is empty.
+    #[serde(default, alias = "segment_id")]
+    pub id: Option<String>,
 }
 
 impl RecordStartRequest {
@@ -899,5 +905,20 @@ mod tests {
 
         request.mode = "unknown".to_string();
         assert!(request.channels().is_err());
+    }
+
+    #[test]
+    fn test_record_start_deserializes_segment_fields() {
+        let request: RecordStartRequest = serde_json::from_value(serde_json::json!({
+            "call_id": "call-001",
+            "mode": "separate_legs",
+            "segment_type": "consult",
+            "id": "abc123",
+            "storage": { "path": "" }
+        }))
+        .unwrap();
+        assert_eq!(request.segment_type.as_deref(), Some("consult"));
+        assert_eq!(request.id.as_deref(), Some("abc123"));
+        assert_eq!(request.channels().unwrap(), 2);
     }
 }

@@ -241,6 +241,9 @@ pub fn rwi_to_call_command(
                     format: None, // RWI doesn't have a format field in RecordStartRequest
                     channels: Some(channels),
                     mono_caller_only: Some(false),
+                    segment_type: req.segment_type.clone(),
+                    segment_id: req.id.clone(),
+                    notify_app: Some(false),
                 },
             })
         }
@@ -456,5 +459,31 @@ mod tests {
         };
         let result = rwi_to_call_command(payload, None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_record_start_maps_segment_fields() {
+        let payload = RwiCommandPayload::RecordStart(crate::rwi::session::RecordStartRequest {
+            call_id: "c1".into(),
+            mode: "separate_legs".into(),
+            beep: Some(false),
+            max_duration_secs: None,
+            storage: crate::rwi::session::RecordStorage {
+                path: String::new(),
+            },
+            segment_type: Some("ivr".into()),
+            id: Some("s1".into()),
+        });
+        let cmd = rwi_to_call_command(payload, Some("c1")).unwrap();
+        match cmd {
+            CallCommand::StartRecording { config } => {
+                assert_eq!(config.segment_type.as_deref(), Some("ivr"));
+                assert_eq!(config.segment_id.as_deref(), Some("s1"));
+                assert_eq!(config.notify_app, Some(false));
+                assert!(config.path.is_empty());
+                assert_eq!(config.channels, Some(2));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

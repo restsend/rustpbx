@@ -119,6 +119,10 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
             get(download_call_record_sip_flow),
         )
         .route("/call-records/{id}/recording", get(stream_call_recording))
+        .route(
+            "/call-records/by-session/{session_id}/artifacts",
+            get(list_session_artifacts),
+        )
 }
 
 pub fn api_urls() -> Router<Arc<ConsoleState>> {
@@ -136,6 +140,10 @@ pub fn api_urls() -> Router<Arc<ConsoleState>> {
             get(download_call_record_sip_flow),
         )
         .route("/call-records/{id}/recording", get(stream_call_recording))
+        .route(
+            "/call-records/by-session/{session_id}/artifacts",
+            get(list_session_artifacts),
+        )
 }
 
 async fn resolve_call_record_by_id_or_call_id(
@@ -184,6 +192,135 @@ async fn resolve_call_record_by_id_or_call_id(
     }
 }
 
+/// List recording + signaling artifacts for every CDR leg under a logical
+/// `session_id` (root Call-ID).
+async fn list_session_artifacts(
+    AxumPath(session_id): AxumPath<String>,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+) -> Response {
+    let db = state.db();
+    let records = match CallRecordEntity::find()
+        .filter(CallRecordColumn::SessionId.eq(session_id.clone()))
+        .order_by_asc(CallRecordColumn::StartedAt)
+        .all(db)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            warn!(%session_id, %err, "failed to list call records by session_id");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": format!("Failed to query session artifacts: {err}") })),
+            )
+                .into_response();
+        }
+    };
+
+    if records.is_empty() {
+        // Also try matching a root CDR where call_id == session_id.
+        let fallback = match CallRecordEntity::find()
+            .filter(CallRecordColumn::CallId.eq(session_id.clone()))
+            .all(db)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "message": format!("Failed to query session artifacts: {err}") })),
+                )
+                    .into_response();
+            }
+        };
+        if fallback.is_empty() {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "message": format!("No call records found for session_id: {session_id}")
+                })),
+            )
+                .into_response();
+        }
+        return Json(json!({
+            "session_id": session_id,
+            "legs": fallback.iter().map(session_leg_artifacts).collect::<Vec<_>>(),
+        }))
+        .into_response();
+    }
+
+    Json(json!({
+        "session_id": session_id,
+        "legs": records.iter().map(session_leg_artifacts).collect::<Vec<_>>(),
+    }))
+    .into_response()
+}
+
+fn session_leg_artifacts(record: &CallRecordModel) -> Value {
+    let segments = record
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("recording_segments"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let sipflow_jsonl = record
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("sipflow_jsonl"))
+        .cloned()
+        .or_else(|| {
+            record
+                .recording_url
+                .as_ref()
+                .filter(|u| u.ends_with(".jsonl"))
+                .map(|u| Value::String(u.clone()))
+        })
+        .unwrap_or(Value::Null);
+    json!({
+        "id": record.id,
+        "call_id": record.call_id,
+        "session_id": record.session_id,
+        "direction": record.direction,
+        "status": record.status,
+        "started_at": record.started_at,
+        "ended_at": record.ended_at,
+        "recording_url": record.recording_url,
+        "recording_segments": segments,
+        "sipflow_jsonl": sipflow_jsonl,
+        "download_recording": format!("/call-records/{}/recording", record.id),
+        "download_sip_flow": format!("/call-records/{}/sip-flow", record.id),
+    })
+}
+
+async fn serve_local_jsonl_file(path: &str) -> Response {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/x-ndjson"),
+            );
+            if let Some(name) = Path::new(path).file_name().and_then(|n| n.to_str()) {
+                if let Ok(v) = HeaderValue::from_str(&format!(
+                    "attachment; filename=\"{}\"",
+                    name
+                )) {
+                    headers.insert(http::header::CONTENT_DISPOSITION, v);
+                }
+            }
+            (StatusCode::OK, headers, bytes).into_response()
+        }
+        Err(err) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "message": format!("Local sipflow JSONL not found: {err}"),
+                "path": path,
+            })),
+        )
+            .into_response(),
+    }
+}
+
 async fn download_call_record_sip_flow(
     AxumPath(identifier): AxumPath<String>,
     Query(query): Query<SipFlowRequestQuery>,
@@ -205,6 +342,15 @@ async fn download_call_record_sip_flow(
     };
 
     let Some(sipflow) = &server.sip_flow else {
+        // Fall back to the recording sidecar JSONL path stored on the CDR.
+        if let Some(path) = record
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("sipflow_jsonl"))
+            .and_then(|v| v.as_str())
+        {
+            return serve_local_jsonl_file(path).await;
+        }
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "message": "SIP flow not configured" })),
@@ -213,6 +359,14 @@ async fn download_call_record_sip_flow(
     };
 
     let Some(backend) = sipflow.backend() else {
+        if let Some(path) = record
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("sipflow_jsonl"))
+            .and_then(|v| v.as_str())
+        {
+            return serve_local_jsonl_file(path).await;
+        }
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "message": "SIP flow backend not available" })),
@@ -2100,6 +2254,82 @@ mod tests {
         assert_eq!(summary["total"], 2);
         assert_eq!(summary["avg_duration"], 45.0);
         assert_eq!(summary["total_minutes"], 1.5);
+    }
+
+    #[tokio::test]
+    async fn session_leg_artifacts_includes_segments_and_sipflow_jsonl() {
+        let db = setup_db().await;
+        let model = call_record::ActiveModel {
+            call_id: Set("leg-a".into()),
+            session_id: Set(Some("root-sess".into())),
+            direction: Set("inbound".into()),
+            status: Set("completed".into()),
+            started_at: Set(Utc::now()),
+            duration_secs: Set(10),
+            recording_url: Set(Some("/rec/root.wav".into())),
+            has_transcript: Set(false),
+            transcript_status: Set("pending".into()),
+            metadata: Set(Some(json!({
+                "recording_segments": [{"path":"/rec/root_ts_ivr_1.wav","segmentType":"ivr"}],
+                "sipflow_jsonl": "/rec/root_leg-a.jsonl"
+            }))),
+            created_at: Set(Utc::now()),
+            updated_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert");
+
+        let artifacts = session_leg_artifacts(&model);
+        assert_eq!(artifacts["call_id"], "leg-a");
+        assert_eq!(artifacts["session_id"], "root-sess");
+        assert!(artifacts["recording_segments"].is_array());
+        assert_eq!(artifacts["sipflow_jsonl"], "/rec/root_leg-a.jsonl");
+        assert!(
+            artifacts["download_recording"]
+                .as_str()
+                .unwrap()
+                .contains(&model.id.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn list_session_artifacts_aggregates_legs_by_session_id() {
+        let db = setup_db().await;
+        let state = create_console_state(db.clone()).await;
+        for call_id in ["leg-1", "leg-2"] {
+            call_record::ActiveModel {
+                call_id: Set(call_id.into()),
+                session_id: Set(Some("sess-agg".into())),
+                direction: Set("inbound".into()),
+                status: Set("completed".into()),
+                started_at: Set(Utc::now()),
+                duration_secs: Set(5),
+                has_transcript: Set(false),
+                transcript_status: Set("pending".into()),
+                metadata: Set(Some(json!({"sipflow_jsonl": format!("/rec/{call_id}.jsonl")}))),
+                created_at: Set(Utc::now()),
+                updated_at: Set(Utc::now()),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .expect("insert");
+        }
+
+        let response = list_session_artifacts(
+            AxumPath("sess-agg".into()),
+            State(state),
+            AuthRequired(superuser()),
+        )
+        .await;
+        let (parts, body) = response.into_parts();
+        assert_eq!(parts.status, StatusCode::OK);
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["session_id"], "sess-agg");
+        assert_eq!(value["legs"].as_array().unwrap().len(), 2);
     }
 
     #[tokio::test]
