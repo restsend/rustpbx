@@ -18,7 +18,8 @@ use crate::proxy::presence::{
     MwiSubscriber, PresenceManager, PresenceModule, PresenceState, PresenceStatus, Subscriber,
 };
 use rsipstack::dialog::DialogId;
-use rsipstack::sip::Uri;
+use rsipstack::sip::{SipMessage, StatusCode, Uri};
+use rsipstack::transaction::key::TransactionRole;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -334,6 +335,45 @@ async fn manager_offline_also_prunes_mwi_for_watcher() {
 // ─────────────────────────────────────────────────────────────────────────────
 // 2. PresenceModule: SUBSCRIBE / NOTIFY fail / locator Offline
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn module_initial_subscribe_sends_ok_for_created_dialog() {
+    let (server, config) = create_test_server().await;
+    let manager = server.presence_manager.clone();
+    let module = PresenceModule::create(server, config).unwrap();
+    let (mut tx, endpoint) = create_transaction(subscribe_to(
+        "alice",
+        "bob",
+        "rustpbx.com",
+        Some(3600),
+        "presence",
+    ))
+    .await;
+    let key = tx.key.clone();
+
+    module
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
+        .await
+        .unwrap();
+
+    let finished = endpoint
+        .finished_transactions
+        .get(&key)
+        .expect("initial SUBSCRIBE must finish with a response");
+    let response = match finished.value().as_ref() {
+        Some(SipMessage::Response(response)) => response,
+        other => panic!("expected final SUBSCRIBE response, got {other:?}"),
+    };
+    assert_eq!(response.status_code, StatusCode::OK);
+    let response_dialog = DialogId::try_from((response, TransactionRole::Server)).unwrap();
+    let subscription = manager.get_subscribers("bob");
+    assert_eq!(subscription.len(), 1);
+    assert_eq!(response_dialog, subscription[0].dialog_id);
+}
 
 #[tokio::test]
 async fn module_resubscribe_same_watcher_does_not_accumulate() {
@@ -770,4 +810,86 @@ async fn reconnect_storm_never_grows_bindings_linearly() {
         1,
         "after 11 reconnects must still be exactly 1 self-watch binding"
     );
+}
+
+#[tokio::test]
+async fn module_in_dialog_refresh_keeps_subscription() {
+    let (server, config) = create_test_server().await;
+    let manager = server.presence_manager.clone();
+    let module = PresenceModule::create(server.clone(), config).unwrap();
+
+    // Initial subscription.
+    let (mut tx1, _) =
+        create_transaction(subscribe_to("alice", "bob", "rustpbx.com", Some(3600), "presence"))
+            .await;
+    module
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx1,
+            TransactionCookie::default(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        wait_until(Duration::from_secs(1), || {
+            manager.subscriber_bindings_len() == 1
+        })
+        .await
+    );
+    let sub = manager.get_subscribers("bob").pop().unwrap();
+    let did = sub.dialog_id;
+
+    // In-dialog refresh: same Call-ID, same From tag, To carries the dialog's
+    // local tag, fresh Via branch and CSeq (create_test_request randomizes
+    // branch; CSeq/Call-ID/tags are overridden below).
+    let mut req = subscribe_to("alice", "bob", "rustpbx.com", Some(3600), "presence");
+    let from = rsipstack::sip::typed::From {
+        display_name: None,
+        uri: watcher("alice", "rustpbx.com"),
+        params: vec![rsipstack::sip::Param::Tag(rsipstack::sip::param::Tag::new(
+            did.remote_tag.clone(),
+        ))],
+    };
+    let to = rsipstack::sip::typed::To {
+        display_name: None,
+        uri: watcher("bob", "rustpbx.com"),
+        params: vec![rsipstack::sip::Param::Tag(rsipstack::sip::param::Tag::new(
+            did.local_tag.clone(),
+        ))],
+    };
+    req.headers.retain(|h| {
+        !matches!(
+            h,
+            rsipstack::sip::Header::CallId(_)
+                | rsipstack::sip::Header::From(_)
+                | rsipstack::sip::Header::To(_)
+        )
+    });
+    req.headers.push(rsipstack::sip::Header::CallId(
+        rsipstack::sip::headers::CallId::new(did.call_id.clone()),
+    ));
+    req.headers.push(rsipstack::sip::Header::From(from.into()));
+    req.headers.push(rsipstack::sip::Header::To(to.into()));
+
+    let (mut tx2, _) = create_transaction(req).await;
+    module
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx2,
+            TransactionCookie::default(),
+        )
+        .await
+        .unwrap();
+
+    // Give any misbehaving guard task time to run.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let subs = manager.get_subscribers("bob");
+    assert_eq!(
+        subs.len(),
+        1,
+        "in-dialog refresh must keep exactly 1 binding, got {}: {:?}",
+        subs.len(),
+        subs.iter().map(|s| &s.dialog_id).collect::<Vec<_>>()
+    );
+    assert_eq!(subs[0].dialog_id, did, "refresh must keep the same dialog");
 }
