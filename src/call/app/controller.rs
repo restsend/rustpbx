@@ -498,12 +498,30 @@ impl CallController {
         target_uri: impl Into<String>,
         _caller_id: Option<String>,
     ) -> anyhow::Result<String> {
+        self.originate_call_with_headers(target_uri, _caller_id, Vec::new())
+            .await
+    }
+
+    /// Like [`originate_call`](Self::originate_call) but attaches extra SIP
+    /// headers (e.g. `Call-Info` / `User-to-User`) to the outgoing INVITE.
+    pub async fn originate_call_with_headers(
+        &self,
+        target_uri: impl Into<String>,
+        _caller_id: Option<String>,
+        headers: Vec<rsipstack::sip::Header>,
+    ) -> anyhow::Result<String> {
         let target = target_uri.into();
         let call_id = uuid::Uuid::new_v4().to_string();
+
+        let header_pairs: Vec<(String, String)> = headers
+            .into_iter()
+            .map(|h| (h.name().to_string(), h.value().to_string()))
+            .collect();
 
         self.session.send_command(CallCommand::LegAdd {
             target: target.clone(),
             leg_id: Some(LegId::from(call_id.clone())),
+            headers: header_pairs,
         })?;
 
         info!(target = %target, call_id = %call_id, "Queue: originated call to agent");

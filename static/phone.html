@@ -2095,6 +2095,45 @@
         }
 
         // ========== Session Events ==========
+        // Android demo only decodes H264. Put H264 payload types first so a
+        // WebRTC answer/offer actually sends Annex-B/AVC instead of VP8.
+        function preferH264Sdp(sdp) {
+            if (!sdp || typeof sdp !== 'string') return sdp;
+            const nl = sdp.includes('\r\n') ? '\r\n' : '\n';
+            const lines = sdp.split(nl);
+            const rtpmap = {};
+            for (const l of lines) {
+                const m = l.match(/^a=rtpmap:(\d+) (\S+)/i);
+                if (m) rtpmap[m[1]] = m[2].split('/')[0];
+            }
+            return lines.map((l) => {
+                if (!l.startsWith('m=video')) return l;
+                const parts = l.split(' ');
+                const formats = parts.slice(3);
+                const h264 = formats.filter((f) => (rtpmap[f] || '').toUpperCase() === 'H264');
+                const rest = formats.filter((f) => !h264.includes(f));
+                if (!h264.length) return l;
+                return `${parts[0]} ${parts[1]} ${parts[2]} ${[...h264, ...rest].join(' ')}`;
+            }).join(nl);
+        }
+
+        function preferH264OnPeerConnection(pc) {
+            if (!pc || typeof RTCRtpSender === 'undefined' || !RTCRtpSender.getCapabilities) return;
+            let caps;
+            try { caps = RTCRtpSender.getCapabilities('video'); } catch (e) { return; }
+            if (!caps || !caps.codecs || !caps.codecs.length) return;
+            const preferred = caps.codecs.filter((c) => (c.mimeType || '').toLowerCase() === 'video/h264');
+            if (!preferred.length) return;
+            const rest = caps.codecs.filter((c) => (c.mimeType || '').toLowerCase() !== 'video/h264');
+            (pc.getTransceivers ? pc.getTransceivers() : []).forEach((t) => {
+                if (!t || typeof t.setCodecPreferences !== 'function') return;
+                const kind = (t.sender && t.sender.track && t.sender.track.kind)
+                    || (t.receiver && t.receiver.track && t.receiver.track.kind);
+                if (kind && kind !== 'video') return;
+                try { t.setCodecPreferences([...preferred, ...rest]); } catch (e) {}
+            });
+        }
+
         function bindSessionEvents(session, isIncoming) {
             callBtn.disabled = true;
             session.on('progress', () => {
@@ -2153,6 +2192,7 @@
             });
             session.on('peerconnection', (data) => {
                 attachMedia(data.peerconnection);
+                preferH264OnPeerConnection(data.peerconnection);
                 try {
                     const fallbackRemote = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'peer';
                     const label = session._iceLabel || `${session.direction || 'session'}:${fallbackRemote}`;
@@ -2162,6 +2202,7 @@
             if (session.connection) {
                 log('bindSessionEvents: PeerConnection already exists, attaching media immediately');
                 attachMedia(session.connection);
+                preferH264OnPeerConnection(session.connection);
                 try {
                     const fallbackRemote = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'peer';
                     const label = session._iceLabel || `${session.direction || 'session'}:${fallbackRemote}`;
@@ -2172,6 +2213,9 @@
                 try { handleSessionIceCandidate(session, event ? event.candidate : null, event ? event.ready : null); } catch (error) {}
             });
             session.on('sdp', (data) => {
+                if (data.originator === 'local' && data.sdp) {
+                    data.sdp = preferH264Sdp(data.sdp);
+                }
                 logSipMessage(data.originator === 'local' ? 'SENT' : 'RECEIVED', 'SDP', data.sdp.substring(0, 300));
             });
         }

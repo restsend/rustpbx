@@ -903,6 +903,17 @@ fn parse_dial_target(target: &str) -> Result<rsipstack::sip::Uri> {
         .map_err(|e| anyhow!("invalid SIP target '{}': {}", target, e))
 }
 
+fn other_header_ci(headers: &[rsipstack::sip::Header], names: &[&str]) -> Option<String> {
+    for h in headers {
+        if let rsipstack::sip::Header::Other(n, v) = h {
+            if names.iter().any(|w| n.eq_ignore_ascii_case(w)) {
+                return Some(v.clone());
+            }
+        }
+    }
+    None
+}
+
 /// How the session was constructed: inbound (UAS, with a server dialog) or
 /// outbound (UAC, no server dialog).
 enum ConstructMode<'a> {
@@ -2859,6 +2870,32 @@ impl SipSession {
         None
     }
 
+    /// Read a string from the session-extensions `HashMap` bag.
+    pub(crate) fn session_ext_get(&self, key: &str) -> Option<String> {
+        self.extensions
+            .read()
+            .get::<std::collections::HashMap<String, String>>()
+            .and_then(|m| m.get(key).cloned())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Write a string into the session-extensions `HashMap` bag (creates the
+    /// map if missing). Empty values are ignored.
+    pub(crate) fn session_ext_set(&self, key: &str, value: impl Into<String>) {
+        let value = value.into();
+        if value.is_empty() {
+            return;
+        }
+        let mut ext = self.extensions.write();
+        if let Some(existing) = ext.get_mut::<std::collections::HashMap<String, String>>() {
+            existing.insert(key.to_string(), value);
+        } else {
+            let mut m = std::collections::HashMap::new();
+            m.insert(key.to_string(), value);
+            ext.insert(m);
+        }
+    }
+
     fn session_hook_ctx(&self) -> crate::proxy::proxy_call::session_hooks::CallSessionContext {
         // Merge routing metadata (X-CRM-* / X-CC-*) into extensions.
         // Use entry() to avoid overwriting keys already set by addons (e.g.
@@ -4249,12 +4286,57 @@ impl SipSession {
                 .as_ref()
                 .map(|d| d.initial_request().headers.into())
                 .unwrap_or_default();
+            let direction_str = self.context.dialplan.direction.to_string();
+            let caller =
+                crate::models::call_record::extract_sip_username(&self.context.original_caller)
+                    .unwrap_or_else(|| self.context.original_caller.clone());
+            let callee =
+                crate::models::call_record::extract_sip_username(&self.context.original_callee)
+                    .unwrap_or_else(|| self.context.original_callee.clone());
+            let queue_id_owned = plan.queue_name.clone();
+            let queue_label_owned = plan
+                .label
+                .clone()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| queue_id_owned.clone());
+            // CC queues are keyed by skill-group id; use the queue id as `sg`
+            // unless a more specific value is later supplied.
+            let skill_owned = queue_id_owned.clone();
+            // UUI `ivr=` — set by `start_ivr_app` / IVR application flow so a
+            // later queue dispatch carries the originating IVR short code.
+            let ivr_owned = self.session_ext_get("ivr");
+            let ticket_id = other_header_ci(
+                &caller_headers,
+                &["X-CRM-Ticket-Id", "X-Ticket-Id", "X-CRM-Ticket"],
+            );
+            let customer_id = other_header_ci(
+                &caller_headers,
+                &["X-CRM-Customer-Id", "X-Customer-Id"],
+            );
+            let session_id_owned = self.context.session_id.to_string();
+            self.server.active_call_registry.set_context_meta(
+                session_id_owned.clone(),
+                crate::proxy::active_call_registry::ActiveCallContextMeta {
+                    queue_id: Some(queue_id_owned.clone()).filter(|s| !s.is_empty()),
+                    queue_name: Some(queue_label_owned.clone()).filter(|s| !s.is_empty()),
+                    skill_group_id: Some(skill_owned.clone()).filter(|s| !s.is_empty()),
+                    ivr_node_id: ivr_owned.clone(),
+                    ticket_id,
+                    customer_id,
+                },
+            );
             enricher
                 .enrich(
                     resolved_agents,
                     &crate::proxy::call::QueueEnrichContext {
-                        session_id: &self.context.session_id.to_string(),
-                        queue_name: &plan.queue_name,
+                        session_id: &session_id_owned,
+                        queue_name: &queue_label_owned,
+                        queue_id: &queue_id_owned,
+                        caller: &caller,
+                        callee: &callee,
+                        direction: &direction_str,
+                        skill_group_id: Some(&skill_owned),
+                        ivr_node_id: ivr_owned.as_deref(),
                         caller_headers: &caller_headers,
                     },
                 )
@@ -4384,6 +4466,25 @@ impl SipSession {
                 } => {
                     info!(app_name = %app_name, "Executing application flow");
                     self.meta.app_name = Some(app_name.clone());
+                    if app_name == "ivr" {
+                        let ivr_short = app_params
+                            .as_ref()
+                            .and_then(|p| {
+                                p.get("name")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string)
+                                    .or_else(|| {
+                                        p.get("file").and_then(|v| v.as_str()).and_then(|f| {
+                                            std::path::Path::new(f)
+                                                .file_stem()
+                                                .and_then(|s| s.to_str())
+                                                .map(str::to_string)
+                                        })
+                                    })
+                            })
+                            .unwrap_or_else(|| "ivr".into());
+                        self.session_ext_set("ivr", ivr_short);
+                    }
                     if let Err(e) = self
                         .app_runtime
                         .start_app(app_name, app_params.clone(), *auto_answer)
@@ -9271,8 +9372,16 @@ impl SipSession {
 
             CallCommand::LeaveMixer => Self::ok_or_failure(self.handle_leave_mixer().await),
 
-            CallCommand::LegAdd { target, leg_id } => {
-                match self.handle_add_leg(target, leg_id).await {
+            CallCommand::LegAdd {
+                target,
+                leg_id,
+                headers,
+            } => {
+                let headers: Vec<rsipstack::sip::Header> = headers
+                    .into_iter()
+                    .map(|(name, value)| rsipstack::sip::headers::make_header(&name, value))
+                    .collect();
+                match self.handle_add_leg(target, leg_id, headers).await {
                     Ok(new_leg_id) => CommandResult::success_with_leg(new_leg_id),
                     Err(e) => CommandResult::failure(e.to_string()),
                 }
@@ -9325,6 +9434,23 @@ impl SipSession {
                 dialog_id,
             } => {
                 info!(session_id = %self.id, %leg_id, "Leg connected async notification");
+
+                // Contract §3.3: CTI `{call_id}` is the B-leg SIP Call-ID.
+                // Map this leg's dialog Call-ID onto the session handle so
+                // `/cc/calls/{call_id}/...` resolves it via `get_handle_by_dialog`.
+                // Covers the main callee leg, fork winners, and dynamic
+                // (queue-agent / consult) legs alike.
+                if let Some(call_id) = &dialog_id {
+                    if let Some(handle) = self
+                        .server
+                        .active_call_registry
+                        .get_handle(&self.id.to_string())
+                    {
+                        self.server
+                            .active_call_registry
+                            .register_dialog(call_id.clone(), handle);
+                    }
+                }
 
                 // In UAC mode, a leg added via `leg_add` with leg_id="callee"
                 // should attach its answered dialog + SDP onto the MediaBridge
@@ -9912,8 +10038,13 @@ impl SipSession {
 
     /// Add a new leg to the session dynamically, recording any failure in the
     /// call trace so operator-facing call records surface dial errors.
-    async fn handle_add_leg(&mut self, target: String, leg_id: Option<LegId>) -> Result<LegId> {
-        match self.handle_add_leg_inner(target, leg_id).await {
+    async fn handle_add_leg(
+        &mut self,
+        target: String,
+        leg_id: Option<LegId>,
+        headers: Vec<rsipstack::sip::Header>,
+    ) -> Result<LegId> {
+        match self.handle_add_leg_inner(target, leg_id, headers).await {
             Ok(id) => Ok(id),
             Err(e) => {
                 let in_queue = self
@@ -9944,6 +10075,7 @@ impl SipSession {
         &mut self,
         target: String,
         leg_id: Option<LegId>,
+        headers: Vec<rsipstack::sip::Header>,
     ) -> Result<LegId> {
         let new_leg_id =
             leg_id.unwrap_or_else(|| LegId::new(format!("leg-{}", uuid::Uuid::new_v4())));
@@ -9996,6 +10128,14 @@ impl SipSession {
                     warn!(session_id = %self.id, target = %uri, error = %e, "Route lookup failed for dynamic leg; dialing directly");
                 }
             }
+        }
+
+        // Merge caller-supplied INVITE headers (queue location enricher:
+        // Call-Info / User-to-User) over any location-derived headers.
+        if !headers.is_empty() {
+            let mut merged = headers;
+            merged.extend(location.headers.take().into_iter().flatten());
+            location.headers = Some(merged);
         }
 
         if self.app_runtime.current_app().as_deref() == Some("queue") && self.media.bridge.is_none()
@@ -10167,6 +10307,7 @@ impl SipSession {
             .map(|c| c.uri.clone())
             .unwrap_or_else(|| caller.clone());
 
+        let bleg_call_id = format!("{}-{}", self.id.0, leg_id);
         let invite_option = rsipstack::dialog::invitation::InviteOption {
             callee: callee_uri.clone(),
             caller: caller.clone(),
@@ -10179,10 +10320,23 @@ impl SipSession {
                 location.destination.clone()
             },
             credential: location.credential.clone(),
-            headers: None,
-            call_id: Some(format!("{}-{}", self.id.0, leg_id)),
+            headers: location.headers.clone(),
+            call_id: Some(bleg_call_id.clone()),
             ..Default::default()
         };
+
+        // Register the B-leg SIP Call-ID as soon as the INVITE is built so
+        // ringing-time CTI (`GET /cc/calls/{call_id}/context`) resolves before
+        // the 200 OK / LegConnected notification.
+        if let Some(handle) = self
+            .server
+            .active_call_registry
+            .get_handle(&self.id.to_string())
+        {
+            self.server
+                .active_call_registry
+                .register_dialog(bleg_call_id, handle);
+        }
 
         let dialog_layer = self.server.dialog_layer.clone();
         let leg_id_for_spawn = leg_id.clone();

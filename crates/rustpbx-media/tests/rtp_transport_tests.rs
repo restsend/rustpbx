@@ -725,6 +725,26 @@ async fn fast_path_webrtc_opus_webrtc_opus() {
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 }
 
+#[tokio::test]
+async fn fast_path_webrtc_opus_rtp_opus() {
+    let mut h = TestMediaHarness::create(
+        TransportMode::WebRtc,
+        CodecType::Opus,
+        TransportMode::Rtp,
+        CodecType::Opus,
+    )
+    .await;
+    h.bridge_and_accept().await;
+    h.assert_relay(true);
+    let frame = h
+        .send_and_receive(CodecType::Opus, 8000)
+        .await
+        .expect("B must receive Opus audio across WebRTC→RTP");
+    assert!(!frame.data.is_empty());
+    h.close();
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+}
+
 // ── Video fast-path (relay-only) ─────────────────────────────────────────
 
 fn h264_caps(pt: u8) -> Vec<rustrtc::config::VideoCapability> {
