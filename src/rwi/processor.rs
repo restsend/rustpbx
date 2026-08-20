@@ -600,14 +600,11 @@ impl RwiCommandProcessor {
             RwiCommandPayload::MediaStop { call_id, leg_id } => {
                 return self.media_stop(call_id, leg_id.clone()).await;
             }
-            RwiCommandPayload::SessionResume { last_sequence } => {
-                return self.handle_session_resume(*last_sequence);
+            RwiCommandPayload::SessionResume {} => {
+                return self.handle_session_resume();
             }
-            RwiCommandPayload::CallResume {
-                call_id,
-                last_sequence,
-            } => {
-                return self.handle_call_resume(call_id, *last_sequence);
+            RwiCommandPayload::CallResume { call_id } => {
+                return self.handle_call_resume(call_id);
             }
             _ => {}
         }
@@ -627,18 +624,14 @@ impl RwiCommandProcessor {
         ))
     }
 
-    fn handle_session_resume(
-        &self,
-        last_sequence: Option<u64>,
-    ) -> Result<CommandResult, CommandError> {
+    fn handle_session_resume(&self) -> Result<CommandResult, CommandError> {
         let gw = self.gateway.read();
-        let (entries, current_seq) = gw.resume_session(last_sequence);
+        let entries = gw.resume_session();
         let replayed_count = entries.len() as u64;
         let events: Vec<serde_json::Value> = entries
             .into_iter()
             .map(|e| {
                 serde_json::json!({
-                    "sequence": e.sequence,
                     "timestamp": e.cached_at.to_rfc3339(),
                     "call_id": e.call_id,
                     "event": e.event,
@@ -647,24 +640,18 @@ impl RwiCommandProcessor {
             .collect();
         Ok(CommandResult::SessionResumed {
             replayed_count,
-            current_sequence: current_seq,
             events,
         })
     }
 
-    fn handle_call_resume(
-        &self,
-        call_id: &String,
-        last_sequence: Option<u64>,
-    ) -> Result<CommandResult, CommandError> {
+    fn handle_call_resume(&self, call_id: &String) -> Result<CommandResult, CommandError> {
         let gw = self.gateway.read();
-        let (entries, current_seq) = gw.resume_call(call_id, last_sequence);
+        let entries = gw.resume_call(call_id);
         let replayed_count = entries.len() as u64;
         let events: Vec<serde_json::Value> = entries
             .into_iter()
             .map(|e| {
                 serde_json::json!({
-                    "sequence": e.sequence,
                     "timestamp": e.cached_at.to_rfc3339(),
                     "call_id": e.call_id,
                     "event": e.event,
@@ -674,7 +661,6 @@ impl RwiCommandProcessor {
         Ok(CommandResult::CallResumed {
             call_id: call_id.to_string(),
             replayed_count,
-            current_sequence: current_seq,
             events,
         })
     }
@@ -1210,6 +1196,22 @@ impl RwiCommandProcessor {
             };
             registry.upsert(entry, handle.clone());
 
+            // Populate the CallMetaStore so events emitted from this originate
+            // (call_created, call_ringing, ...) are enriched with call context
+            // — notably `direction: "outbound"`. Originates are root sessions
+            // (session_id == call_id); UAC legs carry no cross-session root.
+            // Cleanup rides on `call_finished` via the call-record guard.
+            gateway.read().meta_store.insert(
+                call_id.clone(),
+                crate::rwi::proto::CallMeta {
+                    session_id: Some(call_id.clone()),
+                    caller: Some(caller_display.clone()),
+                    callee: Some(callee_display.clone()),
+                    direction: Some("outbound".to_string()),
+                    ..Default::default()
+                },
+            );
+
             // Publish the originated session's owning node in the cluster
             // session registry (no-op backend in single-node mode).
             session.register_in_session_registry().await;
@@ -1229,9 +1231,20 @@ impl RwiCommandProcessor {
                                 match state {
                                     Some(rsipstack::dialog::dialog::DialogState::Calling(_)) => {
                                         let gw = gateway.read();
-                                        gw.send_to_owner(&crate::rwi::CallInitiated {
+                                        gw.send_to_owner(&crate::rwi::CallCreated {
                                             call_id: call_id.clone(),
-                                            destination: callee_display.clone(),
+                                            context: "default".into(),
+                                            caller: caller_display.clone(),
+                                            callee: callee_display.clone(),
+                                            trunk: None,
+                                            sip_headers: Default::default(),
+                                            caller_name: None,
+                                            callee_name: None,
+                                            called_phone: None,
+                                            app_id: None,
+                                            routing_target: None,
+                                            uuid: None,
+                                            routing_path: None,
                                         });
                                     }
                                     Some(rsipstack::dialog::dialog::DialogState::Early(_, ref response)) => {
@@ -2812,13 +2825,11 @@ pub enum CommandResult {
     },
     SessionResumed {
         replayed_count: u64,
-        current_sequence: u64,
         events: Vec<serde_json::Value>,
     },
     CallResumed {
         call_id: String,
         replayed_count: u64,
-        current_sequence: u64,
         events: Vec<serde_json::Value>,
     },
     CallVar {

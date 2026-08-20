@@ -111,6 +111,15 @@ media_proxy = "auto"
 # Default refresh/expiry interval in seconds when the peer sends no
 # Session-Expires of its own (default 600).
 # session_expires = 600
+
+# Default hold music played to the held party when an agent puts a call on
+# hold. Resolution order: explicit hold command -> per-call X-Hold-Music SIP
+# header -> skill-group metadata.hold_music (CC addon) -> this setting ->
+# built-in default (sounds/phone-calling.wav). Accepts a file path under
+# config/sounds (e.g. "sounds/phone-calling.wav") or an http(s) URL.
+# Hot-reloadable. Note: queue wait music while callers wait in a dialplan
+# queue is configured separately per queue ([queue.hold] in config/queue/*.toml).
+# hold_music = "sounds/phone-calling.wav"
 # Base directory for generated routing/trunk/ACL files
 generated_dir = "./config"
 routes_files = ["config/routes/*.toml"]

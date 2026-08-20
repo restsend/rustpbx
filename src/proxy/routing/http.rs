@@ -316,7 +316,7 @@ impl CallRouter for HttpCallRouter {
                         enabled: result.record,
                         auto_start_at: result.record_start_at,
                         ..Default::default()
-        });
+                    });
                 }
 
                 if let Some(mode) = result.media_proxy {

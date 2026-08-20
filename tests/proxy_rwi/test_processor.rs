@@ -258,13 +258,11 @@ fn create_test_call_inner(
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
                     CallCommand::QueryRecorderStatus { reply } => {
-                        let _ = reply.send(Ok(
-                            rustpbx::media::media_recorder::RecorderStatus {
-                                active: recording_active,
-                                paused: recording_paused,
-                                file_path: None,
-                            },
-                        ));
+                        let _ = reply.send(Ok(rustpbx::media::media_recorder::RecorderStatus {
+                            active: recording_active,
+                            paused: recording_paused,
+                            file_path: None,
+                        }));
                     }
                     CallCommand::StartRecording { .. } => {
                         recording_active = true;
@@ -1294,6 +1292,9 @@ async fn test_record_start_success() {
                 storage: rustpbx::rwi::session::RecordStorage {
                     path: "/recordings/call-rec.wav".into(),
                 },
+
+                segment_type: None,
+                id: None,
             },
         ))
         .await;
@@ -1319,6 +1320,9 @@ async fn test_record_start_not_found() {
                 storage: rustpbx::rwi::session::RecordStorage {
                     path: "/recordings/call.wav".into(),
                 },
+
+                segment_type: None,
+                id: None,
             },
         ))
         .await;
@@ -1348,6 +1352,9 @@ async fn test_record_pause_success() {
                 storage: rustpbx::rwi::session::RecordStorage {
                     path: "/recordings/test.wav".into(),
                 },
+
+                segment_type: None,
+                id: None,
             },
         ))
         .await
@@ -1407,6 +1414,9 @@ async fn test_record_resume_success() {
                 storage: rustpbx::rwi::session::RecordStorage {
                     path: "/recordings/test.wav".into(),
                 },
+
+                segment_type: None,
+                id: None,
             },
         ))
         .await
@@ -1473,6 +1483,9 @@ async fn test_record_stop_success() {
                 storage: rustpbx::rwi::session::RecordStorage {
                     path: "/recordings/test.wav".into(),
                 },
+
+                segment_type: None,
+                id: None,
             },
         ))
         .await

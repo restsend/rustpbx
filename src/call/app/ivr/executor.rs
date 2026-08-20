@@ -860,12 +860,9 @@ impl StepIvrApp {
             .unwrap_or_default();
         let headers = self.get_sip_headers();
 
-        let Some(target) = fallback::resolve_fallback_target(
-            config.as_ref(),
-            &caller,
-            &callee,
-            headers.as_ref(),
-        ) else {
+        let Some(target) =
+            fallback::resolve_fallback_target(config.as_ref(), &caller, &callee, headers.as_ref())
+        else {
             tracing::warn!(
                 reason = %reason,
                 "StepIvrApp: ivr_fallback resolved to none, hanging up"
@@ -3093,12 +3090,7 @@ mod tests {
         step_responses: Vec<serde_json::Value>,
         fail_responses: Vec<Result<serde_json::Value, u16>>,
     ) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
-        use axum::{
-            Json, Router,
-            http::StatusCode,
-            response::IntoResponse,
-            routing::post,
-        };
+        use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
         use std::sync::Mutex;
 
         let paths = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -3114,8 +3106,7 @@ mod tests {
                     paths_step.lock().unwrap().push("step".into());
                     let resp = {
                         let mut it = step_q.lock().unwrap();
-                        it.next()
-                            .unwrap_or(serde_json::json!({"type": "hangup"}))
+                        it.next().unwrap_or(serde_json::json!({"type": "hangup"}))
                     };
                     async move { Json(resp) }
                 }),
@@ -3164,7 +3155,9 @@ mod tests {
         // /step returns tree-only `repeat` → execute fails → /fail returns transfer.
         let (url, paths) = spawn_mock_provider_with_fail(
             vec![serde_json::json!({"type": "repeat"})],
-            vec![Ok(serde_json::json!({"type": "transfer", "target": "2001"}))],
+            vec![Ok(
+                serde_json::json!({"type": "transfer", "target": "2001"}),
+            )],
         )
         .await;
 
@@ -5000,7 +4993,9 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(200, "stop_record", |c| matches!(c, CallCommand::StopRecording))
+            .assert_cmd(200, "stop_record", |c| {
+                matches!(c, CallCommand::StopRecording)
+            })
             .await;
         stack
             .assert_cmd(
@@ -5526,9 +5521,7 @@ mod tests {
         let mut app = StepIvrApp::with_provider(Box::new(FailRecoveryProvider {
             fail_called: fail_called.clone(),
         }));
-        app.sess
-            .variables
-            .insert("session_id".into(), "s1".into());
+        app.sess.variables.insert("session_id".into(), "s1".into());
         app.sess.variables.insert("caller".into(), "1001".into());
         app.sess.variables.insert("callee".into(), "4000".into());
 
@@ -5574,9 +5567,7 @@ mod tests {
         });
         let mut app = StepIvrApp::with_provider(Box::new(FailThenEscalateProvider))
             .with_ivr_fallback(Some(fb));
-        app.sess
-            .variables
-            .insert("session_id".into(), "s1".into());
+        app.sess.variables.insert("session_id".into(), "s1".into());
         app.sess.variables.insert("caller".into(), "1001".into());
         app.sess.variables.insert("callee".into(), "4000".into());
 
@@ -5585,7 +5576,10 @@ mod tests {
             .await
             .expect("fallback node");
         match node.action {
-            EntryAction::JumpIvr { route_point, params } => {
+            EntryAction::JumpIvr {
+                route_point,
+                params,
+            } => {
                 assert_eq!(route_point, "builtin_vip");
                 assert_eq!(
                     params
@@ -5636,9 +5630,7 @@ mod tests {
         app.mark_fallback_used();
         let node = app.enter_ivr_fallback_node("again");
         match node.action {
-            EntryAction::Prompt {
-                file: Some(f), ..
-            } => assert_eq!(f, "sounds/error.wav"),
+            EntryAction::Prompt { file: Some(f), .. } => assert_eq!(f, "sounds/error.wav"),
             other => panic!("expected error hangup chain, got {other:?}"),
         }
     }

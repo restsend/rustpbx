@@ -91,7 +91,7 @@ fn test_bills_dir_follows_recording_path() {
     config.recording = Some(rustpbx::config::RecordingPolicy {
         path: Some("/data/recordings".to_string()),
         ..Default::default()
-        });
+    });
     assert_eq!(
         rustpbx::addons::wholesale::billing_service::bills_dir(&config),
         std::path::PathBuf::from("/data/recordings/wholesale_bills")

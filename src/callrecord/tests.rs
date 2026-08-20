@@ -970,7 +970,7 @@ async fn test_recording_upload_uses_sipflow_stashed_url() {
     let policy = RecordingPolicy {
         recording_type: Some(RecordingType::Local),
         ..Default::default()
-        };
+    };
     let hook = RecordingUploadHook::new(policy)
         .expect("failed to create RecordingUploadHook")
         .with_rwi_gateway(gateway.clone());
@@ -1101,7 +1101,7 @@ async fn test_recording_metadata_filename_falls_back_to_call_id_wav() {
     let policy = RecordingPolicy {
         recording_type: Some(RecordingType::Local),
         ..Default::default()
-        };
+    };
     let hook = RecordingUploadHook::new(policy)
         .unwrap()
         .with_rwi_gateway(gateway.clone());
@@ -1171,7 +1171,7 @@ async fn test_recording_metadata_file_size_uses_stashed_sipflow_size() {
     let policy = RecordingPolicy {
         recording_type: Some(RecordingType::Local),
         ..Default::default()
-        };
+    };
     let hook = RecordingUploadHook::new(policy)
         .unwrap()
         .with_rwi_gateway(gateway.clone());

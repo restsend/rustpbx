@@ -450,27 +450,23 @@ fn build_command_result_event(
                 }
                 CommandResult::SessionResumed {
                     replayed_count,
-                    current_sequence,
                     events,
                 } => {
                     event["status"] = serde_json::json!("success");
                     event["data"] = serde_json::json!({
                         "replayed_count": replayed_count,
-                        "current_sequence": current_sequence,
                         "events": events,
                     });
                 }
                 CommandResult::CallResumed {
                     call_id: cid,
                     replayed_count,
-                    current_sequence,
                     events,
                 } => {
                     event["status"] = serde_json::json!("success");
                     event["data"] = serde_json::json!({
                         "call_id": cid,
                         "replayed_count": replayed_count,
-                        "current_sequence": current_sequence,
                         "events": events,
                     });
                 }

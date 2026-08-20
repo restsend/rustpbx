@@ -2,7 +2,7 @@
 
 Tests the POST /ami/v1/outbound/dial endpoint end-to-end. The SSE stream is
 pure RWI event passthrough — assertions use RWI event type names:
-  call_initiated, call_ringing, call_answered, call_busy, call_no_answer, etc.
+  call_created, call_ringing, call_answered, call_busy, call_no_answer, etc.
 
 Requires the `sipbot` binary in PATH (cargo install sipbot).
 """
@@ -129,7 +129,7 @@ async def test_outbound_sip_answer_success(pbx, sipbot_pool):
     for e in events:
         print(f"  {e['event']}: {json.dumps(e['data'], ensure_ascii=False)[:200]}")
 
-    assert "call_initiated" in names, f"missing call_initiated: {names}"
+    assert "call_created" in names, f"missing call_created: {names}"
     assert "call_ringing" in names, f"missing call_ringing: {names}"
     assert "call_answered" in names, f"missing call_answered: {names}"
 
@@ -160,7 +160,7 @@ async def test_outbound_sip_busy_failure(pbx, sipbot_pool):
     names = _event_names(events)
     print("SSE events:", names)
 
-    assert "call_initiated" in names
+    assert "call_created" in names
     assert "call_busy" in names, f"expected call_busy, got: {names}"
 
 
@@ -278,7 +278,7 @@ async def test_outbound_no_answer_timeout(pbx, sipbot_pool):
     names = _event_names(events)
     print("SSE events:", names)
 
-    assert "call_initiated" in names
+    assert "call_created" in names
     assert (
         "call_no_answer" in names or "call_hangup" in names
     ), f"expected failure event, got: {names}"

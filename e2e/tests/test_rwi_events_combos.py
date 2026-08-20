@@ -1,7 +1,7 @@
 """RWI event sequence + CDR correlation E2E tests.
 
 Verifies that a call's full lifecycle emits the expected RWI event sequence
-(call_initiated -> call_ringing -> call_answered -> call_hangup) and that the
+(call_created -> call_ringing -> call_answered -> call_hangup) and that the
 CDR's callId matches the RWI-originated call_id (data consistency).
 """
 
@@ -68,7 +68,7 @@ async def test_rwi_event_sequence_and_cdr_correlation(pbx, sipbot_pool, rwi, cdr
 
     # Full lifecycle event sequence.
     ok = await rwi.wait_for_event_sequence(
-        ["call_initiated", "call_ringing", "call_answered"], timeout=20
+        ["call_created", "call_ringing", "call_answered"], timeout=20
     )
     assert ok, f"missing lifecycle events, got: {[e.get('event_type') for e in rwi.events]}"
 

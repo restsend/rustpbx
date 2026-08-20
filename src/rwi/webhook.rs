@@ -1,6 +1,7 @@
 use crate::config::LocatorWebhookConfig;
 use crate::rwi::gateway::EventCacheEntry;
 use anyhow::anyhow;
+use chrono::{DateTime, Utc};
 use serde_json::json;
 use std::collections::{HashSet, VecDeque};
 use tokio::sync::broadcast;
@@ -8,7 +9,7 @@ use tracing::{debug, info, warn};
 
 /// Buffer size for the broadcast channel between gateway and webhook handler.
 const WEBHOOK_CHANNEL_SIZE: usize = 512;
-/// Max number of recent event (call_id, sequence) pairs kept for dedup.
+/// Max number of recent (call_id, timestamp) pairs kept for dedup.
 const DEDUP_CACHE_SIZE: usize = 4096;
 
 struct RwiWebhookSender {
@@ -106,10 +107,11 @@ async fn run_rwi_webhook_handler(
     let sender = RwiWebhookSender::new(config);
     debug!("RWI webhook handler started for {}", sender.url);
 
-    // Dedup cache: ring buffer of (call_id, sequence) to skip duplicates
+    // Dedup cache: ring buffer of (call_id, cached_at) to skip duplicates
     // when the same event is forwarded from multiple call owners.
-    let mut dedup: VecDeque<(String, u64)> = VecDeque::with_capacity(DEDUP_CACHE_SIZE + 1);
-    let mut seen: HashSet<(String, u64)> = HashSet::new();
+    let mut dedup: VecDeque<(String, DateTime<Utc>)> =
+        VecDeque::with_capacity(DEDUP_CACHE_SIZE + 1);
+    let mut seen: HashSet<(String, DateTime<Utc>)> = HashSet::new();
 
     loop {
         let entry = match rx.recv().await {
@@ -123,13 +125,16 @@ async fn run_rwi_webhook_handler(
             }
         };
 
-        // Dedup: skip event if same (call_id, sequence) already sent.
+        // Dedup: skip event if the same (call_id, timestamp) was already sent.
         // Events with empty call_id (broadcast events like agent state changes)
-        // are not deduped since they have no call context and always use sequence=0.
+        // are not deduped since they have no call context.
         if !entry.call_id.is_empty() {
-            let dedup_key = (entry.call_id.clone(), entry.sequence);
+            let dedup_key = (entry.call_id.clone(), entry.cached_at);
             if seen.contains(&dedup_key) {
-                debug!("RWI webhook: skipping duplicate event {}", entry.sequence);
+                debug!(
+                    "RWI webhook: skipping duplicate event at {}",
+                    entry.cached_at
+                );
                 continue;
             }
             seen.insert(dedup_key.clone());
@@ -152,7 +157,6 @@ async fn run_rwi_webhook_handler(
 
         let payload = json!({
             "rwi": "1.0",
-            "sequence": entry.sequence,
             "timestamp": entry.cached_at.to_rfc3339(),
             "call_id": entry.call_id,
             "event_type": event_type,
@@ -175,7 +179,6 @@ async fn run_rwi_webhook_handler(
                         url = %record.url,
                         event_type,
                         call_id,
-                        sequence = entry.sequence,
                         status_code = record.status_code.unwrap_or(0),
                         latency_ms = record.latency_ms,
                         "RWI webhook delivered"
@@ -185,7 +188,6 @@ async fn run_rwi_webhook_handler(
                         url = %record.url,
                         event_type,
                         call_id,
-                        sequence = entry.sequence,
                         status_code = record.status_code.unwrap_or(0),
                         latency_ms = record.latency_ms,
                         body_preview = %record.body_preview,
@@ -198,7 +200,6 @@ async fn run_rwi_webhook_handler(
                     url = %sender.url,
                     event_type,
                     call_id = %entry.call_id,
-                    sequence = entry.sequence,
                     error = %e,
                     "RWI webhook send failed"
                 );
@@ -220,7 +221,6 @@ pub async fn send_test_event(
     });
     let test_payload = json!({
         "rwi": "1.0",
-        "sequence": 0,
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "call_id": "test-call-id",
         "event_type": "test",
@@ -293,7 +293,6 @@ mod tests {
         let tx = start_rwi_webhook_handler(config);
         tokio::time::sleep(Duration::from_millis(50)).await;
         let entry = EventCacheEntry {
-            sequence: 1,
             cached_at: chrono::Utc::now(),
             call_id: "c1".into(),
             event: crate::rwi::event::to_legacy_event(
@@ -328,10 +327,9 @@ mod tests {
 
         let now = chrono::Utc::now();
 
-        // agent_state_changed: broadcast-style event (empty call_id, sequence=0,
+        // agent_state_changed: broadcast-style event (empty call_id,
         // intentionally NOT deduped by the handler).
         let agent_entry = EventCacheEntry {
-            sequence: 0,
             cached_at: now,
             call_id: String::new(),
             event: crate::rwi::event::RwiEvent {
@@ -347,8 +345,7 @@ mod tests {
         };
         // recording_metadata_available: carries the download URL after upload.
         let rec_meta_entry = EventCacheEntry {
-            sequence: 100,
-            cached_at: now,
+            cached_at: now + chrono::Duration::milliseconds(1),
             call_id: "call-1".into(),
             event: crate::rwi::event::RwiEvent {
                 event_type: "recording_metadata_available",
@@ -362,8 +359,7 @@ mod tests {
         };
         // record_end: recording finalization (url/duration/file_size).
         let record_end_entry = EventCacheEntry {
-            sequence: 101,
-            cached_at: now,
+            cached_at: now + chrono::Duration::milliseconds(2),
             call_id: "call-1".into(),
             event: crate::rwi::event::RwiEvent {
                 event_type: "record_end",

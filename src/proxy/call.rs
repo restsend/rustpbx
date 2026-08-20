@@ -3115,7 +3115,7 @@ mod tests {
                         enabled: Some(true),
                         auto_start: Some(false),
                         ..Default::default()
-        }),
+                    }),
                     enable_recording: None,
                 }),
                 &caller,

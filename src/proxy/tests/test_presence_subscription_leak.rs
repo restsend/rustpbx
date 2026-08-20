@@ -55,8 +55,10 @@ fn mwi_sub(aor: Uri, call_id: &str, ttl_secs: u64) -> MwiSubscriber {
 
 fn webrtc_location(extension: &str, contact_user: &str) -> Location {
     Location {
-        aor: Uri::try_from(format!("sip:{contact_user}@gc1g9pmgn89n.invalid;transport=ws"))
-            .unwrap(),
+        aor: Uri::try_from(format!(
+            "sip:{contact_user}@gc1g9pmgn89n.invalid;transport=ws"
+        ))
+        .unwrap(),
         expires: 50,
         supports_webrtc: true,
         registered_aor: Some(watcher(extension, "192.168.3.227")),
@@ -120,23 +122,14 @@ async fn manager_same_watcher_replaces_and_returns_old_dialog() {
     assert_eq!(replaced.len(), 1);
     assert_eq!(replaced[0].call_id, "old");
     assert_eq!(manager.subscriber_bindings_len(), 1);
-    assert_eq!(
-        manager.get_subscribers("1001")[0].dialog_id.call_id,
-        "new"
-    );
+    assert_eq!(manager.get_subscribers("1001")[0].dialog_id.call_id, "new");
 }
 
 #[tokio::test]
 async fn manager_watcher_match_is_case_insensitive() {
     let manager = PresenceManager::new(None);
-    manager.add_subscriber(
-        "bob",
-        presence_sub(watcher("Alice", "PBX.LOCAL"), "c1", 60),
-    );
-    manager.add_subscriber(
-        "bob",
-        presence_sub(watcher("alice", "pbx.local"), "c2", 60),
-    );
+    manager.add_subscriber("bob", presence_sub(watcher("Alice", "PBX.LOCAL"), "c1", 60));
+    manager.add_subscriber("bob", presence_sub(watcher("alice", "pbx.local"), "c2", 60));
     // Same watcher key → still one binding
     assert_eq!(manager.subscriber_bindings_len(), 1);
     assert_eq!(manager.get_subscribers("bob")[0].dialog_id.call_id, "c2");
@@ -165,7 +158,11 @@ async fn manager_remove_by_dialog_drops_empty_bucket() {
     );
     assert!(manager.remove_subscriber_by_dialog(&id));
     assert_eq!(manager.subscriber_bindings_len(), 0);
-    assert_eq!(manager.subscribers_len(), 0, "empty identity bucket must go");
+    assert_eq!(
+        manager.subscribers_len(),
+        0,
+        "empty identity bucket must go"
+    );
     assert!(!manager.remove_subscriber_by_dialog(&id));
 }
 
@@ -270,9 +267,11 @@ async fn manager_mwi_replace_remove_and_expire_mirror_presence() {
     let aor = watcher("1001", "pbx.local");
 
     // Replace by same watcher.
-    assert!(manager
-        .add_mwi_subscriber("1001", mwi_sub(aor.clone(), "mwi-old", 3600))
-        .is_empty());
+    assert!(
+        manager
+            .add_mwi_subscriber("1001", mwi_sub(aor.clone(), "mwi-old", 3600))
+            .is_empty()
+    );
     let replaced = manager.add_mwi_subscriber("1001", mwi_sub(aor.clone(), "mwi-new", 3600));
     assert_eq!(replaced.len(), 1);
     assert_eq!(replaced[0].call_id, "mwi-old");
@@ -378,9 +377,14 @@ async fn module_expires_zero_unsubscribes_watcher() {
     let manager = server.presence_manager.clone();
     let module = PresenceModule::create(server.clone(), config).unwrap();
 
-    let (mut tx_sub, _) =
-        create_transaction(subscribe_to("alice", "bob", "rustpbx.com", Some(3600), "presence"))
-            .await;
+    let (mut tx_sub, _) = create_transaction(subscribe_to(
+        "alice",
+        "bob",
+        "rustpbx.com",
+        Some(3600),
+        "presence",
+    ))
+    .await;
     module
         .on_transaction_begin(
             CancellationToken::new(),
@@ -389,13 +393,21 @@ async fn module_expires_zero_unsubscribes_watcher() {
         )
         .await
         .unwrap();
-    assert!(wait_until(Duration::from_secs(1), || {
-        manager.subscriber_bindings_len() == 1
-    })
-    .await);
+    assert!(
+        wait_until(Duration::from_secs(1), || {
+            manager.subscriber_bindings_len() == 1
+        })
+        .await
+    );
 
-    let (mut tx_unsub, _) =
-        create_transaction(subscribe_to("alice", "bob", "rustpbx.com", Some(0), "presence")).await;
+    let (mut tx_unsub, _) = create_transaction(subscribe_to(
+        "alice",
+        "bob",
+        "rustpbx.com",
+        Some(0),
+        "presence",
+    ))
+    .await;
     module
         .on_transaction_begin(
             CancellationToken::new(),
@@ -462,9 +474,14 @@ async fn module_locator_offline_clears_subscription_and_dialog() {
     let mut module = PresenceModule::create(server.clone(), config).unwrap();
     module.on_start().await.unwrap();
 
-    let (mut tx_sub, _) =
-        create_transaction(subscribe_to("alice", "bob", "rustpbx.com", Some(3600), "presence"))
-            .await;
+    let (mut tx_sub, _) = create_transaction(subscribe_to(
+        "alice",
+        "bob",
+        "rustpbx.com",
+        Some(3600),
+        "presence",
+    ))
+    .await;
     module
         .on_transaction_begin(
             CancellationToken::new(),
@@ -474,10 +491,12 @@ async fn module_locator_offline_clears_subscription_and_dialog() {
         .await
         .unwrap();
 
-    assert!(wait_until(Duration::from_secs(1), || {
-        manager.subscriber_bindings_len() == 1
-    })
-    .await);
+    assert!(
+        wait_until(Duration::from_secs(1), || {
+            manager.subscriber_bindings_len() == 1
+        })
+        .await
+    );
     let dialog_id = manager.get_subscribers("bob")[0].dialog_id.clone();
     assert!(
         server.dialog_layer.get_dialog(&dialog_id).is_some(),
@@ -528,10 +547,12 @@ async fn module_mwi_subscribe_then_offline_clears_binding() {
         .await
         .unwrap();
 
-    assert!(wait_until(Duration::from_secs(1), || {
-        manager.mwi_subscriber_bindings_len() == 1
-    })
-    .await);
+    assert!(
+        wait_until(Duration::from_secs(1), || {
+            manager.mwi_subscriber_bindings_len() == 1
+        })
+        .await
+    );
     let dialog_id = manager.get_mwi_subscribers("alice")[0].dialog_id.clone();
 
     server
@@ -579,7 +600,10 @@ async fn cluster_remote_offline_prunes_subscriptions() {
             registered_aor: Some(alice),
             ..Default::default()
         }),
-        EventSource::Remote(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 5060)),
+        EventSource::Remote(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            5060,
+        )),
     )
     .await;
 
@@ -595,9 +619,14 @@ async fn cluster_remote_offline_removes_dialog_when_layer_attached() {
     let module = PresenceModule::create(server.clone(), config).unwrap();
 
     // Create a real subscription dialog on this node's dialog_layer.
-    let (mut tx_sub, _) =
-        create_transaction(subscribe_to("alice", "bob", "rustpbx.com", Some(3600), "presence"))
-            .await;
+    let (mut tx_sub, _) = create_transaction(subscribe_to(
+        "alice",
+        "bob",
+        "rustpbx.com",
+        Some(3600),
+        "presence",
+    ))
+    .await;
     module
         .on_transaction_begin(
             CancellationToken::new(),
@@ -606,19 +635,17 @@ async fn cluster_remote_offline_removes_dialog_when_layer_attached() {
         )
         .await
         .unwrap();
-    assert!(wait_until(Duration::from_secs(1), || {
-        manager.subscriber_bindings_len() == 1
-    })
-    .await);
+    assert!(
+        wait_until(Duration::from_secs(1), || {
+            manager.subscriber_bindings_len() == 1
+        })
+        .await
+    );
     let dialog_id = manager.get_subscribers("bob")[0].dialog_id.clone();
     assert!(server.dialog_layer.get_dialog(&dialog_id).is_some());
 
     let (locator_tx, _) = tokio::sync::broadcast::channel(8);
-    let hub = ClusterEventHub::new(
-        locator_tx,
-        manager.clone(),
-        CancellationToken::new(),
-    );
+    let hub = ClusterEventHub::new(locator_tx, manager.clone(), CancellationToken::new());
     hub.set_dialog_layer(server.dialog_layer.clone());
 
     hub.on_remote_locator_event(
@@ -627,7 +654,10 @@ async fn cluster_remote_offline_removes_dialog_when_layer_attached() {
             registered_aor: Some(watcher("alice", "rustpbx.com")),
             ..Default::default()
         }]),
-        EventSource::Remote(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)), 5060)),
+        EventSource::Remote(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)),
+            5060,
+        )),
     )
     .await;
 
@@ -655,7 +685,10 @@ async fn cluster_remote_offline_without_dialog_layer_still_prunes_manager() {
             registered_aor: Some(watcher("alice", "pbx.local")),
             ..Default::default()
         }),
-        EventSource::Remote(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 5060)),
+        EventSource::Remote(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            5060,
+        )),
     )
     .await;
     assert_eq!(manager.subscriber_bindings_len(), 0);
@@ -692,9 +725,14 @@ async fn reconnect_storm_never_grows_bindings_linearly() {
             );
         }
 
-        let (mut tx, _) =
-            create_transaction(subscribe_to("1001", "1001", "rustpbx.com", Some(3600), "presence"))
-                .await;
+        let (mut tx, _) = create_transaction(subscribe_to(
+            "1001",
+            "1001",
+            "rustpbx.com",
+            Some(3600),
+            "presence",
+        ))
+        .await;
         module
             .on_transaction_begin(
                 CancellationToken::new(),

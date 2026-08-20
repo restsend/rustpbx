@@ -76,7 +76,8 @@ UUI 丢失不影响事件链路的 session_id 关联。
 
 - 旧 `X-CC-Call-Id` / `X-CC-Queue-Id` / `X-CC-Queue-Name` 头已由 UUI 替代;
   cc-phone 前端保留 X-* 读取作为旧版本 proxy 的兼容回退
-- 事件 typed 字段 `CallIncoming.root_call_id` / `RecordStopped.root_call_id`
+- 事件 typed 字段 `CallCreated.root_call_id`（原 `CallIncoming`，事件已更名为
+  `call_created`）/ `RecordStopped.root_call_id`
   已删除;跨腿关联一律使用 enrichment 注入的顶层 `session_id`
 - 嵌套块 `root`(`RootCallInfo`)仍可携带主被叫等展示信息,其 `call_id`
   表示该腿自身上下文, **不是** 逻辑呼叫关联键;关联键只用 `session_id`

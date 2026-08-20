@@ -1898,7 +1898,9 @@ impl SipSession {
         // (no-op backend in single-node mode).
         session.register_in_session_registry().await;
 
-        // Emit CallIncoming event via RWI gateway if configured.
+        // Emit CallCreated event via RWI gateway if configured. The `direction`
+        // field is injected by CallMetaStore enrichment (meta was inserted
+        // above, before this event is dispatched).
         let incoming_sip_headers = {
             let mut hdrs = crate::call::app::extract_sip_headers(&server_dialog.initial_request());
             if let Some(ref routed) = session.context.dialplan.routed_headers {
@@ -1909,12 +1911,11 @@ impl SipSession {
             hdrs
         };
         if let Some(ref gw) = server.rwi_gateway {
-            let ev = crate::rwi::CallIncoming {
+            let ev = crate::rwi::CallCreated {
                 call_id: session_id.clone(),
                 context: "default".into(),
                 caller: original_caller,
                 callee: original_callee,
-                dial_direction: "inbound".into(),
                 trunk: None,
                 sip_headers: incoming_sip_headers,
                 caller_name: None,
@@ -2832,6 +2833,56 @@ impl SipSession {
         match result {
             Ok(_) => CommandResult::success(),
             Err(e) => CommandResult::failure(e.to_string()),
+        }
+    }
+
+    /// Extract the user-part of a SIP URI string (`sip:bob@host` → `bob`).
+    /// Returns `None` when the URI has no usable user part.
+    fn uri_user_part(uri: &str) -> Option<String> {
+        uri.strip_prefix("sip:")
+            .or_else(|| uri.strip_prefix("sips:"))
+            .and_then(|s| s.split('@').next())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+
+    /// True while a queue app is driving this session — used to gate
+    /// queue-specific extension bookkeeping.
+    fn in_queue_context(&self) -> bool {
+        self.app_runtime
+            .current_app()
+            .as_deref()
+            .is_some_and(|app| app == "queue")
+            || self.app_runtime.get_queue_name().is_some()
+    }
+
+    /// Resolve the agent id for a queue agent-leg event.
+    ///
+    /// Prefers the user-part of the leg's endpoint URI **when the agent
+    /// registry confirms it is a registered agent** — sequential fallback
+    /// dials a different agent than the session-level `resolved_agent_id`,
+    /// which stays pinned to the first resolved agent. Legs dialed through
+    /// WebRTC contacts carry temp user parts that are NOT agent ids, so an
+    /// unvalidated user-part (or a missing registry) falls back to the
+    /// session-level value.
+    async fn leg_agent_id(&self, agent_uri: Option<&str>) -> Option<String> {
+        let session_level = self
+            .extensions
+            .read()
+            .get::<std::collections::HashMap<String, String>>()
+            .and_then(|m| m.get("resolved_agent_id").cloned());
+        let user = agent_uri
+            .and_then(Self::uri_user_part)
+            .filter(|u| Some(u.as_str()) != session_level.as_deref());
+        match (user, &self.server.agent_registry) {
+            (Some(user), Some(registry)) => {
+                if registry.get_agent(&user).await.is_some() {
+                    Some(user)
+                } else {
+                    session_level
+                }
+            }
+            _ => session_level,
         }
     }
     fn extract_sdp(body: &[u8]) -> Option<String> {
@@ -4370,10 +4421,8 @@ impl SipSession {
                 &caller_headers,
                 &["X-CRM-Ticket-Id", "X-Ticket-Id", "X-CRM-Ticket"],
             );
-            let customer_id = other_header_ci(
-                &caller_headers,
-                &["X-CRM-Customer-Id", "X-Customer-Id"],
-            );
+            let customer_id =
+                other_header_ci(&caller_headers, &["X-CRM-Customer-Id", "X-Customer-Id"]);
             let session_id_owned = self.context.session_id.to_string();
             self.server.active_call_registry.set_context_meta(
                 session_id_owned.clone(),
@@ -7464,8 +7513,24 @@ impl SipSession {
                         return Ok(());
                     }
                 };
-                mb.hold_file(side, path).await?;
-                self.record_play_start("hold-music-callee", "hold music (callee)");
+                let resolved = if path.starts_with("http://") || path.starts_with("https://") {
+                    path
+                } else {
+                    Self::resolve_audio_file_path(&path)
+                };
+                match mb.hold_file(side, resolved.clone()).await {
+                    Ok(_) => {
+                        self.record_play_start(
+                            format!("hold-music-{}", leg_key),
+                            format!("hold music ({})", leg_key),
+                        );
+                    }
+                    Err(e) => {
+                        warn!(session_id = %session_id, %leg_key, path = %resolved, error = %e,
+                            "Hold music failed to load, falling back to silence");
+                        mb.hold(side, None).await?;
+                    }
+                }
             } else {
                 mb.hold(side, None).await?;
             }
@@ -7624,9 +7689,11 @@ impl SipSession {
 
     /// Resolve hold music source by priority:
     /// 1. X-Hold-Music header in the re-INVITE request
-    /// 2. X-Hold-Music in session extensions (from initial INVITE / CC addon)
-    /// 3. PBX default from ProxyConfig
-    fn resolve_hold_music(
+    /// 2. X-Hold-Music in session extensions (from initial INVITE / CC addon,
+    ///    e.g. skill-group `metadata.hold_music` injected by the CC hook)
+    /// 3. PBX default from ProxyConfig (`[proxy].hold_music`)
+    /// 4. Built-in default hold audio (sounds/phone-calling.wav)
+    pub(crate) fn resolve_hold_music(
         &self,
         request_headers: &[rsipstack::sip::Header],
     ) -> Option<crate::call::domain::MediaSource> {
@@ -7652,7 +7719,10 @@ impl SipSession {
         if let Some(path) = &self.server.proxy_config.load().hold_music {
             return Some(crate::call::domain::MediaSource::File { path: path.clone() });
         }
-        None
+        // 4. Built-in default so the held party always hears hold audio.
+        Some(crate::call::domain::MediaSource::File {
+            path: crate::call::DEFAULT_QUEUE_HOLD_AUDIO.to_string(),
+        })
     }
 
     fn parse_hold_music_value(value: &str) -> crate::call::domain::MediaSource {
@@ -7827,7 +7897,10 @@ impl SipSession {
         }
     }
 
-    fn publish_recording_complete(&mut self, result: crate::media::media_recorder::RecordingResult) {
+    fn publish_recording_complete(
+        &mut self,
+        result: crate::media::media_recorder::RecordingResult,
+    ) {
         let notify_app = self.finalize_active_recording_segment(&result);
         let path = result.path;
         let duration = Duration::from_secs_f64(result.duration_secs);
@@ -9251,9 +9324,7 @@ impl SipSession {
                         .segment_id
                         .clone()
                         .filter(|s| !s.trim().is_empty())
-                        .unwrap_or_else(|| {
-                            uuid::Uuid::new_v4().to_string()[..8].to_string()
-                        });
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()[..8].to_string());
                     let path = if config.path.trim().is_empty() {
                         crate::callrecord::segment_wav_path(
                             &self.recording_root_dir(),
@@ -9595,18 +9666,18 @@ impl SipSession {
                 // it can track per-leg state and emit QueueAgentOffered.
                 let agent_uri = self.legs.get(&leg_id).and_then(|l| l.endpoint.clone());
                 if let Some(ref agent_uri) = agent_uri {
-                    let resolved_agent_id = self
-                        .extensions
-                        .read()
-                        .get::<std::collections::HashMap<String, String>>()
-                        .and_then(|m| m.get("resolved_agent_id").cloned());
+                    // Identify the agent from THIS leg first: sequential
+                    // fallback dials a different agent than the session-level
+                    // `resolved_agent_id`, which stays pinned to the first
+                    // resolved agent.
+                    let agent_id = self.leg_agent_id(Some(agent_uri)).await;
                     self.app_event_bridge.send_app_event(
                         crate::call::app::ControllerEvent::Custom(
                             "agent_ringing".to_string(),
                             serde_json::json!({
                                 "leg_id": leg_id.0,
                                 "agent_uri": agent_uri,
-                                "agent_id": resolved_agent_id,
+                                "agent_id": agent_id,
                             }),
                         ),
                     );
@@ -9683,11 +9754,43 @@ impl SipSession {
                 // Forward to running app before processing so the app can react
                 let agent_uri = self.legs.get(&leg_id).and_then(|l| l.endpoint.clone());
                 if let Some(ref agent_uri) = agent_uri {
-                    let resolved_agent_id = self
-                        .extensions
-                        .read()
-                        .get::<std::collections::HashMap<String, String>>()
-                        .and_then(|m| m.get("resolved_agent_id").cloned());
+                    // The leg that actually answered identifies the agent.
+                    // Overwrite the session-level `resolved_agent_id` (pinned
+                    // to the FIRST resolved agent at resolve time) with the
+                    // answering leg's user-part — validated against the agent
+                    // registry — so app events and CC session hooks attribute
+                    // connect/ended to the right agent. This is critical when
+                    // sequential fallback dialed a different agent than the
+                    // primary one. Gated to queue context so direct (non-
+                    // queue) calls keep deriving the agent from parties.
+                    let leg_agent_id = self.leg_agent_id(Some(agent_uri)).await;
+                    if let Some(ref id) = leg_agent_id
+                        && Some(id.as_str())
+                            != self
+                                .extensions
+                                .read()
+                                .get::<std::collections::HashMap<String, String>>()
+                                .and_then(|m| m.get("resolved_agent_id").map(String::as_str))
+                        && self.in_queue_context()
+                    {
+                        let mut ext = self.extensions.write();
+                        match ext.get_mut::<std::collections::HashMap<String, String>>() {
+                            Some(map) => {
+                                map.insert("resolved_agent_id".to_string(), id.clone());
+                            }
+                            None => {
+                                let mut map = std::collections::HashMap::new();
+                                map.insert("resolved_agent_id".to_string(), id.clone());
+                                ext.insert(map);
+                            }
+                        }
+                    }
+                    let resolved_agent_id = leg_agent_id.or_else(|| {
+                        self.extensions
+                            .read()
+                            .get::<std::collections::HashMap<String, String>>()
+                            .and_then(|m| m.get("resolved_agent_id").cloned())
+                    });
                     self.app_event_bridge.send_app_event(
                         crate::call::app::ControllerEvent::Custom(
                             "agent_connected".to_string(),
@@ -9758,23 +9861,23 @@ impl SipSession {
                 } else {
                     "agent_no_answer"
                 };
-                // Resolve the canonical agent_id from session extensions
-                // so the queue app can update the correct agent's presence.
+                // Resolve the canonical agent_id from the failing LEG first
+                // (sequential fallback dials a different agent than the
+                // session-level value; validated against the registry so
+                // WebRTC contact user-parts are not mistaken for agent ids),
+                // then fall back to session extensions so the queue app can
+                // update the correct agent's presence.
                 let resolved_agent_id = self
-                    .extensions
-                    .read()
-                    .get::<std::collections::HashMap<String, String>>()
-                    .and_then(|m| m.get("resolved_agent_id").cloned())
+                    .leg_agent_id(agent_uri.as_deref())
+                    .await
                     .unwrap_or_default();
                 let agent_id = if !resolved_agent_id.is_empty() {
                     resolved_agent_id.clone()
                 } else {
                     agent_uri
                         .as_deref()
-                        .and_then(|u| u.strip_prefix("sip:"))
-                        .and_then(|u| u.split('@').next())
-                        .unwrap_or("unknown")
-                        .to_string()
+                        .and_then(Self::uri_user_part)
+                        .unwrap_or_else(|| "unknown".to_string())
                 };
                 {
                     self.app_event_bridge.send_app_event(
@@ -11424,6 +11527,11 @@ impl SipSession {
 
         self.require_leg(&leg_id)?;
 
+        // Fall back through the standard hold-music chain (X-Hold-Music
+        // header/extension -> [proxy].hold_music -> built-in default) so the
+        // held party always hears hold audio instead of silence.
+        let music = music.or_else(|| self.resolve_hold_music(&[]));
+
         self.update_leg_state(&leg_id, LegState::Hold);
 
         let hold_sdp = self.generate_sdp_for_side(&leg_id, true)?;
@@ -11455,11 +11563,26 @@ impl SipSession {
                     match &music {
                         Some(crate::call::domain::MediaSource::File { path })
                         | Some(crate::call::domain::MediaSource::Url { url: path }) => {
-                            mb.hold_file(side, path.clone()).await?;
-                            self.record_play_start(
-                                format!("hold-music-{}", leg_id.0),
-                                format!("hold music ({})", leg_id.0),
-                            );
+                            let resolved =
+                                if path.starts_with("http://") || path.starts_with("https://") {
+                                    path.clone()
+                                } else {
+                                    Self::resolve_audio_file_path(path)
+                                };
+                            match mb.hold_file(side, resolved.clone()).await {
+                                Ok(_) => {
+                                    self.record_play_start(
+                                        format!("hold-music-{}", leg_id.0),
+                                        format!("hold music ({})", leg_id.0),
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!(session_id = %session_id, %leg_id, path = %resolved,
+                                        error = %e,
+                                        "Hold music failed to load, falling back to silence");
+                                    mb.hold(side, None).await?;
+                                }
+                            }
                         }
                         Some(_) => {
                             warn!(session_id = %session_id, "Unsupported hold music source type");

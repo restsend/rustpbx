@@ -395,7 +395,10 @@ impl ActionProvider for StepProvider {
 
     async fn next_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode> {
         let url = self.endpoint_url(None);
-        match self.post_action_node(&url, &ctx, "StepProvider next_action").await {
+        match self
+            .post_action_node(&url, &ctx, "StepProvider next_action")
+            .await
+        {
             Ok(node) => Ok(node),
             Err(last_err) => {
                 // Prefer session-level IVR fallback when configured.

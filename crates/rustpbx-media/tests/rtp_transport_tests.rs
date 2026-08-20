@@ -189,10 +189,12 @@ impl RtpObserver for DtmfCapture {
         let payload = packet.payload.as_ref();
         if payload.len() == 4 && matches!(payload[0], 0..=15) {
             let end = payload[1] & 0x80 != 0;
-            self.events
-                .lock()
-                .unwrap()
-                .push((packet.header.payload_type, payload[0], end, packet.header.ssrc));
+            self.events.lock().unwrap().push((
+                packet.header.payload_type,
+                payload[0],
+                end,
+                packet.header.ssrc,
+            ));
         }
     }
 
@@ -200,10 +202,12 @@ impl RtpObserver for DtmfCapture {
         let payload = packet.payload.as_ref();
         if payload.len() == 4 && matches!(payload[0], 0..=15) {
             let end = payload[1] & 0x80 != 0;
-            self.events
-                .lock()
-                .unwrap()
-                .push((packet.header.payload_type, payload[0], end, packet.header.ssrc));
+            self.events.lock().unwrap().push((
+                packet.header.payload_type,
+                payload[0],
+                end,
+                packet.header.ssrc,
+            ));
         }
     }
 }
@@ -1653,10 +1657,8 @@ async fn leg_send_dtmf_emits_telephone_events_to_peer() {
         "expected >=4 DTMF packets, got {:?}",
         *events
     );
-    let playback_ssrc = rustpbx_media::leg::sender_ssrc_for_kind(
-        leg.pc(),
-        rustrtc::MediaKind::Audio,
-    );
+    let playback_ssrc =
+        rustpbx_media::leg::sender_ssrc_for_kind(leg.pc(), rustrtc::MediaKind::Audio);
     for &(pt, code, _end, ssrc) in events.iter() {
         assert_eq!(pt, 101, "telephone-event must use negotiated PT 101");
         assert!(code == 1 || code == 2, "digit code must be 1 or 2");

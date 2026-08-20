@@ -493,12 +493,11 @@ async fn test_leg_timeline_via_call_resume() {
         // Simulate call lifecycle events
         let events = vec![
             rustpbx::rwi::event::to_legacy_event(
-                &rustpbx::rwi::CallIncoming {
+                &rustpbx::rwi::CallCreated {
                     call_id: "timeline-call".to_string(),
                     context: "timeline-test".to_string(),
                     caller: "sip:customer@test.com".to_string(),
                     callee: "sip:service@test.com".to_string(),
-                    dial_direction: "inbound".to_string(),
                     trunk: None,
                     sip_headers: std::collections::HashMap::new(),
                     caller_name: None,
@@ -558,14 +557,14 @@ async fn test_leg_timeline_via_call_resume() {
     assert!(!events.is_empty());
 
     // Verify event types represent a call lifecycle
-    // Event structure: {"sequence": N, "timestamp": T, "call_id": "...", "event": {...}}
+    // Event structure: {"timestamp": T, "call_id": "...", "event": {...}}
     // The "event" field contains the RwiEvent which uses snake_case variant names as keys
     let event_json = serde_json::to_string(&events).unwrap_or_default();
 
     // Check for event types in the serialized JSON
     assert!(
-        event_json.contains("call_incoming") || event_json.contains("call_ringing"),
-        "Should have incoming or ringing event: {}",
+        event_json.contains("call_created") || event_json.contains("call_ringing"),
+        "Should have created or ringing event: {}",
         event_json
     );
     assert!(

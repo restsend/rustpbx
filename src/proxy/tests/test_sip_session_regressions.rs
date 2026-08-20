@@ -2383,3 +2383,73 @@ async fn test_leg_ringing_fires_on_call_ringing_hook() {
         "ringing leg should be marked LegState::Ringing"
     );
 }
+
+// ── hold-music resolution chain ──────────────────────────────────────────
+
+fn expect_hold_music_file(resolved: Option<crate::call::domain::MediaSource>) -> String {
+    match resolved {
+        Some(crate::call::domain::MediaSource::File { path }) => path,
+        other => panic!("expected File hold music, got: {other:?}"),
+    }
+}
+
+/// The chain resolves: re-INVITE header > session extension > [proxy]
+/// config > built-in default. Every agent hold (REST/console/supervisor)
+/// goes through it, so the held party always hears hold audio.
+#[tokio::test]
+async fn test_resolve_hold_music_priority_chain() {
+    // 4. Built-in default: no header, no extension, no config.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let session = build_session(dialplan).await;
+    assert_eq!(
+        expect_hold_music_file(session.resolve_hold_music(&[])),
+        crate::call::DEFAULT_QUEUE_HOLD_AUDIO,
+        "empty chain must fall back to the built-in default hold audio"
+    );
+
+    // 3. [proxy].hold_music config.
+    let mut config = ProxyConfig::default();
+    config.hold_music = Some("sounds/from-config.wav".to_string());
+    let session =
+        build_session_with_config(build_dialplan_with_mode(MediaProxyMode::Auto), config).await;
+    assert_eq!(
+        expect_hold_music_file(session.resolve_hold_music(&[])),
+        "sounds/from-config.wav"
+    );
+
+    // 2. Session extension (CC addon injects skill-group metadata.hold_music
+    //    here as "X-Hold-Music").
+    {
+        let mut ext = session.extensions.write();
+        ext.insert(HashMap::from([(
+            "X-Hold-Music".to_string(),
+            "sounds/from-extension.wav".to_string(),
+        )]));
+    }
+    assert_eq!(
+        expect_hold_music_file(session.resolve_hold_music(&[])),
+        "sounds/from-extension.wav",
+        "extension must win over the [proxy] config"
+    );
+
+    // 1. re-INVITE X-Hold-Music header beats everything.
+    let headers = [rsipstack::sip::Header::Other(
+        "X-Hold-Music".to_string(),
+        "sounds/from-header.wav".to_string(),
+    )];
+    assert_eq!(
+        expect_hold_music_file(session.resolve_hold_music(&headers)),
+        "sounds/from-header.wav",
+        "re-INVITE header must win over extension and config"
+    );
+
+    // http(s) values resolve to the Url variant.
+    let url_headers = [rsipstack::sip::Header::Other(
+        "X-Hold-Music".to_string(),
+        "https://cdn.example.com/moh.mp3".to_string(),
+    )];
+    assert!(matches!(
+        session.resolve_hold_music(&url_headers),
+        Some(crate::call::domain::MediaSource::Url { .. })
+    ));
+}

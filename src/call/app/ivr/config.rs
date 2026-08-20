@@ -1147,10 +1147,9 @@ action = { type = "menu", menu = "root" }
         ));
 
         // record_start / record_stop
-        let node: ActionNode = serde_json::from_str(
-            r#"{"type":"record_start","segment_type":"ivr","id":"seg1"}"#,
-        )
-        .unwrap();
+        let node: ActionNode =
+            serde_json::from_str(r#"{"type":"record_start","segment_type":"ivr","id":"seg1"}"#)
+                .unwrap();
         assert!(matches!(
             node.action,
             EntryAction::RecordStart {

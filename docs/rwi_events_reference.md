@@ -77,7 +77,6 @@ events = []
 ```json
 {
   "rwi": "1.0",
-  "sequence": 42,
   "timestamp": 1716212345,
   "call_id": "call-abc123",
   "event_type": "call_ringing",
@@ -90,7 +89,6 @@ events = []
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `rwi` | string | 协议版本 `"1.0"` |
-| `sequence` | u64 | 单调递增事件序号，用于去重和断线重连 |
 | `timestamp` | u64 | Unix 时间戳（秒） |
 | `call_id` | string | 呼叫标识（广播事件为空字符串） |
 | `event_type` | string | snake_case 事件类型名 |
@@ -169,15 +167,15 @@ events = []
   "rwi": "1.0",
   "action_id": "resume-001",
   "action": "session.resume",
-  "params": { "last_sequence": 42 }
+  "params": {}
 }
 ```
 
-服务端缓存最近 1000 条事件（保留 60 秒），重连后自动回放 `last_sequence` 之后的事件。
+服务端缓存最近 1000 条事件（保留 60 秒），重连后自动回放全部缓存事件（`call.resume` 携带 `call_id` 时只回放该呼叫的事件）。客户端可按 `call_id` + `event_type` 自行幂等去重。
 
 ### Webhook 去重
 
-Webhook 使用 `(call_id, sequence)` 元组去重，环形缓冲区容量 4096 条。重复事件自动丢弃。
+Webhook 使用 `(call_id, timestamp)` 元组去重，环形缓冲区容量 4096 条。重复事件自动丢弃。
 
 ---
 
@@ -188,11 +186,11 @@ Webhook 使用 `(call_id, sequence)` 元组去重，环形缓冲区容量 4096 �
 
 ### 6.1 呼叫生命周期
 
-#### call_incoming
+#### call_created
 
-分发：fan_out_to_context
+分发：call_owner
 
-新呼叫进入系统，是任何呼叫流程的第一个事件。
+呼叫创建并进入拨号（calling）阶段——入呼 INVITE 与 API 外呼（`call.originate` / outbound dial）都会触发。是任何呼叫流程的第一个事件。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -200,7 +198,6 @@ Webhook 使用 `(call_id, sequence)` 元组去重，环形缓冲区容量 4096 �
 | `context` | String | 拨号计划 context |
 | `caller` | String | 主叫 SIP URI |
 | `callee` | String | 被叫 SIP URI |
-| `dial_direction` | String | `inbound` / `outbound` / `internal` |
 | `trunk` | Option\<String\> | SIP 中继名 |
 | `sip_headers` | Map\<String, String\> | 白名单 SIP 头 |
 | `caller_name` | Option\<String\> | 主叫号码 |
@@ -209,21 +206,21 @@ Webhook 使用 `(call_id, sequence)` 元组去重，环形缓冲区容量 4096 �
 | `app_id` | Option\<String\> | IVR 应用 ID |
 | `routing_target` | Option\<String\> | 路由目标 |
 | `uuid` | Option\<String\> | 全局 UUID（关联录音） |
-| `routing_path` | Option\<Vec\<String\>\> | 路由路径序列 |
+| `routing_path` | Option\<Vec\<String\>\> | 路由路径 |
 | `session_id` | Option\<String\> | enrichment：逻辑呼叫根 session_id |
+| `direction` | Option\<String\> | enrichment：`inbound` / `outbound` / `internal` |
 
-> **注意**：`call_incoming` 使用 `dial_direction`，其他事件的上下文使用 `direction`。
-> 旧字段 `root_call_id` 已移除；跨腿关联请用 enrichment 注入的 `session_id`。
+> **注意**：所有 call 事件统一使用上下文注入的 `direction` 字段（由 `CallMetaStore` enrichment 注入）。跨腿关联请用 enrichment 注入的 `session_id`。
 
 ```json
 {
   "rwi": "1.0",
-  "call_incoming": {
+  "call_created": {
     "call_id": "call-abc",
     "context": "inbound",
     "caller": "sip:13800138000@pbx.local",
     "callee": "sip:4000@pbx.local",
-    "dial_direction": "inbound",
+    "direction": "inbound",
     "trunk": "trunk_sip",
     "sip_headers": { "X-Tenant": "corp_a" },
     "session_id": "call-abc",
@@ -237,18 +234,6 @@ Webhook 使用 `(call_id, sequence)` 元组去重，环形缓冲区容量 4096 �
   }
 }
 ```
-
-#### call_initiated
-
-分发：call_owner
-
-外呼发起（RWI `call.originate` / outbound dial）时发给会话所有者的第一个事件。
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `call_id` | String | 呼叫唯一标识 |
-| `callee` | String | 目标 URI |
-| *+ctx* | | 扁平化上下文 |
 
 #### call_ringing / call_early_media / call_answered / call_unbridged / call_no_answer / call_busy
 
@@ -1070,12 +1055,12 @@ CC 呼叫挂机。载荷含 `call_id`、`agent_id`、`hangup_by`
 | `mode` | String | 模式（`control`/`listen`/`whisper`/`barge`） |
 | *+ctx* | | 扁平化上下文 |
 
-#### session_resumed
+#### session.resume / call.resume（命令结果，非事件）
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `session_id` | String | 恢复的会话 ID |
-| `last_sequence` | u64 | 客户端上报的最后序号 |
+| `replayed_count` | u64 | 回放的缓存事件条数 |
+| `events` | array | 回放条目（`timestamp` / `call_id` / `event`） |
 
 ---
 
@@ -1083,8 +1068,7 @@ CC 呼叫挂机。载荷含 `call_id`、`agent_id`、`hangup_by`
 
 | 事件类型 | 分发 | call_id | 上下文 |
 |----------|------|---------|--------|
-| `call_incoming` | fan_out | ✅ | 自有字段 |
-| `call_initiated` | owner | ✅ | 外呼已发起 |
+| `call_created` | owner | ✅ | 自有字段（入呼 INVITE 与外呼 originate） |
 | `call_ringing` | owner | ✅ | +ctx |
 | `call_early_media` | owner | ✅ | +ctx |
 | `call_answered` | owner | ✅ | +ctx |

@@ -86,13 +86,15 @@ macro_rules! rwi_event {
 // Special cases with different field names maintain manual impls.
 // ═══════════════════════════════════════════════════════════════════════
 
+/// A call was created and entered the dialing (calling) phase — emitted for
+/// inbound INVITEs and API originates alike. Direction is not part of the
+/// struct: it is injected via `EventCallContext.direction` enrichment.
 #[derive(Debug, Clone, Serialize)]
-pub struct CallIncoming {
+pub struct CallCreated {
     pub call_id: String,
     pub context: String,
     pub caller: String,
     pub callee: String,
-    pub dial_direction: String,
     pub trunk: Option<String>,
     #[serde(default)]
     pub sip_headers: std::collections::HashMap<String, String>,
@@ -111,14 +113,7 @@ pub struct CallIncoming {
     #[serde(default)]
     pub routing_path: Option<Vec<String>>,
 }
-rwi_event!(CallIncoming, "call_incoming");
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CallInitiated {
-    pub call_id: String,
-    pub destination: String,
-}
-rwi_event!(CallInitiated, "call_initiated");
+rwi_event!(CallCreated, "call_created");
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CallRinging {

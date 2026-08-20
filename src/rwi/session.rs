@@ -400,12 +400,11 @@ pub enum RwiCommandPayload {
         new_call_id: String,
     },
     #[serde(rename = "session.resume")]
-    SessionResume { last_sequence: Option<u64> },
+    SessionResume {},
     #[serde(rename = "call.resume")]
     CallResume {
         #[serde(default)]
         call_id: String,
-        last_sequence: Option<u64>,
     },
 }
 

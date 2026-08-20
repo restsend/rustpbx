@@ -69,7 +69,11 @@ impl SignalingSidecar {
         let Some(path) = self.inner.paths.get(call_id) else {
             return;
         };
-        match OpenOptions::new().create(true).append(true).open(path.value()) {
+        match OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path.value())
+        {
             Ok(mut file) => {
                 if let Err(err) = writeln!(file, "{}", line) {
                     warn!(call_id, %err, "signaling sidecar write failed");
@@ -206,8 +210,14 @@ mod tests {
             seq: sidecar_obj["seq"].as_u64().expect("seq"),
             leg: None,
             msg_type: crate::sipflow::SipFlowMsgType::Sip,
-            src_addr: sidecar_obj["src_addr"].as_str().unwrap_or_default().to_string(),
-            dst_addr: sidecar_obj["dst_addr"].as_str().unwrap_or_default().to_string(),
+            src_addr: sidecar_obj["src_addr"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            dst_addr: sidecar_obj["dst_addr"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
             payload: bytes::Bytes::from(msg.to_string()),
         };
         let exported = crate::sipflow::SipFlowQuery::export_jsonl(&[item]);

@@ -87,7 +87,6 @@ embedded `event_type` key identifying the event:
 ```json
 {
   "rwi": "1.0",
-  "sequence": 42,
   "timestamp": 1716212345,
   "call_id": "call-abc123",
   "event_type": "call_ringing",
@@ -99,7 +98,6 @@ embedded `event_type` key identifying the event:
 | Field | Type | Description |
 |-------|------|-------------|
 | `rwi` | string | Protocol version `"1.0"` |
-| `sequence` | u64 | Monotonically increasing event sequence number (for dedup and resume) |
 | `timestamp` | u64 | Unix epoch seconds |
 | `call_id` | string | Call identifier (empty string for broadcast-only events) |
 | `event_type` | string | snake_case event type name |
@@ -181,15 +179,18 @@ Some events (e.g., `RecordStopped`, `IvrNodeEntered`) carry their own `ani`/`dni
   "rwi": "1.0",
   "action_id": "resume-001",
   "action": "session.resume",
-  "params": { "last_sequence": 42 }
+  "params": {}
 }
 ```
 
-Server buffers the latest 1000 events (60-second retention). After reconnection, all events after `last_sequence` are replayed.
+Server buffers the latest 1000 events (60-second retention). After
+reconnection, all cached events are replayed (`call.resume` with a `call_id`
+replays just that call's events). Clients dedupe on `call_id` + `event_type`
+as needed.
 
 ### Webhook Deduplication
 
-The webhook handler deduplicates using `(call_id, sequence)` tuples in a 4096-entry ring buffer. Duplicate events are silently dropped.
+The webhook handler deduplicates using `(call_id, timestamp)` tuples in a 4096-entry ring buffer. Duplicate events are silently dropped.
 
 ---
 
@@ -200,11 +201,13 @@ The webhook handler deduplicates using `(call_id, sequence)` tuples in a 4096-en
 
 ### 6.1 Call Lifecycle
 
-#### call_incoming
+#### call_created
 
-Dispatch: fan_out_to_context
+Dispatch: call_owner
 
-New call enters the system. First event in any call flow.
+A call was created and entered the dialing (calling) phase — emitted for
+inbound INVITEs and API originates (`call.originate` / outbound dial) alike.
+First event in any call flow.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -212,7 +215,6 @@ New call enters the system. First event in any call flow.
 | `context` | String | Dialplan context |
 | `caller` | String | Caller SIP URI |
 | `callee` | String | Callee SIP URI |
-| `dial_direction` | String | `inbound` / `outbound` / `internal` |
 | `trunk` | Option\<String\> | SIP trunk name |
 | `sip_headers` | Map\<String, String\> | Whitelisted SIP headers |
 | `caller_name` | Option\<String\> | Calling party number |
@@ -221,21 +223,23 @@ New call enters the system. First event in any call flow.
 | `app_id` | Option\<String\> | IVR application ID |
 | `routing_target` | Option\<String\> | Routing target |
 | `uuid` | Option\<String\> | Global UUID (for recording linkage) |
-| `routing_path` | Option\<Vec\<String\>\> | Routing path sequence |
+| `routing_path` | Option\<Vec\<String\>\> | Routing path |
 | `session_id` | Option\<String\> | Enrichment: logical-call root session id |
+| `direction` | Option\<String\> | Enrichment: `inbound` / `outbound` / `internal` |
 
-> **Note**: `call_incoming` uses `dial_direction`; other events' context uses `direction`.
-> Former field `root_call_id` was removed; use enrichment `session_id` for multi-leg correlation.
+> **Note**: all call-scoped events carry the same `direction` context field
+> (injected by `CallMetaStore` enrichment). Use enrichment `session_id` for
+> multi-leg correlation.
 
 ```json
 {
   "rwi": "1.0",
-  "call_incoming": {
+  "call_created": {
     "call_id": "call-abc",
     "context": "inbound",
     "caller": "sip:13800138000@pbx.local",
     "callee": "sip:4000@pbx.local",
-    "dial_direction": "inbound",
+    "direction": "inbound",
     "trunk": "trunk_sip",
     "sip_headers": { "X-Tenant": "corp_a" },
     "session_id": "call-abc",
@@ -249,19 +253,6 @@ New call enters the system. First event in any call flow.
   }
 }
 ```
-
-#### call_initiated
-
-Delivery: call_owner
-
-First event sent to the session owner when an outbound call is initiated
-(RWI `call.originate` / outbound dial).
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `call_id` | String | Call identifier |
-| `callee` | String | Destination URI |
-| *+ctx* | | Flattened context |
 
 #### call_ringing / call_early_media / call_answered / call_unbridged / call_no_answer / call_busy
 
@@ -1144,12 +1135,12 @@ Dispatch: broadcast
 | `mode` | String | Mode (`control`/`listen`/`whisper`/`barge`) |
 | *+ctx* | | Flat context fields |
 
-#### session_resumed
+#### session.resume / call.resume (command results, not events)
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `session_id` | String | Resumed session ID |
-| `last_sequence` | u64 | Client-reported last sequence number |
+| `replayed_count` | u64 | Number of replayed cached events |
+| `events` | array | Replayed entries (`timestamp` / `call_id` / `event`) |
 
 ---
 
@@ -1157,8 +1148,7 @@ Dispatch: broadcast
 
 | Event Type | Dispatch | call_id | Context |
 |------------|----------|---------|---------|
-| `call_incoming` | fan_out | yes | own fields |
-| `call_initiated` | owner | ✅ | Outbound call initiated |
+| `call_created` | owner | yes | own fields (inbound INVITE & originate) |
 | `call_ringing` | owner | yes | +ctx |
 | `call_early_media` | owner | yes | +ctx |
 | `call_answered` | owner | yes | +ctx |

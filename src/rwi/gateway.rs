@@ -17,7 +17,6 @@ pub type Context = String;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EventCacheEntry {
-    pub sequence: u64,
     pub cached_at: DateTime<Utc>,
     pub call_id: CallId,
     pub event: RwiEvent,
@@ -96,7 +95,6 @@ pub struct RwiGateway {
 #[derive(Debug)]
 struct EventCacheState {
     cache: VecDeque<EventCacheEntry>,
-    next_sequence: u64,
 }
 
 /// Delivery target for the unified [`RwiGateway::dispatch`] primitive.
@@ -130,7 +128,6 @@ impl RwiGateway {
             call_ownership: HashMap::new(),
             event_cache: Mutex::new(EventCacheState {
                 cache: VecDeque::new(),
-                next_sequence: 1,
             }),
             max_cache_size,
             max_cache_age_secs,
@@ -338,14 +335,6 @@ impl RwiGateway {
         let _ = self.event_tap.send(entry.clone());
     }
 
-    /// Allocate the next monotonic event sequence number.
-    fn next_sequence(&self) -> u64 {
-        let mut cache_state = self.event_cache.lock();
-        let s = cache_state.next_sequence;
-        cache_state.next_sequence += 1;
-        s
-    }
-
     /// Single dispatch primitive shared by every event path.
     ///
     /// Owner / FanOut targets cache the (raw) event for session resume, enrich
@@ -356,9 +345,7 @@ impl RwiGateway {
         match target {
             DispatchTarget::Broadcast => {
                 let enriched = self.enrich_flat_event(event);
-                let seq = self.next_sequence();
                 let entry = EventCacheEntry {
-                    sequence: seq,
                     cached_at: chrono::Utc::now(),
                     call_id: enriched.call_id.clone().unwrap_or_default(),
                     event: enriched.clone(),
@@ -388,10 +375,9 @@ impl RwiGateway {
                     }
                 }
 
-                let seq = self.cache_event(dispatch_call_id, event);
+                self.cache_event(dispatch_call_id, event);
                 let enriched = self.enrich_flat_event(event);
                 let entry = EventCacheEntry {
-                    sequence: seq,
                     cached_at: chrono::Utc::now(),
                     call_id: dispatch_call_id.clone(),
                     event: enriched.clone(),
@@ -402,10 +388,9 @@ impl RwiGateway {
                 }
             }
             DispatchTarget::FanOut(context, exclude) => {
-                let seq = self.cache_event(dispatch_call_id, event);
+                self.cache_event(dispatch_call_id, event);
                 let enriched = self.enrich_flat_event(event);
                 let entry = EventCacheEntry {
-                    sequence: seq,
                     cached_at: chrono::Utc::now(),
                     call_id: dispatch_call_id.clone(),
                     event: enriched.clone(),
@@ -443,7 +428,8 @@ impl RwiGateway {
         self.call_vars.remove(call_id);
     }
 
-    pub fn cache_event(&self, call_id: &CallId, event: &RwiEvent) -> u64 {
+    /// Cache an event for later session/call resume replay.
+    pub fn cache_event(&self, call_id: &CallId, event: &RwiEvent) {
         let mut cache_state = self.event_cache.lock();
         let max_age = self.max_cache_age_secs;
         let now = chrono::Utc::now();
@@ -455,11 +441,7 @@ impl RwiGateway {
             }
         }
 
-        let sequence = cache_state.next_sequence;
-        cache_state.next_sequence += 1;
-
         let entry = EventCacheEntry {
-            sequence,
             cached_at: now,
             call_id: call_id.clone(),
             event: event.clone(),
@@ -471,43 +453,18 @@ impl RwiGateway {
         while cache_state.cache.len() > self.max_cache_size {
             cache_state.cache.pop_front();
         }
-
-        sequence
     }
 
-    /// Get events for a call since a given sequence number
-    /// Used for session resumption after disconnect
-    pub fn get_events_since(&self, last_sequence: u64) -> Vec<EventCacheEntry> {
+    /// Get all cached events for a specific call.
+    pub fn get_events_for_call(&self, call_id: &CallId) -> Vec<EventCacheEntry> {
         let cache_state = self.event_cache.lock();
 
         cache_state
             .cache
             .iter()
-            .filter(|entry| entry.sequence > last_sequence)
+            .filter(|entry| entry.call_id == *call_id)
             .cloned()
             .collect()
-    }
-
-    /// Get events for a specific call since a given sequence number
-    pub fn get_events_for_call_since(
-        &self,
-        call_id: &CallId,
-        last_sequence: u64,
-    ) -> Vec<EventCacheEntry> {
-        let cache_state = self.event_cache.lock();
-
-        cache_state
-            .cache
-            .iter()
-            .filter(|entry| entry.call_id == *call_id && entry.sequence > last_sequence)
-            .cloned()
-            .collect()
-    }
-
-    /// Current sequence number of the event cache.
-    pub fn current_sequence(&self) -> u64 {
-        let cache_state = self.event_cache.lock();
-        cache_state.next_sequence
     }
 
     /// Register a DTMF tap for an active DtmfCollect on `call_id`.
@@ -529,10 +486,6 @@ impl RwiGateway {
     /// consumers can correlate. Truly global events (agent_state_changed, etc.)
     /// have `call_id = None` and the envelope field is empty.
     ///
-    /// Each broadcast event gets a unique sequence number from a monotonic
-    /// counter so the webhook dedup logic doesn't drop consecutive CC events
-    /// (cc_ringing, cc_answered, cc_hangup) that share the same call_id.
-    ///
     /// This is the dispatch path used by addons that construct events
     /// dynamically (e.g. the CC addon's agent / queue / skill-group events).
     /// Call-scoped broadcasts are enriched with flat context (caller/callee/
@@ -541,45 +494,20 @@ impl RwiGateway {
         self.dispatch(&String::new(), event, DispatchTarget::Broadcast);
     }
 
-    /// Resume a session after disconnect
+    /// Resume a session after disconnect.
     ///
-    /// Returns events that need to be replayed to the session
-    /// and the current sequence number for the session to track
-    pub fn resume_session(&self, last_sequence: Option<u64>) -> (Vec<EventCacheEntry>, u64) {
-        let events = match last_sequence {
-            Some(seq) => self.get_events_since(seq),
-            None => {
-                let cache_state = self.event_cache.lock();
-                cache_state.cache.iter().cloned().collect()
-            }
-        };
-
-        (events, self.current_sequence())
+    /// Returns all cached events (bounded by the cache's size/age window) for
+    /// replay to the reconnecting session.
+    pub fn resume_session(&self) -> Vec<EventCacheEntry> {
+        let cache_state = self.event_cache.lock();
+        cache_state.cache.iter().cloned().collect()
     }
 
-    /// Resume a specific call after disconnect
+    /// Resume a specific call after disconnect.
     ///
-    /// Returns events for the call that need to be replayed
-    /// and the current sequence number for the session to track
-    pub fn resume_call(
-        &self,
-        call_id: &CallId,
-        last_sequence: Option<u64>,
-    ) -> (Vec<EventCacheEntry>, u64) {
-        let events = match last_sequence {
-            Some(seq) => self.get_events_for_call_since(call_id, seq),
-            None => {
-                let cache_state = self.event_cache.lock();
-                cache_state
-                    .cache
-                    .iter()
-                    .filter(|entry| entry.call_id == *call_id)
-                    .cloned()
-                    .collect()
-            }
-        };
-
-        (events, self.current_sequence())
+    /// Returns the call's cached events for replay to the reconnecting session.
+    pub fn resume_call(&self, call_id: &CallId) -> Vec<EventCacheEntry> {
+        self.get_events_for_call(call_id)
     }
 
     fn enrich_flat_event(&self, flat: &RwiEvent) -> RwiEvent {
@@ -995,7 +923,7 @@ mod tests {
     }
 
     /// When the event already carries its own `caller` field (e.g. cc_ringing
-    /// or call_incoming), enrichment must not overwrite it with the context value.
+    /// or call_created), enrichment must not overwrite it with the context value.
     #[tokio::test]
     async fn test_broadcast_event_preserves_explicit_caller() {
         let mut gw = RwiGateway::new();
@@ -1013,12 +941,11 @@ mod tests {
         );
 
         gw.broadcast_event(&crate::rwi::event::to_legacy_event(
-            &crate::rwi::CallIncoming {
+            &crate::rwi::CallCreated {
                 call_id: "c1".into(),
                 context: "default".into(),
                 caller: "sip:explicit-caller@localhost".into(),
                 callee: "sip:explicit-callee@localhost".into(),
-                dial_direction: "inbound".into(),
                 trunk: None,
                 sip_headers: Default::default(),
                 caller_name: None,

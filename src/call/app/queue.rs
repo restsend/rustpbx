@@ -504,6 +504,56 @@ impl QueueApp {
         matches!(self.plan.dial_strategy, Some(DialStrategy::Parallel(_)))
     }
 
+    /// True once an agent answered this call (direct connect, during the
+    /// transfer prompt, or while the service prompt is playing).
+    fn call_already_connected(&self) -> bool {
+        matches!(
+            self.state,
+            QueueState::Connected { .. }
+                | QueueState::PlayingServicePrompt { .. }
+                | QueueState::PlayingTransferPrompt {
+                    connected_agent: Some(_)
+                }
+        )
+    }
+
+    /// Check via the agent registry whether the agent behind `uri` can still
+    /// receive this call. An agent is dialable when it is `Idle` with spare
+    /// concurrency, or when it was reserved FOR THIS CALL (resolve-time
+    /// reservation moves the primary agent `Idle → Ringing`). Returns `None`
+    /// when availability cannot be determined (no registry attached, or the
+    /// agent cannot be identified) so callers keep the legacy dial behavior.
+    async fn agent_availability(
+        registry: &dyn AgentRegistry,
+        uri: &str,
+        own_call_id: &str,
+    ) -> Option<bool> {
+        let agents = registry.list_agents().await;
+        let agent_id = agents
+            .iter()
+            .find(|a| a.uri == uri)
+            .map(|a| a.agent_id.clone())
+            .or_else(|| {
+                uri.strip_prefix("sip:")
+                    .and_then(|s| s.split('@').next())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            })?;
+        let agent = registry.get_agent(&agent_id).await?;
+        if agent.has_capacity() {
+            return Some(true);
+        }
+        if matches!(
+            &agent.presence,
+            PresenceState::Ringing {
+                call_id: Some(reserved_for),
+            } if reserved_for == own_call_id
+        ) {
+            return Some(true);
+        }
+        Some(false)
+    }
+
     /// Resolve agents dynamically if agent registry is available.
     async fn resolve_agents(&mut self) {
         if let Some(ref registry) = self.agent_registry {
@@ -563,6 +613,18 @@ impl QueueApp {
         reason: AgentUnavailableReason,
         failed_leg_id: Option<&str>,
     ) -> anyhow::Result<AppAction> {
+        // Never react to agent failures after a call is already connected —
+        // a late ring timeout or a stale leg-failed notification (e.g. from a
+        // parallel leg cancelled by `agent_connected`) must not dial another
+        // agent into the bridged call nor abandon it.
+        if self.call_already_connected() {
+            warn!(
+                ?reason,
+                state = ?self.state,
+                "Queue: ignoring agent-unavailable after connect"
+            );
+            return Ok(AppAction::Continue);
+        }
         if self.is_parallel() {
             if let Some(failed_leg_id) = failed_leg_id {
                 let pending_before = self.pending_agents.len();
@@ -755,6 +817,31 @@ impl QueueApp {
 
     /// Dial the next agent in a sequential dialing strategy.
     async fn dial_next_agent(&mut self, ctrl: &mut CallController) -> anyhow::Result<AppAction> {
+        // Skip agents that became unavailable since this queue's target list
+        // was resolved (e.g. reserved by or busy on another concurrent call)
+        // so sequential fallback never INVITEs an agent already on a call.
+        // Without a registry (static agent lists) keep the legacy behavior.
+        if let Some(ref registry) = self.agent_registry {
+            loop {
+                let Some(next_uri) = self
+                    .get_agents()
+                    .get(self.current_agent_idx)
+                    .map(|l| l.aor.to_string())
+                else {
+                    break;
+                };
+                if matches!(
+                    Self::agent_availability(registry.as_ref(), &next_uri, &self.call_id).await,
+                    Some(false)
+                ) {
+                    info!(agent = %next_uri, "Queue: skipping agent (no longer available)");
+                    self.current_agent_idx += 1;
+                    self.dial_attempts += 1;
+                } else {
+                    break;
+                }
+            }
+        }
         let agents = self.get_agents();
         if self.current_agent_idx >= agents.len() {
             warn!("Queue: no more agents to dial");
@@ -1166,7 +1253,39 @@ impl CallApp for QueueApp {
         // When the first agent answers via agent_connected event, the rest
         // are cancelled via remove_legs.
         if self.is_parallel() {
-            let agents = self.get_agents();
+            let mut agents: Vec<&Location> = self.get_agents();
+            // Filter out agents that are no longer available (reserved by or
+            // busy on another concurrent call) when a registry is attached.
+            if let Some(ref registry) = self.agent_registry {
+                let mut filtered = Vec::with_capacity(agents.len());
+                for agent in agents {
+                    let uri = agent.aor.to_string();
+                    if matches!(
+                        Self::agent_availability(registry.as_ref(), &uri, &self.call_id).await,
+                        Some(false)
+                    ) {
+                        info!(agent = %uri, "Queue: parallel dial skips unavailable agent");
+                        continue;
+                    }
+                    filtered.push(agent);
+                }
+                agents = filtered;
+            }
+            if agents.is_empty() {
+                warn!("Queue: no available parallel agents, executing fallback");
+                if !self.answered {
+                    let prompts = self
+                        .plan
+                        .voice_prompts
+                        .as_ref()
+                        .or(self.config.voice_prompts.as_ref());
+                    if prompts.and_then(|p| p.busy_prompt.as_ref()).is_some() {
+                        ctrl.answer().await?;
+                        self.answered = true;
+                    }
+                }
+                return self.play_busy_and_then_fallback(ctrl).await;
+            }
             if !agents.is_empty() {
                 info!(
                     "Queue: originating {} parallel calls to static agents",
@@ -1349,6 +1468,14 @@ impl CallApp for QueueApp {
                         info!(agent = %agent_uri, "Queue: agent connected");
                         self._stop_hold_music(ctrl).await;
 
+                        // The call is connected: cancel the pending ring
+                        // timeout and the escalation timer so a late fire
+                        // cannot dial another agent into the bridged call
+                        // (the timeout handler also guards on connected
+                        // state as a second line of defense).
+                        ctrl.cancel_timeout("agent_ring_timeout");
+                        ctrl.cancel_timeout("escalation_check");
+
                         // In parallel mode, cancel all remaining pending agent legs
                         // EXCEPT the one that just answered.
                         if !self.pending_agents.is_empty() {
@@ -1442,6 +1569,13 @@ impl CallApp for QueueApp {
                 }
                 "agent_busy" => {
                     info!("Queue: agent busy");
+                    // Stale leg failures (e.g. parallel legs cancelled by
+                    // `agent_connected`) must not touch agent presence nor
+                    // trigger fallback after the call connected.
+                    if self.call_already_connected() {
+                        warn!("Queue: ignoring agent-busy after connect");
+                        return Ok(AppAction::Continue);
+                    }
                     if let Some(agent_id) = data.get("agent_id").and_then(|v| v.as_str())
                         && let Some(ref registry) = self.agent_registry
                     {
@@ -1463,6 +1597,10 @@ impl CallApp for QueueApp {
                 }
                 "agent_no_answer" => {
                     info!("Queue: agent no answer");
+                    if self.call_already_connected() {
+                        warn!("Queue: ignoring agent-no-answer after connect");
+                        return Ok(AppAction::Continue);
+                    }
                     if let Some(agent_id) = data.get("agent_id").and_then(|v| v.as_str())
                         && let Some(ref registry) = self.agent_registry
                     {
@@ -1497,6 +1635,18 @@ impl CallApp for QueueApp {
         match id.as_str() {
             "agent_ring_timeout" => {
                 info!("Queue: agent ring timeout, handling no-answer");
+
+                // Second line of defense (the timer is cancelled on connect):
+                // if an agent already answered, a late fire must not reset
+                // agent presence nor dial the next fallback agent into the
+                // bridged call.
+                if self.call_already_connected() {
+                    warn!(
+                        state = ?self.state,
+                        "Queue: ignoring stale agent ring timeout (call already connected)"
+                    );
+                    return Ok(AppAction::Continue);
+                }
 
                 // Only reset agent(s) that THIS call is currently dialing.
                 // Look up the canonical agent_id via the registry so URI

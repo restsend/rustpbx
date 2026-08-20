@@ -992,7 +992,11 @@ impl SipSession {
         }
 
         let proxy_cfg = self.server.proxy_config.load();
-        let Some(fb) = proxy_cfg.ivr_fallback.as_ref().filter(|c| c.is_configured()) else {
+        let Some(fb) = proxy_cfg
+            .ivr_fallback
+            .as_ref()
+            .filter(|c| c.is_configured())
+        else {
             return Err(original);
         };
 
@@ -1035,8 +1039,12 @@ impl SipSession {
         let ivr_file = self.server.data_context.resolve_ivr_file(&target).await;
         let mut app_params = serde_json::json!({"file": ivr_file});
         app_params["ivr_params"] = serde_json::json!(qp);
-        self.ensure_app_running("ivr", Some(app_params), &format!("IVR fallback '{}'", target))
-            .await
+        self.ensure_app_running(
+            "ivr",
+            Some(app_params),
+            &format!("IVR fallback '{}'", target),
+        )
+        .await
     }
 
     pub(crate) async fn start_voicemail_app(&mut self, extension: &str) -> Result<()> {

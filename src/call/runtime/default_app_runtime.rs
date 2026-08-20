@@ -205,8 +205,7 @@ impl AppRuntime for DefaultAppRuntime {
             // unconditionally would drop the successor's DTMF/timeout channel
             // and kill the new IVR immediately. Only tear down when we are
             // still the current generation.
-            let still_current =
-                generation_counter.load(Ordering::SeqCst) == generation;
+            let still_current = generation_counter.load(Ordering::SeqCst) == generation;
             if still_current {
                 handle.set_app_event_sender(None);
 

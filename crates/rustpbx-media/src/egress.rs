@@ -539,9 +539,7 @@ impl EgressTask {
                             self.source = source;
                             return None;
                         }
-                        tracing::trace!(
-                            "transcode: peer.recv() timeout, emitting silence"
-                        );
+                        tracing::trace!("transcode: peer.recv() timeout, emitting silence");
                         let encoded = self.encode_silence();
                         self.build_frame(encoded)
                     }

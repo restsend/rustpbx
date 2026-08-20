@@ -48,11 +48,7 @@ pub fn resolve_fallback_target(
         }
     }
 
-    config
-        .default
-        .as_ref()
-        .filter(|s| !s.is_empty())
-        .cloned()
+    config.default.as_ref().filter(|s| !s.is_empty()).cloned()
 }
 
 fn split_addr(s: &str) -> (String, String) {

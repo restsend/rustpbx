@@ -3,7 +3,6 @@
 // These tests verify:
 // 1. Session resume returns cached events after disconnect
 // 2. Call resume returns call-specific events
-// 3. Event sequence numbers are correctly tracked
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -185,12 +184,11 @@ async fn test_full_session_resume_flow() {
             let gw = gateway.read();
             gw.fan_out(
                 "resume-test",
-                &rustpbx::rwi::CallIncoming {
+                &rustpbx::rwi::CallCreated {
                     call_id: "resume-call-1".to_string(),
                     context: "resume-test".to_string(),
                     caller: "sip:alice@test.com".to_string(),
                     callee: "sip:bob@test.com".to_string(),
-                    dial_direction: "inbound".to_string(),
                     trunk: None,
                     sip_headers: std::collections::HashMap::new(),
                     caller_name: None,
@@ -219,7 +217,7 @@ async fn test_full_session_resume_flow() {
         // Give time for events to be cached
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // Get current sequence before disconnect
+        // Snapshot replayed count before disconnect
         let (action_id, json) = req("session.resume", serde_json::json!({}));
         let v = send_recv_matching(&mut ws, &json, &action_id).await;
         assert_eq!(v["status"], "success", "session.resume should succeed");
@@ -236,13 +234,12 @@ async fn test_full_session_resume_flow() {
     {
         let mut ws = connect(&url).await;
 
-        // Resume with no last_sequence (should get all cached events)
+        // Resume (should get all cached events)
         let (_, json) = req("session.resume", serde_json::json!({}));
         let v = send_recv(&mut ws, &json).await;
 
         assert_eq!(v["status"], "success");
         let replayed_count = v["data"]["replayed_count"].as_u64().unwrap();
-        let current_sequence = v["data"]["current_sequence"].as_u64().unwrap();
 
         // Should have at least the events we pushed
         assert!(
@@ -252,21 +249,12 @@ async fn test_full_session_resume_flow() {
             replayed_count
         );
 
-        // Current sequence should be >= replayed count
-        assert!(
-            current_sequence >= replayed_count,
-            "Current sequence ({}) should be >= replayed count ({})",
-            current_sequence,
-            replayed_count
-        );
-
         // Verify event structure
         let events = v["data"]["events"].as_array().unwrap();
         assert!(!events.is_empty(), "Should have events");
 
         // Verify each event has required fields
         for event in events {
-            assert!(event["sequence"].is_u64(), "Event should have sequence");
             assert!(
                 event["timestamp"].is_string(),
                 "Event should have timestamp"
@@ -277,50 +265,6 @@ async fn test_full_session_resume_flow() {
 
         ws.close(None).await.unwrap();
     }
-}
-
-/// Test: Incremental resume with last_sequence
-/// 1. Cache multiple events
-/// 2. Resume from sequence 0 (should get all)
-/// 3. Resume from middle sequence (should get partial)
-#[tokio::test]
-async fn test_incremental_resume_with_sequence() {
-    let (url, gateway, _reg) = start_test_server().await;
-    let mut ws = connect(&url).await;
-
-    // Push events to gateway cache
-    {
-        let gw = gateway.read();
-        for i in 0..5 {
-            let event = rustpbx::rwi::event::to_legacy_event(
-                &rustpbx::rwi::CallRinging {
-                    call_id: format!("seq-call-{}", i),
-                },
-                None,
-            );
-            gw.cache_event(&format!("seq-call-{}", i), &event);
-        }
-    }
-
-    // Resume without sequence (get all)
-    let (_, json) = req("session.resume", serde_json::json!({}));
-    let v = send_recv(&mut ws, &json).await;
-    let total_count = v["data"]["replayed_count"].as_u64().unwrap();
-
-    // Resume from sequence 2 (should get events after sequence 2)
-    let (_, json) = req("session.resume", serde_json::json!({"last_sequence": 2}));
-    let v = send_recv(&mut ws, &json).await;
-    let partial_count = v["data"]["replayed_count"].as_u64().unwrap();
-
-    // Partial count should be less than total
-    assert!(
-        partial_count < total_count,
-        "Partial resume should return fewer events: {} < {}",
-        partial_count,
-        total_count
-    );
-
-    ws.close(None).await.unwrap();
 }
 
 /// Test: Call-specific resume
@@ -432,53 +376,6 @@ async fn test_call_resume_nonexistent_call() {
         "Should have no events for non-existent call"
     );
     assert_eq!(v["data"]["replayed_count"], 0);
-
-    ws.close(None).await.unwrap();
-}
-
-/// Test: Event sequence monotonicity
-/// Verify that sequence numbers are monotonically increasing
-#[tokio::test]
-async fn test_event_sequence_monotonicity() {
-    let (url, gateway, _reg) = start_test_server().await;
-    let mut ws = connect(&url).await;
-
-    // Push events sequentially
-    {
-        let gw = gateway.read();
-        for i in 0..10 {
-            let event = rustpbx::rwi::event::to_legacy_event(
-                &rustpbx::rwi::Dtmf {
-                    call_id: "dtmf-call".to_string(),
-                    digit: i.to_string(),
-                    leg_id: None,
-                    extra: None,
-                },
-                None,
-            );
-            gw.cache_event(&"dtmf-call".to_string(), &event);
-        }
-    }
-
-    // Resume and check sequence numbers
-    let (_, json) = req("call.resume", serde_json::json!({"call_id": "dtmf-call"}));
-    let v = send_recv(&mut ws, &json).await;
-
-    let events = v["data"]["events"].as_array().unwrap();
-    assert!(!events.is_empty());
-
-    // Check that sequences are strictly increasing
-    let mut last_seq: u64 = 0;
-    for event in events {
-        let seq = event["sequence"].as_u64().unwrap();
-        assert!(
-            seq > last_seq,
-            "Sequence {} should be greater than {}",
-            seq,
-            last_seq
-        );
-        last_seq = seq;
-    }
 
     ws.close(None).await.unwrap();
 }

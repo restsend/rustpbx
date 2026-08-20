@@ -4,7 +4,7 @@
 //! Uses a background reader to capture ALL events without dropping any.
 //!
 //! Event categories covered:
-//!   — Call lifecycle:  call_incoming, call_ringing, call_answered, call_hangup
+//!   — Call lifecycle:  call_created, call_ringing, call_answered, call_hangup
 //!   — Recording:        record_started, record_stopped
 //!   — Queue:            queue_joined, queue_left
 //!   — IVR:              ivr_step_trace, ivr_node_entered, ivr_node_exited, ivr_flow_completed
@@ -118,7 +118,7 @@ impl TestCtx {
                         enabled: Some(true),
                         auto_start: Some(false),
                         ..Default::default()
-        }),
+                    }),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -201,12 +201,11 @@ async fn test_comprehensive_core_event_structs() {
 
         gw.fan_out(
             "default",
-            &rustpbx::rwi::CallIncoming {
+            &rustpbx::rwi::CallCreated {
                 call_id: call_id.into(),
                 context: "default".into(),
                 caller: "sip:alice@test.local".into(),
                 callee: "sip:bob@test.local".into(),
-                dial_direction: "inbound".into(),
                 trunk: None,
                 sip_headers: std::collections::HashMap::new(),
                 caller_name: None,
@@ -402,7 +401,7 @@ async fn test_comprehensive_core_event_structs() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     let checks = [
-        ("call_incoming", "call lifecycle"),
+        ("call_created", "call lifecycle"),
         ("call_ringing", "call lifecycle"),
         ("call_answered", "call lifecycle"),
         ("record_started", "recording"),

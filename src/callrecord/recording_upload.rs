@@ -169,9 +169,7 @@ impl RecordingUploadHook {
 #[async_trait]
 impl CallRecordHook for RecordingUploadHook {
     async fn on_record_completed(&self, record: &mut CallRecord) -> anyhow::Result<()> {
-        use crate::callrecord::{
-            RecordingSubdir, local_archive_path, write_upload_failed_marker,
-        };
+        use crate::callrecord::{RecordingSubdir, local_archive_path, write_upload_failed_marker};
         use std::time::Instant;
 
         let recording_type = self.policy.recording_type.unwrap_or_default();
@@ -215,12 +213,8 @@ impl CallRecordHook for RecordingUploadHook {
 
             match recording_type {
                 RecordingType::Local => {
-                    let dest = local_archive_path(
-                        &root,
-                        Path::new(&path),
-                        subdir,
-                        record.start_time,
-                    );
+                    let dest =
+                        local_archive_path(&root, Path::new(&path), subdir, record.start_time);
                     if let Some(parent) = dest.parent() {
                         let _ = tokio::fs::create_dir_all(parent).await;
                     }
@@ -374,10 +368,7 @@ impl CallRecordHook for RecordingUploadHook {
 
             if !segment_summaries.is_empty() {
                 let meta = record.details.metadata.get_or_insert_with(HashMap::new);
-                meta.insert(
-                    "recording_segments".to_string(),
-                    json!(segment_summaries),
-                );
+                meta.insert("recording_segments".to_string(), json!(segment_summaries));
             }
 
             if let Some(ref gw) = self.rwi_gateway {
@@ -597,7 +588,9 @@ mod tests {
         assert!(path.exists(), "local file kept after upload failure");
         let marker = upload_failed_marker_path(&path);
         assert!(marker.exists(), "failure marker written");
-        let body = tokio::fs::read_to_string(&marker).await.expect("read marker");
+        let body = tokio::fs::read_to_string(&marker)
+            .await
+            .expect("read marker");
         let parsed: serde_json::Value = serde_json::from_str(&body).expect("marker json");
         assert!(parsed.get("time").is_some());
         assert!(parsed.get("address").is_some());
@@ -635,7 +628,9 @@ mod tests {
             details: CallDetails::default(),
             ..Default::default()
         };
-        hook.on_record_completed(&mut record).await.expect("archive");
+        hook.on_record_completed(&mut record)
+            .await
+            .expect("archive");
         let day = now.format("%Y%m%d").to_string();
         let archived = Path::new(&root).join(&day).join("sess.wav");
         assert!(archived.exists(), "archived under daily subdir");
@@ -675,7 +670,9 @@ mod tests {
             details: CallDetails::default(),
             ..Default::default()
         };
-        hook.on_record_completed(&mut record).await.expect("archive");
+        hook.on_record_completed(&mut record)
+            .await
+            .expect("archive");
         let day = now.format("%Y%m%d").to_string();
         let hour = now.format("%H").to_string();
         let archived = Path::new(&root).join(&day).join(&hour).join("sess.wav");

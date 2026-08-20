@@ -278,10 +278,8 @@ async fn serve_local_jsonl_file(path: &str) -> Response {
                 HeaderValue::from_static("application/x-ndjson"),
             );
             if let Some(name) = Path::new(path).file_name().and_then(|n| n.to_str()) {
-                if let Ok(v) = HeaderValue::from_str(&format!(
-                    "attachment; filename=\"{}\"",
-                    name
-                )) {
+                if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{}\"", name))
+                {
                     headers.insert(http::header::CONTENT_DISPOSITION, v);
                 }
             }
@@ -2282,7 +2280,9 @@ mod tests {
                 duration_secs: Set(5),
                 has_transcript: Set(false),
                 transcript_status: Set("pending".into()),
-                metadata: Set(Some(json!({"sipflow_jsonl": format!("/rec/{call_id}.jsonl")}))),
+                metadata: Set(Some(
+                    json!({"sipflow_jsonl": format!("/rec/{call_id}.jsonl")}),
+                )),
                 created_at: Set(Utc::now()),
                 updated_at: Set(Utc::now()),
                 ..Default::default()

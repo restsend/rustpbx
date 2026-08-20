@@ -2638,4 +2638,230 @@ mod tests {
             .await
             .expect("should exit after service prompt");
     }
+
+    // ── Regression: a late ring timeout after the agent answered must not
+    // dial the next fallback agent into the already-bridged call. ──
+
+    #[tokio::test]
+    async fn test_ring_timeout_after_connect_does_not_dial_next_agent() {
+        let config = config_with_service_prompt("sounds/queue-service-zh.wav");
+        let plan = config.to_plan();
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+
+        // Agent answers; queue plays the caller-only service prompt and
+        // stays alive in PlayingServicePrompt (the window where the stale
+        // ring timer used to fire).
+        let service_cmd = drive_to_service_prompt(&mut stack).await;
+        let service_tid = play_track_id(&service_cmd);
+
+        // Stale ring-timeout fire must be ignored: no new LegAdd for the
+        // next fallback agent, no Hangup, no fallback prompt.
+        stack.timeout("agent_ring_timeout");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            stack.drain_cmds().is_empty(),
+            "stale ring timeout after connect must not produce any command"
+        );
+
+        // The connected call still completes normally.
+        stack.audio_complete(service_tid);
+        stack
+            .join()
+            .await
+            .expect("should exit after service prompt");
+    }
+
+    // ── Regression: stale leg-failure events (e.g. parallel legs cancelled
+    // by agent_connected) must not touch the connected call. ──
+
+    #[tokio::test]
+    async fn test_agent_failure_events_after_connect_are_ignored() {
+        let config = config_with_service_prompt("sounds/queue-service-zh.wav");
+        let plan = config.to_plan();
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+
+        let service_cmd = drive_to_service_prompt(&mut stack).await;
+        let service_tid = play_track_id(&service_cmd);
+
+        // Stale leg failures after connect must be ignored entirely.
+        stack.custom(
+            "agent_busy",
+            serde_json::json!({"agent_id": "agent-001", "leg_id": "leg-x"}),
+        );
+        stack.custom(
+            "agent_no_answer",
+            serde_json::json!({"agent_id": "agent-001", "leg_id": "leg-y"}),
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            stack.drain_cmds().is_empty(),
+            "stale agent failure events after connect must not produce any command"
+        );
+
+        stack.audio_complete(service_tid);
+        stack
+            .join()
+            .await
+            .expect("should exit after service prompt");
+    }
+
+    // ── Regression: sequential fallback must skip agents that became
+    // unavailable (busy/reserved by another concurrent call) before dialing.──
+
+    #[tokio::test]
+    async fn test_sequential_fallback_skips_unavailable_agent() {
+        use crate::call::app::agent_registry::PresenceState;
+        use crate::call::app::agent_registry::memory::MemoryRegistry;
+        use std::sync::Arc;
+
+        let registry = Arc::new(MemoryRegistry::new());
+        for (id, uri) in [
+            ("agent-001", "sip:agent1@example.com"),
+            ("agent-002", "sip:agent2@example.com"),
+            ("agent-003", "sip:agent3@example.com"),
+        ] {
+            registry
+                .register(id.to_string(), id.to_string(), uri.to_string(), vec![], 1)
+                .await
+                .unwrap();
+        }
+        // agent-002 is busy on another call; the fallback must skip it.
+        registry
+            .update_presence(
+                "agent-002",
+                PresenceState::Busy {
+                    call_id: Some("other-call".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+
+        let config = build_sequential_queue_config();
+        let plan = config.to_plan();
+        let queue = QueueApp::new(plan, config).with_agent_registry(registry);
+        let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+
+        // Kick off sequential dialing: agent1 is available and gets dialed.
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        let first = stack.next_cmd(200).await.expect("LegAdd agent1");
+        match &first {
+            CallCommand::LegAdd { target, .. } => {
+                assert_eq!(target, "sip:agent1@example.com")
+            }
+            other => panic!("expected LegAdd, got {other:?}"),
+        }
+
+        // Agent1 does not answer: the ring timeout advances the fallback,
+        // which must skip the busy agent2 and dial agent3 directly.
+        stack.timeout("agent_ring_timeout");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let cmds = stack.drain_cmds();
+        let dialed: Vec<&String> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                CallCommand::LegAdd { target, .. } => Some(target),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            dialed,
+            ["sip:agent3@example.com"],
+            "fallback must skip busy agent2 and dial agent3 (all commands: {cmds:?})"
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, CallCommand::Hangup(_))),
+            "agent2 busy must not end the queue attempt"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    // ── Regression: parallel dialing must not INVITE agents that are
+    // already busy on other calls. ──
+
+    #[tokio::test]
+    async fn test_parallel_dial_skips_unavailable_agents() {
+        use crate::call::app::agent_registry::PresenceState;
+        use crate::call::app::agent_registry::memory::MemoryRegistry;
+        use std::sync::Arc;
+
+        let registry = Arc::new(MemoryRegistry::new());
+        for (id, uri) in [
+            ("agent-001", "sip:agent1@example.com"),
+            ("agent-002", "sip:agent2@example.com"),
+        ] {
+            registry
+                .register(id.to_string(), id.to_string(), uri.to_string(), vec![], 1)
+                .await
+                .unwrap();
+        }
+        // agent-002 is busy on another call; parallel dial must skip it.
+        registry
+            .update_presence(
+                "agent-002",
+                PresenceState::Busy {
+                    call_id: Some("other-call".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+
+        let config = build_parallel_queue_config();
+        let plan = config.to_plan();
+        let queue = QueueApp::new(plan, config).with_agent_registry(registry);
+        let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+
+        // Only the available agent is dialed.
+        let cmd = stack.next_cmd(200).await.expect("LegAdd agent1");
+        match &cmd {
+            CallCommand::LegAdd { target, .. } => {
+                assert_eq!(target, "sip:agent1@example.com")
+            }
+            other => panic!("expected LegAdd, got {other:?}"),
+        }
+        assert!(
+            stack.next_cmd(150).await.is_none(),
+            "busy agent2 must not be dialed in parallel mode"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
 }

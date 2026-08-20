@@ -812,7 +812,7 @@ async fn test_conference_remove_not_in_conference_returns_error() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_session_resume_returns_events_and_sequence() {
+async fn test_session_resume_returns_events() {
     let (url, gateway, _reg) = start_test_server().await;
     let mut ws = connect(&url).await;
 
@@ -835,7 +835,7 @@ async fn test_session_resume_returns_events_and_sequence() {
         gw.cache_event(&"test-call-1".to_string(), &event2);
     }
 
-    // Request session resume without last_sequence (should return all events)
+    // Request session resume (should return all cached events)
     let (_, json) = req("session.resume", serde_json::json!({}));
     let v = send_recv(&mut ws, &json).await;
 
@@ -847,10 +847,6 @@ async fn test_session_resume_returns_events_and_sequence() {
     assert_eq!(v["status"], "success");
     assert!(v["data"]["events"].is_array(), "events should be an array");
     assert!(
-        v["data"]["current_sequence"].is_u64(),
-        "current_sequence should be a number"
-    );
-    assert!(
         v["data"]["replayed_count"].is_u64(),
         "replayed_count should be a number"
     );
@@ -858,57 +854,6 @@ async fn test_session_resume_returns_events_and_sequence() {
     // Should have cached events
     let replayed = v["data"]["replayed_count"].as_u64().unwrap();
     assert!(replayed >= 2, "should have at least 2 cached events");
-
-    ws.close(None).await.unwrap();
-}
-
-#[tokio::test]
-async fn test_session_resume_with_sequence_returns_partial_events() {
-    let (url, gateway, _reg) = start_test_server().await;
-    let mut ws = connect(&url).await;
-
-    // Cache events
-    {
-        let gw = gateway.read();
-        let event1 = rustpbx::rwi::event::to_legacy_event(
-            &rustpbx::rwi::CallRinging {
-                call_id: "seq-call".to_string(),
-            },
-            None,
-        );
-        let event2 = rustpbx::rwi::event::to_legacy_event(
-            &rustpbx::rwi::CallAnswered {
-                call_id: "seq-call".to_string(),
-            },
-            None,
-        );
-        let event3 = rustpbx::rwi::event::to_legacy_event(
-            &rustpbx::rwi::CallBridged {
-                leg_a: "seq-call".to_string(),
-                leg_b: "other".to_string(),
-            },
-            None,
-        );
-        gw.cache_event(&"seq-call".to_string(), &event1);
-        gw.cache_event(&"seq-call".to_string(), &event2);
-        gw.cache_event(&"seq-call".to_string(), &event3);
-    }
-
-    // Get initial sequence
-    let (_, json) = req("session.resume", serde_json::json!({}));
-    let v = send_recv(&mut ws, &json).await;
-    let total_events = v["data"]["replayed_count"].as_u64().unwrap();
-
-    // Resume with a sequence number (should return events after that sequence)
-    let (_, json) = req("session.resume", serde_json::json!({"last_sequence": 1}));
-    let v = send_recv(&mut ws, &json).await;
-
-    assert_eq!(v["status"], "success");
-    let replayed = v["data"]["replayed_count"].as_u64().unwrap();
-    assert!(
-        replayed < total_events,
-        "should return fewer events when using last_sequence"
-    );
 
     ws.close(None).await.unwrap();
 }

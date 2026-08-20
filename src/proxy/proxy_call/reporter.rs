@@ -874,8 +874,7 @@ mod tests {
         }];
         snapshot.signaling_jsonl_path = Some(jsonl.to_string_lossy().into_owned());
 
-        let (recorder, meta) =
-            collect_recording_artifacts(&snapshot, "root-sess", false, None);
+        let (recorder, meta) = collect_recording_artifacts(&snapshot, "root-sess", false, None);
 
         assert_eq!(recorder.len(), 2);
         assert_eq!(recorder[0].track_id, "segment:ivr:ab");
@@ -903,12 +902,8 @@ mod tests {
         let wav = dir.path().join("full.wav");
         std::fs::write(&wav, b"abcdef").unwrap();
         let snapshot = empty_snapshot();
-        let (recorder, meta) = collect_recording_artifacts(
-            &snapshot,
-            "root-sess",
-            true,
-            Some(wav.to_str().unwrap()),
-        );
+        let (recorder, meta) =
+            collect_recording_artifacts(&snapshot, "root-sess", true, Some(wav.to_str().unwrap()));
         assert_eq!(recorder.len(), 1);
         assert_eq!(recorder[0].track_id, "mixed");
         assert!(meta.get("recording_segments").is_none());

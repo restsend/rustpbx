@@ -611,7 +611,10 @@ impl PresenceManager {
                 return Some(user.to_string());
             }
         }
-        loc.aor.user().map(|u| u.to_string()).filter(|u| !u.is_empty())
+        loc.aor
+            .user()
+            .map(|u| u.to_string())
+            .filter(|u| !u.is_empty())
     }
 
     /// Drop subscription dialogs owned by a watcher that just went offline.
