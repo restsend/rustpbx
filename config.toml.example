@@ -224,6 +224,10 @@ auto_start_at = "media" # default; use "answer" to wait for 200
 #                     # is active. SipFlow captures signalling only.
 #                     # Media upload is handled by [recording] (type = http/s3),
 #                     # not [sipflow.upload].
+# signaling = false   # Skip the SIP signalling JSONL sidecar that is normally
+#                     # written (and uploaded) next to the recording when no
+#                     # [sipflow] backend is configured. Default (unset/true):
+#                     # write {session_id}.jsonl and upload it alongside the WAV.
 #
 # Mid-call / IVR segmented recording: set auto_start = false so the call does
 # not record by default; IVR `record_start`/`record_stop` (or RWI
@@ -233,7 +237,8 @@ auto_start_at = "media" # default; use "answer" to wait for 200
 #
 # Without [sipflow], a lightweight SIP JSONL sidecar is still written next to
 # the recording ({session_id}.jsonl / {session_id}_{call_id}.jsonl) and uploaded
-# with the same type=http|s3 path. On upload failure a sibling
+# with the same type=http|s3 path — unless signaling = false disables it. On
+# upload failure a sibling
 # .upload_failed.{filename} JSON marker is written (time/address/duration_ms/error);
 # local files are deleted only after a successful remote upload.
 #

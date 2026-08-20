@@ -1245,6 +1245,11 @@ impl SipSession {
         if !self.context.dialplan.recording.enabled {
             return;
         }
+        // [recording] signaling = false opts out of the JSONL sidecar (and
+        // its upload) entirely.
+        if !self.context.dialplan.recording.signaling {
+            return;
+        }
         let has_sipflow_backend = self
             .server
             .sip_flow

@@ -108,7 +108,10 @@ impl SignalingSidecar {
             "timestamp": chrono::Utc::now().timestamp_micros() as u64,
             "seq": seq,
             "leg": serde_json::Value::Null,
-            "msg_type": "sip",
+            // Must serialize exactly like SipFlowItem::msg_type
+            // (SipFlowMsgType::Sip → "Sip") so consumers of the exported
+            // JSONL treat sidecar and sipflow files identically.
+            "msg_type": "Sip",
             "src_addr": src_addr,
             "dst_addr": dst_addr,
             "payload": payload,
@@ -167,7 +170,7 @@ mod tests {
         let _ = sidecar.before_send(invite_with_call_id("cid-1"), None);
         let body = std::fs::read_to_string(&path).expect("read after capture");
         assert!(body.contains("INVITE"));
-        assert!(body.contains("\"msg_type\":\"sip\""));
+        assert!(body.contains("\"msg_type\":\"Sip\""));
 
         // Unregistered call-id is ignored.
         let other = dir.path().join("other.jsonl");
@@ -178,5 +181,42 @@ mod tests {
         let removed = sidecar.unregister("cid-1");
         assert_eq!(removed, Some(path));
         assert!(sidecar.path_for("cid-1").is_none());
+    }
+
+    /// The sidecar JSONL must be field-for-field identical to a line produced
+    /// by SipFlow `export_jsonl` for the same message: same schema, same
+    /// value types, same `msg_type` spelling ("Sip", the serde variant name).
+    #[test]
+    fn sidecar_line_matches_sipflow_export_jsonl_schema() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("parity.jsonl");
+
+        let sidecar = SignalingSidecar::new();
+        sidecar.register("cid-parity", path.clone());
+        let msg = invite_with_call_id("cid-parity");
+        let _ = sidecar.before_send(msg.clone(), None);
+
+        let line = std::fs::read_to_string(&path).expect("read sidecar line");
+        let sidecar_obj: serde_json::Value = serde_json::from_str(line.trim()).expect("json");
+
+        // Rebuild the equivalent SipFlowItem and export it through the real
+        // sipflow path, using the timestamp/seq the sidecar recorded.
+        let item = crate::sipflow::SipFlowItem {
+            timestamp: sidecar_obj["timestamp"].as_u64().expect("timestamp"),
+            seq: sidecar_obj["seq"].as_u64().expect("seq"),
+            leg: None,
+            msg_type: crate::sipflow::SipFlowMsgType::Sip,
+            src_addr: sidecar_obj["src_addr"].as_str().unwrap_or_default().to_string(),
+            dst_addr: sidecar_obj["dst_addr"].as_str().unwrap_or_default().to_string(),
+            payload: bytes::Bytes::from(msg.to_string()),
+        };
+        let exported = crate::sipflow::SipFlowQuery::export_jsonl(&[item]);
+        let export_obj: serde_json::Value =
+            serde_json::from_str(exported.trim()).expect("export json");
+
+        assert_eq!(
+            sidecar_obj, export_obj,
+            "sidecar JSONL line must be identical to sipflow export_jsonl output"
+        );
     }
 }

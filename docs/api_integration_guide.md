@@ -376,9 +376,10 @@ enabled = true
 auto_start = true
 auto_start_at = "media"
 # No [sipflow] section — falls back to local .wav file
+# signaling = false   # WAV only: skip the SIP JSONL sidecar and its upload
 ```
 
-All calls are recorded locally to `./config/recorders/`, then asynchronously uploaded via `[callrecord]` S3 config.
+All calls are recorded locally to `./config/recorders/`, then asynchronously uploaded via `[callrecord]` S3 config. Without a `[sipflow]` backend, each recorded call also writes a SIP signalling JSONL sidecar (`{session_id}.jsonl`, same schema as SipFlow `export_jsonl`) next to the WAV and uploads it to the same `type = "http"|"s3"` target. Set `signaling = false` to record/upload the WAV only.
 
 ## Outbound Dial (SSE)
 

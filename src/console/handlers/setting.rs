@@ -1,7 +1,7 @@
 use crate::app::AppStateInner;
 use crate::config::{
-    CallRecordConfig, CallRecordStorageConfig, Config, HttpRouterConfig, LocatorWebhookConfig,
-    ProxyConfig, UserBackendConfig,
+    CallRecordConfig, CallRecordStorageConfig, Config, HttpRouterConfig, IvrFallbackConfig,
+    LocatorWebhookConfig, ProxyConfig, UserBackendConfig,
 };
 #[cfg(feature = "commerce")]
 use crate::console::ReloadTarget;
@@ -135,6 +135,9 @@ pub(crate) struct ProxySettingsPayload {
     pub jwt_auth: Option<Option<JwtAuthPayload>>,
     /// Global default max ring time (seconds); 0 disables the ring timeout.
     pub max_ring_time: Option<u64>,
+    /// Step-IVR session fallback (`[proxy.ivr_fallback]`). `None` keeps the
+    /// current value; an inner `None`/empty config removes the section.
+    pub ivr_fallback: Option<Option<IvrFallbackConfig>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -506,6 +509,7 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
             "useragent": config.proxy.useragent.clone(),
             "ua_whitelist": config.proxy.ua_white_list.clone().unwrap_or_default(),
             "ua_blacklist": config.proxy.ua_black_list.clone().unwrap_or_default(),
+            "ivr_fallback": config.proxy.ivr_fallback,
             "data_sources": json!({
                 "routes": "toml",
                 "trunks": "toml",
@@ -1917,6 +1921,20 @@ pub(crate) async fn update_proxy_settings(
             }
             _ => {
                 table.remove("jwt_auth");
+            }
+        }
+        modified = true;
+    }
+
+    if let Some(ivr_fallback) = payload.ivr_fallback {
+        let effective = ivr_fallback.filter(|c| c.is_configured());
+        match effective {
+            Some(fb) => match serialize_to_item(&fb, "ivr_fallback") {
+                Ok(item) => table["ivr_fallback"] = item,
+                Err(resp) => return resp,
+            },
+            None => {
+                table.remove("ivr_fallback");
             }
         }
         modified = true;

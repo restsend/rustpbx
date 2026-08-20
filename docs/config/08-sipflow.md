@@ -312,6 +312,26 @@ delegate_upload = false    # Delegate S3/HTTP upload to cluster nodes
 | `force_pcm` | Option\<bool\> | `false` | Transcode to PCM before upload |
 | `pcm_sample_rate` | Option\<u32\> | 16000 | PCM sample rate when `force_pcm` is true |
 
+### JSONL Export Format (`export_jsonl`)
+
+Signaling upload (`signaling = true`) and the recording JSONL sidecar
+(`[recording]` without a `[sipflow]` backend, see
+[06-media-recording.md](06-media-recording.md)) share the exact same
+line schema — one JSON object per line:
+
+```json
+{"timestamp":1753000000123456,"seq":0,"leg":null,"msg_type":"Sip","src_addr":"192.168.1.10:5060","dst_addr":"","payload":"INVITE sip:1001@pbx SIP/2.0\r\n..."}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `timestamp` | u64 | Unix microseconds |
+| `seq` | u64 | Capture sequence number |
+| `leg` | null / i32 | Media leg (null for SIP messages) |
+| `msg_type` | string | `"Sip"` or `"Rtp"` (variant name of `SipFlowMsgType`) |
+| `src_addr` / `dst_addr` | string | Transport address (one side filled per direction) |
+| `payload` | string | Full SIP message text |
+
 ---
 
 ## WAV Generation

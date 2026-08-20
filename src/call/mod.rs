@@ -633,7 +633,7 @@ impl DialplanFlow {
     }
 }
 /// Recording configuration for call control
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CallRecordingConfig {
     /// Enable call recording
     pub enabled: bool,
@@ -646,9 +646,20 @@ pub struct CallRecordingConfig {
     /// When true, use the legacy WAV file recorder instead of SipFlow for
     /// media capture. SipFlow captures SIP signalling only.
     pub force_file: bool,
+    /// When false, skip the SIP signalling JSONL sidecar that is normally
+    /// written next to the recording when no SipFlow backend is active.
+    pub signaling: bool,
     /// Swap stereo channels: callee→left, caller→right.
     /// Default (false): caller→left, callee→right.
     pub stereo_swap: bool,
+}
+
+impl Default for CallRecordingConfig {
+    fn default() -> Self {
+        // Keep the "write the signaling sidecar" default consistent with
+        // `new()`; a derived Default would flip the bool to false.
+        Self::new()
+    }
 }
 
 impl CallRecordingConfig {
@@ -659,6 +670,7 @@ impl CallRecordingConfig {
             auto_start: true,
             auto_start_at: RecordingAutoStartAt::default(),
             force_file: false,
+            signaling: true,
             stereo_swap: false,
         }
     }

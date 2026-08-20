@@ -778,6 +778,54 @@ impl StepIvrApp {
         )
     }
 
+    /// Record a trace entry + RWI `ivr_step_trace` event for a fallback decision.
+    fn record_fallback_trace(&self, reason: &str, target: Option<&str>) {
+        let session_id = self
+            .sess
+            .variables
+            .get("session_id")
+            .cloned()
+            .unwrap_or_default();
+        let caller = self
+            .sess
+            .variables
+            .get("caller")
+            .cloned()
+            .unwrap_or_default();
+        let callee = self
+            .sess
+            .variables
+            .get("callee")
+            .cloned()
+            .unwrap_or_default();
+        let now = chrono::Utc::now().to_rfc3339();
+        self.record_trace(IvrTraceEntry {
+            session_id,
+            caller,
+            callee,
+            step_index: self.step_index,
+            trigger: crate::rwi::TriggerInfo::with_detail(
+                "ivr_fallback",
+                serde_json::json!({
+                    "reason": reason,
+                    "target": target,
+                }),
+            ),
+            provider_url: None,
+            action_type: "ivr_fallback".to_string(),
+            action_json: None,
+            duration_ms: 0,
+            error: Some(reason.to_string()),
+            step_id: self.current_step_id.clone(),
+            step_name: self.current_step_name.clone(),
+            step_start_time: None,
+            step_end_time: Some(now),
+            extra: self.extra.clone(),
+            end_reason: None,
+            end_detail: None,
+        });
+    }
+
     /// Session-level recovery: match `[proxy.ivr_fallback]` → JumpIvr, else hangup.
     fn enter_ivr_fallback_node(&mut self, reason: &str) -> ActionNode {
         if self.fallback_already_used() {
@@ -785,6 +833,7 @@ impl StepIvrApp {
                 reason = %reason,
                 "StepIvrApp: IVR fallback already used, hanging up"
             );
+            self.record_fallback_trace(&format!("{reason}: already_used"), None);
             return Self::hangup_error_node();
         }
 
@@ -793,6 +842,7 @@ impl StepIvrApp {
                 reason = %reason,
                 "StepIvrApp: no ivr_fallback configured, hanging up"
             );
+            self.record_fallback_trace(&format!("{reason}: not_configured"), None);
             return Self::hangup_error_node();
         };
 
@@ -820,6 +870,7 @@ impl StepIvrApp {
                 reason = %reason,
                 "StepIvrApp: ivr_fallback resolved to none, hanging up"
             );
+            self.record_fallback_trace(&format!("{reason}: no_match"), None);
             return Self::hangup_error_node();
         };
 
@@ -829,6 +880,7 @@ impl StepIvrApp {
             target = %target,
             "StepIvrApp: entering IVR fallback via toivr"
         );
+        self.record_fallback_trace(reason, Some(&target));
         let mut params = HashMap::new();
         params.insert(IVR_FALLBACK_USED_KEY.into(), "1".into());
         ActionNode::new(EntryAction::JumpIvr {

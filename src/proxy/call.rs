@@ -1085,6 +1085,9 @@ impl CallModule {
                 if overrides.force_file.is_some() {
                     merged.force_file = overrides.force_file;
                 }
+                if overrides.signaling.is_some() {
+                    merged.signaling = overrides.signaling;
+                }
 
                 merged
             }
@@ -1183,6 +1186,7 @@ impl CallModule {
         dialplan.recording.auto_start = policy.auto_start.unwrap_or(true);
         dialplan.recording.auto_start_at = policy.auto_start_at.unwrap_or_default();
         dialplan.recording.force_file = force_file;
+        dialplan.recording.signaling = policy.signaling.unwrap_or(true);
         dialplan
     }
 
@@ -3078,6 +3082,7 @@ mod tests {
             auto_start: Some(true),
             auto_start_at: Some(crate::config::RecordingAutoStartAt::Answer),
             force_file: Some(true),
+            signaling: Some(false),
             ..Default::default()
         });
 
@@ -3134,6 +3139,10 @@ mod tests {
             crate::config::RecordingAutoStartAt::Answer
         );
         assert!(dialplan.recording.force_file);
+        assert!(
+            !dialplan.recording.signaling,
+            "partial override without signaling must inherit the global signaling = false"
+        );
         let option = dialplan
             .recording
             .option
@@ -3144,6 +3153,74 @@ mod tests {
                 .starts_with("/tmp/rustpbx-main-recordings"),
             "partial override must inherit the global recorder path"
         );
+    }
+
+    #[tokio::test]
+    async fn default_resolve_recording_signaling_defaults_true_and_route_can_disable() {
+        let mut proxy_config = ProxyConfig::default();
+        proxy_config.recording = Some(RecordingPolicy {
+            enabled: Some(true),
+            path: Some("/tmp/rustpbx-main-recordings".to_string()),
+            ..Default::default()
+        });
+
+        let (server, config) = create_test_server_with_config(proxy_config).await;
+        let module = CallModule::new(config, server);
+
+        let mut request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        request.uri = rsipstack::sip::Uri::try_from("sip:+12025550100@example.net").unwrap();
+        replace_to_header(
+            &mut request,
+            rsipstack::sip::Uri::try_from("sip:+12025550100@example.net").unwrap(),
+        );
+
+        let caller = SipUser {
+            username: "alice".to_string(),
+            realm: Some("rustpbx.com".to_string()),
+            ..Default::default()
+        };
+
+        // No route override: the sidecar default (true) applies.
+        let dialplan = module
+            .default_resolve(
+                &request,
+                Box::new(RecordingHintsRouteInvite {
+                    recording: None,
+                    enable_recording: None,
+                }),
+                &caller,
+                &TransactionCookie::default(),
+            )
+            .await
+            .expect("route should resolve");
+        let dialplan = module.apply_recording_policy(dialplan, &caller);
+        assert!(dialplan.recording.signaling);
+
+        // Route-level override signaling = false wins over the global default.
+        let dialplan = module
+            .default_resolve(
+                &request,
+                Box::new(RecordingHintsRouteInvite {
+                    recording: Some(RecordingPolicy {
+                        enabled: Some(true),
+                        signaling: Some(false),
+                        ..Default::default()
+                    }),
+                    enable_recording: None,
+                }),
+                &caller,
+                &TransactionCookie::default(),
+            )
+            .await
+            .expect("route should resolve");
+        let dialplan = module.apply_recording_policy(dialplan, &caller);
+        assert!(!dialplan.recording.signaling);
     }
 
     #[tokio::test]

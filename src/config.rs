@@ -195,6 +195,10 @@ pub struct RecordingPolicy {
     /// signalling only (no RTP). Media upload is handled by the
     /// `[recording]` upload path, not `[sipflow.upload]`.
     pub force_file: Option<bool>,
+    /// When false, skip the SIP signalling JSONL sidecar (and its upload)
+    /// that is otherwise written next to the recording when no `[sipflow]`
+    /// backend is configured. Default (true/unset): write the sidecar.
+    pub signaling: Option<bool>,
     /// Swap stereo channels in recording: callee→left, caller→right.
     #[serde(default)]
     pub stereo_swap: Option<bool>,
@@ -211,6 +215,7 @@ impl RecordingPolicy {
             auto_start: self.auto_start.unwrap_or(true),
             auto_start_at: self.auto_start_at.unwrap_or_default(),
             force_file: self.force_file.unwrap_or(false),
+            signaling: self.signaling.unwrap_or(true),
             stereo_swap: self.stereo_swap.unwrap_or(false),
             option: None,
         }
@@ -1615,6 +1620,19 @@ mod tests {
         let config = ProxyConfig::default();
 
         assert_eq!(config.all_udp_ports(), vec![5060]);
+    }
+
+    #[test]
+    fn test_recording_signaling_defaults_to_true_and_can_be_disabled() {
+        let policy: RecordingPolicy =
+            toml::from_str("enabled = true\nauto_start = true\n").unwrap();
+        assert_eq!(policy.signaling, None);
+        assert!(policy.new_recording_config().signaling);
+
+        let policy: RecordingPolicy =
+            toml::from_str("enabled = true\nsignaling = false\n").unwrap();
+        assert_eq!(policy.signaling, Some(false));
+        assert!(!policy.new_recording_config().signaling);
     }
 
     #[test]

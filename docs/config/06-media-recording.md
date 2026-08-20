@@ -145,6 +145,14 @@ ptime = 20              # Packetization time (ms)
 # When true, SipFlow captures signalling only; [recording] handles media
 # force_file = true
 
+# SIP signalling JSONL sidecar (written next to the WAV file). Default true.
+# Without a [sipflow] backend, every recorded call also writes a lightweight
+# {session_id}.jsonl (same schema as SipFlow export_jsonl) capturing the SIP
+# messages of the call. It is uploaded together with the WAV when
+# type = "http"|"s3", and powers the console "SIP flow" view/download.
+# Set signaling = false to record WAV only, with no JSONL sidecar or upload.
+# signaling = true
+
 # Or configure per-proxy
 [proxy.recording]
 enabled = true
@@ -180,6 +188,30 @@ root = "recordings"
 ```
 
 When `[recording] type = "http"` or `type = "s3"` is used, the CDR may be written before the media upload finishes. The database `recording_url` is updated after the upload succeeds. The local CDR JSON keeps the local recorder path in `recordingUrl` and the recorder metadata in `recorder[]`.
+
+### SIP Signaling JSONL Sidecar
+
+When `[recording] enabled = true` is used **without** a `[sipflow]` backend (or with `force_file = true`), each recorded call additionally writes a SIP signalling sidecar next to the WAV file:
+
+- Path: `{path}/{session_id}.jsonl` (or `{path}/{session_id}_{call_id}.jsonl` for extra legs).
+- Format: one JSON object per line, **byte-identical schema to SipFlow `export_jsonl`**:
+
+```json
+{"timestamp":1753000000123456,"seq":0,"leg":null,"msg_type":"Sip","src_addr":"192.168.1.10:5060","dst_addr":"","payload":"INVITE sip:1001@pbx SIP/2.0\r\n..."}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `timestamp` | u64 | Unix microseconds |
+| `seq` | u64 | Capture sequence number |
+| `leg` | null / i32 | Media leg (null for SIP messages) |
+| `msg_type` | string | Always `"Sip"` |
+| `src_addr` / `dst_addr` | string | Transport address (one side filled per direction) |
+| `payload` | string | Full SIP message text |
+
+- Upload: with `type = "http"` or `type = "s3"` the JSONL is uploaded together with the WAV (same storage path); local files are deleted only after a successful upload. On failure a sibling `.upload_failed.{filename}` marker is written.
+- Console: the CDR detail page's "SIP flow" view/download falls back to this file when no SipFlow backend is configured.
+- Disable: set `signaling = false` in `[recording]` to skip the sidecar (and its upload) entirely — only the WAV is recorded/uploaded.
 
 ## CDR (Call Detail Records)
 
