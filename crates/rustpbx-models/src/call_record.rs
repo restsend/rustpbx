@@ -141,10 +141,6 @@ pub struct Model {
     pub id: i64,
     #[sea_orm(unique)]
     pub call_id: String,
-    /// Root session id of the whole logical call — first INVITE's Call-ID,
-    /// inherited by every child leg (queue dispatch, REFER transfer,
-    /// consultation). Indexed (non-unique) for call-tree lookup.
-    pub session_id: Option<String>,
     pub display_id: Option<String>,
     pub direction: String,
     pub status: String,
@@ -235,7 +231,6 @@ impl MigrationTrait for Migration {
                             .auto_increment(),
                     )
                     .col(string_len(Column::CallId, 120))
-                    .col(string_len_null(Column::SessionId, 120))
                     .col(string_len_null(Column::DisplayId, 120))
                     .col(string_len(Column::Direction, 16))
                     .col(string_len(Column::Status, 32))
@@ -314,24 +309,6 @@ impl MigrationTrait for Migration {
                         .table(Entity)
                         .col(Column::CallId)
                         .unique()
-                        .to_owned(),
-                )
-                .await?;
-        }
-
-        if !manager
-            .has_index(
-                "rustpbx_call_records",
-                "idx_rustpbx_call_records_session_id",
-            )
-            .await?
-        {
-            manager
-                .create_index(
-                    Index::create()
-                        .name("idx_rustpbx_call_records_session_id")
-                        .table(Entity)
-                        .col(Column::SessionId)
                         .to_owned(),
                 )
                 .await?;

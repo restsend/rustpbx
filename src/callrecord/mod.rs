@@ -1171,7 +1171,6 @@ pub(crate) async fn create_call_record_table(
                 .auto_increment(),
         )
         .col(string_len(Alias::new("call_id"), 255).not_null())
-        .col(string_len_null(Alias::new("session_id"), 255))
         .col(string_len_null(Alias::new("display_id"), 255))
         .col(string_len(Alias::new("direction"), 32).not_null())
         .col(string_len(Alias::new("status"), 32).not_null())

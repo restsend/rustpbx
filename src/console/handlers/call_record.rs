@@ -201,7 +201,7 @@ async fn list_session_artifacts(
 ) -> Response {
     let db = state.db();
     let records = match CallRecordEntity::find()
-        .filter(CallRecordColumn::SessionId.eq(session_id.clone()))
+        .filter(CallRecordColumn::CallId.eq(session_id.clone()))
         .order_by_asc(CallRecordColumn::StartedAt)
         .all(db)
         .await
@@ -218,35 +218,13 @@ async fn list_session_artifacts(
     };
 
     if records.is_empty() {
-        // Also try matching a root CDR where call_id == session_id.
-        let fallback = match CallRecordEntity::find()
-            .filter(CallRecordColumn::CallId.eq(session_id.clone()))
-            .all(db)
-            .await
-        {
-            Ok(rows) => rows,
-            Err(err) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "message": format!("Failed to query session artifacts: {err}") })),
-                )
-                    .into_response();
-            }
-        };
-        if fallback.is_empty() {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "message": format!("No call records found for session_id: {session_id}")
-                })),
-            )
-                .into_response();
-        }
-        return Json(json!({
-            "session_id": session_id,
-            "legs": fallback.iter().map(session_leg_artifacts).collect::<Vec<_>>(),
-        }))
-        .into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "message": format!("No call records found for session_id: {session_id}")
+            })),
+        )
+            .into_response();
     }
 
     Json(json!({
@@ -279,7 +257,6 @@ fn session_leg_artifacts(record: &CallRecordModel) -> Value {
     json!({
         "id": record.id,
         "call_id": record.call_id,
-        "session_id": record.session_id,
         "direction": record.direction,
         "status": record.status,
         "started_at": record.started_at,
@@ -2261,7 +2238,6 @@ mod tests {
         let db = setup_db().await;
         let model = call_record::ActiveModel {
             call_id: Set("leg-a".into()),
-            session_id: Set(Some("root-sess".into())),
             direction: Set("inbound".into()),
             status: Set("completed".into()),
             started_at: Set(Utc::now()),
@@ -2283,7 +2259,6 @@ mod tests {
 
         let artifacts = session_leg_artifacts(&model);
         assert_eq!(artifacts["call_id"], "leg-a");
-        assert_eq!(artifacts["session_id"], "root-sess");
         assert!(artifacts["recording_segments"].is_array());
         assert_eq!(artifacts["sipflow_jsonl"], "/rec/root_leg-a.jsonl");
         assert!(
@@ -2295,13 +2270,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_session_artifacts_aggregates_legs_by_session_id() {
+    async fn list_session_artifacts_matches_root_leg_by_call_id() {
         let db = setup_db().await;
         let state = create_console_state(db.clone()).await;
         for call_id in ["leg-1", "leg-2"] {
             call_record::ActiveModel {
                 call_id: Set(call_id.into()),
-                session_id: Set(Some("sess-agg".into())),
                 direction: Set("inbound".into()),
                 status: Set("completed".into()),
                 started_at: Set(Utc::now()),
@@ -2319,7 +2293,7 @@ mod tests {
         }
 
         let response = list_session_artifacts(
-            AxumPath("sess-agg".into()),
+            AxumPath("leg-1".into()),
             State(state),
             AuthRequired(superuser()),
         )
@@ -2328,8 +2302,9 @@ mod tests {
         assert_eq!(parts.status, StatusCode::OK);
         let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
         let value: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["session_id"], "sess-agg");
-        assert_eq!(value["legs"].as_array().unwrap().len(), 2);
+        assert_eq!(value["session_id"], "leg-1");
+        assert_eq!(value["legs"].as_array().unwrap().len(), 1);
+        assert_eq!(value["legs"][0]["call_id"], "leg-1");
     }
 
     #[tokio::test]

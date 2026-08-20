@@ -80,7 +80,6 @@ mod tests {
         let record = crate::models::call_record::Model {
             id: 1,
             call_id: "call-1".to_string(),
-            session_id: None,
             display_id: None,
             direction: "inbound".to_string(),
             status: "completed".to_string(),
