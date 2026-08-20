@@ -8,6 +8,14 @@ use std::time::Instant;
 
 #[derive(Default)]
 pub struct CallMeta {
+    /// Root session id for the whole logical call: the first INVITE's
+    /// Call-ID for inbound calls (or generated root for originates),
+    /// inherited unchanged by every child leg (queue dispatch, REFER
+    /// transfer, consultation). `None` means "this session is the root"
+    /// — callers resolve with the session's own id. Carried across the
+    /// network boundary via the RFC 7433 `User-to-User` header
+    /// (`purpose=call-center`, see `call::uui`).
+    pub root_session_id: Option<String>,
     pub connected_callee: Option<String>,
     pub connected_callee_dialog_id: Option<DialogId>,
     pub callee_call_ids: HashSet<String>,

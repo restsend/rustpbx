@@ -206,6 +206,7 @@ mod tests {
         }
         let ctx = CallSessionContext {
             session_id: "test-session".into(),
+            root_session_id: None,
             caller: "caller".into(),
             callee: "callee".into(),
             connected_callee: None,
@@ -223,6 +224,7 @@ mod tests {
         let ext = SessionExtensions::new();
         let ctx = CallSessionContext {
             session_id: "test-session".into(),
+            root_session_id: None,
             caller: "caller".into(),
             callee: "callee".into(),
             connected_callee: None,

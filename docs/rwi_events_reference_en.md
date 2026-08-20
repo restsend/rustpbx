@@ -215,7 +215,6 @@ New call enters the system. First event in any call flow.
 | `dial_direction` | String | `inbound` / `outbound` / `internal` |
 | `trunk` | Option\<String\> | SIP trunk name |
 | `sip_headers` | Map\<String, String\> | Whitelisted SIP headers |
-| `root_call_id` | Option\<String\> | Root call ID (constant across transfers) |
 | `caller_name` | Option\<String\> | Calling party number |
 | `callee_name` | Option\<String\> | Dialed number / DNIS |
 | `called_phone` | Option\<String\> | Actual called number (outbound scenario) |
@@ -223,8 +222,10 @@ New call enters the system. First event in any call flow.
 | `routing_target` | Option\<String\> | Routing target |
 | `uuid` | Option\<String\> | Global UUID (for recording linkage) |
 | `routing_path` | Option\<Vec\<String\>\> | Routing path sequence |
+| `session_id` | Option\<String\> | Enrichment: logical-call root session id |
 
 > **Note**: `call_incoming` uses `dial_direction`; other events' context uses `direction`.
+> Former field `root_call_id` was removed; use enrichment `session_id` for multi-leg correlation.
 
 ```json
 {
@@ -237,7 +238,7 @@ New call enters the system. First event in any call flow.
     "dial_direction": "inbound",
     "trunk": "trunk_sip",
     "sip_headers": { "X-Tenant": "corp_a" },
-    "root_call_id": "call-root-42",
+    "session_id": "call-abc",
     "caller_name": "13800138000",
     "callee_name": "4000",
     "called_phone": null,
@@ -510,9 +511,10 @@ Dispatch: call_owner
 | `call_end_time` | Option\<String\> | Call end timestamp |
 | `upload_time` | Option\<String\> | Upload completion timestamp |
 | `switch_flag` | Option\<String\> | Site identifier (e.g., `ks`, `bj`) |
-| `root_call_id` | Option\<String\> | Root call ID |
 
-> Note: `record_stopped` does not carry flat context, but includes its own `ani`/`dnis` fields. `enrich()` backfills `None` fields from context.
+> Note: `record_stopped` does not carry full typed flat context; CallMetaStore
+> enrichment still injects `session_id` (and other missing keys). Former field
+> `root_call_id` was removed.
 
 ```json
 {
@@ -534,7 +536,7 @@ Dispatch: call_owner
     "call_end_time": "2026-05-14T08:12:26Z",
     "upload_time": "2026-05-14T16:14:46Z",
     "switch_flag": "ks",
-    "root_call_id": "call-root-42"
+    "session_id": "call-root-42"
   }
 }
 ```
@@ -591,7 +593,7 @@ Triggered when the recording file upload completes, containing full metadata.
       "upload_time": "2026-05-14T16:14:46Z",
       "switch_flag": "ks",
       "process_flag": "ks_22_normal",
-      "root_call_id": "call-root-42"
+      "session_id": "call-root-42"
     }
   }
 }
@@ -762,6 +764,14 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 > `skill_group_call_abandoned` fires when the caller hangs up while still queued; `skill_group_service_unavailable` fires on queue timeout or fallback. Both are reported by the Queue app through the `AgentRegistry` lifecycle hooks (`notify_call_abandoned` / `notify_call_timeout` / `notify_call_fallback`), which the CC adapter maps to the RWI events.
 
 All queue events carry flat context fields.
+
+> **session_id correlation (since 2026-08)**: all call-scoped events
+> (`queue_*` / `skill_group_*` / `cc_*` / `call_*`) are enriched from
+> CallMetaStore with a top-level `session_id` — the root logical-call id
+> (first INVITE Call-ID; stable across transfer / dispatch / consult).
+> `call_id` is the current leg and changes for transfer children.
+> Former typed field `root_call_id` was removed. See
+> [session_id_correlation.md](./session_id_correlation.md).
 
 #### queue_joined
 

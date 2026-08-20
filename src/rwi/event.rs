@@ -97,8 +97,6 @@ pub struct CallIncoming {
     #[serde(default)]
     pub sip_headers: std::collections::HashMap<String, String>,
     #[serde(default)]
-    pub root_call_id: Option<String>,
-    #[serde(default)]
     pub caller_name: Option<String>,
     #[serde(default)]
     pub callee_name: Option<String>,
@@ -210,7 +208,6 @@ pub struct RecordStopped {
     pub call_end_time: Option<String>,
     pub upload_time: Option<String>,
     pub switch_flag: Option<String>,
-    pub root_call_id: Option<String>,
 }
 rwi_event!(RecordStopped, "record_stopped");
 

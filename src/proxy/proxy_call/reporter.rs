@@ -284,6 +284,12 @@ impl CallReporter {
 
         let mut record = CallRecord {
             call_id: self.context.session_id.clone(),
+            session_id: Some(
+                snapshot
+                    .root_session_id
+                    .clone()
+                    .unwrap_or_else(|| self.context.session_id.clone()),
+            ),
             start_time,
             ring_time,
             answer_time,
@@ -537,6 +543,7 @@ mod tests {
         // This mimics what happens inside CallReporter.report() when call_record_sender is Some(tx)
         let record: CallRecord = CallRecord {
             call_id: "test-session".to_string(),
+            session_id: None,
             start_time: chrono::Utc::now(),
             ring_time: None,
             answer_time: None,
@@ -592,6 +599,7 @@ mod tests {
             ring_time: None,
             answer_time: None,
             last_error: None,
+            root_session_id: None,
             invite_final_status: None,
             hangup_reason: None,
             hangup_messages: vec![],

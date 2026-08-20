@@ -328,6 +328,7 @@ mod tests {
     fn create_test_record() -> CallRecord {
         CallRecord {
             call_id: "test-call-123".to_string(),
+            session_id: None,
             start_time: Utc::now(),
             ring_time: Some(Utc::now()),
             answer_time: Some(Utc::now()),

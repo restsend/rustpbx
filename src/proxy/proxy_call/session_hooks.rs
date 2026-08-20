@@ -50,6 +50,10 @@ impl std::ops::Deref for SessionExtensions {
 pub struct CallSessionContext {
     /// Unique session identifier (UUID string).
     pub session_id: String,
+    /// Root session id of the whole logical call (first INVITE Call-ID,
+    /// inherited across transfers). `None` means this session is the root —
+    /// resolve with `session_id`. See `call::uui` / RFC 7433 UUI.
+    pub root_session_id: Option<String>,
     /// Original caller URI / number as it arrived.
     pub caller: String,
     /// Original callee URI / number as it arrived.
@@ -73,10 +77,21 @@ pub struct CallSessionContext {
     pub extensions: SessionExtensions,
 }
 
+impl CallSessionContext {
+    /// Logical-call correlation id: root session id when this leg is a child,
+    /// otherwise this leg's own `session_id`.
+    pub fn logical_session_id(&self) -> &str {
+        self.root_session_id
+            .as_deref()
+            .unwrap_or(self.session_id.as_str())
+    }
+}
+
 impl Clone for CallSessionContext {
     fn clone(&self) -> Self {
         Self {
             session_id: self.session_id.clone(),
+            root_session_id: self.root_session_id.clone(),
             caller: self.caller.clone(),
             callee: self.callee.clone(),
             connected_callee: self.connected_callee.clone(),
@@ -92,6 +107,7 @@ impl fmt::Debug for CallSessionContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CallSessionContext")
             .field("session_id", &self.session_id)
+            .field("root_session_id", &self.root_session_id)
             .field("caller", &self.caller)
             .field("callee", &self.callee)
             .field("connected_callee", &self.connected_callee)

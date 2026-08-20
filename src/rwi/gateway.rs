@@ -959,6 +959,41 @@ mod tests {
         );
     }
 
+    /// Call-scoped events must carry enrichment `session_id` from CallMetaStore
+    /// so webhook consumers can correlate legs without the retired `root_call_id`.
+    #[tokio::test]
+    async fn test_broadcast_event_enriches_with_session_id() {
+        let mut gw = RwiGateway::new();
+        let sid = gw.create_session(create_identity()).read().id.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, tx);
+
+        gw.meta_store.insert(
+            "leg-child".to_string(),
+            crate::rwi::CallMeta {
+                session_id: Some("root-call-42".to_string()),
+                caller: Some("sip:alice@localhost".to_string()),
+                callee: Some("sip:agent@localhost".to_string()),
+                ..Default::default()
+            },
+        );
+
+        gw.broadcast_event(&crate::rwi::event::to_legacy_event(
+            &crate::rwi::CallAnswered {
+                call_id: "leg-child".into(),
+            },
+            None,
+        ));
+
+        let v = rx.recv().await.unwrap();
+        assert_eq!(v["call_id"].as_str(), Some("leg-child"));
+        assert_eq!(
+            v["session_id"].as_str(),
+            Some("root-call-42"),
+            "session_id must be enriched from CallMeta for webhook correlation"
+        );
+    }
+
     /// When the event already carries its own `caller` field (e.g. cc_ringing
     /// or call_incoming), enrichment must not overwrite it with the context value.
     #[tokio::test]
@@ -986,7 +1021,6 @@ mod tests {
                 dial_direction: "inbound".into(),
                 trunk: None,
                 sip_headers: Default::default(),
-                root_call_id: None,
                 caller_name: None,
                 callee_name: None,
                 called_phone: None,

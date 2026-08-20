@@ -269,6 +269,32 @@ fn test_supervisor_sessions_has_required_fields() {
 }
 
 #[test]
+fn test_call_record_and_active_call_document_session_id() {
+    let raw = load();
+    for schema in &["CallRecord", "ActiveCall"] {
+        let block = schema_block(&raw, schema);
+        assert!(
+            block.contains("session_id:"),
+            "{schema} must document session_id for multi-leg correlation"
+        );
+    }
+    let cdr = schema_block(&raw, "CdrWebhookPayload");
+    assert!(
+        cdr.contains("sessionId:"),
+        "CdrWebhookPayload must document sessionId"
+    );
+    assert!(
+        cdr.contains("callId:"),
+        "CdrWebhookPayload must document callId"
+    );
+    let ctx = schema_block(&raw, "RwiEventCallContext");
+    assert!(
+        ctx.contains("session_id:"),
+        "RwiEventCallContext must document enrichment session_id"
+    );
+}
+
+#[test]
 fn test_canonical_and_static_spec_are_identical() {
     let canonical = std::fs::read_to_string(spec_path()).expect("read canonical");
     let static_copy = std::fs::read_to_string(static_spec_path()).expect("read static");

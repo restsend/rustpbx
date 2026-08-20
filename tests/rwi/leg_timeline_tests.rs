@@ -501,7 +501,6 @@ async fn test_leg_timeline_via_call_resume() {
                     dial_direction: "inbound".to_string(),
                     trunk: None,
                     sip_headers: std::collections::HashMap::new(),
-                    root_call_id: None,
                     caller_name: None,
                     callee_name: None,
                     called_phone: None,

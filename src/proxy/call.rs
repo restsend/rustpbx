@@ -203,9 +203,10 @@ pub struct QueueEnrichContext<'a> {
 /// *before* dialing begins, allowing addons to inject extra SIP headers
 /// (screen-pop context, CRM correlation IDs, etc.) into each target location.
 ///
-/// The cc addon uses this to attach `X-CC-Call-Id`, `X-CC-Queue-Id`,
-/// `X-CC-Queue-Name` and any caller-supplied `X-CRM-*` headers so the
-/// outbound INVITE to the agent carries full screen-pop metadata.
+/// The cc addon uses this to attach a RFC 7433 `User-to-User` header
+/// (`purpose=call-center`, carrying the root session id and queue context)
+/// plus any caller-supplied `X-CRM-*` headers so the outbound INVITE to the
+/// agent carries full screen-pop metadata.
 ///
 /// # Default behaviour
 /// If no enricher is registered the locations are forwarded unchanged.
@@ -2083,11 +2084,34 @@ impl CallModule {
             rsipstack::sip::Uri::try_from(caller_uri_str.as_str())
                 .map_err(|e| (500, format!("Invalid caller URI: {:?}", e)))?;
 
+        // Resolve the root session id from the original session so the
+        // transfer-target leg stays correlated with the whole logical call
+        // (RFC 7433 UUI, purpose=call-center). Falls back to the original
+        // session id when no meta is available.
+        let root_session_id = server
+            .rwi_gateway
+            .as_ref()
+            .and_then(|gw| {
+                gw.read()
+                    .meta_store
+                    .get_sync(original_session_id)
+                    .and_then(|m| m.session_id)
+            })
+            .unwrap_or_else(|| original_session_id.to_string());
+
         // Build headers
         let mut headers = vec![rsipstack::sip::Header::Other(
             "Max-Forwards".into(),
             "70".into(),
         )];
+        // Carry the root session id to the transfer target via UUI so an
+        // external network leg can re-attach on the way back in.
+        headers.push(crate::call::uui::build_uui_header(
+            &root_session_id,
+            None,
+            None,
+            None,
+        ));
         if let Some(replaces) = replaces_header {
             headers.push(rsipstack::sip::Header::Other(
                 "Replaces".into(),
@@ -2209,6 +2233,19 @@ impl CallModule {
                     entry.answered_at = Some(chrono::Utc::now());
                     entry.status = ActiveProxyCallStatus::Talking;
                 });
+
+                // Inherit the root session id on the transfer-target leg so
+                // its events/CDR stay correlated with the logical call
+                // (root = original session's root).
+                if let Some(ref gw) = server.rwi_gateway {
+                    let mut meta = gw
+                        .read()
+                        .meta_store
+                        .get_sync(&new_call_id)
+                        .unwrap_or_default();
+                    meta.session_id = Some(root_session_id.clone());
+                    gw.read().meta_store.insert(new_call_id.clone(), meta);
+                }
 
                 // Bridge original call with new call
                 let leg_a = crate::call::domain::LegId::new(&original_session_id);
@@ -2599,17 +2636,19 @@ mod tests {
     fn loop_guard_external_callee_falls_through_to_locs() {
         // external callee with NotHandled should fall through to locs so that
         // dialplan inspectors (e.g. zhongan inviter) can rewrite the target.
+        // A single location uses the sequential dialer (upstream change
+        // "sequential for 1 location").
         let result = resolve_unhandled_targets(false, false, make_loc(), true);
         assert!(
             result.is_ok(),
-            "external callee should fall through to Parallel(locs)"
+            "external callee should fall through to Sequential(locs)"
         );
         let strategy = result.unwrap();
         match strategy {
-            DialStrategy::Parallel(locs) => {
+            DialStrategy::Sequential(locs) => {
                 assert!(!locs.is_empty(), "locs should contain the callee URI");
             }
-            _ => panic!("expected Parallel strategy"),
+            _ => panic!("expected Sequential strategy for a single target"),
         }
     }
 

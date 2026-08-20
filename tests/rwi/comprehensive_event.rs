@@ -209,7 +209,6 @@ async fn test_comprehensive_core_event_structs() {
                 dial_direction: "inbound".into(),
                 trunk: None,
                 sip_headers: std::collections::HashMap::new(),
-                root_call_id: None,
                 caller_name: None,
                 callee_name: None,
                 called_phone: None,
@@ -256,7 +255,6 @@ async fn test_comprehensive_core_event_structs() {
                 call_end_time: None,
                 upload_time: None,
                 switch_flag: None,
-                root_call_id: None,
             },
         );
         gw.fan_out(

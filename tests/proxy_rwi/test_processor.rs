@@ -123,7 +123,42 @@ fn create_test_call_with_conference_manager(
     let id = SessionId::from(session_id);
     let (handle, mut cmd_rx) = SipSession::with_handle(id);
 
-    rustpbx::utils::spawn(async move { while let Some(_cmd) = cmd_rx.recv().await {} });
+    // Drain commands, replying to request/reply commands so callers (e.g.
+    // record_start's QueryRecorderStatus probe) don't block on a oneshot
+    // that is never answered. Recorder status is reported inactive/active
+    // based on a per-call flag flipped by Start/StopRecording so the RWI
+    // record command flow works end-to-end in tests.
+    let mut recording_active = false;
+    let mut recording_paused = false;
+    rustpbx::utils::spawn(async move {
+        while let Some(cmd) = cmd_rx.recv().await {
+            use rustpbx::call::domain::CallCommand;
+            match cmd {
+                CallCommand::QueryRecorderStatus { reply } => {
+                    let _ = reply.send(Ok(rustpbx::media::media_recorder::RecorderStatus {
+                        active: recording_active,
+                        paused: recording_paused,
+                        file_path: None,
+                    }));
+                }
+                CallCommand::StartRecording { .. } => {
+                    recording_active = true;
+                    recording_paused = false;
+                }
+                CallCommand::PauseRecording => {
+                    recording_paused = true;
+                }
+                CallCommand::ResumeRecording => {
+                    recording_paused = false;
+                }
+                CallCommand::StopRecording => {
+                    recording_active = false;
+                    recording_paused = false;
+                }
+                _ => {}
+            }
+        }
+    });
 
     let entry = rustpbx::proxy::active_call_registry::ActiveProxyCallEntry {
         session_id: session_id.to_string(),
@@ -153,6 +188,39 @@ fn create_test_call_with_rx(
     rustpbx::proxy::proxy_call::sip_session::SipSessionHandle,
     rustpbx::call::domain::CallCommandRx,
 ) {
+    create_test_call_inner(registry, session_id, caller, callee, direction, false)
+}
+
+/// Like [`create_test_call_with_rx`] but the spawned drain task answers
+/// `QueryRecorderStatus` request/reply commands (mirroring a live session)
+/// and tracks recorder active state from Start/StopRecording commands.
+/// Callers that need to inspect the raw command stream still get the
+/// receiver — the drain task only observes request/reply commands it must
+/// answer, forwarding everything else.
+fn create_test_call_with_rx_responder(
+    registry: &Arc<ActiveProxyCallRegistry>,
+    session_id: &str,
+    caller: &str,
+    callee: &str,
+    direction: DialDirection,
+) -> (
+    rustpbx::proxy::proxy_call::sip_session::SipSessionHandle,
+    rustpbx::call::domain::CallCommandRx,
+) {
+    create_test_call_inner(registry, session_id, caller, callee, direction, true)
+}
+
+fn create_test_call_inner(
+    registry: &Arc<ActiveProxyCallRegistry>,
+    session_id: &str,
+    caller: &str,
+    callee: &str,
+    direction: DialDirection,
+    responder: bool,
+) -> (
+    rustpbx::proxy::proxy_call::sip_session::SipSessionHandle,
+    rustpbx::call::domain::CallCommandRx,
+) {
     use rustpbx::call::runtime::SessionId;
     use rustpbx::proxy::proxy_call::sip_session::SipSession;
 
@@ -174,6 +242,57 @@ fn create_test_call_with_rx(
     };
 
     registry.upsert(entry, handle.clone());
+
+    if responder {
+        // A live session answers QueryRecorderStatus synchronously. Tests
+        // that drive the RWI record flow need that reply or the processor
+        // blocks on the oneshot until timeout. The responder also tracks
+        // Start/StopRecording so a subsequent query reflects the state the
+        // RWI flow expects (inactive → active after start, etc.).
+        let (fwd_tx, fwd_rx) = tokio::sync::mpsc::channel(16);
+        let mut cmd_rx = cmd_rx;
+        rustpbx::utils::spawn(async move {
+            use rustpbx::call::domain::CallCommand;
+            let mut recording_active = false;
+            let mut recording_paused = false;
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    CallCommand::QueryRecorderStatus { reply } => {
+                        let _ = reply.send(Ok(
+                            rustpbx::media::media_recorder::RecorderStatus {
+                                active: recording_active,
+                                paused: recording_paused,
+                                file_path: None,
+                            },
+                        ));
+                    }
+                    CallCommand::StartRecording { .. } => {
+                        recording_active = true;
+                        recording_paused = false;
+                        let _ = fwd_tx.send(cmd).await;
+                    }
+                    CallCommand::PauseRecording => {
+                        recording_paused = true;
+                        let _ = fwd_tx.send(cmd).await;
+                    }
+                    CallCommand::ResumeRecording => {
+                        recording_paused = false;
+                        let _ = fwd_tx.send(cmd).await;
+                    }
+                    CallCommand::StopRecording => {
+                        recording_active = false;
+                        recording_paused = false;
+                        let _ = fwd_tx.send(cmd).await;
+                    }
+                    other => {
+                        let _ = fwd_tx.send(other).await;
+                    }
+                }
+            }
+        });
+        return (handle, fwd_rx);
+    }
+
     (handle, cmd_rx)
 }
 
@@ -1156,7 +1275,7 @@ async fn test_command_dedup_cache_evicts_expired_entries_above_soft_cap() {
 #[tokio::test]
 async fn test_record_start_success() {
     let registry = Arc::new(ActiveProxyCallRegistry::new());
-    let (_handle, mut rx) = create_test_call_with_rx(
+    let (_handle, mut rx) = create_test_call_with_rx_responder(
         &registry,
         "call-rec",
         "1001",
@@ -1210,7 +1329,7 @@ async fn test_record_start_not_found() {
 #[tokio::test]
 async fn test_record_pause_success() {
     let registry = Arc::new(ActiveProxyCallRegistry::new());
-    let (_handle, mut rx) = create_test_call_with_rx(
+    let (_handle, mut rx) = create_test_call_with_rx_responder(
         &registry,
         "call-rec-p",
         "1001",
@@ -1269,7 +1388,7 @@ async fn test_record_pause_no_recording() {
 #[tokio::test]
 async fn test_record_resume_success() {
     let registry = Arc::new(ActiveProxyCallRegistry::new());
-    let (_handle, mut rx) = create_test_call_with_rx(
+    let (_handle, mut rx) = create_test_call_with_rx_responder(
         &registry,
         "call-rec-r",
         "1001",
@@ -1335,7 +1454,7 @@ async fn test_record_resume_no_recording() {
 #[tokio::test]
 async fn test_record_stop_success() {
     let registry = Arc::new(ActiveProxyCallRegistry::new());
-    let (_handle, mut rx) = create_test_call_with_rx(
+    let (_handle, mut rx) = create_test_call_with_rx_responder(
         &registry,
         "call-rec-s",
         "1001",
@@ -1384,7 +1503,7 @@ async fn test_record_stop_success() {
 #[tokio::test]
 async fn test_record_stop_no_recording() {
     let registry = Arc::new(ActiveProxyCallRegistry::new());
-    let (_handle, mut rx) = create_test_call_with_rx(
+    let (_handle, mut rx) = create_test_call_with_rx_responder(
         &registry,
         "call-norec3",
         "1001",

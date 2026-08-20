@@ -203,7 +203,6 @@ Webhook 使用 `(call_id, sequence)` 元组去重，环形缓冲区容量 4096 �
 | `dial_direction` | String | `inbound` / `outbound` / `internal` |
 | `trunk` | Option\<String\> | SIP 中继名 |
 | `sip_headers` | Map\<String, String\> | 白名单 SIP 头 |
-| `root_call_id` | Option\<String\> | 根呼叫 ID（转接中不变） |
 | `caller_name` | Option\<String\> | 主叫号码 |
 | `callee_name` | Option\<String\> | 被叫号码 / DNIS |
 | `called_phone` | Option\<String\> | 实际被叫号码（外呼场景） |
@@ -211,8 +210,10 @@ Webhook 使用 `(call_id, sequence)` 元组去重，环形缓冲区容量 4096 �
 | `routing_target` | Option\<String\> | 路由目标 |
 | `uuid` | Option\<String\> | 全局 UUID（关联录音） |
 | `routing_path` | Option\<Vec\<String\>\> | 路由路径序列 |
+| `session_id` | Option\<String\> | enrichment：逻辑呼叫根 session_id |
 
 > **注意**：`call_incoming` 使用 `dial_direction`，其他事件的上下文使用 `direction`。
+> 旧字段 `root_call_id` 已移除；跨腿关联请用 enrichment 注入的 `session_id`。
 
 ```json
 {
@@ -225,7 +226,7 @@ Webhook 使用 `(call_id, sequence)` 元组去重，环形缓冲区容量 4096 �
     "dial_direction": "inbound",
     "trunk": "trunk_sip",
     "sip_headers": { "X-Tenant": "corp_a" },
-    "root_call_id": "call-root-42",
+    "session_id": "call-abc",
     "caller_name": "13800138000",
     "callee_name": "4000",
     "called_phone": null,
@@ -447,9 +448,9 @@ Webhook 使用 `(call_id, sequence)` 元组去重，环形缓冲区容量 4096 �
 | `call_end_time` | Option\<String\> | 通话结束时间 |
 | `upload_time` | Option\<String\> | 上传完成时间 |
 | `switch_flag` | Option\<String\> | 站点标识（如 `ks`、`bj`） |
-| `root_call_id` | Option\<String\> | 根呼叫 ID |
+| `session_id` | Option\<String\> | enrichment：逻辑呼叫根 session_id |
 
-> 注意：`record_stopped` 不携带扁平化上下文，但自身已包含 `ani`/`dnis` 等字段，`enrich()` 会从上下文补充 `None` 字段。
+> 注意：`record_stopped` 不携带完整扁平化上下文的 typed 字段，但 `enrich()` 会从 CallMetaStore 补充 `session_id` 等缺失键。旧字段 `root_call_id` 已移除。
 
 ```json
 {
@@ -471,7 +472,7 @@ Webhook 使用 `(call_id, sequence)` 元组去重，环形缓冲区容量 4096 �
     "call_end_time": "2026-05-14T08:12:26Z",
     "upload_time": "2026-05-14T16:14:46Z",
     "switch_flag": "ks",
-    "root_call_id": "call-root-42"
+    "session_id": "call-root-42"
   }
 }
 ```
@@ -522,7 +523,7 @@ Webhook 使用 `(call_id, sequence)` 元组去重，环形缓冲区容量 4096 �
       "upload_time": "2026-05-14T16:14:46Z",
       "switch_flag": "ks",
       "process_flag": "ks_22_normal",
-      "root_call_id": "call-root-42"
+      "session_id": "call-root-42"
     }
   }
 }
@@ -732,6 +733,12 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 > `queue_joined` → `skill_group_candidates_found` → `skill_group_agent_assigned` → `queue_agent_offered` → `queue_agent_connected`
 
 所有队列事件携带扁平化上下文。
+
+> **session_id 关联（2026-08 起）**：所有呼叫域事件（`queue_*` / `skill_group_*` /
+> `cc_*` / `call_*`）的 payload 通过 CallMetaStore enrichment 自动携带
+> `session_id` 字段 —— 整通逻辑呼叫的根会话 ID（首 INVITE 的 Call-ID，跨转接/
+> 派发/consult 不变）。`call_id` 是当前腿的标识，转接产生的新腿会变化。
+> 详见 [session_id_correlation.md](./session_id_correlation.md)。
 
 #### queue_joined
 

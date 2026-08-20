@@ -426,6 +426,24 @@ impl TransferController {
             .await
             .ok_or(TransferFailureReason::InvalidState)?;
 
+        // Inherit the root session id onto the consultation leg so its
+        // events/CDR stay correlated with the logical call (root = the
+        // original call's root, resolved via the RWI CallMetaStore).
+        {
+            let gw = self.gateway.read();
+            let root = gw
+                .meta_store
+                .get_sync(&call_id)
+                .and_then(|m| m.session_id)
+                .unwrap_or_else(|| call_id.clone());
+            let mut meta = gw
+                .meta_store
+                .get_sync(&consultation_call_id)
+                .unwrap_or_default();
+            meta.session_id = Some(root);
+            gw.meta_store.insert(consultation_call_id.clone(), meta);
+        }
+
         let leg_a = LegId::new(&call_id);
         let leg_b = LegId::new(&consultation_call_id);
         let _ = handle.send_command(CallCommand::Bridge {

@@ -237,6 +237,7 @@ impl CallSessionBuilder {
             ring_time: None,
             answer_time: None,
             last_error: Some((code.clone(), reason)),
+            root_session_id: None,
             invite_final_status: Some(u16::from(code)),
             hangup_reason: Some(crate::callrecord::CallRecordHangupReason::Failed),
             hangup_messages: vec![],

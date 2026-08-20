@@ -147,6 +147,12 @@ pub struct CallRecordLastError {
 #[serde(rename_all = "camelCase")]
 pub struct CallRecord {
     pub call_id: String,
+    /// Root session id of the whole logical call (first INVITE's Call-ID,
+    /// inherited by every child leg — queue dispatch, REFER transfer,
+    /// consultation). Equal to `call_id` for root sessions. This replaces
+    /// the former `root_call_id` correlation mechanism.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub session_id: Option<String>,
     pub start_time: DateTimeUtc,
     pub ring_time: Option<DateTimeUtc>,
     pub answer_time: Option<DateTimeUtc>,
@@ -175,6 +181,7 @@ impl Clone for CallRecord {
     fn clone(&self) -> Self {
         Self {
             call_id: self.call_id.clone(),
+            session_id: self.session_id.clone(),
             start_time: self.start_time,
             ring_time: self.ring_time,
             answer_time: self.answer_time,
@@ -1156,6 +1163,7 @@ pub(crate) async fn create_call_record_table(
                 .auto_increment(),
         )
         .col(string_len(Alias::new("call_id"), 255).not_null())
+        .col(string_len_null(Alias::new("session_id"), 255))
         .col(string_len_null(Alias::new("display_id"), 255))
         .col(string_len(Alias::new("direction"), 32).not_null())
         .col(string_len(Alias::new("status"), 32).not_null())
@@ -1386,6 +1394,7 @@ impl From<rustpbx_models::call_record::Model> for CallRecord {
 
         CallRecord {
             call_id: val.call_id,
+            session_id: None,
             start_time: val.started_at,
             ring_time: None,
             answer_time: None,

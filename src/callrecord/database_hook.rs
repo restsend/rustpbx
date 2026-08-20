@@ -108,6 +108,7 @@ pub async fn persist_call_record(
 
     let active = ActiveModel {
         call_id: Set(record.call_id.clone()),
+        session_id: Set(record.session_id.clone()),
         display_id: Set(None),
         direction: Set(direction.clone()),
         status: Set(status.clone()),
@@ -169,6 +170,7 @@ pub async fn persist_call_record(
         .on_conflict(
             sea_orm::sea_query::OnConflict::column(Column::CallId)
                 .update_columns([
+                    Column::SessionId,
                     Column::DisplayId,
                     Column::Direction,
                     Column::Status,

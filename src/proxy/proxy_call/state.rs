@@ -12,6 +12,9 @@ pub struct CallSessionRecordSnapshot {
     pub ring_time: Option<Instant>,
     pub answer_time: Option<Instant>,
     pub last_error: Option<(StatusCode, Option<String>)>,
+    /// Root session id for the whole logical call (first INVITE Call-ID,
+    /// inherited across transfers; `None` = this session is the root).
+    pub root_session_id: Option<String>,
     /// The INVITE transaction's final status, locked at call setup. Later
     /// signaling must not change the CDR/CallEnded status.
     pub invite_final_status: Option<u16>,

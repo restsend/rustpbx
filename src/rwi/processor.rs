@@ -816,6 +816,14 @@ impl RwiCommandProcessor {
 
         let mut headers: Vec<rsipstack::sip::Header> =
             vec![rsipstack::sip::headers::MaxForwards::from(70u32).into()];
+        // Root session id via RFC 7433 UUI — the originate call is a session
+        // root; the header lets external legs re-attach on the way back in.
+        headers.push(crate::call::uui::build_uui_header(
+            &req.call_id,
+            None,
+            None,
+            None,
+        ));
         for (k, v) in &req.extra_headers {
             headers.push(rsipstack::sip::Header::Other(k.clone(), v.clone()));
         }
@@ -1034,6 +1042,8 @@ impl RwiCommandProcessor {
                         .collect();
                     let mut record = crate::callrecord::CallRecord {
                         call_id: cdr_call_id.clone(),
+                        // Originates are root sessions: session_id == call_id.
+                        session_id: Some(cdr_call_id.clone()),
                         caller: cdr_caller.clone(),
                         callee: cdr_callee.clone(),
                         start_time: cdr_start,

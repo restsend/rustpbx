@@ -28,6 +28,8 @@ pub struct RootCallInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EventCallContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caller_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub callee_name: Option<String>,
@@ -60,6 +62,10 @@ pub use crate::rwi::event::RwiEvent;
 /// Per-call metadata for enriching events at dispatch time.
 #[derive(Debug, Clone, Default)]
 pub struct CallMeta {
+    /// Root session id — constant across every leg of a logical call
+    /// (inbound root Call-ID, generated root for originates, inherited by
+    /// transfer/consult children). See `call::uui`.
+    pub session_id: Option<String>,
     pub caller: Option<String>,
     pub callee: Option<String>,
     pub caller_name: Option<String>,
@@ -74,6 +80,7 @@ pub struct CallMeta {
 impl From<CallMeta> for EventCallContext {
     fn from(m: CallMeta) -> Self {
         EventCallContext {
+            session_id: m.session_id,
             caller: m.caller,
             callee: m.callee,
             caller_name: m.caller_name,

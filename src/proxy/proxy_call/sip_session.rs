@@ -1405,6 +1405,20 @@ impl SipSession {
             }
             ConstructMode::Uac => Default::default(),
         };
+        // Resolve the root session id for the whole logical call.
+        // UAS: an inbound INVITE carrying a CC User-to-User header
+        // (RFC 7433, purpose=call-center) re-attaches this leg to an
+        // existing root session (e.g. a transfer returning from an
+        // external network). Otherwise this session IS the root.
+        // UAC (originate): this session is the root by definition.
+        let root_session_id = match mode {
+            ConstructMode::Uas { server_dialog } => {
+                crate::call::uui::extract_cc_uui(&server_dialog.initial_request().headers)
+                    .map(|uui| uui.session_id)
+            }
+            ConstructMode::Uac => None,
+        };
+
         let call_info = CallInfo {
             session_id: session_id_str.clone(),
             caller: original_caller.clone(),
@@ -1435,6 +1449,11 @@ impl SipSession {
         // (call_hangup, call_no_answer, etc.) are enriched with call context.
         if let Some(ref gw) = server.rwi_gateway {
             let meta = crate::rwi::proto::CallMeta {
+                session_id: Some(
+                    root_session_id
+                        .clone()
+                        .unwrap_or_else(|| session_id_str.clone()),
+                ),
                 caller: Some(original_caller.clone()),
                 callee: Some(original_callee.clone()),
                 caller_name: extract_sip_username(&original_caller),
@@ -1475,6 +1494,7 @@ impl SipSession {
         );
 
         let mut meta = crate::proxy::proxy_call::call_meta::CallMeta::default();
+        meta.root_session_id = root_session_id;
         meta.routed_caller = context.dialplan.caller.as_ref().map(|uri| uri.to_string());
         meta.routed_callee = context
             .dialplan
@@ -1745,7 +1765,6 @@ impl SipSession {
                 dial_direction: "inbound".into(),
                 trunk: None,
                 sip_headers: incoming_sip_headers,
-                root_call_id: None,
                 caller_name: None,
                 callee_name: None,
                 called_phone: None,
@@ -2730,6 +2749,7 @@ impl SipSession {
         }
         crate::proxy::proxy_call::session_hooks::CallSessionContext {
             session_id: self.context.session_id.clone(),
+            root_session_id: self.meta.root_session_id.clone(),
             caller: self.context.original_caller.clone(),
             callee: self.context.original_callee.clone(),
             connected_callee: self.meta.connected_callee.clone(),
@@ -7415,7 +7435,6 @@ impl SipSession {
                 call_end_time: None,
                 upload_time: None,
                 switch_flag: None,
-                root_call_id: None,
             });
         }
     }
@@ -8538,6 +8557,7 @@ impl SipSession {
             ring_time: self.meta.ring_time,
             answer_time: self.meta.answer_time,
             last_error: self.meta.last_error.clone(),
+            root_session_id: self.meta.root_session_id.clone(),
             invite_final_status: self.meta.invite_final_status,
             hangup_reason: self.meta.hangup_reason.clone(),
             hangup_messages: self.recorded_hangup_messages(),

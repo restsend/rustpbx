@@ -193,7 +193,6 @@ async fn test_full_session_resume_flow() {
                     dial_direction: "inbound".to_string(),
                     trunk: None,
                     sip_headers: std::collections::HashMap::new(),
-                    root_call_id: None,
                     caller_name: None,
                     callee_name: None,
                     called_phone: None,
