@@ -200,11 +200,10 @@ async fn recorder_sender_receives_ingress_via_tap() {
     mb.close();
 }
 
-/// DTMF telephone-event RTP packets must reach the recorder sender's channel
-/// (not be dropped by the IngressTap's DTMF short-circuit). Without this, the
-/// sipflow WAV export has no DTMF data and cannot synthesize keypress tones.
+/// Telephone-event RTP is detected by the tap but excluded from recording
+/// because it is not in the leg's configured audio-codec payload-type list.
 #[tokio::test]
-async fn recorder_sender_receives_dtmf_rtp_packets() {
+async fn recorder_sender_filters_non_audio_dtmf_rtp_packets() {
     use rustrtc::peer_connection::RtpObserver;
     use rustrtc::rtp::{RtpHeader, RtpPacket};
     use std::net::SocketAddr;
@@ -227,23 +226,11 @@ async fn recorder_sender_receives_dtmf_rtp_packets() {
     let dtmf = RtpPacket::new(RtpHeader::new(101, 1, 0, 1), vec![5u8, 0x80, 10, 0xA0]);
     tap.on_ingress(&dtmf, addr);
 
-    let item = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
-        .await
-        .expect("timed out waiting for DTMF RTP item")
-        .expect("no item");
-
-    // The recording task sender must receive the raw telephone-event packet
-    // via write_sample — this is what wav_utils parses to synthesize the tone.
-    assert_eq!(captured_direction(&item), PacketDirection::Ingress);
-    assert_eq!(
-        captured_payload_type(&item),
-        101,
-        "DTMF telephone-event PT must be preserved"
-    );
-    // Verify the raw RTP payload contains the RFC 4733 event data.
     assert!(
-        item.payload.len() > 12,
-        "raw RTP must be stored for WAV synthesis"
+        tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .is_err(),
+        "telephone-event RTP must not enter the recorder queue"
     );
 
     mb.close();

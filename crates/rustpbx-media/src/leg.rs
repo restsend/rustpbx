@@ -283,11 +283,16 @@ impl LegInner {
         }
 
         let relay_audio_ssrc = distinct_relay_audio_ssrc(&pc);
+        let audio_payload_types = codecs
+            .iter()
+            .filter(|codec| !codec.is_dtmf())
+            .map(|codec| codec.payload_type)
+            .collect();
 
         // Plaintext bidirectional observer (stats / DTMF / recording).
         // 8 DTMF-event slots is plenty: digits are rare and lagged receivers
         // are dropped, never blocking the hot path.
-        let tap = IngressTap::new(8, recorder_sender);
+        let tap = IngressTap::new(8, audio_payload_types, recorder_sender);
 
         // Gate: closed until the call is answered (`accept`). The egress
         // pipeline parks on it so the leg never emits audio (even silence) to
