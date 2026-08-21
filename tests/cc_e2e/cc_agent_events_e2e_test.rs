@@ -1,3 +1,9 @@
+//! CC agent-event pipeline tests (in-process, NOT SIP e2e).
+//!
+//! Statuses are driven by direct `update_status` calls against a real
+//! sqlite::memory: registry; the RWI event channel is real, but no SIP
+//! stack is involved.
+
 use std::time::Instant;
 
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, Database};

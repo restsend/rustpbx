@@ -1,3 +1,6 @@
+//! Skill-group DB ↔ TOML config round-trip tests (in-process, NOT SIP e2e):
+//! real sqlite::memory: database and real file I/O, no SIP stack.
+
 use sea_orm::{ActiveModelTrait, Database, Set};
 use sea_orm_migration::MigratorTrait;
 use tempfile::TempDir;

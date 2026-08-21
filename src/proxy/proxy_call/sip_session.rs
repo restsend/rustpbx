@@ -2883,11 +2883,7 @@ impl SipSession {
     /// unvalidated user-part (or a missing registry) falls back to the
     /// session-level value.
     async fn leg_agent_id(&self, agent_uri: Option<&str>) -> Option<String> {
-        let session_level = self
-            .extensions
-            .read()
-            .get::<std::collections::HashMap<String, String>>()
-            .and_then(|m| m.get("resolved_agent_id").cloned());
+        let session_level = self.session_ext_get("resolved_agent_id");
         let user = agent_uri
             .and_then(Self::uri_user_part)
             .filter(|u| Some(u.as_str()) != session_level.as_deref());
@@ -3061,10 +3057,7 @@ impl SipSession {
             .zip(target_video_caps.iter().cloned())
             .collect();
 
-        crate::media::leg::ensure_video_sender_for_pc(
-            target_leg.pc(),
-            &target_video_caps[0],
-        )?;
+        crate::media::leg::ensure_video_sender_for_pc(target_leg.pc(), &target_video_caps[0])?;
         if let Some(transceiver) = target_leg
             .pc()
             .get_transceivers()
@@ -7049,15 +7042,11 @@ impl SipSession {
             )
             .severity(crate::call_errors::ErrSeverity::Info);
             if callee.is_some() {
-                use std::collections::HashMap;
                 // Agent identity: prefer the routing-layer `resolved_agent_id`
                 // (set by resolve_custom_targets / CC routing), otherwise fall
                 // back to the connected callee's user part.
                 let resolved_agent_id = self
-                    .extensions
-                    .read()
-                    .get::<HashMap<String, String>>()
-                    .and_then(|m| m.get("resolved_agent_id").cloned())
+                    .session_ext_get("resolved_agent_id")
                     .unwrap_or_default();
                 let connected_callee = self.meta.connected_callee.clone();
                 let agent_id = if !resolved_agent_id.is_empty() {
@@ -7065,15 +7054,7 @@ impl SipSession {
                 } else {
                     connected_callee
                         .as_deref()
-                        .map(|uri| {
-                            let (user, _) = uri.split_once('@').unwrap_or((uri, ""));
-                            let user = user
-                                .strip_prefix("sip:")
-                                .or_else(|| user.strip_prefix("sips:"))
-                                .or_else(|| user.strip_prefix("tel:"))
-                                .unwrap_or(user);
-                            user.to_string()
-                        })
+                        .and_then(extract_sip_username)
                         .unwrap_or_else(|| connected_callee.clone().unwrap_or_default())
                 };
                 let mut detail = serde_json::json!({
@@ -7760,14 +7741,8 @@ impl SipSession {
             return Some(Self::parse_hold_music_value(&val));
         }
         // 2. Session extensions (set by CC addon or from initial INVITE metadata)
-        if let Some(meta) = self
-            .extensions
-            .read()
-            .get::<std::collections::HashMap<String, String>>()
-        {
-            if let Some(val) = meta.get("X-Hold-Music") {
-                return Some(Self::parse_hold_music_value(val));
-            }
+        if let Some(val) = self.session_ext_get("X-Hold-Music") {
+            return Some(Self::parse_hold_music_value(&val));
         }
         // 3. PBX default
         if let Some(path) = &self.server.proxy_config.load().hold_music {
@@ -8190,11 +8165,7 @@ impl SipSession {
         // centric). When no CC agent actually participated (no queue routing
         // and no resolved_agent_id), report "callee" so non-CC calls are not
         // mislabeled as agent-driven.
-        let has_resolved_agent = self
-            .extensions
-            .read()
-            .get::<std::collections::HashMap<String, String>>()
-            .map_or(false, |m| m.get("resolved_agent_id").is_some());
+        let has_resolved_agent = self.session_ext_get("resolved_agent_id").is_some();
         let queue_name = self.meta.queue_name.clone();
         let hangup_by = self
             .meta
@@ -8319,10 +8290,7 @@ impl SipSession {
                 detail["queue_name"] = serde_json::Value::String(queue_name);
             }
             let resolved_agent_id = self
-                .extensions
-                .read()
-                .get::<std::collections::HashMap<String, String>>()
-                .and_then(|m| m.get("resolved_agent_id").cloned())
+                .session_ext_get("resolved_agent_id")
                 .unwrap_or_default();
             if !resolved_agent_id.is_empty() {
                 detail["agent"] = serde_json::Value::String(resolved_agent_id);
@@ -9819,12 +9787,7 @@ impl SipSession {
                     // queue) calls keep deriving the agent from parties.
                     let leg_agent_id = self.leg_agent_id(Some(agent_uri)).await;
                     if let Some(ref id) = leg_agent_id
-                        && Some(id.as_str())
-                            != self
-                                .extensions
-                                .read()
-                                .get::<std::collections::HashMap<String, String>>()
-                                .and_then(|m| m.get("resolved_agent_id").map(String::as_str))
+                        && Some(id.as_str()) != self.session_ext_get("resolved_agent_id").as_deref()
                         && self.in_queue_context()
                     {
                         let mut ext = self.extensions.write();
@@ -9839,12 +9802,8 @@ impl SipSession {
                             }
                         }
                     }
-                    let resolved_agent_id = leg_agent_id.or_else(|| {
-                        self.extensions
-                            .read()
-                            .get::<std::collections::HashMap<String, String>>()
-                            .and_then(|m| m.get("resolved_agent_id").cloned())
-                    });
+                    let resolved_agent_id =
+                        leg_agent_id.or_else(|| self.session_ext_get("resolved_agent_id"));
                     self.app_event_bridge.send_app_event(
                         crate::call::app::ControllerEvent::Custom(
                             "agent_connected".to_string(),
@@ -10384,6 +10343,24 @@ impl SipSession {
 
     /// Add a new leg to the session dynamically, recording any failure in the
     /// call trace so operator-facing call records surface dial errors.
+    /// Merge caller-supplied INVITE headers over location-derived headers.
+    ///
+    /// Caller (queue-enricher) headers come FIRST in the list — they win any
+    /// duplicate-name resolution performed when the INVITE is built. With no
+    /// caller headers the location set is returned unchanged (including
+    /// `None`).
+    pub(crate) fn merge_leg_invite_headers(
+        caller_headers: Vec<rsipstack::sip::Header>,
+        location_headers: Option<Vec<rsipstack::sip::Header>>,
+    ) -> Option<Vec<rsipstack::sip::Header>> {
+        if caller_headers.is_empty() {
+            return location_headers;
+        }
+        let mut merged = caller_headers;
+        merged.extend(location_headers.into_iter().flatten());
+        Some(merged)
+    }
+
     async fn handle_add_leg(
         &mut self,
         target: String,
@@ -10479,9 +10456,7 @@ impl SipSession {
         // Merge caller-supplied INVITE headers (queue location enricher:
         // Call-Info / User-to-User) over any location-derived headers.
         if !headers.is_empty() {
-            let mut merged = headers;
-            merged.extend(location.headers.take().into_iter().flatten());
-            location.headers = Some(merged);
+            location.headers = Self::merge_leg_invite_headers(headers, location.headers.take());
         }
 
         if self.app_runtime.current_app().as_deref() == Some("queue") && self.media.bridge.is_none()

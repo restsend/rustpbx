@@ -1492,6 +1492,17 @@ impl RwiCommandProcessor {
             .ok_or_else(|| CommandError::CallNotFound(call_id.to_string()))
     }
 
+    /// Query a leg's recorder status, mapping transport errors onto
+    /// `CommandError::CommandFailed`.
+    async fn recorder_status(
+        handle: &SipSessionHandle,
+    ) -> Result<crate::media::media_recorder::RecorderStatus, CommandError> {
+        handle
+            .query_recorder_status()
+            .await
+            .map_err(|e| CommandError::CommandFailed(e.to_string()))
+    }
+
     async fn call_hold(
         &self,
         call_id: &str,
@@ -1980,10 +1991,7 @@ impl RwiCommandProcessor {
         use crate::call::domain::RecordConfig;
 
         let handle = self.get_handle(&req.call_id).await?;
-        let status = handle
-            .query_recorder_status()
-            .await
-            .map_err(|error| CommandError::CommandFailed(error.to_string()))?;
+        let status = Self::recorder_status(&handle).await?;
         if status.active {
             return Err(CommandError::CommandFailed(
                 "Recording is already in progress".to_string(),
@@ -2007,10 +2015,7 @@ impl RwiCommandProcessor {
                 },
             })
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
-        let status = handle
-            .query_recorder_status()
-            .await
-            .map_err(|error| CommandError::CommandFailed(error.to_string()))?;
+        let status = Self::recorder_status(&handle).await?;
         if !status.active {
             return Err(CommandError::CommandFailed(
                 "Recording failed to start".to_string(),
@@ -2030,10 +2035,7 @@ impl RwiCommandProcessor {
 
     async fn record_pause(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
-        let status = handle
-            .query_recorder_status()
-            .await
-            .map_err(|error| CommandError::CommandFailed(error.to_string()))?;
+        let status = Self::recorder_status(&handle).await?;
         if !status.active {
             return Err(CommandError::CommandFailed(
                 "No recording in progress".to_string(),
@@ -2042,10 +2044,7 @@ impl RwiCommandProcessor {
         handle
             .send_command(CallCommand::PauseRecording)
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
-        let status = handle
-            .query_recorder_status()
-            .await
-            .map_err(|error| CommandError::CommandFailed(error.to_string()))?;
+        let status = Self::recorder_status(&handle).await?;
         if !status.paused {
             return Err(CommandError::CommandFailed(
                 "Recording failed to pause".to_string(),
@@ -2060,10 +2059,7 @@ impl RwiCommandProcessor {
 
     async fn record_resume(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
-        let status = handle
-            .query_recorder_status()
-            .await
-            .map_err(|error| CommandError::CommandFailed(error.to_string()))?;
+        let status = Self::recorder_status(&handle).await?;
         if !status.active {
             return Err(CommandError::CommandFailed(
                 "No recording in progress".to_string(),
@@ -2072,10 +2068,7 @@ impl RwiCommandProcessor {
         handle
             .send_command(CallCommand::ResumeRecording)
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
-        let status = handle
-            .query_recorder_status()
-            .await
-            .map_err(|error| CommandError::CommandFailed(error.to_string()))?;
+        let status = Self::recorder_status(&handle).await?;
         if !status.active || status.paused {
             return Err(CommandError::CommandFailed(
                 "Recording failed to resume".to_string(),
@@ -2090,10 +2083,7 @@ impl RwiCommandProcessor {
 
     async fn record_stop(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
-        let status = handle
-            .query_recorder_status()
-            .await
-            .map_err(|error| CommandError::CommandFailed(error.to_string()))?;
+        let status = Self::recorder_status(&handle).await?;
         if !status.active {
             return Err(CommandError::CommandFailed(
                 "No recording in progress".to_string(),
@@ -2103,10 +2093,7 @@ impl RwiCommandProcessor {
         handle
             .send_command(CallCommand::StopRecording)
             .map_err(|error| CommandError::CommandFailed(error.to_string()))?;
-        let status = handle
-            .query_recorder_status()
-            .await
-            .map_err(|error| CommandError::CommandFailed(error.to_string()))?;
+        let status = Self::recorder_status(&handle).await?;
         if status.active {
             return Err(CommandError::CommandFailed(
                 "Recording failed to stop".to_string(),

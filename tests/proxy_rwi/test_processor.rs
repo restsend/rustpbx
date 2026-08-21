@@ -1298,13 +1298,11 @@ async fn test_record_start_success() {
             },
         ))
         .await;
-    assert!(result.is_ok() || matches!(result, Err(CommandError::CommandFailed(_))));
+    result.unwrap();
 
     let cmd = rx.try_recv();
-    assert!(cmd.is_ok());
-    if let Ok(action) = cmd {
-        assert!(matches!(action, CallCommand::StartRecording { .. }));
-    }
+    let action = cmd.expect("StartRecording must be forwarded to the session");
+    assert!(matches!(action, CallCommand::StartRecording { .. }));
 }
 
 #[tokio::test]
@@ -1365,10 +1363,14 @@ async fn test_record_pause_success() {
             call_id: "call-rec-p".into(),
         })
         .await;
-    assert!(result.is_ok() || matches!(result, Err(CommandError::CommandFailed(_))));
+    result.unwrap();
 
     let cmd = rx.try_recv();
-    assert!(cmd.is_ok());
+    let action = cmd.expect("record commands must be forwarded to the session");
+    assert!(matches!(action, CallCommand::StartRecording { .. }));
+    let cmd = rx.try_recv();
+    let action = cmd.expect("PauseRecording must be forwarded to the session");
+    assert!(matches!(action, CallCommand::PauseRecording));
 }
 
 #[tokio::test]
@@ -1434,10 +1436,18 @@ async fn test_record_resume_success() {
             call_id: "call-rec-r".into(),
         })
         .await;
-    assert!(result.is_ok() || matches!(result, Err(CommandError::CommandFailed(_))));
+    result.unwrap();
 
-    let cmd = rx.try_recv();
-    assert!(cmd.is_ok());
+    // Start + Pause ran before the resume — consume them in order, then the
+    // ResumeRecording must be the next forwarded command.
+    let action = rx.try_recv().expect("record commands must be forwarded");
+    assert!(matches!(action, CallCommand::StartRecording { .. }));
+    let action = rx.try_recv().expect("record commands must be forwarded");
+    assert!(matches!(action, CallCommand::PauseRecording));
+    let action = rx
+        .try_recv()
+        .expect("ResumeRecording must be forwarded to the session");
+    assert!(matches!(action, CallCommand::ResumeRecording));
 }
 
 #[tokio::test]
@@ -1530,12 +1540,17 @@ async fn test_record_stop_no_recording() {
             call_id: "call-norec3".into(),
         })
         .await;
-    assert!(result.is_ok() || matches!(result, Err(CommandError::CommandFailed(_))));
+    let err = result.expect_err("stop without an active recording must fail");
+    assert!(
+        err.to_string().contains("No recording"),
+        "expected the no-recording guard to fire, got {err}"
+    );
 
     let cmd = rx.try_recv();
-    if let Ok(action) = cmd {
-        assert!(matches!(action, CallCommand::StopRecording));
-    }
+    assert!(
+        cmd.is_err(),
+        "no StopRecording may be forwarded when the guard rejects the stop"
+    );
 }
 
 #[tokio::test]
@@ -1649,7 +1664,7 @@ async fn test_queue_hold_success() {
             call_id: "call-hold".into(),
         })
         .await;
-    assert!(result.is_ok() || matches!(result, Err(CommandError::CommandFailed(_))));
+    result.unwrap();
 
     let cmd = rx.try_recv();
     assert!(cmd.is_ok());
@@ -1699,7 +1714,7 @@ async fn test_call_hold_success() {
             music: None,
         })
         .await;
-    assert!(result.is_ok() || matches!(result, Err(CommandError::CommandFailed(_))));
+    result.unwrap();
 
     let cmd = rx.try_recv();
     assert!(cmd.is_ok());
@@ -1722,7 +1737,7 @@ async fn test_call_unhold_success() {
             call_id: "call-unhold-direct".into(),
         })
         .await;
-    assert!(result.is_ok() || matches!(result, Err(CommandError::CommandFailed(_))));
+    result.unwrap();
 
     let cmd = rx.try_recv();
     assert!(cmd.is_ok());
@@ -1763,7 +1778,7 @@ async fn test_queue_unhold_success() {
             call_id: "call-unhold".into(),
         })
         .await;
-    assert!(result.is_ok() || matches!(result, Err(CommandError::CommandFailed(_))));
+    result.unwrap();
 
     let cmd = rx.try_recv();
     assert!(cmd.is_ok());
@@ -2672,7 +2687,8 @@ async fn test_sip_message_send() {
         })
         .await;
 
-    assert!(result.is_ok() || matches!(result, Err(CommandError::CommandFailed(_))));
+    let err = result.expect_err("no SIP server is wired into this harness");
+    assert!(err.to_string().contains("SIP server not available"));
 }
 
 #[tokio::test]
@@ -2690,7 +2706,8 @@ async fn test_sip_notify_send() {
         })
         .await;
 
-    assert!(result.is_ok() || matches!(result, Err(CommandError::CommandFailed(_))));
+    let err = result.expect_err("no SIP server is wired into this harness");
+    assert!(err.to_string().contains("SIP server not available"));
 }
 
 #[tokio::test]
@@ -2705,5 +2722,6 @@ async fn test_sip_options_ping() {
         })
         .await;
 
-    assert!(result.is_ok() || matches!(result, Err(CommandError::CommandFailed(_))));
+    let err = result.expect_err("no SIP server is wired into this harness");
+    assert!(err.to_string().contains("SIP server not available"));
 }

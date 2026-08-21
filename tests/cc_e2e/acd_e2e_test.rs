@@ -1,12 +1,14 @@
-//! ACD End-to-End Test
+//! ACD engine tests (in-process, NOT a SIP e2e).
 //!
-//! Tests the complete ACD flow with real SIP calls:
-//! 1. Caller dials in
-//! 2. Call enters queue with ACD policy
-//! 3. ACD assigns to agent
-//! 4. Agent answers
+//! These tests drive `AcdEngine::enqueue()`/`tick()` directly on an
+//! in-memory `CcAddonState` with synthetic agent snapshots:
+//! 1. Call enters the queue with an ACD policy
+//! 2. ACD assigns it to an agent / overflows per policy
+//! 3. Presence, concurrency, and skill filters are respected
 //!
-//! This test requires a running PBX with CC addon enabled.
+//! No SIP stack, sockets, or running PBX are involved. The SIP-level ACD
+//! queue behavior is covered by `tests/queue_e2e/` (real INVITEs through a
+//! real in-process SipServer).
 
 #[cfg(test)]
 #[cfg(feature = "addon-cc")]

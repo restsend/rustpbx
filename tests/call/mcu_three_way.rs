@@ -231,6 +231,7 @@ async fn test_full_duplex_media_bridge() {
 
     let manager = std::sync::Arc::new(ConferenceManager::new());
     let bridge = ConferenceMediaBridge::new(manager.clone());
+    let _ = tracing_subscriber::fmt().try_init();
 
     // Create conference
     manager
@@ -260,40 +261,79 @@ async fn test_full_duplex_media_bridge() {
         }
     }
 
-    let receiver = Box::new(MockReceiver {
-        frames: vec![
-            PcmAudioFrame::new(vec![1000i16; 160], 8000),
-            PcmAudioFrame::new(vec![2000i16; 160], 8000),
-        ],
-        index: 0,
-    });
+    async fn start_leg(
+        bridge: &ConferenceMediaBridge,
+        leg: &'static str,
+        amplitude: i16,
+    ) -> (
+        anyhow::Result<rustpbx::call::runtime::conference_media_bridge::ConferenceBridgeHandle>,
+        tokio::sync::mpsc::Receiver<rustrtc::media::MediaSample>,
+    ) {
+        let receiver = Box::new(MockReceiver {
+            frames: vec![
+                PcmAudioFrame::new(vec![amplitude; 160], 8000),
+                PcmAudioFrame::new(vec![amplitude; 160], 8000),
+            ],
+            index: 0,
+        });
+        let (sender_tx, sender_rx) = tokio::sync::mpsc::channel(100);
+        let leg_id = LegId::new(leg);
+        let handle = bridge
+            .start_bridge_full_duplex(
+                "conf4",
+                &leg_id,
+                sender_tx,
+                receiver,
+                audio_codec::CodecType::PCMU,
+            )
+            .await;
+        (handle, sender_rx)
+    }
 
-    // Create mock audio sender
-    let (sender_tx, _sender_rx) = tokio::sync::mpsc::channel(100);
+    // Two participants: the N-1 mixer forwards each leg's audio to the OTHER
+    // leg only, so both directions must carry audio for the egress to be
+    // proven alive (a single participant legitimately hears silence).
+    let (handle_a, mut sender_rx_a) = start_leg(&bridge, "leg-a", 1000).await;
+    let (handle_b, mut sender_rx_b) = start_leg(&bridge, "leg-b", 2000).await;
+    assert!(handle_a.is_ok(), "bridge for leg-a should start");
+    assert!(handle_b.is_ok(), "bridge for leg-b should start");
 
-    // Start full-duplex bridge
-    let leg_id = LegId::new("test-leg");
-    let handle = bridge
-        .start_bridge_full_duplex(
-            "conf4",
-            &leg_id,
-            sender_tx,
-            receiver,
-            audio_codec::CodecType::PCMU,
-        )
-        .await;
+    // Give the 20ms mixing loop time to run several ticks.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
+    fn drain_peak_amplitude(
+        rx: &mut tokio::sync::mpsc::Receiver<rustrtc::media::MediaSample>,
+    ) -> (usize, i16) {
+        let mut count = 0usize;
+        let mut peak = 0i16;
+        let mut decoder = audio_codec::create_decoder(audio_codec::CodecType::PCMU);
+        while let Ok(sample) = rx.try_recv() {
+            if let rustrtc::media::MediaSample::Audio(frame) = sample {
+                count += 1;
+                for s in decoder.decode(&frame.data) {
+                    let s = if s < 0 { -s } else { s };
+                    peak = peak.max(s);
+                }
+            }
+        }
+        (count, peak)
+    }
+
+    // Leg A must hear leg B's 2000-amplitude tone, leg B must hear leg A's
+    // 1000-amplitude tone — both encoded through the PCMU forward loop.
+    let (a_count, a_peak) = drain_peak_amplitude(&mut sender_rx_a);
+    assert!(a_count > 0, "leg A must receive mixed output frames");
     assert!(
-        handle.is_ok(),
-        "Full-duplex bridge should start successfully"
+        a_peak > 500,
+        "leg A's output must carry leg B's audible signal, peak {a_peak}"
     );
 
-    // Give it time to process
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-    // Stop the bridge
-    let handle = handle.unwrap();
-    handle.stop();
+    let (b_count, b_peak) = drain_peak_amplitude(&mut sender_rx_b);
+    assert!(b_count > 0, "leg B must receive mixed output frames");
+    assert!(
+        b_peak > 500,
+        "leg B's output must carry leg A's audible signal, peak {b_peak}"
+    );
 
     // Cleanup
     manager.destroy_conference(&"conf4".into()).await.unwrap();

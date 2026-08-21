@@ -1022,7 +1022,7 @@ fn extract_regex_captures(pattern: &str, value: &str) -> Result<Option<Vec<Strin
 }
 
 /// Match pattern (supports regex)
-fn matches_pattern(pattern: &str, value: &str) -> Result<bool> {
+pub(crate) fn matches_pattern(pattern: &str, value: &str) -> Result<bool> {
     // If pattern doesn't contain regex special characters, use exact match
     if !pattern.contains('^')
         && !pattern.contains('$')

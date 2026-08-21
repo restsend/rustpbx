@@ -2378,12 +2378,9 @@ mod tests {
         let b = a.clone();
 
         let (a_to_b, b_to_a) = video_relay_rules(
-            &a,
-            &b,
-            0xA0A0A0A0, // a_video_ssrc
+            &a, &b, 0xA0A0A0A0, // a_video_ssrc
             0xB0B0B0B0, // b_video_ssrc
-            None,
-            None,
+            None, None,
         );
 
         let a_to_b_by_pt: std::collections::HashMap<u8, RtpRewriteRule> = a_to_b
@@ -2434,14 +2431,7 @@ mod tests {
         let a = vec![vcap("VP8", 96, None)];
         let b = vec![vcap("vp8", 110, None)];
 
-        let (a_to_b, b_to_a) = video_relay_rules(
-            &a,
-            &b,
-            0xA0A0A0A0,
-            0xB0B0B0B0,
-            None,
-            None,
-        );
+        let (a_to_b, b_to_a) = video_relay_rules(&a, &b, 0xA0A0A0A0, 0xB0B0B0B0, None, None);
 
         assert_eq!(a_to_b.len(), 1);
         assert_eq!(a_to_b[0].match_payload_type, Some(96));
@@ -2458,14 +2448,8 @@ mod tests {
         let rtp_video = vec![vcap("H264", 96, Some("profile-level-id=42801F"))];
         let webrtc_video = vec![vcap("H264", 97, Some("profile-level-id=42801F"))];
 
-        let (rtp_to_webrtc, webrtc_to_rtp) = video_relay_rules(
-            &rtp_video,
-            &webrtc_video,
-            1,
-            2,
-            None,
-            None,
-        );
+        let (rtp_to_webrtc, webrtc_to_rtp) =
+            video_relay_rules(&rtp_video, &webrtc_video, 1, 2, None, None);
 
         assert_eq!(rtp_to_webrtc.len(), 1);
         assert_eq!(rtp_to_webrtc[0].match_payload_type, Some(96));

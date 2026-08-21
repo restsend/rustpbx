@@ -333,6 +333,7 @@ async fn test_rtp_direct_flow_no_proxy() -> Result<()> {
 
     // Execute RTP test
     let config = RtpFlowTestConfig::default();
+    let packet_count = config.packet_count;
     let (caller_result, callee_result) = test.execute_bidirectional_rtp_test(config).await?;
 
     info!(
@@ -341,11 +342,18 @@ async fn test_rtp_direct_flow_no_proxy() -> Result<()> {
         "RTP direct flow results"
     );
 
-    // In None mode, RTP should flow directly
-    // We expect some packets to be received (actual routing depends on SDP handling)
+    // In None mode, RTP flows directly between the two endpoints — BOTH
+    // directions must carry packets; a dead direction is a media-path bug
+    // the OR form of this assertion used to hide.
     assert!(
-        caller_result.packets_received > 0 || callee_result.packets_received > 0,
-        "At least some RTP packets should be received"
+        caller_result.packets_received > 0,
+        "caller must receive RTP from callee (got 0 of {} sent)",
+        packet_count
+    );
+    assert!(
+        callee_result.packets_received > 0,
+        "callee must receive RTP from caller (got 0 of {} sent)",
+        packet_count
     );
 
     test.server.stop();

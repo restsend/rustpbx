@@ -1,3 +1,11 @@
+//! CcAgentRegistryAdapter logic tests (in-process, NOT SIP e2e).
+//!
+//! Every test here drives the adapter directly against in-memory /
+//! sqlite::memory: registries — no SipServer, sockets, or INVITEs. The
+//! SIP-level behavior of these features is covered by
+//! `tests/queue_e2e/test_queue_escalation_e2e.rs` and
+//! `tests/queue_e2e/test_queue_concurrent.rs`.
+
 use rustpbx::addons::cc::acd::{AcdConfig, AcdEngine};
 use rustpbx::addons::cc::agent::{AgentRegistry, AgentStatus};
 use rustpbx::addons::cc::agent_registry_adapter::CcAgentRegistryAdapter;
@@ -19,44 +27,39 @@ fn acd_disabled() -> Arc<AcdEngine> {
     }))
 }
 
+/// Build an adapter over `cc_registry` with a disabled ACD engine (the
+/// standard harness shape for these tests).
+fn disabled_adapter(cc_registry: Arc<AgentRegistry>) -> CcAgentRegistryAdapter {
+    disabled_adapter(cc_registry)
+}
+
+/// Registry with the given agents registered and set Idle:
+/// `(agent_id, skills, max_concurrency)`.
+async fn registry_with_idle_agents(agents: &[(&str, &[&str], u32)]) -> Arc<AgentRegistry> {
+    let registry = Arc::new(AgentRegistry::new());
+    for (id, skills, cap) in agents {
+        registry
+            .register(
+                id.to_string(),
+                skills.iter().map(|s| s.to_string()).collect(),
+                *cap,
+            )
+            .await
+            .unwrap();
+        registry.update_status(id, AgentStatus::Idle).await.unwrap();
+    }
+    registry
+}
+
 #[tokio::test]
 async fn test_skill_group_target_resolution() {
     // Setup: Create CC agent registry with test agents
-    let cc_registry = Arc::new(AgentRegistry::new());
-
-    // Register agents with skills
-    cc_registry
-        .register(
-            "agent-001".to_string(),
-            vec!["support".to_string(), "billing".to_string()],
-            2,
-        )
-        .await
-        .unwrap();
-
-    cc_registry
-        .register("agent-002".to_string(), vec!["support".to_string()], 1)
-        .await
-        .unwrap();
-
-    cc_registry
-        .register("agent-003".to_string(), vec!["sales".to_string()], 1)
-        .await
-        .unwrap();
-
-    // Set agents to idle (available)
-    cc_registry
-        .update_status("agent-001", AgentStatus::Idle)
-        .await
-        .unwrap();
-    cc_registry
-        .update_status("agent-002", AgentStatus::Idle)
-        .await
-        .unwrap();
-    cc_registry
-        .update_status("agent-003", AgentStatus::Idle)
-        .await
-        .unwrap();
+    let cc_registry = registry_with_idle_agents(&[
+        ("agent-001", &["support", "billing"], 2),
+        ("agent-002", &["support"], 1),
+        ("agent-003", &["sales"], 1),
+    ])
+    .await;
 
     // Create adapter
     let adapter = CcAgentRegistryAdapter::new(
@@ -194,30 +197,11 @@ async fn test_agent_availability_filtering() {
 #[tokio::test]
 async fn test_skill_matching() {
     // Setup
-    let cc_registry = Arc::new(AgentRegistry::new());
-
-    cc_registry
-        .register(
-            "agent-001".to_string(),
-            vec!["support".to_string(), "billing".to_string()],
-            1,
-        )
-        .await
-        .unwrap();
-
-    cc_registry
-        .register("agent-002".to_string(), vec!["sales".to_string()], 1)
-        .await
-        .unwrap();
-
-    cc_registry
-        .update_status("agent-001", AgentStatus::Idle)
-        .await
-        .unwrap();
-    cc_registry
-        .update_status("agent-002", AgentStatus::Idle)
-        .await
-        .unwrap();
+    let cc_registry = registry_with_idle_agents(&[
+        ("agent-001", &["support", "billing"], 1),
+        ("agent-002", &["sales"], 1),
+    ])
+    .await;
 
     // Create adapter
     let adapter = CcAgentRegistryAdapter::new(
@@ -259,7 +243,7 @@ async fn test_select_agent_with_policy_graceful_when_acd_disabled() {
         .await
         .unwrap();
 
-    let adapter = CcAgentRegistryAdapter::new(cc_registry, acd_disabled(), "localhost");
+    let adapter = disabled_adapter(cc_registry);
     let selected = adapter
         .select_agent_with_policy(
             &["support".to_string()],
@@ -320,7 +304,7 @@ async fn test_skill_group_resolution_with_policy_graceful_when_acd_disabled() {
     .await
     .unwrap();
 
-    let adapter = CcAgentRegistryAdapter::new(cc_registry, acd_disabled(), "localhost");
+    let adapter = disabled_adapter(cc_registry);
     let uris = adapter
         .resolve_target_with_policy(
             "skill-group:support_l1",
@@ -377,7 +361,7 @@ async fn test_skill_group_resolution_fallback_normalizes_extension_endpoint() {
     .await
     .unwrap();
 
-    let adapter = CcAgentRegistryAdapter::new(cc_registry, acd_disabled(), "localhost");
+    let adapter = disabled_adapter(cc_registry);
     let uris = adapter.resolve_target("skill-group:asdf").await;
 
     assert_eq!(uris, vec!["sip:22@localhost".to_string()]);
@@ -467,8 +451,7 @@ async fn test_skill_group_cache_miss_falls_back_to_db() {
         rustpbx::addons::cc::SkillGroupTomlCache::default(),
     ));
 
-    let adapter = CcAgentRegistryAdapter::new(cc_registry, acd_disabled(), "localhost")
-        .with_skill_group_cache(empty_cache);
+    let adapter = disabled_adapter(cc_registry).with_skill_group_cache(empty_cache);
 
     let uris = adapter.resolve_target("skill-group:tech-support2_G").await;
 
@@ -513,8 +496,7 @@ async fn test_skill_group_missing_everywhere_returns_empty() {
     let empty_cache = Arc::new(tokio::sync::RwLock::new(
         rustpbx::addons::cc::SkillGroupTomlCache::default(),
     ));
-    let adapter = CcAgentRegistryAdapter::new(cc_registry, acd_disabled(), "localhost")
-        .with_skill_group_cache(empty_cache);
+    let adapter = disabled_adapter(cc_registry).with_skill_group_cache(empty_cache);
 
     let uris = adapter.resolve_target("skill-group:does-not-exist").await;
     assert!(
@@ -669,7 +651,7 @@ async fn test_queue_no_acd_uses_fallback_strategy() {
         .await
         .unwrap();
 
-    let adapter = CcAgentRegistryAdapter::new(cc_registry, acd_disabled(), "localhost");
+    let adapter = disabled_adapter(cc_registry);
 
     let selected = adapter
         .select_agent_with_policy(
@@ -949,7 +931,7 @@ async fn test_skill_group_without_acd_policy_uses_fallback() {
     let cc_registry = Arc::new(AgentRegistry::with_db(db.clone()));
     register_agent_with_endpoint(&cc_registry, &db, "basic-a", &["support"]).await;
 
-    let adapter = CcAgentRegistryAdapter::new(cc_registry, acd_disabled(), "localhost");
+    let adapter = disabled_adapter(cc_registry);
 
     let uris = adapter
         .resolve_target_with_policy("skill-group:basic", None, "test-call")
@@ -1062,7 +1044,7 @@ async fn test_skill_group_with_level_requirement_filters_agents() {
         .unwrap();
     }
 
-    let adapter = CcAgentRegistryAdapter::new(cc_registry, acd_disabled(), "localhost");
+    let adapter = disabled_adapter(cc_registry);
 
     let uris = adapter
         .resolve_target_with_policy("skill-group:expert-only", None, "test-call")
@@ -1282,7 +1264,7 @@ async fn test_no_policy_unavailable_emits_call_queued() {
         .unwrap();
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SkillGroupEvent>();
-    let adapter = CcAgentRegistryAdapter::new(cc_registry, acd_disabled(), "localhost")
+    let adapter = disabled_adapter(cc_registry)
         .with_skill_group_cache(make_skill_cache(None))
         .with_skill_group_event_tx(tx);
 
@@ -1317,7 +1299,7 @@ async fn test_no_policy_with_available_no_call_queued() {
     register_skill_agent(&cc_registry, "agent-001", AgentStatus::Idle);
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SkillGroupEvent>();
-    let adapter = CcAgentRegistryAdapter::new(cc_registry, acd_disabled(), "localhost")
+    let adapter = disabled_adapter(cc_registry)
         .with_skill_group_cache(make_skill_cache(None))
         .with_skill_group_event_tx(tx);
 
@@ -1346,7 +1328,7 @@ async fn test_non_inline_path_emits_agent_assigned() {
     register_skill_agent(&cc_registry, "agent-002", AgentStatus::Idle);
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SkillGroupEvent>();
-    let adapter = CcAgentRegistryAdapter::new(cc_registry, acd_disabled(), "localhost")
+    let adapter = disabled_adapter(cc_registry)
         .with_skill_group_cache(make_skill_cache(None))
         .with_skill_group_event_tx(tx);
 
@@ -1423,8 +1405,7 @@ async fn test_notify_abandoned_emits_call_abandoned() {
 
     let cc_registry = Arc::new(AgentRegistry::new());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SkillGroupEvent>();
-    let adapter = CcAgentRegistryAdapter::new(cc_registry, acd_disabled(), "localhost")
-        .with_skill_group_event_tx(tx);
+    let adapter = disabled_adapter(cc_registry).with_skill_group_event_tx(tx);
 
     let _ = TraitAgentRegistry::notify_call_abandoned(&adapter, "call-1", "support", 42).await;
 
@@ -1450,8 +1431,7 @@ async fn test_notify_timeout_fallback_emits_service_unavailable() {
 
     let cc_registry = Arc::new(AgentRegistry::new());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SkillGroupEvent>();
-    let adapter = CcAgentRegistryAdapter::new(cc_registry, acd_disabled(), "localhost")
-        .with_skill_group_event_tx(tx);
+    let adapter = disabled_adapter(cc_registry).with_skill_group_event_tx(tx);
 
     let _ = TraitAgentRegistry::notify_call_timeout(&adapter, "call-1", "support", 90).await;
     match rx.try_recv() {
@@ -1534,8 +1514,7 @@ async fn test_concurrent_resolves_assign_distinct_agents() {
     }
 
     let cache = Arc::new(tokio::sync::RwLock::new(SkillGroupTomlCache::default()));
-    let adapter = CcAgentRegistryAdapter::new(cc_registry.clone(), acd_disabled(), "localhost")
-        .with_skill_group_cache(cache);
+    let adapter = disabled_adapter(cc_registry.clone()).with_skill_group_cache(cache);
 
     // Simulate three concurrent calls to the same skill group.
     let uris1 = adapter
@@ -1638,8 +1617,7 @@ async fn test_reservation_fallback_when_all_agents_taken() {
     .unwrap();
 
     let cache = Arc::new(tokio::sync::RwLock::new(SkillGroupTomlCache::default()));
-    let adapter = CcAgentRegistryAdapter::new(cc_registry.clone(), acd_disabled(), "localhost")
-        .with_skill_group_cache(cache);
+    let adapter = disabled_adapter(cc_registry.clone()).with_skill_group_cache(cache);
 
     let uris = adapter
         .resolve_target_with_policy("skill-group:support", None, "call-1")
@@ -1719,8 +1697,7 @@ async fn test_escalation_plan_synthesized_from_overflow_groups() {
         group("support_l2", &["support_l2"], &[], 90),
         group("support_l3", &["support_l3"], &[], 90),
     ]);
-    let adapter = CcAgentRegistryAdapter::new(cc_registry, acd_disabled(), "localhost")
-        .with_skill_group_cache(cache);
+    let adapter = disabled_adapter(cc_registry).with_skill_group_cache(cache);
 
     let plan = adapter.escalation_plan_for("skill-group:support").await;
 
@@ -1803,8 +1780,12 @@ async fn test_escalation_plan_empty_when_unconfigured() {
     use escalation_helpers::{cache_with, group};
 
     let cc_registry = Arc::new(AgentRegistry::new());
-    let adapter = CcAgentRegistryAdapter::new(cc_registry, acd_disabled(), "localhost")
-        .with_skill_group_cache(cache_with(vec![group("support", &["support"], &[], 45)]));
+    let adapter = disabled_adapter(cc_registry).with_skill_group_cache(cache_with(vec![group(
+        "support",
+        &["support"],
+        &[],
+        45,
+    )]));
 
     let plan = adapter.escalation_plan_for("skill-group:support").await;
     assert!(plan.steps.is_empty());
@@ -1827,8 +1808,7 @@ async fn test_resolve_escalation_targets_union() {
         group("support", &["support"], &["support_l2"], 45),
         group("support_l2", &["support_l2"], &[], 90),
     ]);
-    let adapter = CcAgentRegistryAdapter::new(cc_registry.clone(), acd_disabled(), "localhost")
-        .with_skill_group_cache(cache);
+    let adapter = disabled_adapter(cc_registry.clone()).with_skill_group_cache(cache);
 
     let uris = adapter
         .resolve_escalation_targets(
@@ -1879,8 +1859,7 @@ async fn test_resolve_escalation_targets_fair_rotation() {
         group("support", &["support"], &["support_l2"], 45),
         group("support_l2", &["support_l2"], &[], 90),
     ]);
-    let adapter = CcAgentRegistryAdapter::new(cc_registry.clone(), acd_disabled(), "localhost")
-        .with_skill_group_cache(cache);
+    let adapter = disabled_adapter(cc_registry.clone()).with_skill_group_cache(cache);
 
     let uris1 = adapter
         .resolve_escalation_targets(
@@ -1936,8 +1915,7 @@ async fn test_resolve_escalation_targets_non_fair_primary_first() {
         group("support", &["support"], &["support_l2"], 45),
         group("support_l2", &["support_l2"], &[], 90),
     ]);
-    let adapter = CcAgentRegistryAdapter::new(cc_registry, acd_disabled(), "localhost")
-        .with_skill_group_cache(cache);
+    let adapter = disabled_adapter(cc_registry).with_skill_group_cache(cache);
 
     let uris = adapter
         .resolve_escalation_targets(

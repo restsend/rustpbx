@@ -27,21 +27,16 @@ mod escalation_e2e {
     use rustpbx::addons::cc::agent_registry_adapter::CcAgentRegistryAdapter;
     use rustpbx::call::user::SipUser;
     use rustpbx::config::ProxyConfig;
-    use rustpbx::proxy::locator::MemoryLocator;
     use rustpbx::proxy::proxy_call::session_hooks::{CallSessionContext, CallSessionHook};
     use rustpbx::proxy::routing::{
         MatchConditions, RouteAction, RouteQueueConfig, RouteQueueStrategyConfig,
         RouteQueueTargetConfig, RouteRule,
     };
-    use rustpbx::proxy::server::SipServerBuilder;
-    use rustpbx::proxy::user::MemoryUserBackend;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tokio::sync::Mutex;
     use tokio::time::sleep;
-    use tokio_util::sync::CancellationToken;
 
-    use crate::common::test_helpers::register_standard_modules;
     use crate::common::test_ua::{TestUa, TestUaConfig, TestUaEvent};
 
     fn group(
@@ -160,40 +155,9 @@ mod escalation_e2e {
 
     #[tokio::test]
     async fn test_queue_overflow_escalation_priority_then_fair_widening_e2e() {
-        let _ = tracing_subscriber::fmt::try_init();
+        let _ = tracing_subscriber::fmt().try_init();
 
         let port = portpicker::pick_unused_port().unwrap_or(15070);
-        let config = Arc::new(escalation_proxy_config(port));
-
-        let user_backend = MemoryUserBackend::new(None);
-        for u in [
-            SipUser {
-                id: 1,
-                username: "caller".to_string(),
-                password: Some("password".to_string()),
-                enabled: true,
-                realm: Some("127.0.0.1".to_string()),
-                ..Default::default()
-            },
-            SipUser {
-                id: 2,
-                username: "agent1".to_string(),
-                password: Some("password".to_string()),
-                enabled: true,
-                realm: Some("127.0.0.1".to_string()),
-                ..Default::default()
-            },
-            SipUser {
-                id: 3,
-                username: "agent2".to_string(),
-                password: Some("password".to_string()),
-                enabled: true,
-                realm: Some("127.0.0.1".to_string()),
-                ..Default::default()
-            },
-        ] {
-            user_backend.create_user(u).await.unwrap();
-        }
 
         // ── CC addon wiring (the part the production proxy gets from the
         // addon initialization) ──────────────────────────────────────────
@@ -235,29 +199,34 @@ mod escalation_e2e {
             .with_skill_group_cache(skill_group_cache),
         );
 
-        let locator = MemoryLocator::new();
-        let cancel_token = CancellationToken::new();
         let connected: Arc<Mutex<Vec<CallSessionContext>>> = Arc::new(Mutex::new(Vec::new()));
         let hook: Arc<dyn CallSessionHook> = Arc::new(RecordingHook {
             connected: connected.clone(),
         });
 
-        let builder = register_standard_modules(
-            SipServerBuilder::new(config)
-                .with_user_backend(Box::new(user_backend))
-                .with_locator(Box::new(locator))
-                .with_cancel_token(cancel_token.clone())
-                .with_session_hook(hook),
+        let server = crate::common::e2e_test_server::E2eTestServer::start_with_inject(
+            escalation_proxy_config(port),
+            crate::common::e2e_test_server::E2eTestServerInject {
+                users: ["caller", "agent1", "agent2"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, username)| SipUser {
+                        id: (idx + 1) as u64,
+                        username: username.to_string(),
+                        password: Some("password".to_string()),
+                        enabled: true,
+                        realm: Some("127.0.0.1".to_string()),
+                        ..Default::default()
+                    })
+                    .collect(),
+                session_hook: Some(hook),
+                agent_registry: Some(adapter),
+            },
         )
-        .with_agent_registry(adapter);
+        .await
+        .unwrap();
 
-        let server = builder.build().await.unwrap();
-        let proxy_addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
-
-        let serve_task = tokio::spawn(async move {
-            let _ = server.serve().await;
-        });
-        sleep(Duration::from_millis(150)).await;
+        let proxy_addr = server.proxy_addr;
 
         let mk_ua = |username: &'static str, port_hint: u16| {
             TestUa::new(TestUaConfig {
@@ -382,7 +351,6 @@ mod escalation_e2e {
         let _ = tokio::time::timeout(Duration::from_secs(10), call_task).await;
         sleep(Duration::from_millis(300)).await;
 
-        cancel_token.cancel();
-        serve_task.abort();
+        server.stop();
     }
 }

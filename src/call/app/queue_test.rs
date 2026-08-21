@@ -17,30 +17,18 @@ mod tests {
     use rsipstack::sip::Uri;
     use std::time::Duration;
 
+    /// Build a registered-agent [`Location`] for the given SIP URI.
+    fn test_location(uri: &str) -> Location {
+        Location {
+            aor: Uri::try_from(uri).unwrap(),
+            expires: 3600,
+            ..Default::default()
+        }
+    }
+
     /// Build a minimal queue config with a single agent for testing.
     fn build_simple_queue_config() -> QueueConfig {
-        let agent_uri = Uri::try_from("sip:agent1@example.com").unwrap();
-        let location = Location {
-            aor: agent_uri,
-            expires: 3600,
-            destination: None,
-            last_modified: None,
-            supports_webrtc: false,
-            credential: None,
-            headers: None,
-            registered_aor: None,
-            contact_raw: None,
-            contact_params: None,
-            path: None,
-            service_route: None,
-            instance_id: None,
-            gruu: None,
-            temp_gruu: None,
-            reg_id: None,
-            transport: None,
-            user_agent: None,
-            home_proxy: None,
-        };
+        let location = test_location("sip:agent1@example.com");
 
         QueueConfig {
             name: "test-queue".to_string(),
@@ -73,27 +61,7 @@ mod tests {
             "sip:agent3@example.com",
         ]
         .into_iter()
-        .map(|uri| Location {
-            aor: Uri::try_from(uri).unwrap(),
-            expires: 3600,
-            destination: None,
-            last_modified: None,
-            supports_webrtc: false,
-            credential: None,
-            headers: None,
-            registered_aor: None,
-            contact_raw: None,
-            contact_params: None,
-            path: None,
-            service_route: None,
-            instance_id: None,
-            gruu: None,
-            temp_gruu: None,
-            reg_id: None,
-            transport: None,
-            user_agent: None,
-            home_proxy: None,
-        })
+        .map(test_location)
         .collect();
 
         QueueConfig {
@@ -123,27 +91,7 @@ mod tests {
     fn build_parallel_queue_config() -> QueueConfig {
         let agents: Vec<Location> = vec!["sip:agent1@example.com", "sip:agent2@example.com"]
             .into_iter()
-            .map(|uri| Location {
-                aor: Uri::try_from(uri).unwrap(),
-                expires: 3600,
-                destination: None,
-                last_modified: None,
-                supports_webrtc: false,
-                credential: None,
-                headers: None,
-                registered_aor: None,
-                contact_raw: None,
-                contact_params: None,
-                path: None,
-                service_route: None,
-                instance_id: None,
-                gruu: None,
-                temp_gruu: None,
-                reg_id: None,
-                transport: None,
-                user_agent: None,
-                home_proxy: None,
-            })
+            .map(test_location)
             .collect();
 
         QueueConfig {
@@ -588,27 +536,7 @@ mod tests {
                 code: Some(rsipstack::sip::StatusCode::TemporarilyUnavailable),
                 reason: None,
             })),
-            agents: vec![Location {
-                aor: Uri::try_from("sip:agent@example.com").unwrap(),
-                expires: 3600,
-                destination: None,
-                last_modified: None,
-                supports_webrtc: false,
-                credential: None,
-                headers: None,
-                registered_aor: None,
-                contact_raw: None,
-                contact_params: None,
-                path: None,
-                service_route: None,
-                instance_id: None,
-                gruu: None,
-                temp_gruu: None,
-                reg_id: None,
-                transport: None,
-                user_agent: None,
-                home_proxy: None,
-            }],
+            agents: vec![test_location("sip:agent@example.com")],
             strategy: DialStrategy::Sequential(vec![]),
             ring_timeout: Some(Duration::from_secs(60)),
             ..Default::default()
@@ -1802,22 +1730,29 @@ mod tests {
 
     // ── Escalation: auto-armed timer + fair union widening ──────────────
 
-    /// AgentRegistry double for escalation tests: delegates presence duties
-    /// to MemoryRegistry and stubs the escalation hooks with call recording.
-    struct EscalationRegistry {
+    /// AgentRegistry double that delegates presence duties to
+    /// [`MemoryRegistry`] and records the escalation + skill-group lifecycle
+    /// hook invocations for assertions.
+    struct HookRecordingRegistry {
         inner: crate::call::app::agent_registry::memory::MemoryRegistry,
         escalation_calls: std::sync::Mutex<Vec<(String, Vec<String>, bool)>>,
         /// URIs returned by resolve_escalation_targets (rotated per call so
         /// repeated invocations can be distinguished).
         escalation_uris: Vec<Vec<String>>,
+        abandoned: std::sync::Mutex<Vec<(String, String, u64)>>,
+        timeouts: std::sync::Mutex<Vec<(String, String, u64)>>,
+        fallbacks: std::sync::Mutex<Vec<(String, String, String, String)>>,
     }
 
-    impl EscalationRegistry {
+    impl HookRecordingRegistry {
         fn new() -> Self {
             Self {
                 inner: crate::call::app::agent_registry::memory::MemoryRegistry::new(),
                 escalation_calls: std::sync::Mutex::new(Vec::new()),
                 escalation_uris: Vec::new(),
+                abandoned: std::sync::Mutex::new(Vec::new()),
+                timeouts: std::sync::Mutex::new(Vec::new()),
+                fallbacks: std::sync::Mutex::new(Vec::new()),
             }
         }
 
@@ -1828,7 +1763,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl AgentRegistry for EscalationRegistry {
+    impl AgentRegistry for HookRecordingRegistry {
         async fn register(
             &self,
             agent_id: String,
@@ -1888,8 +1823,8 @@ mod tests {
             self.inner.select_agent(required_skills, strategy).await
         }
 
-        async fn resolve_target(&self, _target_uri: &str) -> Vec<String> {
-            vec![]
+        async fn resolve_target(&self, target_uri: &str) -> Vec<String> {
+            self.inner.resolve_target(target_uri).await
         }
 
         async fn resolve_escalation_targets(
@@ -1909,6 +1844,37 @@ mod tests {
                 .get(calls - 1)
                 .cloned()
                 .unwrap_or_default()
+        }
+
+        async fn notify_call_abandoned(&self, call_id: &str, queue_id: &str, waited_secs: u64) {
+            self.abandoned.lock().unwrap().push((
+                call_id.to_string(),
+                queue_id.to_string(),
+                waited_secs,
+            ));
+        }
+
+        async fn notify_call_timeout(&self, call_id: &str, queue_id: &str, waited_secs: u64) {
+            self.timeouts.lock().unwrap().push((
+                call_id.to_string(),
+                queue_id.to_string(),
+                waited_secs,
+            ));
+        }
+
+        async fn notify_call_fallback(
+            &self,
+            call_id: &str,
+            queue_id: &str,
+            reason: &str,
+            action: &str,
+        ) {
+            self.fallbacks.lock().unwrap().push((
+                call_id.to_string(),
+                queue_id.to_string(),
+                reason.to_string(),
+                action.to_string(),
+            ));
         }
     }
 
@@ -1932,7 +1898,7 @@ mod tests {
         // Union resolve returns the already-dialled primary FIRST plus one
         // widened agent — cumulative escalation must skip the duplicate
         // primary leg and dial only the new agent.
-        let registry = Arc::new(EscalationRegistry::new().with_escalation_uris(vec![vec![
+        let registry = Arc::new(HookRecordingRegistry::new().with_escalation_uris(vec![vec![
             "sip:agent1@example.com".to_string(), // primary, already ringing
             "sip:l2agent@example.com".to_string(), // widened fair pick
         ]]));
@@ -2000,7 +1966,7 @@ mod tests {
         config.skill_group = Some("support".to_string());
 
         let registry = Arc::new(
-            EscalationRegistry::new()
+            HookRecordingRegistry::new()
                 .with_escalation_uris(vec![vec!["sip:l2agent@example.com".to_string()]]),
         );
 
@@ -2041,6 +2007,200 @@ mod tests {
 
         stack.cancel();
         let _ = stack.join().await;
+    }
+
+    /// Replace-mode escalation over a skill-group union: when the widened
+    /// resolve returns the already-dialled primary agent plus a new agent,
+    /// Replace must (1) tear down the pending primary leg via LegRemove,
+    /// (2) skip the duplicate primary, and (3) dial ONLY the new agent.
+    #[tokio::test]
+    async fn test_escalation_replace_mode_removes_pending_leg_and_dials_union() {
+        use std::sync::Arc;
+
+        let mut config = build_simple_queue_config();
+        config.escalation_mode = crate::call::app::queue::EscalationMode::Replace;
+        config.escalation_timeline = vec![crate::call::app::queue::EscalationStep {
+            threshold_secs: 1,
+            add_skill_group: "support_l2".to_string(),
+            fair: true,
+        }];
+        config.skill_group = Some("support".to_string());
+
+        let registry = Arc::new(HookRecordingRegistry::new().with_escalation_uris(vec![vec![
+            "sip:agent1@example.com".to_string(), // primary, already ringing
+            "sip:l2agent@example.com".to_string(), // widened fair pick
+        ]]));
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config)
+            .with_agent_registry(registry.clone())
+            .with_call_id("call-esc-replace".to_string());
+
+        let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "Hold", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        stack.assert_cmd(200, "LegAdd-primary", |c| {
+            matches!(c, CallCommand::LegAdd { target, .. } if target.contains("agent1@example.com"))
+        })
+        .await;
+
+        // Replace escalation: the pending primary leg is removed first …
+        stack
+            .assert_cmd(4000, "LegRemove-primary", |c| {
+                matches!(c, CallCommand::LegRemove { .. })
+            })
+            .await;
+        // … then ONLY the widened agent is dialled (no duplicate primary).
+        stack.assert_cmd(2000, "LegAdd-widened", |c| {
+            matches!(c, CallCommand::LegAdd { target, .. } if target.contains("l2agent@example.com"))
+        })
+        .await;
+        assert!(
+            stack.next_cmd(1200).await.is_none(),
+            "replace escalation must not re-dial the removed primary"
+        );
+        assert_eq!(
+            registry.escalation_calls.lock().unwrap().len(),
+            1,
+            "exactly one union resolve for the replace step"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// `next_escalation_check_delay` clamps long thresholds to the 10s
+    /// polling cadence, floors short ones at 1s, and stops (None) once every
+    /// step has triggered.
+    #[tokio::test]
+    async fn test_next_escalation_check_delay_clamps_and_stops() {
+        let mut config = build_simple_queue_config();
+        config.escalation_timeline = vec![
+            crate::call::app::queue::EscalationStep {
+                threshold_secs: 1,
+                add_skill_group: "l1".to_string(),
+                fair: false,
+            },
+            crate::call::app::queue::EscalationStep {
+                threshold_secs: 3600,
+                add_skill_group: "far_away".to_string(),
+                fair: false,
+            },
+        ];
+
+        let plan = config.to_plan();
+        let queue = QueueApp::new(plan, config.clone());
+        // Freshly enqueued: the earliest un-triggered threshold is 1s away.
+        assert_eq!(
+            queue.next_escalation_check_delay(),
+            Some(Duration::from_secs(1)),
+            "1s threshold must fire at the 1s floor"
+        );
+
+        // Only a far step left: degrade to the 10s polling cadence.
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config.clone());
+        queue.escalated_groups = vec!["l1".to_string()];
+        assert_eq!(
+            queue.next_escalation_check_delay(),
+            Some(Duration::from_secs(10)),
+            "3600s threshold must clamp to 10s"
+        );
+
+        // Every step triggered: the timer stops re-arming.
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config);
+        queue.escalated_groups = vec!["l1".to_string(), "far_away".to_string()];
+        assert_eq!(
+            queue.next_escalation_check_delay(),
+            None,
+            "no wake-up after every step has triggered"
+        );
+    }
+
+    /// `agent_availability`: unknown agent → None (legacy dial), own-call
+    /// Ringing reservation → available, other-call Ringing → unavailable.
+    #[tokio::test]
+    async fn test_agent_availability_reservation_semantics() {
+        use crate::call::app::agent_registry::{AgentRegistry, PresenceState};
+
+        let registry = HookRecordingRegistry::new();
+        registry
+            .register(
+                "agent1".to_string(),
+                "Agent One".to_string(),
+                "sip:agent1@example.com".to_string(),
+                vec!["support".to_string()],
+                1,
+            )
+            .await
+            .unwrap();
+
+        // Idle agent with capacity: available.
+        registry
+            .update_presence("agent1", PresenceState::Idle)
+            .await
+            .unwrap();
+        assert_eq!(
+            QueueApp::agent_availability(&registry, "sip:agent1@example.com", "call-a").await,
+            Some(true)
+        );
+
+        // Reserved for OUR call (Idle → Ringing{call-a}): still dialable —
+        // the double-dial fix must not strand the call that reserved it.
+        registry
+            .update_presence(
+                "agent1",
+                PresenceState::Ringing {
+                    call_id: Some("call-a".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            QueueApp::agent_availability(&registry, "sip:agent1@example.com", "call-a").await,
+            Some(true),
+            "Ringing reserved for the same call must stay available"
+        );
+        assert_eq!(
+            QueueApp::agent_availability(&registry, "sip:agent1@example.com", "call-b").await,
+            Some(false),
+            "Ringing reserved for another call must be unavailable"
+        );
+
+        // Busy on another call: unavailable.
+        registry
+            .update_presence(
+                "agent1",
+                PresenceState::Busy {
+                    call_id: Some("call-b".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            QueueApp::agent_availability(&registry, "sip:agent1@example.com", "call-a").await,
+            Some(false)
+        );
+
+        // Unknown agent (not in registry, not resolvable by user part): the
+        // caller keeps the legacy dial behavior.
+        assert_eq!(
+            QueueApp::agent_availability(&registry, "sip:ghost@example.com", "call-a").await,
+            None
+        );
+        // Empty registry path: also None (no false negatives).
+        let empty = HookRecordingRegistry::new();
+        assert_eq!(
+            QueueApp::agent_availability(&empty, "sip:agent1@example.com", "call-a").await,
+            None
+        );
     }
 
     // ── Audio path resolution + action rules (online / offline scenarios) ──
@@ -2179,129 +2339,12 @@ mod tests {
 
     // ── skill-group lifecycle notify hooks ──────────────────────────────────
 
-    /// AgentRegistry double that delegates to `MemoryRegistry` and records the
-    /// skill-group lifecycle notify hooks.
-    struct RecordingRegistry {
-        inner: crate::call::app::agent_registry::memory::MemoryRegistry,
-        abandoned: std::sync::Mutex<Vec<(String, String, u64)>>,
-        timeouts: std::sync::Mutex<Vec<(String, String, u64)>>,
-        fallbacks: std::sync::Mutex<Vec<(String, String, String, String)>>,
-    }
-
-    impl RecordingRegistry {
-        fn new() -> Self {
-            Self {
-                inner: crate::call::app::agent_registry::memory::MemoryRegistry::new(),
-                abandoned: std::sync::Mutex::new(Vec::new()),
-                timeouts: std::sync::Mutex::new(Vec::new()),
-                fallbacks: std::sync::Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl AgentRegistry for RecordingRegistry {
-        async fn register(
-            &self,
-            agent_id: String,
-            display_name: String,
-            uri: String,
-            skills: Vec<String>,
-            max_concurrency: u32,
-        ) -> anyhow::Result<()> {
-            self.inner
-                .register(agent_id, display_name, uri, skills, max_concurrency)
-                .await
-        }
-
-        async fn unregister(&self, agent_id: &str) -> anyhow::Result<()> {
-            self.inner.unregister(agent_id).await
-        }
-
-        async fn get_agent(
-            &self,
-            agent_id: &str,
-        ) -> Option<crate::call::app::agent_registry::AgentRecord> {
-            self.inner.get_agent(agent_id).await
-        }
-
-        async fn list_agents(&self) -> Vec<crate::call::app::agent_registry::AgentRecord> {
-            self.inner.list_agents().await
-        }
-
-        async fn update_presence(
-            &self,
-            agent_id: &str,
-            new_state: crate::call::app::agent_registry::PresenceState,
-        ) -> anyhow::Result<()> {
-            self.inner.update_presence(agent_id, new_state).await
-        }
-
-        async fn start_call(&self, agent_id: &str) -> anyhow::Result<()> {
-            self.inner.start_call(agent_id).await
-        }
-
-        async fn end_call(&self, agent_id: &str, talk_time_secs: u64) -> anyhow::Result<()> {
-            self.inner.end_call(agent_id, talk_time_secs).await
-        }
-
-        async fn find_available_agents(
-            &self,
-            required_skills: &[String],
-        ) -> Vec<crate::call::app::agent_registry::AgentRecord> {
-            self.inner.find_available_agents(required_skills).await
-        }
-
-        async fn select_agent(
-            &self,
-            required_skills: &[String],
-            strategy: crate::call::app::agent_registry::RoutingStrategy,
-        ) -> Option<crate::call::app::agent_registry::AgentRecord> {
-            self.inner.select_agent(required_skills, strategy).await
-        }
-
-        async fn resolve_target(&self, target_uri: &str) -> Vec<String> {
-            self.inner.resolve_target(target_uri).await
-        }
-
-        async fn notify_call_abandoned(&self, call_id: &str, queue_id: &str, waited_secs: u64) {
-            self.abandoned.lock().unwrap().push((
-                call_id.to_string(),
-                queue_id.to_string(),
-                waited_secs,
-            ));
-        }
-
-        async fn notify_call_timeout(&self, call_id: &str, queue_id: &str, waited_secs: u64) {
-            self.timeouts.lock().unwrap().push((
-                call_id.to_string(),
-                queue_id.to_string(),
-                waited_secs,
-            ));
-        }
-
-        async fn notify_call_fallback(
-            &self,
-            call_id: &str,
-            queue_id: &str,
-            reason: &str,
-            action: &str,
-        ) {
-            self.fallbacks.lock().unwrap().push((
-                call_id.to_string(),
-                queue_id.to_string(),
-                reason.to_string(),
-                action.to_string(),
-            ));
-        }
-    }
-
     /// A skill-routed queue with no agents available must notify the dispatcher
     /// of the abandoned call and the executed fallback.
     #[tokio::test]
     async fn test_queue_skill_abandon_notifies_registry() {
         use std::sync::Arc;
-        let registry = Arc::new(RecordingRegistry::new());
+        let registry = Arc::new(HookRecordingRegistry::new());
         let mut config = build_simple_queue_config();
         config.skill_routing_enabled = true;
         config.agents = vec![];
@@ -2336,7 +2379,7 @@ mod tests {
     #[tokio::test]
     async fn test_queue_non_skill_routing_does_not_notify() {
         use std::sync::Arc;
-        let registry = Arc::new(RecordingRegistry::new());
+        let registry = Arc::new(HookRecordingRegistry::new());
         let mut config = build_simple_queue_config();
         config.skill_routing_enabled = false;
         config.agents = vec![];
@@ -2376,7 +2419,7 @@ mod tests {
         gw.set_session_event_sender(&sid, gws_tx);
         let gw = Arc::new(parking_lot::RwLock::new(gw));
 
-        let registry = Arc::new(RecordingRegistry::new());
+        let registry = Arc::new(HookRecordingRegistry::new());
         registry
             .inner
             .register(

@@ -19,14 +19,11 @@ use rustpbx::addons::cc::skill_group::CreateSkillGroupRequest;
 use rustpbx::call::VoicePrompts;
 use rustpbx::call::user::SipUser;
 use rustpbx::config::ProxyConfig;
-use rustpbx::proxy::locator::MemoryLocator;
 use rustpbx::proxy::proxy_call::session_hooks::{CallSessionContext, CallSessionHook};
 use rustpbx::proxy::routing::{
     MatchConditions, QueueDialMode, RouteAction, RouteQueueConfig, RouteQueueFallbackConfig,
     RouteQueueStrategyConfig, RouteQueueTargetConfig, RouteRule,
 };
-use rustpbx::proxy::server::SipServerBuilder;
-use rustpbx::proxy::user::MemoryUserBackend;
 use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
 use std::collections::HashMap;
@@ -35,9 +32,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
-use tokio_util::sync::CancellationToken;
 
-use crate::common::test_helpers::register_standard_modules;
+use crate::common::e2e_test_server::{E2eTestServer, E2eTestServerInject};
 use crate::common::test_ua::{
     TestUa, TestUaConfig, TestUaEvent, create_test_sdp, create_test_sdp_answer,
 };
@@ -246,31 +242,13 @@ async fn build_cc_adapter(bob_idle_first_secs: u64) -> Arc<CcAgentRegistryAdapte
 }
 
 struct TestHarness {
-    cancel_token: CancellationToken,
-    serve_task: tokio::task::JoinHandle<()>,
+    server: E2eTestServer,
     proxy_addr: std::net::SocketAddr,
     captures: Arc<Mutex<Vec<(String, Option<String>)>>>,
 }
 
 async fn start_server(port: u16, flavor: Flavor, bob_idle_first_secs: u64) -> Result<TestHarness> {
     let _ = tracing_subscriber::fmt().try_init();
-    let config = Arc::new(queue_proxy_config(port, flavor));
-
-    let user_backend = MemoryUserBackend::new(None);
-    let mut user_id = 1;
-    for username in ["bob", "alice", "caller1", "caller2", "caller3"] {
-        user_backend
-            .create_user(SipUser {
-                id: user_id,
-                username: username.to_string(),
-                password: Some("password".to_string()),
-                enabled: true,
-                realm: Some("127.0.0.1".to_string()),
-                ..Default::default()
-            })
-            .await?;
-        user_id += 1;
-    }
 
     let adapter = build_cc_adapter(bob_idle_first_secs).await;
     let captures: Arc<Mutex<Vec<(String, Option<String>)>>> = Arc::default();
@@ -278,27 +256,34 @@ async fn start_server(port: u16, flavor: Flavor, bob_idle_first_secs: u64) -> Re
         captures: captures.clone(),
     });
 
-    let cancel_token = CancellationToken::new();
-    let builder = register_standard_modules(
-        SipServerBuilder::new(config)
-            .with_user_backend(Box::new(user_backend))
-            .with_locator(Box::new(MemoryLocator::new()))
-            .with_cancel_token(cancel_token.clone())
-            .with_session_hook(hook),
-    )
-    .with_agent_registry(adapter);
+    let mut users = Vec::new();
+    for (idx, username) in ["bob", "alice", "caller1", "caller2", "caller3"]
+        .into_iter()
+        .enumerate()
+    {
+        users.push(SipUser {
+            id: (idx + 1) as u64,
+            username: username.to_string(),
+            password: Some("password".to_string()),
+            enabled: true,
+            realm: Some("127.0.0.1".to_string()),
+            ..Default::default()
+        });
+    }
 
-    let server = builder.build().await?;
-    let proxy_addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse()?;
-    let serve_task = tokio::spawn(async move {
-        let _ = server.serve().await;
-    });
-    sleep(Duration::from_millis(200)).await;
+    let server = E2eTestServer::start_with_inject(
+        queue_proxy_config(port, flavor),
+        E2eTestServerInject {
+            users,
+            session_hook: Some(hook),
+            agent_registry: Some(adapter),
+        },
+    )
+    .await?;
 
     Ok(TestHarness {
-        cancel_token,
-        serve_task,
-        proxy_addr,
+        proxy_addr: server.proxy_addr,
+        server,
         captures,
     })
 }
@@ -399,8 +384,7 @@ async fn shutdown(harness: TestHarness, uas: Vec<TestUa>) {
     for ua in uas {
         let _ = ua.stop();
     }
-    harness.cancel_token.cancel();
-    harness.serve_task.abort();
+    harness.server.stop();
 }
 
 // ───────────────────────────────────────────────────────────────────────────

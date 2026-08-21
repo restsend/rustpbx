@@ -2,21 +2,17 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rustpbx::call::user::SipUser;
 use rustpbx::config::ProxyConfig;
-use rustpbx::proxy::locator::MemoryLocator;
 use rustpbx::proxy::proxy_call::session_hooks::{CallSessionContext, CallSessionHook};
 use rustpbx::proxy::routing::{
     MatchConditions, RouteAction, RouteQueueConfig, RouteQueueStrategyConfig,
     RouteQueueTargetConfig, RouteRule,
 };
-use rustpbx::proxy::server::SipServerBuilder;
-use rustpbx::proxy::user::MemoryUserBackend;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
-use tokio_util::sync::CancellationToken;
 
-use crate::common::test_helpers::register_standard_modules;
+use crate::common::e2e_test_server::{E2eTestServer, E2eTestServerInject};
 use crate::common::test_ua::{TestUa, TestUaConfig, TestUaEvent};
 
 fn create_queue_proxy_config(port: u16) -> ProxyConfig {
@@ -85,55 +81,40 @@ impl CallSessionHook for QueueTestHook {
 
 #[tokio::test]
 async fn test_call_queue_routing_e2e() -> Result<()> {
-    let _ = tracing_subscriber::fmt::try_init();
+    let _ = tracing_subscriber::fmt().try_init();
 
-    let port = portpicker::pick_unused_port().unwrap_or(15060);
-    let config = Arc::new(create_queue_proxy_config(port));
-
-    let user_backend = MemoryUserBackend::new(None);
-    for u in [
-        SipUser {
-            id: 1,
-            username: "caller".to_string(),
-            password: Some("password".to_string()),
-            enabled: true,
-            realm: Some("127.0.0.1".to_string()),
-            ..Default::default()
-        },
-        SipUser {
-            id: 2,
-            username: "agent".to_string(),
-            password: Some("password".to_string()),
-            enabled: true,
-            realm: Some("127.0.0.1".to_string()),
-            ..Default::default()
-        },
-    ] {
-        user_backend.create_user(u).await?;
-    }
-
-    let locator = MemoryLocator::new();
-    let cancel_token = CancellationToken::new();
     let connected: Arc<Mutex<Vec<CallSessionContext>>> = Arc::new(Mutex::new(Vec::new()));
     let hook: Arc<dyn CallSessionHook> = Arc::new(QueueTestHook {
         connected: connected.clone(),
     });
 
-    let builder = register_standard_modules(
-        SipServerBuilder::new(config)
-            .with_user_backend(Box::new(user_backend))
-            .with_locator(Box::new(locator))
-            .with_cancel_token(cancel_token.clone())
-            .with_session_hook(hook),
-    );
-
-    let server = builder.build().await?;
-    let proxy_addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse()?;
-
-    let serve_task = tokio::spawn(async move {
-        let _ = server.serve().await;
-    });
-    sleep(Duration::from_millis(100)).await;
+    let server = E2eTestServer::start_with_inject(
+        create_queue_proxy_config(portpicker::pick_unused_port().unwrap_or(15060)),
+        E2eTestServerInject {
+            users: vec![
+                SipUser {
+                    id: 1,
+                    username: "caller".to_string(),
+                    password: Some("password".to_string()),
+                    enabled: true,
+                    realm: Some("127.0.0.1".to_string()),
+                    ..Default::default()
+                },
+                SipUser {
+                    id: 2,
+                    username: "agent".to_string(),
+                    password: Some("password".to_string()),
+                    enabled: true,
+                    realm: Some("127.0.0.1".to_string()),
+                    ..Default::default()
+                },
+            ],
+            session_hook: Some(hook),
+            agent_registry: None,
+        },
+    )
+    .await?;
+    let proxy_addr = server.proxy_addr;
 
     let mut agent = TestUa::new(TestUaConfig {
         webrtc: false,
@@ -210,7 +191,6 @@ async fn test_call_queue_routing_e2e() -> Result<()> {
         "callee should contain 'support'"
     );
 
-    cancel_token.cancel();
-    serve_task.abort();
+    server.stop();
     Ok(())
 }

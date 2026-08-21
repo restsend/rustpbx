@@ -34,6 +34,34 @@ use tracing::trace;
 use crate::dtmf::DtmfDetector;
 use crate::media_recorder::RecorderSender;
 
+/// Lock-free 128-bit payload-type bitmask (PT 0..=127), shared by the DTMF
+/// and recording-audio allowlists.
+struct PtMask([AtomicU64; 2]);
+
+impl PtMask {
+    fn new() -> Self {
+        Self([AtomicU64::new(0), AtomicU64::new(0)])
+    }
+
+    /// Replace the mask contents with `pts`.
+    fn set(&self, pts: &[u8]) {
+        let mut words = [0u64; 2];
+        for &p in pts {
+            words[(p as usize) >> 6] |= 1u64 << (p & 63);
+        }
+        self.0[0].store(words[0], Ordering::Relaxed);
+        self.0[1].store(words[1], Ordering::Relaxed);
+    }
+
+    /// Lock-free membership check.
+    #[inline]
+    fn contains(&self, pt: u8) -> bool {
+        let word = (pt as usize) >> 6;
+        let bit = 1u64 << (pt & 63);
+        self.0[word].load(Ordering::Relaxed) & bit != 0
+    }
+}
+
 /// Which direction of a leg's transport a packet belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PacketDirection {
@@ -90,7 +118,7 @@ pub struct IngressTap {
     /// Telephone-event payload types as a 128-bit bitmask (PT 0..=127), split
     /// across two u64 words. Set once after SDP negotiation; read lock-free on
     /// every packet so audio packets pay zero lock cost.
-    dtmf_pt_mask: [AtomicU64; 2],
+    dtmf_pt_mask: PtMask,
     dtmf_detector: Mutex<DtmfDetector>,
     dtmf_tx: broadcast::Sender<DtmfEvent>,
 
@@ -100,7 +128,7 @@ pub struct IngressTap {
     /// codec list and re-synced by `set_audio_payload_types` whenever a
     /// re-INVITE renegotiates the codec — a stale allowlist would silently
     /// drop every post-renegotiation audio packet from the recording.
-    audio_pt_mask: [AtomicU64; 2],
+    audio_pt_mask: PtMask,
     /// Sender for the call-scoped recording task. Recording-enabled calls
     /// supply it when the caller leg is constructed; it then remains immutable
     /// for the tap's lifetime.
@@ -123,10 +151,10 @@ impl IngressTap {
             track_ingress_ssrc_pts: AtomicBool::new(true),
             last_ingress_ssrc_pt: AtomicU64::new(u64::MAX),
             ingress_ssrc_pts: DashMap::new(),
-            dtmf_pt_mask: [AtomicU64::new(0), AtomicU64::new(0)],
+            dtmf_pt_mask: PtMask::new(),
             dtmf_detector: Mutex::new(DtmfDetector::default()),
             dtmf_tx,
-            audio_pt_mask: [AtomicU64::new(0), AtomicU64::new(0)],
+            audio_pt_mask: PtMask::new(),
             recorder_sender,
         });
         tap.set_audio_payload_types(audio_payload_types);
@@ -143,26 +171,14 @@ impl IngressTap {
     /// Set the telephone-event payload type(s) negotiated for this leg.
     /// Called once after SDP negotiation (e.g. from the negotiated leg profile).
     pub fn set_dtmf_payload_types(&self, pts: Vec<u8>) {
-        let mut lo = 0u64;
-        let mut hi = 0u64;
-        for p in pts {
-            if p < 64 {
-                lo |= 1u64 << p;
-            } else {
-                hi |= 1u64 << (p - 64);
-            }
-        }
-        self.dtmf_pt_mask[0].store(lo, Ordering::Relaxed);
-        self.dtmf_pt_mask[1].store(hi, Ordering::Relaxed);
+        self.dtmf_pt_mask.set(&pts);
     }
 
     /// Lock-free telephone-event check: is `pt` one of the negotiated DTMF
     /// payload types?
     #[inline]
     fn is_dtmf_payload_type(&self, pt: u8) -> bool {
-        let word = (pt as usize) >> 6;
-        let bit = 1u64 << (pt & 63);
-        self.dtmf_pt_mask[word].load(Ordering::Relaxed) & bit != 0
+        self.dtmf_pt_mask.contains(pt)
     }
 
     /// Re-sync the recording audio allowlist. Called when a re-INVITE
@@ -170,26 +186,14 @@ impl IngressTap {
     /// pre-renegotiation payload types and every packet sent/received under
     /// the new codec is excluded from the call recording.
     pub fn set_audio_payload_types(&self, pts: Vec<u8>) {
-        let mut lo = 0u64;
-        let mut hi = 0u64;
-        for p in pts {
-            if p < 64 {
-                lo |= 1u64 << p;
-            } else {
-                hi |= 1u64 << (p - 64);
-            }
-        }
-        self.audio_pt_mask[0].store(lo, Ordering::Relaxed);
-        self.audio_pt_mask[1].store(hi, Ordering::Relaxed);
+        self.audio_pt_mask.set(&pts);
     }
 
     /// Lock-free audio-codec check: is `pt` one of the allowlisted audio
     /// payload types?
     #[inline]
     fn is_audio_payload_type(&self, pt: u8) -> bool {
-        let word = (pt as usize) >> 6;
-        let bit = 1u64 << (pt & 63);
-        self.audio_pt_mask[word].load(Ordering::Relaxed) & bit != 0
+        self.audio_pt_mask.contains(pt)
     }
 
     /// Subscribe to deduplicated ingress DTMF events.

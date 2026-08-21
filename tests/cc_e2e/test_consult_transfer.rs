@@ -1,11 +1,19 @@
-//! BC → ABC → AC E2E Test
+//! BC → ABC consult-transfer test (partially in-process).
 //!
-//! Tests the complete consultative transfer flow:
+//! Phases 1–2 are real SIP: A calls B, B consults C, both bridged through a
+//! real in-process `SipServer`. Phase 3 drives `ConsultTransferManager`
+//! directly on a DETACHED `CcAddonState` (not wired to the live sessions),
+//! so the SIP REFER / re-INVITE transfer signaling and the post-merge media
+//! path are NOT exercised here — this covers the transfer-manager state
+//! machine only. SIP-level transfer coverage lives in
+//! `tests/proxy_e2e/test_inbound_refer.rs` and the Python e2e suite.
+//!
+//! Flow:
 //! 1. A calls B (established)
 //! 2. B holds A, calls C (BC consulting)
-//! 3. Merge to ABC conference
+//! 3. Merge to ABC conference (state machine)
 //! 4. B exits
-//! 5. A/C continue in P2P (downgrade from conference)
+//! 5. A/C legs tear down cleanly (no wedged sessions)
 
 use crate::common::e2e_test_server::E2eTestServer;
 use crate::common::test_ua::TestUaEvent;
@@ -187,7 +195,22 @@ async fn test_consult_transfer_bc_to_abc_to_ac() {
             .merge_to_conference(&transfer_id)
             .await
             .expect("merge to conference failed");
+        assert!(!conf_id.is_empty(), "conference id must be assigned");
         info!("Conference created: {}", conf_id);
+
+        // The manager must have recorded the transfer as Completed with the
+        // conference it created (A + B-C legs joined).
+        let state = tm
+            .get_state(&transfer_id)
+            .expect("transfer must be tracked after merge");
+        assert!(
+            matches!(
+                state,
+                rustpbx::addons::cc::transfer::TransferState::Completed { conf_id: cid, .. }
+                    if *cid == conf_id
+            ),
+            "transfer must complete after merge_to_conference, got {state:?}"
+        );
 
         info!("=== Phase 3 complete: ABC conference established ===");
     }
@@ -210,21 +233,38 @@ async fn test_consult_transfer_bc_to_abc_to_ac() {
 
     sleep(Duration::from_millis(500)).await;
 
-    // ========== Phase 5: Verify A/C continue ==========
-    info!("=== Phase 5: Verify A/C continue ===");
-
-    // Check that Alice and Charlie still have active calls
-    let calls = server.get_active_calls();
-    info!("Active calls after B exit: {}", calls.len());
-
-    // In a real implementation, we'd verify the media path
-    // For this test, we at least verify the system didn't crash
+    // ========== Phase 5: legs tear down cleanly ==========
+    info!("=== Phase 5: legs tear down cleanly ===");
 
     // Cleanup
     if let Some(ref id) = charlie_dialog_id {
         charlie.hangup(id).await.ok();
     }
     alice.hangup(&alice_dialog_id).await.ok();
+
+    // Regression guard: after every party hangs up, the server's active-call
+    // registry must drain — a wedged session here is exactly the
+    // hangup/ownership leak class this week's fixes target.
+    let drained = {
+        let mut drained = false;
+        for _ in 0..50 {
+            if server.get_active_calls().is_empty() {
+                drained = true;
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+        drained
+    };
+    assert!(
+        drained,
+        "active-call registry must drain after all parties hang up, still active: {:?}",
+        server
+            .get_active_calls()
+            .iter()
+            .map(|c| c.session_id.clone())
+            .collect::<Vec<_>>()
+    );
 
     server.stop();
     info!("=== Test complete ===");

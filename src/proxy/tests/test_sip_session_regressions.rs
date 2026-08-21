@@ -2453,3 +2453,121 @@ async fn test_resolve_hold_music_priority_chain() {
         Some(crate::call::domain::MediaSource::Url { .. })
     ));
 }
+
+// ── queue-enricher INVITE header merge ──
+
+#[test]
+fn merge_leg_invite_headers_caller_headers_take_precedence() {
+    use rsipstack::sip::Header;
+    let caller = vec![
+        Header::Other("User-to-User".into(), "root-1;purpose=call-center".into()),
+        Header::Other(
+            "Call-Info".into(),
+            "<http://desk/cc>;purpose=call-center".into(),
+        ),
+    ];
+    let location = vec![Header::Other(
+        "Call-Info".into(),
+        "<http://legacy/location>".into(),
+    )];
+
+    let merged =
+        SipSession::merge_leg_invite_headers(caller.clone(), Some(location)).expect("merged");
+    // Caller headers come first — the enricher's values win duplicate-name
+    // resolution; the location header is still carried afterwards.
+    assert_eq!(merged.len(), 3);
+    assert_eq!(merged[0].value(), caller[0].value());
+    assert_eq!(merged[1].value(), caller[1].value());
+    assert_eq!(merged[2].value(), "<http://legacy/location>");
+}
+
+#[test]
+fn merge_leg_invite_headers_empty_caller_keeps_location_set() {
+    use rsipstack::sip::Header;
+    let location = vec![Header::Other("X-Loc".into(), "1".into())];
+    let merged = SipSession::merge_leg_invite_headers(Vec::new(), Some(location.clone()));
+    assert_eq!(merged, Some(location));
+
+    // No caller headers and no location headers → still None.
+    assert_eq!(SipSession::merge_leg_invite_headers(Vec::new(), None), None);
+}
+
+#[test]
+fn merge_leg_invite_headers_no_location_headers() {
+    use rsipstack::sip::Header;
+    let caller = vec![Header::Other("X-Enrich".into(), "1".into())];
+    let merged = SipSession::merge_leg_invite_headers(caller.clone(), None).expect("merged");
+    assert_eq!(merged, caller);
+}
+
+// ── IVR start-failure fallback guards ──
+
+/// With no `[proxy.ivr_fallback]` configured the original start error must
+/// surface unchanged — no silent swallowing.
+#[tokio::test]
+async fn ivr_start_failure_without_fallback_config_returns_original_error() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let config = ProxyConfig::default();
+    let session = build_session_with_config(dialplan, config).await;
+
+    let err = session
+        .try_ivr_fallback_after_start_failure(
+            anyhow::anyhow!("IVR 'sales' failed to start"),
+            "sales",
+            &HashMap::new(),
+        )
+        .await
+        .expect_err("unconfigured fallback must return the original error");
+    assert!(
+        err.to_string().contains("sales"),
+        "original error must surface, got {err}"
+    );
+}
+
+/// A retry flagged with `ivr_fallback_used=1` must not fall back again —
+/// this guard is what prevents fallback loops between two broken IVRs.
+#[tokio::test]
+async fn ivr_start_failure_with_used_flag_does_not_fallback_again() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let mut config = ProxyConfig::default();
+    config.ivr_fallback = Some(crate::config::IvrFallbackConfig {
+        default: Some("fallback-ivr".to_string()),
+        rules: vec![],
+    });
+    let session = build_session_with_config(dialplan, config).await;
+
+    let mut query = HashMap::new();
+    query.insert("ivr_fallback_used".to_string(), "1".to_string());
+    let err = session
+        .try_ivr_fallback_after_start_failure(
+            anyhow::anyhow!("IVR 'fallback-ivr' failed again"),
+            "fallback-ivr",
+            &query,
+        )
+        .await
+        .expect_err("used flag must short-circuit the fallback");
+    assert!(err.to_string().contains("failed again"));
+}
+
+/// When the resolved fallback target is the very IVR that just failed,
+/// retrying would loop forever — the original error must surface.
+#[tokio::test]
+async fn ivr_start_failure_with_same_target_does_not_retry() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let mut config = ProxyConfig::default();
+    config.ivr_fallback = Some(crate::config::IvrFallbackConfig {
+        default: Some("broken-ivr".to_string()),
+        rules: vec![],
+    });
+    let session = build_session_with_config(dialplan, config).await;
+
+    let err = session
+        .try_ivr_fallback_after_start_failure(
+            anyhow::anyhow!("IVR 'broken-ivr' failed to start"),
+            "broken-ivr",
+            &HashMap::new(),
+        )
+        .await
+        .expect_err("same-target fallback must not retry");
+    assert!(err.to_string().contains("broken-ivr"));
+}

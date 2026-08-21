@@ -10,6 +10,92 @@ mod tests {
     use std::sync::Arc;
     use tokio::net::TcpListener;
 
+    struct StubRouteInvite;
+    #[async_trait::async_trait]
+    impl rustpbx::call::RouteInvite for StubRouteInvite {
+        async fn route_invite(
+            &self,
+            _: rsipstack::dialog::invitation::InviteOption,
+            _: &rsipstack::sip::Request,
+            _: &rustpbx::call::DialDirection,
+            _: &TransactionCookie,
+        ) -> anyhow::Result<rustpbx::config::RouteResult> {
+            Ok(rustpbx::config::RouteResult::NotHandled(
+                rsipstack::dialog::invitation::InviteOption::default(),
+                None,
+            ))
+        }
+        async fn preview_route(
+            &self,
+            _: rsipstack::dialog::invitation::InviteOption,
+            _: &rsipstack::sip::Request,
+            _: &rustpbx::call::DialDirection,
+            _: &TransactionCookie,
+        ) -> anyhow::Result<rustpbx::config::RouteResult> {
+            Ok(rustpbx::config::RouteResult::NotHandled(
+                rsipstack::dialog::invitation::InviteOption::default(),
+                None,
+            ))
+        }
+    }
+
+    /// Resolve a routing decision for a synthetic INVITE against a stub
+    /// route server that always replies with `response`.
+    async fn resolve_with_response(
+        response: serde_json::Value,
+    ) -> Result<rustpbx::call::Dialplan, rustpbx::proxy::call::RouteError> {
+        let app = Router::new().route(
+            "/route",
+            post(move || async move { Json(response.clone()) }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        rustpbx::utils::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let config = HttpRouterConfig {
+            url: format!("http://{}/route", addr),
+            headers: None,
+            fallback_to_static: false,
+            timeout_ms: Some(1000),
+        };
+        let router = HttpCallRouter::new(
+            config,
+            ArcSwap::new(Arc::new(RtpConfig::default())),
+            ArcSwap::new(Arc::new(MediaProxyMode::None)),
+            true,
+            None,
+        );
+
+        let request = rsipstack::sip::Request {
+            method: rsipstack::sip::Method::Invite,
+            uri: "sip:target@example.com".try_into().unwrap(),
+            headers: vec![
+                rsipstack::sip::Header::From("sip:caller@example.com".into()),
+                rsipstack::sip::Header::To("sip:target@example.com".into()),
+                rsipstack::sip::Header::CallId("record-start-at-test".into()),
+            ]
+            .into(),
+            version: rsipstack::sip::Version::V2,
+            body: vec![],
+        };
+        let caller = SipUser {
+            username: "caller".to_string(),
+            realm: Some("example.com".to_string()),
+            from: Some("sip:caller@example.com".try_into().unwrap()),
+            ..Default::default()
+        };
+        router
+            .resolve(
+                &request,
+                Box::new(StubRouteInvite),
+                &caller,
+                &TransactionCookie::default(),
+            )
+            .await
+    }
+
     #[tokio::test]
     async fn test_http_router_forward() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
@@ -221,6 +307,85 @@ mod tests {
             dialplan.recording_policy.as_ref().and_then(|p| p.enabled),
             Some(false)
         );
+    }
+
+    /// `record_start_at: "answer"` must flow into the per-call recording
+    /// policy as `RecordingAutoStartAt::Answer` — recording then waits for
+    /// the final 200 OK instead of starting on early media.
+    #[tokio::test]
+    async fn test_http_router_record_start_at_answer_merges_into_policy() {
+        let dialplan = resolve_with_response(json!({
+            "action": "forward",
+            "targets": ["sip:1001@127.0.0.1"],
+            "record": true,
+            "record_start_at": "answer"
+        }))
+        .await
+        .unwrap();
+
+        let policy = dialplan
+            .recording_policy
+            .expect("record=true must set a policy");
+        assert_eq!(policy.enabled, Some(true));
+        assert_eq!(
+            policy.auto_start_at,
+            Some(rustpbx::config::RecordingAutoStartAt::Answer)
+        );
+    }
+
+    /// `record_start_at: "media"` must parse to the early-media start point.
+    #[tokio::test]
+    async fn test_http_router_record_start_at_media_merges_into_policy() {
+        let dialplan = resolve_with_response(json!({
+            "action": "forward",
+            "targets": ["sip:1001@127.0.0.1"],
+            "record": true,
+            "record_start_at": "media"
+        }))
+        .await
+        .unwrap();
+
+        let policy = dialplan
+            .recording_policy
+            .expect("record=true must set a policy");
+        assert_eq!(
+            policy.auto_start_at,
+            Some(rustpbx::config::RecordingAutoStartAt::Media)
+        );
+    }
+
+    /// Omitting `record_start_at` leaves `auto_start_at` unset so the call
+    /// inherits the global recording policy's start point.
+    #[tokio::test]
+    async fn test_http_router_record_without_start_at_inherits_global() {
+        let dialplan = resolve_with_response(json!({
+            "action": "forward",
+            "targets": ["sip:1001@127.0.0.1"],
+            "record": true
+        }))
+        .await
+        .unwrap();
+
+        let policy = dialplan
+            .recording_policy
+            .expect("record=true must set a policy");
+        assert_eq!(policy.enabled, Some(true));
+        assert_eq!(policy.auto_start_at, None);
+    }
+
+    /// An unknown `record_start_at` value must fail deserialization — the
+    /// route cannot silently fall back to a different recording point.
+    #[tokio::test]
+    async fn test_http_router_record_start_at_invalid_value_rejected() {
+        let result = resolve_with_response(json!({
+            "action": "forward",
+            "targets": ["sip:1001@127.0.0.1"],
+            "record": true,
+            "record_start_at": "whenever"
+        }))
+        .await;
+
+        assert!(result.is_err(), "invalid record_start_at must not resolve");
     }
 
     #[tokio::test]

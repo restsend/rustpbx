@@ -424,4 +424,36 @@ mod tests {
         assert!(url.contains("language=multi"));
         assert!(url.contains("interim_results=true"));
     }
+
+    #[test]
+    fn builds_default_listen_url_without_model_or_language() {
+        let cfg = RemoteTranscriptConfig::default();
+        let url = cfg.effective_url();
+        assert!(url.starts_with("wss://api.deepgram.com/v1/listen?"));
+        assert!(!url.contains("model="));
+        assert!(!url.contains("language="));
+        // A custom base URL must be honored (trailing slash trimmed).
+        let cfg = RemoteTranscriptConfig {
+            url: Some("wss://stt.example.com/".into()),
+            ..Default::default()
+        };
+        assert!(
+            cfg.effective_url()
+                .starts_with("wss://stt.example.com/v1/listen?")
+        );
+    }
+
+    /// `is_runnable` is the exact gate `start_live_transcription` checks
+    /// before failing with "missing api_key" (surfaced to subscribers as a
+    /// TranscriptError / SSE 503): a configured key makes it runnable.
+    #[test]
+    fn is_runnable_with_configured_api_key() {
+        let cfg = RemoteTranscriptConfig {
+            api_key: Some("cfg-key".into()),
+            ..Default::default()
+        };
+        assert!(cfg.is_runnable());
+        // The key the provider will use is the configured one, not the env.
+        assert_eq!(cfg.effective_api_key().as_deref(), Some("cfg-key"));
+    }
 }

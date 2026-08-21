@@ -109,8 +109,9 @@ async def test_p2p_cancel_during_ringing(pbx, sipbot_pool, rwi):
     )
     assert resp.get("status") == "success", resp
     await rwi.wait_for_event("call_ringing", timeout=10)
+    # The call is provably ringing — hangup must succeed.
     resp = await rwi.hangup(call_id)
-    assert resp.get("status") in ("success", "error"), resp
+    assert resp.get("status") == "success", resp
 
 
 # ---------------------------------------------------------------------------
@@ -127,12 +128,13 @@ async def test_p2p_hold_resume_via_rwi(pbx, sipbot_pool, rwi):
     resp = await rwi.originate(call_id, f"sip:1002@{pbx.sip_addr}", "sip:p2p@pbx", "default")
     assert resp.get("status") == "success", resp
     await rwi.wait_for_event("call_answered", timeout=15)
+    # The call is answered — hold/unhold/hangup must all succeed; accepting
+    # "error" here made the test unfalsifiable.
     hold = await rwi.hold(call_id)
-    assert hold.get("status") in ("success", "error"), hold
-    if hold.get("status") == "success":
-        await rwi.wait_for_event("media_hold_started", timeout=10)
-        assert (await rwi.unhold(call_id)).get("status") in ("success", "error")
-    assert (await rwi.hangup(call_id)).get("status") in ("success", "error")
+    assert hold.get("status") == "success", hold
+    await rwi.wait_for_event("media_hold_started", timeout=10)
+    assert (await rwi.unhold(call_id)).get("status") == "success"
+    assert (await rwi.hangup(call_id)).get("status") == "success"
 
 
 # ---------------------------------------------------------------------------

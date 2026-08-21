@@ -1063,6 +1063,23 @@ a=rtpmap:96 VP8/90000\r\n";
         assert_eq!(bundle_caps[1].payload_type, 98);
     }
 
+    /// When every dynamic video payload type (96..=127) is already occupied
+    /// on the BUNDLE transport, the remap must fail loudly instead of
+    /// silently producing a colliding payload type.
+    #[test]
+    fn remap_bundle_video_payload_types_errors_when_dynamic_range_exhausted() {
+        let mut caps = vec![video_cap(96, "H264", None, &[])];
+        let err = MediaNegotiator::remap_bundle_video_payload_types(&mut caps, 96..=127)
+            .expect_err("exhausted dynamic range must fail");
+        assert!(
+            err.to_string()
+                .contains("no free dynamic video payload type"),
+            "unexpected error: {err}"
+        );
+        // The original PT is untouched when the remap bails out.
+        assert_eq!(caps[0].payload_type, 96);
+    }
+
     fn video_sdp() -> &'static str {
         "v=0\r\n\
             o=- 1 1 IN IP4 127.0.0.1\r\n\

@@ -974,7 +974,7 @@ impl SipSession {
     }
 
     /// When starting a named IVR fails, try once more with `[proxy.ivr_fallback]`.
-    async fn try_ivr_fallback_after_start_failure(
+    pub(crate) async fn try_ivr_fallback_after_start_failure(
         &self,
         original: anyhow::Error,
         failed_ivr: &str,

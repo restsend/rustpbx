@@ -26,6 +26,7 @@ use crate::call::{
     VoicePrompts,
 };
 use crate::callrecord::CallRecordHangupReason;
+use crate::models::call_record::extract_sip_username;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -300,7 +301,7 @@ pub struct QueueApp {
     last_comfort_played: Option<Instant>,
     // ── Escalation ──
     /// Skill groups already escalated (to avoid duplicates).
-    escalated_groups: Vec<String>,
+    pub(crate) escalated_groups: Vec<String>,
     /// RWI gateway captured from the application context (for queue lifecycle
     /// webhook events). Captured in `on_enter` so that `on_exit` (which has no
     /// context) can still emit abandon events.
@@ -565,7 +566,7 @@ impl QueueApp {
     /// reservation moves the primary agent `Idle → Ringing`). Returns `None`
     /// when availability cannot be determined (no registry attached, or the
     /// agent cannot be identified) so callers keep the legacy dial behavior.
-    async fn agent_availability(
+    pub(crate) async fn agent_availability(
         registry: &dyn AgentRegistry,
         uri: &str,
         own_call_id: &str,
@@ -575,12 +576,7 @@ impl QueueApp {
             .iter()
             .find(|a| a.uri == uri)
             .map(|a| a.agent_id.clone())
-            .or_else(|| {
-                uri.strip_prefix("sip:")
-                    .and_then(|s| s.split('@').next())
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-            })?;
+            .or_else(|| extract_sip_username(uri))?;
         let agent = registry.get_agent(&agent_id).await?;
         if agent.has_capacity() {
             return Some(true);
@@ -623,16 +619,41 @@ impl QueueApp {
         }
     }
 
+    /// Effective voice prompts: the escalation plan overrides the queue config.
+    fn prompts(&self) -> Option<&VoicePrompts> {
+        self.plan
+            .voice_prompts
+            .as_ref()
+            .or(self.config.voice_prompts.as_ref())
+    }
+
+    /// Answer the call if not already answered and a busy prompt is configured
+    /// (playing it requires a media path).
+    async fn answer_if_busy_prompt(&mut self, ctrl: &mut CallController) -> anyhow::Result<()> {
+        if !self.answered
+            && self
+                .prompts()
+                .and_then(|p| p.busy_prompt.as_ref())
+                .is_some()
+        {
+            ctrl.answer().await?;
+            self.answered = true;
+        }
+        Ok(())
+    }
+
+    /// Arm the per-agent ring timeout (default 20s).
+    fn arm_ring_timeout(&self, ctrl: &mut CallController) {
+        let ring_timeout = self.config.ring_timeout.unwrap_or(Duration::from_secs(20));
+        ctrl.set_timeout("agent_ring_timeout", ring_timeout);
+    }
+
     /// Announce queue position.
     ///
     /// Plays `voice_prompts.position_prompt` if configured; otherwise emits a
     /// warning so operators know the announcement was requested but unconfigured.
     async fn announce_position(&self, ctrl: &mut CallController) -> anyhow::Result<()> {
-        let prompts = self
-            .plan
-            .voice_prompts
-            .as_ref()
-            .or(self.config.voice_prompts.as_ref());
+        let prompts = self.prompts();
 
         if let Some(path) = prompts.and_then(|p| p.position_prompt.as_ref()) {
             debug!(file = %path, "Queue: playing position announcement");
@@ -690,44 +711,50 @@ impl QueueApp {
                 return Ok(AppAction::Continue);
             }
 
-            return match reason {
-                AgentUnavailableReason::Busy => self.play_busy_and_then_fallback(ctrl).await,
-                AgentUnavailableReason::NoAnswer => {
-                    self.play_no_answer_and_then_fallback(ctrl).await
-                }
-            };
+            return self
+                .play_unavailable_prompt_and_then_fallback(ctrl, reason)
+                .await;
         }
         self.current_agent_idx += 1;
         self.dial_attempts += 1;
 
         let agents = self.get_agents();
         if self.current_agent_idx >= agents.len() {
-            return match reason {
-                AgentUnavailableReason::Busy => self.play_busy_and_then_fallback(ctrl).await,
-                AgentUnavailableReason::NoAnswer => {
-                    self.play_no_answer_and_then_fallback(ctrl).await
-                }
-            };
+            return self
+                .play_unavailable_prompt_and_then_fallback(ctrl, reason)
+                .await;
         }
 
         // More agents remaining — dial the next one immediately
         self.dial_next_agent(ctrl).await
     }
 
-    /// Record abandoned call, then play busy prompt (if configured) before fallback.
-    async fn play_busy_and_then_fallback(
+    /// Record abandoned call, then play the busy/no-answer prompt (if
+    /// configured for the given reason) before fallback.
+    async fn play_unavailable_prompt_and_then_fallback(
         &mut self,
         ctrl: &mut CallController,
+        reason: AgentUnavailableReason,
     ) -> anyhow::Result<AppAction> {
         let queue_id = self.config.name.clone();
         let wait_secs = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        let (abandon_log, prompt_log) = match reason {
+            AgentUnavailableReason::Busy => (
+                "Queue: call abandoned, playing busy prompt or fallback",
+                "Queue: playing busy prompt before fallback",
+            ),
+            AgentUnavailableReason::NoAnswer => (
+                "Queue: call abandoned, playing no-answer prompt or fallback",
+                "Queue: playing no-answer prompt before fallback",
+            ),
+        };
 
         self.abandoned_recorded = true;
 
         info!(
             queue = %queue_id,
             wait_secs,
-            "Queue: call abandoned, playing busy prompt or fallback"
+            "{abandon_log}"
         );
 
         // Notify the skill-group dispatcher that the call was abandoned.
@@ -736,62 +763,28 @@ impl QueueApp {
         // Emit RWI queue lifecycle event: the call abandoned the queue.
         self.emit_rwi(&crate::rwi::event::QueueLeft {
             call_id: self.call_id.clone(),
-            queue_id: queue_id.clone(),
+            queue_id,
             reason: Some("abandoned".to_string()),
         });
 
-        let prompts = self
-            .plan
-            .voice_prompts
-            .as_ref()
-            .or(self.config.voice_prompts.as_ref());
-        if let Some(path) = prompts.and_then(|p| p.busy_prompt.as_ref()) {
-            info!("Queue: playing busy prompt before fallback");
-            self.state = QueueState::PlayingBusyPrompt;
+        let prompts = self.prompts();
+        let prompt_path = match reason {
+            AgentUnavailableReason::Busy => prompts.and_then(|p| p.busy_prompt.as_ref()),
+            AgentUnavailableReason::NoAnswer => prompts.and_then(|p| p.no_answer_prompt.as_ref()),
+        };
+        if let Some(path) = prompt_path {
+            info!("{prompt_log}");
             let token = ctrl.play_audio(path.clone(), false).await?;
-            self.busy_token = Some(token);
-            return Ok(AppAction::Continue);
-        }
-
-        self.play_final_destination_prompt_or_fallback(ctrl).await
-    }
-
-    /// Record abandoned call, then play no-answer prompt (if configured) before fallback.
-    async fn play_no_answer_and_then_fallback(
-        &mut self,
-        ctrl: &mut CallController,
-    ) -> anyhow::Result<AppAction> {
-        let queue_id = self.config.name.clone();
-        let wait_secs = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
-
-        self.abandoned_recorded = true;
-
-        info!(
-            queue = %queue_id,
-            wait_secs,
-            "Queue: call abandoned, playing no-answer prompt or fallback"
-        );
-
-        // Notify the skill-group dispatcher that the call was abandoned.
-        self.notify_abandoned(wait_secs).await;
-
-        // Emit RWI queue lifecycle event: the call abandoned the queue.
-        self.emit_rwi(&crate::rwi::event::QueueLeft {
-            call_id: self.call_id.clone(),
-            queue_id: queue_id.clone(),
-            reason: Some("abandoned".to_string()),
-        });
-
-        let prompts = self
-            .plan
-            .voice_prompts
-            .as_ref()
-            .or(self.config.voice_prompts.as_ref());
-        if let Some(path) = prompts.and_then(|p| p.no_answer_prompt.as_ref()) {
-            info!("Queue: playing no-answer prompt before fallback");
-            self.state = QueueState::PlayingNoAnswerPrompt;
-            let token = ctrl.play_audio(path.clone(), false).await?;
-            self.no_answer_token = Some(token);
+            match reason {
+                AgentUnavailableReason::Busy => {
+                    self.state = QueueState::PlayingBusyPrompt;
+                    self.busy_token = Some(token);
+                }
+                AgentUnavailableReason::NoAnswer => {
+                    self.state = QueueState::PlayingNoAnswerPrompt;
+                    self.no_answer_token = Some(token);
+                }
+            }
             return Ok(AppAction::Continue);
         }
 
@@ -804,12 +797,10 @@ impl QueueApp {
         &mut self,
         ctrl: &mut CallController,
     ) -> anyhow::Result<AppAction> {
-        let prompts = self
-            .plan
-            .voice_prompts
-            .as_ref()
-            .or(self.config.voice_prompts.as_ref());
-        if let Some(path) = prompts.and_then(|p| p.final_destination_prompt.as_ref()) {
+        let final_destination_prompt = self
+            .prompts()
+            .and_then(|p| p.final_destination_prompt.clone());
+        if let Some(path) = final_destination_prompt {
             info!("Queue: playing final destination prompt before fallback");
             self.state = QueueState::PlayingFinalPrompt;
             let token = ctrl.play_audio(path.clone(), false).await?;
@@ -824,33 +815,30 @@ impl QueueApp {
         let now = Instant::now();
 
         // 1. Comfort prompts
-        let prompts = self
-            .plan
-            .voice_prompts
-            .as_ref()
-            .or(self.config.voice_prompts.as_ref());
-        if let Some(comfort_list) = prompts.map(|p| &p.comfort_prompts) {
-            if !comfort_list.is_empty() {
-                let elapsed = self.last_comfort_played.map(|t| now.duration_since(t));
-                let idx = self.comfort_index % comfort_list.len();
-                let prompt = &comfort_list[idx];
-                let should_play = match elapsed {
-                    Some(d) => d.as_secs() >= prompt.interval_secs as u64,
-                    None => true, // play first comfort immediately after hold loop
-                };
-                if should_play {
-                    debug!(
-                        comfort_idx = idx,
-                        file = %prompt.audio_file,
-                        "Queue: playing comfort prompt"
-                    );
-                    self.state = QueueState::PlayingComfortPrompt;
-                    let token = ctrl.play_audio(prompt.audio_file.clone(), false).await?;
-                    self.comfort_token = Some(token);
-                    self.comfort_index += 1;
-                    self.last_comfort_played = Some(now);
-                    return Ok(());
-                }
+        let comfort_prompts = self
+            .prompts()
+            .map(|p| p.comfort_prompts.clone())
+            .unwrap_or_default();
+        if !comfort_prompts.is_empty() {
+            let elapsed = self.last_comfort_played.map(|t| now.duration_since(t));
+            let idx = self.comfort_index % comfort_prompts.len();
+            let prompt = &comfort_prompts[idx];
+            let should_play = match elapsed {
+                Some(d) => d.as_secs() >= prompt.interval_secs as u64,
+                None => true, // play first comfort immediately after hold loop
+            };
+            if should_play {
+                debug!(
+                    comfort_idx = idx,
+                    file = %prompt.audio_file,
+                    "Queue: playing comfort prompt"
+                );
+                self.state = QueueState::PlayingComfortPrompt;
+                let token = ctrl.play_audio(prompt.audio_file.clone(), false).await?;
+                self.comfort_token = Some(token);
+                self.comfort_index += 1;
+                self.last_comfort_played = Some(now);
+                return Ok(());
             }
         }
 
@@ -887,7 +875,9 @@ impl QueueApp {
         let agents = self.get_agents();
         if self.current_agent_idx >= agents.len() {
             warn!("Queue: no more agents to dial");
-            return self.play_busy_and_then_fallback(ctrl).await;
+            return self
+                .play_unavailable_prompt_and_then_fallback(ctrl, AgentUnavailableReason::Busy)
+                .await;
         }
         // Dial by addr-spec (RFC 3261 Request-URI). `contact_raw` is the raw
         // Contact header value (a `contact-addr` with `<...>` and contact-params)
@@ -919,13 +909,17 @@ impl QueueApp {
                 self.current_agent_idx += 1;
                 self.dial_attempts += 1;
                 if self.current_agent_idx >= self.get_agents().len() {
-                    return self.play_busy_and_then_fallback(ctrl).await;
+                    return self
+                        .play_unavailable_prompt_and_then_fallback(
+                            ctrl,
+                            AgentUnavailableReason::Busy,
+                        )
+                        .await;
                 }
                 return Box::pin(self.dial_next_agent(ctrl)).await;
             }
         }
-        let ring_timeout = self.config.ring_timeout.unwrap_or(Duration::from_secs(20));
-        ctrl.set_timeout("agent_ring_timeout", ring_timeout);
+        self.arm_ring_timeout(ctrl);
         self.state = QueueState::DialingAgents {
             attempt: self.dial_attempts,
         };
@@ -940,7 +934,7 @@ impl QueueApp {
     /// `[1s, 10s]` so short thresholds fire promptly while long thresholds
     /// degrade to the historical 10s polling cadence. Returns `None` when
     /// every step has already triggered — the timer then stops re-arming.
-    fn next_escalation_check_delay(&self) -> Option<Duration> {
+    pub(crate) fn next_escalation_check_delay(&self) -> Option<Duration> {
         let wait = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
         let next = self
             .config
@@ -960,7 +954,7 @@ impl QueueApp {
         }
         let wait_secs = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
 
-        for step in &self.config.escalation_timeline {
+        for step in self.config.escalation_timeline.clone() {
             if wait_secs >= step.threshold_secs
                 && !self.escalated_groups.contains(&step.add_skill_group)
             {
@@ -1010,17 +1004,13 @@ impl QueueApp {
                     match self.config.escalation_mode {
                         EscalationMode::Cumulative => {
                             // Add new agents alongside existing
-                            for uri in &agent_uris {
-                                match ctrl.originate_call(uri, Some(self.call_id.clone())).await {
-                                    Ok(call_id) => {
-                                        info!(agent = %uri, call_id = %call_id, "Queue: cumulative escalation - added agent");
-                                        self.pending_agents.push((uri.clone(), call_id));
-                                    }
-                                    Err(e) => {
-                                        warn!(agent = %uri, error = %e, "Queue: cumulative escalation - failed to add agent");
-                                    }
-                                }
-                            }
+                            self.dial_agents(
+                                ctrl,
+                                &agent_uris,
+                                "Queue: cumulative escalation - added agent",
+                                "Queue: cumulative escalation - failed to add agent",
+                            )
+                            .await;
                         }
                         EscalationMode::Replace => {
                             // Cancel existing legs and dial new agents
@@ -1037,17 +1027,13 @@ impl QueueApp {
                             self.dynamic_agents = None;
                             self.current_agent_idx = 0;
 
-                            for uri in &agent_uris {
-                                match ctrl.originate_call(uri, Some(self.call_id.clone())).await {
-                                    Ok(call_id) => {
-                                        info!(agent = %uri, call_id = %call_id, "Queue: replace escalation - dialed agent");
-                                        self.pending_agents.push((uri.clone(), call_id));
-                                    }
-                                    Err(e) => {
-                                        warn!(agent = %uri, error = %e, "Queue: replace escalation - failed to dial agent");
-                                    }
-                                }
-                            }
+                            self.dial_agents(
+                                ctrl,
+                                &agent_uris,
+                                "Queue: replace escalation - dialed agent",
+                                "Queue: replace escalation - failed to dial agent",
+                            )
+                            .await;
                         }
                     }
                 }
@@ -1064,6 +1050,39 @@ impl QueueApp {
         token.is_none_or(|t| t.track_id == track_id)
     }
 
+    /// Consume `token` if it matches `track_id` (a stale completion is logged
+    /// and left untouched). Returns true when the token was consumed.
+    fn take_if_matching(token: &mut Option<PlaybackToken>, track_id: &str, label: &str) -> bool {
+        if !Self::track_matches(token.as_ref(), track_id) {
+            debug!(track_id = %track_id, "Queue: ignoring stale audio completion ({label})");
+            return false;
+        }
+        *token = None;
+        true
+    }
+
+    /// Originate calls to every agent in `uris`, pushing successful legs onto
+    /// `pending_agents`; originate failures are logged and skipped.
+    async fn dial_agents(
+        &mut self,
+        ctrl: &mut CallController,
+        uris: &[String],
+        success_log: &str,
+        failure_log: &str,
+    ) {
+        for uri in uris {
+            match ctrl.originate_call(uri, Some(self.call_id.clone())).await {
+                Ok(call_id) => {
+                    info!(agent = %uri, call_id = %call_id, "{success_log}");
+                    self.pending_agents.push((uri.clone(), call_id));
+                }
+                Err(e) => {
+                    warn!(agent = %uri, error = %e, "{failure_log}");
+                }
+            }
+        }
+    }
+
     /// Play the transfer prompt on the first originate of this queue entry:
     /// the caller hears it while the agent is being dialed, before any
     /// connection. Caller-only; replaces the hold music.
@@ -1074,11 +1093,7 @@ impl QueueApp {
         if self.transfer_prompt_played {
             return Ok(());
         }
-        let prompts = self
-            .plan
-            .voice_prompts
-            .as_ref()
-            .or(self.config.voice_prompts.as_ref());
+        let prompts = self.prompts();
         let Some(path) = prompts.and_then(|p| p.transfer_prompt.clone()) else {
             return Ok(());
         };
@@ -1101,31 +1116,19 @@ impl QueueApp {
     /// Display name of the answering agent (registry lookup by URI, falling
     /// back to the URI user part).
     async fn resolve_agent_display_name(&self, agent_uri: &str) -> String {
-        let user_part = agent_uri
-            .strip_prefix("sips:")
-            .or_else(|| agent_uri.strip_prefix("sip:"))
-            .unwrap_or(agent_uri)
-            .split('@')
-            .next()
-            .unwrap_or(agent_uri)
-            .to_string();
+        let user_part = extract_sip_username(agent_uri).unwrap_or_else(|| agent_uri.to_string());
         let Some(ref registry) = self.agent_registry else {
             return user_part;
         };
         let agents = registry.list_agents().await;
-        let uri_user = |uri: &str| {
-            uri.strip_prefix("sips:")
-                .or_else(|| uri.strip_prefix("sip:"))
-                .unwrap_or(uri)
-                .split('@')
-                .next()
-                .unwrap_or(uri)
-                .to_string()
-        };
         agents
             .iter()
             .find(|a| a.uri == agent_uri)
-            .or_else(|| agents.iter().find(|a| uri_user(&a.uri) == user_part))
+            .or_else(|| {
+                agents
+                    .iter()
+                    .find(|a| extract_sip_username(&a.uri).as_deref() == Some(user_part.as_str()))
+            })
             .map(|a| {
                 if a.display_name.is_empty() {
                     user_part.clone()
@@ -1148,11 +1151,7 @@ impl QueueApp {
             self.answered = true;
         }
 
-        let prompts = self
-            .plan
-            .voice_prompts
-            .as_ref()
-            .or(self.config.voice_prompts.as_ref());
+        let prompts = self.prompts();
         let Some(template) = prompts.and_then(|p| p.service_prompt.clone()) else {
             self.state = QueueState::Connected {
                 agent_uri: agent_uri.clone(),
@@ -1245,18 +1244,10 @@ impl CallApp for QueueApp {
         if agents.is_empty() {
             warn!("Queue: no agents configured, executing fallback");
             // Answer first if we need to play a busy prompt (needs media path)
-            if !self.answered {
-                let prompts = self
-                    .plan
-                    .voice_prompts
-                    .as_ref()
-                    .or(self.config.voice_prompts.as_ref());
-                if prompts.and_then(|p| p.busy_prompt.as_ref()).is_some() {
-                    ctrl.answer().await?;
-                    self.answered = true;
-                }
-            }
-            return self.play_busy_and_then_fallback(ctrl).await;
+            self.answer_if_busy_prompt(ctrl).await?;
+            return self
+                .play_unavailable_prompt_and_then_fallback(ctrl, AgentUnavailableReason::Busy)
+                .await;
         }
 
         // Answer immediately if configured
@@ -1329,25 +1320,16 @@ impl CallApp for QueueApp {
                 self.dial_attempts = 1;
 
                 // Set timeout for agent answer
-                let ring_timeout = self.config.ring_timeout.unwrap_or(Duration::from_secs(20));
-                ctrl.set_timeout("agent_ring_timeout", ring_timeout);
+                self.arm_ring_timeout(ctrl);
 
                 return Ok(AppAction::Continue);
             } else {
                 warn!("Queue: no available agents for skill routing");
                 // Answer first if we need to play a busy prompt (needs media path)
-                if !self.answered {
-                    let prompts = self
-                        .plan
-                        .voice_prompts
-                        .as_ref()
-                        .or(self.config.voice_prompts.as_ref());
-                    if prompts.and_then(|p| p.busy_prompt.as_ref()).is_some() {
-                        ctrl.answer().await?;
-                        self.answered = true;
-                    }
-                }
-                return self.play_busy_and_then_fallback(ctrl).await;
+                self.answer_if_busy_prompt(ctrl).await?;
+                return self
+                    .play_unavailable_prompt_and_then_fallback(ctrl, AgentUnavailableReason::Busy)
+                    .await;
             }
         }
 
@@ -1375,18 +1357,10 @@ impl CallApp for QueueApp {
             }
             if agents.is_empty() {
                 warn!("Queue: no available parallel agents, executing fallback");
-                if !self.answered {
-                    let prompts = self
-                        .plan
-                        .voice_prompts
-                        .as_ref()
-                        .or(self.config.voice_prompts.as_ref());
-                    if prompts.and_then(|p| p.busy_prompt.as_ref()).is_some() {
-                        ctrl.answer().await?;
-                        self.answered = true;
-                    }
-                }
-                return self.play_busy_and_then_fallback(ctrl).await;
+                self.answer_if_busy_prompt(ctrl).await?;
+                return self
+                    .play_unavailable_prompt_and_then_fallback(ctrl, AgentUnavailableReason::Busy)
+                    .await;
             }
             if !agents.is_empty() {
                 info!(
@@ -1423,8 +1397,7 @@ impl CallApp for QueueApp {
                 self.state = QueueState::DialingAgents { attempt: 1 };
                 self.dial_attempts = 1;
 
-                let ring_timeout = self.config.ring_timeout.unwrap_or(Duration::from_secs(20));
-                ctrl.set_timeout("agent_ring_timeout", ring_timeout);
+                self.arm_ring_timeout(ctrl);
 
                 self.maybe_start_transfer_prompt(ctrl).await?;
 
@@ -1470,11 +1443,9 @@ impl CallApp for QueueApp {
                 self.start_hold_music(ctrl).await?;
             }
             QueueState::PlayingTransferPrompt { connected_agent } => {
-                if !Self::track_matches(self.transfer_token.as_ref(), &track_id) {
-                    debug!(track_id = %track_id, "Queue: ignoring stale audio completion (transfer prompt)");
+                if !Self::take_if_matching(&mut self.transfer_token, &track_id, "transfer prompt") {
                     return Ok(AppAction::Continue);
                 }
-                self.transfer_token = None;
                 match connected_agent {
                     // The prompt finished while the agent is still ringing —
                     // resume hold music and keep waiting for the answer.
@@ -1497,11 +1468,9 @@ impl CallApp for QueueApp {
                 }
             }
             QueueState::PlayingServicePrompt { agent_uri } => {
-                if !Self::track_matches(self.service_token.as_ref(), &track_id) {
-                    debug!(track_id = %track_id, "Queue: ignoring stale audio completion (service prompt)");
+                if !Self::take_if_matching(&mut self.service_token, &track_id, "service prompt") {
                     return Ok(AppAction::Continue);
                 }
-                self.service_token = None;
                 let agent_uri = agent_uri.clone();
                 self.state = QueueState::Connected {
                     agent_uri: agent_uri.clone(),
@@ -1517,36 +1486,29 @@ impl CallApp for QueueApp {
                 return Ok(AppAction::Exit);
             }
             QueueState::PlayingBusyPrompt => {
-                if !Self::track_matches(self.busy_token.as_ref(), &track_id) {
-                    debug!(track_id = %track_id, "Queue: ignoring stale audio completion (busy prompt)");
+                if !Self::take_if_matching(&mut self.busy_token, &track_id, "busy prompt") {
                     return Ok(AppAction::Continue);
                 }
-                self.busy_token = None;
                 return self.play_final_destination_prompt_or_fallback(ctrl).await;
             }
             QueueState::PlayingNoAnswerPrompt => {
-                if !Self::track_matches(self.no_answer_token.as_ref(), &track_id) {
-                    debug!(track_id = %track_id, "Queue: ignoring stale audio completion (no-answer prompt)");
+                if !Self::take_if_matching(&mut self.no_answer_token, &track_id, "no-answer prompt")
+                {
                     return Ok(AppAction::Continue);
                 }
-                self.no_answer_token = None;
                 return self.play_final_destination_prompt_or_fallback(ctrl).await;
             }
             QueueState::PlayingComfortPrompt => {
-                if !Self::track_matches(self.comfort_token.as_ref(), &track_id) {
-                    debug!(track_id = %track_id, "Queue: ignoring stale audio completion (comfort prompt)");
+                if !Self::take_if_matching(&mut self.comfort_token, &track_id, "comfort prompt") {
                     return Ok(AppAction::Continue);
                 }
-                self.comfort_token = None;
                 // Return to hold music; next comfort will be scheduled by maybe_play_comfort_or_ewt
                 self.start_hold_music(ctrl).await?;
             }
             QueueState::PlayingFinalPrompt => {
-                if !Self::track_matches(self.final_token.as_ref(), &track_id) {
-                    debug!(track_id = %track_id, "Queue: ignoring stale audio completion (final prompt)");
+                if !Self::take_if_matching(&mut self.final_token, &track_id, "final prompt") {
                     return Ok(AppAction::Continue);
                 }
-                self.final_token = None;
                 return self.execute_fallback().await;
             }
             _ => {}
@@ -1719,7 +1681,11 @@ impl CallApp for QueueApp {
                 }
                 "all_agents_busy" => {
                     warn!("Queue: all agents busy");
-                    self.play_busy_and_then_fallback(ctrl).await
+                    self.play_unavailable_prompt_and_then_fallback(
+                        ctrl,
+                        AgentUnavailableReason::Busy,
+                    )
+                    .await
                 }
                 "dial_next_agent" => self.dial_next_agent(ctrl).await,
                 _ => Ok(AppAction::Continue),
@@ -1767,10 +1733,7 @@ impl CallApp for QueueApp {
                             .find(|a| a.uri == *uri)
                             .map(|a| a.agent_id.clone())
                             .unwrap_or_else(|| {
-                                uri.strip_prefix("sip:")
-                                    .and_then(|s| s.split('@').next())
-                                    .unwrap_or(uri)
-                                    .to_string()
+                                extract_sip_username(uri).unwrap_or_else(|| uri.to_string())
                             });
                         let _ = registry
                             .update_presence(&agent_id, PresenceState::Idle)
@@ -1823,7 +1786,8 @@ impl CallApp for QueueApp {
                     queue_id: self.config.name.clone(),
                 });
 
-                self.play_busy_and_then_fallback(ctrl).await
+                self.play_unavailable_prompt_and_then_fallback(ctrl, AgentUnavailableReason::Busy)
+                    .await
             }
             "escalation_check" => {
                 debug!("Queue: escalation check");

@@ -189,4 +189,48 @@ mod tests {
         headers.push(Header::Other("X-Other".into(), "v".into()));
         assert!(extract_cc_uui(&headers).is_none());
     }
+
+    #[test]
+    fn extract_skips_non_cc_uui_headers() {
+        // An INVITE may carry several User-to-User headers; only the
+        // purpose=call-center one belongs to the CC correlation.
+        let mut headers = rsipstack::sip::Headers::default();
+        headers.push(Header::Other(
+            UUI_HEADER_NAME.into(),
+            "otherdata;encoding=hex;purpose=foo".into(),
+        ));
+        headers.push(Header::Other(
+            UUI_HEADER_NAME.into(),
+            build_uui_value("root-1", None, None, None),
+        ));
+        let uui = extract_cc_uui(&headers).expect("must find the CC header");
+        assert_eq!(uui.session_id, "root-1");
+    }
+
+    #[test]
+    fn header_name_match_is_case_insensitive() {
+        let mut headers = rsipstack::sip::Headers::default();
+        headers.push(Header::Other(
+            "user-to-user".into(),
+            build_uui_value("root-2", None, None, None),
+        ));
+        let uui = extract_cc_uui(&headers).expect("lowercase header name must match");
+        assert_eq!(uui.session_id, "root-2");
+    }
+
+    /// The inbound REFER transfer path stamps the target INVITE with exactly
+    /// `build_uui_header(root, None, None, None)`; the inbound UAS leg must
+    /// recover the same root session id from it.
+    #[test]
+    fn transfer_target_uui_header_roundtrip() {
+        let header = build_uui_header("root-transfer-1", None, None, None);
+        let mut headers = rsipstack::sip::Headers::default();
+        headers.push(rsipstack::sip::Header::MaxForwards("70".into()));
+        headers.push(header);
+        let uui = extract_cc_uui(&headers).expect("transfer UUI must be extracted");
+        assert_eq!(uui.session_id, "root-transfer-1");
+        assert!(uui.queue_id.is_none());
+        assert!(uui.queue_name.is_none());
+        assert!(uui.skill_group.is_none());
+    }
 }

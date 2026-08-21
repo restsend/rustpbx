@@ -16,3 +16,4 @@ fn init_rustls_crypto_provider() {
 }
 
 pub mod test_server;
+pub mod ws_harness;

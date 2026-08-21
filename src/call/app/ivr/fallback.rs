@@ -2,7 +2,7 @@
 
 use crate::config::{IvrFallbackConfig, IvrFallbackRule};
 use crate::proxy::routing::MatchConditions;
-use regex::Regex;
+use crate::proxy::routing::matcher::matches_pattern;
 use std::collections::HashMap;
 use tracing::warn;
 
@@ -159,25 +159,6 @@ fn header_lookup<'a>(headers: &'a HashMap<String, String>, name: &str) -> Option
         .iter()
         .find(|(k, _)| k.to_lowercase() == lower)
         .map(|(_, v)| v.as_str())
-}
-
-/// Match pattern (supports regex) — mirrors routing matcher semantics.
-fn matches_pattern(pattern: &str, value: &str) -> anyhow::Result<bool> {
-    if !pattern.contains('^')
-        && !pattern.contains('$')
-        && !pattern.contains('*')
-        && !pattern.contains('+')
-        && !pattern.contains('?')
-        && !pattern.contains('[')
-        && !pattern.contains('(')
-        && !pattern.contains('\\')
-    {
-        return Ok(pattern == value);
-    }
-
-    let regex = Regex::new(pattern)
-        .map_err(|e| anyhow::anyhow!("Invalid regex pattern '{}': {}", pattern, e))?;
-    Ok(regex.is_match(value))
 }
 
 #[cfg(test)]
