@@ -38,10 +38,11 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
 use audio_codec::{BoxedResampler, CodecType, Decoder, Encoder, create_encoder};
+use audio_codec::opus::OpusEncoder;
 
 use bytes::Bytes;
 use parking_lot::Mutex;
@@ -153,6 +154,9 @@ pub(crate) struct EgressPipeline {
 enum EgressCmd {
     SetSource(EgressSource),
     UpdateCodec(EgressCodec),
+    /// Continue the paced timeline after rewrite relay released the wire.
+    /// Next emitted frame uses `last_wire_ts + one ptime` and sets marker.
+    AdoptWireTimeline { last_wire_ts: u32 },
 }
 
 impl EgressPipeline {
@@ -174,17 +178,16 @@ impl EgressPipeline {
         let ptime = Duration::from_millis(ptime_ms.unwrap_or(DEFAULT_PTIME_MS) as u64);
         let noise_amplitude = 10f32.powf(codec.comfort_noise_level_db / 20.0) * i16::MAX as f32;
 
-        let playback_timestamp_base = rand::random::<u32>();
+        let playback_timestamp = rand::random::<u32>();
         let task = EgressTask {
             sender,
             codec,
-            encoder: create_encoder(codec.codec),
+            encoder: create_egress_encoder(codec.codec),
             source: initial,
             resampler: None,
             ptime,
             gate,
-            playback_timestamp_base,
-            playback_started_at: Instant::now(),
+            next_rtp_timestamp: playback_timestamp,
             sequence_number: 0,
             marker_pending: false,
             dtmf_event_timestamp: None,
@@ -203,6 +206,16 @@ impl EgressPipeline {
     pub async fn set_source(&self, source: EgressSource) -> Result<()> {
         self.cmd_tx
             .send(EgressCmd::SetSource(source))
+            .await
+            .map_err(|_| anyhow::anyhow!("egress pipeline stopped"))
+    }
+
+    /// Continue paced timestamps from the last packet put on the wire by the
+    /// rewrite bridge (same SSRC). Next frame is `last_wire_ts + ptime ticks`
+    /// with the marker bit set.
+    pub async fn adopt_wire_timestamp(&self, last_wire_ts: u32) -> Result<()> {
+        self.cmd_tx
+            .send(EgressCmd::AdoptWireTimeline { last_wire_ts })
             .await
             .map_err(|_| anyhow::anyhow!("egress pipeline stopped"))
     }
@@ -227,6 +240,21 @@ impl EgressPipeline {
 impl Drop for EgressPipeline {
     fn drop(&mut self) {
         self.cancel.cancel();
+    }
+}
+
+/// Build the encoder used by paced egress.
+///
+/// Opus always encodes **mono**: egress PCM is mono, and Chrome's common offer
+/// (`a=fmtp:111 minptime=10;useinbandfec=1` without `stereo=1`) prefers mono
+/// receive. `create_encoder(Opus)` defaults to stereo TOC + mono→stereo upmix,
+/// which is heavier (debug underproduction) and mismatches the negotiated
+/// preference.
+fn create_egress_encoder(codec: CodecType) -> Box<dyn Encoder> {
+    if codec == CodecType::Opus {
+        Box::new(OpusEncoder::new(48_000, 1))
+    } else {
+        create_encoder(codec)
     }
 }
 
@@ -259,8 +287,10 @@ struct EgressTask {
     /// While held (true) the pipeline parks. Opened by the relay when both
     /// legs accept.
     gate: Option<Arc<AtomicBool>>,
-    playback_timestamp_base: u32,
-    playback_started_at: Instant,
+    /// Next RTP timestamp to emit. Advances by exactly one ptime per frame
+    /// (not wall-clock), so IVR and post-relay playback stay continuous with
+    /// the rewrite bridge when they share an SSRC.
+    next_rtp_timestamp: u32,
     sequence_number: u16,
     marker_pending: bool,
     /// Source DTMF event timestamp and its timestamp on the output timeline.
@@ -365,16 +395,29 @@ impl EgressTask {
                         if was_relay && !will_relay {
                             self.marker_pending = true;
                         }
+                        // Silence/CNG → Media is a decoder discontinuity
+                        // (especially Opus). Mark the first speech frame.
+                        if matches!(&self.source, EgressSource::Silence)
+                            && matches!(&s, EgressSource::Media { .. })
+                        {
+                            self.marker_pending = true;
+                        }
                         self.dtmf_event_timestamp = None;
                         self.source = s;
                     }
                     Some(EgressCmd::UpdateCodec(new_codec)) => {
                         self.codec = new_codec;
-                        self.encoder = create_encoder(new_codec.codec);
+                        self.encoder = create_egress_encoder(new_codec.codec);
                         // Rebuild the PCM staging buffer for the new sample rate.
                         self.pcm_buf = vec![0i16; pcm_samples_per_frame(new_codec.codec, self.ptime)];
                         // Drop any resampler: TranscodePeer re-derives it on next SetSource.
                         self.resampler = None;
+                        self.marker_pending = true;
+                        self.dtmf_event_timestamp = None;
+                    }
+                    Some(EgressCmd::AdoptWireTimeline { last_wire_ts }) => {
+                        self.next_rtp_timestamp =
+                            last_wire_ts.wrapping_add(self.codec_rtp_ticks_per_frame());
                         self.marker_pending = true;
                         self.dtmf_event_timestamp = None;
                     }
@@ -383,8 +426,17 @@ impl EgressTask {
                 _ = tick => {
                     if let Some(frame) = self.next_frame().await {
                         let clear_marker = self.marker_pending;
+                        let stamp_ts = frame.rtp_timestamp;
+                        let stamp_seq = frame.sequence_number;
                         if self.sender.try_send(MediaSample::Audio(frame)).is_err() {
-                            trace!("egress: sender full, dropping frame to keep cadence");
+                            // Frame never reached the packetizer. Roll back the
+                            // paced timeline so we do not leave a seq/ts hole —
+                            // Chrome treats those as loss and PLC clicks (app
+                            // IVR only; RewriteRelay parks this loop).
+                            self.rollback_unsent_timeline(stamp_ts, stamp_seq);
+                            trace!(
+                                "egress: sender full, dropped frame and rolled back timeline"
+                            );
                         } else if clear_marker {
                             self.marker_pending = false;
                         }
@@ -450,15 +502,16 @@ impl EgressTask {
                         if n2 == 0 {
                             self.encode_silence().into()
                         } else {
-                            self.encoder.encode(&self.pcm_buf[..n2]).into()
+                            self.encode_pcm_frame(n2)
                         }
                     } else {
-                        // Live source underrun (e.g. ChannelAudioSource between
-                        // WS chunks) — keep cadence with CNG, do not EOF.
-                        self.encode_silence().into()
+                        // Live source underrun (ChannelAudioSource between app
+                        // TTS chunks). Keep RTP cadence with digital silence —
+                        // comfort noise here pops when the next chunk arrives.
+                        self.encode_digital_silence().into()
                     }
                 } else {
-                    self.encoder.encode(&self.pcm_buf[..n]).into()
+                    self.encode_pcm_frame(n)
                 };
                 self.build_frame(encoded)
             }
@@ -473,7 +526,9 @@ impl EgressTask {
                         frame
                     }
                     None => {
-                        let encoded = self.encode_silence();
+                        // Same as live Media underrun: do not insert CNG between
+                        // app-injected bursts.
+                        let encoded = self.encode_digital_silence();
                         self.build_frame(encoded)
                     }
                 }
@@ -597,6 +652,22 @@ impl EgressTask {
         })
     }
 
+    /// Encode a full ptime PCM frame. Short reads (EOF tail) are zero-padded
+    /// so Opus/PCMU always see a complete frame matching the RTP timestamp step.
+    fn encode_pcm_frame(&mut self, n: usize) -> Bytes {
+        if n < self.pcm_buf.len() {
+            self.pcm_buf[n..].fill(0);
+        }
+        self.encoder.encode(&self.pcm_buf).into()
+    }
+
+    /// True digital silence (zeros). Used for live underruns so the decoder
+    /// does not hear comfort-noise → speech transitions as clicks.
+    fn encode_digital_silence(&mut self) -> Bytes {
+        self.pcm_buf.fill(0);
+        self.encoder.encode(&self.pcm_buf).into()
+    }
+
     /// Zero-fill the PCM buffer (silence).
     fn encode_silence(&mut self) -> Bytes {
         if self.codec.comfort_noise && self.noise_amplitude > 0.0 {
@@ -620,9 +691,13 @@ impl EgressTask {
     }
 
     /// Build the outbound `AudioFrame` from an already-encoded payload.
-    fn build_frame(&self, data: Bytes) -> AudioFrame {
+    fn build_frame(&mut self, data: Bytes) -> AudioFrame {
+        let rtp_timestamp = self.next_rtp_timestamp;
+        self.next_rtp_timestamp = self
+            .next_rtp_timestamp
+            .wrapping_add(self.codec_rtp_ticks_per_frame());
         AudioFrame {
-            rtp_timestamp: self.playback_timestamp(),
+            rtp_timestamp,
             clock_rate: self.codec.clock_rate,
             data,
             sequence_number: Some(self.sequence_number),
@@ -638,10 +713,23 @@ impl EgressTask {
         self.sequence_number = self.sequence_number.wrapping_add(1);
     }
 
-    fn playback_timestamp(&self) -> u32 {
-        let elapsed_frames = self.playback_started_at.elapsed().as_nanos() / self.ptime.as_nanos();
-        self.playback_timestamp_base
-            .wrapping_add((elapsed_frames as u32).wrapping_mul(self.codec_rtp_ticks_per_frame()))
+    /// Undo [`Self::next_frame`] timeline advances for a frame that never left
+    /// the egress task (e.g. `try_send` WouldBlock). Next successful frame
+    /// reuses the same RTP timestamp and sequence number.
+    fn rollback_unsent_timeline(&mut self, rtp_timestamp: u32, sequence_number: Option<u16>) {
+        self.next_rtp_timestamp = rtp_timestamp;
+        if let Some(seq) = sequence_number {
+            self.sequence_number = seq;
+        }
+        // Keep `marker_pending`: the unsent frame may have carried the marker.
+    }
+
+    fn playback_timestamp(&mut self) -> u32 {
+        let ts = self.next_rtp_timestamp;
+        self.next_rtp_timestamp = self
+            .next_rtp_timestamp
+            .wrapping_add(self.codec_rtp_ticks_per_frame());
+        ts
     }
 
     fn codec_rtp_ticks_per_frame(&self) -> u32 {
@@ -696,6 +784,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn egress_opus_encoder_uses_mono_toc() {
+        let mut enc = create_egress_encoder(CodecType::Opus);
+        let pkt = enc.encode(&vec![1_000i16; 960]);
+        assert!(!pkt.is_empty(), "mono Opus must encode");
+        assert_eq!(
+            pkt[0] & 0x04,
+            0,
+            "egress Opus TOC must be mono (Chrome offer has no stereo=1)"
+        );
+    }
+
+    #[test]
+    fn stock_create_encoder_opus_is_stereo_toc() {
+        // Guards against silently flipping create_egress_encoder back to the
+        // stock stereo default — that path is what we intentionally avoid.
+        let mut enc = create_encoder(CodecType::Opus);
+        let pkt = enc.encode(&vec![1_000i16; 960]);
+        assert!(!pkt.is_empty());
+        assert_ne!(pkt[0] & 0x04, 0, "stock create_encoder(Opus) is stereo");
+    }
+
     #[tokio::test]
     async fn silence_pipeline_emits_frames_at_ptime() {
         let (sender, _track, _fb) = sample_track(MediaKind::Audio, 64);
@@ -735,8 +845,7 @@ mod tests {
             resampler: None,
             ptime: Duration::from_millis(20),
             gate: None,
-            playback_timestamp_base: 0,
-            playback_started_at: Instant::now(),
+            next_rtp_timestamp: 0,
             sequence_number: 0,
             marker_pending: false,
             dtmf_event_timestamp: None,
@@ -754,6 +863,256 @@ mod tests {
             &with_noise[..],
             &zeros[..],
             "CNG must not be digital silence"
+        );
+        assert!(
+            with_noise.iter().any(|&b| b != 0xFF),
+            "CNG Silence path must not encode as digital μ-law silence (0xFF)"
+        );
+    }
+
+    /// Regression: when the egress→packetizer ring is full, older code dropped
+    /// the frame but kept the advanced RTP timestamp/seq. Chrome then saw a
+    /// hole and PLC-clicked (app/IVR only). Rollback must reuse the same stamp.
+    #[tokio::test]
+    async fn unsent_frame_rollback_reuses_timestamp_and_seq() {
+        let (sender, _track, _fb) = sample_track(MediaKind::Audio, 1);
+        let codec = EgressCodec {
+            codec: CodecType::PCMU,
+            payload_type: 0,
+            clock_rate: 8000,
+            dtmf_payload_type: Some(101),
+            comfort_noise: false,
+            comfort_noise_level_db: -35.0,
+        };
+        let spf = pcm_samples_per_frame(codec.codec, Duration::from_millis(20));
+        let mut task = EgressTask {
+            sender: sender.clone(),
+            codec,
+            encoder: create_encoder(CodecType::PCMU),
+            source: EgressSource::Silence,
+            resampler: None,
+            ptime: Duration::from_millis(20),
+            gate: None,
+            next_rtp_timestamp: 10_000,
+            sequence_number: 42,
+            marker_pending: true,
+            dtmf_event_timestamp: None,
+            pcm_buf: vec![0i16; spf],
+            noise_state: 1,
+            noise_amplitude: 0.0,
+            noise_lp: 0.0,
+        };
+
+        let first = task.next_frame().await.expect("first frame");
+        assert_eq!(first.rtp_timestamp, 10_000);
+        assert_eq!(first.sequence_number, Some(42));
+        assert!(first.marker);
+
+        // Queue depth 1: accept first, second WouldBlock.
+        sender.try_send(MediaSample::Audio(first.clone())).unwrap();
+        let second = task.next_frame().await.expect("second frame");
+        assert_eq!(second.rtp_timestamp, 10_160);
+        assert_eq!(second.sequence_number, Some(43));
+        assert!(
+            sender.try_send(MediaSample::Audio(second.clone())).is_err(),
+            "capacity-1 ring must WouldBlock on second push"
+        );
+        task.rollback_unsent_timeline(second.rtp_timestamp, second.sequence_number);
+        assert!(
+            task.marker_pending,
+            "rollback must keep marker for the unsent frame"
+        );
+
+        let retried = task.next_frame().await.expect("retried frame");
+        assert_eq!(
+            retried.rtp_timestamp, second.rtp_timestamp,
+            "retried frame must reuse the rolled-back timestamp (no wire hole)"
+        );
+        assert_eq!(
+            retried.sequence_number, second.sequence_number,
+            "retried frame must reuse the rolled-back sequence"
+        );
+    }
+
+    /// Regression: app/TTS streaming (`ChannelAudioSource`) underruns used to
+    /// insert comfort noise. CNG→speech at every chunk boundary sounded like
+    /// a periodic pop (~1 s). Hold/`Silence` may still use CNG; live underruns
+    /// must stay digital silence. Prior tests never exercised this path
+    /// (IVR file play has no underrun; p2p uses RewriteRelay).
+    #[tokio::test]
+    async fn live_channel_underrun_emits_digital_silence_not_cng() {
+        let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(8);
+        let (sender, _track, _fb) = sample_track(MediaKind::Audio, 64);
+        let codec = EgressCodec {
+            codec: CodecType::PCMU,
+            payload_type: 0,
+            clock_rate: 8000,
+            dtmf_payload_type: Some(101),
+            comfort_noise: true,
+            comfort_noise_level_db: -20.0,
+        };
+        let spf = pcm_samples_per_frame(codec.codec, Duration::from_millis(20));
+        let mut task = EgressTask {
+            sender,
+            codec,
+            encoder: create_encoder(CodecType::PCMU),
+            source: EgressSource::Media {
+                audio: Box::new(crate::audio_source::ChannelAudioSource::new(pcm_rx, 8000)),
+                loop_playback: false,
+                on_end: None,
+            },
+            resampler: None,
+            ptime: Duration::from_millis(20),
+            gate: None,
+            next_rtp_timestamp: 0,
+            sequence_number: 0,
+            marker_pending: false,
+            dtmf_event_timestamp: None,
+            pcm_buf: vec![0i16; spf],
+            noise_state: 0x9E37_79B9,
+            noise_amplitude: 10f32.powf(-20.0 / 20.0) * i16::MAX as f32,
+            noise_lp: 0.0,
+        };
+
+        pcm_tx.try_send(vec![2_000i16; spf]).unwrap();
+        let speech = task.next_frame().await.expect("speech frame");
+
+        let mut ref_enc = create_encoder(CodecType::PCMU);
+        let digital_ref: Bytes = ref_enc.encode(&vec![0i16; spf]).into();
+        assert_ne!(
+            speech.data, digital_ref,
+            "speech frame should not be silence"
+        );
+
+        // No more PCM queued → live underrun (sender still alive).
+        let gap = task.next_frame().await.expect("underrun frame");
+        assert_eq!(
+            gap.data, digital_ref,
+            "live underrun must match digital-silence encode, not CNG"
+        );
+        assert!(
+            matches!(task.source, EgressSource::Media { .. }),
+            "underrun must not EOF while the PCM sender is alive"
+        );
+
+        // Resume with another chunk — still Media, still contiguous cadence.
+        pcm_tx.try_send(vec![3_000i16; spf]).unwrap();
+        let resume = task.next_frame().await.expect("resumed speech");
+        assert_ne!(resume.data, digital_ref);
+        assert_eq!(
+            resume.rtp_timestamp,
+            gap.rtp_timestamp.wrapping_add(160),
+            "timestamp must keep ptime steps across the underrun"
+        );
+
+        // Separate sanity: Silence+CNG is distinguishable from digital silence.
+        task.source = EgressSource::Silence;
+        let cng = task.next_frame().await.expect("cng frame");
+        assert_ne!(
+            cng.data, digital_ref,
+            "sanity: EgressSource::Silence with CNG must not equal digital silence"
+        );
+    }
+
+    /// Same underrun contract for [`EgressSource::Inject`] (MCU / app push).
+    #[tokio::test]
+    async fn inject_underrun_emits_digital_silence_not_cng() {
+        let (_inj_tx, inj_rx) = tokio::sync::mpsc::channel::<MediaSample>(4);
+        let (sender, _track, _fb) = sample_track(MediaKind::Audio, 64);
+        let codec = EgressCodec {
+            codec: CodecType::PCMU,
+            payload_type: 0,
+            clock_rate: 8000,
+            dtmf_payload_type: Some(101),
+            comfort_noise: true,
+            comfort_noise_level_db: -20.0,
+        };
+        let spf = pcm_samples_per_frame(codec.codec, Duration::from_millis(20));
+        let mut task = EgressTask {
+            sender,
+            codec,
+            encoder: create_encoder(CodecType::PCMU),
+            source: EgressSource::Inject {
+                rx: parking_lot::Mutex::new(inj_rx),
+            },
+            resampler: None,
+            ptime: Duration::from_millis(20),
+            gate: None,
+            next_rtp_timestamp: 0,
+            sequence_number: 0,
+            marker_pending: false,
+            dtmf_event_timestamp: None,
+            pcm_buf: vec![0i16; spf],
+            noise_state: 0x9E37_79B9,
+            noise_amplitude: 10f32.powf(-20.0 / 20.0) * i16::MAX as f32,
+            noise_lp: 0.0,
+        };
+
+        let mut ref_enc = create_encoder(CodecType::PCMU);
+        let digital_ref: Bytes = ref_enc.encode(&vec![0i16; spf]).into();
+        let gap = task.next_frame().await.expect("inject underrun frame");
+        assert_eq!(
+            gap.data, digital_ref,
+            "Inject underrun must match digital-silence encode, not CNG"
+        );
+    }
+
+    /// Partial app chunks must not be zero-padded into a frame (that click
+    /// every chunk boundary). Channel holds until a full ptime is available;
+    /// egress then sees underrun → digital silence, then one clean frame.
+    #[tokio::test]
+    async fn partial_app_chunk_does_not_emit_padded_speech_frame() {
+        let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(8);
+        let (sender, _track, _fb) = sample_track(MediaKind::Audio, 64);
+        let codec = EgressCodec {
+            codec: CodecType::PCMU,
+            payload_type: 0,
+            clock_rate: 8000,
+            dtmf_payload_type: Some(101),
+            comfort_noise: true,
+            comfort_noise_level_db: -20.0,
+        };
+        let spf = pcm_samples_per_frame(codec.codec, Duration::from_millis(20));
+        assert_eq!(spf, 160);
+        let mut task = EgressTask {
+            sender,
+            codec,
+            encoder: create_encoder(CodecType::PCMU),
+            source: EgressSource::Media {
+                audio: Box::new(crate::audio_source::ChannelAudioSource::new(pcm_rx, 8000)),
+                loop_playback: false,
+                on_end: None,
+            },
+            resampler: None,
+            ptime: Duration::from_millis(20),
+            gate: None,
+            next_rtp_timestamp: 0,
+            sequence_number: 0,
+            marker_pending: false,
+            dtmf_event_timestamp: None,
+            pcm_buf: vec![0i16; spf],
+            noise_state: 0x9E37_79B9,
+            noise_amplitude: 10f32.powf(-20.0 / 20.0) * i16::MAX as f32,
+            noise_lp: 0.0,
+        };
+
+        let mut ref_enc = create_encoder(CodecType::PCMU);
+        let digital_ref: Bytes = ref_enc.encode(&vec![0i16; spf]).into();
+
+        // Half a ptime of loud samples — old code would pad with zeros and
+        // emit a mixed frame (pop). New code holds and underruns instead.
+        pcm_tx.try_send(vec![10_000i16; 80]).unwrap();
+        let first = task.next_frame().await.expect("held → underrun silence");
+        assert_eq!(
+            first.data, digital_ref,
+            "partial chunk must not produce a padded speech frame"
+        );
+
+        pcm_tx.try_send(vec![10_000i16; 80]).unwrap();
+        let second = task.next_frame().await.expect("completed frame");
+        assert_ne!(
+            second.data, digital_ref,
+            "once a full ptime is buffered, speech must go out"
         );
     }
 
@@ -855,9 +1214,10 @@ mod tests {
             third.marker,
             "playback after relay must mark the SSRC switch"
         );
-        assert!(
-            third.rtp_timestamp.wrapping_sub(second.rtp_timestamp) >= 480,
-            "playback timestamp must include the relay gap"
+        assert_eq!(
+            third.rtp_timestamp,
+            second.rtp_timestamp.wrapping_add(160),
+            "playback after relay must continue the monotonic timeline"
         );
         assert_eq!(
             third.sequence_number,
@@ -968,8 +1328,7 @@ mod tests {
             resampler: None,
             ptime: Duration::from_millis(20),
             gate: None,
-            playback_timestamp_base: 0,
-            playback_started_at: Instant::now(),
+            next_rtp_timestamp: 0,
             sequence_number: 0,
             marker_pending: false,
             dtmf_event_timestamp: None,
@@ -1048,8 +1407,7 @@ mod tests {
             resampler: Some(BoxedResampler::new(48_000, 8000).expect("valid sample rates")),
             ptime: Duration::from_millis(20),
             gate: None,
-            playback_timestamp_base: 0,
-            playback_started_at: Instant::now(),
+            next_rtp_timestamp: 0,
             sequence_number: 0,
             marker_pending: false,
             dtmf_event_timestamp: None,
@@ -1118,8 +1476,7 @@ mod tests {
             resampler: None,
             ptime: Duration::from_millis(20),
             gate: None,
-            playback_timestamp_base: 0,
-            playback_started_at: Instant::now(),
+            next_rtp_timestamp: 0,
             sequence_number: 0,
             marker_pending: false,
             dtmf_event_timestamp: None,

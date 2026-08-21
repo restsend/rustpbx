@@ -30,7 +30,7 @@ fn acd_disabled() -> Arc<AcdEngine> {
 /// Build an adapter over `cc_registry` with a disabled ACD engine (the
 /// standard harness shape for these tests).
 fn disabled_adapter(cc_registry: Arc<AgentRegistry>) -> CcAgentRegistryAdapter {
-    disabled_adapter(cc_registry)
+    CcAgentRegistryAdapter::new(cc_registry, acd_disabled(), "localhost")
 }
 
 /// Registry with the given agents registered and set Idle:

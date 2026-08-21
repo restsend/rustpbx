@@ -93,10 +93,13 @@ impl LegConfig {
 pub struct LegInner {
     id: LegId,
     pc: PeerConnection,
-    /// Persistent primary relay source used by the transport rewrite fast
-    /// path. WebRTC advertises this SSRC as the one audio source in SDP. Local
-    /// playback/DTMF keeps the sender SSRC as a secondary source and carries
-    /// SDES-MID so it does not share the relay timeline.
+    /// Persistent relay SSRC used by the transport rewrite fast path toward
+    /// **plain RTP** destinations (SSRC-tolerant, no SDP `a=ssrc` binding).
+    ///
+    /// WebRTC legs do **not** advertise or send on this SSRC: browsers bind to
+    /// the sender/`a=ssrc` (playback) SSRC for both local IVR playback and
+    /// relayed audio. `EgressSource` mutual exclusion already prevents two
+    /// producers from colliding on that single WebRTC SSRC.
     relay_audio_ssrc: u32,
     tap: Arc<IngressTap>,
     /// Egress pipeline — always alive; the source is switched via the command
@@ -104,8 +107,10 @@ pub struct LegInner {
     egress: EgressPipeline,
     /// Whether the current egress source is [`EgressSource::RewriteRelay`].
     /// Tracked so the Leg knows when to tear down/rebuild the PC's rewrite
-    /// bridge on mode switches (EgressSource is not Clone).
-    was_relay: AtomicBool,
+    /// bridge on mode switches (EgressSource is not Clone). Shared with the
+    /// outbound clock sync observer so rewrite packets update the paced
+    /// sender's RTCP/seq state while relay owns the wire.
+    was_relay: Arc<AtomicBool>,
     negotiated: Mutex<Option<NegotiatedLegProfile>>,
     /// Gate: before the remote peer answers (200 OK), relay must not forward.
     /// Set true on construction, flipped to false by [`LegInner::accept`].
@@ -251,13 +256,13 @@ impl LegInner {
         // Egress audio track: create the push/source pair and add the track to
         // the PC so it appears in the SDP.
         //
-        // The ring capacity only needs to absorb producer/consumer jitter: the
-        // egress pacing task pushes exactly one frame per ptime (20 ms) and the
-        // packetizer drains immediately, so a handful of slots is plenty. The
-        // original 500 pre-allocated ~95 KB of `MaybeUninit<MediaSample>` slots
-        // per leg (drop-oldest semantics mean depth never meaningfully exceeds
-        // 1-2), which at 1600 legs ≈ 150 MB of wasted reserved memory.
-        let (sender, track, _feedback) = sample_track(MediaKind::Audio, 8);
+        // Capacity must absorb RtpSender stalls (SRTP/RTCP on the same task,
+        // scheduling jitter). Depth 8 (160 ms) was too shallow: when
+        // `try_send` failed, older code still advanced RTP ts/seq → wire holes
+        // → Chrome PLC pops on app/IVR (p2p RewriteRelay parks egress). 64 ≈
+        // 1.28 s headroom; egress also rolls back timeline on WouldBlock.
+        // (500 was ~95 KB/leg × 1600 ≈ 150 MB reserved — too large.)
+        let (sender, track, _feedback) = sample_track(MediaKind::Audio, 64);
         let params = RtpCodecParameters {
             payload_type: first_codec.payload_type,
             name: first_codec.codec_name().to_string(),
@@ -344,13 +349,21 @@ impl LegInner {
             }
         }
 
+        let was_relay = Arc::new(AtomicBool::new(false));
+        // Keep paced-sender RTCP SR / next-seq coherent while rewrite owns the
+        // shared WebRTC outbound SSRC.
+        pc.add_observer(Arc::new(OutboundClockSync {
+            pc: pc.clone(),
+            relay_active: was_relay.clone(),
+        }));
+
         Ok(Arc::new(LegInner {
             id: LegId::from(label),
             pc,
             relay_audio_ssrc,
             tap,
             egress,
-            was_relay: AtomicBool::new(false),
+            was_relay,
             negotiated: Mutex::new(None),
             gated: Arc::new(AtomicBool::new(true)),
             rtp_timeout: Arc::new(RtpTimeoutState::default()),
@@ -479,8 +492,7 @@ impl LegInner {
         // RTP mode returns instantly; WebRTC/SRTP need the wait.
         let _ = self.pc.create_offer().await?;
         self.pc.wait_for_gathering_complete().await;
-        let mut offer = self.pc.create_offer().await?;
-        self.advertise_relay_audio_ssrc(&mut offer);
+        let offer = self.pc.create_offer().await?;
         Ok(offer)
     }
 
@@ -525,7 +537,6 @@ impl LegInner {
             self.pc.wait_for_gathering_complete().await;
             let mut answer = self.pc.create_answer().await?;
             answer.sdp_type = SdpType::Answer;
-            self.advertise_relay_audio_ssrc(&mut answer);
             set_local(&self.pc, answer)?
         } else {
             // Applying a remote answer (UAC): no local SDP to emit.
@@ -636,43 +647,19 @@ impl LegInner {
         self.sync_negotiated_profile(&profile).await
     }
 
-    /// Stable, call-lifetime SSRC used by fast-path audio toward this leg.
+    /// Stable, call-lifetime SSRC used by fast-path audio toward a **plain RTP**
+    /// peer on this leg. WebRTC peers use [`sender_ssrc_for_kind`] instead.
     pub fn relay_audio_ssrc(&self) -> u32 {
         self.relay_audio_ssrc
     }
 
-    /// rustrtc's paced sender owns the playback SSRC, so its generated SDP
-    /// initially advertises that source. Fast-path audio deliberately uses a
-    /// separate timeline and SSRC. For WebRTC, make that relay SSRC the sole
-    /// signaled audio source by replacing (not adding) the generated SSRC in
-    /// the local description. Adding both as ordinary sources for one m-line
-    /// makes browsers interpret them as two tracks and reject the SDP.
-    fn advertise_relay_audio_ssrc(&self, desc: &mut SessionDescription) {
-        if self.pc.config().transport_mode != TransportMode::WebRtc {
-            return;
-        }
-
-        for section in &mut desc.media_sections {
-            if section.kind != rustrtc::sdp::MediaKind::Audio {
-                continue;
-            }
-            for attribute in &mut section.attributes {
-                if attribute.key != "ssrc" {
-                    continue;
-                }
-                let Some(value) = attribute.value.as_deref() else {
-                    continue;
-                };
-                let suffix = value
-                    .split_once(' ')
-                    .map(|(_, suffix)| suffix)
-                    .unwrap_or_default();
-                attribute.value = Some(if suffix.is_empty() {
-                    self.relay_audio_ssrc.to_string()
-                } else {
-                    format!("{} {}", self.relay_audio_ssrc, suffix)
-                });
-            }
+    /// Outbound audio SSRC that remote peers on this leg must see:
+    /// - WebRTC → paced sender / SDP `a=ssrc` (IVR + relay share it)
+    /// - RTP/SRTP → distinct relay SSRC (isolates later local playback)
+    pub fn outbound_audio_ssrc(&self) -> u32 {
+        match self.pc.config().transport_mode {
+            TransportMode::WebRtc => sender_ssrc_for_kind(&self.pc, rustrtc::MediaKind::Audio),
+            TransportMode::Rtp | TransportMode::Srtp => self.relay_audio_ssrc,
         }
     }
 
@@ -754,9 +741,19 @@ impl LegInner {
                 }
             }
             // Switching FROM RewriteRelay: tear the rewrite bridge down so the
-            // sender owns the ICE send channel again.
+            // sender owns the ICE send channel again, and continue the paced
+            // timeline from the last packet the rewrite put on this SSRC.
             _ if prev_was_relay => {
                 self.pc.clear_rtp_rewrite_bridge();
+                if let Some(sender) = audio_rtp_sender(&self.pc)
+                    && sender.ssrc() == self.outbound_audio_ssrc()
+                    && sender.packets_sent() > 0
+                {
+                    let _ = self
+                        .egress
+                        .adopt_wire_timestamp(sender.last_rtp_timestamp())
+                        .await;
+                }
             }
             _ => {}
         }
@@ -951,6 +948,69 @@ fn rtp_transport_for_kind(
         .and_then(|sender| sender.transport())
 }
 
+fn audio_rtp_sender(pc: &PeerConnection) -> Option<Arc<rustrtc::peer_connection::RtpSender>> {
+    pc.get_transceivers()
+        .into_iter()
+        .find(|transceiver| transceiver.kind() == rustrtc::MediaKind::Audio)
+        .and_then(|transceiver| transceiver.sender())
+}
+
+/// When rewrite stamps the destination paced-sender SSRC (WebRTC), seed seq/ts
+/// from that sender so IVR → relay stays one continuous outbound timeline.
+fn seed_rewrite_options_from_destination(
+    destination_pc: &PeerConnection,
+    rules: &[rustrtc::RtpRewriteRule],
+    mut options: rustrtc::RtpRewriteBridgeOptions,
+) -> rustrtc::RtpRewriteBridgeOptions {
+    let Some(sender) = audio_rtp_sender(destination_pc) else {
+        return options;
+    };
+    let sender_ssrc = sender.ssrc();
+    let stamps_sender = rules
+        .iter()
+        .any(|rule| rule.fixed_out_ssrc == Some(sender_ssrc));
+    if !stamps_sender {
+        return options;
+    }
+
+    if options.initial_sequence_number.is_none() {
+        options.initial_sequence_number = Some(sender.next_sequence_number());
+    }
+    if options.initial_output_timestamp.is_none() && sender.packets_sent() > 0 {
+        let clock_rate = sender.params().clock_rate.max(1);
+        let step = ((clock_rate as u64 * 20) / 1000) as u32;
+        options.initial_output_timestamp =
+            Some(sender.last_rtp_timestamp().wrapping_add(step.max(1)));
+    }
+    options
+}
+
+/// While rewrite owns the shared playback SSRC, feed each outbound packet into
+/// the paced sender so RTCP SR and the next IVR sequence stay coherent.
+struct OutboundClockSync {
+    pc: PeerConnection,
+    relay_active: Arc<AtomicBool>,
+}
+
+impl rustrtc::peer_connection::RtpObserver for OutboundClockSync {
+    fn on_egress(&self, packet: &rustrtc::rtp::RtpPacket, _dst_addr: std::net::SocketAddr) {
+        if !self.relay_active.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(sender) = audio_rtp_sender(&self.pc) else {
+            return;
+        };
+        if packet.header.ssrc != sender.ssrc() {
+            return;
+        }
+        sender.note_external_packet(
+            packet.header.sequence_number,
+            packet.header.timestamp,
+            packet.payload.len() as u32,
+        );
+    }
+}
+
 const WEBRTC_RELAY_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
 async fn wait_and_arm_rewrite_relay(
@@ -973,6 +1033,8 @@ async fn wait_and_arm_rewrite_relay(
             .await
             .map_err(|_| anyhow!("timed out waiting for WebRTC DTLS/SRTP setup"))??;
     }
+
+    let options = seed_rewrite_options_from_destination(destination_pc, rules, options);
 
     let audio_source = rtp_transport_for_kind(source_pc, rustrtc::MediaKind::Audio)
         .ok_or_else(|| anyhow!("source audio RTP transport missing"))?;
@@ -1444,16 +1506,17 @@ mod tests {
         let playback_ssrc = sender_ssrc_for_kind(a.pc(), rustrtc::MediaKind::Audio);
         let relay_ssrc = a.relay_audio_ssrc();
         assert_ne!(relay_ssrc, playback_ssrc);
+        assert_eq!(a.outbound_audio_ssrc(), playback_ssrc);
         let playback_attributes = audio_ssrc_suffixes(&offer, playback_ssrc);
         let relay_attributes = audio_ssrc_suffixes(&offer, relay_ssrc);
-        assert!(
-            playback_attributes.is_empty(),
-            "playback SSRC must not be WebRTC's primary advertised source"
-        );
         assert_eq!(
-            relay_attributes.len(),
+            playback_attributes.len(),
             2,
-            "relay SSRC must be the single WebRTC source with cname + msid"
+            "WebRTC SDP must advertise the playback/sender SSRC (cname + msid)"
+        );
+        assert!(
+            relay_attributes.is_empty(),
+            "WebRTC SDP must not advertise the plain-RTP relay SSRC"
         );
         a.stop();
     }
@@ -1602,14 +1665,15 @@ mod tests {
         let playback_ssrc = sender_ssrc_for_kind(leg.pc(), rustrtc::MediaKind::Audio);
         let playback_attributes = audio_ssrc_suffixes(&answer, playback_ssrc);
         let relay_attributes = audio_ssrc_suffixes(&answer, leg.relay_audio_ssrc());
-        assert!(
-            playback_attributes.is_empty(),
-            "playback SSRC must not be WebRTC's primary advertised source"
-        );
+        assert_eq!(leg.outbound_audio_ssrc(), playback_ssrc);
         assert_eq!(
-            relay_attributes.len(),
+            playback_attributes.len(),
             2,
-            "relay SSRC must be the single WebRTC source with cname + msid"
+            "WebRTC answer must advertise the playback/sender SSRC (cname + msid)"
+        );
+        assert!(
+            relay_attributes.is_empty(),
+            "WebRTC answer must not advertise the plain-RTP relay SSRC"
         );
         leg.stop();
     }

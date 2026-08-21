@@ -364,6 +364,19 @@
                         <label class="checkbox-inline" style="margin-left:16px;"><input type="checkbox" id="relayOnly"> Relay Only</label>
                         <textarea id="iceServers" rows="3" style="width:100%;margin-top:6px;">[{"urls":"stun:stun.l.google.com:19302"}]</textarea>
                     </div>
+                    <div class="form-group">
+                        <label for="audioCodec">Audio codec (offer preference):</label>
+                        <select id="audioCodec">
+                            <option value="auto">Auto (browser default)</option>
+                            <option value="opus">Opus only</option>
+                            <option value="pcmu">PCMU (G.711 µ-law) only</option>
+                            <option value="pcma">PCMA (G.711 A-law) only</option>
+                        </select>
+                        <div style="margin-top:6px;font-size:12px;color:#666;">
+                            Forces local SDP / <code>setCodecPreferences</code> so you can A/B Opus vs PCMU.
+                            URL: <code>?codec=opus</code> / <code>?codec=pcmu</code>
+                        </div>
+                    </div>
                     <button id="registerBtn">Register</button>
                     <button id="unregisterBtn" disabled class="secondary">Unregister</button>
                     <div id="registrationStatus"></div>
@@ -407,6 +420,10 @@
                         <div class="stat-box">
                             <div class="stat-label">TX Bytes</div>
                             <div class="stat-value" id="txBytes">--</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">Negotiated Codec</div>
+                            <div class="stat-value" id="negotiatedCodec" style="font-size:16px;">--</div>
                         </div>
                     </div>
                     <div style="margin-top:10px;">
@@ -928,11 +945,12 @@
             }
         }
 
-        // Auto-fill form fields from URL parameters: ?caller=xxx&callee=xxx
+        // Auto-fill form fields from URL parameters: ?caller=xxx&callee=xxx&codec=opus|pcmu|pcma
         (function applyUrlParams() {
             const params = new URLSearchParams(window.location.search);
             const caller = params.get('caller');
             const callee = params.get('callee');
+            const codec = (params.get('codec') || params.get('audioCodec') || '').toLowerCase();
             if (caller) {
                 if (usernameInput) usernameInput.value = caller;
                 if (displayNameInput) displayNameInput.value = caller;
@@ -940,7 +958,151 @@
             if (callee) {
                 if (callTargetInput) callTargetInput.value = callee;
             }
+            const audioCodecSelect = document.getElementById('audioCodec');
+            if (audioCodecSelect) {
+                const saved = localStorage.getItem('phone_jssip_audio_codec');
+                const pick = ['auto', 'opus', 'pcmu', 'pcma'].includes(codec)
+                    ? codec
+                    : (['auto', 'opus', 'pcmu', 'pcma'].includes(saved) ? saved : 'auto');
+                audioCodecSelect.value = pick;
+                audioCodecSelect.addEventListener('change', () => {
+                    localStorage.setItem('phone_jssip_audio_codec', audioCodecSelect.value);
+                    log(`Audio codec preference set to: ${audioCodecSelect.value}`);
+                });
+            }
         })();
+
+        function getSelectedAudioCodec() {
+            const el = document.getElementById('audioCodec');
+            const v = ((el && el.value) || 'auto').toLowerCase();
+            return ['auto', 'opus', 'pcmu', 'pcma'].includes(v) ? v : 'auto';
+        }
+
+        function audioCodecMime(name) {
+            switch ((name || '').toLowerCase()) {
+                case 'opus': return 'audio/opus';
+                case 'pcmu': return 'audio/PCMU';
+                case 'pcma': return 'audio/PCMA';
+                default: return null;
+            }
+        }
+
+        /** Prefer selected audio codec on the PeerConnection (Chrome/Edge). */
+        function preferAudioCodecOnPeerConnection(pc) {
+            const pref = getSelectedAudioCodec();
+            const mime = audioCodecMime(pref);
+            if (!mime || !pc || typeof RTCRtpSender === 'undefined' || !RTCRtpSender.getCapabilities) return;
+            let caps;
+            try { caps = RTCRtpSender.getCapabilities('audio'); } catch (_) { return; }
+            if (!caps || !caps.codecs || !caps.codecs.length) return;
+            const wanted = caps.codecs.filter((c) => (c.mimeType || '').toLowerCase() === mime.toLowerCase());
+            if (!wanted.length) {
+                log(`Audio codec ${pref}: not in RTCRtpSender capabilities — will still rewrite SDP`);
+                return;
+            }
+            const rest = caps.codecs.filter((c) => (c.mimeType || '').toLowerCase() !== mime.toLowerCase());
+            (pc.getTransceivers ? pc.getTransceivers() : []).forEach((t) => {
+                if (!t || typeof t.setCodecPreferences !== 'function') return;
+                const kind = (t.sender && t.sender.track && t.sender.track.kind)
+                    || (t.receiver && t.receiver.track && t.receiver.track.kind)
+                    || (t.mid != null ? 'audio' : null);
+                // Audio-only pages often have one audio transceiver without track yet.
+                if (kind && kind !== 'audio') return;
+                try {
+                    t.setCodecPreferences([...wanted, ...rest]);
+                    log(`setCodecPreferences(audio): ${pref} first (${wanted.length} variants)`);
+                } catch (e) {
+                    log(`setCodecPreferences failed: ${e.message}`);
+                }
+            });
+        }
+
+        /**
+         * Rewrite local SDP so the preferred audio codec is first; when not
+         * `auto`, drop other audio codecs (keep telephone-event).
+         */
+        function rewriteLocalSdpAudioCodecs(sdp) {
+            const pref = getSelectedAudioCodec();
+            if (pref === 'auto' || !sdp || typeof sdp !== 'string') return sdp;
+            const wantName = pref.toUpperCase() === 'OPUS' ? 'OPUS' : pref.toUpperCase();
+            const nl = sdp.includes('\r\n') ? '\r\n' : '\n';
+            const lines = sdp.split(nl);
+            const rtpmap = {};
+            for (const l of lines) {
+                const m = l.match(/^a=rtpmap:(\d+)\s+(\S+)/i);
+                if (m) rtpmap[m[1]] = m[2].split('/')[0].toUpperCase();
+            }
+            const preferredPts = Object.keys(rtpmap).filter((pt) => rtpmap[pt] === wantName);
+            if (!preferredPts.length) {
+                log(`SDP rewrite: no ${wantName} rtpmap in local SDP — leaving unchanged`);
+                return sdp;
+            }
+            const keepName = (name) => name === wantName || name === 'TELEPHONE-EVENT';
+            let changed = false;
+            const out = lines.map((l) => {
+                if (!l.startsWith('m=audio')) return l;
+                const parts = l.split(' ');
+                if (parts.length < 4) return l;
+                const formats = parts.slice(3);
+                const keep = formats.filter((f) => keepName(rtpmap[f] || ''));
+                // Put preferred payload types first, then telephone-event.
+                const ordered = [
+                    ...preferredPts.filter((pt) => keep.includes(pt)),
+                    ...keep.filter((pt) => !preferredPts.includes(pt)),
+                ];
+                if (!ordered.length) return l;
+                changed = true;
+                return `${parts[0]} ${parts[1]} ${parts[2]} ${ordered.join(' ')}`;
+            });
+            // Drop rtpmap/fmtp/rtcp-fb/rtcp-fb for removed PTs (audio section only).
+            const audioPts = new Set();
+            let inAudio = false;
+            for (const l of out) {
+                if (l.startsWith('m=')) {
+                    inAudio = l.startsWith('m=audio');
+                    if (inAudio) l.split(' ').slice(3).forEach((pt) => audioPts.add(pt));
+                    continue;
+                }
+            }
+            const filtered = [];
+            inAudio = false;
+            for (const l of out) {
+                if (l.startsWith('m=')) {
+                    inAudio = l.startsWith('m=audio');
+                    filtered.push(l);
+                    continue;
+                }
+                if (inAudio) {
+                    const m = l.match(/^a=(?:rtpmap|fmtp|rtcp-fb):(\d+)/i);
+                    if (m && !audioPts.has(m[1])) {
+                        changed = true;
+                        continue;
+                    }
+                }
+                filtered.push(l);
+            }
+            if (changed) log(`SDP rewrite: forced audio codec ${wantName} (pts=${preferredPts.join(',')})`);
+            return filtered.join(nl);
+        }
+
+        async function detectNegotiatedAudioCodec(pc) {
+            if (!pc || typeof pc.getStats !== 'function') return null;
+            try {
+                const report = await pc.getStats();
+                const codecs = {};
+                let inbound = null;
+                report.forEach((s) => {
+                    if (s.type === 'codec' && s.mimeType) codecs[s.id] = s.mimeType;
+                    if (s.type === 'inbound-rtp' && (s.kind === 'audio' || s.mediaType === 'audio')) {
+                        if (!inbound || (s.packetsReceived || 0) > (inbound.packetsReceived || 0)) inbound = s;
+                    }
+                });
+                if (inbound && inbound.codecId && codecs[inbound.codecId]) {
+                    return codecs[inbound.codecId].replace(/^audio\//i, '');
+                }
+            } catch (_) {}
+            return null;
+        }
 
         // Set default CC WS URL
         if (ccWsUrlInput) {
@@ -1568,6 +1730,7 @@
             }
             lastOutgoingCallTime = Date.now();
             lastOutgoingCallLabel = target;
+            log(`Invite codec preference: ${getSelectedAudioCodec()}`);
             ua.call(destination, callOptions);
             log(`Invite sent successfully (video: ${videoEnabled})`);
             callBtn.disabled = true;
@@ -1918,6 +2081,7 @@
             });
             session.on('peerconnection', (data) => {
                 attachMedia(data.peerconnection);
+                preferAudioCodecOnPeerConnection(data.peerconnection);
                 try {
                     const fallbackRemote = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'peer';
                     const label = session._iceLabel || `${session.direction || 'session'}:${fallbackRemote}`;
@@ -1927,6 +2091,7 @@
             if (session.connection) {
                 log('bindSessionEvents: PeerConnection already exists, attaching media immediately');
                 attachMedia(session.connection);
+                preferAudioCodecOnPeerConnection(session.connection);
                 try {
                     const fallbackRemote = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'peer';
                     const label = session._iceLabel || `${session.direction || 'session'}:${fallbackRemote}`;
@@ -1937,6 +2102,14 @@
                 try { handleSessionIceCandidate(session, event ? event.candidate : null, event ? event.ready : null); } catch (error) {}
             });
             session.on('sdp', (data) => {
+                if (data.originator === 'local' && data.sdp) {
+                    const before = data.sdp;
+                    data.sdp = rewriteLocalSdpAudioCodecs(data.sdp);
+                    if (data.sdp !== before) {
+                        logSipMessage('SENT', 'SDP (codec-rewritten)', data.sdp.substring(0, 400));
+                        return;
+                    }
+                }
                 logSipMessage(data.originator === 'local' ? 'SENT' : 'RECEIVED', 'SDP', data.sdp.substring(0, 300));
             });
         }
@@ -2219,6 +2392,11 @@
                     txPackets.textContent = txAudio.packetsSent || 0;
                     txBytes.textContent = formatBytes(txAudio.bytesSent);
                 }
+                const negotiatedEl = document.getElementById('negotiatedCodec');
+                if (negotiatedEl) {
+                    const name = await detectNegotiatedAudioCodec(session.connection);
+                    if (name) negotiatedEl.textContent = name;
+                }
                 // Calculate MOS
                 const mos = calculateMOS(rxAudio);
                 if (mos) {
@@ -2278,7 +2456,10 @@
             txPackets.textContent = '--';
             rxBytes.textContent = '--';
             txBytes.textContent = '--';
+            const negotiatedEl = document.getElementById('negotiatedCodec');
+            if (negotiatedEl) negotiatedEl.textContent = '--';
             [mosValue, rttValue, lossValue, jitterValue, rxPackets, txPackets, rxBytes, txBytes].forEach(el => el.className = 'stat-value');
+            if (negotiatedEl) negotiatedEl.className = 'stat-value';
         }
 
         // ========== ICE Monitoring ==========

@@ -366,8 +366,6 @@ pub struct SipSession {
     active_recording: Option<crate::callrecord::ActiveRecording>,
     /// Completed recording segments for this leg (full-call + mid-call slices).
     completed_recording_segments: Vec<crate::callrecord::RecordingSegment>,
-    /// Local signaling JSONL path when the recording sidecar is active.
-    signaling_jsonl_path: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1193,7 +1191,7 @@ impl SipSession {
             return Ok(());
         }
 
-        if recording.force_file || recording.option.is_some() {
+        if recording.uses_file_media() || recording.option.is_some() {
             let path = recording
                 .option
                 .as_ref()
@@ -1213,7 +1211,6 @@ impl SipSession {
                 started_at: chrono::Utc::now(),
                 notify_app: false,
             });
-            self.ensure_signaling_sidecar();
             debug!(session_id = %self.id, backend = "file", "auto recorder installed");
             return Ok(());
         }
@@ -1251,46 +1248,6 @@ impl SipSession {
             .as_ref()
             .map(|p| p.recorder_path())
             .unwrap_or_else(|| "recordings".to_string())
-    }
-
-    /// Register the SIP signaling JSONL sidecar when recording is enabled and
-    /// there is no full SipFlow backend (or force_file is on).
-    fn ensure_signaling_sidecar(&mut self) {
-        if self.signaling_jsonl_path.is_some() {
-            return;
-        }
-        if !self.context.dialplan.recording.enabled {
-            return;
-        }
-        // [recording] signaling = false opts out of the JSONL sidecar (and
-        // its upload) entirely.
-        if !self.context.dialplan.recording.signaling {
-            return;
-        }
-        let has_sipflow_backend = self
-            .server
-            .sip_flow
-            .as_ref()
-            .and_then(|sf| sf.backend())
-            .is_some();
-        let force_file = self.context.dialplan.recording.force_file;
-        // Full sipflow already captures signaling; skip unless force_file (WAV
-        // path) wants a local jsonl next to the recording.
-        if has_sipflow_backend && !force_file {
-            return;
-        }
-        let Some(sidecar) = self.server.signaling_sidecar.as_ref() else {
-            return;
-        };
-        let root = self.recording_root_dir();
-        let path = crate::callrecord::signaling_jsonl_path(
-            &root,
-            &self.root_session_id_str(),
-            &self.context.session_id,
-        );
-        let path_str = path.to_string_lossy().into_owned();
-        sidecar.register(self.context.session_id.clone(), path.clone());
-        self.signaling_jsonl_path = Some(path_str);
     }
 
     fn finalize_active_recording_segment(
@@ -1737,7 +1694,6 @@ impl SipSession {
             live_transcription: None,
             active_recording: None,
             completed_recording_segments: Vec::new(),
-            signaling_jsonl_path: None,
         };
 
         // Phase 0: Initialize MediaBridge eagerly when media is anchored.
@@ -8123,10 +8079,6 @@ impl SipSession {
             .active_call_registry
             .remove(&self.context.session_id);
 
-        if let Some(ref sidecar) = self.server.signaling_sidecar {
-            let _ = sidecar.unregister(&self.context.session_id);
-        }
-
         // Resolve the final hangup reason BEFORE the CDR snapshot is reported:
         // enrich with IVR end reason and queue abandon detection so the call
         // record (trace + hangup reason), session hooks and RWI webhook all
@@ -9118,7 +9070,6 @@ impl SipSession {
             metadata,
             media_quality,
             recording_segments: self.completed_recording_segments.clone(),
-            signaling_jsonl_path: self.signaling_jsonl_path.clone(),
             extensions,
         }
     }
@@ -9397,7 +9348,6 @@ impl SipSession {
                         started_at: chrono::Utc::now(),
                         notify_app,
                     });
-                    self.ensure_signaling_sidecar();
                     if config.beep {
                         self.handle_play(
                             None,

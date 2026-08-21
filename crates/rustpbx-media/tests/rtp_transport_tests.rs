@@ -712,6 +712,289 @@ async fn local_playback_to_webrtc_carries_mid() {
     tokio::time::sleep(Duration::from_millis(80)).await;
 }
 
+/// IVR (paced sender) then fast-path relay on a WebRTC leg must keep one
+/// outbound SSRC timeline: sequence continues and timestamps do not jump
+/// backwards / by a random offset.
+#[tokio::test]
+async fn webrtc_ivr_then_relay_keeps_outbound_timeline() {
+    let mut h = TestMediaHarness::create(
+        TransportMode::WebRtc,
+        CodecType::PCMU,
+        TransportMode::Rtp,
+        CodecType::PCMU,
+    )
+    .await;
+    let a_playback = playback_ssrc(&h, LegSide::A);
+    // Accept A only so IVR can play before the bridge arms rewrite.
+    h.mb.accept(LegSide::A).await;
+
+    h.mb.leg(LegSide::A)
+        .unwrap()
+        .play(Box::new(TestBeep::new(8000)), true, None)
+        .await
+        .expect("IVR play");
+
+    let control_track = h
+        .test_a
+        .pc
+        .get_transceivers()
+        .into_iter()
+        .find(|t| t.kind() == rustrtc::MediaKind::Audio)
+        .and_then(|t| t.receiver())
+        .map(|r| r.track())
+        .expect("test_a audio track");
+
+    let mut last_seq: Option<u16> = None;
+    let mut last_ts: Option<u32> = None;
+    for _ in 0..5 {
+        let frame = tokio::time::timeout(Duration::from_secs(2), control_track.recv())
+            .await
+            .expect("IVR frame timeout")
+            .expect("IVR frame");
+        let MediaSample::Audio(frame) = frame else {
+            panic!("expected audio");
+        };
+        let raw = frame.raw_packet.as_ref().expect("raw");
+        assert_eq!(raw.header.ssrc, a_playback);
+        if let (Some(seq), Some(ts)) = (last_seq, last_ts) {
+            assert_eq!(
+                raw.header.sequence_number,
+                seq.wrapping_add(1),
+                "IVR sequence must be contiguous"
+            );
+            assert_eq!(
+                raw.header.timestamp,
+                ts.wrapping_add(160),
+                "IVR timestamp must advance one PCMU ptime"
+            );
+        }
+        last_seq = Some(raw.header.sequence_number);
+        last_ts = Some(raw.header.timestamp);
+    }
+
+    // Accept B + bridge → RewriteRelay on both legs.
+    h.mb.accept(LegSide::B).await;
+    assert!(h.mb.is_bridged(), "bridge must activate after both accept");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    h.assert_relay(true);
+
+    // Inject from RTP peer B; rewrite delivers to WebRTC A on playback SSRC.
+    let relay_frame = h
+        .send_b_to_a_receive(CodecType::PCMU, 8000)
+        .await
+        .expect("relay after IVR");
+    let raw = relay_frame.raw_packet.as_ref().expect("raw");
+    assert_eq!(
+        raw.header.ssrc, a_playback,
+        "relay to WebRTC must keep the IVR/SDP SSRC"
+    );
+    let ivr_seq = last_seq.expect("ivr seq");
+    let ivr_ts = last_ts.expect("ivr ts");
+    let seq_delta = raw.header.sequence_number.wrapping_sub(ivr_seq);
+    assert!(
+        (1..=500).contains(&seq_delta),
+        "relay seq {} must continue after IVR seq {} (delta={})",
+        raw.header.sequence_number,
+        ivr_seq,
+        seq_delta
+    );
+    let ts_delta = raw.header.timestamp.wrapping_sub(ivr_ts);
+    assert!(
+        ts_delta > 0 && ts_delta < 8000 * 10,
+        "relay ts {} must continue forward from IVR ts {} (delta={})",
+        raw.header.timestamp,
+        ivr_ts,
+        ts_delta
+    );
+
+    h.close();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+}
+
+/// WebRTC←RTP Opus fast-path must preserve ~20ms timestamp steps (960 @ 48kHz).
+#[tokio::test]
+async fn webrtc_opus_fastpath_timestamp_steps_are_ptime() {
+    let mut h = TestMediaHarness::create(
+        TransportMode::WebRtc,
+        CodecType::Opus,
+        TransportMode::Rtp,
+        CodecType::Opus,
+    )
+    .await;
+    h.bridge_and_accept().await;
+    h.assert_relay(true);
+
+    let track = h
+        .test_a
+        .pc
+        .get_transceivers()
+        .into_iter()
+        .find(|t| t.kind() == rustrtc::MediaKind::Audio)
+        .and_then(|t| t.receiver())
+        .map(|r| r.track())
+        .expect("track");
+
+    // Prime the relay with a few frames, then sample consecutive timestamps.
+    let _ = h.send_b_to_a_receive(CodecType::Opus, 5000).await;
+    let frames = encode_codec_frames(CodecType::Opus, 20);
+    let mut send_ts = 10_000u32;
+    let mut stamps = Vec::new();
+    for _ in 0..8 {
+        h.test_b.send_audio(frames[0].clone(), send_ts);
+        send_ts = send_ts.wrapping_add(960);
+        if let Ok(Ok(MediaSample::Audio(frame))) =
+            tokio::time::timeout(Duration::from_millis(200), track.recv()).await
+        {
+            if let Some(raw) = frame.raw_packet.as_ref() {
+                stamps.push(raw.header.timestamp);
+            }
+        }
+    }
+    assert!(
+        stamps.len() >= 3,
+        "need several relayed Opus packets, got {stamps:?}"
+    );
+    // The first received packet may still be pre-bridge CNG/IVR on the same
+    // SSRC; after the handoff pin, steps must be exactly one Opus ptime.
+    let mut saw_stable = false;
+    for w in stamps.windows(2) {
+        let delta = w[1].wrapping_sub(w[0]);
+        if delta == 960 {
+            saw_stable = true;
+        } else if saw_stable {
+            panic!("Opus timestamp step broke after stabilizing: {delta} from {stamps:?}");
+        }
+    }
+    assert!(
+        saw_stable,
+        "expected contiguous 960 Opus timestamp steps, got {stamps:?}"
+    );
+
+    h.close();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+}
+
+fn first_audio_ssrc_from_sdp(sdp: &str) -> Option<u32> {
+    let mut in_audio = false;
+    for line in sdp.lines() {
+        if let Some(rest) = line.strip_prefix("m=") {
+            in_audio = rest.starts_with("audio");
+            continue;
+        }
+        if !in_audio {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("a=ssrc:") {
+            let token = rest.split_whitespace().next()?;
+            return token.parse().ok();
+        }
+    }
+    None
+}
+
+/// Browser contract (IVR / announcements): Chrome binds the receiver to the
+/// `a=ssrc` advertised in the answer. Local playback MUST use that same SSRC.
+/// WebRTC legs advertise the paced-sender (playback) SSRC; plain-RTP relay
+/// keeps a distinct SSRC that must never appear in WebRTC SDP.
+#[tokio::test]
+async fn webrtc_local_playback_ssrc_matches_sdp_advertised() {
+    let mut h = TestMediaHarness::create(
+        TransportMode::WebRtc,
+        CodecType::PCMU,
+        TransportMode::Rtp,
+        CodecType::PCMU,
+    )
+    .await;
+    // Do NOT bridge: IVR plays on a single answered WebRTC leg.
+    h.mb.accept(LegSide::A).await;
+    h.mb.accept(LegSide::B).await;
+
+    let answer_sdp = h
+        .test_a
+        .pc
+        .remote_description()
+        .expect("test_a has remote answer")
+        .to_sdp_string();
+    let advertised = first_audio_ssrc_from_sdp(&answer_sdp)
+        .expect("WebRTC answer must advertise a=ssrc for audio");
+    let playback = playback_ssrc(&h, LegSide::A);
+    let relay = relay_ssrc(&h, LegSide::A);
+    assert_eq!(advertised, playback, "SDP a=ssrc must be the playback SSRC");
+    assert_ne!(advertised, relay, "SDP must not advertise the plain-RTP relay SSRC");
+
+    h.mb.leg(LegSide::A)
+        .unwrap()
+        .play(Box::new(TestBeep::new(8000)), true, None)
+        .await
+        .expect("play beep on WebRTC leg");
+
+    let control_track = h
+        .test_a
+        .pc
+        .get_transceivers()
+        .into_iter()
+        .find(|t| t.kind() == rustrtc::MediaKind::Audio)
+        .and_then(|t| t.receiver())
+        .map(|r| r.track())
+        .expect("test_a audio receiver track");
+    let frame = tokio::time::timeout(Duration::from_secs(2), control_track.recv())
+        .await
+        .expect("playback frame timeout")
+        .expect("playback frame");
+    let MediaSample::Audio(frame) = frame else {
+        panic!("expected audio");
+    };
+    let raw = frame.raw_packet.as_ref().expect("raw packet");
+
+    assert_eq!(
+        raw.header.ssrc, advertised,
+        "local IVR/playback RTP SSRC must equal SDP a=ssrc (browser contract); \
+         got packet ssrc={} playback={} relay={}",
+        raw.header.ssrc,
+        playback,
+        relay
+    );
+
+    h.close();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+}
+
+/// Fast-path relay into a WebRTC destination must rewrite to the destination's
+/// playback/SDP SSRC (same SSRC IVR uses), not a distinct relay SSRC.
+#[tokio::test]
+async fn webrtc_fastpath_relay_uses_playback_ssrc() {
+    let mut h = TestMediaHarness::create(
+        TransportMode::Rtp,
+        CodecType::PCMU,
+        TransportMode::WebRtc,
+        CodecType::PCMU,
+    )
+    .await;
+    let b_playback = playback_ssrc(&h, LegSide::B);
+    let b_relay = relay_ssrc(&h, LegSide::B);
+    assert_ne!(b_playback, b_relay);
+    h.bridge_and_accept().await;
+    h.assert_relay(true);
+
+    let a_to_b = h
+        .send_and_receive(CodecType::PCMU, 10000)
+        .await
+        .expect("A→B into WebRTC");
+    let raw = a_to_b.raw_packet.as_ref().expect("raw packet");
+    assert_eq!(
+        raw.header.ssrc, b_playback,
+        "relay→WebRTC must use playback/SDP SSRC"
+    );
+    assert_ne!(raw.header.ssrc, b_relay);
+    assert!(
+        raw.header.extension.is_some(),
+        "WebRTC destination should still receive SDES-MID"
+    );
+
+    h.close();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+}
+
 #[tokio::test]
 async fn fast_path_webrtc_opus_webrtc_opus() {
     let mut h = TestMediaHarness::create(
@@ -1328,7 +1611,7 @@ async fn fast_path_rtp_pcmu_uses_separate_relay_ssrc() {
 //
 // Each test verifies audio flow in BOTH directions (caller→agent and
 // agent→caller) and asserts the SSRC attribution rule:
-//   - relay to a WebRTC destination uses the leg's separate relay SSRC and MID.
+//   - relay to a WebRTC destination uses the leg's playback/SDP SSRC and MID.
 //   - relay to a plain RTP destination uses a distinct random relay SSRC
 //     (RTP peers are SSRC-tolerant and don't need MID attribution).
 
@@ -1380,7 +1663,7 @@ async fn relay_full_duplex_rtp_rtp() {
     tokio::time::sleep(Duration::from_millis(80)).await;
 }
 
-/// WebRTC ↔ WebRTC: relayed packets use each destination leg's separate audio
+/// WebRTC ↔ WebRTC: relayed packets use each destination leg's playback/SDP
 /// SSRC and carry its SDES-MID.
 #[tokio::test]
 async fn relay_full_duplex_webrtc_webrtc() {
@@ -1395,6 +1678,8 @@ async fn relay_full_duplex_webrtc_webrtc() {
     let b_playback = playback_ssrc(&h, LegSide::B);
     let a_relay = relay_ssrc(&h, LegSide::A);
     let b_relay = relay_ssrc(&h, LegSide::B);
+    assert_ne!(a_playback, a_relay);
+    assert_ne!(b_playback, b_relay);
     h.bridge_and_accept().await;
     h.assert_relay(true);
 
@@ -1404,8 +1689,8 @@ async fn relay_full_duplex_webrtc_webrtc() {
         .expect("A→B");
     assert!(!a_to_b.data.is_empty());
     let raw = a_to_b.raw_packet.as_ref().expect("raw packet");
-    assert_ne!(raw.header.ssrc, b_playback);
-    assert_eq!(raw.header.ssrc, b_relay);
+    assert_eq!(raw.header.ssrc, b_playback);
+    assert_ne!(raw.header.ssrc, b_relay);
     assert_has_mid(
         raw,
         "WebRTC destination: relay must stamp MID for browser attribution",
@@ -1417,8 +1702,8 @@ async fn relay_full_duplex_webrtc_webrtc() {
         .expect("B→A");
     assert!(!b_to_a.data.is_empty());
     let raw = b_to_a.raw_packet.as_ref().expect("raw packet");
-    assert_ne!(raw.header.ssrc, a_playback);
-    assert_eq!(raw.header.ssrc, a_relay);
+    assert_eq!(raw.header.ssrc, a_playback);
+    assert_ne!(raw.header.ssrc, a_relay);
     assert_has_mid(
         raw,
         "WebRTC destination: relay must stamp MID for browser attribution",
@@ -1430,7 +1715,7 @@ async fn relay_full_duplex_webrtc_webrtc() {
 
 /// WebRTC(A) ↔ RTP(B): caller uses WebRTC, agent is plain RTP.
 /// A→B: RTP destination → distinct SSRC, no MID.
-/// B→A: WebRTC destination → separate relay SSRC and MID present.
+/// B→A: WebRTC destination → playback/SDP SSRC and MID present.
 #[tokio::test]
 async fn relay_full_duplex_webrtc_rtp() {
     let mut h = TestMediaHarness::create(
@@ -1459,15 +1744,15 @@ async fn relay_full_duplex_webrtc_rtp() {
     );
     assert_no_mid(raw);
 
-    // B→A: plain RTP agent → WebRTC caller (original bug direction)
+    // B→A: plain RTP agent → WebRTC caller
     let b_to_a = h
         .send_b_to_a_receive(CodecType::PCMU, 10000)
         .await
         .expect("B→A");
     assert!(!b_to_a.data.is_empty());
     let raw = b_to_a.raw_packet.as_ref().expect("raw packet");
-    assert_ne!(raw.header.ssrc, a_playback);
-    assert_eq!(raw.header.ssrc, a_relay);
+    assert_eq!(raw.header.ssrc, a_playback);
+    assert_ne!(raw.header.ssrc, a_relay);
     assert_has_mid(
         raw,
         "WebRTC destination: relay must stamp MID (the original 'bitrate but no audio' bug)",
@@ -1478,7 +1763,7 @@ async fn relay_full_duplex_webrtc_rtp() {
 }
 
 /// RTP(A) ↔ WebRTC(B): caller is plain RTP, agent is WebRTC.
-/// A→B: WebRTC destination → separate relay SSRC and MID present.
+/// A→B: WebRTC destination → playback/SDP SSRC and MID present.
 /// B→A: RTP destination → distinct SSRC, no MID.
 #[tokio::test]
 async fn relay_full_duplex_rtp_webrtc() {
@@ -1502,8 +1787,8 @@ async fn relay_full_duplex_rtp_webrtc() {
         .expect("A→B");
     assert!(!a_to_b.data.is_empty());
     let raw = a_to_b.raw_packet.as_ref().expect("raw packet");
-    assert_ne!(raw.header.ssrc, b_playback);
-    assert_eq!(raw.header.ssrc, b_relay);
+    assert_eq!(raw.header.ssrc, b_playback);
+    assert_ne!(raw.header.ssrc, b_relay);
     assert_has_mid(raw, "WebRTC destination: relay must stamp MID");
 
     // B→A: WebRTC agent → plain RTP caller

@@ -1,5 +1,7 @@
 use crate::{
-    config::{MediaProxyMode, RecordingAutoStartAt, RecordingPolicy, RouteResult},
+    config::{
+        MediaProxyMode, RecordingAutoStartAt, RecordingPolicy, RecordingType, RouteResult,
+    },
     media::recorder::RecorderOption,
     proxy::routing::VideoPolicy,
 };
@@ -643,12 +645,9 @@ pub struct CallRecordingConfig {
     pub auto_start: bool,
     /// Signaling point at which automatic recording installs its backend.
     pub auto_start_at: RecordingAutoStartAt,
-    /// When true, use the legacy WAV file recorder instead of SipFlow for
-    /// media capture. SipFlow captures SIP signalling only.
-    pub force_file: bool,
-    /// When false, skip the SIP signalling JSONL sidecar that is normally
-    /// written next to the recording when no SipFlow backend is active.
-    pub signaling: bool,
+    /// Where media is captured: `local`/`http`/`s3` → WAV file; `sipflow` →
+    /// SipflowRecorder. SIP signalling always goes to `[sipflow]` when configured.
+    pub recording_type: RecordingType,
     /// Swap stereo channels: callee→left, caller→right.
     /// Default (false): caller→left, callee→right.
     pub stereo_swap: bool,
@@ -656,8 +655,6 @@ pub struct CallRecordingConfig {
 
 impl Default for CallRecordingConfig {
     fn default() -> Self {
-        // Keep the "write the signaling sidecar" default consistent with
-        // `new()`; a derived Default would flip the bool to false.
         Self::new()
     }
 }
@@ -669,10 +666,17 @@ impl CallRecordingConfig {
             option: None,
             auto_start: true,
             auto_start_at: RecordingAutoStartAt::default(),
-            force_file: false,
-            signaling: true,
+            recording_type: RecordingType::Local,
             stereo_swap: false,
         }
+    }
+
+    pub fn uses_file_media(&self) -> bool {
+        self.recording_type.is_file_media()
+    }
+
+    pub fn uses_sipflow_media(&self) -> bool {
+        self.recording_type == RecordingType::Sipflow
     }
 
     pub fn enabled(mut self) -> Self {

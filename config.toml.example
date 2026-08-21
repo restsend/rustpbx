@@ -203,40 +203,34 @@ type = "extension"
 # video_policy = "pass_through"
 
 # ── Recording ─────────────────────────────────────────────────────────────────
-# [recording].enabled is the master switch for RTP capture, regardless of
-# whether the selected recorder is SipFlow or the legacy WAV file recorder.
+# [recording].enabled is the master switch for whether media is recorded.
+# `type` selects WHERE media is captured:
+#   "local" | "http" | "s3"  → WAV file recorder + [recording] upload
+#   "sipflow"                → SipflowRecorder into the [sipflow] backend
+#                              (upload via [sipflow.upload].media)
+#
+# SIP signalling is captured whenever [sipflow] is configured (independent of
+# type). Without [sipflow], there is no SIP ladder / signalling upload.
+#
 # auto_start installs the selected recorder automatically. auto_start_at
 # controls whether that happens at the first completed caller-media setup
-# (the "media" default, which may lead to either 183 or a direct 200)
-# or only after caller media is ready for the final answer.
+# ("media", default) or only after caller media is ready for the final answer.
 #
-#   • Default (recommended): Configure both [recording] and [sipflow]. SipFlow
-#     captures SIP signalling and, when recording is enabled, RTP audio.
-#
-#   • Legacy: Configure [recording] WITHOUT [sipflow]. The live WAV recorder
-#     is selected as the fallback. No SIP signalling capture.
-#
-#   • Hybrid (force_file): Configure BOTH [recording] and [sipflow], then set
-#     force_file = true inside [recording]. The WAV file recorder captures
-#     audio; SipFlow captures SIP signalling ONLY (no RTP). Media upload goes
-#     through [recording] (type = "http" or "s3"), signalling upload goes
-#     through [sipflow.upload] (signaling = true).
+# Recommended patterns:
+#   • WAV + sipflow signalling:
+#       [recording] enabled=true type="local" (or http/s3)
+#       [sipflow] + [sipflow.upload] signaling=true media=false
+#   • Full sipflow (RTP + SIP):
+#       [recording] enabled=true type="sipflow"
+#       [sipflow] + [sipflow.upload] media=true signaling=true
 #
 [recording]
 enabled = true
 auto_start = true
 auto_start_at = "media" # default; use "answer" to wait for 200
-# Recording upload mode: "local" (default), "http", or "s3".
+# Media destination: "local" (default), "http", "s3", or "sipflow".
 # type = "local"
-# path = "./config/recorders"  # default when omitted or blank
-# force_file = true   # Use WAV file recorder for media even when [sipflow]
-#                     # is active. SipFlow captures signalling only.
-#                     # Media upload is handled by [recording] (type = http/s3),
-#                     # not [sipflow.upload].
-# signaling = false   # Skip the SIP signalling JSONL sidecar that is normally
-#                     # written (and uploaded) next to the recording when no
-#                     # [sipflow] backend is configured. Default (unset/true):
-#                     # write {session_id}.jsonl and upload it alongside the WAV.
+# path = "./config/recorders"  # default when omitted or blank (file types only)
 #
 # Mid-call / IVR segmented recording: set auto_start = false so the call does
 # not record by default; IVR `record_start`/`record_stop` (or RWI
@@ -244,10 +238,7 @@ auto_start_at = "media" # default; use "answer" to wait for 200
 # {session_id}_{YYYYMMDDHHMMSS}_{type}_{id}.wav. CDR metadata.recording_segments
 # lists every slice. Prefer record_stop before transfer/REFER.
 #
-# Without [sipflow], a lightweight SIP JSONL sidecar is still written next to
-# the recording ({session_id}.jsonl / {session_id}_{call_id}.jsonl) and uploaded
-# with the same type=http|s3 path — unless signaling = false disables it. On
-# upload failure a sibling
+# On upload failure a sibling
 # .upload_failed.{filename} JSON marker is written (time/address/duration_ms/error);
 # local files are deleted only after a successful remote upload.
 #
@@ -331,16 +322,14 @@ auto_start_at = "media" # default; use "answer" to wait for 200
 # root = "./config/cdr"
 
 # ── SipFlow ───────────────────────────────────────────────────────────────────
-# Unified SIP + RTP recording system (default).
-# [sipflow] enables SIP signalling capture. RTP audio capture additionally
-# requires [recording].enabled = true. Automatic SipFlow recording follows
-# [recording].auto_start_at. The console then shows the SIP flow ladder and an
-# audio player for each recorded call.
+# [sipflow] enables SIP signalling capture for every call (MessageInspector).
+# RTP capture additionally requires:
+#   [recording] enabled = true AND type = "sipflow"
+# When type is local/http/s3, SipFlow stores SIP only; WAV media is owned by
+# [recording] and [sipflow.upload].media is skipped automatically.
 #
-# When [recording] force_file = true is also set, SipFlow captures SIP
-# signalling ONLY. Audio is recorded to a WAV file by the [recording]
-# subsystem. In [sipflow.upload], media upload is automatically skipped
-# (handled by [recording]); only signalling upload (if enabled) runs.
+# Console shows the SIP flow ladder from the backend; audio player works when
+# RTP was stored (type=sipflow) or when a WAV was uploaded via [recording].
 [sipflow]
 type = "local"
 root = "./config/sipflow"
@@ -359,7 +348,7 @@ engine = "flowdb"
 # flush_interval_secs = 5
 # id_cache_size = 8192
 
-# Optional: upload captured media as WAV after each call.
+# Optional: upload after each call.
 # [sipflow.upload]
 # type = "s3"
 # vendor = "aws"
@@ -369,8 +358,8 @@ engine = "flowdb"
 # secret_key = "SECRET"
 # endpoint = "https://s3.amazonaws.com"
 # root = "recordings"
-# media = true          # upload captured RTP as WAV (default: true)
-# signaling = false     # also upload SIP signalling as JSONL (default: false)
+# media = true          # upload RTP as WAV when type=sipflow (default: true)
+# signaling = true      # upload SIP signalling JSONL (recommended with [sipflow])
 
 # Remote backend (single node):
 # [sipflow]

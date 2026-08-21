@@ -379,6 +379,16 @@ impl AudioSource for SilenceSource {
 /// are never dropped. When the sender is dropped and the buffer is empty,
 /// [`AudioSource::has_data`] becomes false so the egress can EOF (with
 /// `loop_playback=false`) instead of emitting comfort-noise forever.
+/// Live PCM feed for app/TTS streaming ("filetrack mode").
+///
+/// Chunks may arrive in arbitrary sizes. [`AudioSource::read_samples`] only
+/// returns a **full** `buffer` (or flushes a partial on sender disconnect) so
+/// the egress encoder never sees a short frame zero-padded mid-stream — that
+/// pattern caused a click at every TTS/app chunk boundary (~1 s).
+///
+/// While the sender is alive but starved, reads return 0 and
+/// [`AudioSource::has_data`] stays true so egress can keep RTP cadence with
+/// digital silence (not comfort-noise, which also pops when speech resumes).
 pub struct ChannelAudioSource {
     rx: parking_lot::Mutex<mpsc::Receiver<Vec<i16>>>,
     remainder: Vec<i16>,
@@ -396,21 +406,26 @@ impl ChannelAudioSource {
         }
     }
 
-    fn pull_into_remainder(&mut self) {
+    /// Pull every currently-queued chunk into `remainder`.
+    fn drain_channel(&mut self) {
         if self.disconnected {
             return;
         }
-        match self.rx.lock().try_recv() {
-            Ok(chunk) => {
-                if self.remainder.is_empty() {
-                    self.remainder = chunk;
-                } else {
-                    self.remainder.extend_from_slice(&chunk);
+        let mut rx = self.rx.lock();
+        loop {
+            match rx.try_recv() {
+                Ok(chunk) => {
+                    if self.remainder.is_empty() {
+                        self.remainder = chunk;
+                    } else {
+                        self.remainder.extend_from_slice(&chunk);
+                    }
                 }
-            }
-            Err(mpsc::error::TryRecvError::Empty) => {}
-            Err(mpsc::error::TryRecvError::Disconnected) => {
-                self.disconnected = true;
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.disconnected = true;
+                    break;
+                }
             }
         }
     }
@@ -418,20 +433,32 @@ impl ChannelAudioSource {
 
 impl AudioSource for ChannelAudioSource {
     fn read_samples(&mut self, buffer: &mut [i16]) -> usize {
-        if self.remainder.is_empty() {
-            self.pull_into_remainder();
-        }
-        if self.remainder.is_empty() {
+        if buffer.is_empty() {
             return 0;
         }
-        let n = self.remainder.len().min(buffer.len());
-        buffer[..n].copy_from_slice(&self.remainder[..n]);
-        self.remainder.drain(..n);
-        // Opportunistically pull more while the sender is ahead of us.
-        if self.remainder.is_empty() {
-            self.pull_into_remainder();
+        self.drain_channel();
+
+        if self.remainder.len() >= buffer.len() {
+            buffer.copy_from_slice(&self.remainder[..buffer.len()]);
+            self.remainder.drain(..buffer.len());
+            // Opportunistically absorb anything the producer queued while we
+            // copied, so the next tick starts with a fuller buffer.
+            self.drain_channel();
+            return buffer.len();
         }
-        n
+
+        // Not enough for a full frame yet.
+        if self.disconnected {
+            // Final flush: allow a short last frame so EOF can complete.
+            let n = self.remainder.len();
+            if n == 0 {
+                return 0;
+            }
+            buffer[..n].copy_from_slice(&self.remainder);
+            self.remainder.clear();
+            return n;
+        }
+        0
     }
 
     fn sample_rate(&self) -> u32 {
@@ -1258,7 +1285,12 @@ mod tests {
         ));
     }
 
-    // ── ChannelAudioSource ────────────────────────────────────────────
+    // ── ChannelAudioSource (app / TTS streaming) ──────────────────────
+    //
+    // Regression context: older tests asserted that a short chunk returned
+    // `n < buffer.len()` immediately. Egress then zero-padded and/or filled
+    // underruns with comfort noise — both click at every app chunk boundary.
+    // Contract now: hold until a full ptime frame (flush partial only on EOF).
 
     #[test]
     fn channel_source_empty_returns_zero() {
@@ -1266,7 +1298,7 @@ mod tests {
         let mut src = ChannelAudioSource::new(rx, 8000);
         let mut buf = vec![0i16; 160];
         let n = src.read_samples(&mut buf);
-        assert_eq!(n, 0, "empty channel → 0 (egress uses CNG)");
+        assert_eq!(n, 0, "empty channel → 0 (egress uses digital silence)");
         assert!(src.has_data(), "sender still alive → has_data");
     }
 
@@ -1299,22 +1331,34 @@ mod tests {
     }
 
     #[test]
-    fn channel_source_variable_chunk_sizes() {
+    fn channel_source_holds_partial_until_full_frame() {
         let (tx, rx) = tokio::sync::mpsc::channel::<Vec<i16>>(64);
         let mut src = ChannelAudioSource::new(rx, 8000);
         let mut buf = vec![0i16; 160];
 
+        // Short chunk must not be returned as a padded partial frame.
         tx.try_send(vec![7i16; 80]).unwrap();
+        assert_eq!(src.read_samples(&mut buf), 0);
+        assert!(src.has_data());
 
-        let n = src.read_samples(&mut buf);
-        assert_eq!(n, 80);
+        // Completing the frame yields one contiguous read.
+        tx.try_send(vec![8i16; 80]).unwrap();
+        assert_eq!(src.read_samples(&mut buf), 160);
         assert_eq!(buf[0], 7);
-        assert_eq!(buf[79], 7);
+        assert_eq!(buf[80], 8);
+    }
 
-        let n = src.read_samples(&mut buf);
-        assert_eq!(n, 0);
-
+    #[test]
+    fn channel_source_flushes_partial_on_disconnect() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<i16>>(64);
+        let mut src = ChannelAudioSource::new(rx, 8000);
+        let mut buf = vec![0i16; 160];
+        tx.try_send(vec![7i16; 80]).unwrap();
         drop(tx);
+        assert_eq!(src.read_samples(&mut buf), 80);
+        assert_eq!(buf[0], 7);
+        assert_eq!(src.read_samples(&mut buf), 0);
+        assert!(!src.has_data());
     }
 
     #[test]

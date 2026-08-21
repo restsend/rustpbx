@@ -26,7 +26,7 @@ pub struct RecordingUploadHook {
 
 impl RecordingUploadHook {
     pub fn new(policy: RecordingPolicy) -> Result<Self> {
-        let recording_type = policy.recording_type.unwrap_or_default();
+        let recording_type = policy.effective_recording_type();
         let s3_storage = if recording_type == RecordingType::S3 {
             let bucket = Self::required(&policy.bucket, "bucket")?;
             let region = Self::required(&policy.region, "region")?;
@@ -67,6 +67,102 @@ impl RecordingUploadHook {
     pub fn with_rwi_gateway(mut self, gw: RwiGatewayRef) -> Self {
         self.rwi_gateway = Some(gw);
         self
+    }
+
+    /// Rename local recording artifacts (wav + signaling jsonl sidecar) into
+    /// their daily/hourly archive subdirectory during enrichment, i.e.
+    /// BEFORE the CDR row is persisted, so `recording_url`, `sipflow_jsonl`
+    /// and `recording_segments` metadata reference the final on-disk layout.
+    /// Archiving only in `on_record_completed` left stale pre-archive paths
+    /// in the database (downloads then 404'd on the moved files).
+    async fn archive_local_artifacts(&self, record: &mut CallRecord) {
+        use crate::callrecord::{RecordingSubdir, local_archive_path};
+
+        let subdir = RecordingSubdir::parse(self.policy.subdir.as_deref());
+        let root = self.policy.recorder_path();
+
+        let mut renames: HashMap<String, String> = HashMap::new();
+        let mut first_media_url: Option<String> = None;
+
+        for index in 0..record.recorder.len() {
+            let (track_id, path) = {
+                let media = &record.recorder[index];
+                (media.track_id.clone(), media.path.clone())
+            };
+            // Only archive artifacts this pipeline generated directly under
+            // the recorder root (segment WAVs + signaling sidecars). Files
+            // recorded to operator-supplied custom paths (e.g. an RWI
+            // `record` option pointing outside the root) keep their original
+            // location until the completed stage, matching historical
+            // behavior.
+            if !is_direct_child_of_root(&root, Path::new(&path)) {
+                continue;
+            }
+            let dest = local_archive_path(&root, Path::new(&path), subdir, record.start_time);
+            if dest.as_path() == Path::new(&path) {
+                continue;
+            }
+            if let Some(parent) = dest.parent() {
+                let _ = tokio::fs::create_dir_all(parent).await;
+            }
+            match tokio::fs::rename(&path, &dest).await {
+                Ok(()) => {
+                    let archived = dest.to_string_lossy().into_owned();
+                    info!(
+                        call_id = %record.call_id,
+                        track_id,
+                        from = %path,
+                        to = %archived,
+                        "local recording archived"
+                    );
+                    if first_media_url.is_none() && track_id != "signaling" {
+                        first_media_url = Some(archived.clone());
+                    }
+                    if let Some(media) = record.recorder.get_mut(index) {
+                        media.path = archived.clone();
+                        let extra = media.extra.get_or_insert_with(HashMap::new);
+                        extra.insert("uploadUrl".to_string(), json!(archived.clone()));
+                    }
+                    renames.insert(path, archived);
+                }
+                Err(err) => {
+                    warn!(
+                        call_id = %record.call_id,
+                        from = %path,
+                        to = %dest.display(),
+                        %err,
+                        "local recording archive failed; keeping original path"
+                    );
+                }
+            }
+        }
+
+        if renames.is_empty() {
+            return;
+        }
+
+        if let Some(url) = first_media_url {
+            record.details.recording_url = Some(url);
+        }
+
+        if let Some(metadata) = record.details.metadata.as_mut() {
+            if let Some(serde_json::Value::String(jsonl)) = metadata.get_mut("sipflow_jsonl")
+                && let Some(archived) = renames.get(jsonl)
+            {
+                *jsonl = archived.clone();
+            }
+            if let Some(serde_json::Value::Array(segments)) =
+                metadata.get_mut("recording_segments")
+            {
+                for segment in segments.iter_mut() {
+                    if let Some(serde_json::Value::String(path)) = segment.get_mut("path")
+                        && let Some(archived) = renames.get(path)
+                    {
+                        *path = archived.clone();
+                    }
+                }
+            }
+        }
     }
 
     fn required(value: &Option<String>, name: &str) -> Result<String> {
@@ -168,11 +264,25 @@ impl RecordingUploadHook {
 
 #[async_trait]
 impl CallRecordHook for RecordingUploadHook {
+    async fn on_record_enrich(&self, record: &mut CallRecord) -> anyhow::Result<()> {
+        // Local artifacts are archived before the CDR is persisted so the
+        // stored paths match the daily/hourly on-disk layout. Remote uploads
+        // (HTTP/S3) stay in `on_record_completed` — they are side effects and
+        // must not delay or break the save.
+        if self.policy.effective_recording_type() == RecordingType::Local {
+            self.archive_local_artifacts(record).await;
+        }
+        Ok(())
+    }
+
     async fn on_record_completed(&self, record: &mut CallRecord) -> anyhow::Result<()> {
         use crate::callrecord::{RecordingSubdir, local_archive_path, write_upload_failed_marker};
         use std::time::Instant;
 
-        let recording_type = self.policy.recording_type.unwrap_or_default();
+        let recording_type = self.policy.effective_recording_type();
+        if !recording_type.is_file_media() {
+            return Ok(());
+        }
         let subdir = RecordingSubdir::parse(self.policy.subdir.as_deref());
         let root = self.policy.recorder_path();
 
@@ -264,14 +374,14 @@ impl CallRecordHook for RecordingUploadHook {
                             .url
                             .clone()
                             .unwrap_or_else(|| "http".to_string()),
-                        RecordingType::Local => unreachable!(),
+                        RecordingType::Local | RecordingType::Sipflow => unreachable!(),
                     };
                     let upload = match recording_type {
                         RecordingType::Http => {
                             self.upload_http(record, &track_id, &path, data).await
                         }
                         RecordingType::S3 => self.upload_s3(&key, data).await,
-                        RecordingType::Local => unreachable!(),
+                        RecordingType::Local | RecordingType::Sipflow => unreachable!(),
                     };
                     let elapsed_ms = started.elapsed().as_millis() as u64;
                     match upload {
@@ -336,6 +446,7 @@ impl CallRecordHook for RecordingUploadHook {
                         }
                     }
                 }
+                RecordingType::Sipflow => unreachable!("file upload path filtered earlier"),
             }
         }
 
@@ -421,6 +532,21 @@ impl CallRecordHook for RecordingUploadHook {
         }
 
         Ok(())
+    }
+}
+
+/// True when `path` sits directly inside `root` (ignoring `./` prefixes),
+/// i.e. it is a pipeline-generated artifact name like `{root}/{file}.wav`.
+fn is_direct_child_of_root(root: &str, path: &Path) -> bool {
+    let normalize = |p: &Path| -> Vec<String> {
+        p.components()
+            .filter(|c| !matches!(c, std::path::Component::CurDir))
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect()
+    };
+    match path.parent() {
+        Some(parent) => normalize(parent) == normalize(Path::new(root)),
+        None => false,
     }
 }
 
@@ -750,6 +876,161 @@ mod tests {
                 .recording_url
                 .as_deref()
                 .is_some_and(|u| u.starts_with("https://recordings.example/"))
+        );
+    }
+
+    /// Regression: local artifacts must be archived during enrichment (before
+    /// the CDR row is persisted) so `recording_url`, `sipflow_jsonl` and
+    /// `recording_segments` metadata reference the final daily layout —
+    /// archiving only in `on_record_completed` left stale pre-archive paths
+    /// in the database and downloads 404'd.
+    #[tokio::test]
+    async fn enrich_archives_into_daily_subdir_and_rewrites_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_string_lossy().into_owned();
+        let wav = dir.path().join("sess.wav");
+        let jsonl = dir.path().join("sess.jsonl");
+        tokio::fs::write(&wav, b"wav").await.expect("write wav");
+        tokio::fs::write(&jsonl, b"{}\n").await.expect("write jsonl");
+        let wav_s = wav.to_string_lossy().into_owned();
+        let jsonl_s = jsonl.to_string_lossy().into_owned();
+
+        let policy = RecordingPolicy {
+            enabled: Some(true),
+            recording_type: Some(RecordingType::Local),
+            path: Some(root.clone()),
+            subdir: Some("daily".into()),
+            ..Default::default()
+        };
+        let hook = RecordingUploadHook::new(policy).expect("hook");
+        let now = chrono::Utc::now();
+        let mut record = CallRecord {
+            call_id: "enrich-archive".into(),
+            start_time: now,
+            answer_time: Some(now),
+            end_time: now,
+            recorder: vec![
+                CallRecordMedia {
+                    track_id: "segment:full:1".into(),
+                    path: wav_s,
+                    size: 3,
+                    extra: None,
+                },
+                CallRecordMedia {
+                    track_id: "signaling".into(),
+                    path: jsonl_s,
+                    size: 2,
+                    extra: None,
+                },
+            ],
+            details: CallDetails {
+                metadata: Some(HashMap::from([
+                    (
+                        "sipflow_jsonl".to_string(),
+                        json!(jsonl.to_string_lossy().into_owned()),
+                    ),
+                    (
+                        "recording_segments".to_string(),
+                        json!([{ "path": wav.to_string_lossy().into_owned() }]),
+                    ),
+                ])),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        hook.on_record_enrich(&mut record).await.expect("enrich");
+
+        let day = now.format("%Y%m%d").to_string();
+        let archived_wav = Path::new(&root).join(&day).join("sess.wav");
+        let archived_jsonl = Path::new(&root).join(&day).join("sess.jsonl");
+        assert!(archived_wav.exists(), "wav archived under daily subdir");
+        assert!(archived_jsonl.exists(), "jsonl archived under daily subdir");
+        assert!(!wav.exists() && !jsonl.exists(), "originals moved");
+
+        assert_eq!(
+            record.recorder[0].path,
+            archived_wav.to_string_lossy().into_owned()
+        );
+        assert_eq!(
+            record.details.recording_url.as_deref(),
+            Some(archived_wav.to_string_lossy().as_ref()),
+            "recording_url must reference the archived path before the DB save"
+        );
+        let meta = record.details.metadata.as_ref().expect("metadata kept");
+        assert_eq!(
+            meta.get("sipflow_jsonl"),
+            Some(&json!(archived_jsonl.to_string_lossy().into_owned()))
+        );
+        assert_eq!(
+            meta.get("recording_segments")
+                .and_then(|s| s.get(0))
+                .and_then(|s| s.get("path")),
+            Some(&json!(archived_wav.to_string_lossy().into_owned()))
+        );
+
+        // completed after enrich is idempotent: no second move, URL stable.
+        hook.on_record_completed(&mut record)
+            .await
+            .expect("completed");
+        assert!(archived_wav.exists() && archived_jsonl.exists());
+        assert_eq!(
+            record.details.recording_url.as_deref(),
+            Some(archived_wav.to_string_lossy().as_ref())
+        );
+    }
+
+    /// Files recorded to operator-supplied paths outside the recorder root
+    /// (e.g. an RWI `record` option) must not be moved during enrichment —
+    /// they keep the historical completed-stage behavior.
+    #[tokio::test]
+    async fn enrich_keeps_custom_path_recordings_in_place() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("recorders");
+        tokio::fs::create_dir_all(&root).await.expect("mkdir root");
+        let custom_dir = dir.path().join("custom");
+        tokio::fs::create_dir_all(&custom_dir)
+            .await
+            .expect("mkdir custom");
+        let wav = custom_dir.join("ob.wav");
+        tokio::fs::write(&wav, b"wav").await.expect("write");
+
+        let policy = RecordingPolicy {
+            enabled: Some(true),
+            recording_type: Some(RecordingType::Local),
+            path: Some(root.to_string_lossy().into_owned()),
+            subdir: Some("daily".into()),
+            ..Default::default()
+        };
+        let hook = RecordingUploadHook::new(policy).expect("hook");
+        let now = chrono::Utc::now();
+        let mut record = CallRecord {
+            call_id: "custom-path".into(),
+            start_time: now,
+            answer_time: Some(now),
+            end_time: now,
+            recorder: vec![CallRecordMedia {
+                track_id: "mixed".into(),
+                path: wav.to_string_lossy().into_owned(),
+                size: 3,
+                extra: None,
+            }],
+            details: CallDetails::default(),
+            ..Default::default()
+        };
+
+        hook.on_record_enrich(&mut record).await.expect("enrich");
+        assert!(
+            wav.exists(),
+            "enrich must not move files outside the recorder root"
+        );
+        assert_eq!(
+            record.recorder[0].path,
+            wav.to_string_lossy().into_owned()
+        );
+        assert_eq!(
+            record.details.recording_url, None,
+            "enrich must not synthesize a recording_url when nothing moved"
         );
     }
 }

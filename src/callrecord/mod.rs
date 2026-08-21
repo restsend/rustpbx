@@ -33,7 +33,6 @@ use tracing::{info, warn};
 pub mod database_hook;
 pub mod recording_artifacts;
 pub mod recording_upload;
-pub mod signaling_sidecar;
 pub mod sipflow;
 pub mod sipflow_remote_upload;
 pub mod sipflow_upload;
@@ -43,9 +42,8 @@ mod tests;
 
 pub use recording_artifacts::{
     ActiveRecording, RecordingSegment, RecordingSubdir, UploadFailedMarker, local_archive_path,
-    segment_wav_path, signaling_jsonl_path, upload_failed_marker_path, write_upload_failed_marker,
+    segment_wav_path, upload_failed_marker_path, write_upload_failed_marker,
 };
-pub use signaling_sidecar::SignalingSidecar;
 
 const CALL_RECORD_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const CALL_RECORD_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);

@@ -511,8 +511,7 @@ async fn recording_enabled_manual_start_creates_idle_capture_task() {
         option: Some(crate::media::recorder::RecorderOption::new(path.clone())),
         auto_start: false,
         auto_start_at: crate::config::RecordingAutoStartAt::Media,
-        force_file: true,
-        signaling: true,
+        recording_type: crate::config::RecordingType::Local,
         stereo_swap: false,
     };
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
@@ -550,8 +549,7 @@ async fn file_recording_default_starts_at_media_setup() {
         option: Some(crate::media::recorder::RecorderOption::new(path.clone())),
         auto_start: true,
         auto_start_at: crate::config::RecordingAutoStartAt::Media,
-        force_file: true,
-        signaling: true,
+        recording_type: crate::config::RecordingType::Local,
         stereo_swap: false,
     };
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
@@ -601,8 +599,7 @@ async fn file_recording_answer_timing_waits_after_media_setup() {
         option: Some(crate::media::recorder::RecorderOption::new(path.clone())),
         auto_start: true,
         auto_start_at: crate::config::RecordingAutoStartAt::Answer,
-        force_file: true,
-        signaling: true,
+        recording_type: crate::config::RecordingType::Local,
         stereo_swap: false,
     };
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
@@ -650,65 +647,6 @@ async fn file_recording_answer_timing_waits_after_media_setup() {
     }
 }
 
-/// Shared helper for signaling-sidecar tests: a file-recording dialplan plus
-/// a server recording policy rooted at `root`.
-async fn build_sidecar_session(signaling: bool, root: &std::path::Path) -> SipSession {
-    let wav = root.join("sidecar-test.wav").to_string_lossy().into_owned();
-    let (server, _) = create_test_server_with_config(ProxyConfig::default()).await;
-    let policy = crate::config::RecordingPolicy {
-        enabled: Some(true),
-        path: Some(root.to_string_lossy().into_owned()),
-        signaling: Some(signaling),
-        ..Default::default()
-    };
-    server.recording_policy.store(Arc::new(Some(policy)));
-    let recording = crate::call::CallRecordingConfig {
-        enabled: true,
-        option: Some(crate::media::recorder::RecorderOption::new(wav)),
-        auto_start: true,
-        auto_start_at: crate::config::RecordingAutoStartAt::Media,
-        force_file: true,
-        signaling,
-        stereo_swap: false,
-    };
-    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
-        .with_application("ivr".to_string(), None, true)
-        .with_recording(recording);
-    let mut session = build_session_on_server(server, dialplan).await;
-    setup_recording_test_media(&mut session).await;
-    session
-}
-
-#[tokio::test]
-async fn file_recording_writes_signaling_sidecar_by_default() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let mut session = build_sidecar_session(true, dir.path()).await;
-    let jsonl = dir.path().join("test-session.jsonl");
-    assert!(
-        jsonl.is_file(),
-        "default recording config must register the signaling JSONL sidecar"
-    );
-    if let Some(mut bridge) = session.media.bridge.take() {
-        bridge.stop_recording().await.expect("stop file recorder");
-        bridge.close();
-    }
-}
-
-#[tokio::test]
-async fn file_recording_signaling_false_skips_sidecar() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let mut session = build_sidecar_session(false, dir.path()).await;
-    let jsonl = dir.path().join("test-session.jsonl");
-    assert!(
-        !jsonl.exists(),
-        "signaling = false must skip the signaling JSONL sidecar entirely"
-    );
-    if let Some(mut bridge) = session.media.bridge.take() {
-        bridge.stop_recording().await.expect("stop file recorder");
-        bridge.close();
-    }
-}
-
 #[tokio::test]
 async fn sipflow_recording_default_starts_at_media_setup() {
     use rustrtc::peer_connection::RtpObserver;
@@ -726,8 +664,7 @@ async fn sipflow_recording_default_starts_at_media_setup() {
         option: None,
         auto_start: true,
         auto_start_at: crate::config::RecordingAutoStartAt::Media,
-        force_file: false,
-        signaling: true,
+        recording_type: crate::config::RecordingType::Sipflow,
         stereo_swap: false,
     };
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
@@ -784,8 +721,7 @@ async fn sipflow_recording_auto_start_false_keeps_backend_idle() {
         option: None,
         auto_start: false,
         auto_start_at: crate::config::RecordingAutoStartAt::Media,
-        force_file: false,
-        signaling: true,
+        recording_type: crate::config::RecordingType::Sipflow,
         stereo_swap: false,
     };
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)

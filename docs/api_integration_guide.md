@@ -339,15 +339,19 @@ GET /ami/v1/sipflow/media/abc123?start=1713232800&end=1713234600
 
 ### Scenario D: Compliance Recording
 
-Two recording backends are available — a traditional local file recorder (`[recording]`) and sipflow (`[sipflow]`). `[recording].enabled` controls RTP capture for both backends. When `auto_start = true`, `auto_start_at = "media"` (the default) installs the selected backend immediately after the first caller-media connection is set up. That connection may be exposed through a provisional response or directly through the final 200 response. Set `auto_start_at = "answer"` to delay installation until caller media is ready for the final 200 response. When both sections are configured, sipflow takes precedence unless `force_file = true`, avoiding duplicate media capture.
+`[recording].enabled` turns media capture on. `[recording].type` selects where
+media goes: `local` / `http` / `s3` write a WAV (uploaded by `[recording]`);
+`sipflow` writes RTP into the `[sipflow]` backend (uploaded by
+`[sipflow.upload].media`). SIP signalling is captured whenever `[sipflow]` is
+configured. `auto_start_at = "media"` (default) installs the recorder after the
+first caller-media setup; use `"answer"` to wait for the final 200.
 
-#### Option 1: SipFlow recording (recommended)
-
-SipFlow captures raw RTP packets and SIP messages, then generates WAV / JSONL on export. No local WAV file is written.
+#### Option 1: Full SipFlow (RTP + SIP)
 
 ```toml
 [recording]
 enabled = true
+type = "sipflow"
 auto_start = true
 auto_start_at = "media"
 
@@ -366,20 +370,40 @@ media = true
 signaling = true
 ```
 
-When the sipflow backend is present, `[recording].enabled` enables both media anchoring and SipFlow RTP capture. Disabling recording stops RTP capture while `[sipflow]` may continue recording SIP signalling. The WAV is generated on-demand from stored RTP packets via `GET /sipflow/media/{call_id}` and uploaded to the sipflow S3/HTTP target. Signaling is uploaded as JSONL to the same target.
+WAV is generated on-demand from stored RTP via `GET /sipflow/media/{call_id}`
+and uploaded by `[sipflow.upload]`. Signalling is uploaded as JSONL to the same
+target.
 
-#### Option 2: Local file recorder (legacy)
+#### Option 2: WAV file + SipFlow signalling
 
 ```toml
 [recording]
 enabled = true
+type = "local"   # or "http" / "s3"
 auto_start = true
 auto_start_at = "media"
-# No [sipflow] section — falls back to local .wav file
-# signaling = false   # WAV only: skip the SIP JSONL sidecar and its upload
+path = "./config/recorders"
+
+[sipflow]
+type = "local"
+root = "./config/sipflow"
+
+[sipflow.upload]
+signaling = true
+media = false
 ```
 
-All calls are recorded locally to `./config/recorders/`, then asynchronously uploaded via `[callrecord]` S3 config. Without a `[sipflow]` backend, each recorded call also writes a SIP signalling JSONL sidecar (`{session_id}.jsonl`, same schema as SipFlow `export_jsonl`) next to the WAV and uploads it to the same `type = "http"|"s3"` target. Set `signaling = false` to record/upload the WAV only.
+Media stays on the `[recording]` path; SipFlow stores SIP only (no RTP).
+
+#### Option 3: WAV only (no SIP ladder)
+
+```toml
+[recording]
+enabled = true
+type = "local"
+auto_start = true
+# No [sipflow] section — WAV only, no signalling capture
+```
 
 ## Outbound Dial (SSE)
 

@@ -131,10 +131,23 @@ impl RecordingDirection {
 #[derive(Debug, Clone, Deserialize, Serialize, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum RecordingType {
+    /// Local WAV file under `[recording].path`, archived by RecordingUploadHook.
     #[default]
     Local,
+    /// WAV file uploaded via HTTP.
     Http,
+    /// WAV file uploaded to S3-compatible storage.
     S3,
+    /// RTP captured by SipflowRecorder into the `[sipflow]` backend.
+    /// Media upload (if any) is handled by `[sipflow.upload].media`.
+    Sipflow,
+}
+
+impl RecordingType {
+    /// `local` / `http` / `s3` own file media; `sipflow` does not.
+    pub fn is_file_media(self) -> bool {
+        matches!(self, Self::Local | Self::Http | Self::S3)
+    }
 }
 
 /// Signaling point at which `auto_start` installs the selected recorder.
@@ -190,14 +203,13 @@ pub struct RecordingPolicy {
     pub secret_key: Option<String>,
     pub endpoint: Option<String>,
     pub root: Option<String>,
-    /// When true, always use the legacy WAV file recorder for media capture
-    /// even if SipFlow backend is available. SipFlow will capture SIP
-    /// signalling only (no RTP). Media upload is handled by the
-    /// `[recording]` upload path, not `[sipflow.upload]`.
+    /// Deprecated: ignored. Use `type = "local"|"http"|"s3"` for WAV media, or
+    /// `type = "sipflow"` for SipFlow RTP capture. Kept for config compatibility.
+    #[serde(default)]
     pub force_file: Option<bool>,
-    /// When false, skip the SIP signalling JSONL sidecar (and its upload)
-    /// that is otherwise written next to the recording when no `[sipflow]`
-    /// backend is configured. Default (true/unset): write the sidecar.
+    /// Deprecated: the signaling JSONL sidecar has been removed. SIP signalling
+    /// is captured only when `[sipflow]` is configured. Kept for compatibility.
+    #[serde(default)]
     pub signaling: Option<bool>,
     /// Swap stereo channels in recording: callee→left, caller→right.
     #[serde(default)]
@@ -209,13 +221,22 @@ pub struct RecordingPolicy {
 }
 
 impl RecordingPolicy {
+    /// Effective media destination, applying deprecated `force_file` as a
+    /// migration hint (force file media when set true with `type = sipflow`).
+    pub fn effective_recording_type(&self) -> RecordingType {
+        let mut ty = self.recording_type.unwrap_or_default();
+        if self.force_file == Some(true) && ty == RecordingType::Sipflow {
+            ty = RecordingType::Local;
+        }
+        ty
+    }
+
     pub fn new_recording_config(&self) -> CallRecordingConfig {
         crate::call::CallRecordingConfig {
             enabled: self.enabled.unwrap_or(false),
             auto_start: self.auto_start.unwrap_or(true),
             auto_start_at: self.auto_start_at.unwrap_or_default(),
-            force_file: self.force_file.unwrap_or(false),
-            signaling: self.signaling.unwrap_or(true),
+            recording_type: self.effective_recording_type(),
             stereo_swap: self.stereo_swap.unwrap_or(false),
             option: None,
         }
@@ -229,8 +250,9 @@ impl RecordingPolicy {
             .unwrap_or_else(default_config_recorder_path)
     }
 
+    /// True when the `[recording]` upload path should handle WAV artifacts.
     pub fn uploads_recording(&self) -> bool {
-        self.enabled.unwrap_or(false)
+        self.enabled.unwrap_or(false) && self.effective_recording_type().is_file_media()
     }
 
     pub fn ensure_defaults(&mut self) -> bool {
@@ -1676,16 +1698,27 @@ mod tests {
     }
 
     #[test]
-    fn test_recording_signaling_defaults_to_true_and_can_be_disabled() {
-        let policy: RecordingPolicy =
-            toml::from_str("enabled = true\nauto_start = true\n").unwrap();
-        assert_eq!(policy.signaling, None);
-        assert!(policy.new_recording_config().signaling);
+    fn test_recording_type_sipflow_and_file_media_helpers() {
+        assert!(crate::config::RecordingType::Local.is_file_media());
+        assert!(crate::config::RecordingType::Http.is_file_media());
+        assert!(crate::config::RecordingType::S3.is_file_media());
+        assert!(!crate::config::RecordingType::Sipflow.is_file_media());
 
         let policy: RecordingPolicy =
-            toml::from_str("enabled = true\nsignaling = false\n").unwrap();
-        assert_eq!(policy.signaling, Some(false));
-        assert!(!policy.new_recording_config().signaling);
+            toml::from_str("enabled = true\ntype = \"sipflow\"\n").unwrap();
+        assert_eq!(
+            policy.effective_recording_type(),
+            crate::config::RecordingType::Sipflow
+        );
+        assert!(!policy.uploads_recording());
+
+        let policy: RecordingPolicy =
+            toml::from_str("enabled = true\ntype = \"local\"\n").unwrap();
+        assert!(policy.uploads_recording());
+        assert_eq!(
+            policy.new_recording_config().recording_type,
+            crate::config::RecordingType::Local
+        );
     }
 
     #[test]

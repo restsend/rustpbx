@@ -513,7 +513,6 @@ async fn test_guest_call_allowed_extension() {
         locator_events: None,
         sipflow_config: ArcSwap::new(Arc::new(None)),
         sip_flow: None,
-        signaling_sidecar: None,
         active_call_registry: Arc::new(ActiveProxyCallRegistry::new()),
         frequency_limiter: None,
         call_record_hooks: Arc::new(Vec::new()),

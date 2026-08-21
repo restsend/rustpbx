@@ -44,6 +44,34 @@ use crate::media::wav_reader::{WavReader, WavSpec, WavWriter};
 const OUTBOUND_TRUNK_NAME_KEY: &str = "outbound_trunk_name";
 const OUTBOUND_TRUNK_DEST_KEY: &str = "outbound_trunk_dest";
 
+/// Local recording artifacts are archived into `{root}/{YYYYMMDD}[/{HH}]`
+/// subdirectories after the call completes. Rows persisted before that rename
+/// (e.g. written by older builds) store the pre-archive path, so try the
+/// recorded path first and fall back to the daily/hourly layouts derived
+/// from the call's start time.
+fn resolve_archived_artifact_path(path: &str, at: DateTime<Utc>) -> String {
+    if path.is_empty() || Path::new(path).exists() {
+        return path.to_string();
+    }
+    let Some(root) = Path::new(path).parent() else {
+        return path.to_string();
+    };
+    let Some(name) = Path::new(path).file_name() else {
+        return path.to_string();
+    };
+    let candidates = [
+        crate::callrecord::RecordingSubdir::Daily.relative_dir(at),
+        crate::callrecord::RecordingSubdir::Hourly.relative_dir(at),
+    ];
+    for dir in candidates {
+        let candidate = root.join(dir).join(name);
+        if candidate.exists() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+    path.to_string()
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct QueryCallRecordFilters {
@@ -269,31 +297,85 @@ fn session_leg_artifacts(record: &CallRecordModel) -> Value {
     })
 }
 
-async fn serve_local_jsonl_file(path: &str) -> Response {
-    match tokio::fs::read(path).await {
-        Ok(bytes) => {
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                http::header::CONTENT_TYPE,
-                HeaderValue::from_static("application/x-ndjson"),
-            );
-            if let Some(name) = Path::new(path).file_name().and_then(|n| n.to_str()) {
-                if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{}\"", name))
-                {
-                    headers.insert(http::header::CONTENT_DISPOSITION, v);
-                }
-            }
-            (StatusCode::OK, headers, bytes).into_response()
+/// Render a local signaling-sidecar JSONL file in the same structured JSON
+/// shape the sipflow backend path returns, so the console UI always receives
+/// parsed flow data instead of a raw JSONL download.
+async fn serve_local_jsonl_flow(
+    record: &CallRecordModel,
+    path: &str,
+    detail_requested: bool,
+) -> Response {
+    let bytes = match tokio::fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "message": format!("Local sipflow JSONL not found: {err}"),
+                    "path": path,
+                })),
+            )
+                .into_response();
         }
-        Err(err) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "message": format!("Local sipflow JSONL not found: {err}"),
-                "path": path,
+    };
+
+    let text = String::from_utf8_lossy(&bytes);
+    let mut flow: Vec<Value> = Vec::new();
+    let mut malformed_lines = 0usize;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Value>(line) {
+            Ok(obj) => flow.push(json!({
+                "timestamp": obj.get("timestamp").cloned().unwrap_or(Value::Null),
+                "seq": obj.get("seq").cloned().unwrap_or(Value::Null),
+                "msg_type": obj.get("msg_type").cloned().unwrap_or(Value::Null),
+                "src_addr": obj.get("src_addr").cloned().unwrap_or(Value::Null),
+                "dst_addr": obj.get("dst_addr").cloned().unwrap_or(Value::Null),
+                "raw_message": obj.get("payload").cloned().unwrap_or(Value::Null),
+                "role": "primary",
+                "call_id": record.call_id,
             })),
-        )
-            .into_response(),
+            Err(_) => malformed_lines += 1,
+        }
     }
+
+    flow.sort_by(|a, b| {
+        let a_ts = a.get("timestamp").and_then(Value::as_f64).unwrap_or(0.0);
+        let b_ts = b.get("timestamp").and_then(Value::as_f64).unwrap_or(0.0);
+        a_ts.partial_cmp(&b_ts).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let total_sip_msgs = flow.len();
+    let end_time = record.ended_at.unwrap_or(record.started_at);
+
+    Json(json!({
+        "call_id": record.call_id,
+        "start_time": record.started_at,
+        "status": "success",
+        "flow": flow,
+        "rtp_streams": [],
+        "diagnostics": {
+            "backend_configured": false,
+            "backend_type": "local-jsonl",
+            "detail_requested": detail_requested,
+            "time_window": {
+                "start": record.started_at,
+                "end": end_time,
+                "base": "jsonl_file",
+            },
+            "sip_leg_roles_source": "local_jsonl",
+            "cdr_loaded": false,
+            "sip_dropped_count": 0,
+            "malformed_lines": malformed_lines,
+            "total_sip_msgs": total_sip_msgs,
+            "total_rtp_streams": 0,
+            "legs": [],
+        },
+    }))
+    .into_response()
 }
 
 async fn download_call_record_sip_flow(
@@ -324,7 +406,8 @@ async fn download_call_record_sip_flow(
             .and_then(|m| m.get("sipflow_jsonl"))
             .and_then(|v| v.as_str())
         {
-            return serve_local_jsonl_file(path).await;
+            let resolved = resolve_archived_artifact_path(path, record.started_at);
+            return serve_local_jsonl_flow(&record, &resolved, query.detail).await;
         }
         return (
             StatusCode::NOT_FOUND,
@@ -340,7 +423,8 @@ async fn download_call_record_sip_flow(
             .and_then(|m| m.get("sipflow_jsonl"))
             .and_then(|v| v.as_str())
         {
-            return serve_local_jsonl_file(path).await;
+            let resolved = resolve_archived_artifact_path(path, record.started_at);
+            return serve_local_jsonl_flow(&record, &resolved, query.detail).await;
         }
         return (
             StatusCode::NOT_FOUND,
@@ -1750,16 +1834,20 @@ pub fn select_recording_path(record: &CallRecordModel, cdr: Option<&CdrData>) ->
             if path.is_empty() {
                 continue;
             }
-            if Path::new(path).exists() {
-                return Some(path.to_string());
+            let resolved = resolve_archived_artifact_path(path, record.started_at);
+            if Path::new(&resolved).exists() {
+                return Some(resolved);
             }
         }
     }
 
     if let Some(url) = record.recording_url.as_ref() {
         let trimmed = url.trim();
-        if !trimmed.is_empty() && Path::new(trimmed).exists() {
-            return Some(trimmed.to_string());
+        if !trimmed.is_empty() {
+            let resolved = resolve_archived_artifact_path(trimmed, record.started_at);
+            if Path::new(&resolved).exists() {
+                return Some(resolved);
+            }
         }
     }
 
@@ -2265,6 +2353,85 @@ mod tests {
                 .unwrap()
                 .contains(&model.id.to_string())
         );
+    }
+
+    /// The local-JSONL fallback must render the same structured JSON shape as
+    /// the sipflow backend path (flow/rtp_streams/diagnostics), never a raw
+    /// JSONL download, so the console UI can always consume `response.json()`.
+    #[tokio::test]
+    async fn serve_local_jsonl_flow_returns_structured_json() {
+        let db = setup_db().await;
+        let model = call_record::ActiveModel {
+            call_id: Set("jsonl-call".into()),
+            direction: Set("inbound".into()),
+            status: Set("completed".into()),
+            started_at: Set(Utc::now()),
+            duration_secs: Set(10),
+            has_transcript: Set(false),
+            transcript_status: Set("pending".into()),
+            created_at: Set(Utc::now()),
+            updated_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let jsonl = dir.path().join("jsonl-call.jsonl");
+        let later_ts = chrono::Utc::now().timestamp_micros() as u64;
+        let earlier_ts = later_ts - 5_000;
+        std::fs::write(
+            &jsonl,
+            format!(
+                "{{\"timestamp\":{later_ts},\"seq\":1,\"msg_type\":\"Sip\",\"src_addr\":\"\",\"dst_addr\":\"10.0.0.1:5060\",\"payload\":\"SIP/2.0 200 OK\\r\\n\"}}\n\
+                 {{\"timestamp\":{earlier_ts},\"seq\":0,\"msg_type\":\"Sip\",\"src_addr\":\"10.0.0.1:5060\",\"dst_addr\":\"\",\"payload\":\"INVITE sip:b@x SIP/2.0\\r\\n\"}}\n\
+                 not-json\n"
+            ),
+        )
+        .expect("write jsonl");
+
+        let response = serve_local_jsonl_flow(
+            &model,
+            jsonl.to_str().unwrap(),
+            true,
+        )
+        .await;
+        let (parts, body) = response.into_parts();
+        assert_eq!(parts.status, StatusCode::OK);
+        assert!(parts
+            .headers
+            .get(http::header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("application/json"));
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(value["status"], "success");
+        assert_eq!(value["call_id"], "jsonl-call");
+        let flow = value["flow"].as_array().unwrap();
+        assert_eq!(flow.len(), 2);
+        // Sorted by timestamp ascending regardless of file line order.
+        assert_eq!(flow[0]["seq"], 0);
+        assert_eq!(flow[0]["raw_message"], "INVITE sip:b@x SIP/2.0\r\n");
+        assert_eq!(flow[0]["role"], "primary");
+        assert_eq!(flow[0]["call_id"], "jsonl-call");
+        assert_eq!(flow[1]["dst_addr"], "10.0.0.1:5060");
+        let diag = &value["diagnostics"];
+        assert_eq!(diag["backend_type"], "local-jsonl");
+        assert_eq!(diag["backend_configured"], false);
+        assert_eq!(diag["total_sip_msgs"], 2);
+        assert_eq!(diag["total_rtp_streams"], 0);
+        assert_eq!(diag["malformed_lines"], 1);
+        assert!(value["rtp_streams"].as_array().unwrap().is_empty());
+
+        // Missing file yields 404, still JSON.
+        let missing = dir.path().join("nope.jsonl");
+        let response = serve_local_jsonl_flow(&model, missing.to_str().unwrap(), true).await;
+        let (parts, _) = response.into_parts();
+        assert_eq!(parts.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -2822,6 +2989,94 @@ mod tests {
         assert!(
             payload.is_none(),
             "should return None when no recording and no sipflow"
+        );
+    }
+
+    /// Local artifacts are archived under `{root}/YYYYMMDD[/HH]` after the
+    /// call; rows written before that rename store the pre-archive path and
+    /// must resolve through the dated fallback.
+    #[test]
+    fn resolve_archived_artifact_path_falls_back_to_dated_layout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("20260821")).expect("mkdir daily");
+        std::fs::write(root.join("20260821").join("sess.jsonl"), b"{}\n").unwrap();
+
+        let at = Utc.with_ymd_and_hms(2026, 8, 21, 9, 30, 0).unwrap();
+        let stale = root.join("sess.jsonl").to_string_lossy().into_owned();
+        assert_eq!(
+            resolve_archived_artifact_path(&stale, at),
+            root.join("20260821").join("sess.jsonl")
+                .to_string_lossy()
+                .into_owned()
+        );
+
+        // A path that already exists resolves to itself.
+        let existing = root.join("20260821").join("sess.jsonl");
+        assert_eq!(
+            resolve_archived_artifact_path(existing.to_str().unwrap(), at),
+            existing.to_string_lossy().into_owned()
+        );
+
+        // Missing everywhere: return the original untouched.
+        let missing = root.join("nope.jsonl").to_string_lossy().into_owned();
+        assert_eq!(resolve_archived_artifact_path(&missing, at), missing);
+    }
+
+    #[test]
+    fn resolve_archived_artifact_path_falls_back_to_hourly_layout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("20260821").join("15"))
+            .expect("mkdir hourly");
+        std::fs::write(root.join("20260821").join("15").join("sess.wav"), b"wav").unwrap();
+
+        let at = Utc.with_ymd_and_hms(2026, 8, 21, 15, 5, 0).unwrap();
+        let stale = root.join("sess.wav").to_string_lossy().into_owned();
+        assert_eq!(
+            resolve_archived_artifact_path(&stale, at),
+            root.join("20260821").join("15").join("sess.wav")
+                .to_string_lossy()
+                .into_owned()
+        );
+    }
+
+    /// A CDR row whose `recording_url` still points at the pre-archive path
+    /// must resolve to the archived WAV for playback/download.
+    #[tokio::test]
+    async fn select_recording_path_resolves_archived_wav_from_stale_url() {
+        let db = setup_db().await;
+
+        let started = Utc.with_ymd_and_hms(2026, 8, 21, 9, 25, 21).unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("20260821")).expect("mkdir daily");
+        let archived = dir.path().join("20260821").join("sess.wav");
+        std::fs::write(&archived, b"wav").unwrap();
+
+        let record = call_record::ActiveModel {
+            call_id: Set("stale-rec-path".into()),
+            direction: Set("inbound".into()),
+            status: Set("completed".into()),
+            started_at: Set(started),
+            duration_secs: Set(10),
+            recording_url: Set(Some(
+                dir.path().join("sess.wav").to_string_lossy().into_owned(),
+            )),
+            has_transcript: Set(false),
+            transcript_status: Set("pending".into()),
+            created_at: Set(started),
+            updated_at: Set(started),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert call record");
+
+        let resolved = select_recording_path(&record, None);
+        assert_eq!(
+            resolved.as_deref(),
+            Some(archived.to_string_lossy().as_ref()),
+            "stale pre-archive recording_url must resolve into the daily subdir"
         );
     }
 }

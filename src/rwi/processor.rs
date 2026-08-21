@@ -1129,7 +1129,7 @@ impl RwiCommandProcessor {
             // it later without rebuilding the media leg.
             dialplan.recording.enabled = true;
             dialplan.recording.auto_start = false;
-            dialplan.recording.force_file = true;
+            dialplan.recording.recording_type = crate::config::RecordingType::Local;
             if let Some(hints) = routed_hints {
                 dialplan = dialplan.with_hints(hints);
             }

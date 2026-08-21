@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1"
 async-trait = "0.1.88"
-audio-codec = "0.4.4"
+audio-codec = "0.4.5"
 bytes = { version = "1", features = ["serde"] }
 dashmap = "6"
 minimp3 = "0.6.1"
@@ -15,7 +15,7 @@ rand = "0.10"
 rustpbx-http-util = { path = "../rustpbx-http-util" }
 rustpbx-sipflow = { path = "../rustpbx-sipflow" }
 rustpbx-record-common = { path = "../rustpbx-record-common" }
-rustrtc = "0.3.124"
+rustrtc = "0.3.126"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1.53", features = ["fs", "io-util", "sync"] }
 tokio-util = "0.7.18"

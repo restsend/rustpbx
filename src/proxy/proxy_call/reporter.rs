@@ -415,38 +415,10 @@ fn collect_recording_artifacts(
         });
     }
 
-    if let Some(ref jsonl) = snapshot.signaling_jsonl_path
-        && let Ok(metadata) = fs::metadata(jsonl)
-        && metadata.is_file()
-        && metadata.len() > 0
-    {
-        let mut extra = HashMap::new();
-        extra.insert(
-            "session_id".to_string(),
-            serde_json::Value::String(root_session.to_string()),
-        );
-        extra.insert(
-            "artifact".to_string(),
-            serde_json::Value::String("sipflow_jsonl".to_string()),
-        );
-        recorder.push(CallRecordMedia {
-            track_id: "signaling".to_string(),
-            path: jsonl.clone(),
-            size: metadata.len(),
-            extra: Some(extra),
-        });
-    }
-
     if !snapshot.recording_segments.is_empty() {
         if let Ok(value) = serde_json::to_value(&snapshot.recording_segments) {
             metadata_map.insert("recording_segments".to_string(), value);
         }
-    }
-    if let Some(ref jsonl) = snapshot.signaling_jsonl_path {
-        metadata_map.insert(
-            "sipflow_jsonl".to_string(),
-            serde_json::Value::String(jsonl.clone()),
-        );
     }
 
     (recorder, metadata_map)
@@ -735,7 +707,6 @@ mod tests {
             metadata: std::collections::HashMap::new(),
             media_quality: None,
             recording_segments: Vec::new(),
-            signaling_jsonl_path: None,
         };
 
         let roles = build_sip_leg_roles(&snapshot);
@@ -850,17 +821,14 @@ mod tests {
             metadata: HashMap::new(),
             media_quality: None,
             recording_segments: Vec::new(),
-            signaling_jsonl_path: None,
         }
     }
 
     #[test]
-    fn collect_recording_artifacts_includes_segments_and_jsonl() {
+    fn collect_recording_artifacts_includes_segments() {
         let dir = tempfile::tempdir().unwrap();
         let wav = dir.path().join("root_20260101010101_ivr_ab.wav");
-        let jsonl = dir.path().join("root_leg.jsonl");
         std::fs::write(&wav, b"wavdata").unwrap();
-        std::fs::write(&jsonl, b"{\"msg_type\":\"sip\"}\n").unwrap();
 
         let mut snapshot = empty_snapshot();
         snapshot.recording_segments = vec![crate::callrecord::RecordingSegment {
@@ -872,11 +840,10 @@ mod tests {
             ended_at: Some("t1".into()),
             duration_secs: 1.5,
         }];
-        snapshot.signaling_jsonl_path = Some(jsonl.to_string_lossy().into_owned());
 
         let (recorder, meta) = collect_recording_artifacts(&snapshot, "root-sess", false, None);
 
-        assert_eq!(recorder.len(), 2);
+        assert_eq!(recorder.len(), 1);
         assert_eq!(recorder[0].track_id, "segment:ivr:ab");
         assert_eq!(
             recorder[0]
@@ -886,14 +853,8 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("root-sess")
         );
-        assert_eq!(recorder[1].track_id, "signaling");
         assert!(meta.get("recording_segments").is_some());
-        assert_eq!(
-            meta.get("sipflow_jsonl").and_then(|v| v.as_str()),
-            Some(jsonl.to_string_lossy().as_ref())
-        );
-        // Prefer non-signaling for primary recording path selection.
-        assert_ne!(recorder[0].track_id, "signaling");
+        assert!(meta.get("sipflow_jsonl").is_none());
     }
 
     #[test]

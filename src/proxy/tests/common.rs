@@ -116,7 +116,6 @@ pub async fn create_test_server_with_config_and_sipflow_backend(
         sip_flow: sipflow_backend.map(|backend| {
             crate::callrecord::sipflow::SipFlow::new(Some(backend), Vec::new(), false)
         }),
-        signaling_sidecar: Some(crate::callrecord::SignalingSidecar::new()),
         active_call_registry: Arc::new(ActiveProxyCallRegistry::new()),
         frequency_limiter: None,
         call_record_hooks: Arc::new(Vec::new()),

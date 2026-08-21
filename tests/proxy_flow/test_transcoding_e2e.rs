@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 use crate::common::e2e_test_server::E2eTestServer;
-use crate::common::rtp_utils::{RtpPacket, RtpReceiver, RtpSender};
+use crate::common::rtp_utils::{extract_media_endpoint, RtpPacket, RtpReceiver, RtpSender};
 use crate::common::test_ua::TestUaEvent;
 
 fn pcmu_sdp(port: u16) -> String {
@@ -87,14 +87,18 @@ async fn test_pcmu_to_g729_transcode() -> Result<()> {
     };
     assert!(alice_dialog_id.is_some(), "Call should be established");
 
-    // Send PCMU RTP from caller
+    // Send PCMU RTP to the proxy's caller-leg media endpoint (from the
+    // negotiated answer SDP) — the proxy transcodes and forwards to the
+    // callee's advertised endpoint.
+    let answer_sdp = alice
+        .get_negotiated_answer_sdp(alice_dialog_id.as_ref().unwrap())
+        .await
+        .expect("negotiated answer SDP for caller");
+    let proxy_media = extract_media_endpoint(&answer_sdp)
+        .expect("media endpoint in caller answer SDP");
     let caller_sender = RtpSender::bind().await?;
     let packets = RtpPacket::create_sequence(50, 1000, 50000, 0x11111111, 0, 160, 160);
-    caller_sender.start_sending(
-        std::net::SocketAddr::from(([127, 0, 0, 1], callee_port)),
-        packets,
-        20,
-    );
+    caller_sender.start_sending(proxy_media, packets, 20);
     sleep(Duration::from_millis(1500)).await;
     caller_sender.stop();
 
@@ -159,13 +163,15 @@ async fn test_pcmu_to_pcma_transcode() -> Result<()> {
     };
     assert!(alice_dialog_id.is_some(), "Call should be established");
 
+    let answer_sdp = alice
+        .get_negotiated_answer_sdp(alice_dialog_id.as_ref().unwrap())
+        .await
+        .expect("negotiated answer SDP for caller");
+    let proxy_media = extract_media_endpoint(&answer_sdp)
+        .expect("media endpoint in caller answer SDP");
     let caller_sender = RtpSender::bind().await?;
     let packets = RtpPacket::create_sequence(50, 1000, 50000, 0x22222222, 0, 160, 160);
-    caller_sender.start_sending(
-        std::net::SocketAddr::from(([127, 0, 0, 1], callee_port)),
-        packets,
-        20,
-    );
+    caller_sender.start_sending(proxy_media, packets, 20);
     sleep(Duration::from_millis(1500)).await;
     caller_sender.stop();
 
@@ -239,13 +245,15 @@ async fn test_g722_to_g729_transcode() -> Result<()> {
     };
     assert!(alice_dialog_id.is_some(), "G722→G729 call should establish");
 
+    let answer_sdp = alice
+        .get_negotiated_answer_sdp(alice_dialog_id.as_ref().unwrap())
+        .await
+        .expect("negotiated answer SDP for caller");
+    let proxy_media = extract_media_endpoint(&answer_sdp)
+        .expect("media endpoint in caller answer SDP");
     let caller_sender = RtpSender::bind().await?;
     let packets = RtpPacket::create_sequence(50, 1000, 50000, 0x33333333, 9, 160, 160);
-    caller_sender.start_sending(
-        std::net::SocketAddr::from(([127, 0, 0, 1], callee_port)),
-        packets,
-        20,
-    );
+    caller_sender.start_sending(proxy_media, packets, 20);
     sleep(Duration::from_millis(1500)).await;
     caller_sender.stop();
 

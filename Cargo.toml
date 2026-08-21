@@ -156,8 +156,8 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
 hex = { version = "0.4.3", optional = true }
 rsipstack = "0.6.4"
-audio-codec = "0.4.4"
-rustrtc = "0.3.124"
+audio-codec = "0.4.5"
+rustrtc = "0.3.126"
 reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
     "stream",
@@ -313,10 +313,24 @@ opt-level = 0
 debug = 0
 panic = "abort"
 
+# Opus encode at opt-level 0 routinely exceeds 20 ms/frame on the egress
+# pacing task → MissedTickBehavior::Skip under-produces → Chrome Opus PLC
+# clicks. PCMU stays cheap so the same path sounds fine. Keep the rest of
+# the tree at 0 for link speed; only speed up the codec stack.
+[profile.dev.package.opus-rs]
+opt-level = 2
+[profile.dev.package.audio-codec]
+opt-level = 2
+
 # `cargo test` inherits from dev; line-tables-only debuginfo cuts test-link
 # time/disk while keeping useful backtraces.
 [profile.test]
 debug = 1
+
+[profile.test.package.opus-rs]
+opt-level = 2
+[profile.test.package.audio-codec]
+opt-level = 2
 
 [profile.release]
 # thin LTO keeps parallel codegen (codegen-units) while shrinking the binary

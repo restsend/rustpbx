@@ -260,7 +260,6 @@ impl CallSessionBuilder {
             metadata,
             media_quality: None,
             recording_segments: Vec::new(),
-            signaling_jsonl_path: None,
         };
 
         reporter.report(snapshot);

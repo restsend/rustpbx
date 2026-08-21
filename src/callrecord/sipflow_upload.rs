@@ -58,11 +58,15 @@ impl CallRecordHook for SipFlowUploadHook {
         let signaling_key = format_sipflow_signaling_key(record);
         let signaling_file_name = format_sipflow_signaling_file_name(record);
 
-        // When force_file is active, the legacy WAV recorder produced a local
-        // file that RecordingUploadHook handles. Skip sipflow media upload to
-        // avoid a redundant (and empty) WAV generation — but still upload
-        // signalling if configured.
-        let skip_media = !record.recorder.is_empty();
+        // When the call used file media (local/http/s3), WAV artifacts are in
+        // `record.recorder` and RecordingUploadHook owns media upload. Skip
+        // sipflow media upload to avoid a redundant empty WAV — but still
+        // upload signalling if configured.
+        let skip_media = record.recorder.iter().any(|m| m.track_id != "signaling");
+
+        // File-media hybrid: default signaling upload on when unset.
+        // Full sipflow media path: keep historical default (signaling off).
+        let signaling_default = skip_media;
 
         if let Some((url, size)) = crate::callrecord::sipflow_upload::do_upload(
             self.backend.as_ref(),
@@ -78,6 +82,7 @@ impl CallRecordHook for SipFlowUploadHook {
             &signaling_key,
             &signaling_file_name,
             skip_media,
+            signaling_default,
         )
         .await
         {
@@ -107,6 +112,7 @@ async fn do_upload(
     signaling_key: &str,
     signaling_file_name: &str,
     skip_media: bool,
+    signaling_default: bool,
 ) -> Option<(String, u64)> {
     if let Err(e) = backend.flush().await {
         warn!(call_id, "SipFlowUploadHook: flush failed: {e}");
@@ -153,8 +159,8 @@ async fn do_upload(
     }
 
     let signaling = match upload_config {
-        SipFlowUploadConfig::S3 { signaling, .. } => signaling.unwrap_or(false),
-        SipFlowUploadConfig::Http { signaling, .. } => signaling.unwrap_or(false),
+        SipFlowUploadConfig::S3 { signaling, .. } => signaling.unwrap_or(signaling_default),
+        SipFlowUploadConfig::Http { signaling, .. } => signaling.unwrap_or(signaling_default),
     };
 
     if signaling {

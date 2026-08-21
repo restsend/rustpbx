@@ -7,7 +7,7 @@ edition = "2024"
 anyhow = "1"
 arc-swap = "1.9.2"
 async-trait = "0.1.88"
-audio-codec = "0.4.4"
+audio-codec = "0.4.5"
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"

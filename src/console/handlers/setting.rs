@@ -1613,6 +1613,9 @@ pub(crate) struct RecordingPolicyPayload {
     format: Option<Option<String>>,
     #[serde(default)]
     force_file: Option<bool>,
+    /// Media destination: `local` | `http` | `s3` | `sipflow`.
+    #[serde(default, rename = "type")]
+    recording_type: Option<crate::config::RecordingType>,
 }
 
 #[derive(Debug, Deserialize)]

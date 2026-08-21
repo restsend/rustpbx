@@ -533,14 +533,15 @@ impl MediaBridge {
             // negotiated SSRC / PT, and strip WebRTC extension headers when the
             // destination is plain RTP.
             //
-            // Use one persistent relay SSRC per destination leg for the entire
-            // call. WebRTC advertises it as the m-line's primary source; plain
-            // RTP does not signal it, but adding video must not present a new
-            // audio RTP source when the bridge is rebuilt.
+            // Use the destination leg's outbound audio SSRC:
+            // - WebRTC → paced sender / SDP `a=ssrc` (IVR + relay share it so
+            //   browsers hear both local playback and bridged audio)
+            // - plain RTP → distinct relay SSRC (isolates later local playback;
+            //   RTP peers do not bind to SDP a=ssrc)
             let a_playback_ssrc = crate::leg::sender_ssrc_for_kind(la.pc(), MediaKind::Audio);
             let b_playback_ssrc = crate::leg::sender_ssrc_for_kind(lb.pc(), MediaKind::Audio);
-            let a_relay_ssrc = la.relay_audio_ssrc();
-            let b_relay_ssrc = lb.relay_audio_ssrc();
+            let a_out_ssrc = la.outbound_audio_ssrc();
+            let b_out_ssrc = lb.outbound_audio_ssrc();
             let a_video_ssrc = crate::leg::sender_ssrc_for_kind(la.pc(), rustrtc::MediaKind::Video);
             let b_video_ssrc = crate::leg::sender_ssrc_for_kind(lb.pc(), rustrtc::MediaKind::Video);
             // SDES-MID (ext id, value) per destination m-line: audio rules stamp
@@ -603,14 +604,14 @@ impl MediaBridge {
             // it once for a BUNDLE source, or partitions it across separate
             // audio/video source transports for non-BUNDLE.
             let mut rules_a_to_b = audio_relay_rules(
-                b_relay_ssrc,
+                b_out_ssrc,
                 (ca.payload_type != cb.payload_type).then_some(cb.payload_type),
                 dtmf_a_to_b,
                 &b_audio_mid,
             );
             // ── B→A rules (mirror) ──
             let mut rules_b_to_a = audio_relay_rules(
-                a_relay_ssrc,
+                a_out_ssrc,
                 (ca.payload_type != cb.payload_type).then_some(ca.payload_type),
                 dtmf_b_to_a,
                 &a_audio_mid,
@@ -646,7 +647,7 @@ impl MediaBridge {
             info!(
                 session = %self.session_id,
                 codec = ?ca.codec,
-                a_playback_ssrc, b_playback_ssrc, a_relay_ssrc, b_relay_ssrc,
+                a_playback_ssrc, b_playback_ssrc, a_out_ssrc, b_out_ssrc,
                 video = ?video_match.as_ref().map(|(v, _)| v.name.as_str()),
                 strip_a_to_b = options_a_to_b.strip_extensions,
                 strip_b_to_a = options_b_to_a.strip_extensions,
@@ -1002,9 +1003,11 @@ impl MediaBridge {
 
     /// Set up a raw-PCM channel audio source on the given leg. The returned
     /// sender feeds the egress pipeline via [`ChannelAudioSource`]. Underruns
-    /// while the sender is alive emit comfort-noise; when the sender is
-    /// dropped and the buffer drains, the source EOFs (`loop_playback=false`)
-    /// so IVR return-app can start without an infinite CNG tail.
+    /// while the sender is alive keep RTP cadence with **digital silence**
+    /// (not comfort-noise — CNG→speech transitions click every chunk). When
+    /// the sender is dropped and the buffer drains, the source EOFs
+    /// (`loop_playback=false`) so IVR return-app can start without an
+    /// infinite CNG/silence tail.
     ///
     /// The source does NOT pre-encode — the leg's egress encoder converts
     /// PCM→codec at its own 20 ms cadence ("filetrack mode").
@@ -1384,7 +1387,7 @@ fn sdes_mid_for_kind(leg: &Leg, kind: rustrtc::MediaKind) -> Option<(u8, std::sy
 }
 
 /// Rewrite rules for one direction of audio relay: the audio catch-all rule
-/// (rewrites every packet to the destination leg's relay SSRC, remapping the
+/// (rewrites every packet to the destination leg's outbound audio SSRC, remapping the
 /// payload type when the legs differ) plus, when the two legs negotiated
 /// different telephone-event payload types, a DTMF remap rule. Both stamp the
 /// destination leg's audio MID for browser attribution.

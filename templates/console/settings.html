@@ -1270,14 +1270,15 @@
                                         x-model="storageDraft.recording_auto_start" :disabled="storageProcessing">
                                     <span>{{ "settings_page.auto_start" | t }}</span>
                                 </label>
-                                <label class="flex items-center gap-2 text-sm font-semibold text-slate-600">
-                                    <input type="checkbox"
-                                        class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
-                                        x-model="storageDraft.recording_force_file" :disabled="storageProcessing">
-                                    <span>Force file recorder</span>
-                                    <template x-if="sipflowSettings?.backend_type !== 'none'">
-                                        <span class="text-[11px] text-slate-400">(WAV file for media, SipFlow for signalling only)</span>
-                                    </template>
+                                <label class="block text-sm font-semibold text-slate-600">
+                                    <span class="mb-1 block">Recording type</span>
+                                    <select x-model="storageDraft.recording_type" :disabled="storageProcessing"
+                                        class="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                        <option value="local">local (WAV)</option>
+                                        <option value="http">http (WAV upload)</option>
+                                        <option value="s3">s3 (WAV upload)</option>
+                                        <option value="sipflow">sipflow (RTP → SipFlow)</option>
+                                    </select>
                                 </label>
                             </div>
                             <div>
@@ -3045,6 +3046,7 @@
                 recording_enabled: false,
                 recording_auto_start: true,
                 recording_force_file: false,
+                recording_type: 'local',
                 recording_direction_inbound: true,
                 recording_direction_outbound: true,
                 recording_direction_internal: true,
@@ -5459,6 +5461,7 @@
                     recording_enabled: !!recording?.enabled,
                     recording_auto_start: recording?.auto_start !== undefined ? !!recording.auto_start : true,
                     recording_force_file: !!recording?.force_file,
+                    recording_type: recording?.type || (recording?.force_file ? 'local' : (this.sipflowSettings?.backend_type && this.sipflowSettings.backend_type !== 'none' ? 'sipflow' : 'local')),
                     recording_direction_inbound: directionInbound,
                     recording_direction_outbound: directionOutbound,
                     recording_direction_internal: directionInternal,
@@ -5516,7 +5519,7 @@
                 const recordingPayload = {
                     enabled: !!this.storageDraft.recording_enabled,
                     auto_start: !!this.storageDraft.recording_auto_start,
-                    force_file: !!this.storageDraft.recording_force_file,
+                    type: this.storageDraft.recording_type || 'local',
                     caller_allow: this.listFromTextarea(this.storageDraft.recording_caller_allow),
                     caller_deny: this.listFromTextarea(this.storageDraft.recording_caller_deny),
                     callee_allow: this.listFromTextarea(this.storageDraft.recording_callee_allow),

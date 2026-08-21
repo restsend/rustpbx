@@ -68,7 +68,7 @@ is_support_webrtc = false
 [recording]
 enabled = true
 auto_start = true
-force_file = true
+type = "local"
 path = "${recordDir}"
 
 [console]

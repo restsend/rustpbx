@@ -1083,6 +1083,11 @@ impl CallModule {
                 if overrides.root.is_some() {
                     merged.root = overrides.root.clone();
                 }
+                if overrides.recording_type.is_some() {
+                    merged.recording_type = overrides.recording_type;
+                }
+                // force_file / signaling are deprecated; still merge so
+                // effective_recording_type() can apply the migration hint.
                 if overrides.force_file.is_some() {
                     merged.force_file = overrides.force_file;
                 }
@@ -1139,11 +1144,12 @@ impl CallModule {
         let caller_identity = Self::caller_identity(caller);
         let callee_identity = Self::callee_identity(&dialplan).unwrap_or_default();
 
-        // When sipflow backend is available, skip local recorder file and use
-        // sipflow for media capture and upload instead — unless force_file is
-        // set, in which case the legacy WAV file recorder is used and sipflow
-        // captures SIP signalling only.
-        let use_sipflow = dialplan.enable_sipflow
+        // Media destination is selected by `recording.type`:
+        //   local|http|s3 → WAV file (+ [recording] upload)
+        //   sipflow       → SipflowRecorder (+ [sipflow.upload].media)
+        // SIP signalling always goes to [sipflow] when a backend is present.
+        let recording_type = policy.effective_recording_type();
+        let has_sipflow_backend = dialplan.enable_sipflow
             && self
                 .inner
                 .server
@@ -1152,9 +1158,7 @@ impl CallModule {
                 .and_then(|sf| sf.backend())
                 .is_some();
 
-        let force_file = policy.force_file.unwrap_or(false);
-
-        if !use_sipflow || force_file {
+        if recording_type.is_file_media() {
             let recorder_option = match self.build_recorder_option(
                 &dialplan,
                 &policy,
@@ -1172,22 +1176,26 @@ impl CallModule {
             } else {
                 dialplan.recording.option = Some(recorder_option);
             }
+        } else if !has_sipflow_backend {
+            warn!(
+                session_id = dialplan.session_id.as_deref(),
+                "recording.type=sipflow but no sipflow backend; media will not be captured"
+            );
         }
 
         debug!(
             session_id = dialplan.session_id.as_deref(),
             caller = %caller_identity,
             callee = %callee_identity,
-            use_sipflow,
-            force_file,
+            ?recording_type,
+            has_sipflow_backend,
             "recording policy enabled for dialplan"
         );
 
         dialplan.recording.enabled = true;
         dialplan.recording.auto_start = policy.auto_start.unwrap_or(true);
         dialplan.recording.auto_start_at = policy.auto_start_at.unwrap_or_default();
-        dialplan.recording.force_file = force_file;
-        dialplan.recording.signaling = policy.signaling.unwrap_or(true);
+        dialplan.recording.recording_type = recording_type;
         dialplan
     }
 
@@ -3139,10 +3147,9 @@ mod tests {
             dialplan.recording.auto_start_at,
             crate::config::RecordingAutoStartAt::Answer
         );
-        assert!(dialplan.recording.force_file);
-        assert!(
-            !dialplan.recording.signaling,
-            "partial override without signaling must inherit the global signaling = false"
+        assert_eq!(
+            dialplan.recording.recording_type,
+            crate::config::RecordingType::S3
         );
         let option = dialplan
             .recording
@@ -3157,10 +3164,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_resolve_recording_signaling_defaults_true_and_route_can_disable() {
+    async fn default_resolve_recording_type_sipflow_skips_file_option() {
         let mut proxy_config = ProxyConfig::default();
         proxy_config.recording = Some(RecordingPolicy {
             enabled: Some(true),
+            recording_type: Some(crate::config::RecordingType::Sipflow),
             path: Some("/tmp/rustpbx-main-recordings".to_string()),
             ..Default::default()
         });
@@ -3186,8 +3194,6 @@ mod tests {
             realm: Some("rustpbx.com".to_string()),
             ..Default::default()
         };
-
-        // No route override: the sidecar default (true) applies.
         let dialplan = module
             .default_resolve(
                 &request,
@@ -3201,27 +3207,16 @@ mod tests {
             .await
             .expect("route should resolve");
         let dialplan = module.apply_recording_policy(dialplan, &caller);
-        assert!(dialplan.recording.signaling);
 
-        // Route-level override signaling = false wins over the global default.
-        let dialplan = module
-            .default_resolve(
-                &request,
-                Box::new(RecordingHintsRouteInvite {
-                    recording: Some(RecordingPolicy {
-                        enabled: Some(true),
-                        signaling: Some(false),
-                        ..Default::default()
-                    }),
-                    enable_recording: None,
-                }),
-                &caller,
-                &TransactionCookie::default(),
-            )
-            .await
-            .expect("route should resolve");
-        let dialplan = module.apply_recording_policy(dialplan, &caller);
-        assert!(!dialplan.recording.signaling);
+        assert!(dialplan.recording.enabled);
+        assert_eq!(
+            dialplan.recording.recording_type,
+            crate::config::RecordingType::Sipflow
+        );
+        assert!(
+            dialplan.recording.option.is_none(),
+            "type=sipflow must not install a WAV file option"
+        );
     }
 
     #[tokio::test]

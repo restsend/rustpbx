@@ -151,7 +151,7 @@ allow_guest_calls = false
 [recording]
 enabled = true
 auto_start = true
-force_file = true
+type = "local"
 format = "wav"
 
 [sipflow]
