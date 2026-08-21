@@ -629,9 +629,32 @@ impl MediaNegotiator {
             .collect()
     }
 
+    /// Assign video payload types that do not collide with other media on a
+    /// BUNDLE transport. Plain RTP may reuse a dynamic PT on separate audio
+    /// and video sockets, but a bundled WebRTC receiver must be able to infer
+    /// the media kind from the PT before the bridge rewrites the packet.
+    pub fn remap_bundle_video_payload_types(
+        caps: &mut [rustrtc::config::VideoCapability],
+        occupied_payload_types: impl IntoIterator<Item = u8>,
+    ) -> anyhow::Result<()> {
+        let mut used_payload_types: HashSet<u8> = occupied_payload_types.into_iter().collect();
+        for cap in caps {
+            if used_payload_types.contains(&cap.payload_type) {
+                cap.payload_type = (96..=127)
+                    .find(|payload_type| !used_payload_types.contains(payload_type))
+                    .ok_or_else(|| anyhow::anyhow!("no free dynamic video payload type"))?;
+            }
+            used_payload_types.insert(cap.payload_type);
+        }
+        Ok(())
+    }
+
     /// Replace an SDP's video formats and codec attributes with `caps`.
-    /// Offers may remap video payload types that collide with another bundled
-    /// media section; answers retain the payload types selected by the offer.
+    ///
+    /// This only filters/reorders the video capabilities supplied by the
+    /// caller. Cross-media payload-type collision handling belongs to the
+    /// BUNDLE leg setup; plain RTP uses separate transports and may reuse the
+    /// same payload type for audio and video.
     pub fn rewrite_video_capabilities(
         sdp_type: SdpType,
         sdp: &str,
@@ -639,32 +662,12 @@ impl MediaNegotiator {
     ) -> anyhow::Result<String> {
         let mut desc = SessionDescription::parse(sdp_type, sdp)
             .map_err(|error| anyhow::anyhow!("failed to parse SDP: {error}"))?;
-        let mut used_payload_types: HashSet<u8> = desc
-            .media_sections
-            .iter()
-            .filter(|section| section.kind != MediaKind::Video)
-            .flat_map(|section| section.formats.iter())
-            .filter_map(|format| format.parse::<u8>().ok())
-            .collect();
         if let Some(video_section) = desc
             .media_sections
             .iter_mut()
             .find(|section| section.kind == MediaKind::Video)
         {
-            let mut ordered_caps = caps.to_vec();
-
-            if sdp_type == SdpType::Offer {
-                for cap in &mut ordered_caps {
-                    if used_payload_types.contains(&cap.payload_type) {
-                        cap.payload_type = (96..=127)
-                            .find(|payload_type| !used_payload_types.contains(payload_type))
-                            .ok_or_else(|| {
-                                anyhow::anyhow!("no free dynamic video payload type")
-                            })?;
-                    }
-                    used_payload_types.insert(cap.payload_type);
-                }
-            }
+            let ordered_caps = caps.to_vec();
 
             if ordered_caps.is_empty() {
                 video_section.port = 0;
@@ -1025,7 +1028,7 @@ a=rtpmap:110 VP8/90000\r\n";
     }
 
     #[test]
-    fn rewrite_video_offer_remaps_audio_payload_collision() {
+    fn video_payload_collision_is_remapped_only_for_bundle() {
         let generated_offer = "v=0\r\n\
 o=- 1 1 IN IP4 127.0.0.1\r\n\
 s=-\r\n\
@@ -1047,9 +1050,15 @@ a=rtpmap:96 VP8/90000\r\n";
         .expect("video offer rewrite");
 
         assert!(offer.contains("m=audio 4000 RTP/AVP 96\r\n"));
-        assert!(offer.contains("m=video 4002 RTP/AVP 97 98\r\n"));
-        assert!(offer.contains("a=rtpmap:97 H264/90000\r\n"));
-        assert!(offer.contains("a=rtpmap:98 VP8/90000\r\n"));
+        assert!(offer.contains("m=video 4002 RTP/AVP 96 97\r\n"));
+        assert!(offer.contains("a=rtpmap:96 H264/90000\r\n"));
+        assert!(offer.contains("a=rtpmap:97 VP8/90000\r\n"));
+
+        let mut bundle_caps = source_caps;
+        MediaNegotiator::remap_bundle_video_payload_types(&mut bundle_caps, [96])
+            .expect("BUNDLE video payload remap");
+        assert_eq!(bundle_caps[0].payload_type, 97);
+        assert_eq!(bundle_caps[1].payload_type, 98);
     }
 
     fn video_sdp() -> &'static str {

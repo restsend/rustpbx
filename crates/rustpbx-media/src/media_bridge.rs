@@ -620,10 +620,6 @@ impl MediaBridge {
                 &pb.video,
                 a_video_ssrc,
                 b_video_ssrc,
-                pa.audio.as_ref().map(|a| a.payload_type),
-                pa.dtmf_pts(),
-                pb.audio.as_ref().map(|a| a.payload_type),
-                pb.dtmf_pts(),
                 a_video_mid,
                 b_video_mid,
             );
@@ -1435,19 +1431,14 @@ fn audio_relay_rules(
 ///
 /// For each video codec on leg A we add a rule matching that PT and rewriting
 /// it to the peer leg's PT for the same (name, fmtp) codec, stamped with the
-/// destination leg's video sender SSRC; the mirror covers B→A. PTs that
-/// collide with a leg's own audio / DTMF payload types are skipped so the
-/// video rules never hijack the audio stream.
-#[allow(clippy::too_many_arguments)]
+/// destination leg's video sender SSRC; the mirror covers B→A. BUNDLE payload
+/// collisions are prevented while constructing the bundled leg's SDP, so this
+/// function only maps the video codecs negotiated independently on each leg.
 fn video_relay_rules(
     a: &[NegotiatedVideoCodec],
     b: &[NegotiatedVideoCodec],
     a_video_ssrc: u32,
     b_video_ssrc: u32,
-    a_audio_pt: Option<u8>,
-    a_dtmf_pts: std::collections::HashSet<u8>,
-    b_audio_pt: Option<u8>,
-    b_dtmf_pts: std::collections::HashSet<u8>,
     a_video_mid: Option<(u8, std::sync::Arc<str>)>,
     b_video_mid: Option<(u8, std::sync::Arc<str>)>,
 ) -> (Vec<RtpRewriteRule>, Vec<RtpRewriteRule>) {
@@ -1468,10 +1459,6 @@ fn video_relay_rules(
             })
     }
 
-    fn is_audio_pt(pt: u8, audio_pt: Option<u8>, dtmf_pts: &std::collections::HashSet<u8>) -> bool {
-        audio_pt == Some(pt) || dtmf_pts.contains(&pt)
-    }
-
     let mid_fields = |m: &Option<(u8, std::sync::Arc<str>)>| {
         m.as_ref()
             .map(|m| (m.0, m.1.to_string()))
@@ -1483,9 +1470,6 @@ fn video_relay_rules(
 
     let mut a_to_b = Vec::new();
     for va in a {
-        if is_audio_pt(va.payload_type, a_audio_pt, &a_dtmf_pts) {
-            continue;
-        }
         if let Some(vb) = match_peer(va, b) {
             a_to_b.push(RtpRewriteRule {
                 match_payload_type: Some(va.payload_type),
@@ -1500,9 +1484,6 @@ fn video_relay_rules(
 
     let mut b_to_a = Vec::new();
     for vb in b {
-        if is_audio_pt(vb.payload_type, b_audio_pt, &b_dtmf_pts) {
-            continue;
-        }
         if let Some(va) = match_peer(vb, a) {
             b_to_a.push(RtpRewriteRule {
                 match_payload_type: Some(vb.payload_type),
@@ -2358,10 +2339,6 @@ mod tests {
         }
     }
 
-    fn empty_dtmf() -> std::collections::HashSet<u8> {
-        std::collections::HashSet::new()
-    }
-
     /// The fast-path relay must install a rewrite rule for EVERY negotiated
     /// video payload type, not just the first common codec. A browser may send
     /// video on any negotiated H264 profile; an unmatched
@@ -2415,10 +2392,6 @@ mod tests {
             &b,
             0xA0A0A0A0, // a_video_ssrc
             0xB0B0B0B0, // b_video_ssrc
-            Some(111),
-            empty_dtmf(),
-            Some(111),
-            empty_dtmf(),
             None,
             None,
         );
@@ -2476,10 +2449,6 @@ mod tests {
             &b,
             0xA0A0A0A0,
             0xB0B0B0B0,
-            Some(0),
-            empty_dtmf(),
-            Some(8),
-            empty_dtmf(),
             None,
             None,
         );
@@ -2494,37 +2463,25 @@ mod tests {
         assert_eq!(b_to_a[0].fixed_out_ssrc, Some(0xA0A0A0A0));
     }
 
-    /// Video rules must not hijack a leg's own audio / DTMF payload types —
-    /// otherwise DTMF events (or the audio stream) would be rewritten to the
-    /// video SSRC and the peer would drop them.
     #[test]
-    fn video_relay_rules_skip_audio_and_dtmf_pts() {
-        let a = vec![vcap("H264", 96, None), vcap("H264", 110, None)];
-        let b = vec![vcap("H264", 96, None), vcap("H264", 110, None)];
-        let mut a_dtmf = std::collections::HashSet::new();
-        a_dtmf.insert(110);
-        let mut b_dtmf = std::collections::HashSet::new();
-        b_dtmf.insert(110);
+    fn video_relay_rules_map_reused_rtp_pt_to_bundled_pt() {
+        let rtp_video = vec![vcap("H264", 96, Some("profile-level-id=42801F"))];
+        let webrtc_video = vec![vcap("H264", 97, Some("profile-level-id=42801F"))];
 
-        let (a_to_b, b_to_a) =
-            video_relay_rules(&a, &b, 1, 2, Some(96), a_dtmf, Some(96), b_dtmf, None, None);
+        let (rtp_to_webrtc, webrtc_to_rtp) = video_relay_rules(
+            &rtp_video,
+            &webrtc_video,
+            1,
+            2,
+            None,
+            None,
+        );
 
-        let a_matched: Vec<u8> = a_to_b
-            .iter()
-            .map(|r| r.match_payload_type.unwrap())
-            .collect();
-        let b_matched: Vec<u8> = b_to_a
-            .iter()
-            .map(|r| r.match_payload_type.unwrap())
-            .collect();
-        // PT 96 (audio) and PT 110 (DTMF) must be excluded from the video rules.
-        assert!(
-            !a_matched.contains(&96) && !a_matched.contains(&110),
-            "A video rules hijack audio/DTMF: {a_matched:?}"
-        );
-        assert!(
-            !b_matched.contains(&96) && !b_matched.contains(&110),
-            "B video rules hijack audio/DTMF: {b_matched:?}"
-        );
+        assert_eq!(rtp_to_webrtc.len(), 1);
+        assert_eq!(rtp_to_webrtc[0].match_payload_type, Some(96));
+        assert_eq!(rtp_to_webrtc[0].out_payload_type, Some(97));
+        assert_eq!(webrtc_to_rtp.len(), 1);
+        assert_eq!(webrtc_to_rtp[0].match_payload_type, Some(97));
+        assert_eq!(webrtc_to_rtp[0].out_payload_type, Some(96));
     }
 }

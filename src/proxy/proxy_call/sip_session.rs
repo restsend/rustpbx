@@ -3001,9 +3001,9 @@ impl SipSession {
         method: rsipstack::sip::Method,
         offered_caps: &[rustrtc::VideoCapability],
     ) -> Result<Vec<rustrtc::VideoCapability>> {
-        let Some(first_cap) = offered_caps.first() else {
+        if offered_caps.is_empty() {
             return Ok(Vec::new());
-        };
+        }
         let target_side = match source_side {
             DialogSide::Caller => DialogSide::Callee,
             DialogSide::Callee => DialogSide::Caller,
@@ -3019,9 +3019,34 @@ impl SipSession {
             .and_then(|bridge| bridge.leg(target_bridge_side))
             .ok_or_else(|| anyhow!("opposite media leg is unavailable for video re-INVITE"))?;
 
+        // Only a BUNDLE destination needs globally unique audio/video payload
+        // types. Plain RTP has separate audio and video sockets, so preserving
+        // an offered PT such as 96 on both m-lines is valid and avoids a
+        // needless PT change during a SIP re-INVITE.
+        let mut target_video_caps = offered_caps.to_vec();
+        if target_leg.pc().config().transport_mode == rustrtc::TransportMode::WebRtc {
+            let occupied_audio_payload_types = target_leg
+                .pc()
+                .config()
+                .media_capabilities
+                .as_ref()
+                .into_iter()
+                .flat_map(|capabilities| capabilities.audio.iter())
+                .map(|capability| capability.payload_type);
+            MediaNegotiator::remap_bundle_video_payload_types(
+                &mut target_video_caps,
+                occupied_audio_payload_types,
+            )?;
+        }
+        let source_target_video_caps: Vec<_> = offered_caps
+            .iter()
+            .cloned()
+            .zip(target_video_caps.iter().cloned())
+            .collect();
+
         crate::media::leg::ensure_video_sender_for_pc(
             target_leg.pc(),
-            first_cap,
+            &target_video_caps[0],
         )?;
         if let Some(transceiver) = target_leg
             .pc()
@@ -3035,7 +3060,7 @@ impl SipSession {
         let mut target_offer_sdp = MediaNegotiator::rewrite_video_capabilities(
             rustrtc::SdpType::Offer,
             &generated_offer.to_sdp_string(),
-            offered_caps,
+            &target_video_caps,
         )
         .map_err(|error| anyhow!("failed to build opposite-leg video offer: {error}"))?;
 
@@ -3099,8 +3124,24 @@ impl SipSession {
         }
         let peer_answer_sdp = Self::extract_sdp(response.body())
             .ok_or_else(|| anyhow!("opposite-leg video re-INVITE returned no SDP"))?;
-        let accepted_caps =
-            MediaNegotiator::accepted_video_capabilities(offered_caps, &peer_answer_sdp);
+        // The peer answers the target-leg offer and therefore echoes the
+        // target-leg PT. Return the paired source capability when building the
+        // source-leg answer, so a non-BUNDLE PT such as 96 remains 96 even when
+        // the WebRTC target had to advertise it as 97.
+        let peer_accepted_video = MediaNegotiator::extract_video_codecs(&peer_answer_sdp);
+        let accepted_caps: Vec<_> = source_target_video_caps
+            .iter()
+            .filter(|(_, target_cap)| {
+                peer_accepted_video.iter().any(|accepted_cap| {
+                    accepted_cap.payload_type == target_cap.payload_type
+                        && accepted_cap
+                            .name
+                            .eq_ignore_ascii_case(&target_cap.codec_name)
+                        && accepted_cap.clock_rate == target_cap.clock_rate
+                })
+            })
+            .map(|(source_cap, _)| source_cap.clone())
+            .collect();
         let accepted_codec_names: Vec<_> = accepted_caps
             .iter()
             .map(|cap| cap.codec_name.as_str())
@@ -6684,7 +6725,7 @@ impl SipSession {
             // Build the callee's video capabilities from the caller's offer,
             // preserving its PTs. Video is relay-only, so the callee must
             // select a codec that the caller offered.
-            let video_codecs = if self.video_relay_enabled() {
+            let mut video_codecs = if self.video_relay_enabled() {
                 self.media
                     .caller_offer
                     .as_ref()
@@ -6693,6 +6734,16 @@ impl SipSession {
             } else {
                 Vec::new()
             };
+
+            // This PC is about to create RustPBX's offer to the callee. A
+            // WebRTC/BUNDLE destination needs audio and video PTs to be unique
+            // on its shared transport; plain RTP keeps the source-leg PTs.
+            if callee_mode == rustrtc::TransportMode::WebRtc {
+                MediaNegotiator::remap_bundle_video_payload_types(
+                    &mut video_codecs,
+                    codecs.iter().map(|codec| codec.payload_type),
+                )?;
+            }
 
             let cfg = self.build_leg_config(callee_mode, codecs, video_codecs);
             let callee_label = format!("{}-callee", self.id.0);
