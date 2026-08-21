@@ -741,6 +741,7 @@ impl CallModule {
         {
             internal_lookup_empty = results.is_empty();
             if internal_lookup_empty {
+                locs.clear();
                 warn!(
                     callee_uri = %callee_uri,
                     callee_realm = %callee_realm,

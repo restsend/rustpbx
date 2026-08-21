@@ -5677,7 +5677,15 @@ impl SipSession {
 
         let mut resolved = Vec::new();
         for location in expanded {
-            let target_realm = location.aor.host().to_string();
+            if location.destination.is_some() || location.home_proxy.is_some() {
+                resolved.push(location);
+                continue;
+            }
+
+            // Include the port when deciding whether this target belongs to the
+            // PBX. An explicit URI on another port is a directly dialable SIP
+            // service, not an unregistered local extension.
+            let target_realm = location.aor.host_with_port.to_string();
             if !self.server.is_same_realm(&target_realm).await {
                 resolved.push(location);
                 continue;
@@ -5694,7 +5702,12 @@ impl SipSession {
                         resolved.push(location);
                     }
                 }
-                Ok(_) => resolved.push(location),
+                Ok(_) => {
+                    warn!(session_id = %self.id,
+                        target = %location.aor,
+                        "Queue target is an unregistered local extension, skipping"
+                    );
+                }
                 Err(error) => {
                     warn!(session_id = %self.id,
                         target = %location.aor,
@@ -15464,6 +15477,160 @@ a=sendrecv\r\n";
             0,
             "routed-leg lease must be released on session drop"
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_custom_targets_skips_only_unregistered_same_realm_queue_targets() {
+        use crate::call::{DialDirection, Dialplan, TransactionCookie};
+        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+        use crate::proxy::tests::common::{
+            create_test_request, create_test_server, create_transaction,
+        };
+
+        let (server, _) = create_test_server().await;
+        let registered_aor: rsipstack::sip::Uri =
+            "sip:online@rustpbx.com".try_into().unwrap();
+        let registered_contact: rsipstack::sip::Uri =
+            "sip:online@10.0.0.10:5070".try_into().unwrap();
+        let remote_registered_aor: rsipstack::sip::Uri =
+            "sip:remote@rustpbx.com".try_into().unwrap();
+        let remote_contact: rsipstack::sip::Uri =
+            "sip:remote@remote-contact.invalid;transport=ws"
+                .try_into()
+                .unwrap();
+        let remote_home_proxy = SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Udp),
+            addr: "10.0.0.20:5060".try_into().unwrap(),
+        };
+        server
+            .locator
+            .register(
+                "online",
+                Some("rustpbx.com"),
+                Location {
+                    aor: registered_contact.clone(),
+                    registered_aor: Some(registered_aor.clone()),
+                    destination: Some(SipAddr {
+                        r#type: Some(rsipstack::sip::Transport::Udp),
+                        addr: "10.0.0.10:5070".try_into().unwrap(),
+                    }),
+                    expires: 3600,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        server
+            .locator
+            .register(
+                "remote",
+                Some("rustpbx.com"),
+                Location {
+                    aor: remote_contact.clone(),
+                    registered_aor: Some(remote_registered_aor.clone()),
+                    destination: Some(SipAddr {
+                        r#type: Some(rsipstack::sip::Transport::Ws),
+                        addr: "198.51.100.20:57890".try_into().unwrap(),
+                    }),
+                    home_proxy: Some(remote_home_proxy.clone()),
+                    supports_webrtc: true,
+                    expires: 3600,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let (tx, _) = create_transaction(request.clone()).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .expect("failed to create server dialog");
+        let context = CallContext {
+            session_id: "queue-target-resolution".to_string(),
+            dialplan: Arc::new(
+                Dialplan::new(
+                    "queue-target-resolution".to_string(),
+                    request,
+                    DialDirection::Inbound,
+                )
+                .with_caller("sip:alice@rustpbx.com".try_into().unwrap()),
+            ),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:alice@rustpbx.com".to_string(),
+            original_callee: "sip:queue@rustpbx.com".to_string(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+        let caller_peer = Arc::new(MockMediaPeer::new());
+        let callee_peer = Arc::new(MockMediaPeer::new());
+        let (mut session, _handle, _cmd_rx) = SipSession::new(
+            server,
+            CancellationToken::new(),
+            None,
+            context,
+            server_dialog,
+            false,
+            caller_peer,
+            callee_peer,
+        );
+
+        let targets = vec![
+            Location {
+                aor: "sip:offline@rustpbx.com".try_into().unwrap(),
+                ..Default::default()
+            },
+            Location {
+                aor: registered_aor,
+                ..Default::default()
+            },
+            Location {
+                aor: remote_registered_aor,
+                ..Default::default()
+            },
+            Location {
+                aor: "sip:ringback@rustpbx.com:5099".try_into().unwrap(),
+                ..Default::default()
+            },
+            Location {
+                aor: "sip:external@example.net".try_into().unwrap(),
+                ..Default::default()
+            },
+        ];
+
+        let resolved = session.resolve_custom_targets(targets).await;
+        let resolved_uris: Vec<String> = resolved
+            .iter()
+            .map(|location| location.aor.to_string())
+            .collect();
+
+        assert_eq!(
+            resolved_uris,
+            vec![
+                registered_contact.to_string(),
+                remote_contact.to_string(),
+                "sip:ringback@rustpbx.com:5099".to_string(),
+                "sip:external@example.net".to_string(),
+            ]
+        );
+        let remote = &resolved[1];
+        assert_eq!(remote.home_proxy, Some(remote_home_proxy));
+        assert_eq!(
+            remote.registered_aor.as_ref().map(ToString::to_string),
+            Some("sip:remote@rustpbx.com".to_string())
+        );
+        assert!(remote.destination.is_some());
+        assert!(remote.supports_webrtc);
     }
 
     // ── effective_ring_timeout ────────────────────────────────────────────
