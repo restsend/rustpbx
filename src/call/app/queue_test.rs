@@ -1779,6 +1779,7 @@ mod tests {
         config.escalation_timeline = vec![crate::call::app::queue::EscalationStep {
             threshold_secs: 5,
             add_skill_group: "support2".to_string(),
+            fair: false,
         }];
 
         let plan = config.to_plan();
@@ -1797,6 +1798,249 @@ mod tests {
         stack.timeout("escalation_check");
 
         stack.join().await.unwrap();
+    }
+
+    // ── Escalation: auto-armed timer + fair union widening ──────────────
+
+    /// AgentRegistry double for escalation tests: delegates presence duties
+    /// to MemoryRegistry and stubs the escalation hooks with call recording.
+    struct EscalationRegistry {
+        inner: crate::call::app::agent_registry::memory::MemoryRegistry,
+        escalation_calls: std::sync::Mutex<Vec<(String, Vec<String>, bool)>>,
+        /// URIs returned by resolve_escalation_targets (rotated per call so
+        /// repeated invocations can be distinguished).
+        escalation_uris: Vec<Vec<String>>,
+    }
+
+    impl EscalationRegistry {
+        fn new() -> Self {
+            Self {
+                inner: crate::call::app::agent_registry::memory::MemoryRegistry::new(),
+                escalation_calls: std::sync::Mutex::new(Vec::new()),
+                escalation_uris: Vec::new(),
+            }
+        }
+
+        fn with_escalation_uris(mut self, uris: Vec<Vec<String>>) -> Self {
+            self.escalation_uris = uris;
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentRegistry for EscalationRegistry {
+        async fn register(
+            &self,
+            agent_id: String,
+            display_name: String,
+            uri: String,
+            skills: Vec<String>,
+            max_concurrency: u32,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .register(agent_id, display_name, uri, skills, max_concurrency)
+                .await
+        }
+
+        async fn unregister(&self, agent_id: &str) -> anyhow::Result<()> {
+            self.inner.unregister(agent_id).await
+        }
+
+        async fn get_agent(
+            &self,
+            agent_id: &str,
+        ) -> Option<crate::call::app::agent_registry::AgentRecord> {
+            self.inner.get_agent(agent_id).await
+        }
+
+        async fn list_agents(&self) -> Vec<crate::call::app::agent_registry::AgentRecord> {
+            self.inner.list_agents().await
+        }
+
+        async fn update_presence(
+            &self,
+            agent_id: &str,
+            new_state: crate::call::app::agent_registry::PresenceState,
+        ) -> anyhow::Result<()> {
+            self.inner.update_presence(agent_id, new_state).await
+        }
+
+        async fn start_call(&self, agent_id: &str) -> anyhow::Result<()> {
+            self.inner.start_call(agent_id).await
+        }
+
+        async fn end_call(&self, agent_id: &str, talk_time_secs: u64) -> anyhow::Result<()> {
+            self.inner.end_call(agent_id, talk_time_secs).await
+        }
+
+        async fn find_available_agents(
+            &self,
+            required_skills: &[String],
+        ) -> Vec<crate::call::app::agent_registry::AgentRecord> {
+            self.inner.find_available_agents(required_skills).await
+        }
+
+        async fn select_agent(
+            &self,
+            required_skills: &[String],
+            strategy: crate::call::app::agent_registry::RoutingStrategy,
+        ) -> Option<crate::call::app::agent_registry::AgentRecord> {
+            self.inner.select_agent(required_skills, strategy).await
+        }
+
+        async fn resolve_target(&self, _target_uri: &str) -> Vec<String> {
+            vec![]
+        }
+
+        async fn resolve_escalation_targets(
+            &self,
+            primary_target_uri: &str,
+            add_group_ids: &[String],
+            _call_id: &str,
+            fair: bool,
+        ) -> Vec<String> {
+            self.escalation_calls.lock().unwrap().push((
+                primary_target_uri.to_string(),
+                add_group_ids.to_vec(),
+                fair,
+            ));
+            let calls = self.escalation_calls.lock().unwrap().len();
+            self.escalation_uris
+                .get(calls - 1)
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    /// The escalation timer must arm itself in `on_enter` and fire WITHOUT
+    /// any manual `stack.timeout("escalation_check")` — the dormant-path
+    /// regression (timer only ever re-armed after firing) is exactly what
+    /// this test forbids.
+    #[tokio::test]
+    async fn test_escalation_timer_auto_arms_and_widens_fairly() {
+        use std::sync::Arc;
+
+        let mut config = build_simple_queue_config();
+        config.escalation_mode = crate::call::app::queue::EscalationMode::Cumulative;
+        config.escalation_timeline = vec![crate::call::app::queue::EscalationStep {
+            threshold_secs: 1,
+            add_skill_group: "support_l2".to_string(),
+            fair: true,
+        }];
+        config.skill_group = Some("support".to_string());
+
+        // Union resolve returns the already-dialled primary FIRST plus one
+        // widened agent — cumulative escalation must skip the duplicate
+        // primary leg and dial only the new agent.
+        let registry = Arc::new(EscalationRegistry::new().with_escalation_uris(vec![vec![
+            "sip:agent1@example.com".to_string(), // primary, already ringing
+            "sip:l2agent@example.com".to_string(), // widened fair pick
+        ]]));
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config)
+            .with_agent_registry(registry.clone())
+            .with_call_id("call-esc-1".to_string());
+
+        let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
+
+        // on_enter: answer + hold music + dial the primary agent (no manual
+        // timer fire). Sequential dialing is kicked off by the production
+        // execute_flow's "dial_next_agent" injection.
+        stack
+            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "Hold", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        stack.assert_cmd(200, "LegAdd-primary", |c| {
+            matches!(c, CallCommand::LegAdd { target, .. } if target.contains("agent1@example.com"))
+        })
+        .await;
+
+        // The auto-armed escalation timer fires by itself after the 1s
+        // threshold; the widened union resolves and dials ONLY the new agent
+        // (the duplicate primary leg is filtered out).
+        stack.assert_cmd(4000, "LegAdd-widened", |c| {
+            matches!(c, CallCommand::LegAdd { target, .. } if target.contains("l2agent@example.com"))
+        })
+        .await;
+
+        // No further LegAdd beyond the two above within a quiet window.
+        assert!(
+            stack.next_cmd(1200).await.is_none(),
+            "no duplicate primary leg or spurious dial after escalation"
+        );
+
+        // The addon saw the fair union resolve with the primary group + step.
+        let calls = registry.escalation_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "exactly one escalation resolve");
+        assert_eq!(calls[0].0, "skill-group:support");
+        assert_eq!(calls[0].1, vec!["support_l2".to_string()]);
+        assert!(calls[0].2, "fair flag must reach the registry");
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// Once every timeline step has triggered the escalation timer stops
+    /// re-arming — no idle wake-ups for the rest of the call.
+    #[tokio::test]
+    async fn test_escalation_timer_stops_after_all_steps() {
+        use std::sync::Arc;
+
+        let mut config = build_simple_queue_config();
+        config.escalation_mode = crate::call::app::queue::EscalationMode::Cumulative;
+        config.escalation_timeline = vec![crate::call::app::queue::EscalationStep {
+            threshold_secs: 1,
+            add_skill_group: "support_l2".to_string(),
+            fair: true,
+        }];
+        config.skill_group = Some("support".to_string());
+
+        let registry = Arc::new(
+            EscalationRegistry::new()
+                .with_escalation_uris(vec![vec!["sip:l2agent@example.com".to_string()]]),
+        );
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config)
+            .with_agent_registry(registry.clone())
+            .with_call_id("call-esc-2".to_string());
+
+        let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
+        stack
+            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "Hold", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        stack
+            .assert_cmd(200, "LegAdd-primary", |c| {
+                matches!(c, CallCommand::LegAdd { .. })
+            })
+            .await;
+        stack.assert_cmd(4000, "LegAdd-widened", |c| {
+            matches!(c, CallCommand::LegAdd { target, .. } if target.contains("l2agent@example.com"))
+        })
+        .await;
+
+        // The historical behavior re-armed a 10s wake-up forever even after
+        // the last step; give the timer ample time to misfire.
+        assert!(
+            stack.next_cmd(2000).await.is_none(),
+            "escalation must not re-check after the last step triggered"
+        );
+        assert_eq!(
+            registry.escalation_calls.lock().unwrap().len(),
+            1,
+            "no additional escalation resolves after the timeline is done"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
     }
 
     // ── Audio path resolution + action rules (online / offline scenarios) ──

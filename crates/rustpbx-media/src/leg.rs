@@ -612,6 +612,13 @@ impl LegInner {
         // the 8 kHz PT for browsers), not just the single preferred `dtmf`.
         let dtmf_pts: Vec<u8> = profile.dtmf_pts().into_iter().collect();
         self.tap.set_dtmf_payload_types(dtmf_pts);
+        // Recording audio allowlist → tap. A re-INVITE that changes the codec
+        // changes the payload type on the wire; without re-syncing the tap's
+        // allowlist every post-renegotiation audio packet would be excluded
+        // from the call recording (both directions).
+        let mut audio_pts: Vec<u8> = profile.audio.iter().map(|a| a.payload_type).collect();
+        audio_pts.retain(|pt| !profile.dtmf_pts().contains(pt));
+        self.tap.set_audio_payload_types(audio_pts);
         // Sync the outbound DTMF send state so RFC 2833 packets use the
         // negotiated telephone-event payload type and clock rate.
         let mut dtmf = self.dtmf_send.lock();
@@ -1011,10 +1018,8 @@ async fn wait_and_arm_rewrite_relay(
     } else {
         // Non-BUNDLE source: audio and video have independent receive loops,
         // so install one ordinary one-target bridge on each source transport.
-        let (video_rules, audio_rules): (Vec<_>, Vec<_>) = rules
-            .iter()
-            .cloned()
-            .partition(|rule| {
+        let (video_rules, audio_rules): (Vec<_>, Vec<_>) =
+            rules.iter().cloned().partition(|rule| {
                 rule.match_payload_type
                     .is_some_and(|pt| video_payload_types.contains(&pt))
             });
@@ -1250,63 +1255,31 @@ mod tests {
 
         let source_audio = test_rtp_transport().await;
         let target_audio = test_rtp_transport().await;
-        set_test_sender_transport(
-            source.pc(),
-            rustrtc::MediaKind::Audio,
-            source_audio.clone(),
-        );
-        set_test_sender_transport(
-            target.pc(),
-            rustrtc::MediaKind::Audio,
-            target_audio.clone(),
-        );
+        set_test_sender_transport(source.pc(), rustrtc::MediaKind::Audio, source_audio.clone());
+        set_test_sender_transport(target.pc(), rustrtc::MediaKind::Audio, target_audio.clone());
 
-        let missing_video = wait_and_arm_rewrite_relay(
-            source.pc(),
-            target.pc(),
-            Default::default(),
-            &[],
-            &[96],
-        )
-        .await;
+        let missing_video =
+            wait_and_arm_rewrite_relay(source.pc(), target.pc(), Default::default(), &[], &[96])
+                .await;
         assert!(missing_video.is_err(), "video transports must be required");
 
         let source_video = test_rtp_transport().await;
-        set_test_sender_transport(
-            source.pc(),
-            rustrtc::MediaKind::Video,
-            source_video.clone(),
-        );
+        set_test_sender_transport(source.pc(), rustrtc::MediaKind::Video, source_video.clone());
 
-        let missing_target_video = wait_and_arm_rewrite_relay(
-            source.pc(),
-            target.pc(),
-            Default::default(),
-            &[],
-            &[96],
-        )
-        .await;
+        let missing_target_video =
+            wait_and_arm_rewrite_relay(source.pc(), target.pc(), Default::default(), &[], &[96])
+                .await;
         assert!(
             missing_target_video.is_err(),
             "target video transport must be required"
         );
 
         let target_video = test_rtp_transport().await;
-        set_test_sender_transport(
-            target.pc(),
-            rustrtc::MediaKind::Video,
-            target_video.clone(),
-        );
+        set_test_sender_transport(target.pc(), rustrtc::MediaKind::Video, target_video.clone());
 
-        wait_and_arm_rewrite_relay(
-            source.pc(),
-            target.pc(),
-            Default::default(),
-            &[],
-            &[96],
-        )
-        .await
-        .expect("relay should arm once all transports are ready");
+        wait_and_arm_rewrite_relay(source.pc(), target.pc(), Default::default(), &[], &[96])
+            .await
+            .expect("relay should arm once all transports are ready");
 
         source.stop();
         target.stop();

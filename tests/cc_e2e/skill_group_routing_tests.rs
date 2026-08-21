@@ -1653,3 +1653,313 @@ async fn test_reservation_fallback_when_all_agents_taken() {
         "fallback must exclude Ringing agents (already reserved), got {uris:?}"
     );
 }
+
+// ═════════════════════════════════════════════════════════════════════
+//  Queue overflow escalation: priority group first, fair widening after
+//  the wait timeout (escalation_plan_for + resolve_escalation_targets)
+// ═════════════════════════════════════════════════════════════════════
+
+mod escalation_helpers {
+    use rustpbx::addons::cc::SkillGroupConfigEntry;
+    use rustpbx::addons::cc::SkillGroupTomlCache;
+    use rustpbx::addons::cc::agent::{AgentRegistry, AgentStatus};
+    use std::sync::Arc;
+
+    pub fn cache_with(
+        groups: Vec<SkillGroupConfigEntry>,
+    ) -> Arc<tokio::sync::RwLock<SkillGroupTomlCache>> {
+        let mut cache = SkillGroupTomlCache::default();
+        for g in groups {
+            cache.groups.insert(g.skill_group_id.clone(), g);
+        }
+        Arc::new(tokio::sync::RwLock::new(cache))
+    }
+
+    pub fn group(
+        id: &str,
+        skills: &[&str],
+        overflow_groups: &[&str],
+        max_wait_secs: i32,
+    ) -> SkillGroupConfigEntry {
+        SkillGroupConfigEntry {
+            skill_group_id: id.to_string(),
+            display_name: None,
+            skills_required: skills.iter().map(|s| s.to_string()).collect(),
+            overflow_groups: overflow_groups.iter().map(|s| s.to_string()).collect(),
+            sla_target_secs: 30,
+            max_wait_secs,
+            acd_policy: None,
+        }
+    }
+
+    pub async fn idle_agent(registry: &AgentRegistry, id: &str, skills: &[&str]) {
+        registry
+            .register(
+                id.to_string(),
+                skills.iter().map(|s| s.to_string()).collect(),
+                1,
+            )
+            .await
+            .unwrap();
+        registry.update_status(id, AgentStatus::Idle).await.unwrap();
+    }
+}
+
+/// `escalation_plan_for` synthesizes a fair cumulative plan from the skill
+/// group's `overflow_groups` + `max_wait_secs` when no ACD policy timeline
+/// is configured (the unconsumed DB/TOML field becomes the feature's
+/// simplest configuration surface).
+#[tokio::test]
+async fn test_escalation_plan_synthesized_from_overflow_groups() {
+    use escalation_helpers::{cache_with, group};
+
+    let cc_registry = Arc::new(AgentRegistry::new());
+    let cache = cache_with(vec![
+        group("support", &["support"], &["support_l2", "support_l3"], 45),
+        group("support_l2", &["support_l2"], &[], 90),
+        group("support_l3", &["support_l3"], &[], 90),
+    ]);
+    let adapter = CcAgentRegistryAdapter::new(cc_registry, acd_disabled(), "localhost")
+        .with_skill_group_cache(cache);
+
+    let plan = adapter.escalation_plan_for("skill-group:support").await;
+
+    assert_eq!(
+        plan.mode,
+        rustpbx::call::app::queue::EscalationMode::Cumulative
+    );
+    assert_eq!(plan.steps.len(), 2, "one step per overflow group");
+    assert_eq!(plan.steps[0].add_skill_group, "support_l2");
+    assert_eq!(
+        plan.steps[0].threshold_secs, 45,
+        "threshold = max_wait_secs"
+    );
+    assert!(plan.steps[0].fair, "synthesized steps must widen fairly");
+    assert_eq!(plan.steps[1].add_skill_group, "support_l3");
+    assert!(plan.steps[1].fair);
+}
+
+/// `escalation_plan_for` prefers the ACD policy's escalation timeline when
+/// one is configured (verbatim thresholds / targets / fair flags).
+#[tokio::test]
+async fn test_escalation_plan_prefers_policy_timeline() {
+    use escalation_helpers::{cache_with, group};
+    use rustpbx::addons::cc::acd::{
+        AcdPolicy, EscalationTimelineEntry, OverflowConfig, OverflowMode,
+    };
+
+    let mut policy = AcdPolicy::default();
+    policy.overflow = OverflowConfig {
+        mode: OverflowMode::Cumulative,
+        escalation_timeline: vec![
+            EscalationTimelineEntry {
+                threshold_secs: 20,
+                skill_group_id: "vip_desk".to_string(),
+                fair: false,
+            },
+            EscalationTimelineEntry {
+                threshold_secs: 60,
+                skill_group_id: "anyone".to_string(),
+                fair: true,
+            },
+        ],
+        ..Default::default()
+    };
+    let mut policies = std::collections::HashMap::new();
+    policies.insert("escalate".to_string(), policy);
+    let acd = Arc::new(AcdEngine::new(AcdConfig {
+        policies,
+        ..Default::default()
+    }));
+
+    let cc_registry = Arc::new(AgentRegistry::new());
+    let mut support = group("support", &["support"], &["support_l2"], 45);
+    support.acd_policy = Some("escalate".to_string());
+    let adapter = CcAgentRegistryAdapter::new(cc_registry, acd, "localhost")
+        .with_skill_group_cache(cache_with(vec![support]));
+
+    let plan = adapter.escalation_plan_for("skill-group:support").await;
+
+    assert_eq!(
+        plan.mode,
+        rustpbx::call::app::queue::EscalationMode::Cumulative
+    );
+    assert_eq!(
+        plan.steps.len(),
+        2,
+        "policy timeline must override overflow_groups"
+    );
+    assert_eq!(plan.steps[0].add_skill_group, "vip_desk");
+    assert_eq!(plan.steps[0].threshold_secs, 20);
+    assert!(!plan.steps[0].fair);
+    assert_eq!(plan.steps[1].add_skill_group, "anyone");
+    assert_eq!(plan.steps[1].threshold_secs, 60);
+    assert!(plan.steps[1].fair);
+}
+
+/// No overflow groups and no policy timeline → empty plan (escalation off).
+#[tokio::test]
+async fn test_escalation_plan_empty_when_unconfigured() {
+    use escalation_helpers::{cache_with, group};
+
+    let cc_registry = Arc::new(AgentRegistry::new());
+    let adapter = CcAgentRegistryAdapter::new(cc_registry, acd_disabled(), "localhost")
+        .with_skill_group_cache(cache_with(vec![group("support", &["support"], &[], 45)]));
+
+    let plan = adapter.escalation_plan_for("skill-group:support").await;
+    assert!(plan.steps.is_empty());
+}
+
+/// `resolve_escalation_targets` returns the UNION of the primary and the
+/// escalation group, deduplicated, with the primary reserved agent first.
+#[tokio::test]
+async fn test_resolve_escalation_targets_union() {
+    use escalation_helpers::{cache_with, group, idle_agent};
+
+    let cc_registry = Arc::new(AgentRegistry::new());
+    idle_agent(&cc_registry, "p1", &["support"]).await;
+    idle_agent(&cc_registry, "p2", &["support"]).await;
+    idle_agent(&cc_registry, "l2_1", &["support_l2"]).await;
+    // Shared agent across both groups — must appear only once.
+    idle_agent(&cc_registry, "both", &["support", "support_l2"]).await;
+
+    let cache = cache_with(vec![
+        group("support", &["support"], &["support_l2"], 45),
+        group("support_l2", &["support_l2"], &[], 90),
+    ]);
+    let adapter = CcAgentRegistryAdapter::new(cc_registry.clone(), acd_disabled(), "localhost")
+        .with_skill_group_cache(cache);
+
+    let uris = adapter
+        .resolve_escalation_targets(
+            "skill-group:support",
+            &["support_l2".to_string()],
+            "call-e1",
+            true,
+        )
+        .await;
+
+    let ids: Vec<String> = uris
+        .iter()
+        .map(|u| {
+            u.strip_prefix("sip:")
+                .and_then(|s| s.split('@').next())
+                .unwrap_or(u)
+                .to_string()
+        })
+        .collect();
+    let mut sorted = ids.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        vec!["both", "l2_1", "p1", "p2"],
+        "union must contain every distinct agent from both groups exactly once"
+    );
+    // The head agent is reserved for this call.
+    let head = ids[0].clone();
+    let agent = cc_registry.get_agent(&head).await.unwrap();
+    assert!(
+        matches!(agent.status, AgentStatus::Ringing { .. }),
+        "head agent {head} must be reserved (Ringing) after escalation resolve"
+    );
+}
+
+/// Fair widening rotates across the union: two sequential escalated calls
+/// must reserve DIFFERENT head agents (round-robin, single advance per
+/// call — the documented starvation-bug discipline).
+#[tokio::test]
+async fn test_resolve_escalation_targets_fair_rotation() {
+    use escalation_helpers::{cache_with, group, idle_agent};
+
+    let cc_registry = Arc::new(AgentRegistry::new());
+    idle_agent(&cc_registry, "p1", &["support"]).await;
+    idle_agent(&cc_registry, "l2_1", &["support_l2"]).await;
+
+    let cache = cache_with(vec![
+        group("support", &["support"], &["support_l2"], 45),
+        group("support_l2", &["support_l2"], &[], 90),
+    ]);
+    let adapter = CcAgentRegistryAdapter::new(cc_registry.clone(), acd_disabled(), "localhost")
+        .with_skill_group_cache(cache);
+
+    let uris1 = adapter
+        .resolve_escalation_targets(
+            "skill-group:support",
+            &["support_l2".to_string()],
+            "call-f1",
+            true,
+        )
+        .await;
+    let head1 = uris1[0]
+        .strip_prefix("sip:")
+        .and_then(|s| s.split('@').next())
+        .unwrap()
+        .to_string();
+
+    // Simulate call-1 ending / agent released before the next escalation.
+    cc_registry
+        .update_status(&head1, AgentStatus::Idle)
+        .await
+        .unwrap();
+
+    let uris2 = adapter
+        .resolve_escalation_targets(
+            "skill-group:support",
+            &["support_l2".to_string()],
+            "call-f2",
+            true,
+        )
+        .await;
+    let head2 = uris2[0]
+        .strip_prefix("sip:")
+        .and_then(|s| s.split('@').next())
+        .unwrap()
+        .to_string();
+
+    assert_ne!(
+        head1, head2,
+        "fair widening must rotate the reserved head across successive calls"
+    );
+}
+
+/// Non-fair widening keeps the primary group's agents ahead of the
+/// escalation group's agents in the dial list.
+#[tokio::test]
+async fn test_resolve_escalation_targets_non_fair_primary_first() {
+    use escalation_helpers::{cache_with, group, idle_agent};
+
+    let cc_registry = Arc::new(AgentRegistry::new());
+    idle_agent(&cc_registry, "p1", &["support"]).await;
+    idle_agent(&cc_registry, "l2_1", &["support_l2"]).await;
+
+    let cache = cache_with(vec![
+        group("support", &["support"], &["support_l2"], 45),
+        group("support_l2", &["support_l2"], &[], 90),
+    ]);
+    let adapter = CcAgentRegistryAdapter::new(cc_registry, acd_disabled(), "localhost")
+        .with_skill_group_cache(cache);
+
+    let uris = adapter
+        .resolve_escalation_targets(
+            "skill-group:support",
+            &["support_l2".to_string()],
+            "call-nf",
+            false,
+        )
+        .await;
+
+    let ids: Vec<String> = uris
+        .iter()
+        .map(|u| {
+            u.strip_prefix("sip:")
+                .and_then(|s| s.split('@').next())
+                .unwrap_or(u)
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        ids.first().map(String::as_str),
+        Some("p1"),
+        "non-fair widening keeps a primary-group agent at the head, got {ids:?}"
+    );
+}

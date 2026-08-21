@@ -95,8 +95,12 @@ pub struct IngressTap {
     dtmf_tx: broadcast::Sender<DtmfEvent>,
 
     // ── recording ───────────────────────────────────────────────────────
-    /// Audio payload types configured on this leg before the tap is installed.
-    audio_payload_types: Vec<u8>,
+    /// Audio payload types configured on this leg, as a 128-bit lock-free
+    /// bitmask (RTP payload types are 7 bits). Initialized from the leg's
+    /// codec list and re-synced by `set_audio_payload_types` whenever a
+    /// re-INVITE renegotiates the codec — a stale allowlist would silently
+    /// drop every post-renegotiation audio packet from the recording.
+    audio_pt_mask: [AtomicU64; 2],
     /// Sender for the call-scoped recording task. Recording-enabled calls
     /// supply it when the caller leg is constructed; it then remains immutable
     /// for the tap's lifetime.
@@ -113,7 +117,7 @@ impl IngressTap {
         recorder_sender: Option<RecorderSender>,
     ) -> Arc<Self> {
         let (dtmf_tx, _) = broadcast::channel(dtmf_bus_capacity.max(1));
-        Arc::new(Self {
+        let tap = Arc::new(Self {
             ingress_packets: AtomicU64::new(0),
             egress_packets: AtomicU64::new(0),
             track_ingress_ssrc_pts: AtomicBool::new(true),
@@ -122,9 +126,11 @@ impl IngressTap {
             dtmf_pt_mask: [AtomicU64::new(0), AtomicU64::new(0)],
             dtmf_detector: Mutex::new(DtmfDetector::default()),
             dtmf_tx,
-            audio_payload_types,
+            audio_pt_mask: [AtomicU64::new(0), AtomicU64::new(0)],
             recorder_sender,
-        })
+        });
+        tap.set_audio_payload_types(audio_payload_types);
+        tap
     }
 
     /// Enable/disable hot-path SSRC→PT tracking (see `track_ingress_ssrc_pts`).
@@ -157,6 +163,33 @@ impl IngressTap {
         let word = (pt as usize) >> 6;
         let bit = 1u64 << (pt & 63);
         self.dtmf_pt_mask[word].load(Ordering::Relaxed) & bit != 0
+    }
+
+    /// Re-sync the recording audio allowlist. Called when a re-INVITE
+    /// renegotiates the leg's codec set: without this the tap keeps only the
+    /// pre-renegotiation payload types and every packet sent/received under
+    /// the new codec is excluded from the call recording.
+    pub fn set_audio_payload_types(&self, pts: Vec<u8>) {
+        let mut lo = 0u64;
+        let mut hi = 0u64;
+        for p in pts {
+            if p < 64 {
+                lo |= 1u64 << p;
+            } else {
+                hi |= 1u64 << (p - 64);
+            }
+        }
+        self.audio_pt_mask[0].store(lo, Ordering::Relaxed);
+        self.audio_pt_mask[1].store(hi, Ordering::Relaxed);
+    }
+
+    /// Lock-free audio-codec check: is `pt` one of the allowlisted audio
+    /// payload types?
+    #[inline]
+    fn is_audio_payload_type(&self, pt: u8) -> bool {
+        let word = (pt as usize) >> 6;
+        let bit = 1u64 << (pt & 63);
+        self.audio_pt_mask[word].load(Ordering::Relaxed) & bit != 0
     }
 
     /// Subscribe to deduplicated ingress DTMF events.
@@ -240,7 +273,7 @@ impl IngressTap {
         }
 
         // Only configured audio RTP enters the call-scoped recording queue.
-        if self.audio_payload_types.contains(&pt)
+        if self.is_audio_payload_type(pt)
             && let Some(sender) = self.recorder_sender.as_ref()
         {
             sender.capture(direction, packet);

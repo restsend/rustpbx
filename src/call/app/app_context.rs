@@ -130,6 +130,10 @@ pub struct PendingQueuePlan {
     pub plan: crate::call::QueuePlan,
     pub agent_uris: Vec<String>,
     pub parallel: bool,
+    /// Primary skill-group id when the queue's dial target was
+    /// `skill-group:{id}`. The queue app factory uses it to pull the
+    /// escalation plan from the agent registry.
+    pub skill_group_id: Option<String>,
 }
 
 impl ApplicationContext {

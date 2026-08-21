@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1"
 async-trait = "0.1.88"
-audio-codec = "0.3.41"
+audio-codec = "0.4.4"
 bytes = { version = "1", features = ["serde"] }
 dashmap = "6"
 minimp3 = "0.6.1"

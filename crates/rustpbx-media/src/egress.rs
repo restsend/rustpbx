@@ -41,7 +41,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use audio_codec::{CodecType, Decoder, Encoder, Resampler, create_encoder};
+use audio_codec::{BoxedResampler, CodecType, Decoder, Encoder, create_encoder};
 
 use bytes::Bytes;
 use parking_lot::Mutex;
@@ -254,7 +254,7 @@ struct EgressTask {
     codec: EgressCodec,
     encoder: Box<dyn Encoder>,
     source: EgressSource,
-    resampler: Option<Resampler>,
+    resampler: Option<BoxedResampler>,
     ptime: Duration,
     /// While held (true) the pipeline parks. Opened by the relay when both
     /// legs accept.
@@ -349,10 +349,13 @@ impl EgressTask {
                         if let EgressSource::TranscodePeer { src_sample_rate, .. } = &s {
                             let dst_sample_rate = self.codec.codec.samplerate();
                             if *src_sample_rate != dst_sample_rate {
-                                self.resampler = Some(Resampler::new(
-                                    *src_sample_rate as usize,
-                                    dst_sample_rate as usize,
-                                ));
+                                self.resampler = Some(
+                                    BoxedResampler::new(
+                                        *src_sample_rate as usize,
+                                        dst_sample_rate as usize,
+                                    )
+                                    .expect("valid sample rates"),
+                                );
                             } else {
                                 self.resampler = None;
                             }
@@ -1042,7 +1045,7 @@ mod tests {
                 src_sample_rate: 48_000,
                 primed: true,
             },
-            resampler: Some(Resampler::new(48_000, 8000)),
+            resampler: Some(BoxedResampler::new(48_000, 8000).expect("valid sample rates")),
             ptime: Duration::from_millis(20),
             gate: None,
             playback_timestamp_base: 0,

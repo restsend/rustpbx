@@ -921,7 +921,10 @@ pub(crate) mod tests {
             codec_name: codec_name.to_string(),
             clock_rate: 90000,
             fmtp: fmtp.map(str::to_string),
-            rtcp_fbs: rtcp_fbs.iter().map(|feedback| feedback.to_string()).collect(),
+            rtcp_fbs: rtcp_fbs
+                .iter()
+                .map(|feedback| feedback.to_string())
+                .collect(),
             rtx_payload_type: None,
         }
     }
@@ -1013,8 +1016,7 @@ m=video 5000 RTP/AVP 110\r\n\
 a=sendrecv\r\n\
 a=rtpmap:110 VP8/90000\r\n";
 
-        let accepted =
-            MediaNegotiator::accepted_video_capabilities(&offered, peer_answer);
+        let accepted = MediaNegotiator::accepted_video_capabilities(&offered, peer_answer);
         assert_eq!(accepted.len(), 1);
         assert_eq!(accepted[0].codec_name, "VP8");
         assert_eq!(accepted[0].payload_type, 98);
@@ -1184,8 +1186,8 @@ a=rtpmap:96 VP8/90000\r\n";
             rtx_payload_type: None,
         }];
 
-        let matched = MediaNegotiator::find_common_video_codec(&a, &b)
-            .expect("VP8 must be relay-compatible");
+        let matched =
+            MediaNegotiator::find_common_video_codec(&a, &b).expect("VP8 must be relay-compatible");
         assert_eq!(matched.0.payload_type, 96);
         assert_eq!(matched.1.payload_type, 110);
     }
@@ -2657,5 +2659,4 @@ a=rtpmap:0 PCMU/8000\r\n";
         assert!(!codecs.iter().any(|c| c.codec == CodecType::G729));
         assert!(!codecs.iter().any(|c| c.codec == CodecType::G722));
     }
-
 }

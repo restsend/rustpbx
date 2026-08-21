@@ -1100,9 +1100,10 @@ where
     D: Deserializer<'de>,
 {
     let codecs = Vec::<String>::deserialize(deserializer)?;
-    if let Some(codec) = codecs.iter().find(|codec| {
-        !codec.eq_ignore_ascii_case("H264") && !codec.eq_ignore_ascii_case("VP8")
-    }) {
+    if let Some(codec) = codecs
+        .iter()
+        .find(|codec| !codec.eq_ignore_ascii_case("H264") && !codec.eq_ignore_ascii_case("VP8"))
+    {
         return Err(serde::de::Error::custom(format!(
             "unsupported video codec `{codec}`; supported codecs are H264 and VP8"
         )));
@@ -1660,7 +1661,11 @@ mod tests {
             "#,
         )
         .expect_err("unsupported video codec must fail configuration parsing");
-        assert!(unsupported.to_string().contains("supported codecs are H264 and VP8"));
+        assert!(
+            unsupported
+                .to_string()
+                .contains("supported codecs are H264 and VP8")
+        );
     }
 
     #[test]

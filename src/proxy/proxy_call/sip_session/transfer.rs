@@ -754,6 +754,15 @@ impl SipSession {
             .to_queue_plan()
             .map_err(|e| anyhow!("Invalid queue config: {}", e))?;
 
+        // The resolved config may not carry an internal `name` (e.g. a
+        // skill-group queue synthesized on the fly). The reference IS the
+        // queue identity in that case — backfill it so QueueApp's
+        // `set_queue_name`, CDR `queue_id` and post-call hooks (CSAT) all
+        // see the real queue instead of an empty string.
+        if queue_plan.queue_name.is_empty() {
+            queue_plan.queue_name = queue_name.to_string();
+        }
+
         if !target_overrides.is_empty() {
             use crate::call::{DialStrategy, Location};
             let mut locations = Vec::new();

@@ -67,3 +67,4 @@ tests/bench/
 todo_lists/
 recordings/
 e2e-artifacts/
+tests/logs/

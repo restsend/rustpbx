@@ -309,7 +309,12 @@ fn make_ua(port: u16, proxy_addr: std::net::SocketAddr, username: &str) -> TestU
         username: username.to_string(),
         password: "password".to_string(),
         realm: "127.0.0.1".to_string(),
-        local_port: port,
+        // The fallback port is never used in practice: pick a fresh port so
+        // the five scenarios in this file can run CONCURRENTLY under libtest
+        // without their UAs fighting over the same hardcoded SIP sockets
+        // (a lost bind race makes one test swallow another's INVITEs and
+        // corrupts the double-dial counters the assertions rely on).
+        local_port: portpicker::pick_unused_port().unwrap_or(port),
         proxy_addr,
     })
 }
@@ -371,7 +376,9 @@ fn spawn_caller(
     rtp_port: u16,
 ) -> tokio::task::JoinHandle<Result<rsipstack::dialog::DialogId>> {
     tokio::spawn(async move {
-        // Bare user part — TestUa builds the full request URI itself.
+        // Fresh RTP port per call so concurrent scenarios never advertise the
+        // same media endpoint (see make_ua for the concurrency rationale).
+        let rtp_port = portpicker::pick_unused_port().unwrap_or(rtp_port);
         let offer = create_test_sdp("127.0.0.1", rtp_port, false);
         ua.make_call(QUEUE_NUMBER, Some(offer)).await
     })

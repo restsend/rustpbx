@@ -106,6 +106,11 @@ pub struct QueueConfig {
     pub escalation_mode: EscalationMode,
     /// Escalation timeline: ordered steps of (threshold_secs, skill_group_id).
     pub escalation_timeline: Vec<EscalationStep>,
+    /// Primary skill-group id when this queue routes into a skill group
+    /// (`skill-group:{id}` target). Present only for skill-group queues —
+    /// escalation resolves the primary group ∪ overflow groups as one
+    /// candidate set through the agent registry.
+    pub skill_group: Option<String>,
 }
 
 /// Escalation mode for overflow/skill-group escalation.
@@ -131,6 +136,32 @@ pub struct EscalationStep {
     pub threshold_secs: u64,
     /// Skill group to add (or switch to, depending on mode).
     pub add_skill_group: String,
+    /// Widen with fair (round-robin) ordering across the union of the
+    /// primary group and the escalation target group. When false (default),
+    /// escalation keeps the primary group's ordering and appends the new
+    /// group's agents.
+    #[serde(default)]
+    pub fair: bool,
+}
+
+/// The escalation plan resolved for a queue target by the agent registry
+/// (addon). Produced by [`AgentRegistry::escalation_plan_for`] and injected
+/// into [`QueueConfig`] at the assembly point.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EscalationPlan {
+    /// Escalation mode (replace vs cumulative widening).
+    pub mode: EscalationMode,
+    /// Ordered escalation steps.
+    pub steps: Vec<EscalationStep>,
+}
+
+impl Default for EscalationPlan {
+    fn default() -> Self {
+        Self {
+            mode: EscalationMode::Replace,
+            steps: Vec::new(),
+        }
+    }
 }
 
 impl Default for QueueConfig {
@@ -159,6 +190,7 @@ impl Default for QueueConfig {
             voice_prompts: None,
             escalation_mode: EscalationMode::Replace,
             escalation_timeline: Vec::new(),
+            skill_group: None,
         }
     }
 }
@@ -327,6 +359,16 @@ impl QueueApp {
     /// Set the call ID for tracking.
     pub fn with_call_id(mut self, call_id: String) -> Self {
         self.call_id = call_id;
+        self
+    }
+
+    /// Set the escalation plan and primary skill group resolved by the
+    /// agent registry at the assembly point. Steps are taken verbatim; an
+    /// empty plan leaves escalation disabled.
+    pub fn with_escalation_plan(mut self, plan: EscalationPlan, skill_group: String) -> Self {
+        self.config.escalation_mode = plan.mode;
+        self.config.escalation_timeline = plan.steps;
+        self.config.skill_group = Some(skill_group);
         self
     }
 
@@ -891,6 +933,26 @@ impl QueueApp {
         Ok(AppAction::Continue)
     }
 
+    /// Compute the delay until the next `escalation_check` wake-up.
+    ///
+    /// Targets the earliest step whose threshold has not been reached yet
+    /// (and whose group has not already been escalated), clamped to
+    /// `[1s, 10s]` so short thresholds fire promptly while long thresholds
+    /// degrade to the historical 10s polling cadence. Returns `None` when
+    /// every step has already triggered — the timer then stops re-arming.
+    fn next_escalation_check_delay(&self) -> Option<Duration> {
+        let wait = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        let next = self
+            .config
+            .escalation_timeline
+            .iter()
+            .filter(|s| !self.escalated_groups.contains(&s.add_skill_group))
+            .map(|s| s.threshold_secs)
+            .min()?;
+        let remaining = next.saturating_sub(wait);
+        Some(Duration::from_secs(remaining.clamp(1, 10)))
+    }
+
     /// Check escalation timeline and add/switch skill groups.
     async fn check_escalation(&mut self, ctrl: &mut CallController) -> anyhow::Result<()> {
         if self.config.escalation_timeline.is_empty() {
@@ -912,8 +974,38 @@ impl QueueApp {
                 );
 
                 if let Some(ref registry) = self.agent_registry {
-                    let skill_uri = format!("skill-group:{}", step.add_skill_group);
-                    let agent_uris = registry.resolve_target(&skill_uri).await;
+                    let agent_uris = match self.config.skill_group.as_deref() {
+                        Some(sg) => {
+                            // Skill-group queue: resolve the primary group and
+                            // the escalation target as ONE candidate set so the
+                            // addon can order the union fairly (round-robin)
+                            // when the step is marked fair.
+                            let primary = format!("skill-group:{}", sg);
+                            registry
+                                .resolve_escalation_targets(
+                                    &primary,
+                                    &[step.add_skill_group.clone()],
+                                    &self.call_id,
+                                    step.fair,
+                                )
+                                .await
+                        }
+                        None => {
+                            let skill_uri = format!("skill-group:{}", step.add_skill_group);
+                            registry.resolve_target(&skill_uri).await
+                        }
+                    };
+                    // The union may include agents already being dialed for the
+                    // primary group — never dial a duplicate leg.
+                    let agent_uris: Vec<String> = agent_uris
+                        .into_iter()
+                        .filter(|uri| {
+                            !self
+                                .pending_agents
+                                .iter()
+                                .any(|(pending, _)| pending == uri)
+                        })
+                        .collect();
 
                     match self.config.escalation_mode {
                         EscalationMode::Cumulative => {
@@ -1126,6 +1218,16 @@ impl CallApp for QueueApp {
         self.rwi_gateway = ctx.rwi_gateway.clone();
 
         ctx.set_queue_name(&queue_id).await;
+
+        // Arm the escalation timer when a timeline is configured. The first
+        // check is scheduled shortly before the earliest untriggered
+        // threshold (clamped to [1s, 10s]); re-arming happens in
+        // `on_timeout("escalation_check")`.
+        if !self.config.escalation_timeline.is_empty() {
+            if let Some(delay) = self.next_escalation_check_delay() {
+                ctrl.set_timeout("escalation_check", delay);
+            }
+        }
 
         // Notify external systems that the call entered the queue.
         self.emit_rwi(&crate::rwi::event::QueueJoined {
@@ -1726,9 +1828,10 @@ impl CallApp for QueueApp {
             "escalation_check" => {
                 debug!("Queue: escalation check");
                 self.check_escalation(ctrl).await?;
-                // Re-register the escalation timer
-                if !self.config.escalation_timeline.is_empty() {
-                    ctrl.set_timeout("escalation_check", Duration::from_secs(10));
+                // Re-register the escalation timer while untriggered steps
+                // remain (None stops the wake-ups once the timeline is done).
+                if let Some(delay) = self.next_escalation_check_delay() {
+                    ctrl.set_timeout("escalation_check", delay);
                 }
                 Ok(AppAction::Continue)
             }

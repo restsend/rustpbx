@@ -316,8 +316,31 @@ impl CallController {
         max_duration: Option<Duration>,
         beep: bool,
     ) -> anyhow::Result<()> {
-        self.start_recording_with_layout(path, max_duration, beep, None, None)
+        self.start_recording_with_layout(path, max_duration, beep, None, None, None)
             .await
+    }
+
+    /// Start a recording at an explicit path tagged with a segment type
+    /// (e.g. `"csat"`). The tag flows into CDR `recording_segments` and
+    /// `recording_metadata_available` so downstream consumers can tell this
+    /// segment apart from full-call recordings. Still notifies the CallApp
+    /// via `RecordingComplete`.
+    pub async fn start_recording_typed(
+        &self,
+        path: impl Into<String>,
+        max_duration: Option<Duration>,
+        beep: bool,
+        segment_type: impl Into<String>,
+    ) -> anyhow::Result<()> {
+        self.start_recording_with_layout(
+            path,
+            max_duration,
+            beep,
+            None,
+            None,
+            Some(segment_type.into()),
+        )
+        .await
     }
 
     /// Start a **mono caller-only** recording.
@@ -331,10 +354,11 @@ impl CallController {
         max_duration: Option<Duration>,
         beep: bool,
     ) -> anyhow::Result<()> {
-        self.start_recording_with_layout(path, max_duration, beep, Some(1), Some(true))
+        self.start_recording_with_layout(path, max_duration, beep, Some(1), Some(true), None)
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn start_recording_with_layout(
         &self,
         path: impl Into<String>,
@@ -342,6 +366,7 @@ impl CallController {
         beep: bool,
         channels: Option<u16>,
         mono_caller_only: Option<bool>,
+        segment_type: Option<String>,
     ) -> anyhow::Result<()> {
         let p = path.into();
         let config = crate::call::domain::RecordConfig {
@@ -351,7 +376,7 @@ impl CallController {
             format: None,
             channels,
             mono_caller_only,
-            segment_type: None,
+            segment_type,
             segment_id: None,
             notify_app: Some(true),
         };

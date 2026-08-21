@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use audio_codec::{CodecType, Resampler, create_decoder};
+use audio_codec::{BoxedResampler, CodecType, create_decoder};
 use std::path::Path;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -452,7 +452,7 @@ impl AudioSource for ChannelAudioSource {
 
 pub struct ResamplingAudioSource {
     source: Box<dyn AudioSource>,
-    resampler: Option<Resampler>,
+    resampler: Option<BoxedResampler>,
     source_sample_rate: u32,
     target_sample_rate: u32,
     intermediate_buffer: Vec<i16>,
@@ -462,10 +462,10 @@ impl ResamplingAudioSource {
     pub fn new(source: Box<dyn AudioSource>, target_sample_rate: u32) -> Self {
         let source_rate = source.sample_rate();
         let resampler = if source_rate != target_sample_rate {
-            Some(Resampler::new(
-                source_rate as usize,
-                target_sample_rate as usize,
-            ))
+            Some(
+                BoxedResampler::new(source_rate as usize, target_sample_rate as usize)
+                    .expect("valid sample rates"),
+            )
         } else {
             None
         };

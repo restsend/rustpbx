@@ -200,3 +200,49 @@ queue:support?target=skillgroup:sales&target=skillgroup:support  # Multiple targ
 ```
 queue:support?target=skillgroup:sales&return_ivr=main_menu
 ```
+
+### Queue Overflow Escalation (skill-group queues)
+
+When a queue's dial target is a skill group (`skill-group:{id}`, via
+`strategy.targets` or `?target=skillgroup:...`), the CC addon derives an
+escalation plan for it: the call is scheduled on the **primary group only**
+at first; after the configured queued-wait threshold the candidate set is
+**widened** to the overflow groups and ordered fairly (round-robin, the
+counter advances once per call) across the union — the new agents ring
+alongside the primary ones (cumulative mode).
+
+Two configuration sources, in order of precedence:
+
+**1. Skill group `overflow_groups` + `max_wait_secs`** (simplest — no ACD
+policy needed). Each overflow group becomes one escalation step at the
+group's `max_wait_secs` threshold, cumulative + fair:
+
+```toml
+# skill_groups TOML (or the /api/cc/skill-groups API — same fields)
+[[skill_groups]]
+skill_group_id = "support"
+skills_required = ["support"]
+overflow_groups = ["support_l2", "support_l3"]  # widen targets
+max_wait_secs = 30                              # widen threshold (per queue wait)
+```
+
+**2. ACD policy `overflow.escalation_timeline`** (explicit, takes
+precedence when the group's `acd_policy` references a policy that defines
+one):
+
+```toml
+[policies.p1.overflow]
+mode = "cumulative"          # cumulative = ring alongside; replace = redial
+
+[[policies.p1.overflow.escalation_timeline]]
+threshold_secs = 20
+skill_group_id = "support_l2"
+fair = true                  # widen with round-robin ordering (default false)
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `threshold_secs` | int | required | Queued-wait seconds before this step triggers |
+| `skill_group_id` | string | required | Group to widen to |
+| `fair` | bool | `false` | Round-robin ordering across the widened union |
+| `mode` | string | `"replace"` | `cumulative` (ring alongside) or `replace` (redial) |

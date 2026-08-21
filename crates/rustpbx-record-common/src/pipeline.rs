@@ -6,12 +6,12 @@
 
 use std::collections::HashMap;
 
-use audio_codec::{CodecType, Decoder, Resampler, create_decoder};
+use audio_codec::{BoxedResampler, CodecType, Decoder, create_decoder};
 
 /// Decode cache keyed by (leg, payload type).
 pub struct LegCodecPipeline {
     decoders: HashMap<(i32, u8), Box<dyn Decoder>>,
-    resamplers: HashMap<(i32, u8), Resampler>,
+    resamplers: HashMap<(i32, u8), BoxedResampler>,
 }
 
 impl LegCodecPipeline {
@@ -39,10 +39,10 @@ impl LegCodecPipeline {
 
         let decoded_rate = decoder.sample_rate().max(src_clock);
         if decoded_rate != target_rate {
-            let resampler = self
-                .resamplers
-                .entry((leg, pt))
-                .or_insert_with(|| Resampler::new(decoded_rate as usize, target_rate as usize));
+            let resampler = self.resamplers.entry((leg, pt)).or_insert_with(|| {
+                BoxedResampler::new(decoded_rate as usize, target_rate as usize)
+                    .expect("valid sample rates")
+            });
             resampler.resample(&samples)
         } else {
             samples

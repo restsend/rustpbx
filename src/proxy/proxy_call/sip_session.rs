@@ -788,6 +788,15 @@ impl BuiltinAppFactory {
                     .with_call_id(context.call_info.session_id.clone());
                 if let Some(ref registry) = self.agent_registry {
                     app = app.with_agent_registry(registry.clone());
+                    // Skill-group queue: pull the escalation plan (widening
+                    // groups + thresholds + fair ordering) from the addon so
+                    // the queue app can escalate after the configured wait.
+                    if let Some(sg) = pending.skill_group_id.clone() {
+                        let escalation = registry
+                            .escalation_plan_for(&format!("skill-group:{}", sg))
+                            .await;
+                        app = app.with_escalation_plan(escalation, sg);
+                    }
                 }
                 Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
             }
@@ -2822,7 +2831,15 @@ impl SipSession {
             caller: self.context.original_caller.clone(),
             callee: self.context.original_callee.clone(),
             connected_callee: self.meta.connected_callee.clone(),
-            queue_name: self.meta.queue_name.clone(),
+            // Prefer the SIP-layer queue name; fall back to the app-layer one
+            // (set by QueueApp via ApplicationContext::set_queue_name).  Without
+            // this fallback, post-call hooks (e.g. CSAT survey) never see the
+            // queue because meta.queue_name is only assigned in tests.
+            queue_name: self
+                .meta
+                .queue_name
+                .clone()
+                .or_else(|| self.app_runtime.get_queue_name()),
             direction: self.context.dialplan.direction.to_string(),
             started_at: Some(self.context.created_at.clone()),
             extensions: self.extensions.clone(),
@@ -3111,9 +3128,7 @@ impl SipSession {
             .await?
             .ok_or_else(|| anyhow!("opposite-leg video re-INVITE timed out"))?;
 
-        if response.status_code.kind()
-            != rsipstack::sip::status_code::StatusCodeKind::Successful
-        {
+        if response.status_code.kind() != rsipstack::sip::status_code::StatusCodeKind::Successful {
             warn!(
                 session_id = %self.id,
                 side = ?target_side,
@@ -3474,20 +3489,16 @@ impl SipSession {
                         )
                     })
             } else {
-                self.build_local_dialog_answer(
-                    side,
-                    request.method.clone(),
-                    &offer_sdp,
-                )
-                .await
-                .map(|answer_sdp| (status.clone(), Some(answer_sdp)))
-                .map_err(|e| {
-                    (
-                        rsipstack::sip::StatusCode::NotAcceptableHere,
-                        "Failed to build local answer for re-INVITE",
-                        e,
-                    )
-                })
+                self.build_local_dialog_answer(side, request.method.clone(), &offer_sdp)
+                    .await
+                    .map(|answer_sdp| (status.clone(), Some(answer_sdp)))
+                    .map_err(|e| {
+                        (
+                            rsipstack::sip::StatusCode::NotAcceptableHere,
+                            "Failed to build local answer for re-INVITE",
+                            e,
+                        )
+                    })
             };
 
             match answer_result {
@@ -4429,7 +4440,16 @@ impl SipSession {
             None => Vec::new(),
         };
 
-        // Resolve custom targets (skill-groups → specific agents)
+        // Resolve custom targets (skill-groups → specific agents). Capture the
+        // primary skill-group id BEFORE resolution rewrites the dial strategy —
+        // the queue app factory needs it to resolve the escalation plan.
+        let primary_skill_group = agents.iter().find_map(|l| {
+            let uri_str = l.aor.to_string();
+            uri_str
+                .strip_prefix("skill-group:")
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty())
+        });
         let resolved_agents = self.resolve_custom_targets(agents).await;
 
         // Enrich via queue_location_enricher if configured
@@ -4526,6 +4546,7 @@ impl SipSession {
                 plan: plan.clone(),
                 agent_uris,
                 parallel: is_parallel,
+                skill_group_id: primary_skill_group,
             });
         }
 
@@ -5515,15 +5536,16 @@ impl SipSession {
             "SDP answer codec selection before rewrite"
         );
 
-        MediaNegotiator::rewrite_sdp_codec_list(answer_sdp, &selected_audio_codecs)
-            .unwrap_or_else(|| {
+        MediaNegotiator::rewrite_sdp_codec_list(answer_sdp, &selected_audio_codecs).unwrap_or_else(
+            || {
                 warn!(session_id = %self.id,
                     session_id = %self.context.session_id,
                     context,
                     "Failed to rewrite SDP answer to selected audio codec"
                 );
                 answer_sdp.to_string()
-            })
+            },
+        )
     }
 
     async fn resolve_custom_targets(
@@ -7176,9 +7198,7 @@ impl SipSession {
             .await
             .map_err(|e| anyhow!("Failed to apply re-INVITE offer: {}", e))?;
 
-        if has_video
-            && let Some(first_cap) = video_caps.and_then(|caps| caps.first())
-        {
+        if has_video && let Some(first_cap) = video_caps.and_then(|caps| caps.first()) {
             crate::media::leg::ensure_video_sender_for_pc(pc, first_cap)?;
         }
 
@@ -7298,10 +7318,7 @@ impl SipSession {
                 if s.port == 0 {
                     return Some("inactive");
                 }
-                if Self::section_has_zero_hold_connection(
-                    s,
-                    offer.session.connection.as_deref(),
-                ) {
+                if Self::section_has_zero_hold_connection(s, offer.session.connection.as_deref()) {
                     return Some("inactive");
                 }
                 match s.direction {
@@ -7412,9 +7429,7 @@ impl SipSession {
                 if let Some(caps) = offered_video_caps.as_mut() {
                     caps.retain(|offered_cap| {
                         peer_video.iter().any(|peer_cap| {
-                            offered_cap
-                                .codec_name
-                                .eq_ignore_ascii_case(&peer_cap.name)
+                            offered_cap.codec_name.eq_ignore_ascii_case(&peer_cap.name)
                                 && offered_cap.clock_rate == peer_cap.clock_rate
                         })
                     });
@@ -7432,12 +7447,8 @@ impl SipSession {
             .bridge
             .as_ref()
             .and_then(|bridge| match side {
-                DialogSide::Caller => {
-                    bridge.leg(crate::media::media_bridge::LegSide::A)
-                }
-                DialogSide::Callee => {
-                    bridge.leg(crate::media::media_bridge::LegSide::B)
-                }
+                DialogSide::Caller => bridge.leg(crate::media::media_bridge::LegSide::A),
+                DialogSide::Callee => bridge.leg(crate::media::media_bridge::LegSide::B),
             })
             .and_then(|leg| leg.negotiated())
             .and_then(|profile| profile.audio.map(|codec| codec.codec));
@@ -7445,13 +7456,9 @@ impl SipSession {
         // Track whether this leg accepted active video. A later re-INVITE may
         // transition the leg from audio-only to video and create the video
         // transceiver while building the local answer below.
-        self.legs
-            .set_video_state(&leg_key, accepted_video_active);
+        self.legs.set_video_state(&leg_key, accepted_video_active);
         if accepted_video_active && !had_video {
-            if let Some(video_codec) = offered_video_caps
-                .as_ref()
-                .and_then(|caps| caps.first())
-            {
+            if let Some(video_codec) = offered_video_caps.as_ref().and_then(|caps| caps.first()) {
                 info!(session_id = %self.id,
                     "Dynamically adding video m-line (codec={}, PT={}, clock={}) for leg {:?}",
                     video_codec.codec_name, video_codec.payload_type, video_codec.clock_rate, side
@@ -7463,12 +7470,8 @@ impl SipSession {
             .get_local_reinvite_pc(side)
             .await
             .ok_or_else(|| anyhow!("No local PeerConnection available for {:?}", side))?;
-        let mut answer_sdp = Self::build_local_answer_from_pc(
-            &pc,
-            offer_sdp,
-            offered_video_caps.as_deref(),
-        )
-        .await?;
+        let mut answer_sdp =
+            Self::build_local_answer_from_pc(&pc, offer_sdp, offered_video_caps.as_deref()).await?;
         if has_audio {
             let (preferred_peer_sdp, context) = match side {
                 DialogSide::Caller => (
@@ -13386,8 +13389,7 @@ mod tests {
             allowed_codecs
         };
 
-        caps
-            .iter()
+        caps.iter()
             .filter(|cap| {
                 effective_allow
                     .iter()
@@ -13547,10 +13549,7 @@ a=fmtp:102 profile-level-id=42801F;packetization-mode=1\r\n";
             make_video_cap(98, "VP9", None, &["goog-remb"]),
         ];
 
-        let result = filter_video_caps_for_rtp(
-            &caps,
-            &["H264".to_string(), "VP8".to_string()],
-        );
+        let result = filter_video_caps_for_rtp(&caps, &["H264".to_string(), "VP8".to_string()]);
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].codec_name, "VP8");
@@ -13571,10 +13570,7 @@ a=fmtp:102 profile-level-id=42801F;packetization-mode=1\r\n";
         ];
 
         // Allowlist uses uppercase "H264"
-        let result = filter_video_caps_for_rtp(
-            &caps,
-            &["H264".to_string(), "VP8".to_string()],
-        );
+        let result = filter_video_caps_for_rtp(&caps, &["H264".to_string(), "VP8".to_string()]);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].codec_name, "h264");
     }
@@ -13599,10 +13595,7 @@ a=fmtp:102 profile-level-id=42801F;packetization-mode=1\r\n";
             make_video_cap(98, "H264", Some("profile-level-id=640032"), &["nack"]),
         ];
 
-        let result = filter_video_caps_for_rtp(
-            &caps,
-            &["H264".to_string(), "VP8".to_string()],
-        );
+        let result = filter_video_caps_for_rtp(&caps, &["H264".to_string(), "VP8".to_string()]);
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].payload_type, 96);
         assert_eq!(result[0].fmtp.as_deref(), Some("profile-level-id=42e01f"));
@@ -13657,17 +13650,16 @@ a=rtcp:42001\r\n";
             &crate::media::negotiate::MediaNegotiator::extract_video_codecs(reinvite),
             &crate::config::default_video_codecs(),
         );
-        let answer = SipSession::build_local_answer_from_pc(
-            leg.pc(),
-            reinvite,
-            Some(&video_caps),
-        )
-        .await
-        .expect("video re-INVITE answer");
+        let answer = SipSession::build_local_answer_from_pc(leg.pc(), reinvite, Some(&video_caps))
+            .await
+            .expect("video re-INVITE answer");
 
         assert!(answer.contains("m=video "));
         assert!(answer.contains("a=rtpmap:102 H264/90000"));
-        assert!(!answer.contains("VP8/90000"), "answer invented VP8:\n{answer}");
+        assert!(
+            !answer.contains("VP8/90000"),
+            "answer invented VP8:\n{answer}"
+        );
         assert!(
             answer.contains("a=sendrecv"),
             "video answer must remain bidirectional:\n{answer}"

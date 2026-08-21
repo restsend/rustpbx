@@ -58,7 +58,7 @@ pub(crate) struct Recorder {
 
     // Dynamic decoders and resamplers per leg and payload type
     decoders: HashMap<(Leg, u8), Box<dyn Decoder>>,
-    resamplers: HashMap<(Leg, u8), audio_codec::Resampler>,
+    resamplers: HashMap<(Leg, u8), audio_codec::BoxedResampler>,
 
     // Buffers store encoded data indexed by absolute recording position (in samples)
     buffer_a: BTreeMap<u32, Bytes>,
@@ -296,10 +296,11 @@ impl Recorder {
                 .resamplers
                 .entry((leg, decoder_type.payload_type()))
                 .or_insert_with(|| {
-                    audio_codec::Resampler::new(
+                    audio_codec::BoxedResampler::new(
                         decoder.sample_rate() as usize,
                         self.sample_rate as usize,
                     )
+                    .expect("valid sample rates")
                 });
             let pcm = resampler.resample(&pcm);
             encoded = if let Some(enc) = self.encoder.as_mut() {

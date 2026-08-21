@@ -312,6 +312,42 @@ pub trait AgentRegistry: Send + Sync {
         self.resolve_target(target_uri).await
     }
 
+    /// Resolve the escalation plan for a queue target URI (e.g.
+    /// `"skill-group:support"`): which skill groups to widen to, after how
+    /// many queued seconds, and whether the widened set is scheduled fairly.
+    ///
+    /// Returns an empty plan by default (no escalation); the CC addon
+    /// derives it from the skill group's `overflow_groups` and its ACD
+    /// policy's `overflow.escalation_timeline`.
+    async fn escalation_plan_for(
+        &self,
+        _target_uri: &str,
+    ) -> crate::call::app::queue::EscalationPlan {
+        crate::call::app::queue::EscalationPlan::default()
+    }
+
+    /// Resolve the escalation dial targets: the union of the primary skill
+    /// group (`primary_target_uri`, e.g. `"skill-group:support"`) and the
+    /// escalation groups (`add_group_ids`), deduplicated.
+    ///
+    /// When `fair` is set, addon implementations order the union with a
+    /// round-robin discipline (the counter advances once per call) so
+    /// successive calls rotate across all groups. The default implementation
+    /// resolves each group independently and concatenates primary-first.
+    async fn resolve_escalation_targets(
+        &self,
+        primary_target_uri: &str,
+        add_group_ids: &[String],
+        _call_id: &str,
+        _fair: bool,
+    ) -> Vec<String> {
+        let mut uris = self.resolve_target(primary_target_uri).await;
+        for group in add_group_ids {
+            uris.extend(self.resolve_target(&format!("skill-group:{group}")).await);
+        }
+        uris
+    }
+
     /// Get agents available for ACD routing with full snapshots.
     /// Returns all agents that can receive calls with their current state.
     async fn get_acd_snapshots(&self) -> Vec<AgentRecord> {

@@ -1450,9 +1450,7 @@ fn video_relay_rules(
         // PTs are preserved across legs by the codec builder); fall back to a
         // name-only match when the fmtp differs between legs.
         peer.iter()
-            .find(|c| {
-                c.name.eq_ignore_ascii_case(&codec.name) && c.fmtp == codec.fmtp
-            })
+            .find(|c| c.name.eq_ignore_ascii_case(&codec.name) && c.fmtp == codec.fmtp)
             .or_else(|| {
                 peer.iter()
                     .find(|c| c.name.eq_ignore_ascii_case(&codec.name))
@@ -1531,16 +1529,8 @@ fn wire_rtcp_relay(
     cancel: CancellationToken,
     forwarder_count: Arc<AtomicUsize>,
 ) {
-    let a_video_pts: Vec<u8> = pa
-        .video
-        .iter()
-        .map(|video| video.payload_type)
-        .collect();
-    let b_video_pts: Vec<u8> = pb
-        .video
-        .iter()
-        .map(|video| video.payload_type)
-        .collect();
+    let a_video_pts: Vec<u8> = pa.video.iter().map(|video| video.payload_type).collect();
+    let b_video_pts: Vec<u8> = pb.video.iter().map(|video| video.payload_type).collect();
     let a_audio_pt = pa.audio.as_ref().map(|c| c.payload_type);
     let b_audio_pt = pb.audio.as_ref().map(|c| c.payload_type);
 

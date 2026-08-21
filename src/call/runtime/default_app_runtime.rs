@@ -106,8 +106,10 @@ impl AppRuntime for DefaultAppRuntime {
         // Check if already running
         {
             let running = self.running.read().await;
-            if running.is_some() {
-                return Err(AppRuntimeError::AlreadyRunning(app_name.to_string()));
+            if let Some(current) = running.as_ref() {
+                // Report the app that actually occupies the slot — callers
+                // (e.g. the CSAT hook) branch on this name.
+                return Err(AppRuntimeError::AlreadyRunning(current.name.clone()));
             }
         }
 

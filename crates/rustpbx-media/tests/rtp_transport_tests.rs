@@ -845,10 +845,10 @@ async fn create_video_harness(
         sdp_compatibility_b.clone(),
     );
 
-    let test_a = TestPeer::new(transport_a.clone(), codec.clone())
-        .with_video(&caps_a, sdp_compatibility_a);
-    let test_b = TestPeer::new(transport_b.clone(), codec.clone())
-        .with_video(&caps_b, sdp_compatibility_b);
+    let test_a =
+        TestPeer::new(transport_a.clone(), codec.clone()).with_video(&caps_a, sdp_compatibility_a);
+    let test_b =
+        TestPeer::new(transport_b.clone(), codec.clone()).with_video(&caps_b, sdp_compatibility_b);
     negotiate(&test_a, &leg_a).await;
     negotiate(&test_b, &leg_b).await;
 
