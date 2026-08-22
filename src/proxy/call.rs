@@ -1838,14 +1838,103 @@ impl CallModule {
         self.build_and_serve_dialplan(tx, cookie, dialplan).await
     }
 
+    /// When an in-dialog BYE/INFO arrives on a node that does not own the
+    /// dialog (typical after mid-call WS reconnect to another home_proxy),
+    /// forward a textual copy to the owner via AMI. Returns `Some(Ok(()))`
+    /// when forward succeeded (and a local 200 was already sent to the UA).
+    #[cfg(feature = "commerce")]
+    async fn try_forward_indialog_to_owner(
+        &self,
+        tx: &mut Transaction,
+        dialog_id: &DialogId,
+    ) -> Option<Result<()>> {
+        let peers = self.inner.server.cluster_peers.clone();
+        if peers.is_empty() {
+            return None;
+        }
+        let call_id = dialog_id.call_id.clone();
+        let owner = self
+            .inner
+            .server
+            .session_registry
+            .lookup_owner(&call_id)
+            .await?;
+        let self_id = self
+            .inner
+            .server
+            .cluster_self_addr
+            .as_ref()
+            .map(|a| a.to_string())
+            .unwrap_or_default();
+        if owner == self_id || owner == "local" {
+            return None;
+        }
+
+        let ami_path = self
+            .inner
+            .server
+            .proxy_config
+            .load()
+            .ami_path
+            .clone()
+            .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string());
+        static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+        let client = CLIENT.get_or_init(|| {
+            crate::http_util::build_keepalive_client(None, None)
+                .unwrap_or_else(|_| reqwest::Client::new())
+        });
+
+        // Reconstruct a minimal first-line + Call-ID for the owner handler.
+        let sip_text = format!(
+            "{} {}\r\nCall-ID: {}\r\n\r\n",
+            tx.original.method,
+            tx.original.uri,
+            call_id
+        );
+        let resp = crate::proxy::cluster_forward::dispatch_indialog_sip(
+            &self.inner.server.session_registry,
+            &peers,
+            &ami_path,
+            client,
+            &call_id,
+            &sip_text,
+        )
+        .await?;
+
+        if resp.0.is_success() {
+            let _ = tx.reply(rsipstack::sip::StatusCode::OK).await;
+            info!(%dialog_id, owner = %owner, "Forwarded in-dialog request to call owner");
+            Some(Ok(()))
+        } else {
+            None
+        }
+    }
+
     async fn process_message(&self, tx: &mut Transaction) -> Result<()> {
         let dialog_id =
             DialogId::try_from((&tx.original, TransactionRole::Server)).map_err(|e| anyhow!(e))?;
         let mut dialog = match self.inner.dialog_layer.get_dialog(&dialog_id) {
             Some(dialog) => dialog,
             None => {
+                // Cluster: if this node has no dialog, try forwarding in-dialog
+                // BYE/INFO to the session owner (agent may have re-registered
+                // here after a mid-call WS reconnect).
+                #[cfg(feature = "commerce")]
+                {
+                    if matches!(
+                        tx.original.method,
+                        rsipstack::sip::Method::Bye | rsipstack::sip::Method::Info
+                    ) {
+                        if let Some(forwarded) =
+                            self.try_forward_indialog_to_owner(tx, &dialog_id).await
+                        {
+                            return forwarded;
+                        }
+                    }
+                }
                 // Peers retransmit BYE if we already tore the dialog down. Answer
                 // with 200 so endpoints clear; other methods stay silent at debug.
+                // Only do this after cluster lookup failed (or single-node).
                 if matches!(tx.original.method, rsipstack::sip::Method::Bye) {
                     info!(%dialog_id, "BYE with no matching dialog; replying 200 so peer clears");
                     let _ = tx.reply(rsipstack::sip::StatusCode::OK).await;

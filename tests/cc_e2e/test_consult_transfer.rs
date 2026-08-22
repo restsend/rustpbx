@@ -213,6 +213,38 @@ async fn test_consult_transfer_bc_to_abc_to_ac() {
         );
 
         info!("=== Phase 3 complete: ABC conference established ===");
+
+        // ========== Phase 3b: owner-anchored same-session merge ==========
+        // When consult is LegAdd on the A-B session, session_b == session_a
+        // and merge must JoinMixerLeg(caller+callee+consult).
+        let live_registry = server.registry.clone();
+        let mut tm_owner = rustpbx::addons::cc::transfer::ConsultTransferManager::new(
+            Arc::new(rustpbx::call::runtime::ConferenceManager::new()),
+        )
+        .with_call_registry(live_registry);
+        let owner_tx = "e2e-tx-owner-001".to_string();
+        // Prefer a live proxy session id when available.
+        let live_sid = server
+            .get_active_calls()
+            .into_iter()
+            .next()
+            .map(|c| c.session_id)
+            .unwrap_or_else(|| alice_dialog_id.to_string());
+        tm_owner.initiate(
+            owner_tx.clone(),
+            live_sid.clone(),
+            "bob".to_string(),
+            charlie_uri.clone(),
+        );
+        tm_owner
+            .consultation_connected(&owner_tx, live_sid.clone())
+            .unwrap();
+        let owner_conf = tm_owner
+            .merge_to_conference(&owner_tx)
+            .await
+            .expect("owner-anchored merge");
+        assert!(owner_conf.starts_with("conf-"));
+        info!("=== Phase 3b complete: owner-anchored merge {owner_conf} ===");
     }
     #[cfg(not(feature = "addon-cc"))]
     {

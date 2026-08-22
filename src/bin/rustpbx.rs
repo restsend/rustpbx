@@ -695,42 +695,13 @@ fn main() -> Result<()> {
 
 async fn dump_ddl(database_url: &str) -> anyhow::Result<()> {
     use sea_orm::{ConnectionTrait, Statement};
-    #[cfg(any(
-        feature = "addon-cc",
-        feature = "addon-wholesale",
-        feature = "addon-endpoint-manager",
-        feature = "addon-enterprise-auth",
-        feature = "addon-ivr-editor",
-        feature = "addon-voicemail",
-    ))]
-    use sea_orm_migration::MigratorTrait;
 
     let db = rustpbx::models::create_db(database_url, None).await?;
 
-    // ── Run addon migrations so all tables are created ──────────────
-    #[cfg(feature = "addon-cc")]
-    if let Err(e) = rustpbx::addons::cc::migration::Migrator::up(&db, None).await {
-        eprintln!("[dump_ddl] CC migration warning: {e}");
-    }
-    #[cfg(feature = "addon-wholesale")]
-    if let Err(e) = rustpbx::addons::wholesale::migration::Migrator::up(&db, None).await {
-        eprintln!("[dump_ddl] wholesale migration warning: {e}");
-    }
-    #[cfg(feature = "addon-endpoint-manager")]
-    if let Err(e) = rustpbx::addons::endpoint_manager::migration::Migrator::up(&db, None).await {
-        eprintln!("[dump_ddl] endpoint_manager migration warning: {e}");
-    }
-    #[cfg(feature = "addon-enterprise-auth")]
-    if let Err(e) = rustpbx::addons::enterprise_auth::migration::Migrator::up(&db, None).await {
-        eprintln!("[dump_ddl] enterprise_auth migration warning: {e}");
-    }
-    #[cfg(feature = "addon-ivr-editor")]
-    if let Err(e) = rustpbx::addons::ivr_editor::migration::Migrator::up(&db, None).await {
-        eprintln!("[dump_ddl] ivr_editor migration warning: {e}");
-    }
-    #[cfg(feature = "addon-voicemail")]
-    if let Err(e) = rustpbx::addons::voicemail::migration::Migrator::up(&db, None).await {
-        eprintln!("[dump_ddl] voicemail migration warning: {e}");
+    // Run every compiled-in addon's migrations via the registry (no per-addon imports).
+    let registry = rustpbx::addons::registry::AddonRegistry::new();
+    if let Err(e) = registry.run_migrations(&db).await {
+        eprintln!("[dump_ddl] addon migration warning: {e}");
     }
 
     let backend = db.get_database_backend();

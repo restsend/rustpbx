@@ -64,6 +64,9 @@ async fn forward_json(
 ///
 /// `payload` is the wire form of the console `CallCommandPayload` consumed by
 /// the remote node's `/cluster/dispatch_command` endpoint.
+///
+/// `session_id` may be a proxy session id or a dialog Call-ID alias registered
+/// via [`SessionInfo::dialog_alias`].
 pub async fn dispatch_call_command(
     registry: &SessionRegistryRef,
     peers: &[ClusterPeer],
@@ -76,8 +79,14 @@ pub async fn dispatch_call_command(
         return None;
     }
 
+    // Prefer canonical session id when `session_id` is a dialog alias.
+    let forward_id = crate::call::runtime::resolve_owner_and_session(registry, session_id)
+        .await
+        .map(|(_, sid)| sid)
+        .unwrap_or_else(|| session_id.to_string());
+
     let body = serde_json::json!({
-        "session_id": session_id,
+        "session_id": forward_id,
         "payload": payload,
     });
 
@@ -112,6 +121,84 @@ pub async fn dispatch_call_command(
         }
     }
     None
+}
+
+/// Forward arbitrary JSON to the owning node's AMI relative path.
+///
+/// Core has no knowledge of addon endpoints: callers (e.g. the CC addon)
+/// supply `ami_relative_path` such as `"cluster/cc_owner_op"` and the full
+/// request body. Owner is resolved via session registry (dialog alias OK);
+/// if the targeted peer returns 404, fans out to remaining peers.
+pub async fn dispatch_to_owner(
+    registry: &SessionRegistryRef,
+    peers: &[ClusterPeer],
+    ami_path: &str,
+    client: &reqwest::Client,
+    session_or_dialog_id: &str,
+    ami_relative_path: &str,
+    body: &serde_json::Value,
+) -> Option<(reqwest::StatusCode, serde_json::Value)> {
+    if peers.is_empty() {
+        return None;
+    }
+
+    let owner = crate::call::runtime::resolve_owner_and_session(registry, session_or_dialog_id)
+        .await
+        .map(|(o, _)| o)
+        .or(registry.lookup_owner(session_or_dialog_id).await)?;
+
+    let rel = ami_relative_path.trim_start_matches('/');
+
+    if let Some(peer) = peer_for_node_id(peers, &owner) {
+        let url = format!("{}/{}", peer_ami_base(peer, ami_path), rel);
+        if let Some(resp) = forward_json(client, &url, reqwest::Method::POST, Some(body)).await {
+            if resp.0 != reqwest::StatusCode::NOT_FOUND {
+                return Some(resp);
+            }
+        }
+    }
+
+    // Fan-out fallback
+    let mut handles = Vec::new();
+    for peer in peers {
+        let url = format!("{}/{}", peer_ami_base(peer, ami_path), rel);
+        let client = client.clone();
+        let body = body.clone();
+        handles.push(tokio::spawn(async move {
+            forward_json(&client, &url, reqwest::Method::POST, Some(&body)).await
+        }));
+    }
+    for handle in handles {
+        if let Ok(Some(resp)) = handle.await {
+            if resp.0 != reqwest::StatusCode::NOT_FOUND {
+                return Some(resp);
+            }
+        }
+    }
+    None
+}
+
+/// Forward raw in-dialog SIP (BYE/INFO/…) to the dialog owner when this node
+/// has no matching dialog. Body is the serialized SIP request bytes / text.
+pub async fn dispatch_indialog_sip(
+    registry: &SessionRegistryRef,
+    peers: &[ClusterPeer],
+    ami_path: &str,
+    client: &reqwest::Client,
+    dialog_call_id: &str,
+    sip_message: &str,
+) -> Option<(reqwest::StatusCode, serde_json::Value)> {
+    if peers.is_empty() {
+        return None;
+    }
+    let owner = registry.lookup_owner(dialog_call_id).await?;
+    let peer = peer_for_node_id(peers, &owner)?;
+    let url = format!("{}/cluster/forward_sip", peer_ami_base(peer, ami_path));
+    let body = serde_json::json!({
+        "dialog_call_id": dialog_call_id,
+        "message": sip_message,
+    });
+    forward_json(client, &url, reqwest::Method::POST, Some(&body)).await
 }
 
 /// Fetch a session snapshot cluster-wide (console "show call"). Same

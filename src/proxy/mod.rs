@@ -28,6 +28,7 @@ pub mod nat;
 pub mod number_pool;
 pub mod presence;
 pub mod proxy_call;
+pub mod queue_files;
 pub mod registrar;
 pub mod routing;
 pub mod server;

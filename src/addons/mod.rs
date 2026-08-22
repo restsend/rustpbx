@@ -94,8 +94,85 @@ pub trait Addon: Send + Sync {
     /// Initialize the addon (migrations, background tasks, etc.)
     async fn initialize(&self, state: AppState) -> anyhow::Result<()>;
 
+    /// Copy addon-specific typed values from the transaction cookie onto the
+    /// dialplan (e.g. wholesale billing context on early Abort). Core never
+    /// names addon types — each addon promotes what it owns.
+    fn promote_cookie_extensions(
+        &self,
+        _cookie: &crate::call::TransactionCookie,
+        _dialplan: &mut crate::call::Dialplan,
+    ) {
+    }
+
+    /// When `true`, [`Self::console_api_routes`] are mounted even if the addon
+    /// is not listed in `[proxy].addons`. Used by built-in addons (queue) whose
+    /// APIs historically shipped unconditionally.
+    #[cfg(feature = "console")]
+    fn console_api_always_mounted(&self) -> bool {
+        false
+    }
+
+    /// Return addon-specific error catalog entries (merged into the process-wide
+    /// [`crate::call_errors`] registry at startup). Keeps core free of
+    /// `cfg(feature = "addon-…")` catalog imports.
+    fn error_catalog(&self) -> &'static [crate::call_errors::CallErrInfo] {
+        &[]
+    }
+
+    /// Extra key/value params for the update-check phone-home (e.g. wholesale CDR count).
+    async fn update_check_params(&self, _state: &AppState) -> Vec<(String, String)> {
+        vec![]
+    }
+
+    /// Tenants available for SIP-trunk binding (wholesale). Empty = no provider.
+    async fn list_trunk_tenants(
+        &self,
+        _db: &sea_orm::DatabaseConnection,
+    ) -> Vec<serde_json::Value> {
+        vec![]
+    }
+
+    /// Current tenant id linked to a SIP trunk, if any.
+    async fn get_trunk_tenant_id(
+        &self,
+        _db: &sea_orm::DatabaseConnection,
+        _trunk_id: i64,
+    ) -> Option<i64> {
+        None
+    }
+
+    /// Create / replace / clear the SIP-trunk ↔ tenant link.
+    async fn set_trunk_tenant(
+        &self,
+        _db: &sea_orm::DatabaseConnection,
+        _trunk_id: i64,
+        _tenant_id: Option<i64>,
+        _clear: bool,
+    ) -> Result<(), sea_orm::DbErr> {
+        Ok(())
+    }
+
+    /// Prometheus /metrics UI hints for the console metrics page.
+    fn metrics_endpoint_info(
+        &self,
+        _config_path: &Option<String>,
+    ) -> Option<crate::metrics::MetricsEndpointInfo> {
+        None
+    }
+
     /// Return API and UI routes to be merged into the main application Router
     fn router(&self, state: AppState) -> Option<Router>;
+
+    /// Return routes merged into the AMI router (before AMI auth middleware).
+    ///
+    /// Use this for cluster peer-to-peer endpoints that must live under the
+    /// configured AMI path and share AMI authentication — without teaching
+    /// core about addon-specific paths.
+    ///
+    /// Paths should be relative to the AMI nest root (e.g. `/cluster/cc_owner_op`).
+    fn ami_routes(&self, _state: AppState) -> Option<Router<AppState>> {
+        None
+    }
 
     /// Return Sidebar menu items
     fn sidebar_items(&self, _state: AppState) -> Vec<SidebarItem> {

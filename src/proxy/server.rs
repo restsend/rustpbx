@@ -113,6 +113,8 @@ pub struct SipServerInner {
     pub cluster_event_hub: Option<Arc<ClusterEventHub>>,
     /// SIP peer IPs for cluster auth bypass.
     pub cluster_peer_ips: Vec<IpAddr>,
+    /// Full `[cluster].peers` entries (addr/sip_port/ami_port) for AMI forwards.
+    pub cluster_peers: Vec<crate::config::ClusterPeer>,
     /// Cluster self address resolved from `[cluster].peers` at startup by matching
     /// the local endpoint listener against peer `addr:sip_port` entries. Used as
     /// the `home_proxy` stamped on registrations so cluster peers route INVITEs to
@@ -1058,6 +1060,11 @@ impl SipServerBuilder {
             transfer_notify_subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             cluster_event_hub,
             cluster_peer_ips,
+            cluster_peers: self
+                .cluster_config
+                .as_ref()
+                .map(|c| c.peers.clone())
+                .unwrap_or_default(),
             cluster_self_addr,
             session_registry,
             session_registry_heartbeat,

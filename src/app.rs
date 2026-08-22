@@ -542,7 +542,12 @@ impl AppStateBuilder {
             config_path,
             reload_requested: AtomicBool::new(false),
             addon_registry: addon_registry.clone(),
-            call_errors: crate::call_errors::build_registry(),
+            call_errors: {
+                let mut reg = crate::call_errors::build_core_registry();
+                addon_registry.merge_error_catalogs_into(&mut reg);
+                crate::call_errors::install_registry(reg.clone());
+                std::sync::Arc::new(reg)
+            },
             #[cfg(feature = "console")]
             console: console_state,
             tls_reloader: Arc::new(RwLock::new(Some(Arc::new(TlsReloaderRegistry::new())))),

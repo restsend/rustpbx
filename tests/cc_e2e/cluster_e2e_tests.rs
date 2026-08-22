@@ -497,3 +497,58 @@ fn acd_snapshot_from_presence(
         csat_avg: None,
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Call-owner session registry: dialog alias + transfer leg contract
+// ═══════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn cluster_session_registry_dialog_alias_routes_to_owner() {
+    use rustpbx::call::runtime::{
+        DbSessionRegistry, SessionInfo, SessionRegistry, resolve_owner_and_session,
+    };
+    use std::time::Duration;
+
+    let db = shared_db().await;
+    let reg: rustpbx::call::runtime::SessionRegistryRef =
+        DbSessionRegistry::new(db, Duration::from_secs(3600)).into_ref();
+    reg.register(&SessionInfo::new("sess-owner-1", "10.0.0.2:5060"))
+        .await
+        .unwrap();
+    reg.register(&SessionInfo::dialog_alias(
+        "bleg-call-id-xyz",
+        "sess-owner-1",
+        "10.0.0.2:5060",
+    ))
+    .await
+    .unwrap();
+
+    let (owner, sid) = resolve_owner_and_session(&reg, "bleg-call-id-xyz")
+        .await
+        .expect("dialog alias must resolve to owner");
+    assert_eq!(owner, "10.0.0.2:5060");
+    assert_eq!(sid, "sess-owner-1");
+}
+
+#[test]
+fn cluster_console_transfer_uses_callee_leg() {
+    use rustpbx::call::adapters::console_to_call_command;
+    use rustpbx::call::domain::CallCommand;
+    use rustpbx::console::handlers::call_control::CallCommandPayload;
+
+    let cmd = console_to_call_command(
+        CallCommandPayload::Transfer {
+            target: "sip:1002@example.com".into(),
+            attended: Some(false),
+        },
+        "sess",
+    )
+    .unwrap();
+    match cmd {
+        CallCommand::Transfer { leg_id, attended, .. } => {
+            assert_eq!(leg_id.as_str(), "callee");
+            assert!(!attended);
+        }
+        other => panic!("expected Transfer, got {other:?}"),
+    }
+}

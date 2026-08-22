@@ -62,6 +62,46 @@ impl SessionInfo {
             started_at: chrono::Utc::now(),
         }
     }
+
+    /// Direction prefix for dialog Call-ID → proxy session id alias rows.
+    pub const ALIAS_PREFIX: &'static str = "alias:";
+
+    /// Build a registry row that maps a SIP dialog Call-ID onto a session.
+    pub fn dialog_alias(
+        dialog_call_id: impl Into<String>,
+        session_id: impl Into<String>,
+        node_id: impl Into<String>,
+    ) -> Self {
+        let session_id = session_id.into();
+        Self {
+            call_id: dialog_call_id.into(),
+            node_id: node_id.into(),
+            caller: String::new(),
+            callee: String::new(),
+            direction: format!("{}{}", Self::ALIAS_PREFIX, session_id),
+            started_at: chrono::Utc::now(),
+        }
+    }
+
+    /// Resolve the canonical proxy session id (unwrap alias rows).
+    pub fn canonical_session_id(&self) -> &str {
+        self.direction
+            .strip_prefix(Self::ALIAS_PREFIX)
+            .unwrap_or(self.call_id.as_str())
+    }
+
+    pub fn is_alias(&self) -> bool {
+        self.direction.starts_with(Self::ALIAS_PREFIX)
+    }
+}
+
+/// Look up owner + canonical session id for a CTI call_id or dialog Call-ID.
+pub async fn resolve_owner_and_session(
+    registry: &SessionRegistryRef,
+    call_id: &str,
+) -> Option<(String, String)> {
+    let info = registry.lookup(call_id).await?;
+    Some((info.node_id.clone(), info.canonical_session_id().to_string()))
 }
 
 /// Errors surfaced by registry backends.
@@ -343,6 +383,40 @@ mod tests {
         // release marks released=true, Drop later is a no-op — no panic/dupe.
         guard.release().await.unwrap();
         assert_eq!(reg.active_count().await, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dialog_alias_resolves_to_canonical_session() {
+        let reg = super::super::memory_session_registry::MemorySessionRegistry::new(
+            "10.0.0.1:5060",
+            Duration::from_secs(3600),
+        );
+        reg.register(&SessionInfo::new("sess-abc", "10.0.0.1:5060"))
+            .await
+            .unwrap();
+        reg.register(&SessionInfo::dialog_alias(
+            "dlg-bleg-1",
+            "sess-abc",
+            "10.0.0.1:5060",
+        ))
+        .await
+        .unwrap();
+
+        let (owner, canonical) = resolve_owner_and_session(&(reg.clone() as SessionRegistryRef), "dlg-bleg-1")
+            .await
+            .expect("alias should resolve");
+        assert_eq!(owner, "10.0.0.1:5060");
+        assert_eq!(canonical, "sess-abc");
+    }
+
+    #[test]
+    fn session_info_alias_helpers() {
+        let alias = SessionInfo::dialog_alias("dlg", "sess", "node");
+        assert!(alias.is_alias());
+        assert_eq!(alias.canonical_session_id(), "sess");
+        let plain = SessionInfo::new("sess", "node");
+        assert!(!plain.is_alias());
+        assert_eq!(plain.canonical_session_id(), "sess");
     }
 
     #[tokio::test(flavor = "multi_thread")]

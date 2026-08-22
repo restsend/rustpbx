@@ -191,6 +191,18 @@ impl Addon for ObservabilityAddon {
         "Free"
     }
 
+    fn metrics_endpoint_info(
+        &self,
+        config_path: &Option<String>,
+    ) -> Option<crate::metrics::MetricsEndpointInfo> {
+        let cfg = Self::load_config_sync(config_path).unwrap_or_default();
+        Some(crate::metrics::MetricsEndpointInfo {
+            enabled: cfg.enabled,
+            path: cfg.path,
+            auth_required: cfg.token.is_some(),
+        })
+    }
+
     async fn initialize(&self, state: AppState) -> anyhow::Result<()> {
         // Load config from addon-specific config file
         let config = Self::load_config(&state.config_path).await;

@@ -94,7 +94,7 @@ pub trait CallErrCatalog: Send + Sync {
 /// Built once at startup ([`CallErrRegistry::build`]) and shared (via
 /// [`Arc`]) with HTTP handlers that need to resolve a code for display or
 /// enumerate the full catalog for the operations manual.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct CallErrRegistry {
     /// All entries, sorted by (`app`, `code`) for stable manual rendering.
     entries: Vec<&'static CallErrInfo>,
@@ -152,6 +152,14 @@ impl CallErrRegistry {
 
 /// Build the merged registry from all compiled-in catalogs. Called once at
 /// startup. Each addon catalog is gated by its cargo feature.
+/// Build a core-only registry (no addon catalogs). App startup merges addons
+/// via [`AddonRegistry::merge_error_catalogs_into`] then [`install_registry`].
+pub fn build_core_registry() -> CallErrRegistry {
+    build_registry_inner()
+}
+
+/// Build the merged registry from core catalogs only, wrapped in Arc.
+/// Prefer app-startup merge + [`install_registry`] when addons are available.
 pub fn build_registry() -> Arc<CallErrRegistry> {
     Arc::new(build_registry_inner())
 }
@@ -166,22 +174,21 @@ fn build_registry_inner() -> CallErrRegistry {
     reg.merge_slice(crate::proxy::proxy_call::error_catalog::CATALOG);
     reg.merge_slice(crate::call::app::error_catalog::CATALOG);
 
-    // Addon catalogs — only when the feature is compiled in.
-    #[cfg(feature = "addon-wholesale")]
-    reg.merge_slice(crate::addons::wholesale::error_catalog::CATALOG);
-    #[cfg(feature = "addon-sbc")]
-    reg.merge_slice(crate::addons::sbc::error_catalog::CATALOG);
-
-    // Note: additional addon catalogs (cc, voicemail, ...) can be wired here
-    // as they are migrated to the registry.
-
+    // Addon catalogs are merged by AppState construction via
+    // `AddonRegistry::merge_error_catalogs_into` + [`install_registry`].
     reg
 }
 
-/// Process-wide merged registry, built lazily on first access from the const
-/// catalogs. Used by handlers that don't carry an `AppState` (e.g. console
-/// handlers backed by `ConsoleState`).
+/// Process-wide merged registry. Populated at app startup via
+/// [`install_registry`]; falls back to core-only catalogs if never installed
+/// (unit tests / early handlers).
 static REGISTRY: OnceLock<CallErrRegistry> = OnceLock::new();
+
+/// Install the process-wide registry (core + addon catalogs). Idempotent —
+/// first call wins.
+pub fn install_registry(reg: CallErrRegistry) {
+    let _ = REGISTRY.set(reg);
+}
 
 /// Access the process-wide merged error registry.
 pub fn registry() -> &'static CallErrRegistry {

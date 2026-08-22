@@ -70,14 +70,6 @@ pub async fn check_update(
         .await
         .unwrap_or(0);
 
-    #[cfg(feature = "addon-wholesale")]
-    let wholesale_calls = crate::addons::wholesale::models::wholesale_cdr::Entity::find()
-        .count(state.db())
-        .await
-        .unwrap_or(0);
-    #[cfg(not(feature = "addon-wholesale"))]
-    let wholesale_calls = 0u64;
-
     let opts = crate::http_util::HttpFetchOptions::new()
         .with_timeout(std::time::Duration::from_secs(5))
         .with_header("User-Agent", &get_useragent());
@@ -90,8 +82,18 @@ pub async fn check_update(
         ("build_time".to_string(), build_time.to_string()),
         ("total_calls".to_string(), total_calls.to_string()),
         ("extensions_count".to_string(), extensions_count.to_string()),
-        ("wholesale_calls".to_string(), wholesale_calls.to_string()),
     ];
+    // Addon-contributed stats (e.g. wholesale_calls) — core never names addon tables.
+    params.extend(
+        state
+            .addon_registry
+            .collect_update_check_params(state)
+            .await,
+    );
+    // Keep historical query key even when no addon contributes it.
+    if !params.iter().any(|(k, _)| k == "wholesale_calls") {
+        params.push(("wholesale_calls".to_string(), "0".to_string()));
+    }
 
     #[cfg(feature = "commerce")]
     if let Some(digest) = compute_license_digest(state) {

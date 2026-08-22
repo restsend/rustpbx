@@ -60,8 +60,12 @@ pub fn console_to_call_command(
             })
         }
 
+        // CC blind transfer moves the customer (callee in inbound B2BUA terms
+        // when the agent is the answered B-leg). Keep cluster-forwarded
+        // Transfer aligned with local `/cc/calls/.../transfer` which uses
+        // `leg_id = "callee"`.
         CallCommandPayload::Transfer { target, attended } => Ok(CallCommand::Transfer {
-            leg_id: LegId::new("caller"),
+            leg_id: LegId::new("callee"),
             target,
             attended: attended.unwrap_or(false),
         }),
@@ -155,7 +159,7 @@ mod tests {
             attended,
         } = cmd
         {
-            assert_eq!(leg_id.as_str(), "caller");
+            assert_eq!(leg_id.as_str(), "callee");
             assert_eq!(target, "sip:1001@example.com");
             assert!(!attended);
         } else {

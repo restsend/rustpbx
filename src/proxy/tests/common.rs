@@ -133,6 +133,7 @@ pub async fn create_test_server_with_config_and_sipflow_backend(
         transfer_notify_subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         cluster_event_hub: None,
         cluster_peer_ips: vec![],
+        cluster_peers: vec![],
         cluster_self_addr: None,
         session_registry: Arc::new(crate::call::runtime::NoopSessionRegistry),
         session_registry_heartbeat: None,

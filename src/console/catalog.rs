@@ -1,9 +1,7 @@
-use crate::addons::queue::services::utils::{
-    QueueFileDocument, canonical_queue_key, slugify_queue_name,
-};
 use crate::call::app::ivr_config::IvrFileConfig;
 use crate::config::ProxyConfig;
 use crate::config_store::GeneratedConfigStore;
+use crate::proxy::queue_files::{QueueFileDocument, canonical_queue_key, slugify_queue_name};
 use crate::proxy::routing::RouteQueueConfig;
 use glob::glob;
 use std::collections::HashMap;

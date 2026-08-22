@@ -20,11 +20,11 @@ use std::{
 use tracing::{info, warn};
 
 use crate::{
-    addons::queue::services::utils as queue_utils,
     call::{concurrent_call_limiter::ConcurrentCallLimiter, cps_limiter::CpsLimiter},
     config::{ProxyConfig, RecordingPolicy},
     config_store::GeneratedConfigStore,
     models::{routing, sip_trunk},
+    proxy::queue_files::{self as queue_files},
     proxy::routing::matcher::RouteResourceLookup,
     proxy::routing::{
         CacPolicy, CallIdMode, ConfigOrigin, DestConfig, MatchConditions, MediaMode, RewriteRules,
@@ -205,21 +205,21 @@ impl ProxyDataContext {
             return Box::pin(self.resolve_queue_config(&db_key)).await;
         }
 
-        let Some(key) = queue_utils::canonical_queue_key(reference) else {
+        let Some(key) = queue_files::canonical_queue_key(reference) else {
             return Ok(None);
         };
 
         for entry in self.queues.iter() {
             let name = entry.key();
             let queue = entry.value();
-            if let Some(existing) = queue_utils::canonical_queue_key(name)
+            if let Some(existing) = queue_files::canonical_queue_key(name)
                 && existing == key
             {
                 return Ok(Some(queue.clone()));
             }
             // Also check the queue name inside the config, in case the key is an ID
             if let Some(queue_name) = &queue.name
-                && let Some(existing) = queue_utils::canonical_queue_key(queue_name)
+                && let Some(existing) = queue_files::canonical_queue_key(queue_name)
                 && existing == key
             {
                 return Ok(Some(queue.clone()));
@@ -237,7 +237,7 @@ impl ProxyDataContext {
         if store.is_db() {
             // In DB mode, try to read the queue file from config_entries
             if let Ok(Some(content)) = store.read("queue", trimmed).await {
-                let doc: queue_utils::QueueFileDocument = toml::from_str(&content)
+                let doc: queue_files::QueueFileDocument = toml::from_str(&content)
                     .with_context(|| format!("failed to parse queue file from db: {}", trimmed))?;
                 return Ok(Some(doc.queue));
             }
@@ -287,7 +287,7 @@ impl ProxyDataContext {
     async fn read_queue_document(path: PathBuf) -> Result<Option<RouteQueueConfig>> {
         match tokio::fs::read_to_string(&path).await {
             Ok(contents) => {
-                let doc: queue_utils::QueueFileDocument = toml::from_str(&contents)
+                let doc: queue_files::QueueFileDocument = toml::from_str(&contents)
                     .with_context(|| format!("failed to parse queue file {}", path.display()))?;
                 Ok(Some(doc.queue))
             }
@@ -595,7 +595,7 @@ impl ProxyDataContext {
         // the .extend above. Without this, file-based queue configs (including
         // skill-group→queue mappings) are invisible when a DB is configured.
         if !config.queues_files.is_empty() {
-            match queue_utils::load_queues_from_files(&config.queues_files).await {
+            match queue_files::load_queues_from_files(&config.queues_files).await {
                 Ok((file_queues, file_paths)) => {
                     file_count = file_queues.len();
                     if !file_paths.is_empty() {
@@ -1928,11 +1928,11 @@ mod tests {
     #[test]
     fn slugify_queue_name_strips_whitespace() {
         assert_eq!(
-            queue_utils::slugify_queue_name("  Sales Support  "),
+            queue_files::slugify_queue_name("  Sales Support  "),
             "sales-support"
         );
-        assert_eq!(queue_utils::slugify_queue_name("UPPER_case"), "upper-case");
-        assert_eq!(queue_utils::slugify_queue_name("..special??"), "special");
+        assert_eq!(queue_files::slugify_queue_name("UPPER_case"), "upper-case");
+        assert_eq!(queue_files::slugify_queue_name("..special??"), "special");
     }
 
     #[tokio::test]

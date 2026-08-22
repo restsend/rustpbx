@@ -25,6 +25,10 @@ mod cc_agent_events_e2e_test;
 mod test_consult_transfer;
 
 #[cfg(feature = "addon-cc")]
+#[path = "cc_e2e/test_owner_anchor_flows.rs"]
+mod test_owner_anchor_flows;
+
+#[cfg(feature = "addon-cc")]
 #[path = "cc_e2e/test_hold_unhold_e2e.rs"]
 mod test_hold_unhold_e2e;
 

@@ -143,6 +143,42 @@ impl AddonRegistry {
         router
     }
 
+    /// Collect AMI-relative routes from enabled addons (merged under AMI auth).
+    pub fn get_ami_routes(&self, state: AppState) -> axum::Router<AppState> {
+        let config = state.config();
+        let mut router = axum::Router::new();
+        for addon in &self.addons {
+            if !self.is_enabled(addon.id(), config) {
+                continue;
+            }
+            if let Some(r) = addon.ami_routes(state.clone()) {
+                router = router.merge(r);
+            }
+        }
+        router
+    }
+}
+
+/// Merge every compiled-in addon's error catalog into `reg`.
+///
+/// Prefer [`AddonRegistry::merge_error_catalogs_into`] when a live registry is
+/// available (app startup). This free function remains for tests that cannot
+/// construct a full registry.
+#[cfg(any(feature = "addon-wholesale", feature = "addon-sbc", test))]
+pub fn merge_compiled_addon_error_catalogs(reg: &mut crate::call_errors::CallErrRegistry) {
+    #[cfg(feature = "addon-wholesale")]
+    {
+        use super::Addon;
+        reg.merge_slice(super::wholesale::WholesaleAddon::new().error_catalog());
+    }
+    #[cfg(feature = "addon-sbc")]
+    {
+        use super::Addon;
+        reg.merge_slice(super::sbc::SbcAddon::new().error_catalog());
+    }
+}
+
+impl AddonRegistry {
     pub fn get_injected_scripts(&self, path: &str, config: &crate::config::Config) -> Vec<String> {
         let mut scripts = Vec::new();
         for addon in &self.addons {
@@ -255,7 +291,10 @@ impl AddonRegistry {
         routers
     }
 
-    /// Collect console API routes from all enabled addons.
+    /// Collect console API routes from addons.
+    ///
+    /// Mounted when the addon is enabled in `[proxy].addons`, or when the addon
+    /// opts into [`Addon::console_api_always_mounted`] (e.g. queue).
     #[cfg(feature = "console")]
     pub fn get_console_api_routes(
         &self,
@@ -264,7 +303,7 @@ impl AddonRegistry {
     ) -> Vec<axum::Router<Arc<crate::console::ConsoleState>>> {
         let mut routers = Vec::new();
         for addon in &self.addons {
-            if !self.is_enabled(addon.id(), config) {
+            if !self.is_enabled(addon.id(), config) && !addon.console_api_always_mounted() {
                 continue;
             }
             if let Some(r) = addon.console_api_routes(state) {
@@ -272,6 +311,96 @@ impl AddonRegistry {
             }
         }
         routers
+    }
+
+    /// Ask every compiled-in addon to promote cookie extensions onto `dialplan`.
+    /// Independent of `[proxy].addons` enablement — matches prior
+    /// `cfg(feature = "addon-…")` behavior for CDR early-reject paths.
+    pub fn promote_cookie_extensions(
+        &self,
+        cookie: &crate::call::TransactionCookie,
+        dialplan: &mut crate::call::Dialplan,
+    ) {
+        for addon in &self.addons {
+            addon.promote_cookie_extensions(cookie, dialplan);
+        }
+    }
+
+    /// Merge each addon's error catalog into `reg` (live registry instance).
+    pub fn merge_error_catalogs_into(&self, reg: &mut crate::call_errors::CallErrRegistry) {
+        for addon in &self.addons {
+            let cat = addon.error_catalog();
+            if !cat.is_empty() {
+                reg.merge_slice(cat);
+            }
+        }
+    }
+
+    /// Collect update-check phone-home params from all addons.
+    pub async fn collect_update_check_params(
+        &self,
+        state: &crate::app::AppState,
+    ) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for addon in &self.addons {
+            out.extend(addon.update_check_params(state).await);
+        }
+        out
+    }
+
+    /// First non-empty tenant list from any addon (wholesale).
+    pub async fn list_trunk_tenants(
+        &self,
+        db: &sea_orm::DatabaseConnection,
+    ) -> Vec<serde_json::Value> {
+        for addon in &self.addons {
+            let list = addon.list_trunk_tenants(db).await;
+            if !list.is_empty() {
+                return list;
+            }
+        }
+        Vec::new()
+    }
+
+    pub async fn get_trunk_tenant_id(
+        &self,
+        db: &sea_orm::DatabaseConnection,
+        trunk_id: i64,
+    ) -> Option<i64> {
+        for addon in &self.addons {
+            if let Some(id) = addon.get_trunk_tenant_id(db, trunk_id).await {
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    pub async fn set_trunk_tenant(
+        &self,
+        db: &sea_orm::DatabaseConnection,
+        trunk_id: i64,
+        tenant_id: Option<i64>,
+        clear: bool,
+    ) -> Result<(), sea_orm::DbErr> {
+        for addon in &self.addons {
+            addon
+                .set_trunk_tenant(db, trunk_id, tenant_id, clear)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// First metrics endpoint info from any addon (observability / telemetry).
+    pub fn metrics_endpoint_info(
+        &self,
+        config_path: &Option<String>,
+    ) -> Option<crate::metrics::MetricsEndpointInfo> {
+        for addon in &self.addons {
+            if let Some(info) = addon.metrics_endpoint_info(config_path) {
+                return Some(info);
+            }
+        }
+        None
     }
 
     /// Get the first phone auth token validator from any enabled addon.

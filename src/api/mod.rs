@@ -32,8 +32,7 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(crate::console::handlers::routing::api_urls())
         .merge(crate::console::handlers::extension::api_urls())
         .merge(crate::console::handlers::sip_trunk::api_urls())
-        .merge(crate::console::handlers::dashboard::api_urls())
-        .merge(crate::addons::queue::console::handlers::api_urls().with_state(state.clone()));
+        .merge(crate::console::handlers::dashboard::api_urls());
 
     // Unified home for console-internal JSON endpoints (formerly nested inside
     // the console router). They all flow through the same api_auth_middleware.
@@ -48,8 +47,8 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(crate::console::handlers::metrics::api_urls())
         .merge(crate::console::handlers::addons::api_urls());
 
-    // Addon API routes (collected at runtime via Addon trait hooks).
-    // Each addon applies its own middleware layers (e.g. phone-auth) as needed.
+    // Addon API routes (collected at runtime via Addon trait hooks), including
+    // queue (`console_api_always_mounted`) and feature-gated addons.
     if let Some(app_state) = state.app_state() {
         let config = app_state.config();
         for r in app_state

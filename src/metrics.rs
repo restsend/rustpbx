@@ -1,3 +1,16 @@
+//! Process metrics helpers and console UI types for the scrape endpoint.
+
+/// Console metrics page hints for the Prometheus scrape endpoint.
+///
+/// Populated by observability/telemetry addons via
+/// [`crate::addons::Addon::metrics_endpoint_info`] — core never loads addon config.
+#[derive(Debug, Clone)]
+pub struct MetricsEndpointInfo {
+    pub enabled: bool,
+    pub path: String,
+    pub auth_required: bool,
+}
+
 pub mod sip {
     pub fn registration_received(realm: &str) {
         metrics::counter!(

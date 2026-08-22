@@ -20,6 +20,7 @@ pub mod presence;
 pub mod routing;
 pub mod setting;
 pub mod sip_trunk;
+mod sip_trunk_tenants;
 pub mod sipflow;
 pub mod user;
 pub mod utils;

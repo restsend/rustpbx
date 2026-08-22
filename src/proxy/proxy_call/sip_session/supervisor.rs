@@ -198,8 +198,43 @@ impl SipSession {
         &mut self,
         supervisor_leg: LegId,
         target_leg: LegId,
-        _supervisor_session_id: Option<String>,
+        supervisor_session_id: Option<String>,
     ) -> Result<()> {
+        // Prefer a conference bridge (same as barge) so supervisor↔customer
+        // media works even when the supervisor arrived via a cross-session listen.
+        if let Some(ref sup_session) = supervisor_session_id {
+            let conf_id = format!("supervisor-{}-takeover", self.id.0);
+            self.ensure_conference(&conf_id, Some(3)).await?;
+            let other_leg = if target_leg == LegId::new("caller") {
+                LegId::new("callee")
+            } else {
+                LegId::new("caller")
+            };
+            let customer_leg = self.participant_leg(&other_leg);
+            if let Err(e) = self
+                .start_conference_media_bridge(&conf_id, &customer_leg)
+                .await
+            {
+                warn!(session_id = %self.id, error = %e, "takeover: failed to bridge customer");
+            }
+            // Cross-session: ask supervisor session to join the same mixer.
+            if let Some(sup_handle) = self
+                .server
+                .active_call_registry
+                .get_handle(sup_session)
+                .or_else(|| self.server.active_call_registry.get_handle_by_dialog(sup_session))
+            {
+                let _ = sup_handle.send_command(CallCommand::JoinMixerLeg {
+                    mixer_id: conf_id.clone(),
+                    leg_id: LegId::new("caller"),
+                });
+            }
+            self.conference_bridge.conf_id = Some(conf_id);
+            self.update_leg_state(&target_leg, LegState::Ending);
+            info!(session_id = %self.id, supervisor_session = %sup_session, "Supervisor takeover (cross-session) activated");
+            return Ok(());
+        }
+
         self.require_leg(&supervisor_leg)?;
         self.require_leg(&target_leg)?;
 
@@ -209,6 +244,17 @@ impl SipSession {
             LegId::new("caller")
         };
 
+        let conf_id = format!("supervisor-{}-takeover", self.id.0);
+        self.ensure_conference(&conf_id, Some(3)).await?;
+        for leg_id in [&supervisor_leg, &other_leg] {
+            if let Err(e) = self
+                .start_conference_media_bridge(&conf_id, &self.participant_leg(leg_id))
+                .await
+            {
+                warn!(session_id = %self.id, %leg_id, error = %e, "takeover bridge failed");
+            }
+        }
+        self.conference_bridge.conf_id = Some(conf_id);
         self.bridge = BridgeConfig::bridge(supervisor_leg.clone(), other_leg.clone());
 
         self.update_leg_state(&target_leg, LegState::Ending);

@@ -40,17 +40,17 @@ struct PrometheusConfig {
 }
 
 fn get_prometheus_config(state: &ConsoleState) -> PrometheusConfig {
-    // Check if metrics are configured via addon-specific config file
     if let Some(app_state) = state.app_state() {
-        let cfg = crate::addons::observability::ObservabilityAddon::load_config_sync(
-            &app_state.config_path,
-        )
-        .unwrap_or_default();
-        return PrometheusConfig {
-            enabled: cfg.enabled,
-            path: cfg.path,
-            auth_required: cfg.token.is_some(),
-        };
+        if let Some(info) = app_state
+            .addon_registry
+            .metrics_endpoint_info(&app_state.config_path)
+        {
+            return PrometheusConfig {
+                enabled: info.enabled,
+                path: info.path,
+                auth_required: info.auth_required,
+            };
+        }
     }
 
     PrometheusConfig {

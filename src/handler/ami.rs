@@ -60,31 +60,37 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
     };
 
     #[cfg(feature = "commerce")]
-    let r = r
-        .route("/cluster/ping", post(cluster_ping_handler))
-        .route("/cluster/reload_config", get(cluster_reload_config_handler))
-        .route("/cluster/reload_sync", post(cluster_reload_sync_handler))
-        .route(
-            "/cluster/dispatch_command",
-            post(cluster_dispatch_command_handler),
-        )
-        .route(
-            "/cluster/show_session/{session_id}",
-            get(cluster_show_session_handler),
-        )
-        .route(
-            "/cluster/session_owner/{call_id}",
-            get(cluster_session_owner_handler),
-        )
-        .route("/cluster/list_calls", get(cluster_list_calls_handler))
-        // Cluster event sync endpoints (AMI HTTP replaces old SIP MESSAGE)
-        .route("/cluster/event/presence", post(cluster_event_presence))
-        .route("/cluster/event/locator", post(cluster_event_locator))
-        .route(
-            "/cluster/event/agent_status",
-            post(cluster_event_agent_status),
-        )
-        .route("/cluster/event/queue", post(cluster_event_queue));
+    let r = {
+        let r = r
+            .route("/cluster/ping", post(cluster_ping_handler))
+            .route("/cluster/reload_config", get(cluster_reload_config_handler))
+            .route("/cluster/reload_sync", post(cluster_reload_sync_handler))
+            .route(
+                "/cluster/dispatch_command",
+                post(cluster_dispatch_command_handler),
+            )
+            .route("/cluster/forward_sip", post(cluster_forward_sip_handler))
+            .route(
+                "/cluster/show_session/{session_id}",
+                get(cluster_show_session_handler),
+            )
+            .route(
+                "/cluster/session_owner/{call_id}",
+                get(cluster_session_owner_handler),
+            )
+            .route("/cluster/list_calls", get(cluster_list_calls_handler))
+            // Cluster event sync endpoints (AMI HTTP replaces old SIP MESSAGE)
+            .route("/cluster/event/presence", post(cluster_event_presence))
+            .route("/cluster/event/locator", post(cluster_event_locator))
+            .route(
+                "/cluster/event/agent_status",
+                post(cluster_event_agent_status),
+            )
+            .route("/cluster/event/queue", post(cluster_event_queue));
+        // Addon-owned AMI routes (e.g. CC `/cluster/cc_owner_op`) — core stays
+        // free of addon path knowledge.
+        r.merge(app_state.addon_registry.get_ami_routes(app_state.clone()))
+    };
 
     let r = r.layer(middleware::from_fn_with_state(
         app_state.clone(),
@@ -1601,7 +1607,12 @@ async fn cluster_dispatch_command_handler(
     );
 
     let registry = state.sip_server().inner.active_call_registry.clone();
-    if registry.get_handle(&session_id).is_none() {
+    // Accept proxy session id or B-leg dialog Call-ID (CC CTI contract).
+    let resolved_id = if registry.get_handle(&session_id).is_some() {
+        session_id.clone()
+    } else if let Some(handle) = registry.get_handle_by_dialog(&session_id) {
+        handle.session_id().to_string()
+    } else {
         tracing::info!(
             audit_event = "call_command",
             action = action,
@@ -1615,11 +1626,11 @@ async fn cluster_dispatch_command_handler(
             Json(serde_json::json!({ "message": "Call not found" })),
         )
             .into_response();
-    }
+    };
 
     use crate::call::runtime::dispatch_console_command;
 
-    match dispatch_console_command(&registry, &session_id, payload) {
+    match dispatch_console_command(&registry, &resolved_id, payload) {
         Ok(result) => {
             if result.success {
                 tracing::info!(
@@ -1668,6 +1679,83 @@ async fn cluster_dispatch_command_handler(
             )
                 .into_response()
         }
+    }
+}
+
+
+
+/// Receive a forwarded in-dialog SIP request and inject it into the local
+/// dialog layer. Used when an agent re-registers on another node mid-call.
+#[cfg(feature = "commerce")]
+async fn cluster_forward_sip_handler(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> Response {
+    let dialog_call_id = match req.get("dialog_call_id").and_then(|v| v.as_str()) {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "message": "Missing dialog_call_id" })),
+            )
+                .into_response();
+        }
+    };
+    let message = match req.get("message").and_then(|v| v.as_str()) {
+        Some(m) => m,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "message": "Missing message" })),
+            )
+                .into_response();
+        }
+    };
+
+    let registry = state.sip_server().inner.active_call_registry.clone();
+    let handle = registry
+        .get_handle_by_dialog(dialog_call_id)
+        .or_else(|| registry.get_handle(dialog_call_id));
+    let Some(handle) = handle else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "message": "Dialog/session not found" })),
+        )
+            .into_response();
+    };
+
+    // Best-effort: parse method from the first line and map common mid-call
+    // controls onto CallCommand. Full SIP re-injection would require a
+    // transport-level replay; for BYE/INFO we translate to session commands.
+    let first_line = message.lines().next().unwrap_or("");
+    let result = if first_line.starts_with("BYE ") {
+        handle.send_command(crate::call::domain::CallCommand::Hangup(
+            crate::call::domain::HangupCommand::local(
+                "cluster_forward_sip",
+                Some(crate::callrecord::CallRecordHangupReason::BySystem),
+                Some(200),
+            ),
+        ))
+    } else if first_line.contains("INFO ") {
+        // Hold/unhold INFO bodies are handled by the session when delivered
+        // over the real dialog; for forwarded INFO we accept and no-op the
+        // media path so the caller gets a 200-equivalent.
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("unsupported forwarded method"))
+    };
+
+    match result {
+        Ok(()) => Json(serde_json::json!({
+            "success": true,
+            "session_id": handle.session_id(),
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "message": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 

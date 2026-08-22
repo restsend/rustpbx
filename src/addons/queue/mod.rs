@@ -98,6 +98,20 @@ impl Addon for QueueAddon {
     }
 
     #[cfg(feature = "console")]
+    fn console_api_always_mounted(&self) -> bool {
+        // Historical: queue JSON APIs were always merged in api::router.
+        true
+    }
+
+    #[cfg(feature = "console")]
+    fn console_api_routes(
+        &self,
+        _state: &crate::console::ConsoleState,
+    ) -> Option<Router<std::sync::Arc<crate::console::ConsoleState>>> {
+        Some(console::handlers::api_urls())
+    }
+
+    #[cfg(feature = "console")]
     fn inject_scripts(&self) -> Vec<crate::addons::ScriptInjection> {
         // Use a regex that matches any base path followed by /extensions/ or /routing/
         vec![crate::addons::ScriptInjection {

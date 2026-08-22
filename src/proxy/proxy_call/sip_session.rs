@@ -9695,6 +9695,25 @@ impl SipSession {
                             .active_call_registry
                             .register_dialog(call_id.clone(), handle);
                     }
+                    // Cluster: also register dialog Call-ID → session owner so
+                    // CTI / in-dialog SIP arriving on another node can resolve.
+                    let node_id = self
+                        .server
+                        .cluster_self_addr
+                        .as_ref()
+                        .map(|a| a.to_string())
+                        .unwrap_or_else(|| "local".to_string());
+                    let alias = crate::call::runtime::SessionInfo::dialog_alias(
+                        call_id.clone(),
+                        self.id.to_string(),
+                        node_id,
+                    );
+                    let registry = self.server.session_registry.clone();
+                    crate::utils::spawn(async move {
+                        if let Err(e) = registry.register(&alias).await {
+                            tracing::debug!(error = %e, "dialog alias registry failed");
+                        }
+                    });
                 }
 
                 // In UAC mode, a leg added via `leg_add` with leg_id="callee"

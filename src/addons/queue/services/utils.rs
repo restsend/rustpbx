@@ -1,27 +1,21 @@
-use anyhow::{Context, Result, anyhow};
-use glob::glob;
-use serde::{Deserialize, Serialize};
-use std::{cmp::Ordering, collections::HashMap, fs, path::Path};
-use tracing::{info, warn};
+//! Queue addon helpers that depend on DB models / export.
+//!
+//! File-format primitives (`QueueFileDocument`, `canonical_queue_key`,
+//! `slugify_queue_name`, `load_queues_from_files`) live in
+//! [`crate::proxy::queue_files`] so the proxy data plane does not import this
+//! addon. Re-exported here for existing addon call sites.
+
+use anyhow::{Context, Result};
+use std::{cmp::Ordering, fs, path::Path};
 
 use crate::{
     addons::queue::models as queue, config_store::GeneratedConfigStore,
-    proxy::routing::RouteQueueConfig,
+    proxy::queue_files::QueueFileDocument, proxy::routing::RouteQueueConfig,
 };
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct QueueFileDocument {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<i64>,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<String>,
-    #[serde(default)]
-    pub queue: RouteQueueConfig,
-}
+pub use crate::proxy::queue_files::{
+    canonical_queue_key, load_queues_from_files, slugify_queue_name,
+};
 
 #[derive(Debug, Clone)]
 pub struct QueueExportEntry {
@@ -43,6 +37,11 @@ impl QueueExportEntry {
             slug = "queue".to_string();
         }
         format!("{}-{}.generated.toml", prefix, slug)
+    }
+
+    /// Get the key used for storing this entry.
+    pub fn get_key(&self) -> String {
+        queue_entry_key(self)
     }
 }
 
@@ -177,41 +176,6 @@ pub async fn write_queue_entry_to_store(
     Ok(filename)
 }
 
-impl QueueExportEntry {
-    /// Get the key used for storing this entry.
-    pub fn get_key(&self) -> String {
-        queue_entry_key(self)
-    }
-}
-
-pub fn canonical_queue_key(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_ascii_lowercase())
-    }
-}
-
-pub fn slugify_queue_name(value: &str) -> String {
-    let mut slug = String::new();
-    let mut last_dash = false;
-    for ch in value.chars() {
-        let lower = ch.to_ascii_lowercase();
-        if lower.is_ascii_alphanumeric() {
-            slug.push(lower);
-            last_dash = false;
-        } else if (lower.is_ascii_whitespace() || matches!(lower, '-' | '_' | '.' | '/'))
-            && !slug.is_empty()
-            && !last_dash
-        {
-            slug.push('-');
-            last_dash = true;
-        }
-    }
-    slug.trim_matches('-').to_string()
-}
-
 fn ensure_parent_dir(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -221,43 +185,4 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
             .with_context(|| format!("failed to create directory {}", parent.display()))?;
     }
     Ok(())
-}
-
-pub async fn load_queues_from_files(
-    patterns: &[String],
-) -> Result<(HashMap<String, RouteQueueConfig>, Vec<String>)> {
-    let mut queues: HashMap<String, RouteQueueConfig> = HashMap::new();
-    let mut files: Vec<String> = Vec::new();
-    for pattern in patterns {
-        if pattern.trim().is_empty() {
-            continue;
-        }
-        let entries = glob(pattern)
-            .map_err(|e| anyhow!("invalid queue include pattern '{}': {}", pattern, e))?;
-        for entry in entries {
-            let path =
-                entry.map_err(|e| anyhow!("failed to read queue include glob entry: {}", e))?;
-            let path_display = path.display().to_string();
-            let contents = tokio::fs::read_to_string(&path)
-                .await
-                .with_context(|| format!("failed to read queue include file {}", path_display))?;
-            let doc: QueueFileDocument = toml::from_str(&contents)
-                .with_context(|| format!("failed to parse queue include file {}", path_display))?;
-            let Some(key) = canonical_queue_key(&doc.name) else {
-                return Err(anyhow!(
-                    "queue include file {} is missing a valid name",
-                    path_display
-                ));
-            };
-            if !files.contains(&path_display) {
-                files.push(path_display.clone());
-            }
-            if queues.contains_key(&key) {
-                warn!(queue = %doc.name, file = %path_display, "queue definition overridden by a later include");
-            }
-            info!(queue = %doc.name, file = %path_display, "loaded queue from include file");
-            queues.insert(key, doc.queue.clone());
-        }
-    }
-    Ok((queues, files))
 }
