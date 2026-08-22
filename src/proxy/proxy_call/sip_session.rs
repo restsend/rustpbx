@@ -2193,7 +2193,7 @@ impl SipSession {
         }
     }
 
-    async fn recv_recorder_finished(
+    pub(crate) async fn recv_recorder_finished(
         bridge: &mut Option<crate::media::media_bridge::MediaBridge>,
     ) -> Option<crate::media::media_recorder::RecordingCompletion> {
         let result = match bridge.as_mut() {
@@ -7893,7 +7893,7 @@ impl SipSession {
         }
     }
 
-    fn publish_recording_complete(
+    pub(crate) fn publish_recording_complete(
         &mut self,
         result: crate::media::media_recorder::RecordingResult,
     ) {

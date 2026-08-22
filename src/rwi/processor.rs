@@ -15,7 +15,7 @@ use crate::rwi::session::{
 use crate::rwi::transfer::TransferController;
 use dashmap::DashMap;
 use futures::FutureExt;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1150,7 +1150,7 @@ impl RwiCommandProcessor {
             };
 
             let use_media_proxy = true;
-            let (mut session, handle, cmd_rx) = SipSession::new_uac(
+            let (mut session, handle, mut cmd_rx) = SipSession::new_uac(
                 server.clone(),
                 cancel_token.clone(),
                 cdr_sender.clone(),
@@ -1237,19 +1237,24 @@ impl RwiCommandProcessor {
             session.register_in_session_registry().await;
 
             // Callee dialog-state channel reserved for later call.leg_add dialogs.
-            let (callee_evt_tx, callee_evt_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (callee_evt_tx, mut callee_evt_rx) = tokio::sync::mpsc::unbounded_channel();
             session.callee_event_tx = Some(callee_evt_tx);
 
             let mut caller_early_sdp: Option<String> = None;
             let mut originate_recording_started = false;
+            let mut pending_commands = VecDeque::new();
+            let mut setup_hangup: Option<(Option<String>, Option<u16>)> = None;
 
-            // Wait for the outbound INVITE to complete.
+            // Wait for the outbound INVITE to complete while servicing the
+            // commands that are meaningful before the first dialog is
+            // confirmed. Other commands retain their previous behavior: they
+            // remain pending until the established UAC loop starts.
             let result = tokio::time::timeout(
                 Duration::from_secs(timeout_secs as u64),
                 async {
                     loop {
                         tokio::select! {
-                            res = &mut invitation => break res,
+                            res = &mut invitation => break Some(res),
                             state = caller_state_rx.recv() => {
                                 match state {
                                     Some(rsipstack::dialog::dialog::DialogState::Calling(_)) => {
@@ -1361,14 +1366,86 @@ impl RwiCommandProcessor {
                                     _ => {}
                                 }
                             }
+                            Some(command) = cmd_rx.recv() => {
+                                if let CallCommand::Hangup(hangup) = &command {
+                                    setup_hangup = Some((
+                                        hangup.reason.as_ref().map(ToString::to_string),
+                                        hangup.code,
+                                    ));
+                                    let command_result = session.execute_command(command, None).await;
+                                    if !command_result.success {
+                                        tracing::warn!(
+                                            call_id = %call_id,
+                                            error = ?command_result.message,
+                                            "pre-answer hangup command failed"
+                                        );
+                                    }
+                                    break None;
+                                }
+
+                                if matches!(
+                                    &command,
+                                    CallCommand::StartRecording { .. }
+                                        | CallCommand::PauseRecording
+                                        | CallCommand::ResumeRecording
+                                        | CallCommand::StopRecording
+                                        | CallCommand::QueryRecorderStatus { .. }
+                                ) {
+                                    let starts_recording =
+                                        matches!(&command, CallCommand::StartRecording { .. });
+                                    let stops_recording =
+                                        matches!(&command, CallCommand::StopRecording);
+                                    let command_result = session.execute_command(command, None).await;
+                                    if command_result.success {
+                                        if starts_recording {
+                                            originate_recording_started = true;
+                                        } else if stops_recording {
+                                            originate_recording_started = false;
+                                        }
+                                    } else {
+                                        tracing::warn!(
+                                            call_id = %call_id,
+                                            error = ?command_result.message,
+                                            "pre-answer recording command failed"
+                                        );
+                                    }
+                                    continue;
+                                }
+
+                                pending_commands.push_back(command);
+                            }
+                            recording_result = SipSession::recv_recorder_finished(
+                                &mut session.media.bridge,
+                            ), if originate_recording_started => {
+                                originate_recording_started = false;
+                                match recording_result {
+                                    Some(Ok(Some(result))) => {
+                                        session.publish_recording_complete(result);
+                                    }
+                                    Some(Ok(None)) => {}
+                                    Some(Err(error)) => {
+                                        tracing::warn!(
+                                            call_id = %call_id,
+                                            %error,
+                                            "pre-answer recording task failed"
+                                        );
+                                    }
+                                    None => {}
+                                }
+                            }
                         }
                     }
                 },
             ).await;
+            // The invitation future is separate from SipSession until a 2xx
+            // response attaches its dialog. Dropping it here is what stops the
+            // pending transaction after an explicit pre-answer hangup (and
+            // sends CANCEL when a provisional response has enabled it).
+            drop(invitation);
 
             'setup: {
                 match result {
-                Ok(Ok((dialog, Some(resp))))
+                Ok(Some(Ok((dialog, Some(resp)))))
                     if resp.status_code().kind() == rsipstack::sip::StatusCodeKind::Successful =>
                 {
                     cdr_answered_for_store.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1434,6 +1511,19 @@ impl RwiCommandProcessor {
                         }
                     }
 
+                    while let Some(command) = pending_commands.pop_front() {
+                        let command_result = session
+                            .execute_command(command, Some(&mut callee_evt_rx))
+                            .await;
+                        if !command_result.success {
+                            tracing::warn!(
+                                call_id = %call_id,
+                                error = ?command_result.message,
+                                "deferred originate command failed after answer"
+                            );
+                        }
+                    }
+
                     // Spawn the UAC command loop now that the caller/A dialog
                     // and its one real media connection are attached.
                     let session_cancel = cancel_token.clone();
@@ -1488,7 +1578,7 @@ impl RwiCommandProcessor {
                     cleanup();
                     return;
                 }
-                Ok(Ok((_dialog, resp_opt))) => {
+                Ok(Some(Ok((_dialog, resp_opt)))) => {
                     let sip_status = resp_opt.as_ref().map(|r| r.status_code.code());
                     {
                         let gw = gateway.read();
@@ -1510,7 +1600,7 @@ impl RwiCommandProcessor {
                         }
                     }
                 }
-                Ok(Err(e)) => {
+                Ok(Some(Err(e))) => {
                     {
                         let gw = gateway.read();
                         gw.send_to_owner(&crate::rwi::CallHangup {
@@ -1520,6 +1610,16 @@ impl RwiCommandProcessor {
                             sip_status: None,
                         });
                     }
+                }
+                Ok(None) => {
+                    let (reason, sip_status) = setup_hangup.take().unwrap_or_default();
+                    let gw = gateway.read();
+                    gw.send_to_owner(&crate::rwi::CallHangup {
+                        call_id: call_id.clone(),
+                        reason,
+                        hangup_by: Some("system".to_string()),
+                        sip_status,
+                    });
                 }
                 Err(_) => {
                     {
