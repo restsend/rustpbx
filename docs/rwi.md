@@ -348,9 +348,10 @@ the recording finishes (explicit stop or call hangup) the owner receives
 With `[recording]` enabled, `recording_metadata_available` and `record_end`
 are also emitted.
 
-**Recording on originate (auto-start on answer):** `call.originate` (and
+**Recording on originate (auto-start on media):** `call.originate` (and
 `POST /ami/v1/outbound/dial`) accepts a `record` object with the same shape as
-`record.start`; recording starts automatically once the call is answered.
+`record.start`; recording starts automatically when the first remote SDP
+establishes media (a provisional response such as 183, or the final answer).
 An empty `storage.path` uses the default location
 (`[recording].path/<call_id>.wav`):
 
@@ -733,7 +734,7 @@ no_answer_transfer_target = "sip:voicemail@local"
 | **Session Commands** | ✅ Complete | All session commands fully implemented |
 | **Call Control** | ✅ Complete | Originate, answer, hangup, bridge, transfer all working |
 | **Media Playback** | ✅ Complete | Play, stop, hold music fully functional |
-| **Recording** | ✅ Complete | Start, pause, resume, stop implemented; inline `record` on `call.originate` / `outbound/dial` (auto-start on answer); CDR carries the file → `recording_metadata_available` + `record_end` |
+| **Recording** | ✅ Complete | Start, pause, resume, stop implemented; inline `record` on `call.originate` / `outbound/dial` (auto-start on first remote SDP); CDR carries the file → `recording_metadata_available` + `record_end` |
 | **Queue** | ✅ Complete | Enqueue, dequeue, hold, unhold working |
 | **Supervisor** | ⚠️ Partial | Commands implemented, **actual audio mixing TODO** |
 | **Conference** | ⚠️ Partial | Create/add/remove/destroy working, **mute/unmute in mixer TODO** |

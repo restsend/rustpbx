@@ -527,9 +527,10 @@ pub struct OriginateRequest {
     /// default.
     #[serde(default)]
     pub route_originated_calls: Option<bool>,
-    /// Recording control: when present, recording starts automatically once
-    /// the originated call is answered (same parameters as `record.start`;
-    /// `call_id` inside is ignored). `storage.path` may be empty to use the
+    /// Recording control: when present, recording starts automatically when
+    /// the first remote SDP establishes media (a provisional response such as
+    /// 183, or the final answer). Uses the same parameters as `record.start`;
+    /// `call_id` inside is ignored. `storage.path` may be empty to use the
     /// default recorder file location (`[recording].path/<call_id>.wav`).
     #[serde(default)]
     pub record: Option<RecordStartRequest>,

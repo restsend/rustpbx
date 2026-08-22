@@ -961,8 +961,8 @@ impl RwiCommandProcessor {
         let dialog_layer = server.dialog_layer.clone();
         let caller_display = req.caller_id.unwrap_or_else(|| caller_str.clone());
         let callee_display = req.destination.clone();
-        let record_on_answer = req.record.clone();
-        let record_channels = record_on_answer
+        let record_on_media = req.record.clone();
+        let record_channels = record_on_media
             .as_ref()
             .map(RecordStartRequest::channels)
             .transpose()
@@ -1125,8 +1125,8 @@ impl RwiCommandProcessor {
                     .with_media(media.clone());
             // Every RWI-originated call prepares the capture sender/task before
             // constructing its caller media leg. A `record` option activates
-            // the file recorder on answer; otherwise record.start may activate
-            // it later without rebuilding the media leg.
+            // the file recorder when remote SDP establishes media; otherwise
+            // record.start may activate it later without rebuilding the leg.
             dialplan.recording.enabled = true;
             dialplan.recording.auto_start = false;
             dialplan.recording.recording_type = crate::config::RecordingType::Local;
@@ -1180,6 +1180,26 @@ impl RwiCommandProcessor {
             };
             invite_option.offer = Some(sdp_offer.into_bytes());
 
+            let originate_recording = record_on_media.as_ref().map(|rec| {
+                let path = if rec.storage.path.trim().is_empty() {
+                    default_originate_recorder_path(&server, &call_id)
+                } else {
+                    rec.storage.path.clone()
+                };
+                let config = crate::call::domain::RecordConfig {
+                    path: path.clone(),
+                    max_duration_secs: rec.max_duration_secs,
+                    beep: rec.beep.unwrap_or(false),
+                    format: None,
+                    channels: record_channels,
+                    mono_caller_only: Some(false),
+                    segment_type: rec.segment_type.clone(),
+                    segment_id: rec.id.clone(),
+                    notify_app: Some(false),
+                };
+                (path, config)
+            });
+
             let (caller_state_tx, mut caller_state_rx) = tokio::sync::mpsc::unbounded_channel();
             let mut invitation = dialog_layer
                 .do_invite(invite_option, caller_state_tx)
@@ -1220,6 +1240,9 @@ impl RwiCommandProcessor {
             let (callee_evt_tx, callee_evt_rx) = tokio::sync::mpsc::unbounded_channel();
             session.callee_event_tx = Some(callee_evt_tx);
 
+            let mut caller_early_sdp: Option<String> = None;
+            let mut originate_recording_started = false;
+
             // Wait for the outbound INVITE to complete.
             let result = tokio::time::timeout(
                 Duration::from_secs(timeout_secs as u64),
@@ -1248,24 +1271,90 @@ impl RwiCommandProcessor {
                                         });
                                     }
                                     Some(rsipstack::dialog::dialog::DialogState::Early(_, ref response)) => {
-                                        let body = response.body();
-                                        if !body.is_empty()
-                                            && String::from_utf8_lossy(body).contains("v=0")
-                                        {
-                                            tracing::debug!(%call_id, "Early media SDP received");
-                                        }
-                                        let gw = gateway.read();
                                         let code = response.status_code().code();
-                                        if code == 180 {
-                                            // 180 Ringing — remote side is alerting.
-                                            gw.send_to_owner(&crate::rwi::CallRinging {
-                                                call_id: call_id.clone(),
-                                            });
-                                        } else {
-                                            // 183 or other provisional — treat as early media.
-                                            gw.send_to_owner(&crate::rwi::CallEarlyMedia {
-                                                call_id: call_id.clone(),
-                                            });
+                                        {
+                                            let gw = gateway.read();
+                                            if code == 180 {
+                                                // 180 Ringing — remote side is alerting.
+                                                gw.send_to_owner(&crate::rwi::CallRinging {
+                                                    call_id: call_id.clone(),
+                                                });
+                                            } else {
+                                                // 183 or other provisional — treat as early media.
+                                                gw.send_to_owner(&crate::rwi::CallEarlyMedia {
+                                                    call_id: call_id.clone(),
+                                                });
+                                            }
+                                        }
+
+                                        let body = response.body();
+                                        if !body.is_empty() {
+                                            let sdp = String::from_utf8_lossy(body).to_string();
+                                            if sdp.contains("v=0")
+                                                && caller_early_sdp.as_deref() != Some(sdp.as_str())
+                                            {
+                                                let early_media = match session
+                                                    .media
+                                                    .bridge
+                                                    .as_ref()
+                                                    .and_then(|bridge| {
+                                                        bridge.leg(
+                                                            crate::media::media_bridge::LegSide::A,
+                                                        )
+                                                    })
+                                                {
+                                                    Some(leg) => leg
+                                                        .apply_sdp(
+                                                            &sdp,
+                                                            rustrtc::SdpType::Pranswer,
+                                                        )
+                                                        .await,
+                                                    None => Err(anyhow::anyhow!(
+                                                        "Originate caller MediaBridge A leg is missing"
+                                                    )),
+                                                };
+                                                match early_media {
+                                                    Ok(_) => {
+                                                        tracing::debug!(%call_id, "Early media SDP applied to caller leg");
+                                                        caller_early_sdp = Some(sdp);
+
+                                                        if !originate_recording_started
+                                                            && let Some((path, config)) = originate_recording.as_ref()
+                                                        {
+                                                            let result = session
+                                                                .execute_command(
+                                                                    CallCommand::StartRecording {
+                                                                        config: config.clone(),
+                                                                    },
+                                                                    None,
+                                                                )
+                                                                .await;
+                                                            if result.success {
+                                                                record_files.insert(call_id.clone(), path.clone());
+                                                                originate_recording_started = true;
+                                                                gateway.read().send_to_owner(
+                                                                    &crate::rwi::RecordStarted {
+                                                                        call_id: call_id.clone(),
+                                                                    },
+                                                                );
+                                                            } else {
+                                                                tracing::warn!(
+                                                                    call_id = %call_id,
+                                                                    error = %result.message.unwrap_or_else(|| "unknown error".to_string()),
+                                                                    "originate record option: failed to start at early media"
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(error) => {
+                                                        tracing::warn!(
+                                                            call_id = %call_id,
+                                                            %error,
+                                                            "failed to apply originate early media SDP"
+                                                        );
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                     Some(rsipstack::dialog::dialog::DialogState::Terminated(_, _)) => {}
@@ -1277,7 +1366,8 @@ impl RwiCommandProcessor {
                 },
             ).await;
 
-            match result {
+            'setup: {
+                match result {
                 Ok(Ok((dialog, Some(resp))))
                     if resp.status_code().kind() == rsipstack::sip::StatusCodeKind::Successful =>
                 {
@@ -1289,7 +1379,7 @@ impl RwiCommandProcessor {
                     let caller_dialog_guard =
                         ClientDialogGuard::new(dialog_layer.clone(), dialog.id());
 
-                    let sdp_answer = if resp.body().is_empty() {
+                    let final_sdp_answer = if resp.body().is_empty() {
                         None
                     } else {
                         let body_str = String::from_utf8_lossy(resp.body()).to_string();
@@ -1299,6 +1389,7 @@ impl RwiCommandProcessor {
                             None
                         }
                     };
+                    let sdp_answer = final_sdp_answer.or_else(|| caller_early_sdp.clone());
 
                     // Attach the answered first INVITE as the primary caller
                     // (MediaBridge A). Its SDP answer is applied to the exact
@@ -1315,10 +1406,32 @@ impl RwiCommandProcessor {
                                 sip_status: Some(resp.status_code().code()),
                             });
                         }
-                        cancel_token.cancel();
-                        registry.remove(&call_id);
-                        cleanup();
-                        return;
+                        break 'setup;
+                    }
+
+                    if !originate_recording_started
+                        && let Some((path, config)) = originate_recording.as_ref()
+                    {
+                        let result = session
+                            .execute_command(
+                                CallCommand::StartRecording {
+                                    config: config.clone(),
+                                },
+                                None,
+                            )
+                            .await;
+                        if result.success {
+                            record_files.insert(call_id.clone(), path.clone());
+                            gateway.read().send_to_owner(&crate::rwi::RecordStarted {
+                                call_id: call_id.clone(),
+                            });
+                        } else {
+                            tracing::warn!(
+                                call_id = %call_id,
+                                error = %result.message.unwrap_or_else(|| "unknown error".to_string()),
+                                "originate record option: failed to start at final media setup"
+                            );
+                        }
                     }
 
                     // Spawn the UAC command loop now that the caller/A dialog
@@ -1339,55 +1452,6 @@ impl RwiCommandProcessor {
                         }
                         session_cancel.cancel();
                     });
-
-                    // Auto-start recording when the originate carried a
-                    // `record` option (recording on answer). The command goes
-                    // through the normal StartRecording path (MediaBridge
-                    // recorder), and the file is tracked so the CDR picks it
-                    // up. Use a short grace so the UAC command loop is armed
-                    // before the command lands in cmd_rx (mpsc is buffered, so
-                    // sending early is safe regardless).
-                    if let Some(rec) = record_on_answer.as_ref() {
-                        let path = if rec.storage.path.trim().is_empty() {
-                            default_originate_recorder_path(&server, &call_id)
-                        } else {
-                            rec.storage.path.clone()
-                        };
-                        let send_result = handle.send_command(CallCommand::StartRecording {
-                            config: crate::call::domain::RecordConfig {
-                                path: path.clone(),
-                                max_duration_secs: rec.max_duration_secs,
-                                beep: rec.beep.unwrap_or(false),
-                                format: None,
-                                channels: record_channels,
-                                mono_caller_only: Some(false),
-                                segment_type: rec.segment_type.clone(),
-                                segment_id: rec.id.clone(),
-                                notify_app: Some(false),
-                            },
-                        });
-                        match send_result {
-                            Ok(()) => match handle.query_recorder_status().await {
-                                Ok(status) if status.active => {
-                                    record_files
-                                        .insert(call_id.clone(), status.file_path.unwrap_or(path));
-                                    let gw = gateway.read();
-                                    gw.send_to_owner(&crate::rwi::RecordStarted {
-                                        call_id: call_id.clone(),
-                                    });
-                                }
-                                Ok(_) => {
-                                    tracing::warn!(call_id = %call_id, "originate record option: recorder did not start");
-                                }
-                                Err(error) => {
-                                    tracing::warn!(call_id = %call_id, %error, "originate record option: failed to query recorder");
-                                }
-                            },
-                            Err(error) => {
-                                tracing::warn!(call_id = %call_id, %error, "originate record option: failed to send StartRecording");
-                            }
-                        }
-                    }
 
                     use crate::proxy::active_call_registry::ActiveProxyCallStatus;
                     registry.update(&call_id, |entry| {
@@ -1422,6 +1486,7 @@ impl RwiCommandProcessor {
                         tracing::warn!(%call_id, error = %e, "UAC session join failed");
                     }
                     cleanup();
+                    return;
                 }
                 Ok(Ok((_dialog, resp_opt))) => {
                     let sip_status = resp_opt.as_ref().map(|r| r.status_code.code());
@@ -1444,9 +1509,6 @@ impl RwiCommandProcessor {
                             });
                         }
                     }
-                    cancel_token.cancel();
-                    registry.remove(&call_id);
-                    cleanup();
                 }
                 Ok(Err(e)) => {
                     {
@@ -1458,9 +1520,6 @@ impl RwiCommandProcessor {
                             sip_status: None,
                         });
                     }
-                    cancel_token.cancel();
-                    registry.remove(&call_id);
-                    cleanup();
                 }
                 Err(_) => {
                     {
@@ -1469,11 +1528,18 @@ impl RwiCommandProcessor {
                             call_id: call_id.clone(),
                         });
                     }
-                    cancel_token.cancel();
-                    registry.remove(&call_id);
-                    cleanup();
+                }
                 }
             }
+
+            if originate_recording_started {
+                let _ = session
+                    .execute_command(CallCommand::StopRecording, None)
+                    .await;
+            }
+            cancel_token.cancel();
+            registry.remove(&call_id);
+            cleanup();
         });
 
         Ok(CommandResult::Originated {

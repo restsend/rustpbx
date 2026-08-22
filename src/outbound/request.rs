@@ -33,10 +33,11 @@ pub struct DialRequest {
     #[serde(default)]
     pub on_answer: OnAnswer,
 
-    /// Recording control: when present, recording starts automatically once
-    /// the call is answered (same shape as the RWI `record.start` params;
-    /// `call_id` inside is ignored). `storage.path` may be empty to use the
-    /// default recorder file location.
+    /// Recording control: when present, recording starts automatically when
+    /// the first remote SDP establishes media (a provisional response such as
+    /// 183, or the final answer). Uses the same shape as the RWI `record.start`
+    /// params; `call_id` inside is ignored. `storage.path` may be empty to use
+    /// the default recorder file location.
     #[serde(default)]
     pub record: Option<crate::rwi::session::RecordStartRequest>,
 

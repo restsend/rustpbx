@@ -2683,12 +2683,10 @@ impl SipSession {
             let _ = dialog.hangup().await;
             return Err(anyhow!("Originate caller MediaBridge A leg is missing"));
         };
-        if leg.negotiated().is_some() {
-            let _ = dialog.hangup().await;
-            return Err(anyhow!(
-                "Originate caller MediaBridge A leg is already negotiated"
-            ));
-        }
+        // A provisional response may already have applied a `Pranswer` to
+        // this leg. The final response must still apply its SDP
+        // as `Answer` to promote the same peer connection; do not replace or
+        // reject the leg merely because early media negotiated it first.
         if let Err(e) = leg.apply_sdp(answer, rustrtc::SdpType::Answer).await {
             // The SIP dialog is already confirmed. If media negotiation cannot
             // complete, terminate it here rather than relying on Drop (which
