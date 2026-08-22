@@ -269,6 +269,34 @@ impl StepIvrApp {
         self.pending_trace.take()
     }
 
+    fn record_pending_session_end(&mut self, preserve_trigger_detail: bool) {
+        let Some(pending) = self.pending_take() else {
+            return;
+        };
+        let duration_ms = self
+            .pending_start_instant
+            .map(|start| start.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        let completed = IvrTraceEntry {
+            step_end_time: Some(chrono::Utc::now().to_rfc3339()),
+            duration_ms,
+            ..pending
+        };
+        let completion_trigger = crate::rwi::TriggerInfo {
+            r#type: "session_end".into(),
+            detail: if preserve_trigger_detail {
+                completed.trigger.detail.clone()
+            } else {
+                None
+            },
+        };
+        self.record_trace(completed.clone());
+        self.record_trace(IvrTraceEntry {
+            trigger: completion_trigger,
+            ..completed
+        });
+    }
+
     fn record_trace(&self, entry: IvrTraceEntry) {
         if let Some(t) = self.effective_trace() {
             let ent = entry.clone();
@@ -298,11 +326,8 @@ impl StepIvrApp {
                 end_reason: entry.end_reason,
                 end_detail: entry.end_detail,
             };
-            let gw = gw.clone();
-            crate::utils::spawn(async move {
-                let guard = gw.read();
-                guard.fan_out(&call_id, &ev);
-            });
+            let guard = gw.read();
+            guard.fan_out(&call_id, &ev);
         }
     }
 
@@ -614,6 +639,7 @@ impl StepIvrApp {
                                 end_reason: None,
                                 end_detail: None,
                             });
+                            self.record_pending_session_end(true);
                             self.current_node =
                                 Some(self.request_next(Some(provider_event)).await?);
                             return Box::pin(self.__exec_node(ctrl, ctx)).await;
@@ -1630,6 +1656,7 @@ impl CallApp for StepIvrApp {
                 }
             }
             AppEvent::TransferResult { outcome } => {
+                self.record_pending_session_end(false);
                 self.current_node = Some(
                     self.request_next(Some(ProviderEvent::TransferResult { outcome }))
                         .await?,
@@ -1796,7 +1823,8 @@ impl CallApp for StepIvrApp {
         // RemoteHangup/Cancelled (caller hung up or system terminated the
         // session) — so the last executed node is captured and surfaced as an
         // `ivr_step_trace` event even when the session ends mid-flow.
-        let (last_action_type, last_step_id, last_step_name) = match &self.current_node {
+        let (last_action_type, last_step_id, last_step_name, last_extra) = match &self.current_node
+        {
             Some(node) => (
                 Self::action_type_label(&node.action).to_string(),
                 node.step_id
@@ -1805,11 +1833,13 @@ impl CallApp for StepIvrApp {
                 node.step_name
                     .clone()
                     .or_else(|| self.current_step_name.clone()),
+                node.extra.clone(),
             ),
             None => (
                 "session_end".to_string(),
                 self.current_step_id.clone(),
                 self.current_step_name.clone(),
+                None,
             ),
         };
         let caller = self
@@ -1839,7 +1869,7 @@ impl CallApp for StepIvrApp {
             step_start_time: None,
             step_end_time: Some(chrono::Utc::now().to_rfc3339()),
             duration_ms: 0,
-            extra: None,
+            extra: last_extra,
             end_reason: Some(end_sr.reason.clone()),
             end_detail: end_sr.detail.clone(),
         });
@@ -2096,6 +2126,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transfer_result_emits_session_end_before_next_node() {
+        use crate::call::app::ControllerEvent;
+        use crate::call::domain::TransferOutcome;
+        use crate::rwi::gateway::RwiGateway;
+
+        let mut transfer = ActionNode::new(EntryAction::Transfer {
+            target: "2001".into(),
+            params: HashMap::new(),
+            return_app: None,
+            return_target: None,
+        });
+        transfer.wait_for_result = true;
+        transfer.step_id = Some("transfer-step".into());
+        transfer.extra = Some(serde_json::json!({"nodetype": "transfer"}));
+        let hangup = ActionNode::new(EntryAction::Hangup {
+            prompt: None,
+            prompt_text: None,
+            prompt_voice: None,
+        });
+        let gateway = RwiGateway::new();
+        let mut events = gateway.subscribe_events();
+        let mut app = mock_app(vec![transfer, hangup]);
+        app.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gateway)));
+
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "transfer", |c| {
+                matches!(c, CallCommand::TransferAwaitResult { target, .. } if target == "2001")
+            })
+            .await;
+        stack
+            .event_sender()
+            .send(ControllerEvent::TransferResult(TransferOutcome::NotConnected))
+            .unwrap();
+        stack
+            .assert_cmd(200, "hangup", |c| matches!(c, CallCommand::Hangup { .. }))
+            .await;
+
+        let ordinary = events.try_recv().expect("transfer trace must be enqueued");
+        let completed = events
+            .try_recv()
+            .expect("transfer completion trace must be enqueued");
+        assert_eq!(ordinary.event.payload["step_id"], "transfer-step");
+        assert_eq!(ordinary.event.payload["trigger"]["type"], "session_start");
+        assert_eq!(completed.event.payload["step_id"], "transfer-step");
+        assert_eq!(completed.event.payload["trigger"]["type"], "session_end");
+        assert!(completed.event.payload["trigger"]["detail"].is_null());
+    }
+
+    #[tokio::test]
     async fn test_prompt_then_transfer_via_next() {
         let node = ActionNode::with_next(
             EntryAction::Prompt {
@@ -2142,7 +2225,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_prompt_then_provider() {
-        let prompt = ActionNode::new(EntryAction::Prompt {
+        use crate::rwi::gateway::RwiGateway;
+
+        let mut prompt = ActionNode::new(EntryAction::Prompt {
             file: Some("hello.wav".into()),
             tts_text: None,
             tts_voice: None,
@@ -2150,15 +2235,20 @@ mod tests {
             interruptible: false,
             tts_api_url: None,
         });
-        let transfer = ActionNode::new(EntryAction::Transfer {
+        prompt.step_id = Some("prompt-step".into());
+        let mut transfer = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
             return_app: None,
             return_target: None,
         });
+        transfer.step_id = Some("transfer-step".into());
+        let gateway = RwiGateway::new();
+        let mut events = gateway.subscribe_events();
+        let mut app = mock_app(vec![prompt, transfer]);
+        app.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gateway)));
 
-        let mut stack =
-            MockCallStack::run(Box::new(mock_app(vec![prompt, transfer])), "1001", "2000");
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
         stack
             .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
@@ -2181,6 +2271,15 @@ mod tests {
                 |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
             )
             .await;
+
+        let prompt_trace = events.try_recv().expect("prompt trace must be enqueued");
+        let transfer_trace = events.try_recv().expect("transfer trace must be enqueued");
+        assert_eq!(prompt_trace.event.payload["step_id"], "prompt-step");
+        assert_eq!(
+            prompt_trace.event.payload["trigger"]["type"],
+            "session_start"
+        );
+        assert_eq!(transfer_trace.event.payload["step_id"], "transfer-step");
     }
 
     #[tokio::test]
@@ -4500,12 +4599,15 @@ mod tests {
         let mut app = StepIvrApp::with_provider(Box::new(MockProviderHandle(provider.clone())));
         app.trace = Some(trace.clone());
         app.ivr_name = Some("test-ivr".to_string());
-        app.current_node = Some(ActionNode::new(EntryAction::Transfer {
+        let mut current_node = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
             return_app: None,
             return_target: None,
-        }));
+        });
+        current_node.extra = Some(serde_json::json!({"nodetype": "transfer"}));
+        app.current_node = Some(current_node);
+        app.extra = Some(serde_json::json!({"nodetype": "previous-node"}));
         app.current_step_id = Some("step-7".to_string());
         app.sess
             .variables
@@ -4532,6 +4634,11 @@ mod tests {
             "session_end trace must carry the last node action type"
         );
         assert_eq!(
+            session_end.extra,
+            Some(serde_json::json!({"nodetype": "transfer"})),
+            "session_end trace must preserve the last node metadata"
+        );
+        assert_eq!(
             session_end.end_reason,
             Some(crate::call::app::ivr::provider::SessionEndTag::UserHangup),
             "session_end trace must carry the end reason"
@@ -4540,6 +4647,55 @@ mod tests {
             !*provider.end_called.lock().unwrap(),
             "remote hangup must skip provider session end"
         );
+    }
+
+    #[tokio::test]
+    async fn test_step_trace_events_are_enqueued_in_record_order() {
+        use crate::rwi::gateway::RwiGateway;
+
+        let mut app = mock_app(vec![]);
+        app.sess
+            .variables
+            .insert("session_id".into(), "test-session".into());
+        let gateway = RwiGateway::new();
+        let mut events = gateway.subscribe_events();
+        app.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gateway)));
+
+        let entry = |step_id: &str, trigger: crate::rwi::TriggerInfo| IvrTraceEntry {
+            session_id: "test-session".into(),
+            caller: "1001".into(),
+            callee: "2000".into(),
+            step_index: 1,
+            trigger,
+            provider_url: None,
+            action_type: "Prompt".into(),
+            action_json: None,
+            duration_ms: 0,
+            error: None,
+            step_id: Some(step_id.into()),
+            step_name: None,
+            step_start_time: None,
+            step_end_time: None,
+            extra: None,
+            end_reason: None,
+            end_detail: None,
+        };
+
+        app.record_trace(entry(
+            "step-normal",
+            crate::rwi::TriggerInfo::new("audio_complete"),
+        ));
+        app.record_trace(entry(
+            "step-end",
+            crate::rwi::TriggerInfo::new("session_end"),
+        ));
+
+        let first = events.try_recv().expect("ordinary trace must be enqueued");
+        let second = events
+            .try_recv()
+            .expect("session end trace must be enqueued");
+        assert_eq!(first.event.payload["step_id"], "step-normal");
+        assert_eq!(second.event.payload["step_id"], "step-end");
     }
 
     #[tokio::test]
@@ -4828,8 +4984,10 @@ mod tests {
     // ── Bug 7: InputPhone forwards collected digits to provider ───────────
 
     #[tokio::test]
-    async fn test_input_phone_forwards_to_provider() {
-        let input_phone = ActionNode::new(EntryAction::InputPhone {
+    async fn input_phone_emits_completion_before_followup() {
+        use crate::rwi::gateway::RwiGateway;
+
+        let mut input_phone = ActionNode::new(EntryAction::InputPhone {
             prompt: Some("enter_phone.wav".into()),
             prompt_text: None,
             prompt_voice: None,
@@ -4839,18 +4997,19 @@ mod tests {
             inter_digit_timeout_ms: 3_000,
             terminator: "#".into(),
         });
+        input_phone.step_id = Some("input-phone-step".into());
         let followup = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
             return_app: None,
             return_target: None,
         });
+        let gateway = RwiGateway::new();
+        let mut events = gateway.subscribe_events();
+        let mut app = mock_app(vec![input_phone, followup]);
+        app.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gateway)));
 
-        let mut stack = MockCallStack::run(
-            Box::new(mock_app(vec![input_phone, followup])),
-            "1001",
-            "2000",
-        );
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
         stack
             .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
@@ -4878,6 +5037,19 @@ mod tests {
                 |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
             )
             .await;
+
+        let ordinary = events.try_recv().expect("input phone trace must be enqueued");
+        let completed = events
+            .try_recv()
+            .expect("input phone completion trace must be enqueued");
+        assert_eq!(ordinary.event.payload["step_id"], "input-phone-step");
+        assert_eq!(ordinary.event.payload["trigger"]["type"], "phone_collected");
+        assert_eq!(completed.event.payload["step_id"], "input-phone-step");
+        assert_eq!(completed.event.payload["trigger"]["type"], "session_end");
+        assert_eq!(
+            completed.event.payload["trigger"]["detail"]["number"],
+            "12345678901"
+        );
     }
 
     #[tokio::test]
