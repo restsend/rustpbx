@@ -128,7 +128,7 @@ async def test_step_ivr_dtmf_during_non_interruptible_prompt_transfers(pbx, sipb
         _add_step_route(pbx.config_builder, url)
         h.boot_pbx(pbx)
 
-        callee = await _reg_callee(sipbot_pool, pbx, 15130, "1002")
+        callee = await _reg_callee(sipbot_pool, pbx, h.ua_port(15130), "1002")
 
         # welcome is 1s (interruptible), announce is 3s (non-interruptible).
         # Press 2 at 2s -> during the announcement.
@@ -162,7 +162,7 @@ async def test_step_ivr_dtmf_during_interruptible_prompt_barges_in(pbx, sipbot_p
         _add_step_route(pbx.config_builder, url)
         h.boot_pbx(pbx)
 
-        callee = await _reg_callee(sipbot_pool, pbx, 15131, "1002")
+        callee = await _reg_callee(sipbot_pool, pbx, h.ua_port(15131), "1002")
 
         # welcome is interruptible (1s): press 2 at 1.5s during the welcome.
         caller = sipbot_pool.caller(

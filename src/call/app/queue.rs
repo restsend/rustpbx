@@ -1,13 +1,24 @@
-//! Queue Application — built-in call queue with agent routing.
+//! Queue Application — built-in **call queue executor**.
 //!
-//! Manages call distribution to agents with support for:
-//! - Sequential and parallel dialing strategies
-//! - Hold music while waiting
-//! - Fallback actions on failure
-//! - Queue position announcements (optional)
-//! - Skill-based routing (via DbRegistry)
-//! - SLA monitoring (built-in)
-//! - Agent state tracking (via DbRegistry)
+//! # Ownership boundary
+//!
+//! This module is the **execution layer** (hold music, ring agents, bridge,
+//! fallback media actions). It must **not** own contact-center decision logic.
+//!
+//! | Concern | Owner |
+//! |---------|--------|
+//! | Dial / hold / bridge / fallback prompts | **Core** `QueueApp` (this file) |
+//! | Agent selection, skill groups, ACD strategy, SLA policy | **CC addon** (`addons/cc/acd`, `CcAgentRegistryAdapter`) |
+//! | Escalation *timeline policy* | CC (`escalation_plan_for`) |
+//! | Escalation *dial widening* (add/replace legs) | Executor calls registry for URIs |
+//! | Cluster scheduling | CC (affinity: call stays on enqueue node; home_proxy rings remote agents) |
+//!
+//! CC-flavoured fields on [`QueueConfig`] (`routing_strategy`, `skill_group`,
+//! `no_answer_action`, `sla_*`, `escalation_*`, …) exist for injection by the
+//! CC adapter / assembly path. New strategy algorithms belong in
+//! `addons/cc/acd`, not here.
+//!
+//! Without `addon-cc`, static `agents` + sequential/parallel dialing still work.
 //!
 //! # State Machine
 //!
@@ -41,7 +52,10 @@ use tracing::{debug, info, warn};
 // Queue Configuration Extensions
 // ===================================================================
 
-/// No-answer action for CC queues.
+/// No-answer action for CC queues (business policy; executed by CC addon).
+///
+/// Kept on [`QueueConfig`] so the executor can surface the configured action
+/// to hooks; selection of which action applies belongs to CC / ACD policy.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum NoAnswerAction {
     /// Transfer to voicemail.
@@ -57,7 +71,11 @@ pub enum NoAnswerAction {
     BackToIvr,
 }
 
-/// Extended queue configuration with CC features.
+/// Extended queue configuration.
+///
+/// Executor fields (`name`, `hold`, `agents`, `strategy`, `ring_timeout`, …)
+/// are core. Fields below the "CC injection" marker are populated by the CC
+/// adapter / dialplan assembly — do not grow new ACD algorithms here.
 #[derive(Debug, Clone)]
 pub struct QueueConfig {
     /// Queue name/identifier.

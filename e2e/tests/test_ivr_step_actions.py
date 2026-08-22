@@ -138,7 +138,9 @@ async def test_step_ivr_api_action_fires_http(pbx, sipbot_pool, tmp_path):
         )
         assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
         # The Api action must fire its HTTP request to the mock endpoint.
-        await asyncio.sleep(3)
+        deadline = asyncio.get_event_loop().time() + 10
+        while asyncio.get_event_loop().time() < deadline and not api_hits:
+            await asyncio.sleep(0.2)
         assert api_hits, f"api action did not reach its URL: {api_hits}"
     finally:
         await cleanup()
@@ -260,7 +262,7 @@ async def test_step_ivr_input_phone_collects_and_transfers(pbx, sipbot_pool, tmp
         _add_step_route(pbx, "to-ivr-phone", "ivr-phone", url)
         h.boot_pbx(pbx)
 
-        agent = await _reg_callee(sipbot_pool, pbx, 15142, "1002")
+        agent = await _reg_callee(sipbot_pool, pbx, h.ua_port(15142), "1002")
         caller = sipbot_pool.caller(
             target=f"sip:ivr-phone@{pbx.sip_addr}",
             username="1001",
@@ -313,7 +315,7 @@ entries = []
         _add_step_route(pbx, "to-ivr-jump", "ivr-jump", url)
         h.boot_pbx(pbx)
 
-        agent = await _reg_callee(sipbot_pool, pbx, 15143, "1002")
+        agent = await _reg_callee(sipbot_pool, pbx, h.ua_port(15143), "1002")
         caller = sipbot_pool.caller(
             target=f"sip:ivr-jump@{pbx.sip_addr}",
             username="1001",
@@ -539,7 +541,7 @@ async def test_step_ivr_input_phone_custom_terminator(pbx, sipbot_pool, tmp_path
         _add_step_route(pbx, "to-ivr-term", "ivr-term", url)
         h.boot_pbx(pbx)
 
-        agent = await _reg_callee(sipbot_pool, pbx, 15146, "1002")
+        agent = await _reg_callee(sipbot_pool, pbx, h.ua_port(15146), "1002")
         caller = sipbot_pool.caller(
             target=f"sip:ivr-term@{pbx.sip_addr}",
             username="1001",

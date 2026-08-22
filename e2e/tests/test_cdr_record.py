@@ -42,7 +42,7 @@ async def _reg_callee(sipbot_pool, pbx, port):
 async def test_cdr_persisted_after_call(pbx, sipbot_pool, cdr_dir):
     """Basic call produces a CDR JSON with caller/callee + duration."""
     h.boot_pbx(pbx)
-    await _reg_callee(sipbot_pool, pbx, 15130)
+    await _reg_callee(sipbot_pool, pbx, h.ua_port(15130))
     caller = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456", hangup=6,
     )
@@ -78,7 +78,7 @@ async def test_rwi_record_start_stop(pbx, sipbot_pool, rwi, tmp_path):
     await h.connect_rwi(rwi)
 
     # 1) Auto-start recording: make a call and find the produced WAV.
-    await _reg_callee(sipbot_pool, pbx, 15131)
+    await _reg_callee(sipbot_pool, pbx, h.ua_port(15131))
     caller = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456", hangup=6,
     )

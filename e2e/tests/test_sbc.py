@@ -102,7 +102,7 @@ async def test_sbc_rewrite_call_established(pbx, sbc_upstream, sipbot_pool):
     )
     h.boot_pbx(pbx)
 
-    await _reg_callee(sipbot_pool, pbx, 15170)
+    await _reg_callee(sipbot_pool, pbx, h.ua_port(15170))
     caller = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456", hangup=6,
     )
@@ -125,7 +125,7 @@ async def test_sbc_reject_call(pbx, sbc_upstream, sipbot_pool):
     )
     h.boot_pbx(pbx)
 
-    callee = await _reg_callee(sipbot_pool, pbx, 15171)
+    callee = await _reg_callee(sipbot_pool, pbx, h.ua_port(15171))
     caller = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456", hangup=4,
     )
@@ -145,7 +145,7 @@ async def test_sbc_header_injection(pbx, sbc_upstream, sipbot_pool):
     )
     h.boot_pbx(pbx)
 
-    await _reg_callee(sipbot_pool, pbx, 15172)
+    await _reg_callee(sipbot_pool, pbx, h.ua_port(15172))
     caller = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456", hangup=6,
     )

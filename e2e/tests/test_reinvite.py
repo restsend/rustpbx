@@ -87,7 +87,7 @@ async def test_reinvite_hold_then_resume_keeps_call_and_media(pbx, sipbot_pool, 
     pbx.config_builder.media_proxy = "all"
     h.boot_pbx(pbx)
 
-    await _registered_callee(sipbot_pool, pbx, 15400, "1002")
+    await _registered_callee(sipbot_pool, pbx, h.ua_port(15400), "1002")
 
     caller = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456",
@@ -129,7 +129,7 @@ async def test_reinvite_with_audio_after_resume(pbx, sipbot_pool, tmp_path):
     sine = tmp_path / "sine.wav"
     generate_sine_wav(sine, 440.0, 0.5, 8000, 0.5)
 
-    await _registered_callee(sipbot_pool, pbx, 15401, "1002")
+    await _registered_callee(sipbot_pool, pbx, h.ua_port(15401), "1002")
 
     caller = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456",

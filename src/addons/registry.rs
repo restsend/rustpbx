@@ -166,6 +166,7 @@ impl AddonRegistry {
 /// construct a full registry.
 #[cfg(any(feature = "addon-wholesale", feature = "addon-sbc", test))]
 pub fn merge_compiled_addon_error_catalogs(reg: &mut crate::call_errors::CallErrRegistry) {
+    let _ = &reg;
     #[cfg(feature = "addon-wholesale")]
     {
         use super::Addon;

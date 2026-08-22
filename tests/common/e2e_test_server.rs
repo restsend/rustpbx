@@ -1,7 +1,6 @@
 //! E2E Test Server - Full PBX server with CDR capture for end-to-end testing
 
 use super::cdr_capture::CdrCapture;
-use super::rtp_utils::{RtpReceiver, RtpSender};
 use super::test_helpers;
 use super::test_ua::{TestUa, TestUaConfig};
 use anyhow::Result;
@@ -314,106 +313,5 @@ impl Drop for E2eTestServer {
         if let Some(abort) = self._server_abort.take() {
             abort.abort();
         }
-    }
-}
-
-/// Enhanced TestUa with RTP capabilities
-pub struct E2eTestUa {
-    pub ua: TestUa,
-    pub rtp_receiver: Option<RtpReceiver>,
-    pub rtp_sender: Option<RtpSender>,
-    pub rtp_port: Option<u16>,
-}
-
-impl E2eTestUa {
-    /// Create and setup E2E TestUa with RTP receiver
-    pub async fn new_with_rtp(ua: TestUa) -> Result<Self> {
-        // Create RTP receiver on a random port
-        let rtp_receiver = RtpReceiver::bind(0).await?;
-        let rtp_port = rtp_receiver.port()?;
-
-        Ok(Self {
-            ua,
-            rtp_receiver: Some(rtp_receiver),
-            rtp_sender: None,
-            rtp_port: Some(rtp_port),
-        })
-    }
-
-    /// Start RTP receiving
-    pub fn start_receiving(&mut self) -> Result<()> {
-        if let Some(ref receiver) = self.rtp_receiver {
-            receiver.start_receiving();
-            info!("RTP receiver started");
-        }
-        Ok(())
-    }
-
-    /// Setup RTP sender
-    pub async fn setup_sender(&mut self) -> Result<()> {
-        self.rtp_sender = Some(RtpSender::bind().await?);
-        Ok(())
-    }
-
-    /// Get SDP with correct RTP port
-    pub fn get_sdp_with_rtp_port(&self, base_sdp: &str) -> String {
-        let port = self.rtp_port.unwrap_or(5004);
-
-        // Replace media port in SDP
-        base_sdp
-            .replace(&format!("m=audio {} ", 5004), &format!("m=audio {} ", port))
-            .replace(
-                &format!("m=audio {} ", 12345),
-                &format!("m=audio {} ", port),
-            )
-    }
-
-    /// Get RTP stats
-    pub async fn get_rtp_stats(&self) -> Option<super::rtp_utils::RtpStats> {
-        if let Some(ref receiver) = self.rtp_receiver {
-            Some(receiver.get_stats().await)
-        } else {
-            None
-        }
-    }
-
-    /// Send RTP packets to target
-    pub async fn send_rtp_to(
-        &self,
-        target: SocketAddr,
-        packets: Vec<super::rtp_utils::RtpPacket>,
-        interval_ms: u64,
-    ) -> Result<()> {
-        if let Some(ref sender) = self.rtp_sender {
-            sender.send_sequence(target, packets, interval_ms).await?;
-        }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_e2e_server_start() {
-        let server = E2eTestServer::start().await;
-        assert!(server.is_ok());
-
-        let server = server.unwrap();
-        assert!(server.port > 0);
-
-        // Cleanup
-        server.stop();
-    }
-
-    #[tokio::test]
-    async fn test_create_ua() {
-        let server = E2eTestServer::start().await.unwrap();
-
-        let ua = server.create_ua("alice").await;
-        assert!(ua.is_ok());
-
-        server.stop();
     }
 }

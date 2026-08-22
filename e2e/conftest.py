@@ -77,23 +77,35 @@ def _pick_worker_offset(worker: int) -> int:
     whole set is free. This keeps xdist workers disjoint from each other and
     from unrelated host services (e.g. a docker port map on 20080).
     """
+    base_shift = int(os.environ.get("RUSTPBX_E2E_PORT_BASE", "0"))
     if worker == 0:
-        return 0
+        return base_shift
     base_sip = int(os.environ.get("RUSTPBX_SIP_PORT", "15070"))
     base_http = int(os.environ.get("RUSTPBX_HTTP_PORT", "18080"))
     # Every fixed local UA/trunk port used across the test suite.
     ua_ports = [
-        15080, 15081, 15082, 15083, 15084,
-        15103, 15104, 15110, 15111, 15112, 15113, 15114,
-        15132, 15140, 15141, 15150, 15160,
+        15080, 15081, 15082, 15083, 15084, 15085, 15086,
+        15100, 15101, 15102, 15103, 15104,
+        15110, 15111, 15112, 15113, 15114,
+        15120, 15121, 15122, 15130, 15131, 15132, 15133,
+        15140, 15141, 15142, 15143, 15144, 15145, 15146,
+        15150, 15151, 15152, 15160, 15161,
+        15170, 15171, 15172,
         15190, 15191, 15192,
-        15200, 15201, 15202, 15204, 15206, 15210,
+        15200, 15201, 15202, 15203, 15204, 15206, 15210,
         15220, 15221, 15222, 15223, 15224,
         15300, 15301,
-        15402, 15410, 15420, 15421, 15422, 15430, 15440, 15442, 15450, 15460, 15470,
+        15400, 15401,
+        15402, 15410, 15420, 15421, 15422, 15430, 15440, 15441, 15442, 15450,
+        15460, 15470,
+        15480, 15481, 15482, 15483, 15484,
+        15500, 15501, 15502, 15503, 15504, 15505, 15506, 15507,
+        15508, 15509, 15510, 15511, 15512, 15513, 15514, 15515, 15516, 15517,
+        15518, 15519,
+        15600, 15601, 15602,
         16700, 16920,
     ]
-    off = worker * PORT_STRIDE
+    off = base_shift + worker * PORT_STRIDE
     while True:
         ok = all(_port_free(p + off) for p in ua_ports) and _port_free(
             base_sip + off
@@ -124,16 +136,22 @@ def _artifact_root() -> Path:
 
     xdist workers share the checkout, so each worker gets its own work dir to
     avoid racing on rustpbx_regression.toml / config/{routes,trunks,queue,ivr}
-    / config/cdr / config/sipflow. Worker 0 keeps PROJECT_ROOT (historical
-    layout) so single-worker runs are unchanged.
+    / config/cdr / config/sipflow. Worker 0 of the DEFAULT session keeps
+    PROJECT_ROOT (historical layout) so single-worker runs are unchanged; a
+    session with RUSTPBX_E2E_PORT_BASE set (parallel scenario sessions) gets
+    its own dir regardless of worker index.
 
     The PBX resolves static assets (console pages, dev consoles, locales,
     sounds) relative to its cwd, so read-only asset dirs are symlinked into
     each worker dir to keep them resolvable.
     """
-    if not WORKER:
+    session_base = int(os.environ.get("RUSTPBX_E2E_PORT_BASE", "0"))
+    if not WORKER and not session_base:
         return PROJECT_ROOT
-    d = PROJECT_ROOT / "e2e-artifacts" / f"worker{WORKER}"
+    if session_base and not WORKER:
+        d = PROJECT_ROOT / "e2e-artifacts" / f"session{session_base}"
+    else:
+        d = PROJECT_ROOT / "e2e-artifacts" / f"worker{WORKER}"
     d.mkdir(parents=True, exist_ok=True)
     (d / "config").mkdir(parents=True, exist_ok=True)
     for rel in ("src", "static", "locales", "templates", "config/sounds"):

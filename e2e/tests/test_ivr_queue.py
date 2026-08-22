@@ -202,7 +202,12 @@ max_retries_action = { type = "hangup" }
     answered = await caller.wait_output_async(r"200 OK|Call established", timeout=20)
     assert answered, f"call not answered:\n{caller.output[-1000:]}"
 
-    await asyncio.sleep(5)
+    # INFO flow fires at 2s — wait for the UA to send it, then for the PBX
+    # to accept the command (log), instead of a fixed sleep.
+    assert await caller.wait_output_async(r"SIP INFO|INFO flow", timeout=10), (
+        f"caller never sent the SIP INFO:\n{caller.output[-1000:]}"
+    )
+    await h.wait_log(pbx, r"SIP INFO rustpbx command accepted", timeout=10)
 
     caller_output = caller.output
     assert "SIP INFO" in caller_output or "INFO flow" in caller_output, (
@@ -317,8 +322,10 @@ target = "noagent"
 
     # Caller should receive the busy prompt audio before being hung up.
     await h.wait_rtp(caller, "caller", 15)
-    # Give the PBX time to play the ~2s prompt and hang up.
-    await asyncio.sleep(6)
+    # Wait for the ~2s prompt to complete and the hangup fallback to run
+    # (log-driven instead of a fixed sleep).
+    await h.wait_log(pbx, r"playing busy prompt before fallback", timeout=12)
+    await h.wait_log(pbx, r"(?i)hangup fallback", timeout=12)
 
     log = pbx.log_file_path.read_text(encoding="utf-8", errors="replace") if pbx.log_file_path else ""
     assert "playing busy prompt before fallback" in log, (
@@ -427,9 +434,12 @@ return_target = "ivr-ret-noagent"
     answered = await caller.wait_output_async(r"200 OK|Call established", timeout=25)
     assert answered, f"call not answered:\n{caller.output[-1500:]}"
 
-    # Give the queue app time to start, play the ~1.5s busy prompt, and return
-    # the caller to the IVR (which replays the greeting).
-    await asyncio.sleep(9)
+    # Wait (log-driven) for the queue app to start, play the busy prompt and
+    # return the caller to the IVR — instead of a fixed 9s sleep. The last
+    # wait also covers the IVR restart line the ordering assert below needs.
+    await h.wait_log(pbx, r"playing busy prompt before fallback", timeout=15)
+    await h.wait_log(pbx, r"will return to IVR on fallback", timeout=15)
+    await h.wait_log(pbx, r"Starting IVR application", timeout=15)
 
     log = pbx.log_file_path.read_text(encoding="utf-8", errors="replace") if pbx.log_file_path else ""
 
@@ -559,8 +569,12 @@ return_target = "ivr-return"
     answered = await caller.wait_output_async(r"200 OK|Call established", timeout=25)
     assert answered, f"call not answered:\n{caller.output[-1500:]}"
 
-    # Wait for agent to hang up and IVR to restart
-    await asyncio.sleep(8)
+    # Wait for agent to hang up and IVR to restart (log-driven).
+    await h.wait_log(
+        pbx,
+        r"starting return app|returning caller to IVR|Connected dynamic leg ended",
+        timeout=15,
+    )
 
     log = pbx.log_file_path.read_text(encoding="utf-8", errors="replace") if pbx.log_file_path else ""
     assert "starting return app" in log or "returning caller to IVR" in log or "B‑leg hung up; returning caller to IVR" in log or "Connected dynamic leg ended" in log, (

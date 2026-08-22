@@ -46,7 +46,7 @@ async def test_cng_on_config_parses(pbx, sipbot_pool, rwi):
     pbx.config_builder.set_media(comfort_noise=True, level_db=-35.0)
     h.boot_pbx(pbx)
     await h.connect_rwi(rwi)
-    await _registered_echo_callee(sipbot_pool, pbx, 15100, "1002")
+    await _registered_echo_callee(sipbot_pool, pbx, h.ua_port(15100), "1002")
 
     caller = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456", hangup=8,
@@ -62,7 +62,7 @@ async def test_cng_off_config_parses(pbx, sipbot_pool, rwi):
     pbx.config_builder.set_media(comfort_noise=False, level_db=-40.0)
     h.boot_pbx(pbx)
     await h.connect_rwi(rwi)
-    await _registered_echo_callee(sipbot_pool, pbx, 15101, "1002")
+    await _registered_echo_callee(sipbot_pool, pbx, h.ua_port(15101), "1002")
 
     caller = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456", hangup=8,
@@ -78,7 +78,7 @@ async def test_cng_custom_level_config_parses(pbx, sipbot_pool, rwi):
     pbx.config_builder.set_media(comfort_noise=True, level_db=-25.0)
     h.boot_pbx(pbx)
     await h.connect_rwi(rwi)
-    await _registered_echo_callee(sipbot_pool, pbx, 15102, "1002")
+    await _registered_echo_callee(sipbot_pool, pbx, h.ua_port(15102), "1002")
 
     caller = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456", hangup=8,
@@ -116,7 +116,7 @@ async def test_cng_rtp_flows_during_hold(pbx, sipbot_pool, rwi):
     hold = await rwi.hold(call_id)
     assert hold.get("status") == "success", f"hold failed: {hold}"
     await rwi.wait_for_event("media_hold_started", timeout=10)
-    await asyncio.sleep(3)
+    await asyncio.sleep(1.5)
     stats_after = callee.get_rtp_stats()
     rx_after = stats_after.rx_packets
     assert rx_after > rx_before, (

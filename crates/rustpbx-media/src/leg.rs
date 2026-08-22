@@ -121,7 +121,9 @@ pub struct LegInner {
     /// True once the ingress tap has been attached to the (now-created) RTP
     /// transport. The transport does not exist at construction, so the tap is
     /// (re)attached after the first SDP application.
-    observer_attached: AtomicBool,
+    /// Shared with the attach task so a failed wait can clear the flag and
+    /// allow [`Self::refresh_observer`] / a later ensure to retry.
+    observer_attached: Arc<AtomicBool>,
     /// Handle of the background observer-attach task, so `stop` can abort it
     /// (prevents a leaked task waiting on a transport that never appears).
     observer_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -367,7 +369,7 @@ impl LegInner {
             negotiated: Mutex::new(None),
             gated: Arc::new(AtomicBool::new(true)),
             rtp_timeout: Arc::new(RtpTimeoutState::default()),
-            observer_attached: AtomicBool::new(false),
+            observer_attached: Arc::new(AtomicBool::new(false)),
             observer_task: Mutex::new(None),
             relay_arm_task: Mutex::new(None),
             rtcp_stats,
@@ -391,12 +393,16 @@ impl LegInner {
         }
         let pc = self.pc.clone();
         let tap = self.tap.clone();
+        let attached = Arc::clone(&self.observer_attached);
         let handle = tokio::spawn(async move {
             if pc
                 .wait_for_rtp_transport_ready(std::time::Duration::from_secs(5))
                 .await
                 .is_err()
             {
+                // Allow a later refresh_observer/ensure_observer to retry —
+                // otherwise a transient miss permanently disables recording.
+                attached.store(false, Ordering::SeqCst);
                 tracing::warn!(
                     "RTP transport never became ready; ingress tap NOT attached (no stats/DTMF/recording for this leg)"
                 );
@@ -627,9 +633,20 @@ impl LegInner {
         // changes the payload type on the wire; without re-syncing the tap's
         // allowlist every post-renegotiation audio packet would be excluded
         // from the call recording (both directions).
+        //
+        // Never replace a populated allowlist with an empty one: an SDP answer
+        // that fails audio codec extraction would otherwise wipe the offer-time
+        // PTs and silently drop every packet from the recorder (empty WAV).
         let mut audio_pts: Vec<u8> = profile.audio.iter().map(|a| a.payload_type).collect();
         audio_pts.retain(|pt| !profile.dtmf_pts().contains(pt));
-        self.tap.set_audio_payload_types(audio_pts);
+        if audio_pts.is_empty() {
+            tracing::warn!(
+                leg = %self.id,
+                "negotiated profile has no audio PTs; keeping prior recording allowlist"
+            );
+        } else {
+            self.tap.set_audio_payload_types(audio_pts);
+        }
         // Sync the outbound DTMF send state so RFC 2833 packets use the
         // negotiated telephone-event payload type and clock rate.
         let mut dtmf = self.dtmf_send.lock();

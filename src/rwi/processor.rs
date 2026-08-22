@@ -1325,7 +1325,7 @@ impl RwiCommandProcessor {
                     // and its one real media connection are attached.
                     let session_cancel = cancel_token.clone();
                     let session_call_id = call_id.clone();
-                    crate::utils::spawn(async move {
+                    let session_join = crate::utils::spawn(async move {
                         if let Err(e) = session
                             .process_uac(
                                 caller_state_rx,
@@ -1402,13 +1402,24 @@ impl RwiCommandProcessor {
                     }
 
                     // Keep the call alive until cancelled / timed out.
+                    //
+                    // IMPORTANT: do not run `cleanup()` (which drops
+                    // `RwiCallRecordGuard` and releases call ownership) until
+                    // `process_uac` has finished. Hangup cancels this token
+                    // immediately, but the session still needs its shutdown
+                    // drain to emit `call_hangup` to the owning RWI session.
+                    // Releasing ownership first drops that event on the floor.
                     tokio::select! {
                         _ = cancel_token.cancelled() => {
                             tracing::info!(%call_id, "Originate task cancelled");
                         }
                         _ = tokio::time::sleep(Duration::from_secs(3600)) => {
                             tracing::info!(%call_id, "Call timeout after 1 hour");
+                            cancel_token.cancel();
                         }
+                    }
+                    if let Err(e) = session_join.await {
+                        tracing::warn!(%call_id, error = %e, "UAC session join failed");
                     }
                     cleanup();
                 }

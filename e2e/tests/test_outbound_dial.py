@@ -191,7 +191,7 @@ async def test_outbound_app_after_answer(pbx, sipbot_pool):
     pbx.config_builder.outbound_enabled = True
     h.boot_pbx(pbx)
 
-    await _registered_callee(sipbot_pool, pbx, 15203, "1002")
+    await _registered_callee(sipbot_pool, pbx, h.ua_port(15203), "1002")
 
     async with aiohttp.ClientSession() as session:
         events = await _sse_dial(session, pbx.http_url, {

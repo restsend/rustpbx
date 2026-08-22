@@ -174,8 +174,12 @@ fn build_registry_inner() -> CallErrRegistry {
     reg.merge_slice(crate::proxy::proxy_call::error_catalog::CATALOG);
     reg.merge_slice(crate::call::app::error_catalog::CATALOG);
 
-    // Addon catalogs are merged by AppState construction via
-    // `AddonRegistry::merge_error_catalogs_into` + [`install_registry`].
+    // Compiled-in addon catalogs. AppState may still merge a live AddonRegistry
+    // and install_registry() (first-wins); including features here keeps unit
+    // tests and early registry() callers consistent with the binary features.
+    #[cfg(any(feature = "addon-wholesale", feature = "addon-sbc"))]
+    crate::addons::registry::merge_compiled_addon_error_catalogs(&mut reg);
+
     reg
 }
 

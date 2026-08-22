@@ -223,13 +223,11 @@ async fn test_cluster_session_registry_publishes_and_clears_call_ownership() -> 
     // Answer from the callee side.
     let answer_sdp = "v=0\r\no=- 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 40002 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n".to_string();
     let mut answered = false;
-    let mut caller_dialog_id = None;
     for _ in 0..50 {
         let events = callee.process_dialog_events().await?;
         for event in events {
             if let TestUaEvent::IncomingCall(id, _) = event {
                 callee.answer_call(&id, Some(answer_sdp.clone())).await?;
-                caller_dialog_id = Some(id);
                 answered = true;
                 break;
             }

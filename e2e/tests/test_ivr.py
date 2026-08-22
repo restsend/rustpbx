@@ -103,7 +103,7 @@ async def test_ivr_dtmf_transfer_routing(pbx, sipbot_pool):
     _add_ivr_route(pbx.config_builder, _ivr_toml("Press 1 to continue.", "1002"))
     h.boot_pbx(pbx)
 
-    callee = await _reg_callee(sipbot_pool, pbx, 15120, "1002")
+    callee = await _reg_callee(sipbot_pool, pbx, h.ua_port(15120), "1002")
     caller = sipbot_pool.caller(
         target=f"sip:ivr@{pbx.sip_addr}", username="1001", password="123456",
         hangup=8, dtmf_flows="2s:1",
@@ -153,7 +153,7 @@ target = "{target}"
     h.boot_pbx(pbx)
 
     write_v("1002")
-    callee_v1 = await _reg_callee(sipbot_pool, pbx, 15121, "1002")
+    callee_v1 = await _reg_callee(sipbot_pool, pbx, h.ua_port(15121), "1002")
     caller1 = sipbot_pool.caller(
         target=f"sip:ivr@{pbx.sip_addr}", username="1001", password="123456",
         hangup=8, dtmf_flows="2s:1",
@@ -166,7 +166,7 @@ target = "{target}"
 
     # Publish v2 without any reload.
     write_v("1003")
-    callee_v2 = await _reg_callee(sipbot_pool, pbx, 15122, "1003")
+    callee_v2 = await _reg_callee(sipbot_pool, pbx, h.ua_port(15122), "1003")
     caller2 = sipbot_pool.caller(
         target=f"sip:ivr@{pbx.sip_addr}", username="1001", password="123456",
         hangup=8, dtmf_flows="2s:1",

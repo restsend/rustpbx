@@ -1904,7 +1904,7 @@ mod tests {
         ]]));
 
         let plan = config.to_plan();
-        let mut queue = QueueApp::new(plan, config)
+        let queue = QueueApp::new(plan, config)
             .with_agent_registry(registry.clone())
             .with_call_id("call-esc-1".to_string());
 
@@ -1971,7 +1971,7 @@ mod tests {
         );
 
         let plan = config.to_plan();
-        let mut queue = QueueApp::new(plan, config)
+        let queue = QueueApp::new(plan, config)
             .with_agent_registry(registry.clone())
             .with_call_id("call-esc-2".to_string());
 
@@ -2032,7 +2032,7 @@ mod tests {
         ]]));
 
         let plan = config.to_plan();
-        let mut queue = QueueApp::new(plan, config)
+        let queue = QueueApp::new(plan, config)
             .with_agent_registry(registry.clone())
             .with_call_id("call-esc-replace".to_string());
 

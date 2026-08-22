@@ -51,7 +51,8 @@ def ua_port(base: int) -> int:
     xdist workers run concurrently on the same host; each worker is assigned a
     non-overlapping port range (see `e2e/conftest.py`), so the same hardcoded
     port in two workers never collides. With a single worker the offset is 0
-    and behaviour is unchanged.
+    and behaviour is unchanged. `RUSTPBX_E2E_PORT_BASE` shifts a whole pytest
+    session (used when two scenario sessions run in parallel).
     """
     import os
 
@@ -124,3 +125,30 @@ async def wait_audio(ua, label: str = "UA", timeout: float = 20):
     ok = await ua.wait_output_async(r"has_audio=true", timeout=timeout)
     if not ok:
         raise AssertionError(f"{label}: no has_audio=true — {ua.output[-800:]}")
+
+
+async def wait_log(pbx, pattern: str, timeout: float = 12.0, label: str = ""):
+    """Poll the PBX log file until *pattern* (regex) appears.
+
+    Replaces fixed `asyncio.sleep(N)` calls that were sized for the worst
+    case: returns as soon as the log line lands.
+    """
+    import asyncio
+    import re
+    from pathlib import Path
+
+    log_path = Path(pbx.log_file_path) if pbx.log_file_path else None
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        if log_path and log_path.exists():
+            try:
+                text = log_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = ""
+            if re.search(pattern, text):
+                return text
+        await asyncio.sleep(0.2)
+    text = log_path.read_text(encoding="utf-8", errors="replace") if log_path and log_path.exists() else ""
+    raise AssertionError(
+        f"{label or pattern!r}: pattern not in PBX log within {timeout}s — tail:\n{text[-2000:]}"
+    )

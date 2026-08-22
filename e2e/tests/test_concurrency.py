@@ -77,7 +77,7 @@ async def test_two_concurrent_p2p_calls(pbx, sipbot_pool, cdr_dir):
     h.boot_pbx(pbx)
 
     await _reg_callee(sipbot_pool, pbx, h.ua_port(15440), "1002")
-    await _reg_callee(sipbot_pool, pbx, 15441, "1003")
+    await _reg_callee(sipbot_pool, pbx, h.ua_port(15441), "1003")
 
     c1 = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456", hangup=6,

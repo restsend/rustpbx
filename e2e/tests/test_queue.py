@@ -139,7 +139,13 @@ async def test_queue_transfer_prompt_before_connect_service_after(pbx, sipbot_po
     )
     assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
     await h.wait_rtp(caller, "caller", 20)
-    await asyncio.sleep(5)
+    # Accumulate enough recorded audio (~2.5s = ~120 packets) for the
+    # frequency analysis, then stop the call — no fixed sleep.
+    deadline = asyncio.get_event_loop().time() + 12
+    while asyncio.get_event_loop().time() < deadline:
+        if caller.get_rtp_stats().rx_packets >= 120:
+            break
+        await asyncio.sleep(0.3)
     caller.terminate()
     agent.terminate()
 
@@ -200,7 +206,11 @@ async def test_queue_transfer_prompt_completes_hold_resumes(pbx, sipbot_pool, tm
     )
     assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
     await h.wait_rtp(caller, "caller", 20)
-    await asyncio.sleep(5)
+    deadline = asyncio.get_event_loop().time() + 12
+    while asyncio.get_event_loop().time() < deadline:
+        if caller.get_rtp_stats().rx_packets >= 120:
+            break
+        await asyncio.sleep(0.3)
     caller.terminate()
 
     assert rec.exists() and rec.stat().st_size > 44, f"no caller recording: {caller.output[-800:]}"

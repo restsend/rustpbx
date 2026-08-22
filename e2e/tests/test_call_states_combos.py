@@ -76,7 +76,7 @@ def _cdr_call_id(rec: dict) -> str:
 async def test_p2p_180_200_state_sequence(pbx, sipbot_pool, cdr_dir):
     """Caller observes 180 (Ringing) then 200 (OK); CDR written with call_id."""
     h.boot_pbx(pbx)
-    await _registered_callee(sipbot_pool, pbx, 15130)
+    await _registered_callee(sipbot_pool, pbx, h.ua_port(15130))
 
     since = _now()
     caller = sipbot_pool.caller(
@@ -133,7 +133,7 @@ async def test_p2p_pre_answer_cancel_cdr(pbx, sipbot_pool, cdr_dir):
 async def test_p2p_hold_reinvite_combination(pbx, sipbot_pool, cdr_dir):
     """P2P call -> bidirectional RTP -> hangup -> completed CDR with call trace."""
     h.boot_pbx(pbx)
-    await _registered_callee(sipbot_pool, pbx, 15133)
+    await _registered_callee(sipbot_pool, pbx, h.ua_port(15133))
 
     since = _now()
     caller = sipbot_pool.caller(

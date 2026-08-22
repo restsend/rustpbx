@@ -120,7 +120,7 @@ async def test_ivr_step_provider(pbx, http_router, sipbot_pool):
     )
     h.boot_pbx(pbx)
 
-    await _reg_callee(sipbot_pool, pbx, 15161)
+    await _reg_callee(sipbot_pool, pbx, h.ua_port(15161))
     caller = sipbot_pool.caller(
         target=f"sip:ivr@{pbx.sip_addr}", username="1001", password="123456", hangup=8,
     )

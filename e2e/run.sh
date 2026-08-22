@@ -27,8 +27,12 @@
 #                        "wholesale" in this list is ignored for core fixtures
 #   RUSTPBX_SIP_PORT     (default 15070)
 #   RUSTPBX_HTTP_PORT    (default 18080)
-#   RUSTPBX_E2E_WORKERS  pytest-xdist workers (>1 runs tests in parallel,
-#                        each worker gets its own port range + artifact dir)
+#   RUSTPBX_E2E_WORKERS  pytest-xdist workers (default 2; each worker gets its
+#                        own port range + artifact dir). Set 1 to run serially.
+#   RUSTPBX_E2E_SCENARIOS_PARALLEL  "1" to run core+wholesale pytest sessions
+#                        CONCURRENTLY in `scenarios` mode (the wholesale
+#                        session gets a +20000 port base). Default: sequential.
+#   RUSTPBX_E2E_BIN      prebuilt feature-complete binary (skips any build)
 #   RUSTPBX_E2E_REPORT_DIR
 #   RUSTPBX_E2E_LOG_LEVEL
 
@@ -37,7 +41,7 @@ cd "$(dirname "$0")"
 
 PY="${PYTHON:-python3}"
 TIER="${1:-scenarios}"
-WORKERS="${RUSTPBX_E2E_WORKERS:-1}"
+WORKERS="${RUSTPBX_E2E_WORKERS:-2}"
 
 if [[ "$TIER" == "-h" || "$TIER" == "--help" ]]; then
   sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
@@ -64,7 +68,7 @@ mkdir -p "$RUSTPBX_E2E_REPORT_DIR"
 run_pytest() {
   local label="$1"
   shift
-  local args=("$@")
+  local args=(${@+"$@"})
   local report_html="$RUSTPBX_E2E_REPORT_DIR/${label}.html"
   local pytest_args=(--tb=short --durations=15)
 
@@ -76,7 +80,7 @@ run_pytest() {
     fi
   fi
 
-  pytest_args+=("${args[@]}")
+  pytest_args+=(${args[@]+"${args[@]}"})
 
   if "$PY" -c "import pytest_html" >/dev/null 2>&1; then
     pytest_args+=(--html="$report_html" --self-contained-html)
@@ -122,10 +126,22 @@ case "$TIER" in
   scenarios|scenario|"")
     fail=0
     ensure_core_addons
-    run_pytest core -m "not wholesale" || fail=1
-    # Wholesale tests call set_wholesale() themselves; keep default addons clean.
-    ensure_core_addons
-    run_pytest wholesale -m wholesale || fail=1
+    if [[ "${RUSTPBX_E2E_SCENARIOS_PARALLEL:-0}" == "1" ]]; then
+      # Both pytest sessions concurrently; the wholesale session lives in a
+      # +20000 port window (RUSTPBX_E2E_PORT_BASE shifts SIP/HTTP and every
+      # fixed UA port, incl. worker 0).
+      run_pytest core -m "not wholesale" &
+      core_pid=$!
+      RUSTPBX_E2E_PORT_BASE=20000 run_pytest wholesale -m wholesale &
+      whole_pid=$!
+      wait "$core_pid" || fail=1
+      wait "$whole_pid" || fail=1
+    else
+      run_pytest core -m "not wholesale" || fail=1
+      # Wholesale tests call set_wholesale() themselves; keep default addons clean.
+      ensure_core_addons
+      run_pytest wholesale -m wholesale || fail=1
+    fi
     exit "$fail"
     ;;
   core|pbx|cc-core)

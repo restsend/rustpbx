@@ -93,15 +93,13 @@ enum Flavor {
     /// Sequential with a caller-only service prompt after connect (keeps the
     /// queue app alive post-connect — the stale ring-timer window).
     SequentialWithServicePrompt,
-    /// Parallel, no prompts.
-    Parallel,
     /// Parallel with a caller-only service prompt after connect.
     ParallelWithServicePrompt,
 }
 
 impl Flavor {
     fn is_parallel(self) -> bool {
-        matches!(self, Flavor::Parallel | Flavor::ParallelWithServicePrompt)
+        matches!(self, Flavor::ParallelWithServicePrompt)
     }
 
     fn has_service_prompt(self) -> bool {

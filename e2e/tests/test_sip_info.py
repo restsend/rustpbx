@@ -44,7 +44,9 @@ async def test_sipbot_info_flows_delivered(pbx, sipbot_pool, rwi):
     answered = await caller.wait_output_async(r"200 OK|Call established", timeout=20)
     assert answered, f"call not answered:\n{caller.output[-1000:]}"
 
-    await asyncio.sleep(4)
+    assert await caller.wait_output_async(r"SIP INFO|INFO flow", timeout=10), (
+        f"caller never sent the SIP INFO:\n{caller.output[-1000:]}"
+    )
 
     output = caller.output
     assert "SIP INFO" in output or "INFO flow" in output, (
@@ -52,10 +54,9 @@ async def test_sipbot_info_flows_delivered(pbx, sipbot_pool, rwi):
     )
 
     if pbx.log_file_path and pbx.log_file_path.exists():
-        log = pbx.log_file_path.read_text(encoding="utf-8", errors="replace")
+        # Wait for the PBX to actually process the INFO (the UA may print
+        # its scheduling line before the message hits the wire).
+        log = await h.wait_log(pbx, r"ivr\.exec", timeout=10)
         assert "SIP INFO" in log or "INFO" in log, (
             "rustpbx did not log receiving SIP INFO"
-        )
-        assert "ivr.exec" in log, (
-            "rustpbx did not parse ivr.exec action from SIP INFO body"
         )

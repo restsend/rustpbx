@@ -293,7 +293,7 @@ async def test_ivr_bridge_play_then_disconnect_returns_to_ivr(pbx, sipbot_pool, 
         )
 
         # 2. Wait for the bridge to disconnect and the IVR to restart.
-        await asyncio.sleep(8)
+        await h.wait_log(pbx, r"(?i)starting return app", timeout=15)
 
         log = pbx.log_file_path.read_text(encoding="utf-8", errors="replace") if pbx.log_file_path else ""
         assert "starting return app" in log.lower(), (

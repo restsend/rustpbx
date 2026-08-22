@@ -1,15 +1,17 @@
 //! End-to-end cluster simulation tests.
 //!
 //! These tests simulate a **two-node cluster** sharing a single SQLite
-//! in-memory database.  They verify the complete data-flow:
+//! in-memory database.  They verify:
 //!
 //! 1. Agent status persistence (`cc_agent_presence`)
 //! 2. Shared distributed queue (`cc_acd_queue`) — enqueue, claim, dequeue
 //! 3. Cluster event message serialization (agent_status + queue_event)
 //! 4. Cross-node agent visibility (node A agents visible to node B's tick)
-//! 5. Cross-node queue claim (node B claims node A's queued call)
-//! 6. Reaper cleanup of stale rows
-//! 7. Full lifecycle: enqueue → remote claim → local enqueue → dequeue
+//! 5. **Affinity**: peers do NOT steal live calls from a healthy enqueue owner
+//! 6. Failover cleanup when enqueue owner is dead
+//! 7. Reaper **releases** stale claims (does not delete waiting calls)
+//! 8. Concurrent claim race — only one node wins
+//! 9. Cluster-wide longest-idle selection across merged agent snapshots
 
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
@@ -242,11 +244,11 @@ async fn cluster_multi_node_multi_agent_scenario() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Test 5: Reaper cleans up after node crash
+// Test 5: Reaper releases stale claims (does not delete waiting calls)
 // ═══════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn cluster_reaper_cleans_after_node_crash() {
+async fn cluster_reaper_releases_stale_claims_after_node_crash() {
     let db = shared_db().await;
     use rustpbx::addons::cc::models::cc_acd_queue;
     use sea_orm::ActiveModelTrait;
@@ -262,6 +264,7 @@ async fn cluster_reaper_cleans_after_node_crash() {
         priority: sea_orm::Set(0),
         enqueued_by: sea_orm::Set(Some("node-a".into())),
         claimed_by: sea_orm::Set(Some("node-b-crashed".into())),
+        claimed_at: sea_orm::Set(Some(old)),
         enqueued_at: sea_orm::Set(old),
     }
     .insert(&db)
@@ -298,13 +301,15 @@ async fn cluster_reaper_cleans_after_node_crash() {
     rustpbx::addons::cc::stats_writer::reap_stale_queue_rows(&db).await;
     rustpbx::addons::cc::stats_writer::reap_stale_presence(&db).await;
 
-    // Stale claimed row is gone.
-    let stale_row = cc_acd_queue::Entity::find()
+    // Waiting call survives; claim is released.
+    let row = cc_acd_queue::Entity::find()
         .filter(cc_acd_queue::Column::CallId.eq("crashed-claim"))
         .one(&db)
         .await
-        .unwrap();
-    assert!(stale_row.is_none(), "stale claimed row should be reaped");
+        .unwrap()
+        .expect("waiting call must not be deleted when claim goes stale");
+    assert!(row.claimed_by.is_none());
+    assert!(row.claimed_at.is_none());
 
     // Stale presence is gone.
     let stale_presence = cc_agent_presence::Entity::find()
@@ -319,14 +324,16 @@ async fn cluster_reaper_cleans_after_node_crash() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Test 6: Full cross-node call lifecycle
+// Test 6: Affinity — peer does not steal live call; dead owner cleaned
 // ═══════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn cluster_full_cross_node_lifecycle() {
+async fn cluster_affinity_peer_does_not_steal_live_call() {
     let db = shared_db().await;
 
-    // ── Step 1: Node A has a queued call ────────────────────────
+unsafe {     std::env::set_var("RUSTPBX_INSTANCE_ID", "node-a") };
+    rustpbx::addons::cc::stats_writer::reset_instance_id_for_test();
+
     rustpbx::addons::cc::stats_writer::shared_enqueue(
         &db,
         "lifecycle-call",
@@ -338,10 +345,22 @@ async fn cluster_full_cross_node_lifecycle() {
     )
     .await;
 
-    let q = rustpbx::addons::cc::stats_writer::read_shared_queue(&db).await;
-    assert_eq!(q.len(), 1, "step 1: one call in shared queue");
+    // Keep node-a alive via presence.
+    rustpbx::addons::cc::stats_writer::upsert_agent_presence(
+        &db,
+        "a-support-agent",
+        "idle",
+        &["support".to_string()],
+        &std::collections::HashMap::new(),
+        1,
+        0,
+        0,
+    )
+    .await;
 
-    // ── Step 2: Node B has an idle "support" agent ──────────────
+    // Node B has an idle matching agent — still must not steal.
+unsafe {     std::env::set_var("RUSTPBX_INSTANCE_ID", "node-b") };
+    rustpbx::addons::cc::stats_writer::reset_instance_id_for_test();
     rustpbx::addons::cc::stats_writer::upsert_agent_presence(
         &db,
         "b-support-agent",
@@ -354,43 +373,67 @@ async fn cluster_full_cross_node_lifecycle() {
     )
     .await;
 
-    // ── Step 3: Node B's tick finds the call and claims it ──────
-    let queue = rustpbx::addons::cc::stats_writer::read_shared_queue(&db).await;
-    let call = queue
-        .iter()
-        .find(|c| c.call_id == "lifecycle-call")
-        .unwrap();
-
-    let presence = rustpbx::addons::cc::stats_writer::read_all_agent_presence(&db).await;
-    let agent = presence
-        .iter()
-        .find(|a| a.status == "idle" && a.skills.contains(&"support".to_string()))
-        .unwrap();
-
-    // Skill match check.
+    let cleaned =
+        rustpbx::addons::cc::stats_writer::cleanup_orphaned_shared_calls(&db, "node-b").await;
     assert!(
-        call.required_skills
-            .iter()
-            .all(|s| agent.skills.contains(s)),
-        "step 3: agent skills match call requirements"
+        cleaned.is_empty(),
+        "affinity: peer must not claim live call from healthy enqueue owner"
     );
 
-    // Claim succeeds.
-    let claimed = rustpbx::addons::cc::stats_writer::shared_claim(&db, &call.call_id).await;
-    assert!(claimed, "step 3: claim should succeed");
+    let q = rustpbx::addons::cc::stats_writer::read_shared_queue(&db).await;
+    assert_eq!(q.len(), 1);
+    assert_eq!(q[0].call_id, "lifecycle-call");
+    assert_eq!(q[0].enqueued_by.as_deref(), Some("node-a"));
 
-    // ── Step 4: Node B dequeues (enqueued locally) ──────────────
-    rustpbx::addons::cc::stats_writer::shared_dequeue(&db, &call.call_id).await;
-
-    let remaining = rustpbx::addons::cc::stats_writer::read_shared_queue(&db).await;
+    // Owner dequeue (normal assign path on enqueue node).
+    rustpbx::addons::cc::stats_writer::shared_dequeue(&db, "lifecycle-call").await;
     assert!(
-        remaining.is_empty(),
-        "step 4: shared queue should be empty after dequeue"
+        rustpbx::addons::cc::stats_writer::read_shared_queue(&db)
+            .await
+            .is_empty()
     );
 
-    // ── Step 5: Verify no orphan rows remain ────────────────────
-    let count = rustpbx::addons::cc::stats_writer::count_shared_queue(&db, "sg_support").await;
-    assert_eq!(count, 0, "step 5: no orphan rows in sg_support");
+unsafe {     std::env::remove_var("RUSTPBX_INSTANCE_ID") };
+    rustpbx::addons::cc::stats_writer::reset_instance_id_for_test();
+}
+
+#[tokio::test]
+async fn cluster_failover_cleans_dead_owner_orphan() {
+    let db = shared_db().await;
+    use rustpbx::addons::cc::models::cc_acd_queue;
+    use sea_orm::ActiveModelTrait;
+
+    cc_acd_queue::ActiveModel {
+        call_id: sea_orm::Set("dead-owner-call".into()),
+        queue_id: sea_orm::Set("sg_support".into()),
+        trace_id: sea_orm::Set("t".into()),
+        caller_number: sea_orm::Set("3001".into()),
+        required_skills: sea_orm::Set(serde_json::json!(["support"])),
+        priority: sea_orm::Set(5),
+        enqueued_by: sea_orm::Set(Some("node-a-dead".into())),
+        claimed_by: sea_orm::Set(None),
+        claimed_at: sea_orm::Set(None),
+        enqueued_at: sea_orm::Set(chrono::Utc::now() - chrono::Duration::seconds(20)),
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+
+unsafe {     std::env::set_var("RUSTPBX_INSTANCE_ID", "node-b") };
+    rustpbx::addons::cc::stats_writer::reset_instance_id_for_test();
+
+    let cleaned =
+        rustpbx::addons::cc::stats_writer::cleanup_orphaned_shared_calls(&db, "node-b").await;
+    assert_eq!(cleaned.len(), 1);
+    assert_eq!(cleaned[0].call_id, "dead-owner-call");
+    assert!(
+        rustpbx::addons::cc::stats_writer::read_shared_queue(&db)
+            .await
+            .is_empty()
+    );
+
+unsafe {     std::env::remove_var("RUSTPBX_INSTANCE_ID") };
+    rustpbx::addons::cc::stats_writer::reset_instance_id_for_test();
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -498,6 +541,84 @@ fn acd_snapshot_from_presence(
     }
 }
 
+#[tokio::test]
+async fn cluster_merged_presence_feeds_longest_idle() {
+    let db = shared_db().await;
+
+unsafe {     std::env::set_var("RUSTPBX_INSTANCE_ID", "node-a") };
+    rustpbx::addons::cc::stats_writer::reset_instance_id_for_test();
+    rustpbx::addons::cc::stats_writer::upsert_agent_presence(
+        &db,
+        "local-agent",
+        "idle",
+        &["support".to_string()],
+        &std::collections::HashMap::new(),
+        1,
+        0,
+        0,
+    )
+    .await;
+
+unsafe {     std::env::set_var("RUSTPBX_INSTANCE_ID", "node-b") };
+    rustpbx::addons::cc::stats_writer::reset_instance_id_for_test();
+    rustpbx::addons::cc::stats_writer::upsert_agent_presence(
+        &db,
+        "remote-agent",
+        "idle",
+        &["support".to_string()],
+        &std::collections::HashMap::new(),
+        1,
+        0,
+        0,
+    )
+    .await;
+
+    use rustpbx::addons::cc::models::cc_agent_presence;
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter};
+    let record = cc_agent_presence::Entity::find()
+        .filter(cc_agent_presence::Column::AgentId.eq("remote-agent"))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut active: cc_agent_presence::ActiveModel = record.into();
+    active.status_since = sea_orm::Set(chrono::Utc::now() - chrono::Duration::seconds(400));
+    active.update(&db).await.unwrap();
+
+    let all = rustpbx::addons::cc::stats_writer::read_all_agent_presence(&db).await;
+    assert_eq!(all.len(), 2);
+
+    let mut snapshots: Vec<_> = all.iter().map(acd_snapshot_from_presence).collect();
+    for (snap, row) in snapshots.iter_mut().zip(all.iter()) {
+        snap.idle_duration_secs = (chrono::Utc::now() - row.status_since)
+            .num_seconds()
+            .max(0) as u64;
+    }
+
+    use rustpbx::addons::cc::acd::config::{PresenceStateKind, StrategyConfig, StrategyType};
+    use rustpbx::addons::cc::acd::strategy::select_best_agent;
+    let config = StrategyConfig {
+        strategy_type: StrategyType::LongestIdle,
+        ..Default::default()
+    };
+    let mut counter = 0u64;
+    let best = select_best_agent(
+        &mut snapshots,
+        &config,
+        &mut counter,
+        &["support".to_string()],
+        &[PresenceStateKind::Idle],
+    );
+    assert_eq!(
+        best.unwrap().agent_id,
+        "remote-agent",
+        "enqueue node must pick globally longest-idle agent from merged view"
+    );
+
+unsafe {     std::env::remove_var("RUSTPBX_INSTANCE_ID") };
+    rustpbx::addons::cc::stats_writer::reset_instance_id_for_test();
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Call-owner session registry: dialog alias + transfer leg contract
 // ═══════════════════════════════════════════════════════════════════
@@ -505,7 +626,7 @@ fn acd_snapshot_from_presence(
 #[tokio::test]
 async fn cluster_session_registry_dialog_alias_routes_to_owner() {
     use rustpbx::call::runtime::{
-        DbSessionRegistry, SessionInfo, SessionRegistry, resolve_owner_and_session,
+        DbSessionRegistry, SessionInfo, resolve_owner_and_session,
     };
     use std::time::Duration;
 

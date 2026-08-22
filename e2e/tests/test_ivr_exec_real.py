@@ -101,7 +101,7 @@ type = "hangup"
             register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
             ring_secs=1, answer_mode="echo", hangup_after=60,
         )
-        await asyncio.sleep(3)
+        await h.wait_registered(agent)
 
         # ── 4. Caller (1001) places the call AND sends ivr.exec + DTMF.   ─
         # Matches the topology of e2e/tests/test_ivr_queue.py::test_ivr_exec_mid_call
