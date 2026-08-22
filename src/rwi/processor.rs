@@ -978,7 +978,6 @@ impl RwiCommandProcessor {
 
         // CDR data for call completion reporting
         let cdr_sender = server.callrecord_sender.clone();
-        let cdr_answered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cdr_start_time = chrono::Utc::now();
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -996,11 +995,12 @@ impl RwiCommandProcessor {
             let cdr_callee = callee_display.clone();
             let cdr_start = cdr_start_time;
             let cdr_sender_owned = cdr_sender.clone();
-            let cdr_answered = cdr_answered.clone();
-            let cdr_answered_for_store = cdr_answered.clone();
             let cdr_record_files = record_files.clone();
+            let mut cdr_ring_time: Option<chrono::DateTime<chrono::Utc>> = None;
+            let mut cdr_answer_time: Option<chrono::DateTime<chrono::Utc>> = None;
             let mut cdr_rwi_call_record_guard = Some(rwi_call_record_guard);
-            let mut cleanup = move || {
+            let mut cleanup = move |ring_time: Option<chrono::DateTime<chrono::Utc>>,
+                                    answer_time: Option<chrono::DateTime<chrono::Utc>>| {
                 let Some(rwi_call_record_guard) = cdr_rwi_call_record_guard.take() else {
                     return;
                 };
@@ -1008,7 +1008,7 @@ impl RwiCommandProcessor {
                 if let Some(ref sender) = cdr_sender_owned.as_ref() {
                     use crate::callrecord::CallRecordHangupReason;
                     let end_time = chrono::Utc::now();
-                    let answered = cdr_answered.load(std::sync::atomic::Ordering::Relaxed);
+                    let answered = answer_time.is_some();
                     // Attach the recorder media when a recording was started on
                     // this call (originate `record` option or mid-call
                     // record.start) so the CDR carries recording_url and the
@@ -1033,8 +1033,8 @@ impl RwiCommandProcessor {
                         caller: cdr_caller.clone(),
                         callee: cdr_callee.clone(),
                         start_time: cdr_start,
-                        ring_time: None,
-                        answer_time: if answered { Some(cdr_start) } else { None },
+                        ring_time,
+                        answer_time,
                         end_time,
                         status_code: if answered { 200 } else { 0 },
                         hangup_reason: Some(if answered {
@@ -1174,7 +1174,7 @@ impl RwiCommandProcessor {
                         sip_status: None,
                     });
                     cancel_token.cancel();
-                    cleanup();
+                    cleanup(cdr_ring_time, cdr_answer_time);
                     return;
                 }
             };
@@ -1277,6 +1277,9 @@ impl RwiCommandProcessor {
                                     }
                                     Some(rsipstack::dialog::dialog::DialogState::Early(_, ref response)) => {
                                         let code = response.status_code().code();
+                                        if cdr_ring_time.is_none() {
+                                            cdr_ring_time = Some(chrono::Utc::now());
+                                        }
                                         {
                                             let gw = gateway.read();
                                             if code == 180 {
@@ -1448,7 +1451,7 @@ impl RwiCommandProcessor {
                 Ok(Some(Ok((dialog, Some(resp)))))
                     if resp.status_code().kind() == rsipstack::sip::StatusCodeKind::Successful =>
                 {
-                    cdr_answered_for_store.store(true, std::sync::atomic::Ordering::Relaxed);
+                    cdr_answer_time = Some(chrono::Utc::now());
 
                     // A successful do_invite registers the confirmed client dialog in
                     // DialogLayer. Keep its guard alive for the entire UAC session so
@@ -1575,7 +1578,7 @@ impl RwiCommandProcessor {
                     if let Err(e) = session_join.await {
                         tracing::warn!(%call_id, error = %e, "UAC session join failed");
                     }
-                    cleanup();
+                    cleanup(cdr_ring_time, cdr_answer_time);
                     return;
                 }
                 Ok(Some(Ok((_dialog, resp_opt)))) => {
@@ -1639,7 +1642,7 @@ impl RwiCommandProcessor {
             }
             cancel_token.cancel();
             registry.remove(&call_id);
-            cleanup();
+            cleanup(cdr_ring_time, cdr_answer_time);
         });
 
         Ok(CommandResult::Originated {

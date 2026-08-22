@@ -904,7 +904,10 @@ pub(crate) struct CallRecordRow {
 impl CallRecordRow {
     pub fn from_record(record: &CallRecord) -> Self {
         let details = &record.details;
-        let duration_secs = (record.end_time - record.start_time).num_seconds().max(0) as i32;
+        let duration_secs = record
+            .answer_time
+            .map(|answer_time| (record.end_time - answer_time).num_seconds().max(0) as i32)
+            .unwrap_or(0);
         let direction = details.direction.trim().to_ascii_lowercase();
         let status = details.status.trim().to_ascii_lowercase();
 
@@ -938,6 +941,18 @@ impl CallRecordRow {
         if !record.sip_leg_roles.is_empty() {
             let json = serde_json::to_string(&record.sip_leg_roles).unwrap_or_default();
             metadata_map.insert("sip_leg_roles".to_string(), serde_json::Value::String(json));
+        }
+        if let Some(ring_time) = record.ring_time {
+            metadata_map.insert(
+                "ring_time".to_string(),
+                serde_json::Value::String(ring_time.to_rfc3339()),
+            );
+        }
+        if let Some(answer_time) = record.answer_time {
+            metadata_map.insert(
+                "answer_time".to_string(),
+                serde_json::Value::String(answer_time.to_rfc3339()),
+            );
         }
         let metadata = serde_json::to_value(&metadata_map).ok();
 

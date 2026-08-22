@@ -1512,8 +1512,8 @@ fn build_record_payload(
     let rewrite_contact = Option::<String>::None;
     let rewrite_destination = Option::<String>::None;
     let status_code = Option::<u16>::None;
-    let ring_time = Option::<String>::None;
-    let answer_time = Option::<String>::None;
+    let ring_time = metadata_string(record.metadata.as_ref(), "ring_time");
+    let answer_time = metadata_string(record.metadata.as_ref(), "answer_time");
     let hangup_reason = Option::<String>::None;
     let hangup_messages = Vec::<Value>::new();
 
@@ -2512,6 +2512,8 @@ mod tests {
     async fn build_record_payload_contains_basic_fields() {
         let db = setup_db().await;
         let state = create_console_state(db.clone()).await;
+        let ring_time = Utc::now();
+        let answer_time = ring_time + chrono::Duration::seconds(5);
 
         let record = call_record::ActiveModel {
             call_id: Set("call-1".into()),
@@ -2519,6 +2521,10 @@ mod tests {
             status: Set("completed".into()),
             started_at: Set(Utc::now()),
             duration_secs: Set(60),
+            metadata: Set(Some(json!({
+                "ring_time": ring_time.to_rfc3339(),
+                "answer_time": answer_time.to_rfc3339(),
+            }))),
             has_transcript: Set(false),
             transcript_status: Set("pending".into()),
             created_at: Set(Utc::now()),
@@ -2534,6 +2540,8 @@ mod tests {
             .expect("related context");
         let payload = build_record_payload(&record, &related, &state, None);
         assert_eq!(payload["id"], 1);
+        assert_eq!(payload["ring_time"], ring_time.to_rfc3339());
+        assert_eq!(payload["answer_time"], answer_time.to_rfc3339());
     }
 
     #[tokio::test]
@@ -2645,6 +2653,8 @@ mod tests {
             .expect("related context");
         let payload = build_record_payload(&record, &related, &state, None);
         assert!(payload["error"].is_null());
+        assert!(payload["ring_time"].is_null());
+        assert!(payload["answer_time"].is_null());
     }
 
     #[tokio::test]

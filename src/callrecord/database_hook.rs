@@ -90,8 +90,10 @@ pub async fn persist_call_record(
     let transcript_status = details.transcript_status.clone();
     let transcript_language = details.transcript_language.clone();
     let tags = details.tags.clone();
-    let duration_secs =
-        std::cmp::Ord::max((record.end_time - record.start_time).num_seconds(), 0) as i32;
+    let duration_secs = record
+        .answer_time
+        .map(|answer_time| (record.end_time - answer_time).num_seconds().max(0) as i32)
+        .unwrap_or(0);
 
     let caller_uri = rustpbx_models::call_record::normalize_endpoint_uri(&record.caller);
     let callee_uri = rustpbx_models::call_record::normalize_endpoint_uri(&record.callee);
@@ -141,6 +143,18 @@ pub async fn persist_call_record(
             if !record.sip_leg_roles.is_empty() {
                 let json = serde_json::to_string(&record.sip_leg_roles).unwrap_or_default();
                 m.insert("sip_leg_roles".to_string(), serde_json::Value::String(json));
+            }
+            if let Some(ring_time) = record.ring_time {
+                m.insert(
+                    "ring_time".to_string(),
+                    serde_json::Value::String(ring_time.to_rfc3339()),
+                );
+            }
+            if let Some(answer_time) = record.answer_time {
+                m.insert(
+                    "answer_time".to_string(),
+                    serde_json::Value::String(answer_time.to_rfc3339()),
+                );
             }
             // Remember the path the CDR file was actually written to so the
             // console can still locate it after the storage root is changed in

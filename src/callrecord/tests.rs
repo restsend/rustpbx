@@ -18,6 +18,8 @@ fn make_record() -> CallRecord {
     CallRecord {
         call_id: "test-call-id".to_string(),
         start_time: now,
+        ring_time: Some(now + chrono::Duration::seconds(5)),
+        answer_time: Some(now + chrono::Duration::seconds(10)),
         end_time: now + chrono::Duration::seconds(30),
         caller: "+1234567890".to_string(),
         callee: "+0987654321".to_string(),
@@ -72,8 +74,34 @@ fn test_call_record_row_from_record() {
     assert_eq!(row.from_number.as_deref(), Some("+1234567890"));
     assert_eq!(row.caller_name.as_deref(), Some("Alice"));
     assert!(row.ended_at.is_some());
-    assert_eq!(row.duration_secs, 30);
+    let ring_time = record.ring_time.unwrap().to_rfc3339();
+    let answer_time = record.answer_time.unwrap().to_rfc3339();
+    assert_eq!(
+        row.metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("ring_time"))
+            .and_then(serde_json::Value::as_str),
+        Some(ring_time.as_str())
+    );
+    assert_eq!(
+        row.metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("answer_time"))
+            .and_then(serde_json::Value::as_str),
+        Some(answer_time.as_str())
+    );
+    assert_eq!(row.duration_secs, 20);
     assert!(row.has_transcript == false);
+}
+
+#[test]
+fn test_call_record_row_duration_is_zero_without_answer() {
+    let mut record = make_record();
+    record.answer_time = None;
+
+    let row = CallRecordRow::from_record(&record);
+
+    assert_eq!(row.duration_secs, 0);
 }
 
 // ── today_string / derive_daily_url ─────────────────────────────────────────────
@@ -176,6 +204,23 @@ async fn test_persist_call_record_nulls_stale_fk_ids() {
     assert_eq!(row.extension_id, None);
     assert_eq!(row.sip_trunk_id, None);
     assert_eq!(row.route_id, None);
+    let ring_time = record.ring_time.unwrap().to_rfc3339();
+    let answer_time = record.answer_time.unwrap().to_rfc3339();
+    assert_eq!(
+        row.metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("ring_time"))
+            .and_then(serde_json::Value::as_str),
+        Some(ring_time.as_str())
+    );
+    assert_eq!(
+        row.metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("answer_time"))
+            .and_then(serde_json::Value::as_str),
+        Some(answer_time.as_str())
+    );
+    assert_eq!(row.duration_secs, 20);
 }
 
 /// When the FK referents DO exist, the ids must be preserved.

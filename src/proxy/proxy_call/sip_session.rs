@@ -5874,8 +5874,11 @@ impl SipSession {
                 }
 
                 state = callee_state_rx.recv() => {
-                    if let Some(DialogState::Early(_, ref response)) = state {
-                        // Any provisional response (100/180/183) proves the downstream
+                    if let Some(DialogState::Trying(_)) = state {
+                        // rsipstack reports 100 Trying separately from Early.
+                        no_trying_dismissed = true;
+                    } else if let Some(DialogState::Early(_, ref response)) = state {
+                        // Any non-100 provisional response also proves the downstream
                         // trunk is alive; dismiss the no-trying timer from now on.
                         no_trying_dismissed = true;
 
