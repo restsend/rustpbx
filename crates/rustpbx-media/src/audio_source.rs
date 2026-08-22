@@ -1,10 +1,14 @@
 use anyhow::{Result, anyhow};
 use audio_codec::{BoxedResampler, CodecType, create_decoder};
 use std::path::Path;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::wav_reader::{WavFormat, WavReader, format_issues};
+
+const AUDIO_DOWNLOAD_RETRY_BACKOFF: Duration = Duration::from_millis(10);
+const AUDIO_DOWNLOAD_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Return the path portion of a URL/file string, stripping any query string
 /// (e.g. `?expire=...&signature=...`) so extension detection on a signed/
@@ -79,19 +83,71 @@ impl FileAudioSource {
     }
 
     async fn download_bytes(url: &str) -> Result<Vec<u8>> {
-        let response = rustpbx_http_util::shared_keepalive_client()
+        Self::download_bytes_with_timeout(url, AUDIO_DOWNLOAD_ATTEMPT_TIMEOUT).await
+    }
+
+    async fn download_bytes_with_timeout(url: &str, attempt_timeout: Duration) -> Result<Vec<u8>> {
+        let initial_error = match rustpbx_http_util::shared_keepalive_client()
             .get(url)
+            .timeout(attempt_timeout)
             .send()
             .await
-            .map_err(|e| anyhow!("Failed to download audio file: {}", e))?;
+        {
+            Ok(response) => {
+                if !response.status().is_success() {
+                    return Err(anyhow!("HTTP error: {}", response.status()));
+                }
+                match response.bytes().await {
+                    Ok(bytes) => return Ok(bytes.to_vec()),
+                    Err(error) => anyhow!("Failed to read response body: {}", error.without_url()),
+                }
+            }
+            Err(error) => anyhow!("Audio download request failed: {}", error.without_url()),
+        };
+
+        warn!(
+            error = %initial_error,
+            "Audio download failed on pooled connection; retrying with a fresh connection"
+        );
+        tokio::time::sleep(AUDIO_DOWNLOAD_RETRY_BACKOFF).await;
+        let fresh_client =
+            rustpbx_http_util::build_keepalive_client(None, None).map_err(|retry_error| {
+                anyhow!(
+                    "Failed to download audio file: initial request: {}; fresh client: {}",
+                    initial_error,
+                    retry_error
+                )
+            })?;
+        let response = fresh_client
+            .get(url)
+            .timeout(attempt_timeout)
+            .send()
+            .await
+            .map_err(|error| {
+                anyhow!(
+                    "Failed to download audio file: initial request: {}; fresh retry: {}",
+                    initial_error,
+                    error.without_url()
+                )
+            })?;
         if !response.status().is_success() {
-            return Err(anyhow!("HTTP error: {}", response.status()));
+            return Err(anyhow!(
+                "Failed to download audio file: initial request: {}; fresh retry: HTTP error: {}",
+                initial_error,
+                response.status()
+            ));
         }
-        let bytes = response
+        response
             .bytes()
             .await
-            .map_err(|e| anyhow!("Failed to read response body: {}", e))?;
-        Ok(bytes.to_vec())
+            .map(|bytes| bytes.to_vec())
+            .map_err(|error| {
+                anyhow!(
+                    "Failed to download audio file: initial request: {}; fresh retry: {}",
+                    initial_error,
+                    error.without_url()
+                )
+            })
     }
 }
 
@@ -1148,6 +1204,317 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    fn serve_stale_keepalive_then_fresh(body: Vec<u8>) -> (String, std::thread::JoinHandle<bool>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind local server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            use std::time::{Duration, Instant};
+
+            fn read_request(stream: &mut std::net::TcpStream) {
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .expect("set read timeout");
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = stream.read(&mut buf).expect("read request");
+                    assert!(read > 0, "client closed before sending request");
+                    request.extend_from_slice(&buf[..read]);
+                }
+            }
+
+            fn write_response(stream: &mut std::net::TcpStream, body: &[u8], connection: &str) {
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: {connection}\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(header.as_bytes()).expect("write headers");
+                stream.write_all(body).expect("write body");
+                stream.flush().expect("flush response");
+            }
+
+            let (mut pooled, _) = listener.accept().expect("accept pooled connection");
+            read_request(&mut pooled);
+            write_response(&mut pooled, &body, "keep-alive");
+
+            read_request(&mut pooled);
+            drop(pooled);
+
+            listener.set_nonblocking(true).expect("set nonblocking");
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut fresh, _)) => {
+                        read_request(&mut fresh);
+                        write_response(&mut fresh, &body, "close");
+                        return true;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept fresh connection: {error}"),
+                }
+            }
+            false
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    fn serve_partial_body_then_fresh(body: Vec<u8>) -> (String, std::thread::JoinHandle<bool>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind local server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            use std::time::{Duration, Instant};
+
+            fn read_request(stream: &mut std::net::TcpStream) {
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .expect("set read timeout");
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = stream.read(&mut buf).expect("read request");
+                    assert!(read > 0, "client closed before sending request");
+                    request.extend_from_slice(&buf[..read]);
+                }
+            }
+
+            let (mut pooled, _) = listener.accept().expect("accept pooled connection");
+            read_request(&mut pooled);
+            let seed_header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                body.len()
+            );
+            pooled
+                .write_all(seed_header.as_bytes())
+                .expect("write seed headers");
+            pooled.write_all(&body).expect("write seed body");
+            pooled.flush().expect("flush seed response");
+
+            read_request(&mut pooled);
+            let partial_header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            pooled
+                .write_all(partial_header.as_bytes())
+                .expect("write partial headers");
+            pooled
+                .write_all(&body[..body.len() / 2])
+                .expect("write partial body");
+            pooled.flush().expect("flush partial response");
+            drop(pooled);
+
+            listener.set_nonblocking(true).expect("set nonblocking");
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut fresh, _)) => {
+                        read_request(&mut fresh);
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        fresh
+                            .write_all(header.as_bytes())
+                            .expect("write fresh headers");
+                        fresh.write_all(&body).expect("write fresh body");
+                        fresh.flush().expect("flush fresh response");
+                        return true;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept fresh connection: {error}"),
+                }
+            }
+            false
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    fn serve_http_error() -> (String, std::thread::JoinHandle<usize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind local server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .expect("write error response");
+            stream.flush().expect("flush error response");
+            1
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    fn serve_silent_then_fresh(body: Vec<u8>) -> (String, std::thread::JoinHandle<bool>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind local server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            use std::time::{Duration, Instant};
+
+            fn read_request(stream: &mut std::net::TcpStream) {
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .expect("set read timeout");
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = stream.read(&mut buf).expect("read request");
+                    assert!(read > 0, "client closed before sending request");
+                    request.extend_from_slice(&buf[..read]);
+                }
+            }
+
+            let (mut pooled, _) = listener.accept().expect("accept pooled connection");
+            read_request(&mut pooled);
+            let seed_header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                body.len()
+            );
+            pooled
+                .write_all(seed_header.as_bytes())
+                .expect("write seed headers");
+            pooled.write_all(&body).expect("write seed body");
+            pooled.flush().expect("flush seed response");
+
+            read_request(&mut pooled);
+            listener.set_nonblocking(true).expect("set nonblocking");
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut fresh, _)) => {
+                        read_request(&mut fresh);
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        fresh
+                            .write_all(header.as_bytes())
+                            .expect("write fresh headers");
+                        fresh.write_all(&body).expect("write fresh body");
+                        fresh.flush().expect("flush fresh response");
+                        drop(pooled);
+                        return true;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept fresh connection: {error}"),
+                }
+            }
+            false
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    #[tokio::test]
+    async fn test_audio_download_retries_transport_failure_on_fresh_connection() {
+        let pcm = sine_pcm(800, 8000, 440.0, 16_000.0);
+        let wav = build_wav(0x0001, 8000, 1, 16, &pcm_bytes(&pcm));
+        let (base, server) = serve_stale_keepalive_then_fresh(wav);
+        let url = format!("{base}/prompt.wav");
+
+        FileAudioSource::new(url.clone(), false)
+            .await
+            .expect("seed pooled connection");
+        let second = FileAudioSource::new(url, false).await;
+        let used_fresh_connection = server.join().expect("join HTTP server");
+
+        let mut source = second.expect("retry transport failure on a fresh connection");
+        assert!(used_fresh_connection, "retry must use a fresh connection");
+        let mut decoded = vec![0i16; pcm.len()];
+        assert_eq!(source.read_samples(&mut decoded), pcm.len());
+        assert_eq!(decoded, pcm);
+    }
+
+    #[tokio::test]
+    async fn test_audio_download_retries_partial_body_on_fresh_connection() {
+        let pcm = sine_pcm(800, 8000, 440.0, 16_000.0);
+        let wav = build_wav(0x0001, 8000, 1, 16, &pcm_bytes(&pcm));
+        let (base, server) = serve_partial_body_then_fresh(wav);
+        let url = format!("{base}/prompt.wav");
+
+        FileAudioSource::new(url.clone(), false)
+            .await
+            .expect("seed pooled connection");
+        let result = FileAudioSource::new(url, false).await;
+        let used_fresh_connection = server.join().expect("join HTTP server");
+
+        let mut source = result.expect("partial body should retry on fresh connection");
+        assert!(used_fresh_connection, "retry must use a fresh connection");
+        let mut decoded = vec![0i16; pcm.len()];
+        assert_eq!(source.read_samples(&mut decoded), pcm.len());
+        assert_eq!(decoded, pcm);
+    }
+
+    #[tokio::test]
+    async fn test_audio_download_does_not_retry_http_error() {
+        let (base, server) = serve_http_error();
+        let result = FileAudioSource::new(format!("{base}/prompt.wav"), false).await;
+        let requests = server.join().expect("join HTTP server");
+
+        let error = match result {
+            Ok(_) => panic!("HTTP error should fail without retry"),
+            Err(error) => error,
+        };
+        assert_eq!(error.to_string(), "HTTP error: 404 Not Found");
+        assert_eq!(requests, 1, "HTTP status must not trigger a retry");
+    }
+
+    #[tokio::test]
+    async fn test_audio_download_error_does_not_expose_signed_url() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind local server");
+        let addr = listener.local_addr().expect("local addr");
+        drop(listener);
+        let signature = "review-secret";
+        let url = format!("http://{addr}/prompt.wav?signature={signature}");
+
+        let result = FileAudioSource::download_bytes_with_timeout(
+            &url,
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+        let error = result.expect_err("closed endpoint should fail both attempts");
+        let message = error.to_string();
+
+        assert!(
+            !message.contains(signature),
+            "error exposed signed URL: {message}"
+        );
+        assert!(!message.contains(&url), "error exposed full URL: {message}");
+    }
+
+    #[tokio::test]
+    async fn test_audio_download_retries_after_attempt_timeout() {
+        let pcm = sine_pcm(800, 8000, 440.0, 16_000.0);
+        let wav = build_wav(0x0001, 8000, 1, 16, &pcm_bytes(&pcm));
+        let (base, server) = serve_silent_then_fresh(wav.clone());
+        let url = format!("{base}/prompt.wav");
+
+        FileAudioSource::new(url.clone(), false)
+            .await
+            .expect("seed pooled connection");
+        let bytes = FileAudioSource::download_bytes_with_timeout(
+            &url,
+            std::time::Duration::from_millis(50),
+        )
+        .await
+        .expect("attempt timeout should retry on fresh connection");
+        let used_fresh_connection = server.join().expect("join HTTP server");
+
+        assert!(used_fresh_connection, "retry must use a fresh connection");
+        assert_eq!(bytes, wav);
     }
 
     #[tokio::test]

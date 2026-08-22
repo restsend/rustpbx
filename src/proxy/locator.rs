@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use rsipstack::{
+    sip::uri::ParamsExt,
     transaction::endpoint::{TargetLocator, TransportEventInspector},
     transport::{SipAddr, TransportEvent},
 };
@@ -321,6 +322,57 @@ impl DialogTargetLocator {
             .iter()
             .any(|addr| addr.addr.to_string() == home_proxy.addr.to_string())
     }
+
+    fn is_exact_contact(location: &Location, uri: &rsipstack::sip::Uri) -> bool {
+        location.aor == *uri
+    }
+
+    fn effective_port(uri: &rsipstack::sip::Uri) -> u16 {
+        uri.host_with_port
+            .port
+            .unwrap_or_else(|| {
+                uri.transport()
+                    .copied()
+                    .unwrap_or(if uri.scheme == Some(rsipstack::sip::Scheme::Sips) {
+                        rsipstack::sip::Transport::Tls
+                    } else {
+                        rsipstack::sip::Transport::Udp
+                    })
+                    .default_port()
+            })
+            .0
+    }
+
+    fn is_registered_aor(location: &Location, uri: &rsipstack::sip::Uri) -> bool {
+        let Some(registered_aor) = location.registered_aor.as_ref() else {
+            return false;
+        };
+        registered_aor.scheme == uri.scheme
+            && registered_aor.user() == uri.user()
+            && registered_aor
+                .host()
+                .to_string()
+                .eq_ignore_ascii_case(&uri.host().to_string())
+            && Self::effective_port(registered_aor) == Self::effective_port(uri)
+    }
+
+    fn is_gruu(location: &Location, uri: &rsipstack::sip::Uri) -> bool {
+        let Some(gruu) = location.gruu.as_ref() else {
+            return false;
+        };
+        let uri = uri.to_string();
+        gruu == &uri || gruu.eq_ignore_ascii_case(&uri)
+    }
+
+    fn is_home_proxy_target(location: &Location, uri: &rsipstack::sip::Uri) -> bool {
+        let Some(home_proxy) = location.home_proxy.as_ref() else {
+            return false;
+        };
+        let Some(registered_aor) = location.registered_aor.as_ref() else {
+            return false;
+        };
+        registered_aor.user() == uri.user() && home_proxy.addr == uri.host_with_port
+    }
 }
 
 #[async_trait]
@@ -330,6 +382,34 @@ impl TargetLocator for DialogTargetLocator {
         if let Ok(locs) = &locs
             && !locs.is_empty()
         {
+            let has_exact_contact = locs
+                .iter()
+                .any(|location| Self::is_exact_contact(location, uri));
+            let has_registered_aor = !has_exact_contact
+                && locs
+                    .iter()
+                    .any(|location| Self::is_registered_aor(location, uri));
+            let has_gruu = !has_exact_contact
+                && !has_registered_aor
+                && locs.iter().any(|location| Self::is_gruu(location, uri));
+            let is_invalid_contact = is_webrtc_invalid_host(&uri.host().to_string());
+            let locs: Vec<_> = locs
+                .iter()
+                .filter(|location| {
+                    if has_exact_contact {
+                        Self::is_exact_contact(location, uri)
+                    } else if has_registered_aor {
+                        Self::is_registered_aor(location, uri)
+                    } else if has_gruu {
+                        Self::is_gruu(location, uri)
+                    } else if is_invalid_contact {
+                        true
+                    } else {
+                        Self::is_home_proxy_target(location, uri)
+                    }
+                })
+                .collect();
+
             if let Some(loc) = locs.iter().find(|loc| {
                 if !self.cluster_enabled {
                     return false;
@@ -1250,8 +1330,10 @@ mod tests {
     #[tokio::test]
     async fn dialog_target_locator_routes_registered_aor_via_home_proxy() {
         let locator = MemoryLocator::new();
-        let registered_aor: rsipstack::sip::Uri = "sip:alice@10.0.0.1".try_into().unwrap();
-        let target_uri: rsipstack::sip::Uri = "sip:alice@10.0.0.1:5060".try_into().unwrap();
+        let registered_aor: rsipstack::sip::Uri =
+            "sip:line@example.com;transport=ws".try_into().unwrap();
+        let target_uri: rsipstack::sip::Uri =
+            "sip:line@example.com:80;transport=ws".try_into().unwrap();
 
         let destination = SipAddr {
             r#type: Some(Transport::Udp),
@@ -1265,10 +1347,12 @@ mod tests {
 
         locator
             .register(
-                "alice",
-                Some("10.0.0.1"),
+                "line",
+                Some("example.com"),
                 Location {
-                    aor: registered_aor.clone(),
+                    aor: "sip:browser@random.invalid;transport=ws"
+                        .try_into()
+                        .unwrap(),
                     expires: 3600,
                     destination: Some(destination.clone()),
                     home_proxy: Some(home_proxy.clone()),
@@ -1286,6 +1370,45 @@ mod tests {
             result, home_proxy,
             "DialogTargetLocator should route registered AOR via home_proxy"
         );
+    }
+
+    #[tokio::test]
+    async fn dialog_target_locator_routes_gruu_to_registered_destination() {
+        let locator = MemoryLocator::new();
+        let gruu_uri: rsipstack::sip::Uri = format!("sip:gruu-user{}{}", "@", "example.test")
+            .try_into()
+            .unwrap();
+        let destination = SipAddr {
+            r#type: Some(Transport::Udp),
+            addr: HostWithPort::try_from("192.168.1.20:5060").unwrap(),
+        };
+
+        locator
+            .register(
+                "gruu-user",
+                Some("example.test"),
+                Location {
+                    aor: format!("sip:contact{}{}", "@", "device.test")
+                        .try_into()
+                        .unwrap(),
+                    registered_aor: Some(
+                        format!("sip:gruu-user{}{}", "@", "canonical.test")
+                            .try_into()
+                            .unwrap(),
+                    ),
+                    destination: Some(destination.clone()),
+                    gruu: Some(gruu_uri.to_string()),
+                    expires: 3600,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false);
+        let result = target_locator.locate(&gruu_uri).await.unwrap();
+
+        assert_eq!(result, destination);
     }
 
     #[tokio::test]
@@ -1532,6 +1655,99 @@ mod tests {
         assert_eq!(
             result, destination,
             "DialogTargetLocator should keep contact destination when URI is not registered AOR"
+        );
+    }
+
+    #[tokio::test]
+    async fn dialog_target_locator_does_not_replace_an_unregistered_explicit_contact() {
+        let locator = MemoryLocator::new();
+        let registered_contact: rsipstack::sip::Uri =
+            "sip:caller@192.168.2.3:62106".try_into().unwrap();
+        let dialog_contact: rsipstack::sip::Uri = "sip:caller@127.0.0.1:5061".try_into().unwrap();
+
+        let registered_destination = SipAddr {
+            r#type: Some(Transport::Udp),
+            addr: HostWithPort::try_from("192.168.2.3:62106").unwrap(),
+        };
+
+        locator
+            .register(
+                "caller",
+                Some("localhost"),
+                Location {
+                    aor: registered_contact,
+                    registered_aor: Some("sip:caller@localhost".try_into().unwrap()),
+                    expires: 3600,
+                    destination: Some(registered_destination),
+                    last_modified: Some(Instant::now()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false);
+        let result = target_locator.locate(&dialog_contact).await.unwrap();
+
+        assert_eq!(
+            result,
+            SipAddr::try_from(&dialog_contact).unwrap(),
+            "an explicit Contact must not be replaced by another registration for the same user"
+        );
+    }
+
+    #[tokio::test]
+    async fn dialog_target_locator_does_not_fold_contact_user_case() {
+        let locator = MemoryLocator::new();
+        let exact_contact: rsipstack::sip::Uri = "sip:Line@192.168.1.10:5060;transport=tcp"
+            .try_into()
+            .unwrap();
+        let other_contact: rsipstack::sip::Uri = "sip:line@192.168.1.10:5060;transport=tcp"
+            .try_into()
+            .unwrap();
+        let exact_destination = SipAddr {
+            r#type: Some(Transport::Tcp),
+            addr: HostWithPort::try_from("192.168.1.11:5060").unwrap(),
+        };
+
+        locator
+            .register(
+                "line",
+                Some("localhost"),
+                Location {
+                    aor: exact_contact.clone(),
+                    expires: 3600,
+                    destination: Some(exact_destination.clone()),
+                    last_modified: Some(Instant::now() - Duration::from_secs(1)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        locator
+            .register(
+                "line",
+                Some("localhost"),
+                Location {
+                    aor: other_contact,
+                    expires: 3600,
+                    destination: Some(SipAddr {
+                        r#type: Some(Transport::Tcp),
+                        addr: HostWithPort::try_from("192.168.1.12:5060").unwrap(),
+                    }),
+                    last_modified: Some(Instant::now()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false);
+        let result = target_locator.locate(&exact_contact).await.unwrap();
+
+        assert_eq!(
+            result, exact_destination,
+            "SIP Contact users are case-sensitive and must not be folded"
         );
     }
 
