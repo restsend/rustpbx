@@ -255,7 +255,7 @@ impl From<&IvrProviderConfig> for RetryConfig {
             max_retries: config.max_retries,
             timeout_ms: config.timeout_secs.saturating_mul(1000),
             retry_delay_ms: config.retry_delay_ms,
-            fallback_action: None,
+            fallback_action: config.fallback_action.clone(),
         }
     }
 }

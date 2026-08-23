@@ -44,7 +44,7 @@
                     </svg>
                     {{ "routing.routing_validation" | t }}
                 </button>
-                <a :href="createUrl"
+                <a x-show="activeTab === 'user-routes'" :href="createUrl"
                     class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
                     <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
@@ -79,118 +79,36 @@
             </div>
         </section>
 
-        <section class="rounded-xl bg-white shadow-sm ring-1 ring-black/5">
-            <div class="border-b border-slate-100 px-5 py-4">
-                <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                    <div>
-                        <h2 class="text-base font-semibold text-slate-900">{{ "routing.stack_title" | t }}</h2>
-                        <p class="mt-1 text-sm text-slate-500">{{ "routing.stack_subtitle" | t }}</p>
-                    </div>
-                    <button type="button"
-                        class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
-                        @click="fetchRoutingStack()" :disabled="stackLoading">
-                        <svg class="h-3.5 w-3.5" :class="stackLoading ? 'animate-spin' : ''" viewBox="0 0 20 20"
-                            fill="none" stroke="currentColor" stroke-width="1.6">
-                            <path stroke-linecap="round" stroke-linejoin="round"
-                                d="M4.5 10a5.5 5.5 0 0 1 9.35-3.89l.65.65M15.5 10a5.5 5.5 0 0 1-9.35 3.89l-.65-.65M10 4.5V2m0 18v-2" />
-                        </svg>
-                        {{ "routing.stack_refresh" | t }}
-                    </button>
-                </div>
-            </div>
+        <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
+            <nav class="inline-flex w-full flex-wrap gap-2 rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600"
+                role="tablist" aria-label="{{ "routing.title" | t }}">
+                <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                    :class="activeTab === 'user-routes' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                    :aria-selected="activeTab === 'user-routes'" aria-controls="routing-tab-user-routes"
+                    @click="setActiveTab('user-routes')">
+                    <span class="text-sm">{{ "routing.tab_user_routes" | t }}</span>
+                </button>
+                <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                    :class="activeTab === 'file-routes' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                    :aria-selected="activeTab === 'file-routes'" aria-controls="routing-tab-file-routes"
+                    @click="setActiveTab('file-routes')">
+                    <span class="text-sm">{{ "routing.tab_file_routes" | t }}</span>
+                    <template x-if="fileRoutes.length">
+                        <span class="ml-1.5 inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-slate-200 px-1.5 py-0.5 text-[10px] font-bold text-slate-600"
+                            x-text="fileRoutes.length"></span>
+                    </template>
+                </button>
+                <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                    :class="activeTab === 'routing-stack' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                    :aria-selected="activeTab === 'routing-stack'" aria-controls="routing-tab-routing-stack"
+                    @click="setActiveTab('routing-stack')">
+                    <span class="text-sm">{{ "routing.tab_routing_stack" | t }}</span>
+                </button>
+            </nav>
+        </div>
 
-            <div class="grid gap-3 border-b border-slate-100 bg-slate-50/80 px-5 py-4 sm:grid-cols-2 xl:grid-cols-3">
-                <template x-for="phase in stackPhases" :key="phase.phase">
-                    <div class="rounded-lg border border-slate-200 bg-white px-3 py-2.5">
-                        <div class="text-xs font-semibold uppercase tracking-wide text-slate-500"
-                            x-text="phaseLabel(phase.phase)"></div>
-                        <p class="mt-1 text-xs leading-relaxed text-slate-600" x-text="phase.description"></p>
-                        <div class="mt-2 text-[11px] font-medium text-sky-700"
-                            x-text="priorityHint(phase.priorityDirection)"></div>
-                    </div>
-                </template>
-            </div>
-
-            <div class="overflow-x-auto">
-                <template x-if="stackWarnings.length">
-                    <div class="border-b border-amber-100 bg-amber-50 px-5 py-3 text-sm text-amber-800">
-                        <div class="font-semibold">{{ "routing.stack_warnings_title" | t }}</div>
-                        <ul class="mt-2 list-disc space-y-1 pl-5">
-                            <template x-for="(warning, idx) in stackWarnings" :key="idx">
-                                <li x-text="warning.message"></li>
-                            </template>
-                        </ul>
-                    </div>
-                </template>
-                <template x-if="stackLoading && !stackContributions.length">
-                    <div class="px-5 py-8 text-center text-sm text-slate-500">{{ "routing.stack_loading" | t }}</div>
-                </template>
-                <template x-if="stackError">
-                    <div class="px-5 py-4 text-sm text-rose-600" x-text="stackError"></div>
-                </template>
-                <table class="min-w-full divide-y divide-slate-100 text-sm" x-show="stackContributions.length">
-                    <thead class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
-                        <tr>
-                            <th class="px-5 py-3">{{ "routing.stack_col_phase" | t }}</th>
-                            <th class="px-5 py-3">{{ "routing.stack_col_source" | t }}</th>
-                            <th class="px-5 py-3">{{ "routing.stack_col_rule" | t }}</th>
-                            <th class="px-5 py-3">{{ "routing.stack_col_match" | t }}</th>
-                            <th class="px-5 py-3">{{ "routing.stack_col_target" | t }}</th>
-                            <th class="px-5 py-3">{{ "routing.priority" | t }}</th>
-                            <th class="px-5 py-3">{{ "routing.stack_col_status" | t }}</th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-slate-100">
-                        <template x-for="row in stackContributions" :key="row.id">
-                            <tr class="hover:bg-slate-50/60">
-                                <td class="px-5 py-3 align-top">
-                                    <span
-                                        class="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-700"
-                                        x-text="phaseLabel(row.phase)"></span>
-                                </td>
-                                <td class="px-5 py-3 align-top">
-                                    <span class="font-medium text-slate-800" x-text="row.source"></span>
-                                </td>
-                                <td class="px-5 py-3 align-top">
-                                    <div class="font-medium text-slate-900" x-text="row.label"></div>
-                                    <template x-if="row.notes">
-                                        <p class="mt-1 text-xs text-slate-500" x-text="row.notes"></p>
-                                    </template>
-                                    <template x-if="row.configUrl">
-                                        <a :href="resolvePath(row.configUrl)"
-                                            class="mt-1 inline-block text-xs font-semibold text-sky-600 hover:text-sky-800"
-                                            x-text="'{{ "routing.stack_open_config" | t }}'"></a>
-                                    </template>
-                                </td>
-                                <td class="px-5 py-3 align-top text-xs text-slate-600" x-text="row.matchSummary"></td>
-                                <td class="px-5 py-3 align-top text-xs text-slate-600" x-text="row.targetSummary"></td>
-                                <td class="px-5 py-3 align-top">
-                                    <span class="font-mono text-xs text-slate-800" x-text="row.priority"></span>
-                                    <span class="ml-1 text-[11px] text-slate-500"
-                                        x-text="priorityHint(row.priorityDirection)"></span>
-                                </td>
-                                <td class="px-5 py-3 align-top">
-                                    <template x-if="row.editable">
-                                        <button type="button"
-                                            class="inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold transition"
-                                            :class="row.enabled ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'"
-                                            :disabled="stackSavingId === row.id"
-                                            @click="patchStackContribution(row, { enabled: !row.enabled })"
-                                            x-text="row.enabled ? '{{ "routing.stack_enabled" | t }}' : '{{ "routing.stack_disabled" | t }}'">
-                                        </button>
-                                    </template>
-                                    <template x-if="!row.editable">
-                                        <span class="inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                                            :class="row.enabled ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'"
-                                            x-text="row.enabled ? '{{ "routing.stack_enabled" | t }}' : '{{ "routing.stack_disabled" | t }}'"></span>
-                                    </template>
-                                </td>
-                            </tr>
-                        </template>
-                    </tbody>
-                </table>
-            </div>
-        </section>
+        <div x-show="activeTab === 'user-routes'" x-cloak id="routing-tab-user-routes" role="tabpanel"
+            class="space-y-6" tabindex="0">
 
         <template x-if="flash">
             <div class="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700"
@@ -587,18 +505,25 @@
             </div>
         </section>
 
-        <!-- Issue #179: file-sourced routes (read-only) -->
-        <template x-if="fileRoutes.length > 0">
+        </div>
+
+        <div x-show="activeTab === 'file-routes'" x-cloak id="routing-tab-file-routes" role="tabpanel"
+            class="space-y-6" tabindex="0">
             <section class="overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-black/5">
                 <div class="border-b border-slate-200 bg-slate-50 px-4 py-3 flex items-center gap-2">
                     <svg class="h-4 w-4 text-slate-400" viewBox="0 0 20 20" fill="currentColor">
                         <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clip-rule="evenodd" />
                     </svg>
                     <span class="text-sm font-semibold text-slate-700">{{ "routing.file_routes_title" | t }}</span>
-                    <span class="ml-auto inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500" x-text="fileRoutes.length"></span>
+                    <template x-if="fileRoutes.length">
+                        <span class="ml-auto inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500" x-text="fileRoutes.length"></span>
+                    </template>
                 </div>
                 <p class="px-4 py-2 text-xs text-slate-500">{{ "routing.file_routes_notice" | t }}</p>
-                <div class="overflow-x-auto">
+                <template x-if="!fileRoutes.length">
+                    <div class="px-4 py-12 text-center text-sm text-slate-400">{{ "routing.file_routes_empty" | t }}</div>
+                </template>
+                <div class="overflow-x-auto" x-show="fileRoutes.length">
                     <table class="min-w-full divide-y divide-slate-200 text-left text-sm">
                         <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
                             <tr>
@@ -659,7 +584,119 @@
                     </table>
                 </div>
             </section>
-        </template>
+        </div>
+
+        <div x-show="activeTab === 'routing-stack'" x-cloak id="routing-tab-routing-stack" role="tabpanel"
+            class="space-y-6" tabindex="0">
+            <section class="rounded-xl bg-white shadow-sm ring-1 ring-black/5">
+                <div class="border-b border-slate-100 px-5 py-4">
+                    <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                            <h2 class="text-base font-semibold text-slate-900">{{ "routing.stack_title" | t }}</h2>
+                            <p class="mt-1 text-sm text-slate-500">{{ "routing.stack_subtitle" | t }}</p>
+                        </div>
+                        <button type="button"
+                            class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
+                            @click="fetchRoutingStack()" :disabled="stackLoading">
+                            <svg class="h-3.5 w-3.5" :class="stackLoading ? 'animate-spin' : ''" viewBox="0 0 20 20"
+                                fill="none" stroke="currentColor" stroke-width="1.6">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                    d="M4.5 10a5.5 5.5 0 0 1 9.35-3.89l.65.65M15.5 10a5.5 5.5 0 0 1-9.35 3.89l-.65-.65M10 4.5V2m0 18v-2" />
+                            </svg>
+                            {{ "routing.stack_refresh" | t }}
+                        </button>
+                    </div>
+                </div>
+
+                <div class="grid gap-3 border-b border-slate-100 bg-slate-50/80 px-5 py-4 sm:grid-cols-2 xl:grid-cols-3">
+                    <template x-for="phase in stackPhases" :key="phase.phase">
+                        <div class="rounded-lg border border-slate-200 bg-white px-3 py-2.5">
+                            <div class="text-xs font-semibold uppercase tracking-wide text-slate-500"
+                                x-text="phaseLabel(phase.phase)"></div>
+                            <p class="mt-1 text-xs leading-relaxed text-slate-600" x-text="phase.description"></p>
+                        </div>
+                    </template>
+                </div>
+
+                <div class="overflow-x-auto">
+                    <template x-if="stackWarnings.length">
+                        <div class="border-b border-amber-100 bg-amber-50 px-5 py-3 text-sm text-amber-800">
+                            <div class="font-semibold">{{ "routing.stack_warnings_title" | t }}</div>
+                            <ul class="mt-2 list-disc space-y-1 pl-5">
+                                <template x-for="(warning, idx) in stackWarnings" :key="idx">
+                                    <li x-text="warning.message"></li>
+                                </template>
+                            </ul>
+                        </div>
+                    </template>
+                    <template x-if="stackLoading && !stackContributions.length">
+                        <div class="px-5 py-8 text-center text-sm text-slate-500">{{ "routing.stack_loading" | t }}</div>
+                    </template>
+                    <template x-if="stackError">
+                        <div class="px-5 py-4 text-sm text-rose-600" x-text="stackError"></div>
+                    </template>
+                    <table class="min-w-full divide-y divide-slate-100 text-sm" x-show="stackContributions.length">
+                        <thead class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            <tr>
+                                <th class="px-5 py-3">{{ "routing.stack_col_phase" | t }}</th>
+                                <th class="px-5 py-3">{{ "routing.stack_col_source" | t }}</th>
+                                <th class="px-5 py-3">{{ "routing.stack_col_rule" | t }}</th>
+                                <th class="px-5 py-3">{{ "routing.stack_col_match" | t }}</th>
+                                <th class="px-5 py-3">{{ "routing.stack_col_target" | t }}</th>
+                                <th class="px-5 py-3">{{ "routing.priority" | t }}</th>
+                                <th class="px-5 py-3">{{ "routing.stack_col_status" | t }}</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100">
+                            <template x-for="row in stackContributions" :key="row.id">
+                                <tr class="hover:bg-slate-50/60">
+                                    <td class="px-5 py-3 align-top">
+                                        <span
+                                            class="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-700"
+                                            x-text="phaseLabel(row.phase)"></span>
+                                    </td>
+                                    <td class="px-5 py-3 align-top">
+                                        <span class="font-medium text-slate-800" x-text="row.source"></span>
+                                    </td>
+                                    <td class="px-5 py-3 align-top">
+                                        <div class="font-medium text-slate-900" x-text="row.label"></div>
+                                        <template x-if="row.notes">
+                                            <p class="mt-1 text-xs text-slate-500" x-text="row.notes"></p>
+                                        </template>
+                                        <template x-if="row.configUrl">
+                                            <a :href="resolvePath(row.configUrl)"
+                                                class="mt-1 inline-block text-xs font-semibold text-sky-600 hover:text-sky-800"
+                                                x-text="'{{ "routing.stack_open_config" | t }}'"></a>
+                                        </template>
+                                    </td>
+                                    <td class="px-5 py-3 align-top text-xs text-slate-600" x-text="row.matchSummary"></td>
+                                    <td class="px-5 py-3 align-top text-xs text-slate-600" x-text="row.targetSummary"></td>
+                                    <td class="px-5 py-3 align-top">
+                                        <span class="font-mono text-xs text-slate-800" x-text="row.priority"></span>
+                                    </td>
+                                    <td class="px-5 py-3 align-top">
+                                        <template x-if="row.editable">
+                                            <button type="button"
+                                                class="inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold transition"
+                                                :class="row.enabled ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'"
+                                                :disabled="stackSavingId === row.id"
+                                                @click="patchStackContribution(row, { enabled: !row.enabled })"
+                                                x-text="row.enabled ? '{{ "routing.stack_enabled" | t }}' : '{{ "routing.stack_disabled" | t }}'">
+                                            </button>
+                                        </template>
+                                        <template x-if="!row.editable">
+                                            <span class="inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                                :class="row.enabled ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'"
+                                                x-text="row.enabled ? '{{ "routing.stack_enabled" | t }}' : '{{ "routing.stack_disabled" | t }}'"></span>
+                                        </template>
+                                    </td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
 
         <div x-show="validationOpen" x-cloak x-transition.opacity.duration.150ms
             class="fixed inset-0 z-40 flex items-center justify-center px-4 py-12">
@@ -963,6 +1000,8 @@
             stackLoading: false,
             stackSavingId: null,
             stackError: null,
+            activeTab: 'user-routes',
+            stackFetched: false,
 
             translations: {
                 failed_load: '{{ "routing.failed_load" | t }}',
@@ -1015,8 +1054,6 @@
                 stack_phase_post_route: '{{ "routing.stack_phase_post_route" | t }}',
                 stack_phase_outbound_wholesale: '{{ "routing.stack_phase_outbound_wholesale" | t }}',
                 stack_phase_session_behavior: '{{ "routing.stack_phase_session_behavior" | t }}',
-                stack_priority_higher: '{{ "routing.stack_priority_higher" | t }}',
-                stack_priority_lower: '{{ "routing.stack_priority_lower" | t }}',
             },
 
             init() {
@@ -1027,8 +1064,20 @@
                 this.forwardingCatalog = options.forwardingCatalog || {};
                 this.setupFilterOptions();
                 this.fetchRoutes();
-                this.fetchRoutingStack();
                 this.fetchPendingReload();
+                const hashTab = (window.location.hash || '').replace(/^#/, '');
+                if (hashTab === 'file-routes' || hashTab === 'routing-stack') {
+                    this.setActiveTab(hashTab);
+                }
+            },
+            setActiveTab(tabId) {
+                if (this.activeTab === tabId) {
+                    return;
+                }
+                this.activeTab = tabId;
+                if (tabId === 'routing-stack' && !this.stackFetched) {
+                    this.fetchRoutingStack();
+                }
             },
             async fetchRoutingStack() {
                 this.stackLoading = true;
@@ -1046,6 +1095,7 @@
                     this.stackError = err?.message || '{{ "routing.stack_load_failed" | t }}';
                 } finally {
                     this.stackLoading = false;
+                    this.stackFetched = true;
                 }
             },
             async patchStackContribution(row, patch) {
@@ -1081,11 +1131,6 @@
                     session_behavior: this.translations.stack_phase_session_behavior,
                 };
                 return map[phase] || phase;
-            },
-            priorityHint(direction) {
-                return direction === 'lower_first'
-                    ? this.translations.stack_priority_lower
-                    : this.translations.stack_priority_higher;
             },
             async fetchPendingReload() {
                 try {

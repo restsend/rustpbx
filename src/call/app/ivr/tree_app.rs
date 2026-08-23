@@ -1662,6 +1662,7 @@ mod tests {
             tts: None,
             root: Some(MenuNode::default()),
             menus: HashMap::new(),
+            ivr_fallback: None,
         };
         def.menus.insert("root".to_string(), MenuNode::default());
         def

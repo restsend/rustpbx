@@ -17,6 +17,7 @@ fn step_provider_uses_configured_timeout_and_retry_delay() {
         max_retries: 3,
         retry_delay_ms: 250,
         timeout_secs: 10,
+        fallback_action: None,
     };
 
     let retry = RetryConfig::from(&config);
@@ -25,6 +26,19 @@ fn step_provider_uses_configured_timeout_and_retry_delay() {
     assert_eq!(retry.timeout_ms, 10_000);
     assert_eq!(retry.retry_delay_ms, 250);
     assert!(retry.fallback_action.is_none());
+
+    let with_fallback = IvrProviderConfig {
+        fallback_action: Some(rustpbx::call::app::ivr::config::ActionNode::new(
+            EntryAction::Hangup {
+                prompt: Some("sounds/error.wav".into()),
+                prompt_text: None,
+                prompt_voice: None,
+            },
+        )),
+        ..config
+    };
+    let retry = RetryConfig::from(&with_fallback);
+    assert!(retry.fallback_action.is_some());
 }
 
 async fn record_attempt(

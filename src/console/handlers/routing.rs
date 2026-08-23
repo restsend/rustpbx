@@ -68,7 +68,7 @@ pub fn api_urls() -> Router<Arc<ConsoleState>> {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PatchRoutingStackRequest {
+pub struct PatchRoutingStackRequest {
     enabled: Option<bool>,
     priority: Option<i32>,
     eval_mode: Option<String>,

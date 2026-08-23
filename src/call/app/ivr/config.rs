@@ -67,6 +67,9 @@ pub struct IvrDefinition {
     pub root: Option<MenuNode>,
     #[serde(default)]
     pub menus: HashMap<String, MenuNode>,
+    /// Step-mode session recovery when provider `/step` or `/fail` fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ivr_fallback: Option<crate::config::IvrFallbackConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -80,6 +83,9 @@ pub struct IvrProviderConfig {
     pub retry_delay_ms: u64,
     #[serde(default = "default_provider_timeout")]
     pub timeout_secs: u64,
+    /// Action when provider HTTP retries are exhausted and session IVR fallback is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_action: Option<ActionNode>,
 }
 
 fn default_provider_retries() -> u32 {

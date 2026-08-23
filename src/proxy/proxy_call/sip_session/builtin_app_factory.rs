@@ -61,6 +61,23 @@ impl BuiltinAppFactory {
             .map(|c| std::sync::Arc::new(c.clone()))
     }
 
+    fn effective_ivr_fallback(
+        context: &ApplicationContext,
+        project: Option<&crate::config::IvrFallbackConfig>,
+    ) -> Option<std::sync::Arc<crate::config::IvrFallbackConfig>> {
+        if let Some(config) = project.filter(|c| c.is_configured()) {
+            return Some(std::sync::Arc::new(config.clone()));
+        }
+        Self::ivr_fallback_arc(context)
+    }
+
+    fn prefer_session_ivr_fallback(
+        context: &ApplicationContext,
+        project: Option<&crate::config::IvrFallbackConfig>,
+    ) -> bool {
+        project.is_some_and(|c| c.is_configured()) || Self::ivr_fallback_configured(context)
+    }
+
     fn build_tree_ivr_app(
         definition: crate::call::app::ivr::IvrDefinition,
         params: Option<&serde_json::Value>,
@@ -147,7 +164,7 @@ impl BuiltinAppFactory {
                             fallback_action: fallback,
                         });
                     }
-                    if Self::ivr_fallback_configured(context) {
+                    if Self::prefer_session_ivr_fallback(context, None) {
                         provider = provider.with_prefer_ivr_fallback(true);
                     }
 
@@ -267,7 +284,10 @@ impl BuiltinAppFactory {
                         }
                         provider = provider
                             .with_retry(crate::call::app::ivr::RetryConfig::from(provider_cfg));
-                        if Self::ivr_fallback_configured(context) {
+                        if Self::prefer_session_ivr_fallback(
+                            context,
+                            file_config.ivr.ivr_fallback.as_ref(),
+                        ) {
                             provider = provider.with_prefer_ivr_fallback(true);
                         }
 
@@ -295,7 +315,10 @@ impl BuiltinAppFactory {
                                 app = app.with_transferred_from(Some(tf.to_string()));
                             }
                         }
-                        app = app.with_ivr_fallback(Self::ivr_fallback_arc(context));
+                        app = app.with_ivr_fallback(Self::effective_ivr_fallback(
+                            context,
+                            file_config.ivr.ivr_fallback.as_ref(),
+                        ));
                         Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
                     } else {
                         // Tree mode from TOML
