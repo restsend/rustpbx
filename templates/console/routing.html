@@ -79,6 +79,98 @@
             </div>
         </section>
 
+        <section class="rounded-xl bg-white shadow-sm ring-1 ring-black/5">
+            <div class="border-b border-slate-100 px-5 py-4">
+                <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                        <h2 class="text-base font-semibold text-slate-900">{{ "routing.stack_title" | t }}</h2>
+                        <p class="mt-1 text-sm text-slate-500">{{ "routing.stack_subtitle" | t }}</p>
+                    </div>
+                    <button type="button"
+                        class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
+                        @click="fetchRoutingStack()" :disabled="stackLoading">
+                        <svg class="h-3.5 w-3.5" :class="stackLoading ? 'animate-spin' : ''" viewBox="0 0 20 20"
+                            fill="none" stroke="currentColor" stroke-width="1.6">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M4.5 10a5.5 5.5 0 0 1 9.35-3.89l.65.65M15.5 10a5.5 5.5 0 0 1-9.35 3.89l-.65-.65M10 4.5V2m0 18v-2" />
+                        </svg>
+                        {{ "routing.stack_refresh" | t }}
+                    </button>
+                </div>
+            </div>
+
+            <div class="grid gap-3 border-b border-slate-100 bg-slate-50/80 px-5 py-4 sm:grid-cols-2 xl:grid-cols-3">
+                <template x-for="phase in stackPhases" :key="phase.phase">
+                    <div class="rounded-lg border border-slate-200 bg-white px-3 py-2.5">
+                        <div class="text-xs font-semibold uppercase tracking-wide text-slate-500"
+                            x-text="phaseLabel(phase.phase)"></div>
+                        <p class="mt-1 text-xs leading-relaxed text-slate-600" x-text="phase.description"></p>
+                        <div class="mt-2 text-[11px] font-medium text-sky-700"
+                            x-text="priorityHint(phase.priorityDirection)"></div>
+                    </div>
+                </template>
+            </div>
+
+            <div class="overflow-x-auto">
+                <template x-if="stackLoading && !stackContributions.length">
+                    <div class="px-5 py-8 text-center text-sm text-slate-500">{{ "routing.stack_loading" | t }}</div>
+                </template>
+                <template x-if="stackError">
+                    <div class="px-5 py-4 text-sm text-rose-600" x-text="stackError"></div>
+                </template>
+                <table class="min-w-full divide-y divide-slate-100 text-sm" x-show="stackContributions.length">
+                    <thead class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        <tr>
+                            <th class="px-5 py-3">{{ "routing.stack_col_phase" | t }}</th>
+                            <th class="px-5 py-3">{{ "routing.stack_col_source" | t }}</th>
+                            <th class="px-5 py-3">{{ "routing.stack_col_rule" | t }}</th>
+                            <th class="px-5 py-3">{{ "routing.stack_col_match" | t }}</th>
+                            <th class="px-5 py-3">{{ "routing.stack_col_target" | t }}</th>
+                            <th class="px-5 py-3">{{ "routing.priority" | t }}</th>
+                            <th class="px-5 py-3">{{ "routing.stack_col_status" | t }}</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100">
+                        <template x-for="row in stackContributions" :key="row.id">
+                            <tr class="hover:bg-slate-50/60">
+                                <td class="px-5 py-3 align-top">
+                                    <span
+                                        class="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-700"
+                                        x-text="phaseLabel(row.phase)"></span>
+                                </td>
+                                <td class="px-5 py-3 align-top">
+                                    <span class="font-medium text-slate-800" x-text="row.source"></span>
+                                </td>
+                                <td class="px-5 py-3 align-top">
+                                    <div class="font-medium text-slate-900" x-text="row.label"></div>
+                                    <template x-if="row.notes">
+                                        <p class="mt-1 text-xs text-slate-500" x-text="row.notes"></p>
+                                    </template>
+                                    <template x-if="row.configUrl">
+                                        <a :href="resolvePath(row.configUrl)"
+                                            class="mt-1 inline-block text-xs font-semibold text-sky-600 hover:text-sky-800"
+                                            x-text="'{{ "routing.stack_open_config" | t }}'"></a>
+                                    </template>
+                                </td>
+                                <td class="px-5 py-3 align-top text-xs text-slate-600" x-text="row.matchSummary"></td>
+                                <td class="px-5 py-3 align-top text-xs text-slate-600" x-text="row.targetSummary"></td>
+                                <td class="px-5 py-3 align-top">
+                                    <span class="font-mono text-xs text-slate-800" x-text="row.priority"></span>
+                                    <span class="ml-1 text-[11px] text-slate-500"
+                                        x-text="priorityHint(row.priorityDirection)"></span>
+                                </td>
+                                <td class="px-5 py-3 align-top">
+                                    <span class="inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                        :class="row.enabled ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'"
+                                        x-text="row.enabled ? '{{ "routing.stack_enabled" | t }}' : '{{ "routing.stack_disabled" | t }}'"></span>
+                                </td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
         <template x-if="flash">
             <div class="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700"
                 x-text="flash"></div>
@@ -844,6 +936,10 @@
             validationLatencyMs: null,
             expandedMatch: {},
             expandedRewrite: {},
+            stackPhases: [],
+            stackContributions: [],
+            stackLoading: false,
+            stackError: null,
 
             translations: {
                 failed_load: '{{ "routing.failed_load" | t }}',
@@ -890,6 +986,14 @@
                 sel_round_robin_balancing: '{{ "routing.sel_round_robin_balancing" | t }}',
                 sel_weighted_distribution: '{{ "routing.sel_weighted_distribution" | t }}',
                 sel_hash_based: '{{ "routing.sel_hash_based" | t }}',
+                stack_phase_pre_route: '{{ "routing.stack_phase_pre_route" | t }}',
+                stack_phase_route_table: '{{ "routing.stack_phase_route_table" | t }}',
+                stack_phase_extension_resolve: '{{ "routing.stack_phase_extension_resolve" | t }}',
+                stack_phase_post_route: '{{ "routing.stack_phase_post_route" | t }}',
+                stack_phase_outbound_wholesale: '{{ "routing.stack_phase_outbound_wholesale" | t }}',
+                stack_phase_session_behavior: '{{ "routing.stack_phase_session_behavior" | t }}',
+                stack_priority_higher: '{{ "routing.stack_priority_higher" | t }}',
+                stack_priority_lower: '{{ "routing.stack_priority_lower" | t }}',
             },
 
             init() {
@@ -900,7 +1004,41 @@
                 this.forwardingCatalog = options.forwardingCatalog || {};
                 this.setupFilterOptions();
                 this.fetchRoutes();
+                this.fetchRoutingStack();
                 this.fetchPendingReload();
+            },
+            async fetchRoutingStack() {
+                this.stackLoading = true;
+                this.stackError = null;
+                try {
+                    const response = await fetch(this.resolvePath(`${this.apiBase}/routing-stack`));
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+                    const data = await response.json();
+                    this.stackPhases = Array.isArray(data.phases) ? data.phases : [];
+                    this.stackContributions = Array.isArray(data.contributions) ? data.contributions : [];
+                } catch (err) {
+                    this.stackError = err?.message || '{{ "routing.stack_load_failed" | t }}';
+                } finally {
+                    this.stackLoading = false;
+                }
+            },
+            phaseLabel(phase) {
+                const map = {
+                    pre_route: this.translations.stack_phase_pre_route,
+                    route_table: this.translations.stack_phase_route_table,
+                    extension_resolve: this.translations.stack_phase_extension_resolve,
+                    post_route: this.translations.stack_phase_post_route,
+                    outbound_wholesale: this.translations.stack_phase_outbound_wholesale,
+                    session_behavior: this.translations.stack_phase_session_behavior,
+                };
+                return map[phase] || phase;
+            },
+            priorityHint(direction) {
+                return direction === 'lower_first'
+                    ? this.translations.stack_priority_lower
+                    : this.translations.stack_priority_higher;
             },
             async fetchPendingReload() {
                 try {

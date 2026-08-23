@@ -271,6 +271,21 @@ impl AddonRegistry {
         false
     }
 
+    /// Collect routing-stack metadata from enabled addons.
+    pub fn routing_contributions(
+        &self,
+        config: &crate::config::Config,
+    ) -> Vec<crate::proxy::routing::stack::RoutingContribution> {
+        let mut out = Vec::new();
+        for addon in &self.addons {
+            if !self.is_enabled(addon.id(), config) {
+                continue;
+            }
+            out.extend(addon.routing_contributions(config));
+        }
+        out
+    }
+
     // ── Console route hooks ──────────────────────────────────────────────────
 
     /// Collect console page routes from all enabled addons.

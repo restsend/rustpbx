@@ -237,6 +237,14 @@ pub trait Addon: Send + Sync {
         None
     }
 
+    /// Static routing-stack metadata for the console (read-only in phase 1).
+    fn routing_contributions(
+        &self,
+        _config: &crate::config::Config,
+    ) -> Vec<crate::proxy::routing::stack::RoutingContribution> {
+        vec![]
+    }
+
     fn queue_location_enricher(
         &self,
     ) -> Option<Arc<dyn crate::proxy::call::QueueLocationEnricher>> {

@@ -24,6 +24,7 @@ pub mod error_catalog;
 pub mod http;
 pub mod http_error_catalog;
 pub mod matcher;
+pub mod stack;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ConfigOrigin {

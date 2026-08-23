@@ -55,6 +55,7 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
 pub fn api_urls() -> Router<Arc<ConsoleState>> {
     Router::new()
         .route("/routing", post(query_routing).put(create_routing))
+        .route("/routing-stack", get(get_routing_stack))
         .route(
             "/routing/{id}",
             patch(update_routing).delete(delete_routing),
@@ -62,6 +63,20 @@ pub fn api_urls() -> Router<Arc<ConsoleState>> {
         .route("/routing/{id}/clone", post(clone_routing))
         .route("/routing/{id}/toggle", post(toggle_routing))
         .route("/routing/{id}/data", get(route_detail_data))
+}
+
+pub async fn get_routing_stack(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+) -> Response {
+    let config = state.config();
+    let addon_contributions = state
+        .app_state()
+        .map(|app| app.addon_registry.routing_contributions(config.as_ref()))
+        .unwrap_or_default();
+    let stack =
+        crate::proxy::routing::stack::build_routing_stack(config.as_ref(), addon_contributions);
+    Json(stack).into_response()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
