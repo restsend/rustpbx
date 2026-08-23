@@ -61,6 +61,26 @@ impl BuiltinAppFactory {
             .map(|c| std::sync::Arc::new(c.clone()))
     }
 
+    fn build_tree_ivr_app(
+        definition: crate::call::app::ivr::IvrDefinition,
+        params: Option<&serde_json::Value>,
+    ) -> Box<dyn crate::call::app::CallApp> {
+        let mut app = crate::call::app::ivr::IvrApp::new(definition);
+        if let Some(tts_value) = params.and_then(|p| p.get("tts"))
+            && let Ok(tts_cfg) = serde_json::from_value::<crate::tts::TtsConfig>(tts_value.clone())
+        {
+            app = app.with_tts(Some(tts_cfg));
+        }
+        if let Some(ivp) = params.and_then(|p| p.get("ivr_params")) {
+            if let Some(menu) = ivp.get("return_menu").and_then(|v| v.as_str()) {
+                if !menu.is_empty() {
+                    app = app.with_start_menu(menu.to_string());
+                }
+            }
+        }
+        Box::new(app)
+    }
+
     async fn build_app(
         &self,
         app_name: &str,
@@ -168,6 +188,26 @@ impl BuiltinAppFactory {
                     // produced by `resolve_ivr_file` / `apply_route_metadata`
                     // when the proxy runs with `generated_db = true`.
                     let file = params.as_ref()?.get("file")?.as_str()?;
+
+                    if let Some(builtin_name) =
+                        crate::call::app::ivr::builtin::parse_uri(file)
+                    {
+                        match crate::call::app::ivr::builtin::get(builtin_name) {
+                            Some(defn) => {
+                                return Some(Self::build_tree_ivr_app(
+                                    defn,
+                                    params.as_ref(),
+                                ));
+                            }
+                            None => {
+                                *diagnostic = Some(format!(
+                                    "unknown builtin IVR '{builtin_name}'"
+                                ));
+                                return None;
+                            }
+                        }
+                    }
+
                     let content = if let Some((category, name)) =
                         crate::config_store::GeneratedConfigStore::parse_db_uri(file)
                     {
@@ -259,22 +299,10 @@ impl BuiltinAppFactory {
                         Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
                     } else {
                         // Tree mode from TOML
-                        let mut app = crate::call::app::ivr::IvrApp::new(file_config.ivr);
-                        if let Some(tts_value) = params.as_ref()?.get("tts")
-                            && let Ok(tts_cfg) =
-                                serde_json::from_value::<crate::tts::TtsConfig>(tts_value.clone())
-                        {
-                            app = app.with_tts(Some(tts_cfg));
-                        }
-                        // Support return_menu for return-to-IVR resume
-                        if let Some(ivp) = params.as_ref().and_then(|p| p.get("ivr_params")) {
-                            if let Some(menu) = ivp.get("return_menu").and_then(|v| v.as_str()) {
-                                if !menu.is_empty() {
-                                    app = app.with_start_menu(menu.to_string());
-                                }
-                            }
-                        }
-                        Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
+                        Some(Self::build_tree_ivr_app(
+                            file_config.ivr,
+                            params.as_ref(),
+                        ))
                     }
                 }
             }

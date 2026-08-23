@@ -240,7 +240,10 @@ pub(super) fn parse_dial_target(target: &str) -> Result<rsipstack::sip::Uri> {
         .map_err(|e| anyhow!("invalid SIP target '{}': {}", target, e))
 }
 
-pub(super) fn other_header_ci(headers: &[rsipstack::sip::Header], names: &[&str]) -> Option<String> {
+pub(super) fn other_header_ci(
+    headers: &[rsipstack::sip::Header],
+    names: &[&str],
+) -> Option<String> {
     for h in headers {
         if let rsipstack::sip::Header::Other(n, v) = h {
             if names.iter().any(|w| n.eq_ignore_ascii_case(w)) {

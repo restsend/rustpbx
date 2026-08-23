@@ -1,3 +1,4 @@
+pub mod builtin;
 pub mod common;
 pub mod config;
 pub mod exec;
@@ -12,6 +13,7 @@ pub use self::tree_app::IvrApp;
 
 pub use self::executor::StepIvrApp;
 
+pub use self::builtin::{resolve_file_param, CSAT_PARAMS_KEY};
 pub use self::common::execute_action;
 pub use self::config::{
     ActionNode, BusinessHours, BusinessHoursSchedule, EntryAction, IvrDefinition, IvrFileConfig,

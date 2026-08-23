@@ -854,8 +854,7 @@ async fn rwi_originate_uses_prepared_caller_leg_for_invite_answer() {
         "one-target originate must not synthesize a B leg"
     );
 
-    let remote =
-        LegInner::new("rwi-remote", &LegConfig::rtp_pcmu(), None).expect("remote RTP leg");
+    let remote = LegInner::new("rwi-remote", &LegConfig::rtp_pcmu(), None).expect("remote RTP leg");
     let answer = remote.answer(&offer).await.expect("remote SDP answer");
     let caller_leg = session
         .bridge()
@@ -958,9 +957,8 @@ async fn test_handle_reinvite_command() {
 
     let result = handle.send_command(CallCommand::HandleReInvite {
         leg_id: LegId::from("caller"),
-        sdp:
-            "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=test\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n"
-                .to_string(),
+        sdp: "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=test\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n"
+            .to_string(),
     });
     assert!(result.is_ok());
 
@@ -1863,8 +1861,7 @@ async fn video_strip_policy_omits_video_mline() {
     let context = CallContext {
         session_id: "video-strip".to_string(),
         dialplan: Arc::new({
-            let mut dp =
-                Dialplan::new("video-strip".to_string(), request, DialDirection::Inbound);
+            let mut dp = Dialplan::new("video-strip".to_string(), request, DialDirection::Inbound);
             dp.media.video_policy = Some(crate::proxy::routing::VideoPolicy::Strip);
             dp
         }),
@@ -2184,15 +2181,10 @@ async fn media_bridge_caller_answer_follows_callee_answer_codec() {
         "configured codecs must control the callee offer"
     );
 
-    let callee =
-        LegInner::new("callee-answer", &LegConfig::rtp_pcmu(), None).expect("callee leg");
+    let callee = LegInner::new("callee-answer", &LegConfig::rtp_pcmu(), None).expect("callee leg");
     let callee_answer = callee.answer(&callee_offer).await.expect("callee answer");
     let caller_answer = session
-        .prepare_caller_answer_from_callee_sdp(
-            Some(callee_answer),
-            false,
-            rustrtc::SdpType::Answer,
-        )
+        .prepare_caller_answer_from_callee_sdp(Some(callee_answer), false, rustrtc::SdpType::Answer)
         .await
         .expect("prepare caller answer")
         .expect("caller answer");
@@ -2684,8 +2676,7 @@ fn test_parse_info_consult_cancel() {
 #[test]
 fn test_parse_info_unknown_action() {
     assert!(
-        SipSession::parse_info_command("unknown.action", None, &serde_json::json!({}))
-            .is_none()
+        SipSession::parse_info_command("unknown.action", None, &serde_json::json!({})).is_none()
     );
 }
 
@@ -2808,8 +2799,8 @@ a=ice-ufrag:test\r\n\
 a=rtpmap:111 opus/48000/2\r\n\
 a=sendrecv\r\n";
     let answer = offer.replace("a=ice-ufrag:test", "a=ice-ufrag:answer");
-    let parsed = SipSession::parse_sdp(rustrtc::SdpType::Offer, offer, "test")
-        .expect("parse WebRTC offer");
+    let parsed =
+        SipSession::parse_sdp(rustrtc::SdpType::Offer, offer, "test").expect("parse WebRTC offer");
 
     assert!(!SipSession::is_hold_direction(
         rustrtc::Direction::SendRecv,
@@ -3151,9 +3142,7 @@ fn rtp_timeout_config_zero_disables() {
 
 fn test_forward_route_config() -> crate::config::ProxyConfig {
     use crate::config::ProxyConfig;
-    use crate::proxy::routing::{
-        DestConfig, MatchConditions, RouteAction, RouteRule, TrunkConfig,
-    };
+    use crate::proxy::routing::{DestConfig, MatchConditions, RouteAction, RouteRule, TrunkConfig};
 
     let mut config = ProxyConfig::default();
     config.route_originated_calls = true;
@@ -3538,16 +3527,12 @@ async fn resolve_custom_targets_skips_only_unregistered_same_realm_queue_targets
     };
 
     let (server, _) = create_test_server().await;
-    let registered_aor: rsipstack::sip::Uri =
-        "sip:online@rustpbx.com".try_into().unwrap();
-    let registered_contact: rsipstack::sip::Uri =
-        "sip:online@10.0.0.10:5070".try_into().unwrap();
-    let remote_registered_aor: rsipstack::sip::Uri =
-        "sip:remote@rustpbx.com".try_into().unwrap();
-    let remote_contact: rsipstack::sip::Uri =
-        "sip:remote@remote-contact.invalid;transport=ws"
-            .try_into()
-            .unwrap();
+    let registered_aor: rsipstack::sip::Uri = "sip:online@rustpbx.com".try_into().unwrap();
+    let registered_contact: rsipstack::sip::Uri = "sip:online@10.0.0.10:5070".try_into().unwrap();
+    let remote_registered_aor: rsipstack::sip::Uri = "sip:remote@rustpbx.com".try_into().unwrap();
+    let remote_contact: rsipstack::sip::Uri = "sip:remote@remote-contact.invalid;transport=ws"
+        .try_into()
+        .unwrap();
     let remote_home_proxy = SipAddr {
         r#type: Some(rsipstack::sip::Transport::Udp),
         addr: "10.0.0.20:5060".try_into().unwrap(),
@@ -3741,10 +3726,7 @@ async fn effective_ring_timeout_precedence_and_disabled() {
     cfg.max_ring_time = Some(45);
     server.proxy_config.store(Arc::new(cfg));
     assert_eq!(
-        SipSession::effective_ring_timeout(
-            &make_dialplan(Some(Duration::from_secs(10))),
-            &server,
-        ),
+        SipSession::effective_ring_timeout(&make_dialplan(Some(Duration::from_secs(10))), &server,),
         Some(Duration::from_secs(10)),
         "per-call value overrides the global default"
     );

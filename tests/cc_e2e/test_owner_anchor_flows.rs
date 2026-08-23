@@ -120,9 +120,7 @@ async fn e2e_blind_transfer_dispatches_transfer_and_agent_hangup() {
 
 #[tokio::test]
 async fn e2e_blind_transfer_resolves_dialog_alias_to_session() {
-    use rustpbx::call::runtime::{
-        MemorySessionRegistry, SessionInfo, resolve_owner_and_session,
-    };
+    use rustpbx::call::runtime::{MemorySessionRegistry, SessionInfo, resolve_owner_and_session};
 
     let reg = MemorySessionRegistry::new("10.0.0.2:5060", Duration::from_secs(3600));
     let reg: rustpbx::call::runtime::SessionRegistryRef = reg.into_ref();
@@ -378,9 +376,7 @@ async fn e2e_supervisor_takeover_resolves_target_by_dialog_alias() {
 
 #[tokio::test]
 async fn e2e_indialog_forward_looks_up_dialog_owner() {
-    use rustpbx::call::runtime::{
-        MemorySessionRegistry, SessionInfo, resolve_owner_and_session,
-    };
+    use rustpbx::call::runtime::{MemorySessionRegistry, SessionInfo, resolve_owner_and_session};
     use rustpbx::config::ClusterPeer;
 
     let reg = MemorySessionRegistry::new("10.0.0.1:5060", Duration::from_secs(3600));

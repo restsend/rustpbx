@@ -165,6 +165,22 @@ impl AppRuntime for DefaultAppRuntime {
             }
         };
 
+        if app_name == "ivr" {
+            if let Some(file) = params
+                .as_ref()
+                .and_then(|p| p.get("file"))
+                .and_then(|v| v.as_str())
+            {
+                crate::call::app::ivr::exec::remember_ivr_start_file(self.context.as_ref(), file);
+            }
+            if let Some(csat) = params.as_ref().and_then(|p| p.get("csat_params")) {
+                self.context.set_var(
+                    crate::call::app::ivr::builtin::CSAT_PARAMS_KEY,
+                    csat.to_string(),
+                );
+            }
+        }
+
         {
             let mut running = self.running.write().await;
             *running = Some(RunningApp {
@@ -232,11 +248,25 @@ impl AppRuntime for DefaultAppRuntime {
 
                 handle.set_app_event_sender(None);
 
-                // Notify the session that the app has exited so it can run
-                // post-exit hooks (e.g. IVR-exec unhold + result delivery).
-                // Skip when a successor app already replaced us (Transfer /
-                // JumpIvr) — that generation owns the session now.
-                if let Err(e) = handle.send_command(CallCommand::AppExited) {
+                if let Some(spec) = crate::call::app::ivr::exec::take_pending_return(&context) {
+                    tracing::info!(
+                        session_id = %session_id_for_log,
+                        return_app = %spec.app_name,
+                        "Sub-app exited; resuming pending return app"
+                    );
+                    if let Err(e) = handle.send_command(CallCommand::StartApp {
+                        app_name: spec.app_name,
+                        params: Some(spec.params),
+                        auto_answer: false,
+                    }) {
+                        tracing::warn!(
+                            session_id = %session_id_for_log,
+                            error = %e,
+                            "Failed to start pending return app after sub-app exit"
+                        );
+                        let _ = handle.send_command(CallCommand::AppExited);
+                    }
+                } else if let Err(e) = handle.send_command(CallCommand::AppExited) {
                     tracing::warn!(
                         "Failed to send AppExited for session {}: {}",
                         session_id_for_log,
@@ -587,6 +617,9 @@ mod tests {
             .await
             .expect("stop must succeed");
         assert!(runtime.current_app().is_none());
-        assert!(runtime.stop_app(None).await.is_err(), "second stop: NotRunning");
+        assert!(
+            runtime.stop_app(None).await.is_err(),
+            "second stop: NotRunning"
+        );
     }
 }

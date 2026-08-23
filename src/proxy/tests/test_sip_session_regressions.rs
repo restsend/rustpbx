@@ -2439,10 +2439,7 @@ async fn hangup_command_queues_bye_dialogs_immediately() {
     let caller_dialog_id = session.caller_dialog_id();
 
     let result = session
-        .execute_command(
-            CallCommand::Hangup(HangupCommand::all(None, None)),
-            None,
-        )
+        .execute_command(CallCommand::Hangup(HangupCommand::all(None, None)), None)
         .await;
     assert!(result.success, "hangup command must succeed");
 
@@ -2539,8 +2536,7 @@ fn merge_leg_invite_headers_filters_protocol_headers_and_dedupes() {
         Header::Other("Content-Type".into(), "application/sdp".into()),
     ];
 
-    let merged =
-        SipSession::merge_leg_invite_headers(caller, Some(location)).expect("merged");
+    let merged = SipSession::merge_leg_invite_headers(caller, Some(location)).expect("merged");
 
     let count = |name: &str| {
         merged

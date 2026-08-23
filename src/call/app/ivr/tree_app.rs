@@ -548,6 +548,32 @@ impl IvrApp {
                 self.state = IvrState::Done;
                 Ok(AppAction::Transfer(format!("voicemail:{}", target)))
             }
+            EntryAction::StartApp {
+                app,
+                params,
+                return_app,
+                return_target,
+                return_menu,
+            } => {
+                info!(
+                    ivr = %self.definition.name,
+                    sub_app = %app,
+                    return_app = ?return_app,
+                    return_target = ?return_target,
+                    "IVR chaining to sub-app"
+                );
+                let sub = super::exec::prepare_start_app(
+                    ctx,
+                    app,
+                    params.clone(),
+                    return_app,
+                    return_target,
+                    return_menu,
+                )
+                .await?;
+                self.state = IvrState::Done;
+                Ok(AppAction::Chain(sub))
+            }
             EntryAction::Bridge {
                 create_room_uri,
                 headers,

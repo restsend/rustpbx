@@ -1887,9 +1887,7 @@ impl CallModule {
         // Reconstruct a minimal first-line + Call-ID for the owner handler.
         let sip_text = format!(
             "{} {}\r\nCall-ID: {}\r\n\r\n",
-            tx.original.method,
-            tx.original.uri,
-            call_id
+            tx.original.method, tx.original.uri, call_id
         );
         let resp = crate::proxy::cluster_forward::dispatch_indialog_sip(
             &self.inner.server.session_registry,

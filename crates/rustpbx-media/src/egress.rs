@@ -41,8 +41,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
-use audio_codec::{BoxedResampler, CodecType, Decoder, Encoder, create_encoder};
 use audio_codec::opus::OpusEncoder;
+use audio_codec::{BoxedResampler, CodecType, Decoder, Encoder, create_encoder};
 
 use bytes::Bytes;
 use parking_lot::Mutex;
@@ -156,7 +156,9 @@ enum EgressCmd {
     UpdateCodec(EgressCodec),
     /// Continue the paced timeline after rewrite relay released the wire.
     /// Next emitted frame uses `last_wire_ts + one ptime` and sets marker.
-    AdoptWireTimeline { last_wire_ts: u32 },
+    AdoptWireTimeline {
+        last_wire_ts: u32,
+    },
 }
 
 impl EgressPipeline {

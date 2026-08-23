@@ -1,5 +1,5 @@
 use crate::call::app::controller::{CallController, DtmfCollectConfig};
-use crate::call::app::{AppAction, ApplicationContext};
+use crate::call::app::{AppAction, ApplicationContext, CallApp};
 use crate::callrecord::CallRecordHangupReason;
 use crate::http_util::{self, HttpFetchOptions};
 use crate::tts::TtsService;
@@ -14,6 +14,8 @@ pub enum ActionResult {
     Terminal(TerminalAction),
     ChainedTo(ActionNode),
     WaitFor(WaitEvent),
+    /// Chain to a registered domain [`CallApp`] (voicemail, csat_survey, …).
+    StartSubApp(Box<dyn CallApp>),
 }
 
 pub enum TerminalAction {
@@ -690,6 +692,25 @@ pub async fn execute_action(
         }
 
         EntryAction::Exit => Ok(ActionResult::Terminal(TerminalAction::Exit)),
+
+        EntryAction::StartApp {
+            app,
+            params,
+            return_app,
+            return_target,
+            return_menu,
+        } => {
+            let sub = super::exec::prepare_start_app(
+                ctx,
+                app,
+                params.clone(),
+                return_app,
+                return_target,
+                return_menu,
+            )
+            .await?;
+            Ok(ActionResult::StartSubApp(sub))
+        }
 
         EntryAction::Play { .. }
         | EntryAction::Menu { .. }

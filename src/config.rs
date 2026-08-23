@@ -1712,8 +1712,7 @@ mod tests {
         );
         assert!(!policy.uploads_recording());
 
-        let policy: RecordingPolicy =
-            toml::from_str("enabled = true\ntype = \"local\"\n").unwrap();
+        let policy: RecordingPolicy = toml::from_str("enabled = true\ntype = \"local\"\n").unwrap();
         assert!(policy.uploads_recording());
         assert_eq!(
             policy.new_recording_config().recording_type,

@@ -218,9 +218,9 @@ async fn test_consult_transfer_bc_to_abc_to_ac() {
         // When consult is LegAdd on the A-B session, session_b == session_a
         // and merge must JoinMixerLeg(caller+callee+consult).
         let live_registry = server.registry.clone();
-        let mut tm_owner = rustpbx::addons::cc::transfer::ConsultTransferManager::new(
-            Arc::new(rustpbx::call::runtime::ConferenceManager::new()),
-        )
+        let mut tm_owner = rustpbx::addons::cc::transfer::ConsultTransferManager::new(Arc::new(
+            rustpbx::call::runtime::ConferenceManager::new(),
+        ))
         .with_call_registry(live_registry);
         let owner_tx = "e2e-tx-owner-001".to_string();
         // Prefer a live proxy session id when available.

@@ -1682,8 +1682,6 @@ async fn cluster_dispatch_command_handler(
     }
 }
 
-
-
 /// Receive a forwarded in-dialog SIP request and inject it into the local
 /// dialog layer. Used when an agent re-registers on another node mid-call.
 #[cfg(feature = "commerce")]

@@ -118,6 +118,9 @@ pub struct ApplicationContext {
     /// Pending queue plan + resolved agent URIs, set by SipSession before
     /// starting the queue app. The queue app factory reads (and clears) this.
     pub pending_queue: Arc<Mutex<Option<PendingQueuePlan>>>,
+
+    /// Factory for creating chained sub-apps from IVR `start_app` actions.
+    pub app_factory: Option<Arc<dyn crate::call::runtime::AppFactory>>,
 }
 
 /// A resolved queue plan ready to be handed to QueueApp.
@@ -146,6 +149,7 @@ impl ApplicationContext {
             ivr_trace: None,
             session_extensions: crate::proxy::proxy_call::session_hooks::SessionExtensions::new(),
             pending_queue: Arc::new(Mutex::new(None)),
+            app_factory: None,
         }
     }
 

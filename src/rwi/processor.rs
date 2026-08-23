@@ -999,74 +999,75 @@ impl RwiCommandProcessor {
             let mut cdr_ring_time: Option<chrono::DateTime<chrono::Utc>> = None;
             let mut cdr_answer_time: Option<chrono::DateTime<chrono::Utc>> = None;
             let mut cdr_rwi_call_record_guard = Some(rwi_call_record_guard);
-            let mut cleanup = move |ring_time: Option<chrono::DateTime<chrono::Utc>>,
-                                    answer_time: Option<chrono::DateTime<chrono::Utc>>| {
-                let Some(rwi_call_record_guard) = cdr_rwi_call_record_guard.take() else {
-                    return;
-                };
-                let recorder_file = cdr_record_files.remove(&cdr_call_id).map(|(_, path)| path);
-                if let Some(ref sender) = cdr_sender_owned.as_ref() {
-                    use crate::callrecord::CallRecordHangupReason;
-                    let end_time = chrono::Utc::now();
-                    let answered = answer_time.is_some();
-                    // Attach the recorder media when a recording was started on
-                    // this call (originate `record` option or mid-call
-                    // record.start) so the CDR carries recording_url and the
-                    // call-record hooks can emit recording_metadata_available /
-                    // record_end.
-                    let recorder: Vec<crate::callrecord::CallRecordMedia> = recorder_file
-                        .map(|path| {
-                            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                            crate::callrecord::CallRecordMedia {
-                                track_id: "mixed".to_string(),
-                                path,
-                                size,
-                                extra: None,
-                            }
-                        })
-                        .into_iter()
-                        .collect();
-                    let mut record = crate::callrecord::CallRecord {
-                        call_id: cdr_call_id.clone(),
-                        // Originates are root sessions: session_id == call_id.
-                        session_id: Some(cdr_call_id.clone()),
-                        caller: cdr_caller.clone(),
-                        callee: cdr_callee.clone(),
-                        start_time: cdr_start,
-                        ring_time,
-                        answer_time,
-                        end_time,
-                        status_code: if answered { 200 } else { 0 },
-                        hangup_reason: Some(if answered {
-                            CallRecordHangupReason::BySystem
-                        } else {
-                            CallRecordHangupReason::Canceled
-                        }),
-                        hangup_messages: vec![],
-                        recorder,
-                        sip_leg_roles: std::collections::HashMap::new(),
-                        leg_timeline: crate::callrecord::LegTimeline::default(),
-                        details: crate::callrecord::CallDetails {
-                            direction: "outbound".to_string(),
-                            status: if answered {
-                                "answered".to_string()
-                            } else {
-                                "no_answer".to_string()
-                            },
-                            from_number: Some(cdr_caller.clone()),
-                            to_number: Some(cdr_callee.clone()),
-                            ..Default::default()
-                        },
-                        extensions: http::Extensions::new(),
+            let mut cleanup =
+                move |ring_time: Option<chrono::DateTime<chrono::Utc>>,
+                      answer_time: Option<chrono::DateTime<chrono::Utc>>| {
+                    let Some(rwi_call_record_guard) = cdr_rwi_call_record_guard.take() else {
+                        return;
                     };
-                    record.extensions.insert(rwi_call_record_guard);
-                    if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
-                        sender.try_send(record)
-                    {
-                        tracing::warn!(call_id = %cdr_call_id, "call record channel full; dropping RWI-originated CDR");
+                    let recorder_file = cdr_record_files.remove(&cdr_call_id).map(|(_, path)| path);
+                    if let Some(ref sender) = cdr_sender_owned.as_ref() {
+                        use crate::callrecord::CallRecordHangupReason;
+                        let end_time = chrono::Utc::now();
+                        let answered = answer_time.is_some();
+                        // Attach the recorder media when a recording was started on
+                        // this call (originate `record` option or mid-call
+                        // record.start) so the CDR carries recording_url and the
+                        // call-record hooks can emit recording_metadata_available /
+                        // record_end.
+                        let recorder: Vec<crate::callrecord::CallRecordMedia> = recorder_file
+                            .map(|path| {
+                                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                                crate::callrecord::CallRecordMedia {
+                                    track_id: "mixed".to_string(),
+                                    path,
+                                    size,
+                                    extra: None,
+                                }
+                            })
+                            .into_iter()
+                            .collect();
+                        let mut record = crate::callrecord::CallRecord {
+                            call_id: cdr_call_id.clone(),
+                            // Originates are root sessions: session_id == call_id.
+                            session_id: Some(cdr_call_id.clone()),
+                            caller: cdr_caller.clone(),
+                            callee: cdr_callee.clone(),
+                            start_time: cdr_start,
+                            ring_time,
+                            answer_time,
+                            end_time,
+                            status_code: if answered { 200 } else { 0 },
+                            hangup_reason: Some(if answered {
+                                CallRecordHangupReason::BySystem
+                            } else {
+                                CallRecordHangupReason::Canceled
+                            }),
+                            hangup_messages: vec![],
+                            recorder,
+                            sip_leg_roles: std::collections::HashMap::new(),
+                            leg_timeline: crate::callrecord::LegTimeline::default(),
+                            details: crate::callrecord::CallDetails {
+                                direction: "outbound".to_string(),
+                                status: if answered {
+                                    "answered".to_string()
+                                } else {
+                                    "no_answer".to_string()
+                                },
+                                from_number: Some(cdr_caller.clone()),
+                                to_number: Some(cdr_callee.clone()),
+                                ..Default::default()
+                            },
+                            extensions: http::Extensions::new(),
+                        };
+                        record.extensions.insert(rwi_call_record_guard);
+                        if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
+                            sender.try_send(record)
+                        {
+                            tracing::warn!(call_id = %cdr_call_id, "call record channel full; dropping RWI-originated CDR");
+                        }
                     }
-                }
-            };
+                };
 
             // These peers are logical registry anchors. The first outbound
             // SIP/RTP connection is owned by MediaBridge A below; no duplicate
@@ -1448,163 +1449,163 @@ impl RwiCommandProcessor {
 
             'setup: {
                 match result {
-                Ok(Some(Ok((dialog, Some(resp)))))
-                    if resp.status_code().kind() == rsipstack::sip::StatusCodeKind::Successful =>
-                {
-                    cdr_answer_time = Some(chrono::Utc::now());
+                    Ok(Some(Ok((dialog, Some(resp)))))
+                        if resp.status_code().kind()
+                            == rsipstack::sip::StatusCodeKind::Successful =>
+                    {
+                        cdr_answer_time = Some(chrono::Utc::now());
 
-                    // A successful do_invite registers the confirmed client dialog in
-                    // DialogLayer. Keep its guard alive for the entire UAC session so
-                    // every exit path removes that registry entry.
-                    let caller_dialog_guard =
-                        ClientDialogGuard::new(dialog_layer.clone(), dialog.id());
+                        // A successful do_invite registers the confirmed client dialog in
+                        // DialogLayer. Keep its guard alive for the entire UAC session so
+                        // every exit path removes that registry entry.
+                        let caller_dialog_guard =
+                            ClientDialogGuard::new(dialog_layer.clone(), dialog.id());
 
-                    let final_sdp_answer = if resp.body().is_empty() {
-                        None
-                    } else {
-                        let body_str = String::from_utf8_lossy(resp.body()).to_string();
-                        if body_str.contains("v=0") {
-                            Some(body_str)
-                        } else {
+                        let final_sdp_answer = if resp.body().is_empty() {
                             None
-                        }
-                    };
-                    let sdp_answer = final_sdp_answer.or_else(|| caller_early_sdp.clone());
+                        } else {
+                            let body_str = String::from_utf8_lossy(resp.body()).to_string();
+                            if body_str.contains("v=0") {
+                                Some(body_str)
+                            } else {
+                                None
+                            }
+                        };
+                        let sdp_answer = final_sdp_answer.or_else(|| caller_early_sdp.clone());
 
-                    // Attach the answered first INVITE as the primary caller
-                    // (MediaBridge A). Its SDP answer is applied to the exact
-                    // leg whose offer was sent above. B remains empty until a
-                    // genuine second endpoint is added through call.leg_add.
-                    if let Err(e) = session.attach_caller_dialog(dialog, sdp_answer).await {
-                        tracing::warn!(call_id = %call_id, error = %e, "failed to complete originate media negotiation");
+                        // Attach the answered first INVITE as the primary caller
+                        // (MediaBridge A). Its SDP answer is applied to the exact
+                        // leg whose offer was sent above. B remains empty until a
+                        // genuine second endpoint is added through call.leg_add.
+                        if let Err(e) = session.attach_caller_dialog(dialog, sdp_answer).await {
+                            tracing::warn!(call_id = %call_id, error = %e, "failed to complete originate media negotiation");
+                            {
+                                let gw = gateway.read();
+                                gw.send_to_owner(&crate::rwi::CallHangup {
+                                    call_id: call_id.clone(),
+                                    reason: Some(format!("media_setup_failed: {}", e)),
+                                    hangup_by: None,
+                                    sip_status: Some(resp.status_code().code()),
+                                });
+                            }
+                            break 'setup;
+                        }
+
+                        if !originate_recording_started
+                            && let Some((path, config)) = originate_recording.as_ref()
+                        {
+                            let result = session
+                                .execute_command(
+                                    CallCommand::StartRecording {
+                                        config: config.clone(),
+                                    },
+                                    None,
+                                )
+                                .await;
+                            if result.success {
+                                record_files.insert(call_id.clone(), path.clone());
+                                gateway.read().send_to_owner(&crate::rwi::RecordStarted {
+                                    call_id: call_id.clone(),
+                                });
+                            } else {
+                                tracing::warn!(
+                                    call_id = %call_id,
+                                    error = %result.message.unwrap_or_else(|| "unknown error".to_string()),
+                                    "originate record option: failed to start at final media setup"
+                                );
+                            }
+                        }
+
+                        while let Some(command) = pending_commands.pop_front() {
+                            let command_result = session
+                                .execute_command(command, Some(&mut callee_evt_rx))
+                                .await;
+                            if !command_result.success {
+                                tracing::warn!(
+                                    call_id = %call_id,
+                                    error = ?command_result.message,
+                                    "deferred originate command failed after answer"
+                                );
+                            }
+                        }
+
+                        // Spawn the UAC command loop now that the caller/A dialog
+                        // and its one real media connection are attached.
+                        let session_cancel = cancel_token.clone();
+                        let session_call_id = call_id.clone();
+                        let session_join = crate::utils::spawn(async move {
+                            if let Err(e) = session
+                                .process_uac(
+                                    caller_state_rx,
+                                    callee_evt_rx,
+                                    cmd_rx,
+                                    caller_dialog_guard,
+                                )
+                                .await
+                            {
+                                tracing::warn!(call_id = %session_call_id, error = %e, "UAC session loop exited with error");
+                            }
+                            session_cancel.cancel();
+                        });
+
+                        use crate::proxy::active_call_registry::ActiveProxyCallStatus;
+                        registry.update(&call_id, |entry| {
+                            entry.answered_at = Some(chrono::Utc::now());
+                            entry.status = ActiveProxyCallStatus::Talking;
+                        });
                         {
                             let gw = gateway.read();
-                            gw.send_to_owner(&crate::rwi::CallHangup {
-                                call_id: call_id.clone(),
-                                reason: Some(format!("media_setup_failed: {}", e)),
-                                hangup_by: None,
-                                sip_status: Some(resp.status_code().code()),
-                            });
-                        }
-                        break 'setup;
-                    }
-
-                    if !originate_recording_started
-                        && let Some((path, config)) = originate_recording.as_ref()
-                    {
-                        let result = session
-                            .execute_command(
-                                CallCommand::StartRecording {
-                                    config: config.clone(),
-                                },
-                                None,
-                            )
-                            .await;
-                        if result.success {
-                            record_files.insert(call_id.clone(), path.clone());
-                            gateway.read().send_to_owner(&crate::rwi::RecordStarted {
+                            gw.send_to_owner(&crate::rwi::CallAnswered {
                                 call_id: call_id.clone(),
                             });
-                        } else {
-                            tracing::warn!(
-                                call_id = %call_id,
-                                error = %result.message.unwrap_or_else(|| "unknown error".to_string()),
-                                "originate record option: failed to start at final media setup"
-                            );
                         }
-                    }
 
-                    while let Some(command) = pending_commands.pop_front() {
-                        let command_result = session
-                            .execute_command(command, Some(&mut callee_evt_rx))
-                            .await;
-                        if !command_result.success {
-                            tracing::warn!(
-                                call_id = %call_id,
-                                error = ?command_result.message,
-                                "deferred originate command failed after answer"
-                            );
+                        // Keep the call alive until cancelled / timed out.
+                        //
+                        // IMPORTANT: do not run `cleanup()` (which drops
+                        // `RwiCallRecordGuard` and releases call ownership) until
+                        // `process_uac` has finished. Hangup cancels this token
+                        // immediately, but the session still needs its shutdown
+                        // drain to emit `call_hangup` to the owning RWI session.
+                        // Releasing ownership first drops that event on the floor.
+                        tokio::select! {
+                            _ = cancel_token.cancelled() => {
+                                tracing::info!(%call_id, "Originate task cancelled");
+                            }
+                            _ = tokio::time::sleep(Duration::from_secs(3600)) => {
+                                tracing::info!(%call_id, "Call timeout after 1 hour");
+                                cancel_token.cancel();
+                            }
                         }
+                        if let Err(e) = session_join.await {
+                            tracing::warn!(%call_id, error = %e, "UAC session join failed");
+                        }
+                        cleanup(cdr_ring_time, cdr_answer_time);
+                        return;
                     }
-
-                    // Spawn the UAC command loop now that the caller/A dialog
-                    // and its one real media connection are attached.
-                    let session_cancel = cancel_token.clone();
-                    let session_call_id = call_id.clone();
-                    let session_join = crate::utils::spawn(async move {
-                        if let Err(e) = session
-                            .process_uac(
-                                caller_state_rx,
-                                callee_evt_rx,
-                                cmd_rx,
-                                caller_dialog_guard,
-                            )
-                            .await
+                    Ok(Some(Ok((_dialog, resp_opt)))) => {
+                        let sip_status = resp_opt.as_ref().map(|r| r.status_code.code());
                         {
-                            tracing::warn!(call_id = %session_call_id, error = %e, "UAC session loop exited with error");
-                        }
-                        session_cancel.cancel();
-                    });
-
-                    use crate::proxy::active_call_registry::ActiveProxyCallStatus;
-                    registry.update(&call_id, |entry| {
-                        entry.answered_at = Some(chrono::Utc::now());
-                        entry.status = ActiveProxyCallStatus::Talking;
-                    });
-                    {
-                        let gw = gateway.read();
-                        gw.send_to_owner(&crate::rwi::CallAnswered {
-                            call_id: call_id.clone(),
-                        });
-                    }
-
-                    // Keep the call alive until cancelled / timed out.
-                    //
-                    // IMPORTANT: do not run `cleanup()` (which drops
-                    // `RwiCallRecordGuard` and releases call ownership) until
-                    // `process_uac` has finished. Hangup cancels this token
-                    // immediately, but the session still needs its shutdown
-                    // drain to emit `call_hangup` to the owning RWI session.
-                    // Releasing ownership first drops that event on the floor.
-                    tokio::select! {
-                        _ = cancel_token.cancelled() => {
-                            tracing::info!(%call_id, "Originate task cancelled");
-                        }
-                        _ = tokio::time::sleep(Duration::from_secs(3600)) => {
-                            tracing::info!(%call_id, "Call timeout after 1 hour");
-                            cancel_token.cancel();
+                            let gw = gateway.read();
+                            if sip_status == Some(486) || sip_status == Some(600) {
+                                gw.send_to_owner(&crate::rwi::CallBusy {
+                                    call_id: call_id.clone(),
+                                });
+                            } else if matches!(sip_status, Some(408) | Some(480) | Some(487)) {
+                                gw.send_to_owner(&crate::rwi::CallNoAnswer {
+                                    call_id: call_id.clone(),
+                                });
+                            } else {
+                                gw.send_to_owner(&crate::rwi::CallHangup {
+                                    call_id: call_id.clone(),
+                                    reason: Some("originate_failed".to_string()),
+                                    hangup_by: None,
+                                    sip_status,
+                                });
+                            }
                         }
                     }
-                    if let Err(e) = session_join.await {
-                        tracing::warn!(%call_id, error = %e, "UAC session join failed");
-                    }
-                    cleanup(cdr_ring_time, cdr_answer_time);
-                    return;
-                }
-                Ok(Some(Ok((_dialog, resp_opt)))) => {
-                    let sip_status = resp_opt.as_ref().map(|r| r.status_code.code());
-                    {
-                        let gw = gateway.read();
-                        if sip_status == Some(486) || sip_status == Some(600) {
-                            gw.send_to_owner(&crate::rwi::CallBusy {
-                                call_id: call_id.clone(),
-                            });
-                        } else if matches!(sip_status, Some(408) | Some(480) | Some(487)) {
-                            gw.send_to_owner(&crate::rwi::CallNoAnswer {
-                                call_id: call_id.clone(),
-                            });
-                        } else {
-                            gw.send_to_owner(&crate::rwi::CallHangup {
-                                call_id: call_id.clone(),
-                                reason: Some("originate_failed".to_string()),
-                                hangup_by: None,
-                                sip_status,
-                            });
-                        }
-                    }
-                }
-                Ok(Some(Err(e))) => {
-                    {
+                    Ok(Some(Err(e))) => {
                         let gw = gateway.read();
                         gw.send_to_owner(&crate::rwi::CallHangup {
                             call_id: call_id.clone(),
@@ -1613,25 +1614,22 @@ impl RwiCommandProcessor {
                             sip_status: None,
                         });
                     }
-                }
-                Ok(None) => {
-                    let (reason, sip_status) = setup_hangup.take().unwrap_or_default();
-                    let gw = gateway.read();
-                    gw.send_to_owner(&crate::rwi::CallHangup {
-                        call_id: call_id.clone(),
-                        reason,
-                        hangup_by: Some("system".to_string()),
-                        sip_status,
-                    });
-                }
-                Err(_) => {
-                    {
+                    Ok(None) => {
+                        let (reason, sip_status) = setup_hangup.take().unwrap_or_default();
+                        let gw = gateway.read();
+                        gw.send_to_owner(&crate::rwi::CallHangup {
+                            call_id: call_id.clone(),
+                            reason,
+                            hangup_by: Some("system".to_string()),
+                            sip_status,
+                        });
+                    }
+                    Err(_) => {
                         let gw = gateway.read();
                         gw.send_to_owner(&crate::rwi::CallNoAnswer {
                             call_id: call_id.clone(),
                         });
                     }
-                }
                 }
             }
 

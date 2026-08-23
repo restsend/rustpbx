@@ -2,10 +2,10 @@
 
 mod prelude;
 
-mod util;
 mod builtin_app_factory;
-mod session;
 mod peer_audio;
+mod session;
+mod util;
 
 mod conference;
 mod live_transcription;
@@ -18,4 +18,4 @@ pub(crate) use util::{pct_decode_query, route_outbound_leg};
 pub(crate) use transfer::ReturnTargetSpec;
 
 pub use session::{SessionSnapshot, SipSession, SipSessionHandle};
-pub use util::{into_callee_err, CalleeError};
+pub use util::{CalleeError, into_callee_err};

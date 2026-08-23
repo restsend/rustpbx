@@ -819,9 +819,14 @@ async fn module_in_dialog_refresh_keeps_subscription() {
     let module = PresenceModule::create(server.clone(), config).unwrap();
 
     // Initial subscription.
-    let (mut tx1, _) =
-        create_transaction(subscribe_to("alice", "bob", "rustpbx.com", Some(3600), "presence"))
-            .await;
+    let (mut tx1, _) = create_transaction(subscribe_to(
+        "alice",
+        "bob",
+        "rustpbx.com",
+        Some(3600),
+        "presence",
+    ))
+    .await;
     module
         .on_transaction_begin(
             CancellationToken::new(),

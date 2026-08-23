@@ -101,7 +101,10 @@ pub async fn resolve_owner_and_session(
     call_id: &str,
 ) -> Option<(String, String)> {
     let info = registry.lookup(call_id).await?;
-    Some((info.node_id.clone(), info.canonical_session_id().to_string()))
+    Some((
+        info.node_id.clone(),
+        info.canonical_session_id().to_string(),
+    ))
 }
 
 /// Errors surfaced by registry backends.
@@ -402,9 +405,10 @@ mod tests {
         .await
         .unwrap();
 
-        let (owner, canonical) = resolve_owner_and_session(&(reg.clone() as SessionRegistryRef), "dlg-bleg-1")
-            .await
-            .expect("alias should resolve");
+        let (owner, canonical) =
+            resolve_owner_and_session(&(reg.clone() as SessionRegistryRef), "dlg-bleg-1")
+                .await
+                .expect("alias should resolve");
         assert_eq!(owner, "10.0.0.1:5060");
         assert_eq!(canonical, "sess-abc");
     }

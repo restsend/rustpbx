@@ -151,8 +151,7 @@ impl RecordingUploadHook {
             {
                 *jsonl = archived.clone();
             }
-            if let Some(serde_json::Value::Array(segments)) =
-                metadata.get_mut("recording_segments")
+            if let Some(serde_json::Value::Array(segments)) = metadata.get_mut("recording_segments")
             {
                 for segment in segments.iter_mut() {
                     if let Some(serde_json::Value::String(path)) = segment.get_mut("path")
@@ -891,7 +890,9 @@ mod tests {
         let wav = dir.path().join("sess.wav");
         let jsonl = dir.path().join("sess.jsonl");
         tokio::fs::write(&wav, b"wav").await.expect("write wav");
-        tokio::fs::write(&jsonl, b"{}\n").await.expect("write jsonl");
+        tokio::fs::write(&jsonl, b"{}\n")
+            .await
+            .expect("write jsonl");
         let wav_s = wav.to_string_lossy().into_owned();
         let jsonl_s = jsonl.to_string_lossy().into_owned();
 
@@ -1024,10 +1025,7 @@ mod tests {
             wav.exists(),
             "enrich must not move files outside the recorder root"
         );
-        assert_eq!(
-            record.recorder[0].path,
-            wav.to_string_lossy().into_owned()
-        );
+        assert_eq!(record.recorder[0].path, wav.to_string_lossy().into_owned());
         assert_eq!(
             record.details.recording_url, None,
             "enrich must not synthesize a recording_url when nothing moved"

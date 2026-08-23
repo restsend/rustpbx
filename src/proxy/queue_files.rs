@@ -110,10 +110,7 @@ mod tests {
 
     #[test]
     fn canonical_queue_key_trims_and_lowercases() {
-        assert_eq!(
-            canonical_queue_key("  Sales  ").as_deref(),
-            Some("sales")
-        );
+        assert_eq!(canonical_queue_key("  Sales  ").as_deref(), Some("sales"));
         assert!(canonical_queue_key("   ").is_none());
     }
 }

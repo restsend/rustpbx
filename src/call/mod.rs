@@ -1,7 +1,5 @@
 use crate::{
-    config::{
-        MediaProxyMode, RecordingAutoStartAt, RecordingPolicy, RecordingType, RouteResult,
-    },
+    config::{MediaProxyMode, RecordingAutoStartAt, RecordingPolicy, RecordingType, RouteResult},
     media::recorder::RecorderOption,
     proxy::routing::VideoPolicy,
 };

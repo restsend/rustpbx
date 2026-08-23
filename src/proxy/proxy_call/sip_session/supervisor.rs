@@ -232,7 +232,11 @@ impl SipSession {
                 .server
                 .active_call_registry
                 .get_handle(sup_session)
-                .or_else(|| self.server.active_call_registry.get_handle_by_dialog(sup_session))
+                .or_else(|| {
+                    self.server
+                        .active_call_registry
+                        .get_handle_by_dialog(sup_session)
+                })
             {
                 let _ = sup_handle.send_command(CallCommand::JoinMixerLeg {
                     mixer_id: conf_id.clone(),

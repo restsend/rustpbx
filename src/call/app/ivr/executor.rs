@@ -439,6 +439,7 @@ impl StepIvrApp {
             EntryAction::JumpIvr { .. } => "JumpIvr",
             EntryAction::RouteToAgent { .. } => "RouteToAgent",
             EntryAction::Bridge { .. } => "Bridge",
+            EntryAction::StartApp { .. } => "StartApp",
         }
     }
 
@@ -560,6 +561,11 @@ impl StepIvrApp {
                         self.current_trigger = Some(crate::rwi::TriggerInfo::new("chained"));
                         self.current_node = Some(next);
                         return Box::pin(self.__exec_node(ctrl, ctx)).await;
+                    }
+                    ActionResult::StartSubApp(sub_app) => {
+                        self.step_index += 1;
+                        self.increment_total_steps();
+                        return Ok(AppAction::Chain(sub_app));
                     }
                     ActionResult::WaitFor(ref wait_event) => {
                         // InputPhone collects digits synchronously; forward to provider

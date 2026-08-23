@@ -2391,21 +2391,18 @@ mod tests {
         )
         .expect("write jsonl");
 
-        let response = serve_local_jsonl_flow(
-            &model,
-            jsonl.to_str().unwrap(),
-            true,
-        )
-        .await;
+        let response = serve_local_jsonl_flow(&model, jsonl.to_str().unwrap(), true).await;
         let (parts, body) = response.into_parts();
         assert_eq!(parts.status, StatusCode::OK);
-        assert!(parts
-            .headers
-            .get(http::header::CONTENT_TYPE)
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .starts_with("application/json"));
+        assert!(
+            parts
+                .headers
+                .get(http::header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("application/json")
+        );
         let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
         let value: Value = serde_json::from_slice(&bytes).unwrap();
 
@@ -3016,7 +3013,8 @@ mod tests {
         let stale = root.join("sess.jsonl").to_string_lossy().into_owned();
         assert_eq!(
             resolve_archived_artifact_path(&stale, at),
-            root.join("20260821").join("sess.jsonl")
+            root.join("20260821")
+                .join("sess.jsonl")
                 .to_string_lossy()
                 .into_owned()
         );
@@ -3037,15 +3035,16 @@ mod tests {
     fn resolve_archived_artifact_path_falls_back_to_hourly_layout() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
-        std::fs::create_dir_all(root.join("20260821").join("15"))
-            .expect("mkdir hourly");
+        std::fs::create_dir_all(root.join("20260821").join("15")).expect("mkdir hourly");
         std::fs::write(root.join("20260821").join("15").join("sess.wav"), b"wav").unwrap();
 
         let at = Utc.with_ymd_and_hms(2026, 8, 21, 15, 5, 0).unwrap();
         let stale = root.join("sess.wav").to_string_lossy().into_owned();
         assert_eq!(
             resolve_archived_artifact_path(&stale, at),
-            root.join("20260821").join("15").join("sess.wav")
+            root.join("20260821")
+                .join("15")
+                .join("sess.wav")
                 .to_string_lossy()
                 .into_owned()
         );

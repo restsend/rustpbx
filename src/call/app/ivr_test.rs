@@ -2990,6 +2990,7 @@ action = { type = "transfer", target = "100" }
             ivr_trace: None,
             session_extensions: ext.clone(),
             pending_queue: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            app_factory: None,
         };
 
         let mut stack = crate::call::app::testing::MockCallStack::run_with_context(

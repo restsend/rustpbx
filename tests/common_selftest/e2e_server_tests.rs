@@ -3,7 +3,6 @@
 //! harness self-tests run ONCE here instead of in every aggregator
 //! binary (they used to re-execute ~11x per `cargo test` run).
 
-
 use crate::common::e2e_test_server::*;
 
 #[tokio::test]

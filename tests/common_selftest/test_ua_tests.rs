@@ -3,7 +3,6 @@
 //! harness self-tests run ONCE here instead of in every aggregator
 //! binary (they used to re-execute ~11x per `cargo test` run).
 
-
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -13,8 +12,8 @@ use crate::common::e2e_test_server::E2eTestServer;
 use crate::common::test_ua::*;
 use anyhow::Result;
 use rsipstack::dialog::DialogId;
-use std::net::SocketAddr;
 use rustpbx::config::MediaProxyMode;
+use std::net::SocketAddr;
 
 // Simplified test helper functions
 pub async fn create_test_ua(
@@ -164,9 +163,10 @@ async fn test_call_flow_comprehensive() {
         // Test call with SDP: spawn caller and handle callee events concurrently
         let sdp_offer = create_test_sdp("192.168.1.100", 5004, true);
         let alice_clone = alice.clone();
-        let caller_handle = rustpbx::utils::spawn(async move {
-            alice_clone.make_call("bob", Some(sdp_offer)).await
-        });
+        let caller_handle =
+            rustpbx::utils::spawn(
+                async move { alice_clone.make_call("bob", Some(sdp_offer)).await },
+            );
 
         // Wait and answer incoming call by polling events (avoid draining issue)
         let mut answered = false;
@@ -522,9 +522,7 @@ async fn test_dialog_state_monitoring() {
                             bob.answer_call(id, None).await.ok();
                             established_id = Some(id.clone());
                         }
-                        TestUaEvent::CallRinging(_) => {
-                            states_observed.push("Ringing".to_string())
-                        }
+                        TestUaEvent::CallRinging(_) => states_observed.push("Ringing".to_string()),
                         TestUaEvent::CallEstablished(_) => {
                             states_observed.push("Established".to_string())
                         }
@@ -818,8 +816,7 @@ async fn test_dtmf_and_info_messages() {
                 bob.process_dialog_events().await.ok();
             }
 
-            if let Ok(join_res) =
-                tokio::time::timeout(Duration::from_secs(5), caller_handle).await
+            if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(5), caller_handle).await
                 && let Ok(Ok(id)) = join_res
             {
                 alice_arc.hangup(&id).await.ok();
@@ -976,8 +973,7 @@ async fn test_codec_negotiation() {
             }
 
             sleep(Duration::from_millis(100)).await;
-            if let Ok(join_res) =
-                tokio::time::timeout(Duration::from_secs(5), caller_handle).await
+            if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(5), caller_handle).await
                 && let Ok(Ok(id)) = join_res
             {
                 alice_arc.hangup(&id).await.ok();
@@ -1488,8 +1484,7 @@ a=rtpmap:0 PCMU/8000"#;
             }
 
             sleep(Duration::from_millis(200)).await;
-            if let Ok(join_res) =
-                tokio::time::timeout(Duration::from_secs(5), caller_handle).await
+            if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(5), caller_handle).await
                 && let Ok(Ok(id)) = join_res
             {
                 alice_arc.hangup(&id).await.ok();
@@ -1545,8 +1540,7 @@ a=rtpmap:111 opus/48000/2"#;
             }
 
             sleep(Duration::from_millis(200)).await;
-            if let Ok(join_res) =
-                tokio::time::timeout(Duration::from_secs(5), caller_handle).await
+            if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(5), caller_handle).await
                 && let Ok(Ok(id)) = join_res
             {
                 alice_arc.hangup(&id).await.ok();

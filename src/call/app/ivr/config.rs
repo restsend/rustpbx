@@ -409,6 +409,21 @@ pub enum EntryAction {
         #[serde(default)]
         failure: Option<Box<ActionNode>>,
     },
+
+    /// Chain to another registered [`CallApp`] (voicemail, csat_survey, …).
+    /// When `return_app` / `return_target` are set the sub-app exit resumes
+    /// the caller flow (typically back into this IVR).
+    StartApp {
+        app: String,
+        #[serde(default)]
+        params: Option<serde_json::Value>,
+        #[serde(default)]
+        return_app: Option<String>,
+        #[serde(default, alias = "return_to_ivr")]
+        return_target: Option<String>,
+        #[serde(default)]
+        return_menu: Option<String>,
+    },
 }
 
 impl EntryAction {
@@ -1205,6 +1220,16 @@ action = { type = "menu", menu = "root" }
         ] {
             assert!(serde_json::from_str::<ActionNode>(invalid).is_err());
         }
+
+        // start_app
+        let node: ActionNode = serde_json::from_str(
+            r#"{"type":"start_app","app":"check_voicemail","return_target":"main"}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(node.action, EntryAction::StartApp { app, return_target, .. }
+            if app == "check_voicemail" && return_target.as_deref() == Some("main"))
+        );
 
         let node: ActionNode = serde_json::from_str(r#"{"type":"exit"}"#).unwrap();
         assert!(matches!(node.action, EntryAction::Exit));

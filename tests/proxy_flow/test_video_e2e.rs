@@ -17,7 +17,11 @@ fn media_endpoints(sdp: &str) -> Vec<(&'static str, SocketAddr)> {
     for line in sdp.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("c=IN IP4 ") {
-            host = rest.split_whitespace().next().unwrap_or("127.0.0.1").to_string();
+            host = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or("127.0.0.1")
+                .to_string();
         } else if let Some(rest) = line.strip_prefix("m=") {
             let mut parts = rest.split_whitespace();
             let kind = match parts.next() {
@@ -47,9 +51,11 @@ fn endpoint_for(sdp: &str, kind: &str) -> Option<SocketAddr> {
         .map(|(_, a)| a)
 }
 
-async fn establish(server: &Arc<E2eTestServer>, caller_sdp: String, callee_sdp: String)
-    -> anyhow::Result<(String, Option<String>)>
-{
+async fn establish(
+    server: &Arc<E2eTestServer>,
+    caller_sdp: String,
+    callee_sdp: String,
+) -> anyhow::Result<(String, Option<String>)> {
     let alice = server.create_ua("alice").await?;
     let bob = server.create_ua("bob").await?;
     sleep(Duration::from_millis(100)).await;
@@ -159,7 +165,8 @@ async fn test_video_rtp_relay_bidirectional() -> Result<()> {
     let cv_rx = RtpReceiver::bind(0).await?;
     let ba_rx = RtpReceiver::bind(0).await?;
     let bv_rx = RtpReceiver::bind(0).await?;
-    let (ca_port, cv_port, ba_port, bv_port) = (ca_rx.port()?, cv_rx.port()?, ba_rx.port()?, bv_rx.port()?);
+    let (ca_port, cv_port, ba_port, bv_port) =
+        (ca_rx.port()?, cv_rx.port()?, ba_rx.port()?, bv_rx.port()?);
     for rx in [&ca_rx, &cv_rx, &ba_rx, &bv_rx] {
         rx.start_receiving();
     }

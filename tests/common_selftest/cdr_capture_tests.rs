@@ -3,11 +3,10 @@
 //! harness self-tests run ONCE here instead of in every aggregator
 //! binary (they used to re-execute ~11x per `cargo test` run).
 
-
 use crate::common::cdr_capture::*;
+use chrono::Utc;
 use rustpbx::callrecord::{CallRecord, CallRecordHangupReason};
 use std::time::Duration;
-use chrono::Utc;
 
 fn create_test_record() -> CallRecord {
     CallRecord {

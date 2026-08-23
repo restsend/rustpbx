@@ -29,6 +29,15 @@ async fn shared_db() -> DatabaseConnection {
     db
 }
 
+/// `RUSTPBX_INSTANCE_ID` is process-global; tests that mutate it (and the
+/// cached INSTANCE_ID) must run serially or they cross-contaminate node
+/// identity under the parallel test harness.
+static INSTANCE_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn instance_env_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    INSTANCE_ENV_LOCK.lock().await
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Test 1: Agent status written by node A is visible to node B
 // ═══════════════════════════════════════════════════════════════════
@@ -330,8 +339,9 @@ async fn cluster_reaper_releases_stale_claims_after_node_crash() {
 #[tokio::test]
 async fn cluster_affinity_peer_does_not_steal_live_call() {
     let db = shared_db().await;
+    let _env = instance_env_guard().await;
 
-unsafe {     std::env::set_var("RUSTPBX_INSTANCE_ID", "node-a") };
+    unsafe { std::env::set_var("RUSTPBX_INSTANCE_ID", "node-a") };
     rustpbx::addons::cc::stats_writer::reset_instance_id_for_test();
 
     rustpbx::addons::cc::stats_writer::shared_enqueue(
@@ -359,7 +369,7 @@ unsafe {     std::env::set_var("RUSTPBX_INSTANCE_ID", "node-a") };
     .await;
 
     // Node B has an idle matching agent — still must not steal.
-unsafe {     std::env::set_var("RUSTPBX_INSTANCE_ID", "node-b") };
+    unsafe { std::env::set_var("RUSTPBX_INSTANCE_ID", "node-b") };
     rustpbx::addons::cc::stats_writer::reset_instance_id_for_test();
     rustpbx::addons::cc::stats_writer::upsert_agent_presence(
         &db,
@@ -393,13 +403,14 @@ unsafe {     std::env::set_var("RUSTPBX_INSTANCE_ID", "node-b") };
             .is_empty()
     );
 
-unsafe {     std::env::remove_var("RUSTPBX_INSTANCE_ID") };
+    unsafe { std::env::remove_var("RUSTPBX_INSTANCE_ID") };
     rustpbx::addons::cc::stats_writer::reset_instance_id_for_test();
 }
 
 #[tokio::test]
 async fn cluster_failover_cleans_dead_owner_orphan() {
     let db = shared_db().await;
+    let _env = instance_env_guard().await;
     use rustpbx::addons::cc::models::cc_acd_queue;
     use sea_orm::ActiveModelTrait;
 
@@ -419,7 +430,7 @@ async fn cluster_failover_cleans_dead_owner_orphan() {
     .await
     .unwrap();
 
-unsafe {     std::env::set_var("RUSTPBX_INSTANCE_ID", "node-b") };
+    unsafe { std::env::set_var("RUSTPBX_INSTANCE_ID", "node-b") };
     rustpbx::addons::cc::stats_writer::reset_instance_id_for_test();
 
     let cleaned =
@@ -432,7 +443,7 @@ unsafe {     std::env::set_var("RUSTPBX_INSTANCE_ID", "node-b") };
             .is_empty()
     );
 
-unsafe {     std::env::remove_var("RUSTPBX_INSTANCE_ID") };
+    unsafe { std::env::remove_var("RUSTPBX_INSTANCE_ID") };
     rustpbx::addons::cc::stats_writer::reset_instance_id_for_test();
 }
 
@@ -544,8 +555,9 @@ fn acd_snapshot_from_presence(
 #[tokio::test]
 async fn cluster_merged_presence_feeds_longest_idle() {
     let db = shared_db().await;
+    let _env = instance_env_guard().await;
 
-unsafe {     std::env::set_var("RUSTPBX_INSTANCE_ID", "node-a") };
+    unsafe { std::env::set_var("RUSTPBX_INSTANCE_ID", "node-a") };
     rustpbx::addons::cc::stats_writer::reset_instance_id_for_test();
     rustpbx::addons::cc::stats_writer::upsert_agent_presence(
         &db,
@@ -559,7 +571,7 @@ unsafe {     std::env::set_var("RUSTPBX_INSTANCE_ID", "node-a") };
     )
     .await;
 
-unsafe {     std::env::set_var("RUSTPBX_INSTANCE_ID", "node-b") };
+    unsafe { std::env::set_var("RUSTPBX_INSTANCE_ID", "node-b") };
     rustpbx::addons::cc::stats_writer::reset_instance_id_for_test();
     rustpbx::addons::cc::stats_writer::upsert_agent_presence(
         &db,
@@ -590,9 +602,8 @@ unsafe {     std::env::set_var("RUSTPBX_INSTANCE_ID", "node-b") };
 
     let mut snapshots: Vec<_> = all.iter().map(acd_snapshot_from_presence).collect();
     for (snap, row) in snapshots.iter_mut().zip(all.iter()) {
-        snap.idle_duration_secs = (chrono::Utc::now() - row.status_since)
-            .num_seconds()
-            .max(0) as u64;
+        snap.idle_duration_secs =
+            (chrono::Utc::now() - row.status_since).num_seconds().max(0) as u64;
     }
 
     use rustpbx::addons::cc::acd::config::{PresenceStateKind, StrategyConfig, StrategyType};
@@ -615,7 +626,7 @@ unsafe {     std::env::set_var("RUSTPBX_INSTANCE_ID", "node-b") };
         "enqueue node must pick globally longest-idle agent from merged view"
     );
 
-unsafe {     std::env::remove_var("RUSTPBX_INSTANCE_ID") };
+    unsafe { std::env::remove_var("RUSTPBX_INSTANCE_ID") };
     rustpbx::addons::cc::stats_writer::reset_instance_id_for_test();
 }
 
@@ -625,9 +636,7 @@ unsafe {     std::env::remove_var("RUSTPBX_INSTANCE_ID") };
 
 #[tokio::test]
 async fn cluster_session_registry_dialog_alias_routes_to_owner() {
-    use rustpbx::call::runtime::{
-        DbSessionRegistry, SessionInfo, resolve_owner_and_session,
-    };
+    use rustpbx::call::runtime::{DbSessionRegistry, SessionInfo, resolve_owner_and_session};
     use std::time::Duration;
 
     let db = shared_db().await;
@@ -666,7 +675,9 @@ fn cluster_console_transfer_uses_callee_leg() {
     )
     .unwrap();
     match cmd {
-        CallCommand::Transfer { leg_id, attended, .. } => {
+        CallCommand::Transfer {
+            leg_id, attended, ..
+        } => {
             assert_eq!(leg_id.as_str(), "callee");
             assert!(!attended);
         }

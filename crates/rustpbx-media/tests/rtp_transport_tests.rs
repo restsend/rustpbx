@@ -920,7 +920,10 @@ async fn webrtc_local_playback_ssrc_matches_sdp_advertised() {
     let playback = playback_ssrc(&h, LegSide::A);
     let relay = relay_ssrc(&h, LegSide::A);
     assert_eq!(advertised, playback, "SDP a=ssrc must be the playback SSRC");
-    assert_ne!(advertised, relay, "SDP must not advertise the plain-RTP relay SSRC");
+    assert_ne!(
+        advertised, relay,
+        "SDP must not advertise the plain-RTP relay SSRC"
+    );
 
     h.mb.leg(LegSide::A)
         .unwrap()
@@ -950,9 +953,7 @@ async fn webrtc_local_playback_ssrc_matches_sdp_advertised() {
         raw.header.ssrc, advertised,
         "local IVR/playback RTP SSRC must equal SDP a=ssrc (browser contract); \
          got packet ssrc={} playback={} relay={}",
-        raw.header.ssrc,
-        playback,
-        relay
+        raw.header.ssrc, playback, relay
     );
 
     h.close();

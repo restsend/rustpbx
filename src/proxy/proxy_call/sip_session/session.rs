@@ -1,13 +1,13 @@
-use crate::proxy::call::parse_allowed_codecs;
+use super::builtin_app_factory::BuiltinAppFactory;
 use super::peer_audio::PeerConnectionAudioReceiver;
 use super::prelude::*;
-use super::builtin_app_factory::BuiltinAppFactory;
 use super::util::{
-    format_duration_ms, forward_dtmf_event, into_callee_err, normalize_call_hangup_by,
-    other_header_ci, parse_dial_target, parse_dtmf_digit, parse_sipfrag_status,
-    route_outbound_leg, sip_status_to_hangup_reason, trunk_host_port, CalleeError,
+    CalleeError, format_duration_ms, forward_dtmf_event, into_callee_err, normalize_call_hangup_by,
+    other_header_ci, parse_dial_target, parse_dtmf_digit, parse_sipfrag_status, route_outbound_leg,
+    sip_status_to_hangup_reason, trunk_host_port,
 };
 use super::{live_transcription, transfer};
+use crate::proxy::call::parse_allowed_codecs;
 
 const CMD_CHANNEL_CAPACITY: usize = 256;
 const RUSTPBX_COMMAND_CT: &str = "application/vnd.rustpbx+json";
@@ -841,6 +841,12 @@ impl SipSession {
         app_ctx.ivr_trace = server.ivr_trace.clone();
         app_ctx.session_extensions = session_extensions.clone();
 
+        let app_factory = Arc::new(BuiltinAppFactory::new(
+            server.addon_registry.clone(),
+            server.agent_registry.clone(),
+        ));
+        app_ctx.app_factory = Some(app_factory.clone());
+
         // Populate RWI CallMetaStore so events emitted from this session
         // (call_hangup, call_no_answer, etc.) are enriched with call context.
         if let Some(ref gw) = server.rwi_gateway {
@@ -883,10 +889,7 @@ impl SipSession {
                 handle: sip_handle.clone(),
                 context: Arc::new(app_ctx),
             })
-            .with_factory(Arc::new(BuiltinAppFactory::new(
-                server.addon_registry.clone(),
-                server.agent_registry.clone(),
-            ))),
+            .with_factory(app_factory),
         );
 
         let mut meta = crate::proxy::proxy_call::call_meta::CallMeta::default();
@@ -2067,7 +2070,9 @@ impl SipSession {
             callee: self.context.original_callee.clone(),
             connected_callee: self.meta.connected_callee.clone(),
             queue_name: crate::proxy::proxy_call::call_meta::effective_queue_name(&self.meta),
-            skill_group_id: crate::proxy::proxy_call::call_meta::effective_skill_group_id(&self.meta),
+            skill_group_id: crate::proxy::proxy_call::call_meta::effective_skill_group_id(
+                &self.meta,
+            ),
             transferred: self.meta.transferred,
             direction: self.context.dialplan.direction.to_string(),
             started_at: Some(self.context.created_at.clone()),
@@ -7535,8 +7540,7 @@ impl SipSession {
         // ── 1. Queue abandon catch-all ──────────────────────────────
         // Covers the CallApp-based queue path (where execute_queue is not
         // called and meta.queue_name may not be set via the SIP layer).
-        let in_queue =
-            crate::proxy::proxy_call::call_meta::has_queue_name(&self.meta);
+        let in_queue = crate::proxy::proxy_call::call_meta::has_queue_name(&self.meta);
         if in_queue
             && !self.meta.ever_connected_callee
             && self.meta.connected_callee.is_none()
@@ -7551,7 +7555,7 @@ impl SipSession {
             self.meta.hangup_reason = Some(CallRecordHangupReason::Abandoned);
             self.meta.error_code = Some(&crate::proxy::proxy_call::error_catalog::QUEUE_ABANDONED);
             let queue_name = crate::proxy::proxy_call::call_meta::effective_queue_name(&self.meta)
-            .unwrap_or_default();
+                .unwrap_or_default();
             let msg = if queue_name.is_empty() {
                 "Caller abandoned the queue".to_string()
             } else {
@@ -8270,8 +8274,9 @@ impl SipSession {
             // Terminal End event — carries the hangup initiator and any
             // standardized error code so "why did the call end" is visible.
             {
-                let queue_ctx = crate::proxy::proxy_call::call_meta::effective_queue_name(&self.meta)
-                .map(|q| format!(" (queue '{}')", q));
+                let queue_ctx =
+                    crate::proxy::proxy_call::call_meta::effective_queue_name(&self.meta)
+                        .map(|q| format!(" (queue '{}')", q));
                 let (severity, code, msg) = if let Some(info) = self.meta.error_code {
                     let base = format!("Call ended: {}", info.message);
                     (
@@ -9222,8 +9227,9 @@ impl SipSession {
                         .strip_prefix("Rejected with ")
                         .map(str::to_string)
                         .unwrap_or_else(|| reason.clone());
-                    let queue_name = crate::proxy::proxy_call::call_meta::effective_queue_name(&self.meta)
-                        .unwrap_or_default();
+                    let queue_name =
+                        crate::proxy::proxy_call::call_meta::effective_queue_name(&self.meta)
+                            .unwrap_or_default();
                     let (msg, severity) = if event_name == "agent_busy" {
                         (
                             format!("Agent {} rejected ({})", agent_id, status),
@@ -10332,7 +10338,10 @@ impl SipSession {
 
     /// Map a session leg to its MediaBridge side, if it is one of the two
     /// anchored legs (caller=A, callee=B).
-    pub(crate) fn media_side_for_leg(&self, leg: &LegId) -> Option<crate::media::media_bridge::LegSide> {
+    pub(crate) fn media_side_for_leg(
+        &self,
+        leg: &LegId,
+    ) -> Option<crate::media::media_bridge::LegSide> {
         match leg.0.as_str() {
             "caller" => Some(crate::media::media_bridge::LegSide::A),
             "callee" => Some(crate::media::media_bridge::LegSide::B),
@@ -11198,4 +11207,3 @@ impl Drop for SipSession {
 #[cfg(test)]
 #[path = "tests/mod.rs"]
 mod tests;
-
