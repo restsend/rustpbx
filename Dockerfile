@@ -25,19 +25,13 @@ ARG TARGETARCH
 COPY --chmod=0755 bin/${TARGETARCH}/rustpbx /app/rustpbx
 COPY --chmod=0755 bin/${TARGETARCH}/sipflow /app/sipflow
 
+RUN mkdir -p /app/config
 # Copy static resources
 COPY ./static /app/static
 COPY ./templates /app/templates
 COPY ./locales /app/locales
-# Sounds are placed in /app/sounds/ for the normalized ("sounds/") convention
-# and symlinked from /app/config/sounds/ for the legacy ("config/sounds/") path.
-# This ensures both QueuePlan defaults and the serve_sound_handler resolve correctly.
-COPY ./config/sounds /app/sounds
-# CSAT prompts are bundled inside the cc addon repo (sounds/) — merge them
-# into the shared /app/sounds so runtime resolution finds them without a
-# separate config/ population step.
-COPY ./src/addons/cc/sounds /app/sounds
-RUN mkdir -p /app/config && ln -s /app/sounds /app/config/sounds
+COPY ./config/sounds /app/config/sounds
+RUN ln -s /app/config/sounds /app/sounds
 
 # Copy addon static and templates
 COPY ./src/addons/acme/static /app/static/acme
