@@ -33,6 +33,10 @@ COPY ./locales /app/locales
 # and symlinked from /app/config/sounds/ for the legacy ("config/sounds/") path.
 # This ensures both QueuePlan defaults and the serve_sound_handler resolve correctly.
 COPY ./config/sounds /app/sounds
+# CSAT prompts are bundled inside the cc addon repo (sounds/) — merge them
+# into the shared /app/sounds so runtime resolution finds them without a
+# separate config/ population step.
+COPY ./src/addons/cc/sounds /app/sounds
 RUN mkdir -p /app/config && ln -s /app/sounds /app/config/sounds
 
 # Copy addon static and templates
