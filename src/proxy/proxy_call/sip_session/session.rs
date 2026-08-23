@@ -5190,55 +5190,57 @@ impl SipSession {
 
                         let callee_sdp = String::from_utf8_lossy(response.body()).to_string();
                         if !callee_sdp.is_empty() && callee_sdp.contains("v=0") {
-                            self.media.early_media_sent = true;
-                            self.update_leg_state(&LegId::from("callee"), LegState::EarlyMedia);
+                            if !self.media.early_media_sent {
+                                self.media.early_media_sent = true;
+                                self.update_leg_state(&LegId::from("callee"), LegState::EarlyMedia);
 
-                            if self.media_profile.path == MediaPathMode::Anchored {
-                                let caller_sdp = match self
-                                    .prepare_caller_answer_from_callee_sdp(
-                                        Some(callee_sdp),
-                                        false,
-                                        rustrtc::SdpType::Pranswer,
-                                    )
-                                    .await
-                                {
-                                    Ok(caller_sdp) => caller_sdp,
-                                    Err(error) => {
+                                if self.media_profile.path == MediaPathMode::Anchored {
+                                    let caller_sdp = match self
+                                        .prepare_caller_answer_from_callee_sdp(
+                                            Some(callee_sdp),
+                                            false,
+                                            rustrtc::SdpType::Pranswer,
+                                        )
+                                        .await
+                                    {
+                                        Ok(caller_sdp) => caller_sdp,
+                                        Err(error) => {
+                                            warn!(session_id = %self.id,
+                                                session_id = %self.context.session_id,
+                                                error = %error,
+                                                "Failed to prepare caller early-media answer"
+                                            );
+                                            None
+                                        }
+                                    };
+
+                                    if let Some(dialog) = self.caller_dialog.as_ref() {
+                                    if let Err(e) = dialog.ringing(
+                                        Some(Self::sdp_headers()),
+                                        caller_sdp.map(|sdp| sdp.into_bytes()),
+                                    ) {
                                         warn!(session_id = %self.id,
                                             session_id = %self.context.session_id,
-                                            error = %error,
-                                            "Failed to prepare caller early-media answer"
+                                            error = %e,
+                                            "Failed to send 183 Session Progress"
                                         );
-                                        None
                                     }
-                                };
-
-                                if let Some(dialog) = self.caller_dialog.as_ref() {
-                                if let Err(e) = dialog.ringing(
-                                    Some(Self::sdp_headers()),
-                                    caller_sdp.map(|sdp| sdp.into_bytes()),
-                                ) {
-                                    warn!(session_id = %self.id,
-                                        session_id = %self.context.session_id,
-                                        error = %e,
-                                        "Failed to send 183 Session Progress"
-                                    );
-                                }
-                                }
-                            } else {
-                                if let Some(dialog) = self.caller_dialog.as_ref() {
-                                if let Err(e) = dialog.ringing(
-                                    Some(Self::sdp_headers()),
-                                    Some(callee_sdp.into_bytes()),
-                                ) {
-                                    warn!(session_id = %self.id,
-                                        session_id = %self.context.session_id,
-                                        error = %e,
-                                        "Failed to relay provisional SDP"
-                                    );
+                                    }
+                                } else {
+                                    if let Some(dialog) = self.caller_dialog.as_ref() {
+                                        if let Err(e) = dialog.ringing(
+                                            Some(Self::sdp_headers()),
+                                            Some(callee_sdp.into_bytes()),
+                                        ) {
+                                            warn!(session_id = %self.id,
+                                                session_id = %self.context.session_id,
+                                                error = %e,
+                                                "Failed to relay provisional SDP"
+                                            );
+                                        }
+                                    }
                                 }
                             }
-                                }
                         } else {
                             if !self.media.early_media_sent {
                                 self.update_leg_state(&LegId::from("callee"), LegState::Ringing);
