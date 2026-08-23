@@ -20,6 +20,10 @@ use super::{AppResult, AppRuntime, AppRuntimeError};
 struct RunningApp {
     name: String,
     cancel_token: CancellationToken,
+    /// Generation claimed by the `start_app` that installed this slot.
+    /// Lets the event-loop teardown clear its own registration on natural
+    /// exit without ever clobbering a successor's.
+    generation: u64,
 }
 
 /// Configuration needed to create an AppRuntime
@@ -35,8 +39,9 @@ pub struct DefaultAppRuntime {
     handle: SipSessionHandle,
     /// Shared per-call context (public for post-call hook access).
     pub context: Arc<ApplicationContext>,
-    /// Currently running app (if any)
-    running: RwLock<Option<RunningApp>>,
+    /// Currently running app (if any). Shared with the event-loop teardown
+    /// task so a naturally-exited app can clear its own registration.
+    running: Arc<RwLock<Option<RunningApp>>>,
     /// App factory function
     app_factory: Option<Arc<dyn AppFactory>>,
     /// Incremented on every successful `start_app`.
@@ -64,7 +69,7 @@ impl DefaultAppRuntime {
             session_id: config.session_id,
             handle: config.handle,
             context: config.context,
-            running: RwLock::new(None),
+            running: Arc::new(RwLock::new(None)),
             app_factory: None,
             app_generation: Arc::new(AtomicU64::new(0)),
         }
@@ -165,6 +170,7 @@ impl AppRuntime for DefaultAppRuntime {
             *running = Some(RunningApp {
                 name: app_name.to_string(),
                 cancel_token: cancel_token.clone(),
+                generation,
             });
         }
 
@@ -183,6 +189,7 @@ impl AppRuntime for DefaultAppRuntime {
         let context = self.context.clone();
         let handle = self.handle.clone();
         let generation_counter = self.app_generation.clone();
+        let running_slot = self.running.clone();
 
         crate::utils::spawn(async move {
             let event_loop = crate::call::app::AppEventLoop::new(
@@ -209,6 +216,20 @@ impl AppRuntime for DefaultAppRuntime {
             // still the current generation.
             let still_current = generation_counter.load(Ordering::SeqCst) == generation;
             if still_current {
+                // Clear the running registration on natural exit (e.g.
+                // QueueApp's Exit once the agent answers) so the next app
+                // starts cleanly instead of tripping AlreadyRunning and
+                // requiring the stop+restart recovery. The identity check
+                // under the write lock makes it impossible to clear a
+                // successor's slot if one was installed between the
+                // generation load above and here.
+                {
+                    let mut guard = running_slot.write().await;
+                    if guard.as_ref().map(|app| app.generation) == Some(generation) {
+                        *guard = None;
+                    }
+                }
+
                 handle.set_app_event_sender(None);
 
                 // Notify the session that the app has exited so it can run
@@ -297,10 +318,6 @@ impl AppRuntime for DefaultAppRuntime {
         } else {
             None
         }
-    }
-
-    fn get_queue_name(&self) -> Option<String> {
-        self.context.queue_name.try_read().ok()?.clone()
     }
 }
 
@@ -447,5 +464,129 @@ mod tests {
         });
         let result = parse_json_event(&json);
         assert!(result.is_err());
+    }
+
+    // ── running-slot lifecycle ────────────────────────────────────────────
+
+    /// An app that exits immediately from `on_enter`.
+    struct ExitApp;
+
+    #[async_trait::async_trait]
+    impl crate::call::app::CallApp for ExitApp {
+        fn app_type(&self) -> crate::call::app::CallAppType {
+            crate::call::app::CallAppType::Custom
+        }
+
+        fn name(&self) -> &str {
+            "exit_app"
+        }
+
+        async fn on_enter(
+            &mut self,
+            _controller: &mut crate::call::app::CallController,
+            _context: &crate::call::app::ApplicationContext,
+        ) -> anyhow::Result<crate::call::app::AppAction> {
+            Ok(crate::call::app::AppAction::Exit)
+        }
+    }
+
+    struct ExitAppFactory;
+
+    #[async_trait]
+    impl AppFactory for ExitAppFactory {
+        async fn create_app(
+            &self,
+            _app_name: &str,
+            _params: Option<serde_json::Value>,
+            _context: &crate::call::app::ApplicationContext,
+        ) -> Result<Option<Box<dyn crate::call::app::CallApp>>, anyhow::Error> {
+            Ok(Some(Box::new(ExitApp)))
+        }
+    }
+
+    fn make_runtime() -> (DefaultAppRuntime, mpsc::Receiver<CallCommand>) {
+        let (cmd_tx, cmd_rx) = mpsc::channel(64);
+        let handle = SipSessionHandle::new_for_test("runtime-test", cmd_tx);
+        let call_info = crate::call::app::CallInfo {
+            session_id: "runtime-test".into(),
+            caller: "1001".into(),
+            callee: "1002".into(),
+            direction: "inbound".into(),
+            started_at: chrono::Utc::now(),
+            sip_headers: Default::default(),
+            route_name: None,
+        };
+        let context = crate::call::app::ApplicationContext::new(
+            Default::default(),
+            call_info,
+            std::sync::Arc::new(crate::config::Config::default()),
+        );
+        let runtime = DefaultAppRuntime::new(AppRuntimeConfig {
+            session_id: "runtime-test".into(),
+            handle,
+            context: std::sync::Arc::new(context),
+        })
+        .with_factory(std::sync::Arc::new(ExitAppFactory));
+        (runtime, cmd_rx)
+    }
+
+    /// Natural exit must clear the `running` slot so the next `start_app`
+    /// succeeds cleanly instead of tripping `AlreadyRunning` (the stop+
+    /// restart recovery in `SipSession::ensure_app_running` remains only as
+    /// a race fallback). Regression for the "runtime still marked running,
+    /// restarting app" warn on every app transition.
+    #[tokio::test]
+    async fn natural_exit_clears_running_slot() {
+        let (runtime, mut cmd_rx) = make_runtime();
+
+        runtime
+            .start_app("exit_app", None, false)
+            .await
+            .expect("first start must succeed");
+        assert_eq!(runtime.current_app().as_deref(), Some("exit_app"));
+
+        // Wait (bounded) for the event loop to run, exit and clear the slot.
+        let mut cleared = false;
+        for _ in 0..100 {
+            if runtime.current_app().is_none() {
+                cleared = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(cleared, "running slot must be cleared after natural exit");
+        assert!(!runtime.is_running());
+
+        // The teardown also notified the session with AppExited.
+        let mut got_app_exited = false;
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            if matches!(cmd, CallCommand::AppExited) {
+                got_app_exited = true;
+            }
+        }
+        assert!(got_app_exited, "AppExited must be sent on natural exit");
+
+        // Restarting after a natural exit must not hit AlreadyRunning.
+        runtime
+            .start_app("exit_app", None, false)
+            .await
+            .expect("restart after natural exit must succeed directly");
+    }
+
+    /// An explicit `stop_app` still clears the slot immediately and cancels
+    /// the app (unchanged legacy behavior).
+    #[tokio::test]
+    async fn stop_app_still_clears_slot() {
+        let (runtime, _cmd_rx) = make_runtime();
+        runtime
+            .start_app("exit_app", None, false)
+            .await
+            .expect("start must succeed");
+        runtime
+            .stop_app(Some("test".into()))
+            .await
+            .expect("stop must succeed");
+        assert!(runtime.current_app().is_none());
+        assert!(runtime.stop_app(None).await.is_err(), "second stop: NotRunning");
     }
 }

@@ -514,6 +514,7 @@ mod tests {
                     terminator: None,
                     play_prompt: None,
                     inter_digit_timeout: Some(Duration::from_millis(40)),
+                    initial_digits: String::new(),
                 })
                 .await?;
             self.log.lock().unwrap().push(format!("collected:{digits}"));
@@ -551,6 +552,107 @@ mod tests {
             .await;
 
         assert!(logged(&log).contains(&"collected:42".to_string()));
+    }
+
+    // ── 7b. collect_dtmf initial_digits prefix ───────────────────────────────
+
+    /// App that seeds collect_dtmf with a barge-in digit prefix.
+    struct CollectSeedApp {
+        log: EventLog,
+        seed: String,
+        max_digits: usize,
+    }
+
+    #[async_trait]
+    impl CallApp for CollectSeedApp {
+        fn app_type(&self) -> CallAppType {
+            CallAppType::Ivr
+        }
+        fn name(&self) -> &str {
+            "collect_seed"
+        }
+
+        async fn on_enter(
+            &mut self,
+            ctrl: &mut CallController,
+            _ctx: &ApplicationContext,
+        ) -> Result<AppAction> {
+            ctrl.answer().await?;
+            let digits = ctrl
+                .collect_dtmf(DtmfCollectConfig {
+                    min_digits: 1,
+                    max_digits: self.max_digits,
+                    timeout: Duration::from_millis(500),
+                    terminator: Some('#'),
+                    play_prompt: None,
+                    inter_digit_timeout: Some(Duration::from_millis(40)),
+                    initial_digits: self.seed.clone(),
+                })
+                .await?;
+            self.log.lock().unwrap().push(format!("collected:{digits}"));
+            Ok(AppAction::Hangup {
+                reason: None,
+                code: None,
+            })
+        }
+    }
+
+    /// The initial_digits prefix counts toward the collected string: a
+    /// barge-in digit pressed during a prompt plus one further keypress must
+    /// yield prefix+digit (terminator still honored).
+    #[tokio::test]
+    async fn test_collect_dtmf_initial_digits_prefix() {
+        let log = new_log();
+        let app = CollectSeedApp {
+            log: log.clone(),
+            seed: "4".to_string(),
+            max_digits: 4,
+        };
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "3001");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
+
+        // One more digit after the seed, then terminator.
+        stack.dtmf("2");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        stack.dtmf("#");
+
+        stack
+            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .await;
+        assert!(logged(&log).contains(&"collected:42".to_string()));
+    }
+
+    /// When the prefix already fills max_digits the collection must return
+    /// immediately — no waiting for further keypresses or the inter-digit
+    /// timeout (barge-in digits during a multi-digit score prompt must not
+    /// stall the flow).
+    #[tokio::test]
+    async fn test_collect_dtmf_initial_digits_full_returns_immediately() {
+        let log = new_log();
+        let app = CollectSeedApp {
+            log: log.clone(),
+            seed: "5".to_string(),
+            max_digits: 1,
+        };
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "3001");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
+
+        // No further DTMF is sent; the hangup must still arrive well before
+        // the 500ms overall timeout.
+        stack
+            .assert_cmd(150, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .await;
+        assert!(logged(&log).contains(&"collected:5".to_string()));
     }
 
     // ── 8. System cancellation ────────────────────────────────────────────────
@@ -658,6 +760,7 @@ mod tests {
                     terminator: Some('#'),
                     play_prompt: None,
                     inter_digit_timeout: None,
+                    initial_digits: String::new(),
                 })
                 .await?;
             self.log.lock().unwrap().push(format!("collected:{digits}"));
@@ -720,6 +823,7 @@ mod tests {
                     terminator: None,
                     play_prompt: None,
                     inter_digit_timeout: None,
+                    initial_digits: String::new(),
                 })
                 .await?;
             Ok(AppAction::Exit)
@@ -775,6 +879,7 @@ mod tests {
                     terminator: Some('#'),
                     play_prompt: Some("sounds/enter_pin.wav".to_string()),
                     inter_digit_timeout: Some(Duration::from_millis(50)),
+                    initial_digits: String::new(),
                 })
                 .await?;
             self.log.lock().unwrap().push(format!("pin:{digits}"));

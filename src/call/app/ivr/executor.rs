@@ -1870,31 +1870,25 @@ impl CallApp for StepIvrApp {
 
         // If this IVR was started via ivr.exec, write result to extensions.
         if let Some(ref ext) = self.session_extensions {
-            let is_exec = ext
-                .read()
-                .get::<crate::proxy::proxy_call::ivr_exec_hook::IvrExecState>()
-                .is_some();
-            if is_exec {
-                let collected: std::collections::HashMap<String, String> = self
-                    .sess
-                    .variables
-                    .iter()
-                    .filter(|(k, _)| {
-                        !["session_id", "caller", "callee", "direction"].contains(&k.as_str())
-                    })
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                ext.write()
-                    .insert(crate::proxy::proxy_call::ivr_exec_hook::IvrExecResult {
-                        status: status.clone(),
-                        reason: end_reason_label.clone(),
-                        routing_target: self.last_transfer_target.clone(),
-                        collected,
-                        trace: vec![],
-                        duration_ms: 0,
-                        completion_time: chrono::Utc::now().to_rfc3339(),
-                    });
-            }
+            let collected: std::collections::HashMap<String, String> = self
+                .sess
+                .variables
+                .iter()
+                .filter(|(k, _)| {
+                    !["session_id", "caller", "callee", "direction"].contains(&k.as_str())
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            super::exec::write_ivr_exec_result(
+                ext,
+                super::exec::build_ivr_exec_result(
+                    &status,
+                    &end_reason_label,
+                    self.last_transfer_target.clone(),
+                    collected,
+                    0,
+                ),
+            );
         }
 
         Ok(())

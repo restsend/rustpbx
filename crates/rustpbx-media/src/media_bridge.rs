@@ -1066,7 +1066,15 @@ impl MediaBridge {
     /// already failed to arm (e.g. WebRTC DTLS never came up), so re-selecting
     /// it would strand the call with no media. Clears the active route and
     /// re-bridges so the next activation picks transcoding.
+    ///
+    /// Idempotent: when transcode mode is already forced AND the forced
+    /// route is active, repeat calls are a no-op — duplicate
+    /// relay-arm-failure notifications must not re-run the unbridge/bridge
+    /// cycle (each cycle tears media down and re-logs the activation).
     pub async fn force_transcode(&mut self) -> Result<()> {
+        if self.force_transcode && self.route_active {
+            return Ok(());
+        }
         self.force_transcode = true;
         if self.route_active {
             self.unbridge().await?;
@@ -2204,6 +2212,24 @@ mod tests {
             assert!(
                 !mb.leg(side).unwrap().egress_is_relay(),
                 "leg {side:?} should be on transcode after relay-arm fallback"
+            );
+        }
+
+        // Duplicate relay-arm-failure notifications (e.g. from two monitors
+        // subscribed to the same latch) must NOT re-run the unbridge/bridge
+        // cycle: force_transcode is idempotent while the forced route is
+        // active.
+        let was_bridged = mb.is_bridged();
+        mb.force_transcode().await.expect("repeat force transcode");
+        assert_eq!(
+            mb.is_bridged(),
+            was_bridged,
+            "repeat force_transcode must keep the route active and unchanged"
+        );
+        for side in [LegSide::A, LegSide::B] {
+            assert!(
+                !mb.leg(side).unwrap().egress_is_relay(),
+                "leg {side:?} must stay on transcode after repeat force"
             );
         }
         mb.close();

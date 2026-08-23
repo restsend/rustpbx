@@ -1274,14 +1274,6 @@ async fn test_leg_failed_in_queue_records_agent_rejection_trace() {
     let mut session = build_session(dialplan).await;
     session.meta.queue_name = Some("support".to_string());
 
-    // Mirror the live queue state the queue app publishes via set_queue_name.
-    let ctx = session
-        .app_runtime
-        .app_context()
-        .expect("test session uses DefaultAppRuntime")
-        .clone();
-    *ctx.queue_name.write().await = Some("support".to_string());
-
     // Mirror custom-target resolution: agent AOR user part in session extensions.
     let mut map = HashMap::new();
     map.insert("resolved_agent_id".to_string(), "1001".to_string());
@@ -1332,13 +1324,6 @@ async fn test_leg_no_answer_in_queue_records_agent_trace() {
     });
     let mut session = build_session(dialplan).await;
     session.meta.queue_name = Some("support".to_string());
-
-    let ctx = session
-        .app_runtime
-        .app_context()
-        .expect("test session uses DefaultAppRuntime")
-        .clone();
-    *ctx.queue_name.write().await = Some("support".to_string());
 
     let mut map = HashMap::new();
     map.insert("resolved_agent_id".to_string(), "1001".to_string());
@@ -1492,6 +1477,54 @@ async fn test_start_queue_app_records_queue_entry_trace_and_app_name() {
         session.meta.app_name.as_deref(),
         Some("queue"),
         "terminal phase must be attributed to the queue app, not a stale IVR"
+    );
+}
+
+/// `session_hook_ctx().queue_name` feeds cc_* RWI webhook events (`queue_id`
+/// field). It must be populated from CallMeta when the queue app starts — not
+/// deferred to QueueApp::on_enter's old ApplicationContext mirror.
+#[tokio::test]
+async fn test_queue_start_populates_meta_for_webhook_hooks() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let mut config = ProxyConfig::default();
+    config.queues.insert(
+        "support".to_string(),
+        RouteQueueConfig {
+            name: Some("support".to_string()),
+            strategy: RouteQueueStrategyConfig {
+                targets: vec![RouteQueueTargetConfig {
+                    uri: "skill-group:sg_support".to_string(),
+                    label: Some("support-group".to_string()),
+                }],
+                ..Default::default()
+            },
+            ..RouteQueueConfig::default()
+        },
+    );
+    let mut session = build_session_with_config(dialplan, config).await;
+
+    let runtime = Arc::new(StartOnlyRuntime::new());
+    session.app_runtime = runtime.clone();
+
+    session
+        .handle_queue_transfer("support", None, Vec::new())
+        .await
+        .expect("queue app should start");
+
+    assert_eq!(
+        session.meta.queue_name.as_deref(),
+        Some("support"),
+        "CallMeta.queue_name must be set before cc_* / abandon hooks fire"
+    );
+    assert_eq!(
+        session.meta.skill_group_id.as_deref(),
+        Some("sg_support"),
+        "CallMeta.skill_group_id must be set for CSAT/wrapup webhook lookups"
+    );
+    assert_eq!(
+        crate::proxy::proxy_call::call_meta::effective_queue_name(&session.meta).as_deref(),
+        Some("support"),
+        "effective_queue_name is what session_hook_ctx exposes to webhooks"
     );
 }
 
@@ -2390,6 +2423,61 @@ async fn test_resolve_hold_music_priority_chain() {
     ));
 }
 
+// ── hangup command → immediate SIP BYE ──
+
+/// Regression: `CallCommand::Hangup` must queue the affected dialogs into
+/// `pending_hangup` so the session main loop sends the SIP BYE(s) on its
+/// next iteration. Before the fix the command only marked legs `Ended` and
+/// cancelled the token — the actual BYE sat behind the 3s shutdown drain
+/// (or never went out because the remote hung up first), which was
+/// user-visible as "the survey requested a hangup but the call stayed up".
+#[tokio::test]
+async fn hangup_command_queues_bye_dialogs_immediately() {
+    use crate::call::domain::HangupCommand;
+
+    let mut session = build_session(build_dialplan_with_mode(MediaProxyMode::Bypass)).await;
+    let caller_dialog_id = session.caller_dialog_id();
+
+    let result = session
+        .execute_command(
+            CallCommand::Hangup(HangupCommand::all(None, None)),
+            None,
+        )
+        .await;
+    assert!(result.success, "hangup command must succeed");
+
+    // The caller leg is ended AND its dialog is queued for an immediate BYE.
+    assert_eq!(
+        session.legs.get(&LegId::from("caller")).map(|l| l.state),
+        Some(LegState::Ended)
+    );
+    assert!(
+        session.pending_hangup.contains(&caller_dialog_id),
+        "caller dialog must be queued in pending_hangup for an immediate BYE"
+    );
+}
+
+/// `cascade = None` (single-leg semantics) must NOT queue any BYE — the
+/// command is a no-op for dialogs in that mode.
+#[tokio::test]
+async fn hangup_command_cascade_none_queues_nothing() {
+    use crate::call::domain::{HangupCascade, HangupCommand};
+
+    let mut session = build_session(build_dialplan_with_mode(MediaProxyMode::Bypass)).await;
+
+    let result = session
+        .execute_command(
+            CallCommand::Hangup(HangupCommand::all(None, None).with_cascade(HangupCascade::None)),
+            None,
+        )
+        .await;
+    assert!(result.success);
+    assert!(
+        session.pending_hangup.is_empty(),
+        "cascade=None must not queue any BYE dialog"
+    );
+}
+
 // ── queue-enricher INVITE header merge ──
 
 #[test]
@@ -2409,12 +2497,97 @@ fn merge_leg_invite_headers_caller_headers_take_precedence() {
 
     let merged =
         SipSession::merge_leg_invite_headers(caller.clone(), Some(location)).expect("merged");
-    // Caller headers come first — the enricher's values win duplicate-name
-    // resolution; the location header is still carried afterwards.
-    assert_eq!(merged.len(), 3);
+    // Caller headers win duplicate-name resolution — the same-named location
+    // header is DROPPED (dedup), not appended: the INVITE must carry each
+    // header name once.
+    assert_eq!(merged.len(), 2);
     assert_eq!(merged[0].value(), caller[0].value());
     assert_eq!(merged[1].value(), caller[1].value());
-    assert_eq!(merged[2].value(), "<http://legacy/location>");
+}
+
+/// Protocol-managed headers captured from a REGISTER (registrar stores the
+/// full REGISTER header set on the location) must not leak into the new
+/// leg's INVITE — the stack generates its own Contact / User-Agent / Via /
+/// … and SIP.js REGISTERs also carry Allow / Supported / X-Auth-Token.
+/// Regression for the Contact ×3 / User-Agent ×3 / X-Auth-Token ×2 INVITE.
+#[test]
+fn merge_leg_invite_headers_filters_protocol_headers_and_dedupes() {
+    use rsipstack::sip::Header;
+    let caller = vec![
+        // Enricher/business headers — must survive.
+        Header::Other("User-to-User".into(), "q=support;t=inbound".into()),
+        Header::Other("X-Auth-Token".into(), "jwt-from-first-lookup".into()),
+        // REGISTER-captured noise that arrived with the caller set.
+        Header::Other(
+            "Contact".into(),
+            "<sip:abc@127.0.0.1:53847;transport=ws>;expires=300".into(),
+        ),
+        Header::Other("User-Agent".into(), "cc-phone/sip.js".into()),
+    ];
+    let location = vec![
+        // Fresh locator lookup repeats the REGISTER set.
+        Header::Other("X-Auth-Token".into(), "jwt-from-second-lookup".into()),
+        Header::Other("Allow".into(), "ACK,CANCEL,INVITE".into()),
+        Header::Other("Supported".into(), "outbound, path, gruu".into()),
+        Header::Other("Expires".into(), "300".into()),
+        Header::Other("Max-Forwards".into(), "70".into()),
+        Header::Other(
+            "Via".into(),
+            "SIP/2.0/WS 127.0.0.1:53847;branch=z9hG4bKx".into(),
+        ),
+        Header::Other("From".into(), "<sip:bob@localhost>;tag=1".into()),
+        Header::Other("Content-Type".into(), "application/sdp".into()),
+    ];
+
+    let merged =
+        SipSession::merge_leg_invite_headers(caller, Some(location)).expect("merged");
+
+    let count = |name: &str| {
+        merged
+            .iter()
+            .filter(|h| h.name().eq_ignore_ascii_case(name))
+            .count()
+    };
+    // Business headers kept exactly once (first occurrence wins).
+    assert_eq!(count("User-to-User"), 1);
+    assert_eq!(count("X-Auth-Token"), 1);
+    assert_eq!(
+        merged
+            .iter()
+            .find(|h| h.name().eq_ignore_ascii_case("X-Auth-Token"))
+            .unwrap()
+            .value(),
+        "jwt-from-first-lookup"
+    );
+    // Protocol-managed names fully dropped from BOTH sets.
+    for name in [
+        "Contact",
+        "User-Agent",
+        "Allow",
+        "Supported",
+        "Expires",
+        "Max-Forwards",
+        "Via",
+        "From",
+        "Content-Type",
+    ] {
+        assert_eq!(count(name), 0, "header {name} must be filtered out");
+    }
+}
+
+/// Without caller headers the location set is still filtered (the REGISTER
+/// noise must not reach the INVITE even on the location-only path).
+#[test]
+fn merge_leg_invite_headers_filters_location_only_set() {
+    use rsipstack::sip::Header;
+    let location = vec![
+        Header::Other("X-Route-Tag".into(), "edge-1".into()),
+        Header::Other("Contact".into(), "<sip:abc@127.0.0.1>;expires=300".into()),
+        Header::Other("User-Agent".into(), "cc-phone/sip.js".into()),
+    ];
+    let merged = SipSession::merge_leg_invite_headers(Vec::new(), Some(location)).unwrap();
+    assert_eq!(merged.len(), 1);
+    assert!(merged[0].name().eq_ignore_ascii_case("X-Route-Tag"));
 }
 
 #[test]

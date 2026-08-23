@@ -5,30 +5,48 @@ use anyhow::{Result, anyhow};
 use tracing::{info, warn};
 
 impl SipSession {
+    async fn handle_supervisor_monitor(
+        &mut self,
+        kind: &str,
+        supervisor_leg: LegId,
+        target_leg: LegId,
+        supervisor_session_id: Option<String>,
+    ) -> Result<()> {
+        if kind == "listen" {
+            if let Some(ref sup_session_id) = supervisor_session_id
+                && sup_session_id != &self.id.0
+            {
+                return self
+                    .handle_cross_session_supervisor_listen(sup_session_id, target_leg)
+                    .await;
+            }
+        }
+
+        self.require_leg(&supervisor_leg)?;
+        let resolved_target_leg = if kind == "listen" {
+            self.resolve_supervisor_target(&target_leg, false)?
+        } else {
+            self.require_leg(&target_leg)?;
+            target_leg
+        };
+        self.start_supervisor_bridge_pair(kind, &supervisor_leg, &resolved_target_leg)
+            .await?;
+        info!(session_id = %self.id,
+            supervisor = %supervisor_leg,
+            target = %resolved_target_leg,
+            "Supervisor {kind} mode activated via conference bridge"
+        );
+        Ok(())
+    }
+
     pub(super) async fn handle_supervisor_listen(
         &mut self,
         supervisor_leg: LegId,
         target_leg: LegId,
         supervisor_session_id: Option<String>,
     ) -> Result<()> {
-        if let Some(ref sup_session_id) = supervisor_session_id
-            && sup_session_id != &self.id.0
-        {
-            return self
-                .handle_cross_session_supervisor_listen(sup_session_id, target_leg)
-                .await;
-        }
-
-        self.require_leg(&supervisor_leg)?;
-        let resolved_target_leg = self.resolve_supervisor_target(&target_leg, false)?;
-        self.start_supervisor_bridge_pair("listen", &supervisor_leg, &resolved_target_leg)
-            .await?;
-        info!(session_id = %self.id,
-            supervisor = %supervisor_leg,
-            target = %resolved_target_leg,
-            "Supervisor listen mode activated via conference bridge"
-        );
-        Ok(())
+        self.handle_supervisor_monitor("listen", supervisor_leg, target_leg, supervisor_session_id)
+            .await
     }
 
     /// Resolve a supervisor target leg, optionally skipping the exact match
@@ -91,18 +109,10 @@ impl SipSession {
         &mut self,
         supervisor_leg: LegId,
         target_leg: LegId,
-        _supervisor_session_id: Option<String>,
+        supervisor_session_id: Option<String>,
     ) -> Result<()> {
-        self.require_leg(&supervisor_leg)?;
-        self.require_leg(&target_leg)?;
-        self.start_supervisor_bridge_pair("whisper", &supervisor_leg, &target_leg)
-            .await?;
-        info!(session_id = %self.id,
-            supervisor = %supervisor_leg,
-            target = %target_leg,
-            "Supervisor whisper mode activated via conference bridge"
-        );
-        Ok(())
+        self.handle_supervisor_monitor("whisper", supervisor_leg, target_leg, supervisor_session_id)
+            .await
     }
 
     pub(super) async fn handle_supervisor_barge(

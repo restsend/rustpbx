@@ -34,6 +34,10 @@ pub struct CallMeta {
     pub routed_contact: Option<String>,
     pub routed_destination: Option<String>,
     pub queue_name: Option<String>,
+    /// Primary skill-group id when the queue dials a `skill-group:{id}` target.
+    /// Post-call hooks (CSAT, wrapup, hold-music) resolve skill-group
+    /// configuration via this id — not via the queue name label.
+    pub skill_group_id: Option<String>,
     /// Standardized error code (from the [`crate::call_errors`] registry) for
     /// the last in-call failure. Mirrors `last_error` but carries a stable,
     /// queryable code; injected into call-record metadata by `record_snapshot`.
@@ -78,4 +82,44 @@ pub struct CallMeta {
     /// Lets the queue-abandon detector distinguish "caller hung up while still
     /// waiting for an agent" from "caller hung up after already being served".
     pub ever_connected_callee: bool,
+    /// One-shot: the fast-path relay-arm-failure monitor has been spawned.
+    /// Both the app-answer and callee-answer paths would otherwise spawn a
+    /// monitor on the same bridge latch, doubling the warn + the
+    /// `RelayArmFailure` command (and the transcode fallback it triggers).
+    pub relay_arm_monitor_spawned: bool,
+    /// One-shot: the `RelayArmFailure` command was already handled (bridge
+    /// forced into transcode mode). Duplicate commands are ignored.
+    pub relay_arm_failure_handled: bool,
+}
+
+/// Queue name for this session (authoritative store in [`CallMeta`]).
+pub fn effective_queue_name(meta: &CallMeta) -> Option<String> {
+    meta.queue_name
+        .clone()
+        .or_else(|| meta.queue_label.clone())
+        .filter(|s| !s.is_empty())
+}
+
+/// Skill-group id for this session (authoritative store in [`CallMeta`]).
+pub fn effective_skill_group_id(meta: &CallMeta) -> Option<String> {
+    meta.skill_group_id.clone()
+}
+
+pub fn has_queue_name(meta: &CallMeta) -> bool {
+    effective_queue_name(meta).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_queue_name_falls_back_to_label() {
+        let mut meta = CallMeta::default();
+        meta.queue_label = Some("Sales Hotline".to_string());
+        assert_eq!(
+            effective_queue_name(&meta).as_deref(),
+            Some("Sales Hotline")
+        );
+    }
 }

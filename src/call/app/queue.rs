@@ -391,6 +391,17 @@ impl QueueApp {
         self
     }
 
+    /// Set the primary skill-group id without an escalation plan. Used when
+    /// the queue dials a `skill-group:{id}` target but no agent registry is
+    /// attached — the id still reaches post-call hooks (CSAT/wrapup/
+    /// hold-music) via ApplicationContext.
+    pub fn with_skill_group(mut self, skill_group: String) -> Self {
+        if self.config.skill_group.is_none() {
+            self.config.skill_group = Some(skill_group);
+        }
+        self
+    }
+
     /// Broadcast a queue lifecycle RWI event via the gateway (if captured).
     /// Mirrors the ACD engine bridge in `cc/mod.rs` (`broadcast`) so that queue
     /// events look identical regardless of which subsystem generated them.
@@ -1233,8 +1244,6 @@ impl CallApp for QueueApp {
         // Capture the RWI gateway so that `on_exit` (which has no context) can
         // still emit abandon events later in the lifecycle.
         self.rwi_gateway = ctx.rwi_gateway.clone();
-
-        ctx.set_queue_name(&queue_id).await;
 
         // Arm the escalation timer when a timeline is configured. The first
         // check is scheduled shortly before the earliest untriggered

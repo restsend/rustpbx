@@ -92,10 +92,6 @@ pub trait AppRuntime: Send + Sync {
     /// Get the name of the currently running application (if any)
     fn current_app(&self) -> Option<String>;
 
-    fn get_queue_name(&self) -> Option<String> {
-        None
-    }
-
     /// Synchronous best-effort cancellation of the running app's event loop.
     ///
     /// Used by `SipSession::drop` (which cannot `.await`) so an orphaned app

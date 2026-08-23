@@ -23,7 +23,7 @@ use crate::media::media_bridge::LegSide;
 use crate::rwi::{TranscriptEnded, TranscriptError, TranscriptSegmentEvent, TranscriptStarted};
 
 /// Session-held live-transcription state.
-pub(super) struct LiveTranscription {
+pub(crate) struct LiveTranscription {
     provider: std::sync::Arc<dyn TranscriptionProvider>,
     /// Outstanding `StartTranscription` references.
     pub(super) refs: usize,

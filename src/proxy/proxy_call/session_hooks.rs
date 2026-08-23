@@ -62,6 +62,10 @@ pub struct CallSessionContext {
     pub connected_callee: Option<String>,
     /// Queue name if the call was routed through a queue.
     pub queue_name: Option<String>,
+    /// Primary skill-group id when the queue dials a `skill-group:{id}`
+    /// target. Skill-group configuration lookups (CSAT survey, wrapup,
+    /// hold-music) must use this — the queue name is an unrelated label.
+    pub skill_group_id: Option<String>,
     /// Call direction: `"inbound"` or `"outbound"`.
     pub direction: String,
     /// ISO-8601 timestamp when the session was created (before ringing).
@@ -96,6 +100,7 @@ impl Clone for CallSessionContext {
             callee: self.callee.clone(),
             connected_callee: self.connected_callee.clone(),
             queue_name: self.queue_name.clone(),
+            skill_group_id: self.skill_group_id.clone(),
             direction: self.direction.clone(),
             started_at: self.started_at.clone(),
             extensions: self.extensions.clone(),
@@ -112,6 +117,7 @@ impl fmt::Debug for CallSessionContext {
             .field("callee", &self.callee)
             .field("connected_callee", &self.connected_callee)
             .field("queue_name", &self.queue_name)
+            .field("skill_group_id", &self.skill_group_id)
             .field("direction", &self.direction)
             .field("started_at", &self.started_at)
             .field("extensions", &"<http::Extensions>")

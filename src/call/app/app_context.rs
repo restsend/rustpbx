@@ -7,7 +7,6 @@ use sea_orm::{DatabaseConnection, DatabaseConnectionType};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// Metadata about the current call, derived from the SIP INVITE.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,9 +91,6 @@ pub struct ApplicationContext {
     /// Session-level variables shared across chained applications.
     pub session_vars: Arc<DashMap<String, String>>,
 
-    /// Queue name set by QueueApp — used by post-call hooks (e.g., CSAT survey).
-    pub queue_name: Arc<RwLock<Option<String>>>,
-
     /// Database connection (SeaORM).
     pub db: DatabaseConnection,
 
@@ -141,7 +137,6 @@ impl ApplicationContext {
     pub fn new(db: DatabaseConnection, call_info: CallInfo, config: Arc<Config>) -> Self {
         Self {
             session_vars: Arc::new(DashMap::new()),
-            queue_name: Arc::new(RwLock::new(None)),
             db,
             http_client: crate::http_util::build_keepalive_client(None, None)
                 .unwrap_or_else(|_| reqwest::Client::new()),
@@ -162,11 +157,6 @@ impl ApplicationContext {
     /// Get a session variable.
     pub fn get_var(&self, key: &str) -> Option<String> {
         self.session_vars.get(key).map(|r| r.value().clone())
-    }
-
-    /// Set the queue name for this session (called by QueueApp on enter).
-    pub async fn set_queue_name(&self, name: impl Into<String>) {
-        *self.queue_name.write().await = Some(name.into());
     }
 
     /// Get a usable database connection reference, or None if disconnected.

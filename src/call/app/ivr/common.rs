@@ -251,15 +251,7 @@ pub async fn execute_action(
                 }
                 query.push_str(&format!("{}={}", k, urlencoding::encode(v)));
             }
-            if let Some(app) = effective_return_app(return_app, return_target) {
-                if !query.is_empty() {
-                    query.push('&');
-                }
-                query.push_str(&format!("return_app={}", urlencoding::encode(app)));
-                if let Some(rt) = return_target.as_ref().filter(|s| !s.is_empty()) {
-                    query.push_str(&format!("&return_target={}", urlencoding::encode(rt)));
-                }
-            }
+            super::exec::append_return_app_query(&mut query, return_app, return_target, None);
             if !query.is_empty() {
                 t.push('?');
                 t.push_str(&query);
@@ -276,12 +268,7 @@ pub async fn execute_action(
             return_target,
         } => {
             let mut t = substitute_vars(target, &sess.variables);
-            if let Some(app) = effective_return_app(return_app, return_target) {
-                t.push_str(&format!("?return_app={}", urlencoding::encode(app)));
-                if let Some(rt) = return_target.as_ref().filter(|s| !s.is_empty()) {
-                    t.push_str(&format!("&return_target={}", urlencoding::encode(rt)));
-                }
-            }
+            super::exec::append_return_app_to_uri(&mut t, return_app, return_target);
             Ok(ActionResult::Terminal(TerminalAction::Transfer(format!(
                 "queue:{}",
                 t
@@ -440,6 +427,7 @@ pub async fn execute_action(
                 terminator: terminator.as_ref().and_then(|t| t.chars().next()),
                 play_prompt: None,
                 inter_digit_timeout: None,
+                initial_digits: String::new(),
             };
             let digits = ctrl.collect_dtmf(config).await?;
             sess.variables.insert("dtmf_input".into(), digits.clone());
@@ -479,6 +467,7 @@ pub async fn execute_action(
                 terminator: terminator.chars().next(),
                 play_prompt: None,
                 inter_digit_timeout: Some(Duration::from_millis(*inter_digit_timeout_ms)),
+                initial_digits: String::new(),
             };
             let digits = ctrl.collect_dtmf(config).await?;
             sess.variables.insert("phone_number".into(), digits.clone());
@@ -616,13 +605,7 @@ pub async fn execute_action(
                     .insert(format!("bridge_hdr_{}", k), v.clone());
             }
             let mut uri = uri;
-            if let Some(app) = effective_return_app(return_app, return_target) {
-                let sep = if uri.contains('?') { "&" } else { "?" };
-                uri = format!("{}{}return_app={}", uri, sep, urlencoding::encode(app));
-                if let Some(rt) = return_target.as_ref().filter(|s| !s.is_empty()) {
-                    uri = format!("{}&return_target={}", uri, urlencoding::encode(rt));
-                }
-            }
+            super::exec::append_return_app_to_uri(&mut uri, return_app, return_target);
             if success.is_some() || failure.is_some() {
                 sess.variables.insert("bridge_branch".into(), "true".into());
                 Ok(ActionResult::Terminal(TerminalAction::Transfer(format!(

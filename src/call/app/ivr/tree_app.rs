@@ -209,24 +209,16 @@ impl IvrApp {
         let completion_time = chrono::Utc::now().to_rfc3339();
 
         // If this IVR was started via ivr.exec, write result to extensions.
-        if ctx
-            .session_extensions
-            .read()
-            .get::<crate::proxy::proxy_call::ivr_exec_hook::IvrExecState>()
-            .is_some()
-        {
-            ctx.session_extensions.write().insert(
-                crate::proxy::proxy_call::ivr_exec_hook::IvrExecResult {
-                    status: status.to_string(),
-                    reason: reason.to_string(),
-                    routing_target: target.map(|s| s.to_string()),
-                    collected: self.collected_variables.clone(),
-                    trace: vec![],
-                    duration_ms: total_duration_ms,
-                    completion_time: completion_time.clone(),
-                },
-            );
-        }
+        super::exec::write_ivr_exec_result(
+            &ctx.session_extensions,
+            super::exec::build_ivr_exec_result(
+                status,
+                reason,
+                target.map(|s| s.to_string()),
+                self.collected_variables.clone(),
+                total_duration_ms,
+            ),
+        );
 
         self.emit_rwi_event_typed(
             ctx,
@@ -348,74 +340,7 @@ impl IvrApp {
         text: Option<&str>,
         voice: Option<&str>,
     ) -> Option<String> {
-        if let Some(path) = file
-            && !path.is_empty()
-        {
-            // tts:// URI: parse text and optional voice from the URI, then synthesize
-            if let Some(rest) = path.strip_prefix("tts://") {
-                let (encoded_text, tts_voice) = if let Some((t, q)) = rest.split_once('?') {
-                    let v = q.strip_prefix("voice=").filter(|v| !v.is_empty());
-                    (t, v)
-                } else {
-                    (rest, None)
-                };
-                let tts_text = urlencoding::decode(encoded_text)
-                    .map(|s| s.into_owned())
-                    .unwrap_or_else(|_| encoded_text.to_string());
-                if let Some(service) = self.tts_service.as_ref() {
-                    match service.synthesize(&tts_text, tts_voice).await {
-                        Ok(audio_path) => return Some(audio_path),
-                        Err(e) => {
-                            warn!(ivr = %self.definition.name, text = %tts_text, error = %e, "TTS synthesis failed for tts:// URI");
-                        }
-                    }
-                } else {
-                    // Fallback: try edge-cli if available
-                    let voice_str = tts_voice.unwrap_or("zh-CN-XiaoxiaoNeural").to_string();
-                    let fallback_cfg = crate::tts::TtsConfig {
-                        cache_dir: std::env::temp_dir()
-                            .join("rustpbx_tts_cache")
-                            .to_string_lossy()
-                            .to_string(),
-                        cache_ttl_seconds: 86400,
-                        driver: crate::tts::TtsDriverConfig::Cli(crate::tts::CliTtsConfig {
-                            command: "edge-cli".to_string(),
-                            args: vec![
-                                "speak".to_string(),
-                                "--text".to_string(),
-                                "{text}".to_string(),
-                                "--voice".to_string(),
-                                "{voice}".to_string(),
-                                "--output".to_string(),
-                                "{output}".to_string(),
-                            ],
-                            output_format: "mp3".to_string(),
-                        }),
-                    };
-                    let fallback_service = crate::tts::TtsService::new(fallback_cfg);
-                    match fallback_service
-                        .synthesize(&tts_text, Some(&voice_str))
-                        .await
-                    {
-                        Ok(audio_path) => return Some(audio_path),
-                        Err(e) => {
-                            warn!(ivr = %self.definition.name, text = %tts_text, error = %e, "edge-cli fallback TTS failed");
-                        }
-                    }
-                }
-                return None;
-            }
-            return Some(path.to_string());
-        }
-        if let (Some(t), Some(service)) = (text, self.tts_service.as_ref()) {
-            match service.synthesize(t, voice).await {
-                Ok(path) => return Some(path),
-                Err(e) => {
-                    warn!(ivr = %self.definition.name, text = %t, error = %e, "TTS synthesis failed");
-                }
-            }
-        }
-        None
+        super::common::resolve_audio(file, text, voice, self.tts_service.as_ref()).await
     }
 
     /// Start playing the greeting for the specified menu.
@@ -563,19 +488,12 @@ impl IvrApp {
                     }
                     query.push_str(&format!("{}={}", k, urlencoding::encode(v)));
                 }
-                if let Some(app) = super::common::effective_return_app(return_app, return_target) {
-                    if !query.is_empty() {
-                        query.push('&');
-                    }
-                    query.push_str(&format!("return_app={}", urlencoding::encode(app)));
-                    if let Some(rt) = return_target.as_ref().filter(|s| !s.is_empty()) {
-                        query.push_str(&format!("&return_target={}", urlencoding::encode(rt)));
-                    }
-                    let menu = self.current_menu_key().to_string();
-                    if !menu.is_empty() && menu != "root" {
-                        query.push_str(&format!("&return_menu={}", urlencoding::encode(&menu)));
-                    }
-                }
+                super::exec::append_return_app_query(
+                    &mut query,
+                    return_app,
+                    return_target,
+                    Some(self.current_menu_key()),
+                );
                 if !query.is_empty() {
                     t.push('?');
                     t.push_str(&query);
@@ -600,19 +518,19 @@ impl IvrApp {
                 self.ivr_flow_completed(ctx, "transferred", "queue", Some(target))
                     .await;
                 self.state = IvrState::Done;
-                if let Some(app) = super::common::effective_return_app(return_app, return_target) {
-                    let mut query = format!("return_app={}", urlencoding::encode(app));
-                    if let Some(rt) = return_target.as_ref().filter(|s| !s.is_empty()) {
-                        query.push_str(&format!("&return_target={}", urlencoding::encode(rt)));
-                    }
-                    let menu = self.current_menu_key().to_string();
-                    if !menu.is_empty() && menu != "root" {
-                        query.push_str(&format!("&return_menu={}", urlencoding::encode(&menu)));
-                    }
-                    Ok(AppAction::Transfer(format!("queue:{}?{}", target, query)))
-                } else {
-                    Ok(AppAction::Transfer(format!("queue:{}", target)))
+                let mut queue_uri = format!("queue:{}", target);
+                let mut query = String::new();
+                super::exec::append_return_app_query(
+                    &mut query,
+                    return_app,
+                    return_target,
+                    Some(self.current_menu_key()),
+                );
+                if !query.is_empty() {
+                    queue_uri.push('?');
+                    queue_uri.push_str(&query);
                 }
+                Ok(AppAction::Transfer(queue_uri))
             }
             EntryAction::Menu { menu } => {
                 info!(ivr = %self.definition.name, from = %self.current_menu_key(), to = %menu, "IVR navigating to menu");
@@ -658,13 +576,7 @@ impl IvrApp {
                     ctx.session_vars
                         .insert("bridge_branch".into(), "true".into());
                 }
-                if let Some(app) = super::common::effective_return_app(return_app, return_target) {
-                    let sep = if uri.contains('?') { "&" } else { "?" };
-                    uri = format!("{}{}return_app={}", uri, sep, urlencoding::encode(app));
-                    if let Some(rt) = return_target.as_ref().filter(|s| !s.is_empty()) {
-                        uri = format!("{}&return_target={}", uri, urlencoding::encode(rt));
-                    }
-                }
+                super::exec::append_return_app_to_uri(&mut uri, return_app, return_target);
                 let target = format!("bridge:{}", uri);
                 info!(ivr = %self.definition.name, target = %target, "IVR bridging to WebSocket endpoint");
                 self.ivr_flow_completed(ctx, "transferred", "bridge", Some(target.as_str()))
@@ -805,6 +717,7 @@ impl IvrApp {
                                 inter_digit_timeout: Some(Duration::from_millis(
                                     *inter_digit_timeout_ms,
                                 )),
+                                initial_digits: String::new(),
                             })
                             .await?;
                         combined.push_str(&more);
@@ -820,6 +733,7 @@ impl IvrApp {
                         terminator: Some('#'),
                         play_prompt: resolved_prompt.clone(),
                         inter_digit_timeout: Some(Duration::from_millis(*inter_digit_timeout_ms)),
+                        initial_digits: String::new(),
                     })
                     .await?
                 };
@@ -880,6 +794,7 @@ impl IvrApp {
                                 inter_digit_timeout: Some(Duration::from_millis(
                                     *inter_digit_timeout_ms,
                                 )),
+                                initial_digits: String::new(),
                             })
                             .await?;
                         combined.push_str(&more);
@@ -895,6 +810,7 @@ impl IvrApp {
                         terminator,
                         play_prompt: resolved_prompt.clone(),
                         inter_digit_timeout: Some(Duration::from_millis(*inter_digit_timeout_ms)),
+                        initial_digits: String::new(),
                     })
                     .await?
                 };
@@ -1668,32 +1584,25 @@ impl CallApp for IvrApp {
             });
         }
 
-        // Publish the end reason so the session can enrich CallHangup / CDR
-        // (resolve_final_hangup_reason reads ivr_end_reason).
-        if let Some(ref vars) = self.runtime_vars {
-            vars.insert("ivr_end_reason".to_string(), end_reason_label.to_string());
-            vars.insert("ivr_status".to_string(), end_reason_label.to_string());
-            vars.insert("ivr_name".to_string(), self.definition.name.clone());
-        }
+        super::exec::publish_ivr_end_reason(
+            self.runtime_vars.as_ref(),
+            end_reason_label,
+            &self.definition.name,
+        );
 
-        // If started via ivr.exec, write the result so the post-exit hook can
-        // deliver it (mirrors StepIvrApp::on_exit).
-        if let Some(ref ext) = self.session_extensions {
-            let is_exec = ext
-                .read()
-                .get::<crate::proxy::proxy_call::ivr_exec_hook::IvrExecState>()
-                .is_some();
-            if is_exec {
-                ext.write()
-                    .insert(crate::proxy::proxy_call::ivr_exec_hook::IvrExecResult {
-                        status: end_reason_label.to_string(),
-                        reason: end_reason_label.to_string(),
-                        routing_target: None,
-                        collected: self.collected_variables.clone(),
-                        trace: vec![],
-                        duration_ms: total_duration_ms,
-                        completion_time: chrono::Utc::now().to_rfc3339(),
-                    });
+        // If started via ivr.exec and no terminal action already reported the result.
+        if !self.flow_completed {
+            if let Some(ref ext) = self.session_extensions {
+                super::exec::write_ivr_exec_result(
+                    ext,
+                    super::exec::build_ivr_exec_result(
+                        end_reason_label,
+                        end_reason_label,
+                        None,
+                        self.collected_variables.clone(),
+                        total_duration_ms,
+                    ),
+                );
             }
         }
 

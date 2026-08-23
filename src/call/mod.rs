@@ -58,25 +58,6 @@ pub enum CallFailureType {
     Timeout,
 }
 
-#[async_trait::async_trait]
-pub trait CallAppFactory: Send + Sync {
-    async fn create_app(
-        &self,
-        app_name: &str,
-        context: &RouteContext<'_>,
-        params: &serde_json::Value,
-    ) -> Option<Box<dyn app::CallApp>>;
-}
-
-#[async_trait::async_trait]
-pub trait CallFailureHandler: Send + Sync {
-    async fn on_call_failure(
-        &self,
-        context: &RouteContext<'_>,
-        failure_type: CallFailureType,
-    ) -> Option<Box<dyn app::CallApp>>;
-}
-
 /// Default hold audio that ships with config/sounds, relocated in Dockerfile to /app/sounds.
 pub const DEFAULT_QUEUE_HOLD_AUDIO: &str = "sounds/phone-calling.wav";
 /// Default prompt played when a queue cannot find an available agent.

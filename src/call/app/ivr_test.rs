@@ -2974,7 +2974,6 @@ action = { type = "transfer", target = "100" }
         // Build ApplicationContext with pre-seeded session_extensions.
         let app_ctx = crate::call::app::ApplicationContext {
             session_vars: std::sync::Arc::new(dashmap::DashMap::new()),
-            queue_name: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             db: Default::default(),
             http_client: reqwest::Client::new(),
             call_info: crate::call::app::CallInfo {

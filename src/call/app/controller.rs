@@ -107,6 +107,11 @@ pub struct DtmfCollectConfig {
     /// collection completes with whatever has been gathered so far.
     /// Defaults to the remaining `timeout` if not set (i.e. no inter-digit limit).
     pub inter_digit_timeout: Option<Duration>,
+    /// Digits already gathered before this round (e.g. a barge-in keypress
+    /// that arrived while a prompt was still playing). Collection continues
+    /// from this prefix under the normal terminator / max_digits /
+    /// inter-digit-timeout rules.
+    pub initial_digits: String,
 }
 
 impl CallController {
@@ -467,7 +472,10 @@ impl CallController {
             self.play_audio(prompt.clone(), true).await?;
         }
 
-        let mut collected = String::new();
+        let mut collected = config.initial_digits.clone();
+        if collected.len() >= config.max_digits {
+            return Ok(collected);
+        }
         let overall_deadline = Instant::now() + config.timeout;
 
         loop {

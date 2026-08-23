@@ -12,6 +12,18 @@ const WEBHOOK_CHANNEL_SIZE: usize = 512;
 /// Max number of recent (call_id, timestamp) pairs kept for dedup.
 const DEDUP_CACHE_SIZE: usize = 4096;
 
+/// Truncate a string to `max` bytes on a UTF-8 char boundary for logging.
+fn truncate_for_log(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 struct RwiWebhookSender {
     url: String,
     headers: std::collections::HashMap<String, String>,
@@ -112,6 +124,9 @@ async fn run_rwi_webhook_handler(
     let mut dedup: VecDeque<(String, DateTime<Utc>)> =
         VecDeque::with_capacity(DEDUP_CACHE_SIZE + 1);
     let mut seen: HashSet<(String, DateTime<Utc>)> = HashSet::new();
+    // Consecutive transport-failure counter — used only to log a single
+    // "recovered" line when delivery succeeds again after an outage.
+    let mut consecutive_send_failures: u32 = 0;
 
     loop {
         let entry = match rx.recv().await {
@@ -165,6 +180,14 @@ async fn run_rwi_webhook_handler(
 
         match sender.send_payload(&payload).await {
             Ok(record) => {
+                if consecutive_send_failures > 0 {
+                    info!(
+                        url = %record.url,
+                        consecutive_failures = consecutive_send_failures,
+                        "RWI webhook delivery recovered"
+                    );
+                }
+                consecutive_send_failures = 0;
                 let success = record
                     .status_code
                     .map(|c| (200..300).contains(&c))
@@ -196,10 +219,16 @@ async fn run_rwi_webhook_handler(
                 }
             }
             Err(e) => {
-                warn!(
+                consecutive_send_failures += 1;
+                // INFO with the full request body: when the receiver is
+                // down this log is the only place to see which events (and
+                // payloads) were generated, so the body must be visible at
+                // the default log level.
+                info!(
                     url = %sender.url,
                     event_type,
                     call_id = %entry.call_id,
+                    body = %truncate_for_log(&payload.to_string(), 1024),
                     error = %e,
                     "RWI webhook send failed"
                 );
