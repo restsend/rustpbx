@@ -56,6 +56,7 @@ pub fn api_urls() -> Router<Arc<ConsoleState>> {
     Router::new()
         .route("/routing", post(query_routing).put(create_routing))
         .route("/routing-stack", get(get_routing_stack))
+        .route("/routing-stack/{id}", patch(patch_routing_stack))
         .route(
             "/routing/{id}",
             patch(update_routing).delete(delete_routing),
@@ -65,17 +66,144 @@ pub fn api_urls() -> Router<Arc<ConsoleState>> {
         .route("/routing/{id}/data", get(route_detail_data))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PatchRoutingStackRequest {
+    enabled: Option<bool>,
+    priority: Option<i32>,
+    eval_mode: Option<String>,
+}
+
+async fn load_routing_stack_warnings(
+    state: &ConsoleState,
+    config: &crate::config::Config,
+) -> Vec<crate::proxy::routing::stack::RoutingStackWarning> {
+    let shortcode = check_voicemail_shortcode(config);
+    let db = state.db();
+    let Ok(routes) = RoutingEntity::find().all(db).await else {
+        return Vec::new();
+    };
+    let pattern_routes: Vec<(i64, String, bool, Option<String>, Option<String>)> = routes
+        .into_iter()
+        .map(|route| {
+            (
+                route.id,
+                route.name,
+                route.is_active,
+                route.destination_pattern,
+                route.source_pattern,
+            )
+        })
+        .collect();
+    let pattern_refs: Vec<(i64, String, bool, Option<&str>, Option<&str>)> = pattern_routes
+        .iter()
+        .map(|(id, name, active, dest, src)| {
+            (
+                *id,
+                name.clone(),
+                *active,
+                dest.as_deref(),
+                src.as_deref(),
+            )
+        })
+        .collect();
+    crate::proxy::routing::stack::detect_route_pattern_conflicts(&shortcode, &pattern_refs)
+}
+
+fn check_voicemail_shortcode(config: &crate::config::Config) -> String {
+    #[cfg(feature = "addon-voicemail")]
+    {
+        let path = config.config_dir().join("voicemail.toml");
+        crate::addons::voicemail::settings::FileConfig::load(&path).check_voicemail_number
+    }
+    #[cfg(not(feature = "addon-voicemail"))]
+    {
+        let _ = config;
+        "*97".to_string()
+    }
+}
+
 pub async fn get_routing_stack(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
+) -> Response {
+    let config = state.config();
+    let warnings = load_routing_stack_warnings(state.as_ref(), config.as_ref()).await;
+    let addon_contributions = state
+        .app_state()
+        .map(|app| app.addon_registry.routing_contributions(config.as_ref()))
+        .unwrap_or_default();
+    let stack = crate::proxy::routing::stack::build_routing_stack(
+        config.as_ref(),
+        addon_contributions,
+        warnings,
+    );
+    Json(stack).into_response()
+}
+
+pub async fn patch_routing_stack(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<PatchRoutingStackRequest>,
 ) -> Response {
     let config = state.config();
     let addon_contributions = state
         .app_state()
         .map(|app| app.addon_registry.routing_contributions(config.as_ref()))
         .unwrap_or_default();
-    let stack =
-        crate::proxy::routing::stack::build_routing_stack(config.as_ref(), addon_contributions);
+    let baseline = crate::proxy::routing::stack::build_routing_stack(
+        config.as_ref(),
+        addon_contributions,
+        vec![],
+    );
+    let Some(contribution) = baseline.contributions.iter().find(|c| c.id == id) else {
+        return bad_request(format!("Unknown routing stack contribution: {id}"));
+    };
+    if !contribution.editable {
+        return bad_request(format!("Contribution \"{id}\" is not editable from the routing stack"));
+    }
+    if let Some(priority) = body.priority
+        && !(0..=10_000).contains(&priority)
+    {
+        return bad_request("priority must be between 0 and 10000");
+    }
+    let eval_mode = match body.eval_mode.as_deref() {
+        None => None,
+        Some(value) => match crate::proxy::routing::stack::eval_mode_from_str(value) {
+            Some(mode) => Some(mode),
+            None => return bad_request("eval_mode must be pre_route or post_route"),
+        },
+    };
+
+    let mut file = crate::proxy::routing::stack::load_routing_stack_file(config.as_ref());
+    crate::proxy::routing::stack::upsert_contribution_override(
+        &mut file,
+        &id,
+        body.enabled,
+        body.priority,
+        eval_mode,
+    );
+    if let Err(err) =
+        crate::proxy::routing::stack::save_routing_stack_file(config.as_ref(), &file)
+    {
+        warn!(error = %err, "failed to persist routing_stack.toml");
+        return internal_error(format!("Failed to save routing stack: {err}"));
+    }
+    if let Some(server) = state.sip_server() {
+        server.reapply_routing_stack_inspectors(config.as_ref());
+    }
+
+    let warnings = load_routing_stack_warnings(state.as_ref(), config.as_ref()).await;
+    let addon_contributions = state
+        .app_state()
+        .map(|app| app.addon_registry.routing_contributions(config.as_ref()))
+        .unwrap_or_default();
+    let stack = crate::proxy::routing::stack::build_routing_stack(
+        config.as_ref(),
+        addon_contributions,
+        warnings,
+    );
     Json(stack).into_response()
 }
 

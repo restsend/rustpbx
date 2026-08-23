@@ -23,6 +23,7 @@ use tokio::net::lookup_host;
 pub mod error_catalog;
 pub mod http;
 pub mod http_error_catalog;
+pub mod inspector_stack;
 pub mod matcher;
 pub mod stack;
 

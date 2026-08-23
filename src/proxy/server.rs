@@ -78,7 +78,8 @@ pub struct SipServerInner {
     pub user_backend: Box<dyn UserBackend>,
     pub auth_backend: Vec<Box<dyn AuthBackend>>,
     pub call_router: Option<Box<dyn CallRouter>>,
-    pub dialplan_inspectors: Vec<Box<dyn DialplanInspector>>,
+    pub dialplan_inspectors:
+        Arc<parking_lot::RwLock<Vec<Arc<crate::proxy::routing::inspector_stack::OrderedDialplanInspector>>>>,
     pub locator: Arc<Box<dyn Locator>>,
     pub callrecord_sender: Option<CallRecordSender>,
     pub endpoint: Endpoint,
@@ -166,7 +167,7 @@ pub struct SipServerBuilder {
     locator: Option<Box<dyn Locator>>,
     callrecord_sender: Option<CallRecordSender>,
     message_inspectors: Vec<Box<dyn MessageInspector>>,
-    dialplan_inspectors: Vec<Box<dyn DialplanInspector>>,
+    dialplan_inspectors: Vec<Arc<crate::proxy::routing::inspector_stack::OrderedDialplanInspector>>,
     create_route_invites: Vec<FnCreateRouteInvite>,
     database: Option<DatabaseConnection>,
     data_context: Option<Arc<ProxyDataContext>>,
@@ -302,7 +303,43 @@ impl SipServerBuilder {
         mut self,
         dialplan_inspector: Box<dyn DialplanInspector>,
     ) -> Self {
-        self.dialplan_inspectors.push(dialplan_inspector);
+        self.dialplan_inspectors.push(Arc::new(
+            crate::proxy::routing::inspector_stack::OrderedDialplanInspector::new(
+                "legacy.anonymous",
+                crate::proxy::routing::stack::RoutingPhase::PreRoute,
+                0,
+                crate::proxy::routing::stack::EvalMode::PreRoute,
+                dialplan_inspector,
+            ),
+        ));
+        self
+    }
+
+    pub fn with_dialplan_inspector_entry(
+        mut self,
+        entry: crate::proxy::routing::inspector_stack::OrderedDialplanInspector,
+    ) -> Self {
+        self.dialplan_inspectors.push(Arc::new(entry));
+        self
+    }
+
+    /// Apply `routing_stack.toml` overrides and sort the inspector chain.
+    pub fn finalize_dialplan_inspectors(mut self, config: &crate::config::Config) -> Self {
+        let file = crate::proxy::routing::stack::load_routing_stack_file(config);
+        for entry in &mut self.dialplan_inspectors {
+            if let Some(entry) = Arc::get_mut(entry) {
+                crate::proxy::routing::stack::apply_overrides_to_inspector_meta(
+                    &entry.id,
+                    &mut entry.enabled,
+                    &mut entry.priority,
+                    &mut entry.eval_mode,
+                    &file,
+                );
+            }
+        }
+        crate::proxy::routing::inspector_stack::sort_inspector_entries(
+            &mut self.dialplan_inspectors,
+        );
         self
     }
 
@@ -1036,7 +1073,7 @@ impl SipServerBuilder {
             callrecord_sender: self.callrecord_sender,
             endpoint,
             dialog_layer,
-            dialplan_inspectors: self.dialplan_inspectors,
+            dialplan_inspectors: Arc::new(parking_lot::RwLock::new(self.dialplan_inspectors)),
             create_route_invites: self.create_route_invites,
             ignore_out_of_dialog_request: self.ignore_out_of_dialog_request,
             locator_events: Some(locator_events),
@@ -1465,6 +1502,24 @@ impl Drop for SipServerInner {
 }
 
 impl SipServerInner {
+    /// Re-read `routing_stack.toml` and refresh inspector priority/enabled/eval_mode.
+    pub fn reapply_routing_stack_inspectors(&self, config: &crate::config::Config) {
+        let file = crate::proxy::routing::stack::load_routing_stack_file(config);
+        let mut entries = self.dialplan_inspectors.write();
+        for entry in entries.iter_mut() {
+            if let Some(entry) = Arc::get_mut(entry) {
+                crate::proxy::routing::stack::apply_overrides_to_inspector_meta(
+                    &entry.id,
+                    &mut entry.enabled,
+                    &mut entry.priority,
+                    &mut entry.eval_mode,
+                    &file,
+                );
+            }
+        }
+        crate::proxy::routing::inspector_stack::sort_inspector_entries(entries.as_mut_slice());
+    }
+
     pub fn default_contact_uri(&self) -> Option<rsipstack::sip::Uri> {
         let addr = self.endpoint.get_addrs().first()?.clone();
         Some(build_contact_uri(&self.contact_username, &addr, None))
@@ -1559,8 +1614,8 @@ impl SipServerInner {
 
         // Push the new emergency config into the shared inspector so existing
         // inspections observe the updated numbers/trunk immediately.
-        for inspector in &self.dialplan_inspectors {
-            if let Some(emg) = inspector.as_any()
+        for entry in self.dialplan_inspectors.read().iter() {
+            if let Some(emg) = entry.inspector.as_any()
                 && let Some(inspector) =
                     emg.downcast_ref::<crate::proxy::emergency::EmergencyInspector>()
             {

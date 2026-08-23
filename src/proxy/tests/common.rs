@@ -108,7 +108,7 @@ pub async fn create_test_server_with_config_and_sipflow_backend(
         callrecord_sender: None,
         endpoint,
         dialog_layer,
-        dialplan_inspectors: Vec::new(),
+        dialplan_inspectors: Arc::new(parking_lot::RwLock::new(Vec::new())),
         create_route_invites: Vec::new(),
         ignore_out_of_dialog_request: true,
         locator_events: Some(locator_events_tx),

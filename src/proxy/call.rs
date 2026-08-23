@@ -329,6 +329,75 @@ impl RouteInvite for DefaultRouteInvite {
     }
 }
 
+/// Try a primary [`RouteInvite`]; on `NotHandled`, delegate to a fallback
+/// (typically wholesale → PBX default routes).
+pub struct ChainedRouteInvite {
+    primary: Box<dyn RouteInvite>,
+    fallback: Box<dyn RouteInvite>,
+}
+
+impl ChainedRouteInvite {
+    pub fn new(primary: Box<dyn RouteInvite>, fallback: Box<dyn RouteInvite>) -> Self {
+        Self { primary, fallback }
+    }
+
+    async fn dispatch(
+        &self,
+        option: InviteOption,
+        origin: &rsipstack::sip::Request,
+        direction: &DialDirection,
+        cookie: &TransactionCookie,
+        preview: bool,
+    ) -> Result<RouteResult> {
+        let primary_result = if preview {
+            self.primary
+                .preview_route(option, origin, direction, cookie)
+                .await?
+        } else {
+            self.primary
+                .route_invite(option, origin, direction, cookie)
+                .await?
+        };
+        match primary_result {
+            RouteResult::NotHandled(option, _) => {
+                if preview {
+                    self.fallback
+                        .preview_route(option, origin, direction, cookie)
+                        .await
+                } else {
+                    self.fallback
+                        .route_invite(option, origin, direction, cookie)
+                        .await
+                }
+            }
+            other => Ok(other),
+        }
+    }
+}
+
+#[async_trait]
+impl RouteInvite for ChainedRouteInvite {
+    async fn route_invite(
+        &self,
+        option: InviteOption,
+        origin: &rsipstack::sip::Request,
+        direction: &DialDirection,
+        cookie: &TransactionCookie,
+    ) -> Result<RouteResult> {
+        self.dispatch(option, origin, direction, cookie, false).await
+    }
+
+    async fn preview_route(
+        &self,
+        option: InviteOption,
+        origin: &rsipstack::sip::Request,
+        direction: &DialDirection,
+        cookie: &TransactionCookie,
+    ) -> Result<RouteResult> {
+        self.dispatch(option, origin, direction, cookie, true).await
+    }
+}
+
 impl DefaultRouteInvite {
     fn build_context(
         &self,
@@ -1488,8 +1557,21 @@ impl CallModule {
             };
             dialplan = dialplan.with_caller_contact(contact);
         }
-        for inspector in &self.inner.server.dialplan_inspectors {
-            match inspector
+        let inspectors: Vec<Arc<crate::proxy::routing::inspector_stack::OrderedDialplanInspector>> =
+            self.inner.server.dialplan_inspectors.read().iter().cloned().collect();
+        for entry in inspectors {
+            if !entry.enabled {
+                continue;
+            }
+            if matches!(
+                entry.eval_mode,
+                crate::proxy::routing::stack::EvalMode::PostRoute
+            ) && !dialplan.is_empty()
+            {
+                continue;
+            }
+            match entry
+                .inspector
                 .inspect_dialplan(dialplan, &cookie, &tx.original)
                 .await
             {
@@ -1549,25 +1631,18 @@ impl CallModule {
             .with_code(&crate::proxy::error_catalog::CALLEE_OFFLINE));
         }
 
-        #[cfg(not(feature = "addon-wholesale"))]
-        {
-            match self.resolve_callee_user(&tx.original).await {
-                Ok(Some(callee)) => {
-                    // Apply call-forwarding only when no custom resolver already set it.
-                    if dialplan.call_forwarding.is_none()
-                        && let Some(config) = callee.forwarding_config()
-                    {
-                        dialplan = dialplan.with_call_forwarding(Some(config));
-                    }
-                    // Propagate voicemail eligibility into the dialplan so that
-                    // the call session can decide whether to chain to voicemail
-                    // on no-answer / busy without having to re-query the DB.
-                    dialplan.voicemail_enabled = !callee.voicemail_disabled;
+        match self.resolve_callee_user(&tx.original).await {
+            Ok(Some(callee)) => {
+                if dialplan.call_forwarding.is_none()
+                    && let Some(config) = callee.forwarding_config()
+                {
+                    dialplan = dialplan.with_call_forwarding(Some(config));
                 }
-                Ok(None) => {}
-                Err(err) => {
-                    warn!(error = %err, "failed to resolve callee user for forwarding/voicemail");
-                }
+                dialplan.voicemail_enabled = !callee.voicemail_disabled;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                warn!(error = %err, "failed to resolve callee user for forwarding/voicemail");
             }
         }
 
@@ -2646,6 +2721,41 @@ mod tests {
             _cookie: &TransactionCookie,
         ) -> Result<RouteResult> {
             Ok(RouteResult::NotHandled(option, None))
+        }
+    }
+
+    #[tokio::test]
+    async fn chained_route_invite_falls_back_on_not_handled() {
+        let chained = ChainedRouteInvite::new(
+            Box::new(NotHandledRouteInvite),
+            Box::new(ApplicationRouteInvite { headers: None }),
+        );
+        let request = rsipstack::sip::Request {
+            method: rsipstack::sip::Method::Invite,
+            uri: rsipstack::sip::Uri::try_from("sip:bob@example.com").unwrap(),
+            version: rsipstack::sip::Version::V2,
+            headers: vec![
+                rsipstack::sip::Header::From("<sip:alice@example.com>".try_into().unwrap()),
+                rsipstack::sip::Header::To("<sip:bob@example.com>".into()),
+                rsipstack::sip::Header::CallId("chained-test".into()),
+                rsipstack::sip::Header::CSeq("1 INVITE".try_into().unwrap()),
+            ]
+            .into(),
+            body: Vec::new(),
+        };
+        let cookie = TransactionCookie::default();
+        let result = chained
+            .preview_route(
+                InviteOption::default(),
+                &request,
+                &DialDirection::Outbound,
+                &cookie,
+            )
+            .await
+            .expect("chained preview");
+        match result {
+            RouteResult::Application { app_name, .. } => assert_eq!(app_name, "ivr"),
+            _ => panic!("expected fallback application route"),
         }
     }
 

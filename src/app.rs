@@ -484,14 +484,29 @@ impl AppStateBuilder {
 
                 // Register emergency routing inspector (core feature)
                 if let Some(ref emg) = config.proxy.emergency {
-                    builder = builder.with_dialplan_inspector(Box::new(
-                        crate::proxy::emergency::EmergencyInspector::new(Some(emg.clone())),
-                    ));
+                    builder = builder.with_dialplan_inspector_entry(
+                        crate::proxy::routing::inspector_stack::OrderedDialplanInspector::new(
+                            "core.emergency",
+                            crate::proxy::routing::stack::RoutingPhase::PreRoute,
+                            crate::proxy::routing::stack::default_priority_for_id("core.emergency"),
+                            crate::proxy::routing::stack::EvalMode::PreRoute,
+                            Box::new(crate::proxy::emergency::EmergencyInspector::new(Some(
+                                emg.clone(),
+                            ))),
+                        ),
+                    );
                 }
-                // Register number pool inspector for least-used DID assignment
-                builder = builder.with_dialplan_inspector(Box::new(
-                    crate::proxy::number_pool::NumberPoolInspector::default(),
-                ));
+                builder = builder.with_dialplan_inspector_entry(
+                    crate::proxy::routing::inspector_stack::OrderedDialplanInspector::new(
+                        "core.number_pool",
+                        crate::proxy::routing::stack::RoutingPhase::PreRoute,
+                        crate::proxy::routing::stack::default_priority_for_id("core.number_pool"),
+                        crate::proxy::routing::stack::EvalMode::PreRoute,
+                        Box::new(crate::proxy::number_pool::NumberPoolInspector::default()),
+                    ),
+                );
+
+                builder = builder.finalize_dialplan_inspectors(&config);
 
                 builder.build().await
             }

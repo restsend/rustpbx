@@ -507,7 +507,7 @@ async fn test_guest_call_allowed_extension() {
         callrecord_sender: None,
         endpoint,
         dialog_layer,
-        dialplan_inspectors: Vec::new(),
+        dialplan_inspectors: Arc::new(parking_lot::RwLock::new(Vec::new())),
         create_route_invites: Vec::new(),
         ignore_out_of_dialog_request: true,
         locator_events: None,

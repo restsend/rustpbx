@@ -112,6 +112,16 @@
             </div>
 
             <div class="overflow-x-auto">
+                <template x-if="stackWarnings.length">
+                    <div class="border-b border-amber-100 bg-amber-50 px-5 py-3 text-sm text-amber-800">
+                        <div class="font-semibold">{{ "routing.stack_warnings_title" | t }}</div>
+                        <ul class="mt-2 list-disc space-y-1 pl-5">
+                            <template x-for="(warning, idx) in stackWarnings" :key="idx">
+                                <li x-text="warning.message"></li>
+                            </template>
+                        </ul>
+                    </div>
+                </template>
                 <template x-if="stackLoading && !stackContributions.length">
                     <div class="px-5 py-8 text-center text-sm text-slate-500">{{ "routing.stack_loading" | t }}</div>
                 </template>
@@ -160,9 +170,20 @@
                                         x-text="priorityHint(row.priorityDirection)"></span>
                                 </td>
                                 <td class="px-5 py-3 align-top">
-                                    <span class="inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                                        :class="row.enabled ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'"
-                                        x-text="row.enabled ? '{{ "routing.stack_enabled" | t }}' : '{{ "routing.stack_disabled" | t }}'"></span>
+                                    <template x-if="row.editable">
+                                        <button type="button"
+                                            class="inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold transition"
+                                            :class="row.enabled ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'"
+                                            :disabled="stackSavingId === row.id"
+                                            @click="patchStackContribution(row, { enabled: !row.enabled })"
+                                            x-text="row.enabled ? '{{ "routing.stack_enabled" | t }}' : '{{ "routing.stack_disabled" | t }}'">
+                                        </button>
+                                    </template>
+                                    <template x-if="!row.editable">
+                                        <span class="inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                            :class="row.enabled ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'"
+                                            x-text="row.enabled ? '{{ "routing.stack_enabled" | t }}' : '{{ "routing.stack_disabled" | t }}'"></span>
+                                    </template>
                                 </td>
                             </tr>
                         </template>
@@ -938,7 +959,9 @@
             expandedRewrite: {},
             stackPhases: [],
             stackContributions: [],
+            stackWarnings: [],
             stackLoading: false,
+            stackSavingId: null,
             stackError: null,
 
             translations: {
@@ -1018,10 +1041,34 @@
                     const data = await response.json();
                     this.stackPhases = Array.isArray(data.phases) ? data.phases : [];
                     this.stackContributions = Array.isArray(data.contributions) ? data.contributions : [];
+                    this.stackWarnings = Array.isArray(data.warnings) ? data.warnings : [];
                 } catch (err) {
                     this.stackError = err?.message || '{{ "routing.stack_load_failed" | t }}';
                 } finally {
                     this.stackLoading = false;
+                }
+            },
+            async patchStackContribution(row, patch) {
+                this.stackSavingId = row.id;
+                this.stackError = null;
+                try {
+                    const response = await fetch(this.resolvePath(`${this.apiBase}/routing-stack/${encodeURIComponent(row.id)}`), {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(patch),
+                    });
+                    if (!response.ok) {
+                        const payload = await response.json().catch(() => ({}));
+                        throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
+                    }
+                    const data = await response.json();
+                    this.stackPhases = Array.isArray(data.phases) ? data.phases : [];
+                    this.stackContributions = Array.isArray(data.contributions) ? data.contributions : [];
+                    this.stackWarnings = Array.isArray(data.warnings) ? data.warnings : [];
+                } catch (err) {
+                    this.stackError = err?.message || '{{ "routing.stack_save_failed" | t }}';
+                } finally {
+                    this.stackSavingId = null;
                 }
             },
             phaseLabel(phase) {
