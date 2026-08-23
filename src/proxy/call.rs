@@ -2366,6 +2366,12 @@ impl CallModule {
                 let leg_a = crate::call::domain::LegId::new(&original_session_id);
                 let leg_b = crate::call::domain::LegId::new(&new_call_id);
 
+                // Mark the surviving caller session as transferred so
+                // post-call hooks (CSAT) suppress the survey on this leg.
+                original_handle
+                    .send_command(crate::call::domain::CallCommand::MarkTransferred)
+                    .map_err(|e| (500, format!("Failed to mark transferred: {}", e)))?;
+
                 original_handle
                     .send_command(crate::call::domain::CallCommand::Bridge {
                         leg_a,

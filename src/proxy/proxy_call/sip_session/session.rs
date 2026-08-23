@@ -2068,6 +2068,7 @@ impl SipSession {
             connected_callee: self.meta.connected_callee.clone(),
             queue_name: crate::proxy::proxy_call::call_meta::effective_queue_name(&self.meta),
             skill_group_id: crate::proxy::proxy_call::call_meta::effective_skill_group_id(&self.meta),
+            transferred: self.meta.transferred,
             direction: self.context.dialplan.direction.to_string(),
             started_at: Some(self.context.created_at.clone()),
             extensions: self.extensions.clone(),
@@ -8501,6 +8502,16 @@ impl SipSession {
 
             CallCommand::Unbridge { .. } => {
                 self.clear_bridge().await;
+                CommandResult::success()
+            }
+
+            CallCommand::MarkTransferred => {
+                if !self.meta.transferred {
+                    info!(session_id = %self.id,
+                        "Call marked as transferred (post-call survey suppressed)"
+                    );
+                }
+                self.meta.transferred = true;
                 CommandResult::success()
             }
 

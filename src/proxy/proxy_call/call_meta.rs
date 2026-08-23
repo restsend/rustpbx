@@ -77,6 +77,12 @@ pub struct CallMeta {
     /// True while a blind transfer is in progress (new B-leg ringing / REFER
     /// awaiting completion). The RTP watchdog is suppressed during this window.
     pub transfer_in_progress: bool,
+    /// Whether this session's call was transferred away to another party
+    /// (inbound REFER blind transfer, consultative transfer / 3-way merge).
+    /// Sticky — never reset once set. Post-call hooks use it to suppress
+    /// CSAT surveys on transferred legs: the survey, if any, belongs to the
+    /// final queue that served the customer.
+    pub transferred: bool,
     /// Whether a real callee/agent leg ever answered (media path established
     /// to a remote party), even if that leg has since terminated. Never reset.
     /// Lets the queue-abandon detector distinguish "caller hung up while still

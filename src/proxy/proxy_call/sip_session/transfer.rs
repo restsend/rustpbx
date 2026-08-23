@@ -466,6 +466,9 @@ impl SipSession {
             // Transfer failed — the existing bridge stays up, so normal
             // (non-suppressed) monitoring resumes.
             self.meta.transfer_in_progress = false;
+            // The customer stays with the original agent, so CSAT is not
+            // suppressed either.
+            self.meta.transferred = false;
             self.sync_rtp_timeout_pause();
         }
         result
@@ -516,6 +519,7 @@ impl SipSession {
                 return_app,
             } => {
                 info!(session_id = %self.id, %leg_id, endpoint = %endpoint, sample_rate, codec = %codec, ?return_app, "Handling Bridge transfer");
+                self.meta.transferred = true;
                 self.connect_bridge(
                     leg_id,
                     endpoint.clone(),
@@ -533,6 +537,7 @@ impl SipSession {
                 from_user,
             } => {
                 self.meta.transfer_return_app = self.resolve_return_app(return_app).await;
+                self.meta.transferred = true;
 
                 let realm = self.server.proxy_config.load().select_realm("");
                 let normalized = crate::call::build_sip_uri(&uri, &realm);

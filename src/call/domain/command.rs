@@ -130,6 +130,11 @@ pub enum CallCommand {
         into_conference: String,
     },
 
+    /// Mark this logical call as transferred (inbound REFER blind transfer,
+    /// consultative transfer / 3-way merge). Sticky; post-call hooks (CSAT
+    /// survey) suppress surveys on transferred legs.
+    MarkTransferred,
+
     /// Place a leg on hold
     Hold {
         /// The leg to hold

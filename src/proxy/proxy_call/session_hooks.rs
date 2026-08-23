@@ -66,6 +66,10 @@ pub struct CallSessionContext {
     /// target. Skill-group configuration lookups (CSAT survey, wrapup,
     /// hold-music) must use this — the queue name is an unrelated label.
     pub skill_group_id: Option<String>,
+    /// True when this logical call went through a transfer (inbound REFER
+    /// blind transfer, consultative transfer / 3-way merge) before reaching
+    /// the current leg. Post-call hooks suppress CSAT surveys on it.
+    pub transferred: bool,
     /// Call direction: `"inbound"` or `"outbound"`.
     pub direction: String,
     /// ISO-8601 timestamp when the session was created (before ringing).
@@ -101,6 +105,7 @@ impl Clone for CallSessionContext {
             connected_callee: self.connected_callee.clone(),
             queue_name: self.queue_name.clone(),
             skill_group_id: self.skill_group_id.clone(),
+            transferred: self.transferred,
             direction: self.direction.clone(),
             started_at: self.started_at.clone(),
             extensions: self.extensions.clone(),
@@ -118,6 +123,7 @@ impl fmt::Debug for CallSessionContext {
             .field("connected_callee", &self.connected_callee)
             .field("queue_name", &self.queue_name)
             .field("skill_group_id", &self.skill_group_id)
+            .field("transferred", &self.transferred)
             .field("direction", &self.direction)
             .field("started_at", &self.started_at)
             .field("extensions", &"<http::Extensions>")
