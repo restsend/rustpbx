@@ -548,88 +548,16 @@ impl SipSession {
                     self.server.proxy_config.load().blind_transfer_use_refer,
                     disposition,
                 ) {
-                    info!(session_id = %self.id, %leg_id, target = %uri, return_app = ?self.meta.transfer_return_app, "Blind transfer via B-leg INVITE (B2BUA)");
-                    // The transfer target is a NEW peer — invalidate the cached
-                    // callee offer so `prepare_callee_media_offer` creates a
-                    // fresh B leg (with its own local offer) instead of reusing
-                    // the previous callee's offer/leg, which would break
-                    // apply_sdp(answer) for the transferred-to endpoint.
-                    self.media.callee_offer = None;
-                    self.media.callee_offer_cached_webrtc = None;
-                    let caller = from_user
-                        .map(|user| format!("sip:{}@{}", user, refer_to_uri.host_with_port).parse())
-                        .transpose()
-                        .map_err(|e| anyhow!("Invalid transfer caller URI: {}", e))?;
-                    let mut location = crate::call::Location {
-                        aor: refer_to_uri.clone(),
-                        ..Default::default()
-                    };
-                    let mut registered = false;
-                    match self.server.locator.lookup(&refer_to_uri).await {
-                        Ok(registered_locations) => {
-                            if let Some(registered_location) =
-                                registered_locations.into_iter().next()
-                            {
-                                info!(
-                                    target = %refer_to_uri,
-                                    registered_contact = %registered_location.aor,
-                                    webrtc = registered_location.supports_webrtc,
-                                    transport = ?registered_location.transport,
-                                    "Resolved B-leg transfer target through locator"
-                                );
-                                location = registered_location;
-                                registered = true;
-                            }
-                        }
-                        Err(error) => {
-                            warn!(
-                                target = %refer_to_uri,
-                                %error,
-                                "Failed to resolve B-leg transfer target through locator; using bare SIP target"
-                            );
-                        }
-                    }
-                    // Not a registered internal contact — run the transfer target
-                    // through the route table (match/rewrite/trunk) if enabled.
-                    if !registered {
-                        match self.route_originated_leg(&location).await {
-                            Ok((routed, hints)) => {
-                                location = routed;
-                                self.track_routed_leg_hints(hints);
-                            }
-                            Err(e) => {
-                                warn!(session_id = %self.id, %leg_id, target = %uri, error = %e, "Route lookup failed for transfer target; dialing directly");
-                            }
-                        }
-                    }
-                    let result = self
-                        .try_single_target(&location, callee_state_rx, None, None, caller)
+                    return self
+                        .dial_blind_transfer_b2bua(leg_id, &uri, &refer_to_uri, from_user, callee_state_rx)
                         .await;
-                    if result.is_ok() {
-                        // The B2BUA blind-transfer path swaps the B leg
-                        // in-session (no REFER), so the REFER-based emitters
-                        // never fire. Emit the transfer notification here,
-                        // aligned with the inbound-REFER path's payload.
-                        self.emit_typed_rwi_event(&crate::rwi::CallTransferred {
-                            call_id: self.context.session_id.to_string(),
-                            transfer_target: Some(uri.clone()),
-                        });
-                    }
-                    return result.map_err(|(code, text, reason)| {
-                        self.meta.transfer_return_app = None;
-                        anyhow!(
-                            "B-leg transfer failed: {} {} - {}",
-                            code,
-                            text,
-                            reason.unwrap_or_default()
-                        )
-                    });
                 }
 
-                if self.meta.transfer_return_app.is_some() {
-                    warn!(session_id = %self.id, %leg_id, "return_app not supported with SIP REFER; use B2BUA or set blind_transfer_use_refer=false");
-                    self.meta.transfer_return_app = None;
-                }
+                // transfer_return_app is intentionally kept here even though
+                // SIP REFER cannot carry it: if the peer rejects the REFER we
+                // fall back to the B2BUA path below, which CAN honor it. It is
+                // cleared once the REFER is accepted (202) or definitively
+                // fails without fallback.
 
                 let referred_by = self
                     .context
@@ -651,7 +579,10 @@ impl SipSession {
                         "REFER not supported without an inbound caller dialog; use B2BUA"
                     ));
                 };
-                match server_dialog.refer(refer_to_uri, Some(headers), None).await {
+                match server_dialog
+                    .refer(refer_to_uri.clone(), Some(headers), None)
+                    .await
+                {
                     Ok(Some(response)) => {
                         let status = response.status_code.code();
                         info!(session_id = %self.id, status = %status, "REFER response received");
@@ -667,24 +598,32 @@ impl SipSession {
                         match status {
                             202 => {
                                 info!(session_id = %self.id, "REFER accepted (202), transfer in progress");
+                                self.meta.transfer_return_app = None;
                                 self.update_leg_state(&leg_id, LegState::Ending);
                             }
                             100..=199 => {
                                 info!(session_id = %self.id, status = %status, "REFER received provisional response");
                             }
                             405 | 420 | 501 => {
-                                warn!(session_id = %self.id, status = %status, "REFER not supported by peer, needs 3PCC fallback");
-                                return Err(anyhow!(
-                                    "REFER not supported by peer ({}), needs 3PCC fallback",
-                                    status
-                                ));
+                                warn!(session_id = %self.id, status = %status, "REFER not supported by peer; falling back to B2BUA transfer");
+                                return self
+                                    .dial_blind_transfer_b2bua(
+                                        leg_id,
+                                        &uri,
+                                        &refer_to_uri,
+                                        from_user,
+                                        callee_state_rx,
+                                    )
+                                    .await;
                             }
                             _ if status >= 400 => {
                                 warn!(session_id = %self.id, status = %status, "REFER rejected");
+                                self.meta.transfer_return_app = None;
                                 return Err(anyhow!("REFER rejected with status {}", status));
                             }
                             _ => {
                                 warn!(session_id = %self.id, status = %status, "Unexpected REFER response");
+                                self.meta.transfer_return_app = None;
                                 return Err(anyhow!("Unexpected REFER response: {}", status));
                             }
                         }
@@ -697,6 +636,7 @@ impl SipSession {
                             crate::call::domain::ReferNotifyEventType::ReferResponse,
                         )
                         .await;
+                        self.meta.transfer_return_app = None;
                         return Err(anyhow!("REFER timed out"));
                     }
                     Err(e) => {
@@ -707,6 +647,7 @@ impl SipSession {
                             crate::call::domain::ReferNotifyEventType::ReferResponse,
                         )
                         .await;
+                        self.meta.transfer_return_app = None;
                         return Err(anyhow!("Failed to send REFER: {}", e));
                     }
                 }
@@ -718,6 +659,95 @@ impl SipSession {
                 Ok(())
             }
         }
+    }
+
+    /// Dial the blind-transfer target as a new B leg in-session (B2BUA style).
+    ///
+    /// Used directly when `blind_transfer_use_refer` is disabled (or the
+    /// disposition requires an anchored result), and as the 3PCC fallback
+    /// when the peer rejects an outbound REFER with 405/420/501.
+    async fn dial_blind_transfer_b2bua(
+        &mut self,
+        leg_id: LegId,
+        uri: &str,
+        refer_to_uri: &rsipstack::sip::Uri,
+        from_user: Option<String>,
+        callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
+    ) -> Result<()> {
+        info!(session_id = %self.id, %leg_id, target = %uri, return_app = ?self.meta.transfer_return_app, "Blind transfer via B-leg INVITE (B2BUA)");
+        // The transfer target is a NEW peer — invalidate the cached
+        // callee offer so `prepare_callee_media_offer` creates a
+        // fresh B leg (with its own local offer) instead of reusing
+        // the previous callee's offer/leg, which would break
+        // apply_sdp(answer) for the transferred-to endpoint.
+        self.media.callee_offer = None;
+        self.media.callee_offer_cached_webrtc = None;
+        let caller = from_user
+            .map(|user| format!("sip:{}@{}", user, refer_to_uri.host_with_port).parse())
+            .transpose()
+            .map_err(|e| anyhow!("Invalid transfer caller URI: {}", e))?;
+        let mut location = crate::call::Location {
+            aor: refer_to_uri.clone(),
+            ..Default::default()
+        };
+        let mut registered = false;
+        match self.server.locator.lookup(refer_to_uri).await {
+            Ok(registered_locations) => {
+                if let Some(registered_location) = registered_locations.into_iter().next() {
+                    info!(
+                        target = %refer_to_uri,
+                        registered_contact = %registered_location.aor,
+                        webrtc = registered_location.supports_webrtc,
+                        transport = ?registered_location.transport,
+                        "Resolved B-leg transfer target through locator"
+                    );
+                    location = registered_location;
+                    registered = true;
+                }
+            }
+            Err(error) => {
+                warn!(
+                    target = %refer_to_uri,
+                    %error,
+                    "Failed to resolve B-leg transfer target through locator; using bare SIP target"
+                );
+            }
+        }
+        // Not a registered internal contact — run the transfer target
+        // through the route table (match/rewrite/trunk) if enabled.
+        if !registered {
+            match self.route_originated_leg(&location).await {
+                Ok((routed, hints)) => {
+                    location = routed;
+                    self.track_routed_leg_hints(hints);
+                }
+                Err(e) => {
+                    warn!(session_id = %self.id, %leg_id, target = %uri, error = %e, "Route lookup failed for transfer target; dialing directly");
+                }
+            }
+        }
+        let result = self
+            .try_single_target(&location, callee_state_rx, None, None, caller)
+            .await;
+        if result.is_ok() {
+            // The B2BUA blind-transfer path swaps the B leg
+            // in-session (no REFER), so the REFER-based emitters
+            // never fire. Emit the transfer notification here,
+            // aligned with the inbound-REFER path's payload.
+            self.emit_typed_rwi_event(&crate::rwi::CallTransferred {
+                call_id: self.context.session_id.to_string(),
+                transfer_target: Some(uri.to_string()),
+            });
+        }
+        result.map_err(|(code, text, reason)| {
+            self.meta.transfer_return_app = None;
+            anyhow!(
+                "B-leg transfer failed: {} {} - {}",
+                code,
+                text,
+                reason.unwrap_or_default()
+            )
+        })
     }
 
     pub(crate) async fn handle_queue_transfer(

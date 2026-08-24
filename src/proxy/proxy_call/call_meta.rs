@@ -96,6 +96,11 @@ pub struct CallMeta {
     /// One-shot: the `RelayArmFailure` command was already handled (bridge
     /// forced into transcode mode). Duplicate commands are ignored.
     pub relay_arm_failure_handled: bool,
+    /// True once a supervisor takeover kicked the agent leg and moved the
+    /// customer into the takeover conference. While set, B-leg termination
+    /// must NOT cascade into a caller hangup (the customer keeps talking to
+    /// the supervisor in the conference).
+    pub supervisor_takeover_active: bool,
 }
 
 /// Queue name for this session (authoritative store in [`CallMeta`]).

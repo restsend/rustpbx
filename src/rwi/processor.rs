@@ -2900,7 +2900,7 @@ impl RwiCommandProcessor {
             CallCommand::SupervisorTakeover {
                 supervisor_leg: LegId::new(supervisor_call_id),
                 target_leg: LegId::new(target_call_id),
-                supervisor_session_id: None,
+                supervisor_session_id: Some(supervisor_call_id.to_string()),
             },
             crate::rwi::SupervisorTakeoverStarted {
                 supervisor_call_id: supervisor_call_id.to_string(),

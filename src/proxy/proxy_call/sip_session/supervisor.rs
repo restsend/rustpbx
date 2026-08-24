@@ -213,16 +213,21 @@ impl SipSession {
         // Prefer a conference bridge (same as barge) so supervisor↔customer
         // media works even when the supervisor arrived via a cross-session listen.
         if let Some(ref sup_session) = supervisor_session_id {
-            let conf_id = format!("supervisor-{}-takeover", self.id.0);
-            self.ensure_conference(&conf_id, Some(3)).await?;
-            let other_leg = if target_leg == LegId::new("caller") {
+            // The RWI command passes the target *session id* as the target
+            // leg — resolve it to the real agent leg ("callee" then "caller"
+            // fallback), mirroring the cross-session listen path.
+            let target_is_session_id = target_leg.0 == self.id.0;
+            let agent_leg = self.resolve_supervisor_target(&target_leg, target_is_session_id)?;
+            let customer_leg = if agent_leg == LegId::new("caller") {
                 LegId::new("callee")
             } else {
                 LegId::new("caller")
             };
-            let customer_leg = self.participant_leg(&other_leg);
+
+            let conf_id = format!("supervisor-{}-takeover", self.id.0);
+            self.ensure_conference(&conf_id, Some(3)).await?;
             if let Err(e) = self
-                .start_conference_media_bridge(&conf_id, &customer_leg)
+                .start_conference_media_bridge(&conf_id, &self.participant_leg(&customer_leg))
                 .await
             {
                 warn!(session_id = %self.id, error = %e, "takeover: failed to bridge customer");
@@ -244,8 +249,14 @@ impl SipSession {
                 });
             }
             self.conference_bridge.conf_id = Some(conf_id);
-            self.update_leg_state(&target_leg, LegState::Ending);
-            info!(session_id = %self.id, supervisor_session = %sup_session, "Supervisor takeover (cross-session) activated");
+            // Kick the agent leg: mark it ended and queue the SIP BYE so the
+            // agent softphone actually clears (merely flipping the leg state
+            // leaves the remote party up). The takeover flag keeps the
+            // B-leg-disconnect cascade from hanging up the customer.
+            self.meta.supervisor_takeover_active = true;
+            self.update_leg_state(&agent_leg, LegState::Ended);
+            self.queue_leg_bye(&agent_leg);
+            info!(session_id = %self.id, supervisor_session = %sup_session, agent = %agent_leg, customer = %customer_leg, "Supervisor takeover (cross-session) activated");
             return Ok(());
         }
 
@@ -271,7 +282,9 @@ impl SipSession {
         self.conference_bridge.conf_id = Some(conf_id);
         self.bridge = BridgeConfig::bridge(supervisor_leg.clone(), other_leg.clone());
 
-        self.update_leg_state(&target_leg, LegState::Ending);
+        self.update_leg_state(&target_leg, LegState::Ended);
+        self.meta.supervisor_takeover_active = true;
+        self.queue_leg_bye(&target_leg);
         self.update_leg_state(&supervisor_leg, LegState::Connected);
 
         info!(session_id = %self.id,
@@ -289,5 +302,18 @@ impl SipSession {
         self.update_leg_state(&supervisor_leg, LegState::Ended);
         info!(session_id = %self.id, "Supervisor mode stopped");
         Ok(())
+    }
+
+    /// Queue a SIP BYE for a single leg (used by takeover to kick the agent)
+    /// without tearing down the rest of the session — the main loop's
+    /// `pending_hangup` drain sends it on its next iteration.
+    fn queue_leg_bye(&mut self, leg_id: &LegId) -> bool {
+        if let Some(dialog) = self.legs.get_dialog(leg_id) {
+            self.pending_hangup.insert(dialog.id());
+            true
+        } else {
+            warn!(session_id = %self.id, %leg_id, "queue_leg_bye: no dialog for leg");
+            false
+        }
     }
 }

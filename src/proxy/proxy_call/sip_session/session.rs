@@ -9369,6 +9369,17 @@ impl SipSession {
             return CommandResult::success();
         }
 
+        // A supervisor takeover intentionally ended the agent (B) leg — the
+        // customer stays alive in the takeover conference with the supervisor,
+        // so the regular B-leg-disconnect cascade (return app / caller hangup)
+        // must not run.
+        if self.meta.supervisor_takeover_active {
+            info!(session_id = %self.id,
+                "B-leg ended by supervisor takeover; keeping caller in takeover conference"
+            );
+            return CommandResult::success();
+        }
+
         if self.deliver_pending_transfer_result() {
             return CommandResult::success();
         }

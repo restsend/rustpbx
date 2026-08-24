@@ -120,6 +120,14 @@ media_proxy = "auto"
 # Hot-reloadable. Note: queue wait music while callers wait in a dialplan
 # queue is configured separately per queue ([queue.hold] in config/queue/*.toml).
 # hold_music = "sounds/phone-calling.wav"
+
+# Blind transfer signalling mode. false (default) = B2BUA: the PBX dials the
+# transfer target as a new B leg and stays in the media path. true = send a
+# SIP REFER to the transferee (true blind transfer, media released to the
+# endpoints). If the peer rejects the REFER with 405/420/501 (not supported),
+# the PBX automatically falls back to the B2BUA path. Transfers issued with
+# wait_for_result=true always use B2BUA. Hot-reloadable.
+# blind_transfer_use_refer = false
 # Base directory for generated routing/trunk/ACL files
 generated_dir = "./config"
 routes_files = ["config/routes/*.toml"]

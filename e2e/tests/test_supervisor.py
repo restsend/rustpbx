@@ -123,6 +123,49 @@ async def test_supervisor_mode_lifecycle(pbx, sipbot_pool, rwi,
 
 
 @pytest.mark.asyncio
+async def test_supervisor_takeover_kicks_agent_keeps_customer(
+    pbx, sipbot_pool, rwi, webhook_server, webhook_session
+):
+    """Takeover (强拆): the agent leg is kicked (real SIP BYE) while the
+    customer and supervisor legs survive in the takeover conference."""
+    h.boot_pbx(pbx, webhook_url=webhook_server.url)
+    caller, session_id, sup_call = await _setup_call(pbx, sipbot_pool, rwi)
+
+    def _bot(name: str):
+        for p in sipbot_pool._procs:
+            if p.name == name:
+                return p
+        raise AssertionError(f"sipbot {name} not found")
+
+    agent_bot = _bot("1002")
+    sup_bot = _bot("1003")
+
+    rt = await rwi.supervisor_takeover(sup_call, session_id)
+    assert rt.get("status") == "success", rt
+    assert await webhook_session.wait_for_event(
+        "supervisor_takeover_started", timeout=10
+    ), f"no takeover event: {webhook_session.event_types()[-15:]}"
+
+    # The target session actually executed the cross-session takeover.
+    await h.wait_log(
+        pbx, r"Supervisor takeover \(cross-session\) activated",
+        timeout=15, label="takeover activated",
+    )
+
+    # The agent leg is kicked: the agent UA receives a BYE.
+    assert await agent_bot.wait_output_async(
+        r"BYE|bye|hangup|terminated|Call ended", timeout=15
+    ), f"agent 1002 was not kicked by takeover:\n{agent_bot.output[-1500:]}"
+
+    # Customer and supervisor legs survive the takeover.
+    await asyncio.sleep(2)
+    assert caller.is_alive, "customer call died during takeover"
+    assert sup_bot.is_alive, "supervisor call died during takeover"
+
+    await rwi.hangup(session_id)
+
+
+@pytest.mark.asyncio
 @pytest.mark.xfail(
     reason="supervisor monitor audio rides the conference-media reverse path, "
            "which delivers silence (same root cause as the conference dial-in "
