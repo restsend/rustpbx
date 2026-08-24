@@ -455,6 +455,7 @@ impl SipSession {
         if !self.context.dialplan.recording.enabled {
             return Ok(None);
         }
+        let _media_runtime_guard = crate::utils::media_enter();
         let sender = self
             .bridge_mut()
             .ok_or_else(|| anyhow!("Recording requires MediaBridge"))?
