@@ -799,7 +799,7 @@ async fn test_archive_export_task_has_correct_bills_dir() {
         &db,
         tenant.id,
         "csv-call-1",
-        3.14,
+        3.15,
         77,
         true,
         now - Duration::hours(2),

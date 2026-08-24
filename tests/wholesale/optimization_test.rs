@@ -8,6 +8,7 @@ fn test_rate_trie_matching() {
     trie.insert(
         "1",
         RateConfig {
+            id: 0,
             prefix: "1".to_string(),
             match_caller_prefix: None,
             rate: 0.01,
@@ -19,6 +20,7 @@ fn test_rate_trie_matching() {
     trie.insert(
         "1212",
         RateConfig {
+            id: 0,
             prefix: "1212".to_string(),
             match_caller_prefix: None,
             rate: 0.02,
@@ -30,6 +32,7 @@ fn test_rate_trie_matching() {
     trie.insert(
         "86",
         RateConfig {
+            id: 0,
             prefix: "86".to_string(),
             match_caller_prefix: None,
             rate: 0.05,
@@ -108,6 +111,7 @@ fn test_rewrite_rule_try_from() {
 fn test_wholesale_state_load_and_find() {
     let rates = RateMatcher::from(vec![
         RateConfig {
+            id: 0,
             prefix: "1".to_string(),
             match_caller_prefix: None,
             rate: 0.1,
@@ -116,6 +120,7 @@ fn test_wholesale_state_load_and_find() {
             remark: None,
         },
         RateConfig {
+            id: 0,
             prefix: "123".to_string(),
             match_caller_prefix: None,
             rate: 0.2,
