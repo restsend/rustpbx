@@ -135,7 +135,7 @@ impl MigrationTrait for MigrationAddInstanceId {
                 .alter_table(
                     Table::alter()
                         .table(Entity)
-                        .add_column_if_not_exists(string_len_null(Column::InstanceId, 255))
+                        .add_column(string_len_null(Column::InstanceId, 255))
                         .to_owned(),
                 )
                 .await?;
