@@ -23,7 +23,32 @@ use crate::ingress_tap::PacketDirection;
 use crate::negotiate::NegotiatedLegProfile;
 use crate::recorder::{Leg, Recorder};
 
-const DEFAULT_CAPTURE_QUEUE_CAPACITY: usize = 2048;
+// 256 slots ≈ 2.5 s of audio at 100 pkt/s per call. Large pre-allocated
+// queues (2048) cost ~150 KB per recording call and add malloc churn at
+// high concurrency; overflow only drops recording packets, never media.
+const DEFAULT_CAPTURE_QUEUE_CAPACITY: usize = 256;
+
+/// Dedicated runtime for recorder tasks, set once at startup by the app
+/// (rustpbx wires it to the media runtime). Recording tasks wake once per
+/// captured packet (~100/s per call); at thousands of concurrent recordings
+/// that load must not compete with latency-sensitive SIP transaction
+/// processing on the SIP runtime. Falls back to the ambient runtime when
+/// unset (tests, embedders).
+static RECORDER_RUNTIME: std::sync::OnceLock<tokio::runtime::Handle> =
+    std::sync::OnceLock::new();
+
+/// Set the runtime on which recorder tasks are spawned. Must be called
+/// before the first recording starts.
+pub fn set_recorder_runtime(handle: tokio::runtime::Handle) {
+    let _ = RECORDER_RUNTIME.set(handle);
+}
+
+fn recorder_runtime_or_current() -> tokio::runtime::Handle {
+    RECORDER_RUNTIME
+        .get()
+        .cloned()
+        .unwrap_or_else(|| tokio::runtime::Handle::current())
+}
 
 pub(crate) struct CapturedRtp {
     pub(crate) direction: PacketDirection,
@@ -263,7 +288,8 @@ impl RecorderHandle {
         let (rtp_tx, rtp_rx) = mpsc::channel(DEFAULT_CAPTURE_QUEUE_CAPACITY);
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (recorder_finished_tx, recorder_finished_rx) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
+        let runtime = recorder_runtime_or_current();
+        runtime.spawn(async move {
             RecorderTask::new(rtp_rx, command_rx, recorder_finished_tx)
                 .run()
                 .await;

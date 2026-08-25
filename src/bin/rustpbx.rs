@@ -306,6 +306,9 @@ fn main() -> Result<()> {
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to build media runtime: {}", e))?;
     rustpbx::utils::set_media_runtime(media_runtime.handle().clone());
+    // Recorder tasks wake per captured RTP packet; keep them off the small
+    // SIP runtime so high-concurrency recording cannot starve SIP timers.
+    rustpbx::media::media_recorder::set_recorder_runtime(media_runtime.handle().clone());
 
     let sip_runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(sip_workers)

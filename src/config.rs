@@ -1061,7 +1061,13 @@ fn available_parallelism() -> usize {
 
 fn default_sip_worker_threads() -> usize {
     let n = available_parallelism();
-    if n >= 8 { 4 } else { (n + 1) / 2 }
+    // Half the cores, capped at 12. The old fixed 4 starved under load: with
+    // recording enabled the SIP runtime accumulated a 90k-task backlog at
+    // >3.3k concurrent calls while all 4 workers sat idle in futex waits
+    // (lock/queue convoy), surfacing as 408 INVITE timeouts and multi-second
+    // DB-pool queueing. SIP and media runtimes never peak simultaneously, so
+    // oversubscribing both against the core count is safe.
+    (n / 2).clamp(2, 12)
 }
 
 fn default_media_worker_threads() -> usize {

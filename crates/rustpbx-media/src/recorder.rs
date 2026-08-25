@@ -143,7 +143,11 @@ impl Recorder {
             next_flush_ts: 0,
             written_samples: 0,
             writer,
-            ptime: Duration::from_millis(200),
+            // Flush cadence: batches ~0.5 s of audio (~8 KB stereo PCMU) per
+            // write syscall. Larger intervals reduce blocking-pool dispatches
+            // and syscalls at high concurrency; buffered audio is bounded by
+            // the 2 s slow-leg safety valve in flush_impl.
+            ptime: Duration::from_millis(500),
             stereo_swap: false,
             mono_caller_only,
             leg_a_started: false,

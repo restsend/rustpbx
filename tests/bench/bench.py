@@ -1303,7 +1303,7 @@ class P2PBenchmark:
         print(f"[UAC] Batch started (log: {log_file})")
 
         # Wait for completion with generous timeout
-        timeout = max(120, total // max(cps, 1) + duration + 60)
+        timeout = max(120, total // max(cps, 1) + duration + 300)
         t_start = time.time()
         self.uac_process.wait(timeout=timeout)
         wall_time = time.time() - t_start
@@ -2715,6 +2715,42 @@ class P2PBenchmark:
 # Main
 # ---------------------------------------------------------------------------
 
+def ensure_kernel_port_range(need_widen_for: int) -> None:
+    """Widen net.ipv4.ip_local_port_range for high-concurrency runs.
+
+    Linux allocates kernel-assigned UDP ports scanning even numbers only, so
+    the load generator (sipbot UAC/UAS RTP sockets) consumes ~3 even ports
+    per call. The default range (32768-60999) provides ~14k even ports —
+    exhausted at ~4.5k calls, surfacing as sipbot ``EADDRINUSE`` errors and
+    stuck-in-180 calls. rustpbx binds its RTP ports explicitly from its own
+    configured range, so overlapping with the ephemeral range is safe (both
+    sides skip busy ports).
+    """
+    try:
+        cur = open("/proc/sys/net/ipv4/ip_local_port_range").read().split()
+        lo, hi = int(cur[0]), int(cur[1])
+    except Exception:
+        return
+    even_ports = (hi - lo) // 2
+    required = need_widen_for * 4  # UAC RTP + RTCP + UAS RTP + RTCP (even slots)
+    if even_ports >= required:
+        return
+    target = "1024 65535"
+    r = subprocess.run(
+        ["sudo", "-n", "sysctl", "-w", f"net.ipv4.ip_local_port_range={target}"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if r.returncode == 0:
+        print(f"✓ widened ip_local_port_range {lo}-{hi} → {target} "
+              f"(needed ~{required} even ports for {need_widen_for} calls)")
+    else:
+        print(
+            f"⚠ ip_local_port_range={lo}-{hi} has only ~{even_ports} even ports; "
+            f"~{required} needed for {need_widen_for} concurrent calls.\n"
+            f"  Run manually: sudo sysctl -w net.ipv4.ip_local_port_range={target}"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="RustPBX P2P Benchmark using sipbot",
@@ -2967,6 +3003,10 @@ Examples:
     if need_binary and not os.path.exists(args.rustpbx_bin):
         print(f"❌ Error: {args.rustpbx_bin} not found. Build with: cargo build --release")
         return 1
+
+    # Widen the kernel ephemeral port range when the target concurrency would
+    # exhaust its even-port budget (kernel-assigned UDP ports are even-only).
+    ensure_kernel_port_range(min(args.cps * args.duration, args.total))
 
     benchmark = P2PBenchmark(
         proxy_host=args.proxy_host,
