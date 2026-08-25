@@ -289,6 +289,7 @@ sea-orm = { version = "2", features = [
     "sqlx-sqlite",
     "sqlx-mysql",
     "sqlx-postgres",
+    "mock",
 ] }
 sea-orm-migration = { version = "2", features = [
     "runtime-tokio-rustls",
