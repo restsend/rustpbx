@@ -635,11 +635,18 @@ impl EgressTask {
                 output_timestamp
             }
             _ => {
-                let output_timestamp = self.playback_timestamp();
+                let output_timestamp = self.next_rtp_timestamp;
                 self.dtmf_event_timestamp = Some((source.rtp_timestamp, output_timestamp));
                 output_timestamp
             }
         };
+        if payload[1] & 0x80 != 0 {
+            let duration = u16::from_be_bytes([payload[2], payload[3]]) as u32;
+            let event_end = rtp_timestamp.wrapping_add(duration);
+            if event_end.wrapping_sub(self.next_rtp_timestamp) as i32 > 0 {
+                self.next_rtp_timestamp = event_end;
+            }
+        }
 
         Some(AudioFrame {
             rtp_timestamp,
@@ -724,14 +731,6 @@ impl EgressTask {
             self.sequence_number = seq;
         }
         // Keep `marker_pending`: the unsent frame may have carried the marker.
-    }
-
-    fn playback_timestamp(&mut self) -> u32 {
-        let ts = self.next_rtp_timestamp;
-        self.next_rtp_timestamp = self
-            .next_rtp_timestamp
-            .wrapping_add(self.codec_rtp_ticks_per_frame());
-        ts
     }
 
     fn codec_rtp_ticks_per_frame(&self) -> u32 {
@@ -1420,7 +1419,12 @@ mod tests {
         };
 
         let first = task.next_frame().await.expect("first DTMF frame");
+        assert_eq!(task.next_rtp_timestamp, first.rtp_timestamp);
         let second = task.next_frame().await.expect("second DTMF frame");
+        assert_eq!(
+            task.next_rtp_timestamp,
+            second.rtp_timestamp.wrapping_add(800)
+        );
         let audio = task.next_frame().await.expect("transcoded audio frame");
 
         assert_eq!(first.payload_type, Some(101));
@@ -1432,6 +1436,7 @@ mod tests {
         assert_eq!(u16::from_be_bytes([second.data[2], second.data[3]]), 800);
         assert_eq!(audio.payload_type, Some(0));
         assert_eq!(audio.sequence_number, Some(2));
+        assert_eq!(audio.rtp_timestamp, second.rtp_timestamp.wrapping_add(800));
         assert_eq!(task.sequence_number, 3);
         assert!(
             tokio::time::timeout(Duration::from_millis(1), output_track.recv())
