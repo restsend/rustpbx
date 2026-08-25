@@ -496,6 +496,18 @@
                 </div>
 
                 <div class="mt-4 flex flex-wrap items-center gap-2 border-y border-slate-100 py-3">
+                    <template x-if="(logViewer.nodes || []).length > 1">
+                        <label class="inline-flex items-center gap-2 text-xs font-semibold text-slate-600">
+                            <span x-text="tt('settings_page.logs_node') || 'Node'"></span>
+                            <select x-model="logViewer.node" @change="onLogNodeChange()"
+                                class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <template x-for="n in logViewer.nodes" :key="'log-node-' + n.id">
+                                    <option :value="n.id"
+                                        x-text="n.local ? (tt('settings_page.logs_node_local') || 'Local node') : (n.label || n.id)"></option>
+                                </template>
+                            </select>
+                        </label>
+                    </template>
                     <label class="inline-flex items-center gap-2 text-xs font-semibold text-slate-600">
                         <span x-text="tt('settings_page.logs_recent_count') || 'Recent lines'"></span>
                         <select x-model.number="logViewer.limit" @change="applyLogLimit()"
@@ -3152,6 +3164,9 @@
                 nextPosition: 0,
                 truncated: false,
                 copied: false,
+                nodes: [],
+                node: 'local',
+                nodesLoading: false,
             },
             directory: { departments: [], users: [], pending_invites: [] },
             selectedStorageProfile: '',
@@ -4901,6 +4916,14 @@
             logsStreamEndpoint() {
                 return `${this.apiBase}/settings/logs/stream`;
             },
+            logsNodesEndpoint() {
+                return `${this.apiBase}/settings/logs/nodes`;
+            },
+            applyLogNodeParam(url) {
+                if (this.logViewer.node && this.logViewer.node !== 'local') {
+                    url.searchParams.set('node', this.logViewer.node);
+                }
+            },
             ensureLogVisibleTail() {
                 this.$nextTick(() => {
                     const el = this.$refs.logOutput;
@@ -4942,8 +4965,41 @@
                 }
                 this.stopLogFollow();
                 this.logViewer.error = null;
+                await this.loadLogNodes();
                 await this.loadRecentLogs();
                 this.startLogFollow();
+            },
+            async loadLogNodes() {
+                this.logViewer.nodesLoading = true;
+                try {
+                    const url = new URL(this.logsNodesEndpoint(), window.location.origin);
+                    const response = await fetch(url.toString(), {
+                        method: 'GET',
+                        headers: { Accept: 'application/json' },
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to fetch log nodes');
+                    }
+                    const nodes = Array.isArray(data?.nodes) ? data.nodes : [];
+                    this.logViewer.nodes = nodes;
+                    if (!nodes.some((n) => n?.id === this.logViewer.node)) {
+                        this.logViewer.node = 'local';
+                    }
+                } catch (err) {
+                    console.error(err);
+                    this.logViewer.nodes = [];
+                    this.logViewer.node = 'local';
+                } finally {
+                    this.logViewer.nodesLoading = false;
+                }
+            },
+            onLogNodeChange() {
+                this.stopLogFollow();
+                this.clearLogLines();
+                this.logViewer.nextPosition = 0;
+                this.logViewer.path = '';
+                this.loadRecentLogs().then(() => this.startLogFollow());
             },
             applyLogLimit() {
                 const parsed = Number(this.logViewer.limit);
@@ -4974,6 +5030,7 @@
                 const url = new URL(this.logsStreamEndpoint(), window.location.origin);
                 url.searchParams.set('position', String(this.logViewer.nextPosition || 0));
                 url.searchParams.set('limit', String(this.logViewer.limit || 200));
+                this.applyLogNodeParam(url);
 
                 const source = new EventSource(url.toString(), { withCredentials: true });
                 source.onmessage = (event) => {
@@ -5006,6 +5063,7 @@
                 try {
                     const url = new URL(this.logsRecentEndpoint(), window.location.origin);
                     url.searchParams.set('limit', String(this.logViewer.limit || 200));
+                    this.applyLogNodeParam(url);
                     const response = await fetch(url.toString(), {
                         method: 'GET',
                         headers: { Accept: 'application/json' },

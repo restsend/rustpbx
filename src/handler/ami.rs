@@ -79,6 +79,8 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
                 get(cluster_session_owner_handler),
             )
             .route("/cluster/list_calls", get(cluster_list_calls_handler))
+            .route("/cluster/logs/recent", get(cluster_logs_recent_handler))
+            .route("/cluster/logs/follow", get(cluster_logs_follow_handler))
             // Cluster event sync endpoints (AMI HTTP replaces old SIP MESSAGE)
             .route("/cluster/event/presence", post(cluster_event_presence))
             .route("/cluster/event/locator", post(cluster_event_locator))
@@ -191,7 +193,7 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
     };
 
     let health = serde_json::json!({
-        "status": "running",
+        "status": if crate::shutdown::is_draining() { "draining" } else { "running" },
         "uptime": state.uptime,
         "version": crate::version::get_version_info(),
         "total": state.total_calls.load(Ordering::Relaxed),
@@ -206,13 +208,101 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
             "meta_store_size": rwi_meta_store_size,
         },
     });
-    Json(health).into_response()
+    if crate::shutdown::is_draining() {
+        // A draining node reports 500 so load balancers / cluster peers
+        // (e.g. siprouted health checks) stop sending new traffic here.
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(health),
+        )
+            .into_response()
+    } else {
+        Json(health).into_response()
+    }
 }
 
-async fn shutdown_handler(State(state): State<AppState>, client_ip: ClientAddr) -> Response {
-    warn!(%client_ip, "Shutdown initiated via /shutdown endpoint");
-    state.token().cancel();
-    Json(serde_json::json!({"status": "shutdown initiated"})).into_response()
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ShutdownRequest {
+    /// Immediate cancel-and-exit (bypasses the drain).
+    force: bool,
+    /// Max seconds to wait for active calls to finish before force
+    /// exiting. `None` waits indefinitely.
+    timeout_secs: Option<u64>,
+}
+
+async fn shutdown_handler(
+    State(state): State<AppState>,
+    client_ip: ClientAddr,
+    body: Option<Json<ShutdownRequest>>,
+) -> Response {
+    let req = body.map(|Json(r)| r).unwrap_or_default();
+    if req.force {
+        warn!(%client_ip, "Force shutdown initiated via /shutdown endpoint");
+        state.token().cancel();
+        return Json(serde_json::json!({"status": "shutdown initiated"})).into_response();
+    }
+
+    let active_calls = state.sip_server().inner.active_call_registry.count();
+    if crate::shutdown::is_draining() {
+        // Idempotent: already draining, just report current status.
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "draining",
+                "active_calls": active_calls,
+            })),
+        )
+            .into_response();
+    }
+
+    crate::shutdown::initiate();
+    info!(
+        %client_ip,
+        active_calls,
+        timeout_secs = req.timeout_secs,
+        "Graceful shutdown initiated: draining, new calls/registrations rejected, \
+         health/OPTIONS report 500 until exit"
+    );
+
+    let drain_state = state.clone();
+    tokio::spawn(async move {
+        let deadline = req
+            .timeout_secs
+            .map(|s| tokio::time::Instant::now() + Duration::from_secs(s));
+        loop {
+            let active_calls = drain_state.sip_server().inner.active_call_registry.count();
+            let dialogs = drain_state.sip_server().inner.dialog_layer.len();
+            if active_calls == 0 && dialogs == 0 {
+                // Settle briefly so in-flight teardown (BYE/ACK) finishes,
+                // then exit the process.
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                if drain_state.sip_server().inner.active_call_registry.count() == 0 {
+                    info!("Drain complete: no active calls/dialogs; exiting");
+                    drain_state.token().cancel();
+                    return;
+                }
+            }
+            if let Some(dl) = deadline {
+                if tokio::time::Instant::now() >= dl {
+                    warn!(
+                        active_calls,
+                        dialogs,
+                        "Drain timeout reached; force exiting with active calls remaining"
+                    );
+                    drain_state.token().cancel();
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
+
+    Json(serde_json::json!({
+        "status": "draining",
+        "active_calls": active_calls,
+    }))
+    .into_response()
 }
 
 trait DialogInfo {
@@ -1834,6 +1924,50 @@ async fn cluster_list_calls_handler(
         .collect();
 
     Json(serde_json::json!({ "data": payload })).into_response()
+}
+
+#[cfg(feature = "commerce")]
+#[derive(Deserialize, Default)]
+struct ClusterLogsQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    position: Option<u64>,
+}
+
+#[cfg(feature = "commerce")]
+async fn cluster_logs_recent_handler(
+    State(state): State<AppState>,
+    Query(query): Query<ClusterLogsQuery>,
+) -> Response {
+    let limit = crate::log_viewer::normalize_log_limit(query.limit);
+    let path = crate::log_viewer::log_file_path_from_config(state.config());
+    match crate::log_viewer::recent_log_payload(path.as_deref(), limit) {
+        Ok(payload) => Json(payload).into_response(),
+        Err(message) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "status": "error", "message": message })),
+        )
+            .into_response(),
+    }
+}
+
+#[cfg(feature = "commerce")]
+async fn cluster_logs_follow_handler(
+    State(state): State<AppState>,
+    Query(query): Query<ClusterLogsQuery>,
+) -> Response {
+    let position = query.position.unwrap_or(0);
+    let limit = crate::log_viewer::normalize_log_limit(query.limit);
+    let path = crate::log_viewer::log_file_path_from_config(state.config());
+    match crate::log_viewer::follow_log_payload(path.as_deref(), position, limit) {
+        Ok(payload) => Json(payload).into_response(),
+        Err(message) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "status": "error", "message": message })),
+        )
+            .into_response(),
+    }
 }
 
 // ── AMI cluster event receivers (replace old SIP MESSAGE handlers) ────────

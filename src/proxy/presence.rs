@@ -351,7 +351,7 @@ impl PresenceManager {
             // Cluster sync first (parallel fire-and-forget) — no partial borrow issues
             let msg = crate::proxy::cluster_event::ClusterPresenceMessage::from((identity, &state));
             if let Some(ref sync) = *self.cluster_sync.read() {
-                sync.broadcast("presence", &msg);
+                sync.broadcast("presence", identity, &msg);
             }
 
             // Persist to DB

@@ -2783,8 +2783,16 @@ impl SipSession {
                     .await?;
             }
             DialogState::Options(_, _, tx_handle) => {
+                // During drain every OPTIONS reports 500 to signal the
+                // draining state (a 500 to an in-dialog OPTIONS does not
+                // terminate the dialog, so active calls are unaffected).
+                let code = if crate::shutdown::is_draining() {
+                    rsipstack::sip::StatusCode::ServerInternalError
+                } else {
+                    rsipstack::sip::StatusCode::OK
+                };
                 tx_handle
-                    .respond(rsipstack::sip::StatusCode::OK, None, None)
+                    .respond(code, None, None)
                     .await
                     .ok();
             }
@@ -3243,20 +3251,33 @@ impl SipSession {
             .to_string();
         let ivr_params = p.and_then(|p| p.get("ivr_params")).cloned();
         // Resolve route_point → file path so the IVR factory can find the config.
+        // Accept route_point at the top level (cc-phone `insertIvr`) or inside
+        // ivr_params (widget panel), and resolve it the same way
+        // `start_ivr_app` does (`resolve_ivr_file`), so both filesystem and
+        // DB-backed (ivr_editor) IVRs work by name.
         let route_point = p
             .and_then(|p| p.get("route_point"))
             .and_then(|v| v.as_str())
-            .unwrap_or("");
+            .map(|s| s.to_string())
+            .or_else(|| {
+                ivr_params
+                    .as_ref()
+                    .and_then(|v| v.get("route_point"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            });
         let mut ivr_params = ivr_params.unwrap_or(serde_json::json!({}));
-        if !route_point.is_empty()
-            && ivr_params.get("file").is_none()
-            && ivr_params.get("mode").is_none()
-        {
-            let file = format!("config/ivr/{}.toml", route_point);
-            if let Some(obj) = ivr_params.as_object_mut() {
-                obj.insert("file".to_string(), serde_json::json!(file));
-            } else {
-                ivr_params = serde_json::json!({"file": file});
+        let has_file_or_mode =
+            ivr_params.get("file").is_some() || ivr_params.get("mode").is_some();
+        if let (Some(route_point), false) = (&route_point, has_file_or_mode) {
+            let route_point = route_point.trim();
+            if !route_point.is_empty() {
+                let file = self.server.data_context.resolve_ivr_file(route_point).await;
+                if let Some(obj) = ivr_params.as_object_mut() {
+                    obj.insert("file".to_string(), serde_json::json!(file));
+                } else {
+                    ivr_params = serde_json::json!({"file": file});
+                }
             }
         }
         let hold_agent = p
@@ -3605,8 +3626,16 @@ impl SipSession {
                 }
             }
             DialogState::Options(_, _, tx_handle) => {
+                // During drain every OPTIONS reports 500 to signal the
+                // draining state (a 500 to an in-dialog OPTIONS does not
+                // terminate the dialog, so active calls are unaffected).
+                let code = if crate::shutdown::is_draining() {
+                    rsipstack::sip::StatusCode::ServerInternalError
+                } else {
+                    rsipstack::sip::StatusCode::OK
+                };
                 tx_handle
-                    .respond(rsipstack::sip::StatusCode::OK, None, None)
+                    .respond(code, None, None)
                     .await
                     .ok();
             }

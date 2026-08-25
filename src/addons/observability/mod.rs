@@ -266,8 +266,22 @@ impl Addon for ObservabilityAddon {
 /// Returns HTTP 200 with a JSON body.  Intentionally does **not** check the
 /// database or SIP server so it can be used as a pod-level liveness probe
 /// even when those services are temporarily unavailable.
+///
+/// While the node is draining (graceful shutdown), returns HTTP 500 with
+/// `"status": "draining"` so orchestrators / load balancers stop sending
+/// traffic here.
 async fn healthz_handler(State(state): State<AppState>) -> impl IntoResponse {
     let uptime_seconds = (chrono::Utc::now() - state.uptime).num_seconds();
+    if crate::shutdown::is_draining() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({
+                "status": "draining",
+                "uptime_seconds": uptime_seconds,
+                "version": crate::version::get_short_version(),
+            })),
+        );
+    }
     (
         StatusCode::OK,
         axum::Json(serde_json::json!({

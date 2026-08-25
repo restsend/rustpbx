@@ -40,10 +40,7 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
-use std::collections::VecDeque;
 use std::convert::Infallible;
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 use tokio::time;
@@ -64,18 +61,21 @@ struct QueryUserFilters {
 #[derive(Debug, Clone, Deserialize, Default)]
 struct LogRecentQuery {
     pub limit: Option<usize>,
+    pub node: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct LogFollowQuery {
     pub position: Option<u64>,
     pub limit: Option<usize>,
+    pub node: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct LogStreamQuery {
     pub position: Option<u64>,
     pub limit: Option<usize>,
+    pub node: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -218,6 +218,7 @@ impl From<UserModel> for UserView {
 pub fn urls() -> Router<Arc<ConsoleState>> {
     let router = Router::new()
         .route("/settings", get(page_settings))
+        .route("/settings/logs/nodes", get(logs_nodes))
         .route("/settings/logs/recent", get(fetch_recent_logs))
         .route("/settings/logs/follow", get(follow_logs))
         .route("/settings/logs/stream", get(stream_logs))
@@ -292,6 +293,7 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
 
 pub fn api_urls() -> Router<Arc<ConsoleState>> {
     let router = Router::new()
+        .route("/settings/logs/nodes", get(logs_nodes))
         .route("/settings/logs/recent", get(fetch_recent_logs))
         .route("/settings/logs/follow", get(follow_logs))
         .route("/settings/logs/stream", get(stream_logs))
@@ -2727,14 +2729,231 @@ async fn reload_routes_console(app: &crate::app::AppStateInner, _node: &str) -> 
     }
 }
 
-const LOG_DEFAULT_LIMIT: usize = 200;
-const LOG_MAX_LIMIT: usize = 5000;
+#[cfg_attr(not(feature = "commerce"), allow(dead_code))]
+const CLUSTER_LOG_FETCH_TIMEOUT_SECS: u64 = 10;
 
-struct FollowReadResult {
-    lines: Vec<String>,
-    next_position: u64,
-    reset: bool,
-    truncated: bool,
+#[cfg_attr(not(feature = "commerce"), allow(dead_code))]
+struct ClusterLogTarget {
+    label: String,
+    base_url: String,
+}
+
+#[cfg(feature = "commerce")]
+fn cluster_log_peers(state: &ConsoleState) -> Vec<crate::config::ClusterPeer> {
+    let Some(app_state) = state.app_state() else {
+        return Vec::new();
+    };
+    let cluster_config = app_state
+        .cluster_config
+        .read()
+        .map(|c| c.clone())
+        .unwrap_or(None);
+    cluster_config
+        .or_else(|| app_state.config().cluster.clone())
+        .map(|c| c.peers)
+        .unwrap_or_default()
+}
+
+#[cfg(not(feature = "commerce"))]
+fn resolve_log_node_target(
+    _state: &ConsoleState,
+    node: &str,
+) -> Result<Option<ClusterLogTarget>, String> {
+    let node = node.trim();
+    if node.is_empty() || node == "local" {
+        return Ok(None);
+    }
+    Err(format!("Unknown cluster node: {node}"))
+}
+
+#[cfg(feature = "commerce")]
+fn resolve_log_node_target(
+    state: &ConsoleState,
+    node: &str,
+) -> Result<Option<ClusterLogTarget>, String> {
+    let node = node.trim();
+    if node.is_empty() || node == "local" {
+        return Ok(None);
+    }
+    let peers = cluster_log_peers(state);
+    let peer = peers
+        .iter()
+        .find(|p| node == format!("{}:{}", p.addr, p.sip_port) || node == p.addr)
+        .ok_or_else(|| format!("Unknown cluster node: {node}"))?;
+    let ami_path = state
+        .app_state()
+        .and_then(|app| app.config().proxy.ami_path.clone())
+        .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string());
+    Ok(Some(ClusterLogTarget {
+        label: format!("{}:{}", peer.addr, peer.sip_port),
+        base_url: format!("http://{}:{}{}", peer.addr, peer.ami_port, ami_path),
+    }))
+}
+
+#[cfg(feature = "commerce")]
+fn tag_peer_log_path(payload: &mut JsonValue, label: &str) {
+    let Some(path) = payload
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string())
+    else {
+        return;
+    };
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("path".to_string(), json!(format!("[{label}] {path}")));
+    }
+}
+
+#[cfg(feature = "commerce")]
+async fn fetch_peer_log_payload(
+    state: &ConsoleState,
+    target: &ClusterLogTarget,
+    kind: &str,
+    query: &str,
+) -> Result<JsonValue, Response> {
+    let url = format!("{}/cluster/logs/{}?{}", target.base_url, kind, query);
+    let opts = crate::http_util::HttpFetchOptions::new()
+        .with_timeout(std::time::Duration::from_secs(CLUSTER_LOG_FETCH_TIMEOUT_SECS));
+    let request = state.http_client().get(&url);
+    match crate::http_util::execute_request(request, &opts.headers, opts.timeout).await {
+        Ok(response) => {
+            let status = response.status();
+            let body = response.json::<JsonValue>().await.unwrap_or(JsonValue::Null);
+            if !status.is_success() {
+                let detail = body
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("no detail");
+                return Err(json_error(
+                    StatusCode::BAD_GATEWAY,
+                    format!("Node {} responded with HTTP {status}: {detail}", target.label),
+                ));
+            }
+            let mut body = body;
+            tag_peer_log_path(&mut body, &target.label);
+            Ok(body)
+        }
+        Err(err) => Err(json_error(
+            StatusCode::BAD_GATEWAY,
+            format!("Failed to reach node {}: {err}", target.label),
+        )),
+    }
+}
+
+#[cfg(feature = "commerce")]
+fn peer_log_stream(
+    state: &ConsoleState,
+    target: ClusterLogTarget,
+    start_position: u64,
+    limit: usize,
+) -> Response {
+    let client = state.http_client().clone();
+    let url = format!("{}/cluster/logs/follow", target.base_url);
+    let label = target.label;
+
+    let stream = stream::unfold((start_position, url, label), move |(cursor, url, label)| {
+        let client = client.clone();
+        async move {
+            time::sleep(StdDuration::from_millis(1000)).await;
+
+            let fetch_url = format!("{url}?position={cursor}&limit={limit}");
+            let opts = crate::http_util::HttpFetchOptions::new()
+                .with_timeout(std::time::Duration::from_secs(CLUSTER_LOG_FETCH_TIMEOUT_SECS));
+            let request = client.get(&fetch_url);
+
+            let (mut payload, next_cursor) =
+                match crate::http_util::execute_request(request, &opts.headers, opts.timeout).await
+                {
+                    Ok(response) if response.status().is_success() => {
+                        let body = response.json::<JsonValue>().await.unwrap_or(JsonValue::Null);
+                        let next = body
+                            .get("next_position")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(cursor);
+                        (body, next)
+                    }
+                    Ok(response) => {
+                        let status = response.status();
+                        (
+                            json!({
+                                "status": "error",
+                                "message": format!("Node {label} responded with HTTP {status}."),
+                            }),
+                            cursor,
+                        )
+                    }
+                    Err(err) => (
+                        json!({
+                            "status": "ok",
+                            "path": JsonValue::Null,
+                            "lines": [],
+                            "next_position": cursor,
+                            "reset": false,
+                            "truncated": false,
+                            "message": format!("Node {label} unreachable: {err}"),
+                        }),
+                        cursor,
+                    ),
+                };
+
+            tag_peer_log_path(&mut payload, &label);
+            let event = axum::response::sse::Event::default()
+                .event("logs")
+                .data(payload.to_string());
+            Some((Ok::<_, Infallible>(event), (next_cursor, url, label)))
+        }
+    });
+
+    Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(StdDuration::from_secs(15))
+                .text("keep-alive"),
+        )
+        .into_response()
+}
+
+#[cfg_attr(not(feature = "commerce"), allow(unused_variables))]
+async fn logs_nodes(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+) -> Response {
+    if !user.is_superuser {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "Permission denied. Superuser required.",
+        );
+    }
+
+    #[cfg_attr(not(feature = "commerce"), allow(unused_mut))]
+    let mut nodes = vec![json!({ "id": "local", "label": "local", "local": true })];
+
+    #[cfg(feature = "commerce")]
+    {
+        let self_node_id = state.app_state().and_then(|app| {
+            app.sip_server()
+                .inner
+                .cluster_self_addr
+                .as_ref()
+                .map(|addr| addr.addr.to_string())
+        });
+        for peer in cluster_log_peers(&state) {
+            let id = format!("{}:{}", peer.addr, peer.sip_port);
+            if Some(&id) == self_node_id.as_ref() {
+                continue;
+            }
+            nodes.push(json!({
+                "id": id,
+                "label": id,
+                "addr": peer.addr,
+                "sip_port": peer.sip_port,
+                "ami_port": peer.ami_port,
+                "local": false,
+            }));
+        }
+    }
+
+    Json(json!({ "status": "ok", "nodes": nodes })).into_response()
 }
 
 async fn fetch_recent_logs(
@@ -2749,51 +2968,31 @@ async fn fetch_recent_logs(
         );
     }
 
-    let Some(path) = resolve_log_file_path(&state) else {
-        return Json(json!({
-            "status": "ok",
-            "available": false,
-            "exists": false,
-            "path": JsonValue::Null,
-            "lines": [],
-            "next_position": 0u64,
-            "reset": false,
-            "truncated": false,
-            "message": "Log file is not configured. Set settings -> platform -> log_file first.",
-        }))
-        .into_response();
-    };
+    let limit = crate::log_viewer::normalize_log_limit(query.limit);
 
-    let limit = normalize_log_limit(query.limit);
-    match read_recent_log_lines(&path, limit) {
-        Ok((lines, next_position, truncated)) => Json(json!({
-            "status": "ok",
-            "available": true,
-            "exists": true,
-            "path": path,
-            "lines": lines,
-            "next_position": next_position,
-            "reset": false,
-            "truncated": truncated,
-            "message": JsonValue::Null,
-        }))
-        .into_response(),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Json(json!({
-            "status": "ok",
-            "available": true,
-            "exists": false,
-            "path": path,
-            "lines": [],
-            "next_position": 0u64,
-            "reset": false,
-            "truncated": false,
-            "message": "Log file does not exist yet.",
-        }))
-        .into_response(),
-        Err(err) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to read log file: {err}"),
-        ),
+    match resolve_log_node_target(&state, query.node.as_deref().unwrap_or_default()) {
+        Err(message) => return json_error(StatusCode::NOT_FOUND, message),
+        #[cfg(feature = "commerce")]
+        Ok(Some(target)) => {
+            return match fetch_peer_log_payload(
+                &state,
+                &target,
+                "recent",
+                &format!("limit={limit}"),
+            )
+            .await
+            {
+                Ok(payload) => Json(payload).into_response(),
+                Err(response) => response,
+            };
+        }
+        _ => {}
+    }
+
+    let path = resolve_log_file_path(&state);
+    match crate::log_viewer::recent_log_payload(path.as_deref(), limit) {
+        Ok(payload) => Json(payload).into_response(),
+        Err(message) => json_error(StatusCode::INTERNAL_SERVER_ERROR, message),
     }
 }
 
@@ -2809,53 +3008,32 @@ async fn follow_logs(
         );
     }
 
-    let Some(path) = resolve_log_file_path(&state) else {
-        return Json(json!({
-            "status": "ok",
-            "available": false,
-            "exists": false,
-            "path": JsonValue::Null,
-            "lines": [],
-            "next_position": 0u64,
-            "reset": false,
-            "truncated": false,
-            "message": "Log file is not configured. Set settings -> platform -> log_file first.",
-        }))
-        .into_response();
-    };
-
     let position = query.position.unwrap_or(0);
-    let limit = normalize_log_limit(query.limit);
+    let limit = crate::log_viewer::normalize_log_limit(query.limit);
 
-    match read_follow_log_lines(&path, position, limit) {
-        Ok(result) => Json(json!({
-            "status": "ok",
-            "available": true,
-            "exists": true,
-            "path": path,
-            "lines": result.lines,
-            "next_position": result.next_position,
-            "reset": result.reset,
-            "truncated": result.truncated,
-            "message": JsonValue::Null,
-        }))
-        .into_response(),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Json(json!({
-            "status": "ok",
-            "available": true,
-            "exists": false,
-            "path": path,
-            "lines": [],
-            "next_position": 0u64,
-            "reset": position > 0,
-            "truncated": false,
-            "message": "Log file does not exist yet.",
-        }))
-        .into_response(),
-        Err(err) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to follow log file: {err}"),
-        ),
+    match resolve_log_node_target(&state, query.node.as_deref().unwrap_or_default()) {
+        Err(message) => return json_error(StatusCode::NOT_FOUND, message),
+        #[cfg(feature = "commerce")]
+        Ok(Some(target)) => {
+            return match fetch_peer_log_payload(
+                &state,
+                &target,
+                "follow",
+                &format!("position={position}&limit={limit}"),
+            )
+            .await
+            {
+                Ok(payload) => Json(payload).into_response(),
+                Err(response) => response,
+            };
+        }
+        _ => {}
+    }
+
+    let path = resolve_log_file_path(&state);
+    match crate::log_viewer::follow_log_payload(path.as_deref(), position, limit) {
+        Ok(payload) => Json(payload).into_response(),
+        Err(message) => json_error(StatusCode::INTERNAL_SERVER_ERROR, message),
     }
 }
 
@@ -2871,6 +3049,18 @@ async fn stream_logs(
         );
     }
 
+    let start_position = query.position.unwrap_or(0);
+    let limit = crate::log_viewer::normalize_log_limit(query.limit);
+
+    match resolve_log_node_target(&state, query.node.as_deref().unwrap_or_default()) {
+        Err(message) => return json_error(StatusCode::NOT_FOUND, message),
+        #[cfg(feature = "commerce")]
+        Ok(Some(target)) => {
+            return peer_log_stream(&state, target, start_position, limit);
+        }
+        _ => {}
+    }
+
     let Some(path) = resolve_log_file_path(&state) else {
         return Json(json!({
             "status": "ok",
@@ -2886,8 +3076,6 @@ async fn stream_logs(
         .into_response();
     };
 
-    let start_position = query.position.unwrap_or(0);
-    let limit = normalize_log_limit(query.limit);
     let path_for_stream = path.clone();
 
     let stream = stream::unfold(start_position, move |mut cursor| {
@@ -2895,36 +3083,10 @@ async fn stream_logs(
         async move {
             time::sleep(StdDuration::from_millis(1000)).await;
 
-            let payload = match read_follow_log_lines(&path, cursor, limit) {
-                Ok(result) => {
-                    cursor = result.next_position;
-                    json!({
-                        "status": "ok",
-                        "path": path,
-                        "lines": result.lines,
-                        "next_position": result.next_position,
-                        "reset": result.reset,
-                        "truncated": result.truncated,
-                    })
-                }
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                    cursor = 0;
-                    json!({
-                        "status": "ok",
-                        "path": path,
-                        "lines": [],
-                        "next_position": 0u64,
-                        "reset": true,
-                        "truncated": false,
-                        "exists": false,
-                        "message": "Log file does not exist yet.",
-                    })
-                }
-                Err(err) => json!({
-                    "status": "error",
-                    "message": format!("Failed to follow log file: {err}"),
-                }),
-            };
+            let payload = crate::log_viewer::follow_log_stream_frame(&path, cursor, limit);
+            if let Some(next) = payload.get("next_position").and_then(|v| v.as_u64()) {
+                cursor = next;
+            }
 
             let event = axum::response::sse::Event::default()
                 .event("logs")
@@ -2942,90 +3104,10 @@ async fn stream_logs(
         .into_response()
 }
 
-fn normalize_log_limit(limit: Option<usize>) -> usize {
-    match limit {
-        Some(value) => value.clamp(1, LOG_MAX_LIMIT),
-        None => LOG_DEFAULT_LIMIT,
-    }
-}
-
 fn resolve_log_file_path(state: &ConsoleState) -> Option<String> {
-    state.app_state().and_then(|app| {
-        app.config()
-            .log_file
-            .as_ref()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-    })
-}
-
-fn read_recent_log_lines(path: &str, limit: usize) -> io::Result<(Vec<String>, u64, bool)> {
-    let file = File::open(path)?;
-    let next_position = file.metadata()?.len();
-    let reader = BufReader::new(file);
-    let mut lines = VecDeque::new();
-    let mut truncated = false;
-
-    for line in reader.lines() {
-        let line = line?;
-        if lines.len() == limit {
-            lines.pop_front();
-            truncated = true;
-        }
-        lines.push_back(line);
-    }
-
-    Ok((lines.into_iter().collect(), next_position, truncated))
-}
-
-fn read_follow_log_lines(path: &str, position: u64, limit: usize) -> io::Result<FollowReadResult> {
-    let file = File::open(path)?;
-    let file_len = file.metadata()?.len();
-
-    if position > file_len {
-        let (lines, next_position, truncated) = read_recent_log_lines(path, limit)?;
-        return Ok(FollowReadResult {
-            lines,
-            next_position,
-            reset: true,
-            truncated,
-        });
-    }
-
-    let mut reader = BufReader::new(file);
-    reader.seek(SeekFrom::Start(position))?;
-
-    let mut lines = Vec::new();
-    let mut raw = String::new();
-    let mut truncated = false;
-
-    while lines.len() < limit {
-        raw.clear();
-        let read = reader.read_line(&mut raw)?;
-        if read == 0 {
-            break;
-        }
-        lines.push(raw.trim_end_matches(&['\n', '\r'][..]).to_string());
-    }
-
-    if lines.len() == limit {
-        let mut extra = String::new();
-        let extra_read = reader.read_line(&mut extra)?;
-        if extra_read > 0 {
-            truncated = true;
-            let rewind = i64::try_from(extra_read).unwrap_or(i64::MAX);
-            reader.seek(SeekFrom::Current(-rewind))?;
-        }
-    }
-
-    let next_position = reader.stream_position()?;
-
-    Ok(FollowReadResult {
-        lines,
-        next_position,
-        reset: false,
-        truncated,
-    })
+    state
+        .app_state()
+        .and_then(|app| crate::log_viewer::log_file_path_from_config(app.config()))
 }
 
 fn parse_lines_to_vec(raw: &str) -> Vec<String> {
@@ -3522,8 +3604,6 @@ mod tests {
 
     use super::*;
     use crate::models::rbac;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
 
     #[tokio::test]
     async fn list_roles_returns_seeded_roles() {
@@ -3614,52 +3694,5 @@ mod tests {
         let items = parsed["items"].as_array().expect("items");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["name"], "viewer");
-    }
-
-    #[test]
-    fn read_recent_log_lines_limits_tail() {
-        let mut file = NamedTempFile::new().expect("tempfile");
-        writeln!(file, "line-1").expect("write line 1");
-        writeln!(file, "line-2").expect("write line 2");
-        writeln!(file, "line-3").expect("write line 3");
-
-        let path = file.path().to_string_lossy().to_string();
-        let (lines, next_position, truncated) =
-            read_recent_log_lines(&path, 2).expect("read recent logs");
-
-        assert_eq!(lines, vec!["line-2".to_string(), "line-3".to_string()]);
-        assert!(next_position > 0);
-        assert!(truncated);
-    }
-
-    #[test]
-    fn follow_logs_resets_on_rotation() {
-        let mut file = NamedTempFile::new().expect("tempfile");
-        writeln!(file, "new-1").expect("write new-1");
-        writeln!(file, "new-2").expect("write new-2");
-
-        let path = file.path().to_string_lossy().to_string();
-        let result = read_follow_log_lines(&path, 10_000, 200).expect("follow logs");
-
-        assert!(result.reset);
-        assert_eq!(result.lines, vec!["new-1".to_string(), "new-2".to_string()]);
-        assert!(result.next_position > 0);
-    }
-
-    #[test]
-    fn follow_logs_keeps_position_when_truncated() {
-        let mut file = NamedTempFile::new().expect("tempfile");
-        writeln!(file, "l1").expect("write l1");
-        writeln!(file, "l2").expect("write l2");
-        writeln!(file, "l3").expect("write l3");
-
-        let path = file.path().to_string_lossy().to_string();
-        let first = read_follow_log_lines(&path, 0, 2).expect("first follow");
-        assert_eq!(first.lines, vec!["l1".to_string(), "l2".to_string()]);
-        assert!(first.truncated);
-
-        let second = read_follow_log_lines(&path, first.next_position, 2).expect("second follow");
-        assert_eq!(second.lines, vec!["l3".to_string()]);
-        assert!(!second.reset);
     }
 }

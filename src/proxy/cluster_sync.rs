@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::fmt;
 use std::time::Duration;
 use tokio::task::JoinSet;
-use tracing::debug;
+use tracing::{info, warn};
 
 #[derive(Clone, Debug)]
 pub struct AmiPeer {
@@ -50,30 +50,43 @@ impl ClusterSync {
     }
 
     /// Parallel fire-and-forget HTTP POST to all peers.
-    pub fn broadcast<T: Serialize + Send + 'static>(&self, event_type: &str, body: &T) {
+    /// `subject` identifies who/what the event is about (AOR, agent id, …).
+    pub fn broadcast<T: Serialize + Send + 'static>(
+        &self,
+        event_type: &str,
+        subject: &str,
+        body: &T,
+    ) {
         if self.peers.is_empty() {
             return;
         }
         let client = self.client.clone();
         let peers = self.peers.clone();
         let et = event_type.to_string();
+        let who = subject.to_string();
         let payload = match serde_json::to_value(body) {
             Ok(v) => v,
             Err(e) => {
-                debug!("cluster_sync: serialize failed for {}: {}", et, e);
+                warn!("cluster_sync: serialize failed for {}: {}", et, e);
                 return;
             }
         };
         let peer_count = peers.len();
+        let peer_list = peers
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         tokio::spawn(async move {
+            let start = std::time::Instant::now();
             let mut set = JoinSet::new();
             for p in peers {
                 let url = p.ami_url(&et);
                 let c = client.clone();
                 let b = payload.clone();
                 let etag = et.clone();
+                let subj = who.clone();
                 set.spawn(async move {
-                    let start = std::time::Instant::now();
                     match c
                         .post(&url)
                         .json(&b)
@@ -81,26 +94,21 @@ impl ClusterSync {
                         .send()
                         .await
                     {
-                        Ok(resp) => {
-                            let status = resp.status();
-                            debug!(
-                                "cluster_sync: {} {} -> {} ({:?})",
-                                etag,
-                                p,
-                                status,
-                                start.elapsed()
-                            );
-                        }
-                        Err(dur_err) => {
-                            debug!("cluster_sync: {} {} failed: {}", etag, p, dur_err);
+                        Ok(_) => {}
+                        Err(e) => {
+                            warn!("cluster_sync: {} {} -> {} failed: {}", etag, subj, p, e);
                         }
                     }
                 });
             }
             while set.join_next().await.is_some() {}
-            debug!(
-                "cluster_sync: {} broadcast to {} peers done",
-                et, peer_count
+            info!(
+                "cluster_sync: {} {} broadcast to {} peers [{}] in {:?}",
+                et,
+                who,
+                peer_count,
+                peer_list,
+                start.elapsed()
             );
         });
     }

@@ -14,6 +14,7 @@ pub mod console;
 pub mod handler;
 pub mod license;
 pub mod log_reload;
+pub mod log_viewer;
 
 pub use rustpbx_http_util as http_util;
 pub use rustpbx_media as media;
@@ -24,6 +25,7 @@ pub mod outbound;
 pub mod preflight;
 pub mod proxy;
 pub mod rwi;
+pub mod shutdown;
 pub use rustpbx_sipflow as sipflow;
 pub use rustpbx_storage as storage;
 pub mod sip_telemetry;

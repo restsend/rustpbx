@@ -81,6 +81,10 @@ pub struct ClusterLocatorMessage {
 }
 
 impl ClusterLocatorMessage {
+    pub fn aor(&self) -> &str {
+        &self.aor
+    }
+
     pub fn to_event(&self) -> Option<LocatorEvent> {
         let aor: Uri = self.aor.parse().ok()?;
         let registered_aor = self
@@ -402,21 +406,21 @@ impl ClusterEventHub {
     async fn send_locator_to_peers(&self, event: &LocatorEvent) {
         let msg = ClusterLocatorMessage::from(event);
         if let Some(ref sync) = *self.cluster_sync.read() {
-            sync.broadcast("locator", &msg);
+            sync.broadcast("locator", msg.aor(), &msg);
         }
     }
 
     /// Broadcast an agent status change to all cluster peers.
     pub async fn send_agent_status_to_peers(&self, msg: &ClusterAgentStatusMessage) {
         if let Some(ref sync) = *self.cluster_sync.read() {
-            sync.broadcast("agent_status", msg);
+            sync.broadcast("agent_status", &msg.agent_id, msg);
         }
     }
 
     /// Broadcast a queue event (enqueue / dequeue / assign) to all peers.
     pub async fn send_queue_event_to_peers(&self, msg: &ClusterQueueEventMessage) {
         if let Some(ref sync) = *self.cluster_sync.read() {
-            sync.broadcast("queue_event", msg);
+            sync.broadcast("queue_event", &msg.call_id, msg);
         }
     }
 

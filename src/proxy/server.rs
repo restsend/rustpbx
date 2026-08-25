@@ -1357,6 +1357,36 @@ impl SipServer {
                     .ok();
                 continue;
             }
+            // Graceful shutdown (drain): while draining, reject ALL
+            // out-of-dialog requests (new REGISTER / INVITE / SUBSCRIBE /
+            // OPTIONS / ...) so no new registrations or calls are accepted.
+            // In-dialog requests (To-tag present, e.g. BYE / re-INVITE / ACK)
+            // keep flowing so active calls can finish cleanly. Health probes
+            // answer 500 to signal the draining state to the load balancer.
+            if crate::shutdown::is_draining() {
+                let to_tag = tx
+                    .original
+                    .to_header()
+                    .and_then(|to| to.tag())
+                    .ok()
+                    .flatten();
+                if to_tag.is_none() {
+                    let code =
+                        if tx.original.method == rsipstack::sip::Method::Options {
+                            rsipstack::sip::StatusCode::ServerInternalError
+                        } else {
+                            rsipstack::sip::StatusCode::ServiceUnavailable
+                        };
+                    crate::metrics::transaction::rejected("shutting_down");
+                    warn!(
+                        key = %tx.key,
+                        method = ?tx.original.method,
+                        "draining: rejecting out-of-dialog request"
+                    );
+                    tx.reply(code).await.ok();
+                    continue;
+                }
+            }
             // Spam protection for out-of-dialog requests
             if self.inner.ignore_out_of_dialog_request
                 && matches!(
