@@ -1394,22 +1394,14 @@
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div>
                         <h3 class="text-sm font-semibold text-slate-800">Recorder storage paths</h3>
-                        <p class="text-xs text-slate-500">Manage recorder output paths and call record storage targets.</p>
+                        <p class="text-xs text-slate-500">Manage local audio recorder output and media cache paths.</p>
                     </div>
                     <form class="mt-4 space-y-4" @submit.prevent="saveStorageSettings">
-                        <div class="grid gap-4 md:grid-cols-2">
-                            <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Recorder root path</label>
-                                <input type="text" x-model="storageDraft.recorder_path" :disabled="storageProcessing"
-                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="/tmp/recorder" />
-                            </div>
-                            <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Call record root path</label>
-                                <input type="text" x-model="storageDraft.callrecord_root" :disabled="storageProcessing"
-                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="/tmp/cdr" />
-                            </div>
+                        <div>
+                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Recorder root path</label>
+                            <input type="text" x-model="storageDraft.recorder_path" :disabled="storageProcessing"
+                                class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="/tmp/recorder" />
                         </div>
                         <div class="grid gap-4 md:grid-cols-2">
                             <div>
@@ -1445,7 +1437,7 @@
                     </form>
                 </div>
 
-                <!-- Card 4: Call Record Storage Destination -->
+                <!-- Card 4: Call Detail Record Storage -->
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
                         <div>
@@ -1454,7 +1446,7 @@
                         </div>
                         <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">
                             {{ "common.active" | t }} · <span class="text-sky-600"
-                                x-text="selectedStorageProfileData?.label || storageModeLabel(server.storage?.mode)"></span>
+                                x-text="storageModeLabel(server.storage?.mode)"></span>
                         </span>
                     </div>
                     <form class="mt-4 space-y-4" @submit.prevent="saveStorageSettings">
@@ -1469,15 +1461,15 @@
                         </div>
                         <div x-show="storageDraft.callrecord_mode === 'local'" class="space-y-3">
                             <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Root Path</label>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">CDR Root Path</label>
                                 <input type="text" x-model="storageDraft.callrecord_root" :disabled="storageProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="/var/lib/rustpbx/recordings">
+                                    placeholder="/var/lib/rustpbx/cdr">
                             </div>
                         </div>
                         <div x-show="storageDraft.callrecord_mode === 's3'" class="space-y-4">
                             <div class="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-500">
-                                S3 credentials (vendor, region, bucket, access keys) are configured in the Recording Engine card above. Configure SipFlow with S3 upload enabled, or use the fields below for direct call record storage.
+                                These settings store CDR JSON files only. Audio recording storage is configured separately by Recording type above.
                             </div>
                             <div class="grid gap-4 md:grid-cols-2">
                                 <div>
@@ -1519,9 +1511,9 @@
                                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                 </div>
                                 <div>
-                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Root Path (Prefix)</label>
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">CDR Object Prefix</label>
                                     <input type="text" x-model="storageDraft.callrecord_s3_root" :disabled="storageProcessing"
-                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" placeholder="recordings/">
+                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" placeholder="cdr/">
                                 </div>
                             </div>
                             <div class="flex items-center justify-end gap-3 border-t border-slate-100 pt-4">
