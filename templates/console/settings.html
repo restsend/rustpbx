@@ -1454,7 +1454,7 @@
                             <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.storage_backend" | t }}</label>
                             <select x-model="storageDraft.callrecord_mode" :disabled="storageProcessing"
                                 class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                <option value="disabled">{{ "settings_page.disabled" | t }}</option>
+                                <option value="database">{{ "settings_page.default_database" | t }}</option>
                                 <option value="local">{{ "settings_page.local_filesystem" | t }}</option>
                                 <option value="s3">S3 Compatible Object Store</option>
                             </select>
@@ -3045,7 +3045,7 @@
                 recorder_path: '',
                 recorder_format: 'wav',
                 media_cache_path: '',
-                callrecord_mode: 'local',
+                callrecord_mode: 'database',
                 callrecord_root: '',
                 recording_enabled: false,
                 recording_auto_start: true,
@@ -3438,6 +3438,8 @@
             },
             storageModeLabel(mode) {
                 switch ((mode || '').toLowerCase()) {
+                    case 'database':
+                        return this.tt('settings_page.default_database');
                     case 'local':
                         return 'Local only';
                     case 'hybrid':
@@ -5491,7 +5493,7 @@
                     ? this.server.storage_profiles.find(p => String(p?.id || '').startsWith('callrecord'))
                     : null;
                 const crConfig = crProfile?.config || {};
-                const crType = crConfig?.type || (meta?.mode === 's3' ? 's3' : (meta?.mode === 'local' ? 'local' : 'disabled'));
+                const crType = crConfig?.type || meta?.mode || 'database';
 
                 this.storageDraft = {
                     recorder_path: recorderPath,
@@ -5583,8 +5585,8 @@
                 }
                 // Build callrecord payload based on mode
                 let callrecordPayload = null;
-                const crMode = this.storageDraft.callrecord_mode || 'disabled';
-                if (crMode === 'disabled') {
+                const crMode = this.storageDraft.callrecord_mode || 'database';
+                if (crMode === 'database') {
                     callrecordPayload = { type: 'disabled' };
                 } else if (crMode === 'local') {
                     callrecordPayload = {

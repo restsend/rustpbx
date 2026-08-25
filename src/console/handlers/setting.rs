@@ -836,13 +836,13 @@ fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<Jso
         }
         None => {
             let mut profile = Profile::new(
-                "callrecord-local",
-                "Call recordings",
-                format!("Storing call detail records on {}", recorder_path),
+                "callrecord-database",
+                "Call detail records",
+                "Storing call detail records in the main database",
             );
-            profile.insert("type", json!("local"));
-            profile.insert("root", json!(&recorder_path));
-            ("local".to_string(), profile)
+            profile.insert("type", json!("database"));
+            profile.insert("table_name", json!("rustpbx_call_records"));
+            ("database".to_string(), profile)
         }
     };
 
@@ -3694,5 +3694,25 @@ mod tests {
         let items = parsed["items"].as_array().expect("items");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["name"], "viewer");
+    }
+
+    #[test]
+    fn missing_callrecord_profile_reports_default_database() {
+        let mut config = crate::config::Config::default();
+        config.callrecord = None;
+
+        let (storage, profiles) = build_storage_profiles(&config);
+
+        assert_eq!(storage["mode"], "database");
+        assert_eq!(storage["active_profile"], "callrecord-database");
+        let profile = profiles
+            .iter()
+            .find(|profile| profile["id"] == "callrecord-database")
+            .expect("default database profile");
+        assert_eq!(profile["config"]["type"], "database");
+        assert_eq!(
+            profile["config"]["table_name"],
+            "rustpbx_call_records"
+        );
     }
 }
