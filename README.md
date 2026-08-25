@@ -92,6 +92,18 @@ Key takeaways:
 - **WebRTC clients and plain SIP/RTP peers interoperate** through the PBX with zero packet loss.
 - Media-layer optimizations — lock-free ingress tap, parked egress pacing, cross-leg relay teardown — keep the hot path lean at scale.
 
+**5000-concurrent-call full-recording run** (`forward` + recording, CPS=200, 4,943 peak concurrent, stereo WAV on local disk; same 16-thread machine, CPU per-core %):
+
+| Phase | rustpbx CPU | MySQL QPS | Notes |
+|---|---|---|---|
+| Ramp — 200 CPS INVITE storm | 280–380% | **2–6** | auth & extension lookups served from cache |
+| Steady — 4,943 CC, all recorded | **380–390% (≈3.9 cores)** | **2–4** | ~0.078% core & ~0.70 MB per recorded call |
+| Teardown — ~5k BYE/CDR burst (~90 s) | declining | **peak 277, sustained 30–90** | 1 CDR INSERT + FK SELECTs per completed call |
+
+- Completion **4943/5000 answered, 100% progressed**, packet loss **0.00%**, 0 slow SQL, drain/leak assertion **PASS** (tasks & dialogs fully reclaimed).
+- Recording cost ≈ **+0.13% core and +0.13 MB per call** vs plain relay; 4,980 stereo WAV files (4.4 GB) written with zero recorder queue drops.
+- The DB is idle while calls are up — capacity planning should size **CPU ≈ 0.08 core per recorded call** and CDR-burst write throughput for teardown (≈55 QPS per 1,000 calls draining per 90 s, MySQL <1% core).
+
 > See [Benchmark Details](tests/bench/bench.md) for methodology and full results.
 
 ---
