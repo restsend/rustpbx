@@ -326,6 +326,15 @@ pub trait AgentRegistry: Send + Sync {
         crate::call::app::queue::EscalationPlan::default()
     }
 
+    /// Load wait-retention parameters for a skill group: required skills,
+    /// `max_wait_secs`, and poll/`retry_interval_secs`. Default: `None`.
+    async fn skill_group_queue_config(
+        &self,
+        _skill_group_id: &str,
+    ) -> Option<(Vec<String>, u64, u64)> {
+        None
+    }
+
     /// Resolve the escalation dial targets: the union of the primary skill
     /// group (`primary_target_uri`, e.g. `"skill-group:support"`) and the
     /// escalation groups (`add_group_ids`), deduplicated.

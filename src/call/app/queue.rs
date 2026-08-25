@@ -27,6 +27,9 @@
 //!           │                │
 //!           │                ├─ Busy/NoAnswer → Retry/Fallback
 //!           │                │
+//!           ├─ WaitingForAgent (skill-group wait retention) ──→ DialingAgents
+//!           │         │ hold/comfort + queue_retry / max_wait
+//!           │         └─ abandon / timeout → Fallback
 //!           └─ HoldMusic ◄───┘ (while waiting)
 //! ```
 
@@ -244,6 +247,9 @@ pub enum QueueState {
     Answering,
     /// Playing hold music while waiting for an agent.
     PlayingHold { attempt: u32 },
+    /// Skill-group wait retention: hold/comfort while polling for an Idle agent.
+    /// No agent INVITE has been sent yet.
+    WaitingForAgent,
     /// Playing the pre-connect transfer prompt while the agent is being
     /// dialed. `connected_agent` is set when the agent answers mid-prompt.
     PlayingTransferPrompt { connected_agent: Option<String> },
@@ -416,11 +422,12 @@ impl QueueApp {
     /// agent answered. Only meaningful for skill-group-routed queues; the CC
     /// addon translates this into `skill_group_call_abandoned`.
     async fn notify_abandoned(&self, wait_secs: u64) {
-        if self.config.skill_routing_enabled
-            && let Some(ref registry) = self.agent_registry
-        {
+        if !self.skill_events_enabled() {
+            return;
+        }
+        if let Some(ref registry) = self.agent_registry {
             let _ = registry
-                .notify_call_abandoned(&self.call_id, &self.config.name, wait_secs)
+                .notify_call_abandoned(&self.call_id, self.skill_queue_id(), wait_secs)
                 .await;
         }
     }
@@ -428,11 +435,12 @@ impl QueueApp {
     /// Notify the agent dispatcher that a queued call exceeded its max wait
     /// time. CC addon translates this into `skill_group_service_unavailable`.
     async fn notify_timeout(&self, wait_secs: u64) {
-        if self.config.skill_routing_enabled
-            && let Some(ref registry) = self.agent_registry
-        {
+        if !self.skill_events_enabled() {
+            return;
+        }
+        if let Some(ref registry) = self.agent_registry {
             let _ = registry
-                .notify_call_timeout(&self.call_id, &self.config.name, wait_secs)
+                .notify_call_timeout(&self.call_id, self.skill_queue_id(), wait_secs)
                 .await;
         }
     }
@@ -441,13 +449,132 @@ impl QueueApp {
     /// and a fallback action executed. CC addon translates this into
     /// `skill_group_service_unavailable`.
     async fn notify_fallback(&self, reason: &str, action: &str) {
-        if self.config.skill_routing_enabled
-            && let Some(ref registry) = self.agent_registry
-        {
+        if !self.skill_events_enabled() {
+            return;
+        }
+        if let Some(ref registry) = self.agent_registry {
             let _ = registry
-                .notify_call_fallback(&self.call_id, &self.config.name, reason, action)
+                .notify_call_fallback(&self.call_id, self.skill_queue_id(), reason, action)
                 .await;
         }
+    }
+
+    /// Whether skill-group lifecycle hooks should fire.
+    fn skill_events_enabled(&self) -> bool {
+        self.config.skill_routing_enabled || self.config.skill_group.is_some()
+    }
+
+    /// Queue / skill-group id reported to the dispatcher (prefer skill group).
+    fn skill_queue_id(&self) -> &str {
+        self.config
+            .skill_group
+            .as_deref()
+            .unwrap_or(self.config.name.as_str())
+    }
+
+    /// Skill-group queues with a registry may wait for Idle agents (wait retention).
+    fn allows_wait_retention(&self) -> bool {
+        self.config.skill_group.is_some() && self.agent_registry.is_some()
+    }
+
+    fn arm_max_wait_timeout(&self, ctrl: &mut CallController) {
+        let secs = self.config.max_wait_secs.max(1);
+        ctrl.set_timeout("max_wait_timeout", Duration::from_secs(secs));
+    }
+
+    fn arm_queue_retry(&self, ctrl: &mut CallController) {
+        let secs = self.config.retry_interval_secs.max(1);
+        ctrl.set_timeout("queue_retry", Duration::from_secs(secs));
+    }
+
+    /// Enter wait-retention: answer, play hold/comfort, poll for Idle agents.
+    async fn enter_waiting_for_agent(
+        &mut self,
+        ctrl: &mut CallController,
+    ) -> anyhow::Result<AppAction> {
+        info!(
+            queue = %self.config.name,
+            skill_group = ?self.config.skill_group,
+            "Queue: no Idle agents — entering wait retention"
+        );
+        if !self.answered {
+            ctrl.answer().await?;
+            self.answered = true;
+        }
+        self.state = QueueState::WaitingForAgent;
+        self.start_hold_music(ctrl).await?;
+        if self.config.announce_position {
+            self.announce_position(ctrl).await?;
+        }
+        // First comfort/retention prompt as soon as practical.
+        self.maybe_play_comfort_or_ewt(ctrl).await?;
+        self.arm_max_wait_timeout(ctrl);
+        self.arm_queue_retry(ctrl);
+        if let Some(delay) = self.next_escalation_check_delay() {
+            ctrl.set_timeout("escalation_check", delay);
+        }
+        Ok(AppAction::Continue)
+    }
+
+    /// Poll for an Idle agent while in wait retention; dial when one appears.
+    async fn try_offer_from_wait(
+        &mut self,
+        ctrl: &mut CallController,
+    ) -> anyhow::Result<AppAction> {
+        if self.call_already_connected() {
+            return Ok(AppAction::Continue);
+        }
+        if !matches!(
+            self.state,
+            QueueState::WaitingForAgent
+                | QueueState::PlayingComfortPrompt
+                | QueueState::PlayingHold { .. }
+        ) {
+            return Ok(AppAction::Continue);
+        }
+
+        let Some(ref sg) = self.config.skill_group.clone() else {
+            self.arm_queue_retry(ctrl);
+            return Ok(AppAction::Continue);
+        };
+        let Some(ref registry) = self.agent_registry else {
+            self.arm_queue_retry(ctrl);
+            return Ok(AppAction::Continue);
+        };
+
+        let target = format!("skill-group:{}", sg);
+        let uris = registry
+            .resolve_target_with_policy(&target, None, &self.call_id)
+            .await;
+        if uris.is_empty() {
+            debug!(skill_group = %sg, "Queue: wait retention poll — still no Idle agent");
+            self.arm_queue_retry(ctrl);
+            return Ok(AppAction::Continue);
+        }
+
+        info!(
+            skill_group = %sg,
+            agents = uris.len(),
+            "Queue: Idle agent available — leaving wait retention"
+        );
+        ctrl.cancel_timeout("queue_retry");
+
+        let locations: Vec<Location> = uris
+            .iter()
+            .map(|uri| Location {
+                aor: uri.parse().unwrap_or_default(),
+                contact_raw: Some(uri.clone()),
+                ..Default::default()
+            })
+            .collect();
+        self.dynamic_agents = Some(locations);
+        self.current_agent_idx = 0;
+        self.dial_attempts = 0;
+
+        if !matches!(self.state, QueueState::PlayingComfortPrompt) {
+            self.start_hold_music(ctrl).await?;
+        }
+        self.dial_next_agent(ctrl).await
     }
 
     /// Get the next action based on fallback configuration.
@@ -904,6 +1031,13 @@ impl QueueApp {
         let agents = self.get_agents();
         if self.current_agent_idx >= agents.len() {
             warn!("Queue: no more agents to dial");
+            if self.allows_wait_retention() {
+                self.dynamic_agents = None;
+                self.current_agent_idx = 0;
+                self.pending_agents.clear();
+                ctrl.cancel_timeout("agent_ring_timeout");
+                return self.enter_waiting_for_agent(ctrl).await;
+            }
             return self
                 .play_unavailable_prompt_and_then_fallback(ctrl, AgentUnavailableReason::Busy)
                 .await;
@@ -1269,6 +1403,9 @@ impl CallApp for QueueApp {
         // Check if we have agents configured
         let agents = self.get_agents();
         if agents.is_empty() {
+            if self.allows_wait_retention() {
+                return self.enter_waiting_for_agent(ctrl).await;
+            }
             warn!("Queue: no agents configured, executing fallback");
             // Answer first if we need to play a busy prompt (needs media path)
             self.answer_if_busy_prompt(ctrl).await?;
@@ -1290,6 +1427,11 @@ impl CallApp for QueueApp {
         // Announce position if enabled
         if self.config.announce_position {
             self.announce_position(ctrl).await?;
+        }
+
+        // Skill-group queues always arm max wait (covers dial + wait retention).
+        if self.allows_wait_retention() {
+            self.arm_max_wait_timeout(ctrl);
         }
 
         // Start dialing agents if autonomous routing is enabled
@@ -1350,6 +1492,9 @@ impl CallApp for QueueApp {
                 self.arm_ring_timeout(ctrl);
 
                 return Ok(AppAction::Continue);
+            } else if self.allows_wait_retention() {
+                warn!("Queue: no available agents for skill routing — wait retention");
+                return self.enter_waiting_for_agent(ctrl).await;
             } else {
                 warn!("Queue: no available agents for skill routing");
                 // Answer first if we need to play a busy prompt (needs media path)
@@ -1383,6 +1528,10 @@ impl CallApp for QueueApp {
                 agents = filtered;
             }
             if agents.is_empty() {
+                if self.allows_wait_retention() {
+                    warn!("Queue: no available parallel agents — wait retention");
+                    return self.enter_waiting_for_agent(ctrl).await;
+                }
                 warn!("Queue: no available parallel agents, executing fallback");
                 self.answer_if_busy_prompt(ctrl).await?;
                 return self
@@ -1460,13 +1609,21 @@ impl CallApp for QueueApp {
         debug!(track_id = %track_id, "Queue: audio playback completed");
 
         match &self.state {
-            QueueState::PlayingHold { .. } | QueueState::DialingAgents { .. } => {
+            QueueState::WaitingForAgent
+            | QueueState::PlayingHold { .. }
+            | QueueState::DialingAgents { .. } => {
                 if !Self::track_matches(self.hold_playback.as_ref(), &track_id) {
                     debug!(track_id = %track_id, "Queue: ignoring stale audio completion (hold)");
                     return Ok(AppAction::Continue);
                 }
                 // Hold music loop completed or starting — check comfort/EWT scheduling
                 self.maybe_play_comfort_or_ewt(ctrl).await?;
+                if matches!(self.state, QueueState::PlayingComfortPrompt) {
+                    return Ok(AppAction::Continue);
+                }
+                if matches!(self.state, QueueState::WaitingForAgent) {
+                    self.state = QueueState::WaitingForAgent;
+                }
                 self.start_hold_music(ctrl).await?;
             }
             QueueState::PlayingTransferPrompt { connected_agent } => {
@@ -1529,7 +1686,13 @@ impl CallApp for QueueApp {
                 if !Self::take_if_matching(&mut self.comfort_token, &track_id, "comfort prompt") {
                     return Ok(AppAction::Continue);
                 }
-                // Return to hold music; next comfort will be scheduled by maybe_play_comfort_or_ewt
+                // Return to wait retention or dialing hold music.
+                if self.allows_wait_retention()
+                    && self.pending_agents.is_empty()
+                    && self.get_agents().is_empty()
+                {
+                    self.state = QueueState::WaitingForAgent;
+                }
                 self.start_hold_music(ctrl).await?;
             }
             QueueState::PlayingFinalPrompt => {
@@ -1566,6 +1729,8 @@ impl CallApp for QueueApp {
                         // state as a second line of defense).
                         ctrl.cancel_timeout("agent_ring_timeout");
                         ctrl.cancel_timeout("escalation_check");
+                        ctrl.cancel_timeout("queue_retry");
+                        ctrl.cancel_timeout("max_wait_timeout");
 
                         // In parallel mode, cancel all remaining pending agent legs
                         // EXCEPT the one that just answered.
@@ -1791,6 +1956,7 @@ impl CallApp for QueueApp {
             }
             "max_wait_timeout" => {
                 info!("Queue: max wait timeout, executing fallback");
+                ctrl.cancel_timeout("queue_retry");
 
                 // Notify queue timeout
                 ctrl.notify_event(
@@ -1815,6 +1981,10 @@ impl CallApp for QueueApp {
 
                 self.play_unavailable_prompt_and_then_fallback(ctrl, AgentUnavailableReason::Busy)
                     .await
+            }
+            "queue_retry" => {
+                debug!("Queue: wait retention poll");
+                self.try_offer_from_wait(ctrl).await
             }
             "escalation_check" => {
                 debug!("Queue: escalation check");
@@ -1846,6 +2016,7 @@ impl CallApp for QueueApp {
             }
         );
         if !was_connected && !self.abandoned_recorded {
+            self.abandoned_recorded = true;
             let queue_id = self.config.name.clone();
             // Notify the skill-group dispatcher that the call was abandoned
             // (e.g. caller hung up while waiting).

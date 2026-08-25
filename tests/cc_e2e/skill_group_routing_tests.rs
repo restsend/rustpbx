@@ -1250,8 +1250,8 @@ fn register_skill_agent(registry: &Arc<AgentRegistry>, id: &str, status: AgentSt
 // ─── skill_group scheduling event accuracy ──────────────────────────────
 
 /// No ACD policy and no immediately available agent: the call must be
-/// queued → `skill_group_call_queued` is emitted (single source), even
-/// though skill-matched agents exist (they are dialed as fallback).
+/// queued → `skill_group_call_queued` is emitted, and **no** dial URIs are
+/// returned (wait retention — QueueApp holds until an agent becomes Idle).
 #[tokio::test]
 async fn test_no_policy_unavailable_emits_call_queued() {
     use rustpbx::addons::cc::agent_registry_adapter::SkillGroupEvent;
@@ -1269,10 +1269,15 @@ async fn test_no_policy_unavailable_emits_call_queued() {
         .with_skill_group_event_tx(tx);
 
     let uris = adapter.resolve_target("skill-group:support").await;
-    assert!(!uris.is_empty(), "fallback URIs expected");
+    assert!(
+        uris.is_empty(),
+        "no Idle agents → empty dial list (wait retention), got {:?}",
+        uris
+    );
 
     let mut saw_queued = false;
     let mut saw_candidates = false;
+    let mut saw_assigned = false;
     while let Ok(ev) = rx.try_recv() {
         match ev {
             SkillGroupEvent::CallQueued { skill_group_id, .. } => {
@@ -1280,6 +1285,7 @@ async fn test_no_policy_unavailable_emits_call_queued() {
                 saw_queued = true;
             }
             SkillGroupEvent::CandidatesFound { .. } => saw_candidates = true,
+            SkillGroupEvent::AgentAssigned { .. } => saw_assigned = true,
             _ => {}
         }
     }
@@ -1288,6 +1294,7 @@ async fn test_no_policy_unavailable_emits_call_queued() {
         saw_queued,
         "skill_group_call_queued must fire without a policy when no agent is available"
     );
+    assert!(!saw_assigned, "must not assign when enqueueing for wait retention");
 }
 
 /// No policy but an idle agent available: dial immediately, NO call_queued.

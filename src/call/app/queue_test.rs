@@ -1739,6 +1739,10 @@ mod tests {
         /// URIs returned by resolve_escalation_targets (rotated per call so
         /// repeated invocations can be distinguished).
         escalation_uris: Vec<Vec<String>>,
+        /// URIs returned by `resolve_target` / `resolve_target_with_policy`
+        /// (rotated per call). When empty, falls through to `inner`.
+        resolve_uris: Vec<Vec<String>>,
+        resolve_calls: std::sync::Mutex<usize>,
         abandoned: std::sync::Mutex<Vec<(String, String, u64)>>,
         timeouts: std::sync::Mutex<Vec<(String, String, u64)>>,
         fallbacks: std::sync::Mutex<Vec<(String, String, String, String)>>,
@@ -1750,6 +1754,8 @@ mod tests {
                 inner: crate::call::app::agent_registry::memory::MemoryRegistry::new(),
                 escalation_calls: std::sync::Mutex::new(Vec::new()),
                 escalation_uris: Vec::new(),
+                resolve_uris: Vec::new(),
+                resolve_calls: std::sync::Mutex::new(0),
                 abandoned: std::sync::Mutex::new(Vec::new()),
                 timeouts: std::sync::Mutex::new(Vec::new()),
                 fallbacks: std::sync::Mutex::new(Vec::new()),
@@ -1759,6 +1765,21 @@ mod tests {
         fn with_escalation_uris(mut self, uris: Vec<Vec<String>>) -> Self {
             self.escalation_uris = uris;
             self
+        }
+
+        fn with_resolve_uris(mut self, uris: Vec<Vec<String>>) -> Self {
+            self.resolve_uris = uris;
+            self
+        }
+
+        fn next_resolve_uris(&self) -> Option<Vec<String>> {
+            if self.resolve_uris.is_empty() {
+                return None;
+            }
+            let mut n = self.resolve_calls.lock().unwrap();
+            let idx = (*n).min(self.resolve_uris.len() - 1);
+            *n += 1;
+            Some(self.resolve_uris[idx].clone())
         }
     }
 
@@ -1824,7 +1845,24 @@ mod tests {
         }
 
         async fn resolve_target(&self, target_uri: &str) -> Vec<String> {
+            if let Some(uris) = self.next_resolve_uris() {
+                return uris;
+            }
             self.inner.resolve_target(target_uri).await
+        }
+
+        async fn resolve_target_with_policy(
+            &self,
+            target_uri: &str,
+            _policy: Option<&str>,
+            _call_id: &str,
+        ) -> Vec<String> {
+            if let Some(uris) = self.next_resolve_uris() {
+                return uris;
+            }
+            self.inner
+                .resolve_target_with_policy(target_uri, _policy, _call_id)
+                .await
         }
 
         async fn resolve_escalation_targets(
@@ -2397,6 +2435,116 @@ mod tests {
         assert!(registry.abandoned.lock().unwrap().is_empty());
         assert!(registry.timeouts.lock().unwrap().is_empty());
         assert!(registry.fallbacks.lock().unwrap().is_empty());
+    }
+
+    /// Skill-group with no Idle agents enters wait retention (hold), not
+    /// immediate busy fallback; hangup notifies abandoned with skill_group id.
+    #[tokio::test]
+    async fn test_queue_wait_retention_abandon_notifies() {
+        use std::sync::Arc;
+        let registry = Arc::new(
+            HookRecordingRegistry::new().with_resolve_uris(vec![vec![], vec![]]),
+        );
+        let mut config = build_simple_queue_config();
+        config.skill_routing_enabled = true;
+        config.skill_group = Some("support".to_string());
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.hold = Some(QueueHoldConfig {
+            audio_file: Some("sounds/hold_music.wav".to_string()),
+            loop_playback: true,
+        });
+        config.retry_interval_secs = 5;
+        config.max_wait_secs = 300;
+        config.voice_prompts = Some(crate::call::VoicePrompts {
+            busy_prompt: Some("sounds/queue-busy-zh.wav".to_string()),
+            comfort_prompts: vec![crate::call::ComfortPrompt {
+                audio_file: "sounds/queue-busy-zh.wav".to_string(),
+                interval_secs: 30,
+            }],
+            ..Default::default()
+        });
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(registry.clone());
+        queue = queue.with_call_id("call-wait-1".to_string());
+        queue = queue.with_skill_group("support".to_string());
+
+        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
+        stack
+            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        let hold_cmd = stack
+            .next_cmd(200)
+            .await
+            .expect("expected hold music while waiting");
+        assert!(
+            matches!(hold_cmd, CallCommand::Play { .. }),
+            "wait retention must play hold/comfort, got {hold_cmd:?}"
+        );
+        stack.cancel();
+        let _ = stack.join().await;
+
+        let abandoned = registry.abandoned.lock().unwrap();
+        assert!(
+            abandoned
+                .iter()
+                .any(|(c, q, _)| c == "call-wait-1" && q == "support"),
+            "wait-retention hangup must notify abandoned for skill group, got {abandoned:?}"
+        );
+    }
+
+    /// Wait retention poll (`queue_retry`) dials when resolve returns an Idle agent.
+    #[tokio::test]
+    async fn test_queue_wait_retention_retry_dials_when_idle() {
+        use std::sync::Arc;
+        let registry = Arc::new(HookRecordingRegistry::new().with_resolve_uris(vec![
+            vec![],
+            vec!["sip:agent-1@localhost".to_string()],
+        ]));
+        let mut config = build_simple_queue_config();
+        config.skill_routing_enabled = true;
+        config.skill_group = Some("support".to_string());
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.hold = Some(QueueHoldConfig {
+            audio_file: Some("sounds/hold_music.wav".to_string()),
+            loop_playback: true,
+        });
+        config.retry_interval_secs = 1;
+        config.max_wait_secs = 300;
+        config.accept_immediately = true;
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(registry.clone());
+        queue = queue.with_call_id("call-wait-2".to_string());
+        queue = queue.with_skill_group("support".to_string());
+
+        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
+        stack
+            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        let _hold = stack.next_cmd(200).await.expect("hold while waiting");
+
+        stack.timeout("queue_retry");
+
+        let mut saw_originate = false;
+        for _ in 0..5 {
+            if let Some(cmd) = stack.next_cmd(300).await {
+                if matches!(cmd, CallCommand::LegAdd { .. }) {
+                    saw_originate = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            saw_originate,
+            "queue_retry with Idle agent must originate a dial"
+        );
+        stack.cancel();
+        let _ = stack.join().await;
     }
 
     /// Agent ring timeout must emit the `queue_agent_no_answer` RWI event via

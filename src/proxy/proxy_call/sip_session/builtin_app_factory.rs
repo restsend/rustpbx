@@ -356,7 +356,7 @@ impl BuiltinAppFactory {
             }
             "queue" => {
                 let pending = context.pending_queue.lock().take()?;
-                let plan = pending.plan;
+                let mut plan = pending.plan;
                 let mut config = crate::call::app::queue::QueueConfig::default();
                 config.name = plan.queue_name.clone();
                 config.accept_immediately = plan.accept_immediately;
@@ -392,6 +392,54 @@ impl BuiltinAppFactory {
                 } else {
                     crate::call::DialStrategy::Sequential(agents)
                 };
+
+                // Skill-group queues: enable lifecycle events + wait retention.
+                if let Some(ref sg) = pending.skill_group_id {
+                    config.skill_routing_enabled = true;
+                    config.skill_group = Some(sg.clone());
+                    if let Some(ref registry) = self.agent_registry {
+                        if let Some((skills, max_wait, retry)) =
+                            registry.skill_group_queue_config(sg).await
+                        {
+                            if config.required_skills.is_empty() {
+                                config.required_skills = skills;
+                            }
+                            config.max_wait_secs = max_wait;
+                            config.retry_interval_secs = retry;
+                        }
+                    }
+                    // Ensure hold + comfort (wait retention) have audio.
+                    if plan.hold.is_none() {
+                        plan.hold = Some(crate::call::QueueHoldConfig::default().with_audio_file(
+                            crate::call::DEFAULT_QUEUE_HOLD_AUDIO.to_string(),
+                        ));
+                        config.hold = plan.hold.clone();
+                    }
+                    if plan.voice_prompts.is_none() {
+                        let mut prompts = crate::call::VoicePrompts::zh();
+                        if prompts.comfort_prompts.is_empty() {
+                            if let Some(ref busy) = prompts.busy_prompt {
+                                prompts.comfort_prompts.push(crate::call::ComfortPrompt {
+                                    audio_file: busy.clone(),
+                                    interval_secs: 30,
+                                });
+                            }
+                        }
+                        plan.voice_prompts = Some(prompts.clone());
+                        config.voice_prompts = Some(prompts);
+                    } else if let Some(ref mut prompts) = plan.voice_prompts {
+                        if prompts.comfort_prompts.is_empty() {
+                            if let Some(busy) = prompts.busy_prompt.clone() {
+                                prompts.comfort_prompts.push(crate::call::ComfortPrompt {
+                                    audio_file: busy,
+                                    interval_secs: 30,
+                                });
+                            }
+                        }
+                        config.voice_prompts = Some(prompts.clone());
+                    }
+                }
+
                 let mut app = crate::call::app::queue::QueueApp::new(plan, config)
                     .with_call_id(context.call_info.session_id.clone());
                 // The primary skill-group id must be visible to post-call
