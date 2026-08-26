@@ -679,6 +679,7 @@ impl CallModule {
         let mut forced_preview_forward: Option<InviteOption> = None;
         let mut forced_pending_queue: Option<crate::call::QueuePlan> = None;
         let mut forced_pending_app: Option<(String, Option<serde_json::Value>, bool)> = None;
+        let mut forced_route_point: Option<String> = None;
 
         if let Some(config) = callee_forwarding.as_ref()
             && matches!(config.mode, crate::call::CallForwardingMode::Always)
@@ -754,6 +755,9 @@ impl CallModule {
                         queue_plan.label = Some(reference.to_string());
                     }
                     forced_pending_queue = Some(queue_plan);
+                }
+                crate::call::TransferEndpoint::RoutePoint(route_point) => {
+                    forced_route_point = Some(route_point.clone());
                 }
                 crate::call::TransferEndpoint::Ivr(ivr_name) => {
                     let name = ivr_name.trim();
@@ -839,15 +843,45 @@ impl CallModule {
                 })?,
         };
 
-        let preview_option = InviteOption {
+        let mut preview_option = InviteOption {
             callee: callee_uri.clone(),
             caller: caller_uri.clone(),
             contact: caller_uri.clone(),
             ..Default::default()
         };
+        let mut route_origin = None;
+        if let Some(route_point) = forced_route_point.as_deref() {
+            let target = crate::call::build_sip_uri(route_point, &callee_realm);
+            let target_uri = rsipstack::sip::Uri::try_from(target.as_str()).map_err(|e| {
+                RouteError::from((
+                    anyhow!("invalid always-forwarding route point '{}': {}", route_point, e),
+                    Some(rsipstack::sip::StatusCode::ServerInternalError),
+                ))
+                .with_code(&crate::proxy::error_catalog::ALWAYS_FWD_URI_INVALID)
+            })?;
+            preview_option.callee = target_uri.clone();
+
+            // Route points are new routing identities, so every matcher view must see the target.
+            let mut synthetic_origin = original.clone();
+            synthetic_origin.uri = target_uri.clone();
+            synthetic_origin
+                .headers
+                .retain(|header| !matches!(header, rsipstack::sip::Header::To(_)));
+            synthetic_origin.headers.push(
+                rsipstack::sip::typed::To {
+                    display_name: None,
+                    uri: target_uri,
+                    params: vec![],
+                }
+                .into(),
+            );
+            route_origin = Some(synthetic_origin);
+        }
 
         let mut routed_headers: Option<Vec<rsipstack::sip::Header>> = None;
-        let (preview_forward, pending_queue, pending_app, dialplan_hints) = if always_forwarding {
+        let (preview_forward, pending_queue, pending_app, dialplan_hints) = if always_forwarding
+            && forced_route_point.is_none()
+        {
             (
                 forced_preview_forward,
                 forced_pending_queue,
@@ -855,8 +889,13 @@ impl CallModule {
                 None,
             )
         } else {
-            let preview_outcome = route_invite
-                .preview_route(preview_option, original, &direction, cookie)
+            let mut preview_outcome = route_invite
+                .preview_route(
+                    preview_option,
+                    route_origin.as_ref().unwrap_or(original),
+                    &direction,
+                    cookie,
+                )
                 .await
                 .map_err(|e| {
                     RouteError::from((
@@ -865,6 +904,36 @@ impl CallModule {
                     ))
                     .with_code(&crate::proxy::error_catalog::ROUTE_PREVIEW_ERROR)
                 })?;
+
+            if forced_route_point.is_some()
+                && !matches!(
+                    &preview_outcome,
+                    RouteResult::Application { .. } | RouteResult::Abort(_, _)
+                )
+            {
+                // Rejecting a non-application result must release policy slots acquired by routing.
+                let hints = match &mut preview_outcome {
+                    RouteResult::Queue { hints, .. }
+                    | RouteResult::Forward(_, hints)
+                    | RouteResult::NotHandled(_, hints) => hints.as_mut(),
+                    _ => None,
+                };
+                if let Some(hints) = hints {
+                    if let Some(guard) = self.inner.routing_state.policy_guard.as_ref() {
+                        crate::call::policy::PolicyGuard::release_concurrency_holds(
+                            &hints.concurrency_holds,
+                            guard.limiter().as_ref(),
+                        )
+                        .await;
+                    }
+                    hints.concurrency_holds.clear();
+                }
+                return Err(RouteError::from((
+                    anyhow!("always-forwarding route point did not resolve to an application"),
+                    Some(rsipstack::sip::StatusCode::ServerInternalError),
+                ))
+                .with_code(&crate::proxy::error_catalog::ROUTE_PREVIEW_ERROR));
+            }
 
             match preview_outcome {
                 RouteResult::Queue { queue, hints, .. } => (None, Some(queue), None, hints),
@@ -2793,6 +2862,67 @@ mod tests {
         }
     }
 
+    struct RoutePointApplicationRouteInvite;
+
+    #[async_trait]
+    impl RouteInvite for RoutePointApplicationRouteInvite {
+        async fn route_invite(
+            &self,
+            mut option: InviteOption,
+            origin: &rsipstack::sip::Request,
+            _direction: &DialDirection,
+            _cookie: &TransactionCookie,
+        ) -> Result<RouteResult> {
+            assert_eq!(option.callee.user(), Some("39230"));
+            assert_eq!(origin.uri.user(), Some("39230"));
+            assert_eq!(
+                origin
+                    .to_header()
+                    .expect("route-point To header")
+                    .uri()
+                    .expect("route-point To URI")
+                    .user(),
+                Some("39230")
+            );
+            option.headers = Some(vec![rsipstack::sip::Header::Other(
+                "X-Business-Key".into(),
+                "driver-spring-festival".into(),
+            )]);
+            Ok(RouteResult::Application {
+                option,
+                app_name: "step_ivr".to_string(),
+                app_params: Some(serde_json::json!({
+                    "businessKey": "driver-spring-festival"
+                })),
+                auto_answer: true,
+                hints: None,
+            })
+        }
+    }
+
+    struct RoutePointNotHandledRouteInvite;
+
+    #[async_trait]
+    impl RouteInvite for RoutePointNotHandledRouteInvite {
+        async fn route_invite(
+            &self,
+            option: InviteOption,
+            _origin: &rsipstack::sip::Request,
+            _direction: &DialDirection,
+            _cookie: &TransactionCookie,
+        ) -> Result<RouteResult> {
+            let mut hints = crate::config::DialplanHints::default();
+            hints
+                .concurrency_holds
+                .push(crate::call::policy::ConcurrencyHold {
+                    policy_id: "route-point-policy".to_string(),
+                    scope: "caller".to_string(),
+                    scope_value: "bp".to_string(),
+                });
+            Ok(RouteResult::NotHandled(option, Some(hints)))
+        }
+    }
+
     struct RewrittenForwardRouteInvite;
 
     #[async_trait]
@@ -3810,6 +3940,120 @@ mod tests {
             .aor
             .to_string();
         assert_eq!(target, "sip:alice@rustpbx.com");
+    }
+
+    #[tokio::test]
+    async fn default_resolve_always_forwarding_route_point_uses_application_route_context() {
+        let (server, mut config) = create_test_server().await;
+        Arc::make_mut(&mut config).frequency_limiter = Some("memory".to_string());
+        server
+            .user_backend
+            .create_user(SipUser {
+                id: 101,
+                username: "cfwdrp".to_string(),
+                enabled: true,
+                realm: Some("rustpbx.com".to_string()),
+                call_forwarding_mode: Some("always".to_string()),
+                call_forwarding_destination: Some("toivr:39230".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("create route-point forwarding user");
+        let module = CallModule::new(config, server);
+
+        let mut request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite,
+            "bp",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let route_point_user_uri = format!("sip:{}@{}", "cfwdrp", "rustpbx.com");
+        request.uri = rsipstack::sip::Uri::try_from(route_point_user_uri.as_str()).unwrap();
+        let request_uri = request.uri.clone();
+        replace_to_header(&mut request, request_uri);
+
+        let caller = SipUser {
+            username: "bp".to_string(),
+            realm: Some("rustpbx.com".to_string()),
+            ..Default::default()
+        };
+        let dialplan = module
+            .default_resolve(
+                &request,
+                Box::new(RoutePointApplicationRouteInvite),
+                &caller,
+                &TransactionCookie::default(),
+            )
+            .await
+            .expect("route-point forwarding should resolve through call routing");
+
+        match &dialplan.flow {
+            crate::call::DialplanFlow::Application {
+                app_name,
+                app_params,
+                auto_answer,
+            } => {
+                assert_eq!(app_name, "step_ivr");
+                assert_eq!(
+                    app_params.as_ref().and_then(|params| params.get("businessKey")),
+                    Some(&serde_json::json!("driver-spring-festival"))
+                );
+                assert!(*auto_answer);
+            }
+            other => panic!("expected application flow, got {other:?}"),
+        }
+        assert_eq!(
+            dialplan.routed_headers.as_ref().and_then(|headers| headers
+                .iter()
+                .find_map(|header| match header {
+                    rsipstack::sip::Header::Other(name, value)
+                        if name.eq_ignore_ascii_case("X-Business-Key") =>
+                    {
+                        Some(value.as_str())
+                    }
+                    _ => None,
+                })),
+            Some("driver-spring-festival")
+        );
+
+        let limiter = module
+            .inner
+            .routing_state
+            .policy_guard
+            .as_ref()
+            .expect("frequency policy guard")
+            .limiter()
+            .clone();
+        assert!(
+            limiter
+                .check_concurrency("route-point-policy", "caller", "bp", 1)
+                .await
+                .expect("acquire route-point concurrency hold")
+        );
+        let error = module
+            .default_resolve(
+                &request,
+                Box::new(RoutePointNotHandledRouteInvite),
+                &caller,
+                &TransactionCookie::default(),
+            )
+            .await
+            .expect_err("unresolved route point must not dial the forwarding user");
+        assert_eq!(
+            error.status,
+            Some(rsipstack::sip::StatusCode::ServerInternalError)
+        );
+        assert!(
+            limiter
+                .check_concurrency("route-point-policy", "caller", "bp", 1)
+                .await
+                .expect("reacquire released route-point concurrency hold")
+        );
+        limiter
+            .release_concurrency("route-point-policy", "caller", "bp")
+            .await
+            .expect("release test concurrency hold");
     }
 
     #[tokio::test]

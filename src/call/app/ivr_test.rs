@@ -3003,6 +3003,7 @@ action = { type = "transfer", target = "100" }
                 sip_headers: HashMap::new(),
                 route_name: None,
             },
+            invocation: None,
             config: std::sync::Arc::new(crate::config::Config::default()),
             rwi_gateway: None,
             ivr_trace: None,

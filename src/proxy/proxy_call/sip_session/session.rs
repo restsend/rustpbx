@@ -621,7 +621,19 @@ impl SipSession {
         params: Option<serde_json::Value>,
         label: &str,
     ) -> Result<()> {
-        self.ensure_app_running_with(kind, params, true, label)
+        self.ensure_app_running_with(kind, params, true, label, None)
+            .await
+    }
+
+    pub(crate) async fn ensure_app_running_with_route_context(
+        &self,
+        kind: &str,
+        params: Option<serde_json::Value>,
+        auto_answer: bool,
+        label: &str,
+        route_context: crate::call::app::AppRouteContext,
+    ) -> Result<()> {
+        self.ensure_app_running_with(kind, params, auto_answer, label, Some(route_context))
             .await
     }
 
@@ -639,12 +651,18 @@ impl SipSession {
         params: Option<serde_json::Value>,
         auto_answer: bool,
         label: &str,
+        route_context: Option<crate::call::app::AppRouteContext>,
     ) -> Result<()> {
         use crate::call::runtime::AppRuntimeError;
-        let result = self
-            .app_runtime
-            .start_app(kind, params.clone(), auto_answer)
-            .await;
+        let result = if let Some(context) = route_context.clone() {
+            self.app_runtime
+                .start_app_with_route_context(kind, params.clone(), auto_answer, context)
+                .await
+        } else {
+            self.app_runtime
+                .start_app(kind, params.clone(), auto_answer)
+                .await
+        };
         match result {
             Ok(()) => {
                 // App now drives the session — suppress the RTP watchdog unless
@@ -664,9 +682,14 @@ impl SipSession {
                         warn!(session_id = %self.id, error = ?stop_err, "Failed to stop existing {} app", label)
                     }
                 }
-                self.app_runtime
-                    .start_app(kind, params, auto_answer)
-                    .await
+                let restarted = if let Some(context) = route_context {
+                    self.app_runtime
+                        .start_app_with_route_context(kind, params, auto_answer, context)
+                        .await
+                } else {
+                    self.app_runtime.start_app(kind, params, auto_answer).await
+                };
+                restarted
                     .map(|()| self.sync_rtp_timeout_pause())
                     .map_err(|e| anyhow!("Failed to restart {}: {:?}", label, e))
             }
@@ -791,14 +814,12 @@ impl SipSession {
         // no inbound request.
         let sip_headers = match mode {
             ConstructMode::Uas { server_dialog } => {
-                let mut hdrs =
-                    crate::call::app::extract_sip_headers(&server_dialog.initial_request());
+                let hdrs = crate::call::app::extract_sip_headers(&server_dialog.initial_request());
                 if let Some(ref routed) = context.dialplan.routed_headers {
-                    for h in routed {
-                        hdrs.insert(h.name().to_string(), h.value().to_string());
-                    }
+                    crate::call::app::merge_sip_headers(&hdrs, routed)
+                } else {
+                    hdrs
                 }
-                hdrs
             }
             ConstructMode::Uac => Default::default(),
         };
@@ -1152,13 +1173,12 @@ impl SipSession {
         // field is injected by CallMetaStore enrichment (meta was inserted
         // above, before this event is dispatched).
         let incoming_sip_headers = {
-            let mut hdrs = crate::call::app::extract_sip_headers(&server_dialog.initial_request());
+            let hdrs = crate::call::app::extract_sip_headers(&server_dialog.initial_request());
             if let Some(ref routed) = session.context.dialplan.routed_headers {
-                for h in routed {
-                    hdrs.insert(h.name().to_string(), h.value().to_string());
-                }
+                crate::call::app::merge_sip_headers(&hdrs, routed)
+            } else {
+                hdrs
             }
-            hdrs
         };
         if let Some(ref gw) = server.rwi_gateway {
             let ev = crate::rwi::CallCreated {
@@ -3840,6 +3860,7 @@ impl SipSession {
             None,
             plan.accept_immediately,
             &format!("queue '{}'", plan.queue_name),
+            None,
         )
         .await
         .map_err(|e| anyhow!("Failed to start queue app: {:?}", e))?;
@@ -9531,7 +9552,7 @@ impl SipSession {
         Self::send_info_to_dialog(&dlg, headers, body).await
     }
 
-    async fn handle_hangup(&mut self, cmd: &HangupCommand) -> CommandResult {
+    pub(super) async fn handle_hangup(&mut self, cmd: &HangupCommand) -> CommandResult {
         self.meta.pending_transfer_outcome = None;
         let cascade = &cmd.cascade;
 

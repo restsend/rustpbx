@@ -64,7 +64,28 @@ pub(crate) async fn route_outbound_leg(
     carry_headers: Option<Vec<rsipstack::sip::Header>>,
     cookie: crate::call::cookie::TransactionCookie,
 ) -> Result<Option<crate::config::RouteResult>> {
-    use crate::call::{DialDirection, RouteInvite};
+    route_leg(
+        server,
+        target_uri,
+        caller,
+        contact,
+        carry_headers,
+        &crate::call::DialDirection::Outbound,
+        cookie,
+    )
+    .await
+}
+
+pub(crate) async fn route_leg(
+    server: &SipServerRef,
+    target_uri: &rsipstack::sip::Uri,
+    caller: &rsipstack::sip::Uri,
+    contact: &rsipstack::sip::Uri,
+    carry_headers: Option<Vec<rsipstack::sip::Header>>,
+    direction: &crate::call::DialDirection,
+    cookie: crate::call::cookie::TransactionCookie,
+) -> Result<Option<crate::config::RouteResult>> {
+    use crate::call::RouteInvite;
 
     let route_invite: Box<dyn RouteInvite> = {
         let routing_state = server.routing_state.read().clone();
@@ -133,12 +154,7 @@ pub(crate) async fn route_outbound_leg(
     };
 
     match route_invite
-        .route_invite(
-            option,
-            &synthetic_request,
-            &DialDirection::Outbound,
-            &cookie,
-        )
+        .route_invite(option, &synthetic_request, direction, &cookie)
         .await
     {
         Ok(result) => Ok(Some(result)),

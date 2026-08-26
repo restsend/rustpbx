@@ -651,6 +651,9 @@ impl QueueApp {
                     crate::call::TransferEndpoint::Queue(queue_name) => {
                         AppAction::Transfer(format!("queue:{}", queue_name))
                     }
+                    crate::call::TransferEndpoint::RoutePoint(route_point) => {
+                        AppAction::Transfer(format!("toivr:{}", route_point))
+                    }
                     crate::call::TransferEndpoint::Ivr(ivr_name) => {
                         AppAction::Transfer(format!("ivr:{}", ivr_name))
                     }

@@ -24,6 +24,7 @@ struct RunningApp {
     /// Lets the event-loop teardown clear its own registration on natural
     /// exit without ever clobbering a successor's.
     generation: u64,
+    invocation: crate::call::app::AppInvocationContext,
 }
 
 /// Configuration needed to create an AppRuntime
@@ -46,6 +47,7 @@ pub struct DefaultAppRuntime {
     app_factory: Option<Arc<dyn AppFactory>>,
     /// Incremented on every successful `start_app`.
     app_generation: Arc<AtomicU64>,
+    last_invocation: Arc<parking_lot::RwLock<Option<crate::call::app::AppInvocationContext>>>,
 }
 
 /// Factory trait for creating CallApp instances.
@@ -72,6 +74,7 @@ impl DefaultAppRuntime {
             running: Arc::new(RwLock::new(None)),
             app_factory: None,
             app_generation: Arc::new(AtomicU64::new(0)),
+            last_invocation: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
     pub fn with_factory(mut self, factory: Arc<dyn AppFactory>) -> Self {
@@ -108,6 +111,35 @@ impl AppRuntime for DefaultAppRuntime {
         params: Option<serde_json::Value>,
         auto_answer: bool,
     ) -> AppResult<()> {
+        let inherited = self.last_invocation.read().clone();
+        self.start_app_with_route_context(
+            app_name,
+            params,
+            auto_answer,
+            crate::call::app::AppRouteContext {
+                callee: inherited
+                    .as_ref()
+                    .map(|context| context.callee.clone())
+                    .unwrap_or_else(|| self.context.call_info.callee.clone()),
+                sip_headers: inherited
+                    .as_ref()
+                    .map(|context| context.sip_headers.clone())
+                    .unwrap_or_else(|| self.context.call_info.sip_headers.clone()),
+                variables: inherited
+                    .map(|context| context.variables)
+                    .unwrap_or_default(),
+            },
+        )
+        .await
+    }
+
+    async fn start_app_with_route_context(
+        &self,
+        app_name: &str,
+        params: Option<serde_json::Value>,
+        auto_answer: bool,
+        route_context: crate::call::app::AppRouteContext,
+    ) -> AppResult<()> {
         // Check if already running
         {
             let running = self.running.read().await;
@@ -125,6 +157,15 @@ impl AppRuntime for DefaultAppRuntime {
         // `set_app_event_sender(None)`, dropping the successor's channel and
         // killing the new IVR with ExitReason::Normal.
         let generation = self.app_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let invocation = crate::call::app::AppInvocationContext {
+            app_execution_id: generation,
+            callee: route_context.callee,
+            sip_headers: route_context.sip_headers,
+            variables: route_context.variables,
+        };
+        let mut invocation_context = (*self.context).clone();
+        invocation_context.invocation = Some(invocation.clone());
+        let invocation_context = Arc::new(invocation_context);
 
         // Create event channel for app events (DTMF, hangup, etc.)
         let (event_tx, event_rx) = mpsc::unbounded_channel::<ControllerEvent>();
@@ -142,7 +183,7 @@ impl AppRuntime for DefaultAppRuntime {
         // Get the app from factory
         let app = if let Some(factory) = &self.app_factory {
             match factory
-                .create_app(app_name, params.clone(), &self.context)
+                .create_app(app_name, params.clone(), &invocation_context)
                 .await
             {
                 Ok(app) => app,
@@ -164,6 +205,7 @@ impl AppRuntime for DefaultAppRuntime {
                 return Err(AppRuntimeError::UnknownApp(app_name.to_string()));
             }
         };
+        *self.last_invocation.write() = Some(invocation.clone());
 
         if app_name == "ivr" {
             if let Some(file) = params
@@ -171,10 +213,13 @@ impl AppRuntime for DefaultAppRuntime {
                 .and_then(|p| p.get("file"))
                 .and_then(|v| v.as_str())
             {
-                crate::call::app::ivr::exec::remember_ivr_start_file(self.context.as_ref(), file);
+                crate::call::app::ivr::exec::remember_ivr_start_file(
+                    invocation_context.as_ref(),
+                    file,
+                );
             }
             if let Some(csat) = params.as_ref().and_then(|p| p.get("csat_params")) {
-                self.context.set_var(
+                invocation_context.set_var(
                     crate::call::app::ivr::builtin::CSAT_PARAMS_KEY,
                     csat.to_string(),
                 );
@@ -187,6 +232,7 @@ impl AppRuntime for DefaultAppRuntime {
                 name: app_name.to_string(),
                 cancel_token: cancel_token.clone(),
                 generation,
+                invocation,
             });
         }
 
@@ -202,7 +248,7 @@ impl AppRuntime for DefaultAppRuntime {
         // Spawn the event loop
         let session_id_for_log = self.session_id.clone();
         let app_name_owned = app_name.to_string();
-        let context = self.context.clone();
+        let context = invocation_context;
         let handle = self.handle.clone();
         let generation_counter = self.app_generation.clone();
         let running_slot = self.running.clone();
@@ -278,6 +324,15 @@ impl AppRuntime for DefaultAppRuntime {
 
         tracing::info!("App {} started for session {}", app_name, self.session_id);
         Ok(())
+    }
+
+    async fn current_app_invocation(&self) -> Option<crate::call::app::AppInvocationContext> {
+        self.running
+            .read()
+            .await
+            .as_ref()
+            .map(|app| app.invocation.clone())
+            .or_else(|| self.last_invocation.read().clone())
     }
 
     async fn stop_app(&self, reason: Option<String>) -> AppResult<()> {
@@ -534,6 +589,44 @@ mod tests {
         }
     }
 
+    struct HoldApp;
+
+    #[async_trait::async_trait]
+    impl crate::call::app::CallApp for HoldApp {
+        fn app_type(&self) -> crate::call::app::CallAppType {
+            crate::call::app::CallAppType::Custom
+        }
+
+        fn name(&self) -> &str {
+            "hold_app"
+        }
+
+        async fn on_enter(
+            &mut self,
+            _controller: &mut crate::call::app::CallController,
+            _context: &crate::call::app::ApplicationContext,
+        ) -> anyhow::Result<crate::call::app::AppAction> {
+            Ok(crate::call::app::AppAction::Continue)
+        }
+    }
+
+    struct CaptureFactory {
+        contexts: std::sync::Mutex<Vec<crate::call::app::ApplicationContext>>,
+    }
+
+    #[async_trait]
+    impl AppFactory for CaptureFactory {
+        async fn create_app(
+            &self,
+            _app_name: &str,
+            _params: Option<serde_json::Value>,
+            context: &crate::call::app::ApplicationContext,
+        ) -> Result<Option<Box<dyn crate::call::app::CallApp>>, anyhow::Error> {
+            self.contexts.lock().unwrap().push(context.clone());
+            Ok(Some(Box::new(HoldApp)))
+        }
+    }
+
     fn make_runtime() -> (DefaultAppRuntime, mpsc::Receiver<CallCommand>) {
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         let handle = SipSessionHandle::new_for_test("runtime-test", cmd_tx);
@@ -621,5 +714,83 @@ mod tests {
             runtime.stop_app(None).await.is_err(),
             "second stop: NotRunning"
         );
+    }
+
+    #[tokio::test]
+    async fn routed_start_owns_immutable_generation_context() {
+        let (cmd_tx, _cmd_rx) = mpsc::channel(64);
+        let handle = SipSessionHandle::new_for_test("runtime-test", cmd_tx);
+        let context = crate::call::app::ApplicationContext::new(
+            Default::default(),
+            crate::call::app::CallInfo {
+                session_id: "runtime-test".into(),
+                caller: "1001".into(),
+                callee: "1002".into(),
+                direction: "inbound".into(),
+                started_at: chrono::Utc::now(),
+                sip_headers: std::collections::HashMap::from([(
+                    "X-Business-Type".into(),
+                    "old".into(),
+                )]),
+                route_name: None,
+            },
+            std::sync::Arc::new(crate::config::Config::default()),
+        );
+        let factory = Arc::new(CaptureFactory {
+            contexts: std::sync::Mutex::new(Vec::new()),
+        });
+        let runtime = DefaultAppRuntime::new(AppRuntimeConfig {
+            session_id: "runtime-test".into(),
+            handle,
+            context: Arc::new(context),
+        })
+        .with_factory(factory.clone());
+
+        runtime
+            .start_app_with_route_context(
+                "hold_app",
+                None,
+                false,
+                crate::call::app::AppRouteContext {
+                    callee: "39230".into(),
+                    sip_headers: std::collections::HashMap::from([(
+                        "x-business-type".into(),
+                        "34".into(),
+                    )]),
+                    variables: std::collections::HashMap::from([(
+                        "order_id".into(),
+                        "order-001".into(),
+                    )]),
+                },
+            )
+            .await
+            .unwrap();
+
+        let invocation = runtime.current_app_invocation().await.unwrap();
+        assert_eq!(invocation.app_execution_id, 1);
+        assert_eq!(invocation.callee, "39230");
+        assert_eq!(invocation.sip_headers["x-business-type"], "34");
+        assert_eq!(invocation.variables["order_id"], "order-001");
+        assert_eq!(
+            runtime.context.call_info.sip_headers["X-Business-Type"],
+            "old"
+        );
+        let captured = factory.contexts.lock().unwrap();
+        assert_eq!(
+            captured[0].invocation.as_ref().unwrap().app_execution_id,
+            invocation.app_execution_id
+        );
+        drop(captured);
+
+        runtime
+            .stop_app(Some("bridge excursion".into()))
+            .await
+            .unwrap();
+        runtime.start_app("hold_app", None, false).await.unwrap();
+        let resumed = runtime.current_app_invocation().await.unwrap();
+        assert_eq!(resumed.app_execution_id, 2);
+        assert_eq!(resumed.callee, "39230");
+        assert_eq!(resumed.sip_headers["x-business-type"], "34");
+        assert_eq!(resumed.variables["order_id"], "order-001");
     }
 }
