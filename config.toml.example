@@ -26,17 +26,47 @@ database_url = "sqlite://rustpbx.sqlite3"
 # idle_timeout_secs = 600
 # max_lifetime_secs = 1800
 
-# external IP address for SIP signaling and media
-# if server is behind NAT, set your public IP here (without port)
-# external_ip = "1.2.3.4"
+# ── Network & NAT ─────────────────────────────────────────────────────────────
+# RustPBX separates RTP/SDP (media) from SIP Contact (signaling). Set both when
+# behind NAT. Console: Settings → Platform (global) / Network profiles (multi-path).
 
-# Auto-detect external IP via HTTP service (mutually exclusive with external_ip)
-# At startup, a GET request is sent to this URL and the response body is parsed as IP
-# Leave empty to use the default: http://ifconfig.me
+# RTP / SDP — public IP advertised in SDP c=/o= and ICE candidates
+# external_ip = "203.0.113.10"
+# Auto-detect RTP external IP (mutually exclusive with external_ip)
 # auto_external_ip = "http://ifconfig.me"
 
-# rtp_start_port = 20000
-# rtp_end_port = 30000
+# RTP port range. Defaults: 12000–42000 (~30k ports; plan ~2 ports per call).
+# rtp_start_port = 12000
+# rtp_end_port = 42000
+# webrtc_port_start = 30000
+# webrtc_port_end = 40000
+
+# SIP Contact — host in Contact for dialogs (BYE, re-INVITE). Unset → follow external_ip.
+# sip_external_ip = "203.0.113.10"
+# auto_sip_external_ip = "http://ifconfig.me"
+# sip_contact_always_bind = false       # true → Contact always uses [proxy].addr
+# local_networks = ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]
+# contact_lan_use_bind = true           # LAN destinations get bind address in Contact
+
+# Multi-path egress (optional). When [[network_profile]] is empty, a synthetic
+# "default" profile is derived from the top-level fields above.
+# default_network_profile = "wan"
+#
+# [[network_profile]]
+# id = "wan"
+# label = "Public WAN"
+# external_ip = "203.0.113.10"
+# sip_external_ip = "203.0.113.10"
+# local_networks = ["192.168.0.0/16"]
+# rtp_start_port = 12000
+# rtp_end_port = 42000
+#
+# [[network_profile]]
+# id = "overlay"
+# label = "Tailscale / WireGuard"
+# external_ip = "100.64.0.5"
+# bind_ip = "100.64.0.5"                # omit → falls back to global RTP bind ([proxy].addr)
+# contact_lan_use_bind = true
 
 # Max size in bytes for audio files downloaded over HTTP from the console
 # (queue prompts, voicemail prompts, ...). Default: 20971520 (20 MB)
@@ -391,6 +421,9 @@ engine = "flowdb"
 
 # [proxy.trunks.wuhoo]
 # dest = "sip:123.456.789.00:1234"
+# profile = "wan"                       # [[network_profile]] id (Console: Media → Network profile)
+# external_ip = "100.64.0.5"            # optional per-trunk RTP/SDP override (wins over profile)
+# bind_ip = "100.64.0.5"                # optional per-trunk RTP bind override
 # # Forward original custom headers to this trunk's outgoing INVITE.
 # # Unset (default) -> forward nothing; internal destinations forward everything.
 # # header_passthrough = { mode = "all" }

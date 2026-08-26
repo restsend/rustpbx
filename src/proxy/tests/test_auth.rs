@@ -9,7 +9,7 @@ use super::common::{
 use crate::auth::jwt_auth_backend::JwtAuthBackend;
 use crate::auth::jwt_validator::{JwtValidator, generate_hs256_jwt};
 use crate::call::{SipUser, TransactionCookie};
-use crate::config::{JwtAuthConfig, MediaProxyMode, ProxyConfig, RtpConfig};
+use crate::config::{JwtAuthConfig, MediaProxyMode, ProxyConfig, RtpConfig, SipContactConfig};
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 use crate::proxy::auth::{AuthBackend, AuthModule};
 use crate::proxy::data::ProxyDataContext;
@@ -490,6 +490,9 @@ async fn test_guest_call_allowed_extension() {
 
     let server_inner = Arc::new(SipServerInner {
         rtp_config: ArcSwap::new(Arc::new(RtpConfig::default())),
+        sip_contact_config: ArcSwap::new(Arc::new(SipContactConfig::default())),
+        network_profiles: ArcSwap::new(Arc::new(Vec::new())),
+        default_network_profile_id: ArcSwap::new(Arc::new("default".to_string())),
         media_proxy: ArcSwap::new(Arc::new(MediaProxyMode::default())),
         recording_policy: ArcSwap::new(Arc::new(None)),
         proxy_config: ArcSwap::from_pointee(config.as_ref().clone()),

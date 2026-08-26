@@ -2560,6 +2560,12 @@ impl SipSession {
             .caller_contact
             .as_ref()
             .map(|c| c.uri.clone())
+            .or_else(|| {
+                self.server.contact_uri_for_location_with_sip_contact(
+                    target,
+                    self.context.dialplan.media.sip_contact.as_ref(),
+                )
+            })
             .unwrap_or_else(|| caller.clone());
 
         let callee_call_id = self.context.dialplan.call_id.clone().unwrap_or_else(|| {
@@ -4445,19 +4451,18 @@ impl SipSession {
     /// Supports file paths and `tone://frequency,duration_ms` format. The ring
     /// tone loops until the callee answers; the caller-side handle is dropped.
     async fn send_early_media_tone(&mut self, audio_path: &str) -> Result<()> {
-        self.send_early_media(audio_path, true).await.map(|_| ())
+        let loop_playback = !audio_path.starts_with("tone://");
+        self.send_early_media(audio_path, loop_playback).await.map(|_| ())
     }
 
     /// Play a one-shot early-media cue (e.g. a failure/beep tone) through the
-    /// caller media bridge. Played with `loop_playback = true` so early-media
-    /// RTP reaches the caller reliably (a non-looping egress can stall file
-    /// delivery in the unbridged early state). The caller waits the cue's
-    /// natural duration before rejecting, so effectively plays once.
+    /// caller media bridge.
     async fn send_early_media_cue(
         &mut self,
         audio_path: &str,
     ) -> Result<Option<crate::media::media_bridge::PlaybackHandle>> {
-        self.send_early_media(audio_path, true).await
+        let loop_playback = !audio_path.starts_with("tone://");
+        self.send_early_media(audio_path, loop_playback).await
     }
 
     /// Build (if needed) the caller media bridge, send 183 Session Progress,

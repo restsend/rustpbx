@@ -1295,6 +1295,9 @@ pub fn sbc_config_from_metadata(meta: &serde_json::Value) -> TrunkConfig {
         ringback: sbc
             .and_then(|s| s.get("ringback"))
             .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        profile: from_str(sbc.and_then(|s| s.get("profile"))),
+        external_ip: from_str(sbc.and_then(|s| s.get("external_ip"))),
+        bind_ip: from_str(sbc.and_then(|s| s.get("bind_ip"))),
         codec: codecs,
         recording: if recording.is_some() { recording } else { None },
         ..Default::default()
@@ -1409,6 +1412,15 @@ pub(crate) fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkCon
             }
             if sbc.ringback.is_some() {
                 trunk.ringback = sbc.ringback;
+            }
+            if sbc.profile.is_some() {
+                trunk.profile = sbc.profile;
+            }
+            if sbc.external_ip.is_some() {
+                trunk.external_ip = sbc.external_ip;
+            }
+            if sbc.bind_ip.is_some() {
+                trunk.bind_ip = sbc.bind_ip;
             }
         }
     }

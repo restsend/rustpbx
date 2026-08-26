@@ -132,6 +132,7 @@ async fn page_sip_trunk_create(
             "create_url": state.api_url_for("/sip-trunk"),
             "current_user": current_user,
             "ami_endpoint": ami_endpoint,
+            "network_profiles": network_profiles_payload(&state),
         }),
         &headers,
     )
@@ -182,6 +183,7 @@ async fn page_sip_trunk_detail(
                     "update_url": state.api_url_for(&format!("/sip-trunk/{id}")),
                     "current_user": current_user,
                     "ami_endpoint": ami_endpoint,
+                    "network_profiles": network_profiles_payload(&state),
                 }),
                 &headers,
             )
@@ -557,6 +559,20 @@ async fn build_filters_payload(state: &ConsoleState) -> (Value, Vec<Value>) {
         }),
         tenants,
     )
+}
+
+fn network_profiles_payload(state: &ConsoleState) -> Value {
+    let config = state.config();
+    let profiles = config.effective_network_profiles();
+    json!({
+        "default": config.default_network_profile_id(),
+        "profiles": profiles.iter().map(|p| {
+            json!({
+                "id": p.id,
+                "label": p.label,
+            })
+        }).collect::<Vec<_>>(),
+    })
 }
 
 #[allow(clippy::result_large_err)]

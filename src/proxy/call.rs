@@ -1027,10 +1027,19 @@ impl CallModule {
             if let Some(video_policy) = hints.video_policy {
                 dialplan.media.video_policy = Some(video_policy);
             }
-            // Per-trunk external_ip / bind_ip overrides the global rtp_config
-            // value. This lets operators assign different advertised IPs per
-            // trunk (e.g. overlay-network IP for internal trunks, public NAT
-            // IP for external trunks) without running multiple PBX instances.
+            if let Some(profile_id) = hints.network_profile_id.as_deref() {
+                if let Some(profile) = self
+                    .inner
+                    .server
+                    .network_profile(profile_id)
+                    .or_else(|| Some(self.inner.server.default_network_profile()))
+                {
+                    self.inner
+                        .server
+                        .apply_network_profile_to_media(&profile, &mut dialplan.media);
+                }
+            }
+            // Per-trunk external_ip / bind_ip overrides the profile/global value.
             if let Some(external_ip) = hints.external_ip.take() {
                 dialplan.media.external_ip = Some(external_ip);
             }

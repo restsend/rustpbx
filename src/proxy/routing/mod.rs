@@ -151,6 +151,9 @@ pub struct TrunkConfig {
     /// Per-trunk override for the local IP RTP sockets bind to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_ip: Option<String>,
+    /// Network profile id from `[[network_profile]]` in the main config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 
     #[serde(skip)]
     pub origin: ConfigOrigin,
@@ -468,6 +471,7 @@ impl Default for TrunkConfig {
             video_policy: None,
             external_ip: None,
             bind_ip: None,
+            profile: None,
             did_numbers: Vec::new(),
             ringback: None,
             max_ring_time: None,

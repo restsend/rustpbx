@@ -1,7 +1,7 @@
 use crate::app::AppStateInner;
 use crate::config::{
     CallRecordConfig, CallRecordStorageConfig, Config, HttpRouterConfig, IvrFallbackConfig,
-    LocatorWebhookConfig, ProxyConfig, UserBackendConfig,
+    LocatorWebhookConfig, NetworkProfile, ProxyConfig, UserBackendConfig,
 };
 #[cfg(feature = "commerce")]
 use crate::console::ReloadTarget;
@@ -40,6 +40,7 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -227,6 +228,10 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
             "/settings/config/platform/auto-external-ip/test",
             post(test_auto_external_ip),
         )
+        .route(
+            "/settings/config/network-profiles",
+            patch(update_network_profiles),
+        )
         .route("/settings/config/proxy", patch(update_proxy_settings))
         .route("/settings/config/storage", patch(update_storage_settings))
         .route(
@@ -301,6 +306,10 @@ pub fn api_urls() -> Router<Arc<ConsoleState>> {
         .route(
             "/settings/config/platform/auto-external-ip/test",
             post(test_auto_external_ip),
+        )
+        .route(
+            "/settings/config/network-profiles",
+            patch(update_network_profiles),
         )
         .route("/settings/config/proxy", patch(update_proxy_settings))
         .route("/settings/config/storage", patch(update_storage_settings))
@@ -450,7 +459,7 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
         let mut key_items: Vec<JsonValue> = Vec::new();
         key_items.push(json!({ "label": "HTTP address", "value": config.http_addr.clone() }));
         if let Some(ext) = config.external_ip.as_ref() {
-            key_items.push(json!({ "label": "External IP", "value": ext }));
+            key_items.push(json!({ "label": "RTP external IP", "value": ext }));
         } else if let Some(url) = config.auto_external_ip.as_ref() {
             let display = if url.is_empty() {
                 "http://ifconfig.me"
@@ -458,7 +467,29 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
                 url
             };
             key_items
-                .push(json!({ "label": "External IP", "value": format!("auto ({})", display) }));
+                .push(json!({ "label": "RTP external IP", "value": format!("auto ({})", display) }));
+        }
+        if let Some(ext) = config.sip_external_ip.as_ref() {
+            key_items.push(json!({ "label": "SIP Contact IP", "value": ext }));
+        } else if let Some(url) = config.auto_sip_external_ip.as_ref() {
+            let display = if url.is_empty() {
+                "http://ifconfig.me"
+            } else {
+                url
+            };
+            key_items.push(
+                json!({ "label": "SIP Contact IP", "value": format!("auto ({})", display) }),
+            );
+        } else if config.external_ip.is_some() || config.auto_external_ip.is_some() {
+            key_items.push(json!({ "label": "SIP Contact IP", "value": "follow RTP external IP" }));
+        } else {
+            key_items.push(json!({ "label": "SIP Contact IP", "value": "bind address (LAN)" }));
+        }
+        if !config.local_networks.is_empty() {
+            key_items.push(json!({
+                "label": "Local networks",
+                "value": config.local_networks.join(", "),
+            }));
         }
         if let (Some(start), Some(end)) = (config.rtp_start_port, config.rtp_end_port) {
             key_items.push(json!({ "label": "RTP ports", "value": format!("{}-{}", start, end) }));
@@ -517,6 +548,13 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
                 "trunks": "toml",
             }),
             "rtp": config.rtp_config(),
+            "sip_contact": {
+                "sip_external_ip": config.sip_external_ip,
+                "auto_sip_external_ip": config.auto_sip_external_ip,
+                "local_networks": config.local_networks,
+                "contact_lan_use_bind": config.contact_lan_use_bind,
+                "sip_contact_always_bind": config.sip_contact_always_bind,
+            },
             "user_backends": config.proxy.user_backends.clone(),
             "locator_webhook": config.proxy.locator_webhook.clone(),
             "rwi_webhook": config.rwi_webhook.clone(),
@@ -598,6 +636,42 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
             .and_then(|policy| serde_json::to_value(policy).ok())
             .unwrap_or(JsonValue::Null);
         data.insert("recording".to_string(), recording_meta);
+
+        let profiles = config.effective_network_profiles();
+        let trunk_profile_refs: HashMap<String, Vec<String>> = {
+            let mut map: HashMap<String, Vec<String>> = HashMap::new();
+            for (name, trunk) in config.proxy.trunks.iter() {
+                if let Some(ref pid) = trunk.profile {
+                    map.entry(pid.clone()).or_default().push(name.clone());
+                }
+            }
+            map
+        };
+        data.insert(
+            "network_profiles".to_string(),
+            json!({
+                "default": config.default_network_profile_id(),
+                "explicit": !config.network_profiles.is_empty(),
+                "profiles": profiles.iter().map(|p| {
+                    json!({
+                        "id": p.id,
+                        "label": p.label,
+                        "description": p.description,
+                        "external_ip": p.external_ip,
+                        "auto_external_ip": p.auto_external_ip,
+                        "sip_external_ip": p.sip_external_ip,
+                        "auto_sip_external_ip": p.auto_sip_external_ip,
+                        "local_networks": p.local_networks,
+                        "contact_lan_use_bind": p.contact_lan_use_bind,
+                        "sip_contact_always_bind": p.sip_contact_always_bind,
+                        "bind_ip": p.bind_ip,
+                        "rtp_start_port": p.rtp_start_port,
+                        "rtp_end_port": p.rtp_end_port,
+                        "trunk_refs": trunk_profile_refs.get(&p.id).cloned().unwrap_or_default(),
+                    })
+                }).collect::<Vec<_>>(),
+            }),
+        );
     } else {
         data.insert("storage".to_string(), json!({ "mode": "unknown" }));
         data.insert(
@@ -1518,6 +1592,16 @@ pub(crate) struct PlatformSettingsPayload {
     #[serde(default)]
     auto_external_ip: Option<Option<String>>,
     #[serde(default)]
+    sip_external_ip: Option<Option<String>>,
+    #[serde(default)]
+    auto_sip_external_ip: Option<Option<String>>,
+    #[serde(default)]
+    local_networks: Option<Option<Vec<String>>>,
+    #[serde(default)]
+    contact_lan_use_bind: Option<bool>,
+    #[serde(default)]
+    sip_contact_always_bind: Option<bool>,
+    #[serde(default)]
     rtp_start_port: Option<Option<u16>>,
     #[serde(default)]
     rtp_end_port: Option<Option<u16>>,
@@ -1705,6 +1789,57 @@ pub(crate) async fn update_platform_settings(
         modified = true;
     }
 
+    if let Some(sip_opt) = payload.sip_external_ip {
+        if let Some(ip) = normalize_opt_string(sip_opt) {
+            doc["sip_external_ip"] = value(ip);
+            doc.insert("auto_sip_external_ip", Item::None);
+        } else {
+            doc.insert("sip_external_ip", Item::None);
+        }
+        modified = true;
+    }
+
+    if let Some(auto_sip_opt) = payload.auto_sip_external_ip {
+        if let Some(url) = normalize_opt_string(auto_sip_opt) {
+            doc["auto_sip_external_ip"] = value(url);
+            doc.insert("sip_external_ip", Item::None);
+        } else {
+            doc.insert("auto_sip_external_ip", Item::None);
+        }
+        modified = true;
+    }
+
+    if let Some(networks_opt) = payload.local_networks {
+        match networks_opt {
+            Some(networks) => {
+                let cleaned: Vec<String> = networks
+                    .into_iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let mut arr = Array::new();
+                for net in cleaned {
+                    arr.push(net.as_str());
+                }
+                doc["local_networks"] = Item::Value(Value::Array(arr));
+            }
+            None => {
+                doc["local_networks"] = Item::Value(Value::Array(Array::new()));
+            }
+        }
+        modified = true;
+    }
+
+    if let Some(use_bind) = payload.contact_lan_use_bind {
+        doc["contact_lan_use_bind"] = value(use_bind);
+        modified = true;
+    }
+
+    if let Some(always_bind) = payload.sip_contact_always_bind {
+        doc["sip_contact_always_bind"] = value(always_bind);
+        modified = true;
+    }
+
     if let Some(start_opt) = payload.rtp_start_port {
         if let Some(port) = start_opt {
             if port == 0 {
@@ -1793,8 +1928,243 @@ pub(crate) async fn update_platform_settings(
             "start_port": config.rtp_start_port,
             "end_port": config.rtp_end_port,
         },
+        "sip_contact": {
+            "sip_external_ip": config.sip_external_ip,
+            "auto_sip_external_ip": config.auto_sip_external_ip,
+            "local_networks": config.local_networks,
+            "contact_lan_use_bind": config.contact_lan_use_bind,
+            "sip_contact_always_bind": config.sip_contact_always_bind,
+        },
         "log_level_applied": log_level_applied,
         "platform_applied": platform_applied,
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct NetworkProfilesUpdatePayload {
+    #[serde(default)]
+    default: Option<String>,
+    profiles: Vec<NetworkProfile>,
+}
+
+#[derive(Serialize)]
+struct NetworkProfilesTomlWrapper {
+    #[serde(rename = "network_profile")]
+    profiles: Vec<NetworkProfile>,
+}
+
+fn validate_network_profiles_update(
+    profiles: &[NetworkProfile],
+    default: Option<&str>,
+    config: &Config,
+) -> Result<(), Response> {
+    let mut seen = HashSet::new();
+    for profile in profiles {
+        let id = profile.id.trim();
+        if id.is_empty() {
+            return Err(json_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Each network profile must have a non-empty id",
+            ));
+        }
+        if !seen.insert(id.to_string()) {
+            return Err(json_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Duplicate network profile id: {id}"),
+            ));
+        }
+        if let (Some(start), Some(end)) = (profile.rtp_start_port, profile.rtp_end_port)
+            && start > end
+        {
+            return Err(json_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Profile '{id}': rtp_start_port must be <= rtp_end_port"),
+            ));
+        }
+    }
+
+    if !profiles.is_empty() {
+        let default_id = default
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(profiles[0].id.trim());
+        if !seen.contains(default_id) {
+            return Err(json_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Default network profile '{default_id}' was not found"),
+            ));
+        }
+    }
+
+    let old_ids: HashSet<String> = config
+        .network_profiles
+        .iter()
+        .map(|p| p.id.clone())
+        .collect();
+    let new_ids: HashSet<String> = profiles
+        .iter()
+        .map(|p| p.id.trim().to_string())
+        .collect();
+    for removed in old_ids.difference(&new_ids) {
+        for (name, trunk) in &config.proxy.trunks {
+            if trunk.profile.as_deref() == Some(removed.as_str()) {
+                return Err(json_error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!(
+                        "Cannot remove profile '{removed}': trunk '{name}' still references it"
+                    ),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn write_network_profiles_document(
+    doc: &mut DocumentMut,
+    profiles: &[NetworkProfile],
+    default: Option<&str>,
+) -> Result<(), Response> {
+    if profiles.is_empty() {
+        doc.remove("network_profile");
+        doc.remove("default_network_profile");
+        return Ok(());
+    }
+
+    let wrapper = NetworkProfilesTomlWrapper {
+        profiles: profiles.to_vec(),
+    };
+    let item = serialize_to_item(&wrapper, "network_profiles")?;
+    if let Item::Table(table) = item {
+        if let Some(profile_item) = table.get("network_profile") {
+            doc.insert("network_profile", profile_item.clone());
+        } else {
+            doc.remove("network_profile");
+        }
+    } else {
+        return Err(json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to serialize network profiles",
+        ));
+    }
+
+    let default_id = default
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(profiles[0].id.trim());
+    doc["default_network_profile"] = value(default_id);
+
+    Ok(())
+}
+
+pub(crate) async fn update_network_profiles(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+    Json(payload): Json<NetworkProfilesUpdatePayload>,
+) -> Response {
+    if let Err(resp) = state.require_permission(&user, "system", "write").await {
+        return resp;
+    }
+    let config_path = match get_config_path(&state) {
+        Ok(path) => path,
+        Err(resp) => return resp,
+    };
+
+    let mut doc = match load_document(&config_path) {
+        Ok(doc) => doc,
+        Err(resp) => return resp,
+    };
+
+    let existing_config = match parse_config_from_str(&doc.to_string()) {
+        Ok(cfg) => cfg,
+        Err(resp) => return resp,
+    };
+
+    if let Err(resp) = validate_network_profiles_update(
+        &payload.profiles,
+        payload.default.as_deref(),
+        &existing_config,
+    ) {
+        return resp;
+    }
+
+    if let Err(resp) = write_network_profiles_document(
+        &mut doc,
+        &payload.profiles,
+        payload.default.as_deref(),
+    ) {
+        return resp;
+    }
+
+    let doc_text = doc.to_string();
+    let config = match parse_config_from_str(&doc_text) {
+        Ok(cfg) => cfg,
+        Err(resp) => return resp,
+    };
+
+    if let Err(resp) = persist_document(&config_path, doc_text) {
+        return resp;
+    }
+
+    let mut applied = false;
+    let mut message = String::new();
+    if let Some(app_state) = state.app_state() {
+        match app_state
+            .sip_server()
+            .inner
+            .reload_proxy_config(&config_path)
+            .await
+        {
+            Ok(msg) => {
+                applied = true;
+                message = msg;
+            }
+            Err(e) => {
+                message = format!("Failed: {e}");
+            }
+        }
+    }
+
+    let profiles = config.effective_network_profiles();
+    let trunk_profile_refs: HashMap<String, Vec<String>> = {
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for (name, trunk) in config.proxy.trunks.iter() {
+            if let Some(ref pid) = trunk.profile {
+                map.entry(pid.clone()).or_default().push(name.clone());
+            }
+        }
+        map
+    };
+
+    Json(json!({
+        "status": "ok",
+        "requires_restart": !applied,
+        "message": message,
+        "network_profiles": {
+            "default": config.default_network_profile_id(),
+            "explicit": !config.network_profiles.is_empty(),
+            "profiles": profiles.iter().map(|p| {
+                json!({
+                    "id": p.id,
+                    "label": p.label,
+                    "description": p.description,
+                    "external_ip": p.external_ip,
+                    "auto_external_ip": p.auto_external_ip,
+                    "sip_external_ip": p.sip_external_ip,
+                    "auto_sip_external_ip": p.auto_sip_external_ip,
+                    "local_networks": p.local_networks,
+                    "contact_lan_use_bind": p.contact_lan_use_bind,
+                    "sip_contact_always_bind": p.sip_contact_always_bind,
+                    "bind_ip": p.bind_ip,
+                    "rtp_start_port": p.rtp_start_port,
+                    "rtp_end_port": p.rtp_end_port,
+                    "trunk_refs": trunk_profile_refs.get(&p.id).cloned().unwrap_or_default(),
+                })
+            }).collect::<Vec<_>>(),
+        },
+        "applied": applied,
     }))
     .into_response()
 }

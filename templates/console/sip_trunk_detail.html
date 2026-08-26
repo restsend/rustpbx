@@ -17,7 +17,8 @@ default('RustPBX') }}{% endblock %}
         updateUrl: {{ update_url | default(null) | tojson }},
         apiPrefix: {{ api_prefix | tojson }},
         t: window.__i18n_t || {},
-        amiEndpoint: {{ ami_endpoint | default("/ami/v1") | tojson }}
+        amiEndpoint: {{ ami_endpoint | default("/ami/v1") | tojson }},
+        networkProfiles: {{ network_profiles | default({"profiles": []}) | tojson }}
     })' x-init="init()">
     <div class="mx-auto max-w-5xl space-y-6">
         <header class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -437,6 +438,29 @@ default('RustPBX') }}{% endblock %}
                     <p class="mt-1 text-xs text-slate-500">{{ "sip_trunk_detail.section_media_desc" | t }}</p>
                     <div class="mt-4 space-y-4">
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            {{ "sip_trunk_detail.field_network_profile" | t }}
+                            <select x-model="form.network_profile"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="">{{ "sip_trunk_detail.none" | t }}</option>
+                                <template x-for="profile in networkProfileOptions()" :key="profile.id">
+                                    <option :value="profile.id" x-text="profile.label || profile.id"></option>
+                                </template>
+                            </select>
+                            <span class="text-xs font-normal text-slate-400">{{ "sip_trunk_detail.field_network_profile_hint" | t }}</span>
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            {{ "sip_trunk_detail.field_external_ip_override" | t }}
+                            <input type="text" x-model.trim="form.external_ip_override"
+                                class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="203.0.113.10" />
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            {{ "sip_trunk_detail.field_bind_ip_override" | t }}
+                            <input type="text" x-model.trim="form.bind_ip_override"
+                                class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="0.0.0.0" />
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_media_mode" | t }}
                             <select x-model="form.media_mode"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
@@ -570,6 +594,7 @@ default('RustPBX') }}{% endblock %}
             t: options.t || {},
             amiEndpoint: options.amiEndpoint || '/ami/v1',
             apiPrefix: options.apiPrefix || '',
+            networkProfiles: options.networkProfiles || { profiles: [] },
             listUrl: `${options.basePath || '/console'}/sip-trunk`,
             createUrl: options.createUrl || null,
             updateUrl: options.updateUrl || null,
@@ -608,6 +633,9 @@ default('RustPBX') }}{% endblock %}
                 register_expires: '',
                 register_extra_headers: '',
                 recording_enabled: '',
+                network_profile: '',
+                external_ip_override: '',
+                bind_ip_override: '',
                 media_mode: '',
                 video_policy: '',
                 audio_codecs: '',
@@ -624,6 +652,12 @@ default('RustPBX') }}{% endblock %}
             error: null,
             saving: false,
             activeTab: 'general',
+            networkProfileOptions() {
+                const profiles = Array.isArray(this.networkProfiles?.profiles)
+                    ? this.networkProfiles.profiles
+                    : [];
+                return profiles;
+            },
             init() {
                 this.loadOptions();
                 if (this.model) {
@@ -683,6 +717,9 @@ default('RustPBX') }}{% endblock %}
                     const meta = typeof model.metadata === 'string' ? JSON.parse(model.metadata) : (model.metadata || {});
                     const sbc = meta.sbc || {};
                     this.form.recording_enabled = typeof sbc.recording_enabled === 'boolean' ? String(sbc.recording_enabled) : '';
+                    this.form.network_profile = typeof sbc.profile === 'string' ? sbc.profile : '';
+                    this.form.external_ip_override = typeof sbc.external_ip === 'string' ? sbc.external_ip : '';
+                    this.form.bind_ip_override = typeof sbc.bind_ip === 'string' ? sbc.bind_ip : '';
                     this.form.media_mode = typeof sbc.media_mode === 'string' ? sbc.media_mode : '';
                     this.form.video_policy = sbc.video_policy || '';
                     this.form.audio_codecs = Array.isArray(sbc.audio_codecs) ? sbc.audio_codecs.join('\n') : '';
@@ -903,6 +940,21 @@ default('RustPBX') }}{% endblock %}
                         meta.sbc.media_mode = this.form.media_mode;
                     } else {
                         delete meta.sbc.media_mode;
+                    }
+                    if (this.form.network_profile) {
+                        meta.sbc.profile = this.form.network_profile;
+                    } else {
+                        delete meta.sbc.profile;
+                    }
+                    if (this.form.external_ip_override) {
+                        meta.sbc.external_ip = this.form.external_ip_override;
+                    } else {
+                        delete meta.sbc.external_ip;
+                    }
+                    if (this.form.bind_ip_override) {
+                        meta.sbc.bind_ip = this.form.bind_ip_override;
+                    } else {
+                        delete meta.sbc.bind_ip;
                     }
                     if (this.form.video_policy) {
                         meta.sbc.video_policy = this.form.video_policy;

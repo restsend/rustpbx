@@ -13,8 +13,8 @@ use crate::{
         sipflow::{SipFlow, SipFlowBuilder},
     },
     config::{
-        ClusterConfig, ClusterPeer, MediaProxyMode, ProxyConfig, RecordingPolicy, RtpConfig,
-        SipFlowConfig,
+        ClusterConfig, ClusterPeer, MediaProxyMode, NetworkProfile, ProxyConfig, RecordingPolicy,
+        RtpConfig, SipContactConfig, SipFlowConfig,
     },
     proxy::{
         FnCreateRouteInvite,
@@ -66,6 +66,9 @@ use tracing::{debug, info, warn};
 pub struct SipServerInner {
     pub cancel_token: CancellationToken,
     pub rtp_config: ArcSwap<RtpConfig>,
+    pub sip_contact_config: ArcSwap<SipContactConfig>,
+    pub network_profiles: ArcSwap<Vec<NetworkProfile>>,
+    pub default_network_profile_id: ArcSwap<String>,
     pub media_proxy: ArcSwap<MediaProxyMode>,
     pub proxy_config: ArcSwap<ProxyConfig>,
     pub data_context: Arc<ProxyDataContext>,
@@ -158,6 +161,9 @@ pub struct SipServer {
 
 pub struct SipServerBuilder {
     rtp_config: Option<RtpConfig>,
+    sip_contact_config: Option<SipContactConfig>,
+    network_profiles: Option<Vec<NetworkProfile>>,
+    default_network_profile_id: Option<String>,
     config: Arc<ProxyConfig>,
     cancel_token: Option<CancellationToken>,
     user_backend: Option<Box<dyn UserBackend>>,
@@ -207,6 +213,9 @@ impl SipServerBuilder {
         Self {
             config,
             rtp_config: None,
+            sip_contact_config: None,
+            network_profiles: None,
+            default_network_profile_id: None,
             cancel_token: None,
             user_backend: None,
             auth_backend: Vec::new(),
@@ -375,6 +384,21 @@ impl SipServerBuilder {
 
     pub fn with_rtp_config(mut self, config: RtpConfig) -> Self {
         self.rtp_config = Some(config);
+        self
+    }
+
+    pub fn with_sip_contact_config(mut self, config: SipContactConfig) -> Self {
+        self.sip_contact_config = Some(config);
+        self
+    }
+
+    pub fn with_network_profiles(
+        mut self,
+        profiles: Vec<NetworkProfile>,
+        default_id: String,
+    ) -> Self {
+        self.network_profiles = Some(profiles);
+        self.default_network_profile_id = Some(default_id);
         self
     }
 
@@ -560,6 +584,27 @@ impl SipServerBuilder {
 
         let locator = Arc::new(locator);
         let mut rtp_config = self.rtp_config.unwrap_or_default();
+        let mut sip_contact_config = self.sip_contact_config.unwrap_or_default();
+        let network_profiles = self
+            .network_profiles
+            .unwrap_or_else(|| vec![NetworkProfile {
+                id: "default".to_string(),
+                label: Some("Default".to_string()),
+                description: None,
+                external_ip: rtp_config.external_ip.clone(),
+                auto_external_ip: rtp_config.auto_external_ip.clone(),
+                sip_external_ip: sip_contact_config.sip_external_ip.clone(),
+                auto_sip_external_ip: sip_contact_config.auto_sip_external_ip.clone(),
+                local_networks: Vec::new(),
+                contact_lan_use_bind: sip_contact_config.contact_lan_use_bind,
+                sip_contact_always_bind: sip_contact_config.sip_contact_always_bind,
+                bind_ip: rtp_config.bind_ip.clone(),
+                rtp_start_port: rtp_config.start_port,
+                rtp_end_port: rtp_config.end_port,
+            }]);
+        let default_network_profile_id = self
+            .default_network_profile_id
+            .unwrap_or_else(|| network_profiles.first().map(|p| p.id.clone()).unwrap_or_else(|| "default".to_string()));
         let cancel_token = self.cancel_token.unwrap_or_default();
         let config = self.config.clone();
         #[cfg(unix)]
@@ -614,6 +659,28 @@ impl SipServerBuilder {
                         }
                         Err(e) => {
                             warn!("auto_external_ip: detection failed: {}", e);
+                        }
+                    }
+                }
+            }
+
+            if sip_contact_config.sip_external_ip.is_none() {
+                if let Some(ref url) = sip_contact_config.auto_sip_external_ip {
+                    match auto_external_ip::detect_external_ip(url).await {
+                        Ok(ip) => {
+                            warn!(
+                                "auto_sip_external_ip: detected {} from '{}'",
+                                ip,
+                                if url.is_empty() {
+                                    auto_external_ip::DEFAULT_AUTO_EXTERNAL_IP_URL
+                                } else {
+                                    url
+                                }
+                            );
+                            sip_contact_config.sip_external_ip = Some(ip.to_string());
+                        }
+                        Err(e) => {
+                            warn!("auto_sip_external_ip: detection failed: {}", e);
                         }
                     }
                 }
@@ -1058,6 +1125,9 @@ impl SipServerBuilder {
 
         let inner = Arc::new(SipServerInner {
             rtp_config: ArcSwap::new(Arc::new(rtp_config)),
+            sip_contact_config: ArcSwap::new(Arc::new(sip_contact_config)),
+            network_profiles: ArcSwap::new(Arc::new(network_profiles)),
+            default_network_profile_id: ArcSwap::new(Arc::new(default_network_profile_id)),
             media_proxy: ArcSwap::new(Arc::new(self.config.media_proxy)),
             proxy_config: ArcSwap::from_pointee(self.config.as_ref().clone()),
             cancel_token,
@@ -1551,8 +1621,49 @@ impl SipServerInner {
     }
 
     pub fn default_contact_uri(&self) -> Option<rsipstack::sip::Uri> {
-        let addr = self.endpoint.get_addrs().first()?.clone();
-        Some(build_contact_uri(&self.contact_username, &addr, None))
+        self.contact_uri_for_transport(Transport::Udp, None, None)
+    }
+
+    /// Build a Contact URI using configured listener ports and platform network policy.
+    pub fn contact_uri_for_transport(
+        &self,
+        transport: Transport,
+        port_override: Option<u16>,
+        destination: Option<IpAddr>,
+    ) -> Option<rsipstack::sip::Uri> {
+        self.contact_uri_for_transport_with_sip_contact(
+            transport,
+            port_override,
+            destination,
+            None,
+        )
+    }
+
+    pub fn contact_uri_for_transport_with_sip_contact(
+        &self,
+        transport: Transport,
+        port_override: Option<u16>,
+        destination: Option<IpAddr>,
+        sip_contact: Option<&SipContactConfig>,
+    ) -> Option<rsipstack::sip::Uri> {
+        let proxy = self.proxy_config.load();
+        let contact = sip_contact
+            .cloned()
+            .unwrap_or_else(|| self.sip_contact_config.load().as_ref().clone());
+        let rtp = self.rtp_config.load();
+        let sip_addr = super::sip_contact::build_contact_sip_addr(
+            &proxy,
+            &contact,
+            rtp.external_ip.as_deref(),
+            transport,
+            port_override,
+            destination,
+        )?;
+        Some(build_contact_uri(
+            &self.contact_username,
+            &sip_addr,
+            Some(transport),
+        ))
     }
 
     /// Build a Contact URI for a response to an inbound SIP transaction.
@@ -1571,11 +1682,120 @@ impl SipServerInner {
             return None;
         }
 
-        Some(build_contact_uri(
-            &self.contact_username,
-            connection.get_addr(),
-            Some(connection.transport()),
-        ))
+        let conn_addr = connection.get_addr();
+        let transport = connection.transport();
+        let port = conn_addr.addr.port.map(|p| p.0);
+        let proxy = self.proxy_config.load();
+
+        // Prefer configured listener port over whatever host the transport layer
+        // advertises (may be NAT external IP or an ephemeral outbound socket).
+        let port_override = if super::sip_contact::is_configured_listener_addr(&proxy, conn_addr) {
+            port
+        } else {
+            super::sip_contact::listener_sip_addr(&proxy, transport, None)
+                .and_then(|a| a.addr.port.map(|p| p.0))
+                .or(port)
+        };
+
+        // Inbound: without a reliable destination hint, prefer bind address (LAN-safe).
+        self.contact_uri_for_transport(transport, port_override, None)
+    }
+
+    /// Contact URI for an outbound leg toward `target`.
+    pub fn contact_uri_for_location(
+        &self,
+        target: &crate::call::Location,
+    ) -> Option<rsipstack::sip::Uri> {
+        self.contact_uri_for_location_with_sip_contact(target, None)
+    }
+
+    pub fn contact_uri_for_location_with_sip_contact(
+        &self,
+        target: &crate::call::Location,
+        sip_contact: Option<&SipContactConfig>,
+    ) -> Option<rsipstack::sip::Uri> {
+        let transport = target
+            .destination
+            .as_ref()
+            .and_then(|d| d.r#type)
+            .unwrap_or(Transport::Udp);
+        let port = target
+            .destination
+            .as_ref()
+            .and_then(|d| d.addr.port.map(|p| p.0));
+        let destination = target.destination.as_ref().and_then(|d| {
+            super::sip_contact::ip_from_sip_host(&d.addr.host.to_string())
+        });
+        self.contact_uri_for_transport_with_sip_contact(
+            transport,
+            port,
+            destination,
+            sip_contact,
+        )
+    }
+
+    pub fn network_profile(&self, id: &str) -> Option<NetworkProfile> {
+        let trimmed = id.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        self.network_profiles
+            .load()
+            .iter()
+            .find(|p| p.id == trimmed)
+            .cloned()
+    }
+
+    pub fn default_network_profile(&self) -> NetworkProfile {
+        let default_id = self.default_network_profile_id.load();
+        self.network_profile(default_id.as_str())
+            .or_else(|| self.network_profiles.load().first().cloned())
+            .unwrap_or_else(|| NetworkProfile {
+                id: "default".to_string(),
+                label: Some("Default".to_string()),
+                description: None,
+                external_ip: self.rtp_config.load().external_ip.clone(),
+                auto_external_ip: self.rtp_config.load().auto_external_ip.clone(),
+                sip_external_ip: self.sip_contact_config.load().sip_external_ip.clone(),
+                auto_sip_external_ip: self
+                    .sip_contact_config
+                    .load()
+                    .auto_sip_external_ip
+                    .clone(),
+                local_networks: Vec::new(),
+                contact_lan_use_bind: self.sip_contact_config.load().contact_lan_use_bind,
+                sip_contact_always_bind: self
+                    .sip_contact_config
+                    .load()
+                    .sip_contact_always_bind,
+                bind_ip: self.rtp_config.load().bind_ip.clone(),
+                rtp_start_port: self.rtp_config.load().start_port,
+                rtp_end_port: self.rtp_config.load().end_port,
+            })
+    }
+
+    pub fn apply_network_profile_to_media(
+        &self,
+        profile: &NetworkProfile,
+        media: &mut crate::call::MediaConfig,
+    ) {
+        let proxy_bind = self.proxy_config.load().addr.clone();
+        let rtp_bind = self.rtp_config.load().bind_ip.clone();
+        if let Some(ext) = profile.external_ip.clone() {
+            media.external_ip = Some(ext);
+        }
+        media.bind_ip = Some(
+            profile
+                .effective_bind_ip(&proxy_bind, rtp_bind.as_deref())
+                .to_string(),
+        );
+        if let Some(start) = profile.rtp_start_port {
+            media.rtp_start_port = Some(start);
+        }
+        if let Some(end) = profile.rtp_end_port {
+            media.rtp_end_port = Some(end);
+        }
+        media.sip_contact = Some(profile.sip_contact_config());
     }
 
     pub fn default_media_config(&self) -> MediaConfig {
@@ -1636,6 +1856,21 @@ impl SipServerInner {
             }
         }
         self.rtp_config.store(Arc::new(new_rtp));
+
+        let mut new_sip_contact = config.sip_contact_config();
+        if new_sip_contact.sip_external_ip.is_none() {
+            if let Some(ref url) = new_sip_contact.auto_sip_external_ip {
+                if let Ok(ip) = crate::auto_external_ip::detect_external_ip(url).await {
+                    tracing::info!(ip = %ip, url = %url, "auto_sip_external_ip detected on proxy reload");
+                    new_sip_contact.sip_external_ip = Some(ip.to_string());
+                }
+            }
+        }
+        self.sip_contact_config.store(Arc::new(new_sip_contact));
+        self.network_profiles
+            .store(Arc::new(config.effective_network_profiles()));
+        self.default_network_profile_id
+            .store(Arc::new(config.default_network_profile_id()));
         self.media_proxy.store(Arc::new(config.proxy.media_proxy));
         self.recording_policy
             .store(Arc::new(new_proxy.recording.clone()));
@@ -1998,7 +2233,7 @@ async fn log_rlimit_nofile() {
 #[cfg(test)]
 mod contact_uri_tests {
     use super::*;
-    use crate::config::ClusterPeer;
+    use crate::config::{ClusterPeer, SipContactConfig};
     use rsipstack::sip::HostWithPort;
 
     fn sip_addr(value: &str, transport: Option<Transport>) -> SipAddr {
@@ -2030,6 +2265,33 @@ mod contact_uri_tests {
             uri.to_string(),
             "sips:rustpbx@[2001:db8::20]:5061;transport=TLS"
         );
+    }
+
+    #[test]
+    fn contact_uri_from_listener_not_ephemeral_port() {
+        let proxy = ProxyConfig {
+            addr: "192.168.10.252".to_string(),
+            udp_port: Some(5060),
+            tls_port: Some(5061),
+            ..ProxyConfig::default()
+        };
+        let contact = SipContactConfig {
+            sip_external_ip: Some("203.0.113.10".to_string()),
+            local_networks: crate::config::default_local_networks(),
+            contact_lan_use_bind: true,
+            ..Default::default()
+        };
+        let addr = crate::proxy::sip_contact::build_contact_sip_addr(
+            &proxy,
+            &contact,
+            Some("203.0.113.10"),
+            Transport::Tls,
+            None,
+            Some("192.168.0.50".parse().unwrap()),
+        )
+        .unwrap();
+        assert_eq!(addr.addr.to_string(), "192.168.10.252:5061");
+        assert_eq!(addr.r#type, Some(Transport::Tls));
     }
 
     #[test]

@@ -32,6 +32,7 @@ pub mod queue_files;
 pub mod registrar;
 pub mod routing;
 pub mod server;
+pub mod sip_contact;
 #[cfg(test)]
 pub mod tests;
 pub mod trunk_health;

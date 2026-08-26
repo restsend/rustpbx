@@ -729,6 +729,10 @@ pub struct MediaConfig {
     /// Comfort-noise level in dBFS (default -35.0). Ignored when
     /// `comfort_noise` is false.
     pub comfort_noise_level_db: f32,
+    /// Per-call SIP Contact policy (from network profile). Falls back to the
+    /// server default when unset.
+    #[serde(skip)]
+    pub sip_contact: Option<crate::config::SipContactConfig>,
 }
 
 impl Default for MediaConfig {
@@ -753,6 +757,7 @@ impl MediaConfig {
             video_policy: None,
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
+            sip_contact: None,
         }
     }
 

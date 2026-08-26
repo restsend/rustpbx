@@ -1,5 +1,5 @@
 use crate::call::SipUser;
-use crate::config::{MediaProxyMode, ProxyConfig, RtpConfig};
+use crate::config::{MediaProxyMode, ProxyConfig, RtpConfig, SipContactConfig};
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 use crate::proxy::server::SipServerInner;
 use crate::proxy::user::MemoryUserBackend;
@@ -91,6 +91,9 @@ pub async fn create_test_server_with_config_and_sipflow_backend(
 
     let server_inner = Arc::new(SipServerInner {
         rtp_config: ArcSwap::new(Arc::new(RtpConfig::default())),
+        sip_contact_config: ArcSwap::new(Arc::new(SipContactConfig::default())),
+        network_profiles: ArcSwap::new(Arc::new(Vec::new())),
+        default_network_profile_id: ArcSwap::new(Arc::new("default".to_string())),
         media_proxy: ArcSwap::new(Arc::new(MediaProxyMode::default())),
         recording_policy: ArcSwap::new(Arc::new(None)),
         proxy_config: ArcSwap::from_pointee(config.as_ref().clone()),

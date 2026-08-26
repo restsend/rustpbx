@@ -457,6 +457,11 @@ impl AppStateBuilder {
                     .with_cancel_token(core.token.child_token())
                     .with_callrecord_sender(core.callrecord_sender.clone())
                     .with_rtp_config(config.rtp_config())
+                    .with_sip_contact_config(config.sip_contact_config())
+                    .with_network_profiles(
+                        config.effective_network_profiles(),
+                        config.default_network_profile_id(),
+                    )
                     .with_database_connection(core.db.clone())
                     .with_call_record_hooks(call_record_hooks)
                     .with_storage(core.storage.clone())

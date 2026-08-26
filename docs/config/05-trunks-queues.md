@@ -45,8 +45,9 @@ inbound_hosts = ["203.0.113.50"] # Whitelist IPs
 | `recording` | table | none | Per-trunk recording policy override |
 | `ringback` | table | none | Per-trunk ringback audio override |
 | `max_ring_time` | int | none | Per-trunk max ring/setup time (seconds) before a no-answer call is rejected with 408. `0` disables the ring timeout for this trunk. Overrides the global `[proxy] max_ring_time` for calls routed through this trunk |
-| `external_ip` | string | none | Override the IP advertised in SDP `c=`/`o=` lines and ICE candidates for this trunk's legs. Replaces the global `rtp_config.external_ip`. Essential when some trunks terminate on an overlay network (Tailscale/WireGuard) that needs a different advertised IP than the public NAT address |
-| `bind_ip` | string | none | Override the local IP RTP sockets bind to for this trunk's legs. Replaces the global `rtp_config.bind_ip` |
+| `external_ip` | string | none | Override the IP advertised in SDP `c=`/`o=` lines and ICE candidates for this trunk's legs. Replaces the profile/global RTP external IP. Essential when some trunks terminate on an overlay network (Tailscale/WireGuard) that needs a different advertised IP than the public NAT address |
+| `bind_ip` | string | none | Override the local IP RTP sockets bind to for this trunk's legs. Replaces the profile/global RTP bind IP |
+| `profile` | string | none | Network profile id from `[[network_profile]]` in the main config (Console: trunk **Media Option → Network profile**). Applies grouped RTP/SDP and SIP Contact settings; per-trunk `external_ip` / `bind_ip` override the profile when set |
 | `header_passthrough` | table | none | Control which custom headers from the original INVITE are forwarded to this trunk's outbound INVITE. `mode` is `"all"` (default), `"whitelist"`, or `"blacklist"`; `whitelist`/`blacklist` are header-name lists (case-insensitive). Standard SIP headers (`Via`/`From`/`To`/`Call-ID`/`CSeq`/`Contact`/...) are never forwarded. Unset (default) = forward nothing to external trunks; internal destinations (same realm / registered / home-proxy) always forward everything unless overridden by the route's `with_original_headers` |
 
 ### Trunk Registration
@@ -97,9 +98,13 @@ media_mode = "auto"               # "auto", "none", "bypass", "force_transcode"
                                   # - force_transcode: always bridge through PBX
 video_policy = "pass_through"      # "passthrough", "strip", "transcode"
 
+# Per-trunk network profile (multi-path egress; see 01-platform.md)
+profile = "overlay"               # [[network_profile]] id
+
 # Per-trunk IP override (for overlay networks like Tailscale/WireGuard)
-external_ip = "100.64.10.1"       # Override global rtp_config.external_ip
-bind_ip = "100.64.10.2"           # Override global rtp_config.bind_ip
+# These override the selected profile when set.
+external_ip = "100.64.10.1"
+bind_ip = "100.64.10.2"
 
 # See [06-media-recording.md](06-media-recording.md) for the full media proxy
 # reference, including latching, trunk-level vs server-level configuration,

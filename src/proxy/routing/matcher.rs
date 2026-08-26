@@ -1505,11 +1505,15 @@ pub(crate) fn merge_trunk_media_hints(hints: &mut Option<DialplanHints>, trunk: 
         && trunk.max_ring_time.is_none()
         && trunk.external_ip.is_none()
         && trunk.bind_ip.is_none()
+        && trunk.profile.is_none()
     {
         return;
     }
 
     let hints = hints.get_or_insert_with(DialplanHints::default);
+    if trunk.profile.is_some() {
+        hints.network_profile_id = trunk.profile.clone();
+    }
     if !trunk.codec.is_empty() {
         hints.allow_codecs = Some(trunk.codec.clone());
     }

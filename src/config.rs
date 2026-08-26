@@ -297,6 +297,30 @@ pub struct Config {
 
     pub external_ip: Option<String>,
     pub auto_external_ip: Option<String>,
+    /// Public IP advertised in SIP Contact / dialog signaling. When unset,
+    /// WAN destinations use `external_ip` (RTP). LAN destinations (see
+    /// `local_networks`) always use `proxy.addr` when `contact_lan_use_bind`
+    /// is true (default).
+    pub sip_external_ip: Option<String>,
+    /// Auto-detect `sip_external_ip` via HTTP (mutually exclusive with manual).
+    pub auto_sip_external_ip: Option<String>,
+    /// CIDR ranges treated as "local" for Contact host selection. Defaults to
+    /// RFC1918 + loopback when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_networks: Vec<String>,
+    /// When true (default), peers whose IP falls in `local_networks` receive a
+    /// Contact host of `proxy.addr` instead of the public SIP/RTP IP.
+    #[serde(default = "default_contact_lan_use_bind")]
+    pub contact_lan_use_bind: bool,
+    /// When true, SIP Contact always uses `proxy.addr` (never RTP/public IP).
+    #[serde(default)]
+    pub sip_contact_always_bind: bool,
+    /// Named network profiles (public WAN, overlay, etc.). When empty, a
+    /// synthetic `default` profile is derived from the top-level fields above.
+    #[serde(default, rename = "network_profile", alias = "network_profiles")]
+    pub network_profiles: Vec<NetworkProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_network_profile: Option<String>,
     #[serde(default = "default_config_rtp_start_port")]
     pub rtp_start_port: Option<u16>,
     #[serde(default = "default_config_rtp_end_port")]
@@ -707,6 +731,86 @@ impl SessionTimerMode {
 
     pub fn is_always(self) -> bool {
         matches!(self, Self::Always)
+    }
+}
+
+fn default_contact_lan_use_bind() -> bool {
+    true
+}
+
+/// RFC1918, loopback, and link-local ranges used when `local_networks` is unset.
+pub fn default_local_networks() -> Vec<IpNet> {
+    [
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "::1/128",
+        "fe80::/10",
+    ]
+    .iter()
+    .filter_map(|s| s.parse().ok())
+    .collect()
+}
+
+pub fn parse_local_networks(raw: &[String]) -> Vec<IpNet> {
+    if raw.is_empty() {
+        return default_local_networks();
+    }
+    raw.iter().filter_map(|s| s.trim().parse().ok()).collect()
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SipContactConfig {
+    pub sip_external_ip: Option<String>,
+    pub auto_sip_external_ip: Option<String>,
+    pub local_networks: Vec<IpNet>,
+    pub contact_lan_use_bind: bool,
+    pub sip_contact_always_bind: bool,
+}
+
+/// Network egress profile (FreeSWITCH-style). Groups RTP/SDP and SIP Contact
+/// settings for a logical network path (public WAN, overlay VPN, etc.).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct NetworkProfile {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub external_ip: Option<String>,
+    pub auto_external_ip: Option<String>,
+    pub sip_external_ip: Option<String>,
+    pub auto_sip_external_ip: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_networks: Vec<String>,
+    #[serde(default = "default_contact_lan_use_bind")]
+    pub contact_lan_use_bind: bool,
+    #[serde(default)]
+    pub sip_contact_always_bind: bool,
+    pub bind_ip: Option<String>,
+    pub rtp_start_port: Option<u16>,
+    pub rtp_end_port: Option<u16>,
+}
+
+impl NetworkProfile {
+    pub fn sip_contact_config(&self) -> SipContactConfig {
+        SipContactConfig {
+            sip_external_ip: self.sip_external_ip.clone(),
+            auto_sip_external_ip: self.auto_sip_external_ip.clone(),
+            local_networks: parse_local_networks(&self.local_networks),
+            contact_lan_use_bind: self.contact_lan_use_bind,
+            sip_contact_always_bind: self.sip_contact_always_bind,
+        }
+    }
+
+    pub fn effective_bind_ip<'a>(&'a self, proxy_bind: &'a str, rtp_bind: Option<&'a str>) -> &'a str {
+        self.bind_ip
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or_else(|| rtp_bind.filter(|s| !s.is_empty()))
+            .unwrap_or(proxy_bind)
     }
 }
 
@@ -1158,6 +1262,8 @@ pub struct DialplanHints {
     pub external_ip: Option<String>,
     /// Per-trunk override for the local bind IP.
     pub bind_ip: Option<String>,
+    /// Resolved network profile id stamped during routing (from trunk.profile).
+    pub network_profile_id: Option<String>,
     /// Per-trunk ringback/early-media audio configuration
     pub ringback: Option<crate::proxy::routing::RingbackAudio>,
     /// Concurrency slots acquired during routing policy enforcement. The
@@ -1546,6 +1652,13 @@ impl Default for Config {
             ami: Some(AmiConfig::default()),
             external_ip: None,
             auto_external_ip: None,
+            sip_external_ip: None,
+            auto_sip_external_ip: None,
+            local_networks: Vec::new(),
+            contact_lan_use_bind: default_contact_lan_use_bind(),
+            sip_contact_always_bind: false,
+            network_profiles: Vec::new(),
+            default_network_profile: None,
             rtp_start_port: default_config_rtp_start_port(),
             rtp_end_port: default_config_rtp_end_port(),
             webrtc_port_start: default_config_webrtc_start_port(),
@@ -1617,6 +1730,85 @@ impl Config {
                 .map(|m| m.comfort_noise_level_db)
                 .unwrap_or_else(default_comfort_noise_level_db),
         }
+    }
+
+    pub fn sip_contact_config(&self) -> SipContactConfig {
+        SipContactConfig {
+            sip_external_ip: self.sip_external_ip.clone(),
+            auto_sip_external_ip: self.auto_sip_external_ip.clone(),
+            local_networks: parse_local_networks(&self.local_networks),
+            contact_lan_use_bind: self.contact_lan_use_bind,
+            sip_contact_always_bind: self.sip_contact_always_bind,
+        }
+    }
+
+    pub fn synthetic_default_network_profile(&self) -> NetworkProfile {
+        NetworkProfile {
+            id: "default".to_string(),
+            label: Some("Default".to_string()),
+            description: Some("Derived from top-level RTP/SIP Contact settings".to_string()),
+            external_ip: self.external_ip.clone(),
+            auto_external_ip: self.auto_external_ip.clone(),
+            sip_external_ip: self.sip_external_ip.clone(),
+            auto_sip_external_ip: self.auto_sip_external_ip.clone(),
+            local_networks: self.local_networks.clone(),
+            contact_lan_use_bind: self.contact_lan_use_bind,
+            sip_contact_always_bind: self.sip_contact_always_bind,
+            bind_ip: None,
+            rtp_start_port: self.rtp_start_port,
+            rtp_end_port: self.rtp_end_port,
+        }
+    }
+
+    pub fn effective_network_profiles(&self) -> Vec<NetworkProfile> {
+        if self.network_profiles.is_empty() {
+            return vec![self.synthetic_default_network_profile()];
+        }
+        self.network_profiles.clone()
+    }
+
+    pub fn default_network_profile_id(&self) -> String {
+        self.default_network_profile
+            .clone()
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| {
+                self.network_profiles
+                    .first()
+                    .map(|p| p.id.clone())
+                    .unwrap_or_else(|| "default".to_string())
+            })
+    }
+
+    pub fn network_profile(&self, id: &str) -> Option<NetworkProfile> {
+        let trimmed = id.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if let Some(found) = self
+            .network_profiles
+            .iter()
+            .find(|p| p.id == trimmed)
+            .cloned()
+        {
+            return Some(found);
+        }
+        if trimmed == "default" && self.network_profiles.is_empty() {
+            return Some(self.synthetic_default_network_profile());
+        }
+        None
+    }
+
+    pub fn resolve_trunk_network_profile(
+        &self,
+        trunk: &crate::proxy::routing::TrunkConfig,
+    ) -> NetworkProfile {
+        if let Some(ref id) = trunk.profile {
+            if let Some(profile) = self.network_profile(id) {
+                return profile;
+            }
+        }
+        self.network_profile(&self.default_network_profile_id())
+            .unwrap_or_else(|| self.synthetic_default_network_profile())
     }
 
     pub fn recorder_path(&self) -> String {
@@ -1913,6 +2105,90 @@ mod tests {
 
         assert_eq!(rtp_config.bind_ip.as_deref(), Some("120.228.209.243"));
         assert_eq!(rtp_config.external_ip.as_deref(), Some("203.0.113.10"));
+    }
+
+    #[test]
+    fn test_network_profile_toml_roundtrip() {
+        let raw = r#"
+            proxy = { addr = "127.0.0.1" }
+            default_network_profile = "wan"
+
+            [[network_profile]]
+            id = "wan"
+            label = "Public WAN"
+            external_ip = "203.0.113.10"
+            sip_external_ip = "203.0.113.11"
+            local_networks = ["10.0.0.0/8"]
+            rtp_start_port = 12000
+            rtp_end_port = 12010
+
+            [[network_profile]]
+            id = "overlay"
+            external_ip = "100.64.0.5"
+            bind_ip = "100.64.0.5"
+        "#;
+        let config: Config = toml::from_str(raw).unwrap();
+        assert_eq!(config.network_profiles.len(), 2);
+        assert_eq!(config.default_network_profile_id(), "wan");
+        let wan = config.network_profile("wan").unwrap();
+        assert_eq!(wan.external_ip.as_deref(), Some("203.0.113.10"));
+        assert_eq!(wan.sip_contact_config().sip_external_ip.as_deref(), Some("203.0.113.11"));
+        let overlay = config.network_profile("overlay").unwrap();
+        assert_eq!(overlay.effective_bind_ip("0.0.0.0", Some("192.168.1.5")), "100.64.0.5");
+        let no_bind = NetworkProfile {
+            id: "x".to_string(),
+            label: None,
+            description: None,
+            external_ip: None,
+            auto_external_ip: None,
+            sip_external_ip: None,
+            auto_sip_external_ip: None,
+            local_networks: vec![],
+            contact_lan_use_bind: true,
+            sip_contact_always_bind: false,
+            bind_ip: None,
+            rtp_start_port: None,
+            rtp_end_port: None,
+        };
+        assert_eq!(no_bind.effective_bind_ip("10.0.0.1", Some("192.168.1.5")), "192.168.1.5");
+        assert_eq!(no_bind.effective_bind_ip("10.0.0.1", None), "10.0.0.1");
+    }
+
+    #[test]
+    fn test_effective_network_profiles_synthetic_when_empty() {
+        let config = Config::default();
+        let profiles = config.effective_network_profiles();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].id, "default");
+    }
+
+    #[test]
+    fn test_sip_contact_config_parses_local_networks() {
+        let raw = r#"
+            proxy = { addr = "127.0.0.1" }
+            local_networks = ["192.168.50.0/24"]
+            sip_external_ip = "203.0.113.20"
+            contact_lan_use_bind = true
+            sip_contact_always_bind = false
+        "#;
+        let config: Config = toml::from_str(raw).unwrap();
+        let sip = config.sip_contact_config();
+        assert_eq!(sip.sip_external_ip.as_deref(), Some("203.0.113.20"));
+        assert!(sip.contact_lan_use_bind);
+        assert!(!sip.sip_contact_always_bind);
+        assert_eq!(sip.local_networks.len(), 1);
+        assert!(sip.local_networks[0].contains(&"192.168.50.10".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn test_sip_contact_config_default_local_networks_when_empty() {
+        let config = Config::default();
+        let sip = config.sip_contact_config();
+        assert!(!sip.local_networks.is_empty());
+        assert!(sip
+            .local_networks
+            .iter()
+            .any(|n| n.contains(&"10.1.2.3".parse::<IpAddr>().unwrap())));
     }
 
     #[cfg(feature = "commerce")]
