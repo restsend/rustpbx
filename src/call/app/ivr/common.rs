@@ -13,6 +13,8 @@ use super::config::{ActionNode, EntryAction};
 pub enum ActionResult {
     Terminal(TerminalAction),
     ChainedTo(ActionNode),
+    /// Complete an explicitly empty prompt without waiting for a media event.
+    ImmediateAudioComplete,
     WaitFor(WaitEvent),
     /// Chain to a registered domain [`CallApp`] (voicemail, csat_survey, …).
     StartSubApp(Box<dyn CallApp>),
@@ -341,6 +343,11 @@ pub async fn execute_action(
             tts_api_url,
             ..
         } => {
+            // Some("") is a successful no-media prompt; None still means missing audio input.
+            let explicitly_empty = tts_api_url.is_none()
+                && tts_text.as_deref() == Some("")
+                && file.as_deref().unwrap_or_default().is_empty()
+                && record_name_list.is_none();
             let resolved_text = if tts_api_url.is_some() {
                 match fetch_tts_text_from_api(tts_api_url.as_deref().unwrap(), sess, ctx).await {
                     Some(text) => Some(text),
@@ -366,6 +373,8 @@ pub async fn execute_action(
                 Ok(ActionResult::WaitFor(WaitEvent::AudioComplete {
                     interrupted: false,
                 }))
+            } else if explicitly_empty {
+                Ok(ActionResult::ImmediateAudioComplete)
             } else {
                 Ok(ActionResult::WaitFor(WaitEvent::NoAudio))
             }

@@ -582,6 +582,36 @@ impl StepIvrApp {
                             TerminalAction::Exit => AppAction::Exit,
                         }
                     }
+                    ActionResult::ImmediateAudioComplete => {
+                        // Reuse pending-trace completion so the no-media Prompt remains observable.
+                        self.pending_start_instant = self.step_start_instant;
+                        self.pending_trace = Some(IvrTraceEntry {
+                            session_id: session_id.clone(),
+                            caller: caller.clone(),
+                            callee: callee.clone(),
+                            step_index: self.step_index,
+                            trigger: trigger.clone(),
+                            provider_url: None,
+                            action_type: node_type_str,
+                            action_json,
+                            error: None,
+                            step_id: step_id.clone(),
+                            step_name: step_name.clone(),
+                            step_start_time: self.current_step_start_time.clone(),
+                            step_end_time: None,
+                            duration_ms: 0,
+                            extra: self.extra.clone(),
+                            end_reason: None,
+                            end_detail: None,
+                        });
+                        self.current_node = Some(
+                            self.request_next(Some(ProviderEvent::AudioComplete {
+                                interrupted: false,
+                            }))
+                            .await?,
+                        );
+                        return Box::pin(self.__exec_node(ctrl, ctx)).await;
+                    }
                     ActionResult::ChainedTo(next) => {
                         self.current_trigger = Some(crate::rwi::TriggerInfo::new("chained"));
                         self.current_node = Some(next);
@@ -1981,6 +2011,7 @@ mod tests {
         idx: std::sync::Mutex<usize>,
         start_called: std::sync::Mutex<bool>,
         end_called: std::sync::Mutex<bool>,
+        events: std::sync::Mutex<Vec<Option<ProviderEvent>>>,
     }
 
     impl MockProvider {
@@ -1990,6 +2021,7 @@ mod tests {
                 idx: std::sync::Mutex::new(0),
                 start_called: std::sync::Mutex::new(false),
                 end_called: std::sync::Mutex::new(false),
+                events: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -1998,7 +2030,8 @@ mod tests {
 
     #[async_trait]
     impl ActionProvider for MockProvider {
-        async fn next_action(&self, _ctx: ProviderContext) -> anyhow::Result<ActionNode> {
+        async fn next_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode> {
+            self.events.lock().unwrap().push(ctx.event.clone());
             let mut idx = self.idx.lock().unwrap();
             if *idx < self.nodes.len() {
                 let node = self.nodes[*idx].clone();
@@ -2280,6 +2313,95 @@ mod tests {
             "session_start"
         );
         assert_eq!(transfer_trace.event.payload["step_id"], "transfer-step");
+    }
+
+    #[tokio::test]
+    async fn test_empty_prompt_completes_without_audio() {
+        use crate::rwi::gateway::RwiGateway;
+
+        let prompt: ActionNode = serde_json::from_value(serde_json::json!({
+            "type": "prompt",
+            "tts_text": "",
+            "step_id": "empty-prompt-step",
+            "extra": { "nodetype": "dynamic_prompt" }
+        }))
+        .expect("provider-shaped empty Prompt must deserialize");
+        let mut transfer = ActionNode::new(EntryAction::Transfer {
+            target: "2001".into(),
+            params: HashMap::new(),
+            return_app: None,
+            return_target: None,
+        });
+        transfer.step_id = Some("next-step".into());
+        let gateway = RwiGateway::new();
+        let mut events = gateway.subscribe_events();
+        let mut app = mock_app(vec![prompt, transfer]);
+        app.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gateway)));
+
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        let prompt_trace = events
+            .try_recv()
+            .expect("empty prompt trace must be enqueued");
+        let transfer_trace = events.try_recv().expect("next step trace must be enqueued");
+        assert_eq!(prompt_trace.event.payload["step_id"], "empty-prompt-step");
+        assert_eq!(prompt_trace.event.payload["action_type"], "Prompt");
+        assert_eq!(
+            prompt_trace.event.payload["extra"]["nodetype"],
+            "dynamic_prompt"
+        );
+        assert_eq!(transfer_trace.event.payload["step_id"], "next-step");
+        assert_eq!(
+            transfer_trace.event.payload["trigger"]["type"],
+            "audio_complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_missing_prompt_audio_reports_provider_error() {
+        let prompt: ActionNode = serde_json::from_value(serde_json::json!({
+            "type": "prompt",
+            "step_id": "missing-audio-step"
+        }))
+        .expect("provider-shaped Prompt without media must deserialize");
+        let mut transfer = ActionNode::new(EntryAction::Transfer {
+            target: "2001".into(),
+            params: HashMap::new(),
+            return_app: None,
+            return_target: None,
+        });
+        transfer.step_id = Some("error-step".into());
+        let provider = Arc::new(MockProvider::new(vec![prompt, transfer]));
+        let app = StepIvrApp::with_provider(Box::new(MockProviderHandle(provider.clone())));
+
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        assert!(provider.events.lock().unwrap().iter().any(|event| {
+            matches!(
+                event,
+                Some(ProviderEvent::Error { reason }) if reason == "TTS service not available"
+            )
+        }));
     }
 
     #[tokio::test]
