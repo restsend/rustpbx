@@ -495,8 +495,8 @@ impl Locator for DbLocator {
                 active_model.instance_id = Set(location.instance_id.clone());
 
                 // Insert without specifying id
-                active_model
-                    .insert(&self.db)
+                Entity::insert(active_model)
+                    .exec(&self.db)
                     .await
                     .map_err(|e| anyhow::anyhow!("Database error on register insert: {}", e))?;
             }
@@ -792,8 +792,48 @@ impl Locator for DbLocator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rsipstack::sip::transport::Transport;
+    use rsipstack::sip::{Auth, HostWithPort, Scheme, transport::Transport};
     use rsipstack::transport::SipAddr;
+    use sea_orm::{DbBackend, MockDatabase, MockExecResult};
+
+    #[tokio::test]
+    async fn register_succeeds_when_inserted_row_is_not_immediately_visible() {
+        let db = MockDatabase::new(DbBackend::MySql)
+            .append_query_results([Vec::<Model>::new(), Vec::<Model>::new()])
+            .append_exec_results([MockExecResult {
+                last_insert_id: 1,
+                rows_affected: 1,
+            }])
+            .into_connection();
+        let locator = DbLocator {
+            db,
+            realm_checker: Mutex::new(None),
+        };
+        let location = Location {
+            aor: rsipstack::sip::Uri {
+                scheme: Some(Scheme::Sip),
+                auth: Some(Auth {
+                    user: "alice".to_string(),
+                    password: None,
+                }),
+                host_with_port: HostWithPort::try_from("client.example.com")
+                    .expect("valid aor host"),
+                params: vec![],
+                headers: vec![],
+            },
+            expires: 60,
+            destination: Some(SipAddr {
+                r#type: Some(Transport::Udp),
+                addr: "192.0.2.10:5060".try_into().expect("valid destination"),
+            }),
+            ..Default::default()
+        };
+
+        locator
+            .register("alice", Some("pbx.example.com"), location)
+            .await
+            .expect("successful insert must complete registration");
+    }
 
     #[tokio::test]
     async fn register_prefers_destination_transport_for_websocket_connections() {
