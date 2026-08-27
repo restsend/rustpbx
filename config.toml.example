@@ -226,6 +226,39 @@ type = "extension"
 # token_cache_ttl_secs = 60         # Default: 0 (disabled). Recommended: 30-300
 # token_cache_size = 10000          # Default: 10000 (LRU eviction)
 
+# SSO login broker (commerce builds only) — brokers an enterprise SSO login
+# into a native-app deep link via the OAuth2 authorization-code + PKCE flow.
+# Endpoints mount ONLY when enabled = true: {base_path}/authorize|callback|token.
+# Stateless envelopes: cluster-ready with NO shared storage — every node just
+# needs identical secrets.
+# Contracts: docs/sso_upstream_integration.md / docs/sso_client_integration.md
+# End-to-end example: docs/config/sso_walkthrough.md (中文) / sso_walkthrough_en.md
+# [sso]
+# enabled = true
+# base_path = "/sso"                 # Customizable URL prefix
+# provider = "jwt"                   # Phase 1: third-party HS256 JWT handoff
+# redirect_url = "myapp://auth/sso"  # Full deep-link URL handed to the app;
+#                                    # code & state appended as query params
+# auto_provision = false             # JIT-create role-less console user on first login
+# code_ttl_secs = 60                 # Authorization-code envelope lifetime
+# flow_ttl_secs = 600                # authorize → callback window
+#
+# [sso.jwt]
+# secret = "shared-secret-with-the-upstream-idp"
+# issuer = ""                        # Optional iss enforcement
+# audience = ""                      # Optional aud enforcement
+# user_id_claim = "userId"           # Enterprise identity claim (userId/mis_id/sub...)
+# upstream_login_url = "https://sso.example.com/login?client=rustpbx"
+#                                    # PBX appends &state=<sealed>; upstream must
+#                                    # 302 back to {base_path}/callback?token=<jwt>&state=<echo>
+# token_mode = "passthrough"         # "passthrough": client receives the enterprise JWT verbatim.
+#                                    # "minted": rustpbx signs its own JWT instead (prefers
+#                                    # [proxy.jwt_auth].secret; enables refresh_token grant).
+#
+# Tip: enable [proxy.jwt_auth] above with the SAME secret so the SIP/WS
+# chain accepts SSO tokens without extra plumbing:
+#   X-Auth-Token on REGISTER, ?token= on the WebSocket URL.
+
 # Audio codec allowlist (e.g. PCMU, PCMA, G722, OPUS).
 # audio_codecs = ["pcma","pcmu","g722","opus"]
 

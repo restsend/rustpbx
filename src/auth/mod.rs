@@ -2,6 +2,8 @@ pub mod http_token_auth_backend;
 pub mod jwt_auth_backend;
 pub mod jwt_validator;
 pub mod phone_auth;
+#[cfg(feature = "commerce")]
+pub mod sso;
 
 use std::sync::Arc;
 

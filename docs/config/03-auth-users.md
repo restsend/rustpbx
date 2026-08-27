@@ -470,3 +470,20 @@ The webhook sends a POST request with a JSON body:
 - `location`: Sip location details (only for `registered` and `unregistered`).
 - `locations`: Array of locations (only for `offline`).
 - `timestamp`: Unix timestamp in seconds.
+
+## SSO Login Broker (Enterprise SSO → Native App)
+
+Brokers an enterprise SSO login into a native-app deep link using the standard
+OAuth2 authorization-code + PKCE flow (commerce builds only; endpoints mount
+when `[sso].enabled = true`).
+
+- Contracts: `docs/sso_upstream_integration.md` (upstream IdP) /
+  `docs/sso_client_integration.md` (client app)
+- End-to-end example with copy-paste commands:
+  [sso_walkthrough.md](sso_walkthrough.md) · [English](sso_walkthrough_en.md)
+
+Key interplay with the JWT fast registration above: share one HS256 secret
+between `[sso.jwt]` and `[proxy.jwt_auth]` so tokens issued/relayed by the SSO
+broker are accepted on the SIP (`X-Auth-Token`) and WebSocket (`?token=`)
+chains unchanged. Stateful-free by design — cluster-safe with identical node
+secrets, no shared storage.

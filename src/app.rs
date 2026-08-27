@@ -1058,6 +1058,14 @@ pub fn create_router(state: AppState) -> Router {
         router = router.merge(crate::api::router(console_state));
     }
 
+    // SSO login broker — commerce builds only, mounted only when [sso]
+    // is enabled and its provider section validates. Routes simply do not
+    // exist otherwise.
+    #[cfg(feature = "commerce")]
+    if let Some(sso_router) = crate::auth::sso::mount_router(state.config()) {
+        router = router.merge(sso_router);
+    }
+
     let access_log_skip_paths = Arc::new(state.config().http_access_skip_paths.clone());
 
     router = router.layer(middleware::from_fn_with_state(

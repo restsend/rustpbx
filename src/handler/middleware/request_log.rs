@@ -173,6 +173,46 @@ fn should_skip_logging(path: &str, patterns: &[String]) -> bool {
     })
 }
 
+/// Query parameters whose values must never reach access logs.
+const REDACTED_QUERY_PARAMS: &[&str] = &[
+    "token",
+    "access_token",
+    "refresh_token",
+    "code",
+    "code_verifier",
+    "code_challenge",
+    "ticket",
+    "secret",
+    "client_secret",
+    "state",
+];
+
+/// Mask sensitive query values (SSO/OAuth traffic) while keeping the rest of
+/// the URI intact.
+fn redact_query(uri: &str) -> String {
+    let Some((path, query)) = uri.split_once('?') else {
+        return uri.to_string();
+    };
+    let redacted = query
+        .split('&')
+        .map(|pair| {
+            if let Some((key, _)) = pair.split_once('=')
+                && REDACTED_QUERY_PARAMS.contains(&key)
+            {
+                format!("{key}=<redacted>")
+            } else {
+                pair.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    if redacted.is_empty() {
+        path.to_string()
+    } else {
+        format!("{path}?{redacted}")
+    }
+}
+
 /// Logs basic request metadata once the downstream handler returns.
 pub async fn log_requests(
     State(skip_paths): State<Arc<Vec<String>>>,
@@ -181,7 +221,7 @@ pub async fn log_requests(
 ) -> Response {
     let started_at = Instant::now();
     let method = req.method().clone();
-    let uri = req.uri().to_string();
+    let uri = redact_query(req.uri().to_string().as_str());
     let request_path = req.uri().path().to_string();
     let connect_info = req
         .extensions()

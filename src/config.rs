@@ -355,6 +355,11 @@ pub struct Config {
     #[cfg(feature = "commerce")]
     #[serde(default)]
     pub licenses: Option<LicenseConfig>,
+    /// SSO login broker (commerce builds only). Handlers are mounted only
+    /// when `enabled = true` and the provider section validates.
+    #[cfg(feature = "commerce")]
+    #[serde(default)]
+    pub sso: Option<SsoConfig>,
     #[serde(default)]
     pub rwi: Option<RwiConfig>,
     #[serde(default)]
@@ -944,6 +949,95 @@ fn default_jwt_sip_header() -> String {
 }
 fn default_jwt_ws_token_param() -> String {
     "token".to_string()
+}
+
+/// SSO login broker — brokers an enterprise SSO login into a native-app
+/// deep link. Handlers only mount when `enabled = true` (commerce builds).
+#[cfg(feature = "commerce")]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SsoConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// URL prefix for the SSO endpoints (`/authorize`, `/callback`, `/token`).
+    #[serde(default = "default_sso_base_path")]
+    pub base_path: String,
+    /// Active upstream provider kind. Phase 1 supports `"jwt"`
+    /// (third-party HS256 JWT handoff).
+    #[serde(default = "default_sso_provider")]
+    pub provider: String,
+    /// Full deep-link URL handed back to the native app after login,
+    /// e.g. `myapp://callback` or `corp://auth/sso`. The one-time code and
+    /// client state are appended as query parameters.
+    #[serde(default)]
+    pub redirect_url: Option<String>,
+    /// JIT-create a local console user on first SSO login (no roles).
+    #[serde(default)]
+    pub auto_provision: bool,
+    /// Authorization-code lifetime. Default 60s.
+    #[serde(default = "default_sso_code_ttl")]
+    pub code_ttl_secs: u64,
+    /// authorize → upstream-login → callback flow lifetime. Default 600s.
+    #[serde(default = "default_sso_flow_ttl")]
+    pub flow_ttl_secs: u64,
+    /// Provider-specific settings; required when provider is "jwt".
+    #[serde(default)]
+    pub jwt: Option<SsoJwtConfig>,
+}
+
+#[cfg(feature = "commerce")]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SsoJwtConfig {
+    pub secret: String,
+    /// `passthrough` (default) returns the upstream JWT verbatim as
+    /// access_token; `minted` issues a rustpbx-signed JWT instead.
+    #[serde(default = "default_sso_token_mode")]
+    pub token_mode: String,
+    /// Claim carrying the enterprise user id (userId / mis_id / sub ...).
+    #[serde(default = "default_jwt_user_id_claim")]
+    pub user_id_claim: String,
+    #[serde(default)]
+    pub issuer: Option<String>,
+    #[serde(default)]
+    pub audience: Option<String>,
+    /// Enterprise login page; PBX appends `state=<..>` and the upstream must
+    /// 302 back to `{base}/callback?token=<jwt>&state=<same value>`.
+    pub upstream_login_url: String,
+    /// access_token TTL for minted mode. Default 3600s.
+    #[serde(default = "default_sso_token_ttl")]
+    pub token_ttl_secs: u64,
+    /// refresh_token TTL for minted mode; 0 disables the refresh grant.
+    /// Default 86400s. Ignored in passthrough mode.
+    #[serde(default = "default_sso_refresh_ttl")]
+    pub refresh_token_ttl_secs: u64,
+}
+
+#[cfg(feature = "commerce")]
+fn default_sso_base_path() -> String {
+    "/sso".to_string()
+}
+#[cfg(feature = "commerce")]
+fn default_sso_provider() -> String {
+    "jwt".to_string()
+}
+#[cfg(feature = "commerce")]
+fn default_sso_code_ttl() -> u64 {
+    60
+}
+#[cfg(feature = "commerce")]
+fn default_sso_flow_ttl() -> u64 {
+    600
+}
+#[cfg(feature = "commerce")]
+fn default_sso_token_mode() -> String {
+    "passthrough".to_string()
+}
+#[cfg(feature = "commerce")]
+fn default_sso_token_ttl() -> u64 {
+    3600
+}
+#[cfg(feature = "commerce")]
+fn default_sso_refresh_ttl() -> u64 {
+    86400
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1683,6 +1777,8 @@ impl Default for Config {
             sipflow: None,
             #[cfg(feature = "commerce")]
             licenses: None,
+            #[cfg(feature = "commerce")]
+            sso: None,
             rwi_webhook: None,
             cluster: None,
             outbound: None,
