@@ -614,17 +614,25 @@ pub enum LocatorConfig {
 
 pub use crate::storage::S3Vendor;
 
-pub const DEFAULT_CALL_RECORD_MAX_CONCURRENT: usize = 64;
+pub const DEFAULT_CALL_RECORD_CHANNEL_CAPACITY: usize = 2048;
+pub const DEFAULT_CALL_RECORD_BATCH_SIZE: usize = 16;
 
-fn default_call_record_max_concurrent() -> usize {
-    DEFAULT_CALL_RECORD_MAX_CONCURRENT
+fn default_call_record_channel_capacity() -> usize {
+    DEFAULT_CALL_RECORD_CHANNEL_CAPACITY
+}
+
+fn default_call_record_batch_size() -> usize {
+    DEFAULT_CALL_RECORD_BATCH_SIZE
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
 pub struct CallRecordConfig {
-    /// Maximum concurrent call record save/hook tasks (minimum: 1).
-    #[serde(default = "default_call_record_max_concurrent")]
-    pub max_concurrent: usize,
+    /// Bounded channel capacity used between call producers and the manager.
+    #[serde(default = "default_call_record_channel_capacity")]
+    pub channel_capacity: usize,
+    /// Maximum number of records passed to hooks and the saver at once.
+    #[serde(default = "default_call_record_batch_size")]
+    pub batch_size: usize,
     #[serde(flatten)]
     pub storage: CallRecordStorageConfig,
 }
@@ -1620,7 +1628,8 @@ impl Default for UserBackendConfig {
 impl Default for CallRecordConfig {
     fn default() -> Self {
         Self {
-            max_concurrent: default_call_record_max_concurrent(),
+            channel_capacity: default_call_record_channel_capacity(),
+            batch_size: default_call_record_batch_size(),
             storage: CallRecordStorageConfig::Local {
                 #[cfg(target_os = "windows")]
                 root: "./config/cdr".to_string(),
@@ -1969,16 +1978,18 @@ mod tests {
     }
 
     #[test]
-    fn test_callrecord_max_concurrent_is_shared_config() {
+    fn test_callrecord_batch_config() {
         let callrecord: CallRecordConfig = toml::from_str(
             r#"
             type = "http"
             url = "https://example.com/cdr"
-            max_concurrent = 7
+            channel_capacity = 4096
+            batch_size = 128
             "#,
         )
         .unwrap();
-        assert_eq!(callrecord.max_concurrent, 7);
+        assert_eq!(callrecord.channel_capacity, 4096);
+        assert_eq!(callrecord.batch_size, 128);
         assert!(matches!(
             callrecord.storage,
             CallRecordStorageConfig::Http { .. }
@@ -1991,7 +2002,11 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(defaulted.max_concurrent, DEFAULT_CALL_RECORD_MAX_CONCURRENT);
+        assert_eq!(
+            defaulted.channel_capacity,
+            DEFAULT_CALL_RECORD_CHANNEL_CAPACITY
+        );
+        assert_eq!(defaulted.batch_size, DEFAULT_CALL_RECORD_BATCH_SIZE);
     }
 
     #[test]

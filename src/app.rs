@@ -1,6 +1,7 @@
 use crate::{
     callrecord::{
-        CallRecordManagerBuilder, CallRecordSender, recording_upload::RecordingUploadHook,
+        CallRecordManagerBuilder, CallRecordSender,
+        recording_upload::{RecordingUploadHook, RecordingUploadManager},
         sipflow_upload::SipFlowUploadHook,
     },
     config::{CallRecordStorageConfig, ClusterConfig, Config, UserBackendConfig},
@@ -313,6 +314,7 @@ impl AppStateBuilder {
 
         let mut callrecord_stats = None;
         let mut callrecord_manager = None;
+        let mut recording_upload_manager: Option<RecordingUploadManager> = None;
         let callrecord_sender = if let Some(sender) = self.callrecord_sender {
             Some(sender)
         } else {
@@ -334,7 +336,6 @@ impl AppStateBuilder {
                         CallRecordStorageConfig::Local { .. } => "local",
                     };
                     tracing::info!(storage_type = ty, "callrecord config detected");
-                    builder = builder.with_max_concurrent(cr.max_concurrent);
                     builder = builder.with_config(cr.clone());
                 }
                 None => {
@@ -378,7 +379,8 @@ impl AppStateBuilder {
             }
 
             if let Some(policy) = recording_upload_policy.as_ref() {
-                let mut hook = RecordingUploadHook::new(policy.clone())?;
+                let (mut hook, upload_manager) = RecordingUploadHook::new(policy.clone())?;
+                recording_upload_manager = upload_manager;
                 if let Some(ref gw) = rwi_gateway {
                     hook = hook.with_rwi_gateway(gw.clone());
                 }
@@ -580,6 +582,12 @@ impl AppStateBuilder {
             if let Some(registry_guard) = app_state.tls_reloader.read().await.as_ref() {
                 registry_guard.register_sip_tls(reloader).await;
             }
+        }
+
+        if let Some(mut manager) = recording_upload_manager {
+            crate::utils::spawn(async move {
+                manager.serve().await;
+            });
         }
 
         if let Some(mut manager) = callrecord_manager {

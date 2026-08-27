@@ -33,7 +33,7 @@ pub mod system_notification;
 pub mod user;
 
 fn default_max_connections() -> u32 {
-    64
+    16
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

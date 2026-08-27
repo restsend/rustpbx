@@ -1,8 +1,12 @@
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use bytes::Bytes;
+use object_store::{Attribute, Attributes, PutOptions};
 use reqwest::multipart::{Form, Part};
 use serde_json::json;
 use tracing::{info, warn};
@@ -21,13 +25,21 @@ pub struct RecordingUploadHook {
     policy: RecordingPolicy,
     rwi_gateway: Option<RwiGatewayRef>,
     client: reqwest::Client,
-    s3_storage: Option<Storage>,
+    s3_upload_sender: Option<tokio::sync::mpsc::Sender<PathBuf>>,
 }
 
+pub struct RecordingUploadManager {
+    policy: RecordingPolicy,
+    storage: Storage,
+    receiver: tokio::sync::mpsc::Receiver<PathBuf>,
+}
+
+const RECORDING_UPLOAD_CHANNEL_CAPACITY: usize = 65_536;
+
 impl RecordingUploadHook {
-    pub fn new(policy: RecordingPolicy) -> Result<Self> {
+    pub fn new(policy: RecordingPolicy) -> Result<(Self, Option<RecordingUploadManager>)> {
         let recording_type = policy.effective_recording_type();
-        let s3_storage = if recording_type == RecordingType::S3 {
+        let (s3_upload_sender, upload_manager) = if recording_type == RecordingType::S3 {
             let bucket = Self::required(&policy.bucket, "bucket")?;
             let region = Self::required(&policy.region, "region")?;
             let access_key = Self::required(&policy.access_key, "access_key")?;
@@ -48,20 +60,32 @@ impl RecordingUploadHook {
                 endpoint: endpoint.clone(),
                 prefix: None,
             })?;
-            Some(storage)
+            let (sender, receiver) =
+                tokio::sync::mpsc::channel(RECORDING_UPLOAD_CHANNEL_CAPACITY);
+            (
+                Some(sender),
+                Some(RecordingUploadManager {
+                    policy: policy.clone(),
+                    storage,
+                    receiver,
+                }),
+            )
         } else {
-            None
+            (None, None)
         };
 
-        Ok(Self {
-            policy,
-            rwi_gateway: None,
-            client: crate::http_util::build_keepalive_client(
-                Some(CALL_RECORD_HTTP_TIMEOUT),
-                Some(CALL_RECORD_HTTP_CONNECT_TIMEOUT),
-            )?,
-            s3_storage,
-        })
+        Ok((
+            Self {
+                policy,
+                rwi_gateway: None,
+                client: crate::http_util::build_keepalive_client(
+                    Some(CALL_RECORD_HTTP_TIMEOUT),
+                    Some(CALL_RECORD_HTTP_CONNECT_TIMEOUT),
+                )?,
+                s3_upload_sender,
+            },
+            upload_manager,
+        ))
     }
 
     pub fn with_rwi_gateway(mut self, gw: RwiGatewayRef) -> Self {
@@ -173,14 +197,24 @@ impl RecordingUploadHook {
             .ok_or_else(|| anyhow!("recording.{name} is required"))
     }
 
-    fn storage_key(&self, record: &CallRecord, _track_id: &str, media_path: &str) -> String {
-        let file_name = Path::new(media_path)
-            .file_name()
-            .unwrap_or_else(|| std::ffi::OsStr::new("recording.wav"))
-            .to_string_lossy();
-        let key = format!("{}/{}", record.start_time.format("%Y%m%d"), file_name);
-        match self
-            .policy
+    fn storage_key(policy: &RecordingPolicy, media_path: &Path) -> String {
+        let recorder_root = policy.recorder_path();
+        let relative = media_path
+            .strip_prefix(Path::new(&recorder_root))
+            .ok()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| {
+                media_path
+                    .file_name()
+                    .map(Path::new)
+                    .unwrap_or_else(|| Path::new("recording.wav"))
+            });
+        let key = relative
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        match policy
             .root
             .as_deref()
             .map(str::trim)
@@ -206,14 +240,95 @@ impl RecordingUploadHook {
         }
     }
 
-    async fn upload_s3(&self, key: &str, data: Vec<u8>) -> Result<String> {
-        let storage = self
-            .s3_storage
-            .as_ref()
-            .ok_or_else(|| anyhow!("recording S3 storage is not initialized"))?;
+}
+
+impl RecordingUploadManager {
+    pub async fn serve(&mut self) {
+        while let Some(path) = self.receiver.recv().await {
+            let key = RecordingUploadHook::storage_key(&self.policy, &path);
+            let data = match tokio::fs::read(&path).await {
+                Ok(data) => data,
+                Err(err) => {
+                    warn!(
+                        path = %path.display(),
+                        %err,
+                        "recording uploader failed to read local media"
+                    );
+                    continue;
+                }
+            };
+            let bytes = data.len();
+            let content_type = match path.extension().and_then(|extension| extension.to_str()) {
+                Some(extension) if extension.eq_ignore_ascii_case("wav") => "audio/wav",
+                Some(extension) if extension.eq_ignore_ascii_case("jsonl") => "application/jsonl",
+                _ => "application/octet-stream",
+            };
+            let attributes = Attributes::from_iter([(
+                Attribute::ContentType,
+                content_type,
+            )]);
+            if let Err(err) = self
+                .storage
+                .write_opts(
+                    &key,
+                    Bytes::from(data),
+                    PutOptions {
+                        attributes,
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                warn!(
+                    path = %path.display(),
+                    key,
+                    %err,
+                    "recording upload failed"
+                );
+                continue;
+            }
+            info!(
+                path = %path.display(),
+                key,
+                bytes,
+                content_type,
+                "recording uploaded"
+            );
+            if let Err(err) = tokio::fs::remove_file(&path).await {
+                warn!(
+                    path = %path.display(),
+                    %err,
+                    "failed to remove local recording after upload"
+                );
+            }
+        }
+    }
+}
+
+impl RecordingUploadHook {
+    fn preconstruct_s3_urls(&self, record: &mut CallRecord) -> Result<()> {
         let bucket = Self::required(&self.policy.bucket, "bucket")?;
-        storage.write(key, Bytes::from(data)).await?;
-        Ok(Self::s3_url(self.policy.endpoint.as_deref(), &bucket, key))
+        let mut first_media_url = None;
+
+        for media in &mut record.recorder {
+            let key = Self::storage_key(&self.policy, Path::new(&media.path));
+            let url = Self::s3_url(self.policy.endpoint.as_deref(), &bucket, &key);
+            let extra = media.extra.get_or_insert_with(HashMap::new);
+            extra.insert("uploadUrl".to_string(), json!(url.clone()));
+            if first_media_url.is_none() && media.track_id != "signaling" {
+                first_media_url = Some(url);
+            }
+        }
+
+        if let Some(url) = first_media_url {
+            record.details.recording_url = Some(url);
+            record.details.recording_duration_secs = Some(
+                (record.end_time - record.start_time)
+                    .num_seconds()
+                    .max(0) as i32,
+            );
+        }
+        Ok(())
     }
 
     async fn upload_http(
@@ -263,18 +378,23 @@ impl RecordingUploadHook {
 
 #[async_trait]
 impl CallRecordHook for RecordingUploadHook {
-    async fn on_record_enrich(&self, record: &mut CallRecord) -> anyhow::Result<()> {
-        // Local artifacts are archived before the CDR is persisted so the
-        // stored paths match the daily/hourly on-disk layout. Remote uploads
-        // (HTTP/S3) stay in `on_record_completed` — they are side effects and
-        // must not delay or break the save.
-        if self.policy.effective_recording_type() == RecordingType::Local {
-            self.archive_local_artifacts(record).await;
+    async fn on_record_enrich(&self, records: &mut [CallRecord]) -> anyhow::Result<()> {
+        for record in records {
+            match self.policy.effective_recording_type() {
+                RecordingType::Local => self.archive_local_artifacts(record).await,
+                RecordingType::S3 => {
+                    // Move generated artifacts into their final dated layout first,
+                    // then persist the remote URL before the asynchronous upload.
+                    self.archive_local_artifacts(record).await;
+                    self.preconstruct_s3_urls(record)?;
+                }
+                RecordingType::Http | RecordingType::Sipflow => {}
+            }
         }
         Ok(())
     }
 
-    async fn on_record_completed(&self, record: &mut CallRecord) -> anyhow::Result<()> {
+    async fn on_record_completed(&self, records: &mut [CallRecord]) -> anyhow::Result<()> {
         use crate::callrecord::{RecordingSubdir, local_archive_path, write_upload_failed_marker};
         use std::time::Instant;
 
@@ -284,6 +404,8 @@ impl CallRecordHook for RecordingUploadHook {
         }
         let subdir = RecordingSubdir::parse(self.policy.subdir.as_deref());
         let root = self.policy.recorder_path();
+
+        for record in records {
 
         // File entries are finalized recording artifacts (wav + optional jsonl).
         let mut first_uploaded_url = None;
@@ -304,6 +426,48 @@ impl CallRecordHook for RecordingUploadHook {
                 continue;
             }
 
+            if recording_type == RecordingType::S3 {
+                let key = Self::storage_key(&self.policy, Path::new(&path));
+                let bucket = Self::required(&self.policy.bucket, "bucket")?;
+                let url = Self::s3_url(self.policy.endpoint.as_deref(), &bucket, &key);
+                match self
+                    .s3_upload_sender
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("recording S3 uploader is not initialized"))?
+                    .try_send(PathBuf::from(&path))
+                {
+                    Ok(()) => info!(
+                        call_id = %record.call_id,
+                        track_id,
+                        path,
+                        key,
+                        "recording queued for upload"
+                    ),
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => warn!(
+                        call_id = %record.call_id,
+                        track_id,
+                        path,
+                        "recording upload channel full; local file retained"
+                    ),
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => warn!(
+                        call_id = %record.call_id,
+                        track_id,
+                        path,
+                        "recording uploader stopped; local file retained"
+                    ),
+                }
+                if first_uploaded_url.is_none() && track_id != "signaling" {
+                    first_uploaded_url = Some(url.clone());
+                }
+                segment_summaries.push(json!({
+                    "path": path,
+                    "track_id": track_id,
+                    "size": record.recorder[index].size,
+                    "upload_url": url,
+                }));
+                continue;
+            }
+
             let data = match tokio::fs::read(&path).await {
                 Ok(data) => data,
                 Err(err) => {
@@ -317,8 +481,6 @@ impl CallRecordHook for RecordingUploadHook {
                 }
             };
             let data_len = data.len();
-            let key = self.storage_key(record, &track_id, &path);
-            let started = Instant::now();
 
             match recording_type {
                 RecordingType::Local => {
@@ -365,23 +527,14 @@ impl CallRecordHook for RecordingUploadHook {
                         "size": data_len,
                     }));
                 }
-                RecordingType::Http | RecordingType::S3 => {
-                    let address = match recording_type {
-                        RecordingType::S3 => key.clone(),
-                        RecordingType::Http => self
-                            .policy
-                            .url
-                            .clone()
-                            .unwrap_or_else(|| "http".to_string()),
-                        RecordingType::Local | RecordingType::Sipflow => unreachable!(),
-                    };
-                    let upload = match recording_type {
-                        RecordingType::Http => {
-                            self.upload_http(record, &track_id, &path, data).await
-                        }
-                        RecordingType::S3 => self.upload_s3(&key, data).await,
-                        RecordingType::Local | RecordingType::Sipflow => unreachable!(),
-                    };
+                RecordingType::Http => {
+                    let address = self
+                        .policy
+                        .url
+                        .clone()
+                        .unwrap_or_else(|| "http".to_string());
+                    let started = Instant::now();
+                    let upload = self.upload_http(record, &track_id, &path, data).await;
                     let elapsed_ms = started.elapsed().as_millis() as u64;
                     match upload {
                         Ok(url) => {
@@ -445,6 +598,7 @@ impl CallRecordHook for RecordingUploadHook {
                         }
                     }
                 }
+                RecordingType::S3 => unreachable!("S3 uploads are queued before file reads"),
                 RecordingType::Sipflow => unreachable!("file upload path filtered earlier"),
             }
         }
@@ -463,7 +617,7 @@ impl CallRecordHook for RecordingUploadHook {
 
         // No file was recorded/uploaded and no SipFlow upload URL was supplied.
         if recording_url.is_none() {
-            return Ok(());
+            continue;
         }
 
         let emit_url = first_uploaded_url.as_deref().or_else(|| {
@@ -528,6 +682,7 @@ impl CallRecordHook for RecordingUploadHook {
                     .map(|m| m.size)
                     .unwrap_or(0),
             });
+        }
         }
 
         Ok(())
@@ -598,6 +753,117 @@ mod tests {
     };
 
     #[tokio::test]
+    async fn s3_enrich_preconstructs_recording_url() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let recorder_root = dir.path().join("recorders");
+        tokio::fs::create_dir_all(&recorder_root)
+            .await
+            .expect("create recorder root");
+        let recording = recorder_root.join("call.wav");
+        tokio::fs::write(&recording, b"wav")
+            .await
+            .expect("write recording");
+        let policy = RecordingPolicy {
+            enabled: Some(true),
+            recording_type: Some(RecordingType::S3),
+            path: Some(recorder_root.to_string_lossy().into_owned()),
+            vendor: Some(crate::storage::S3Vendor::Minio),
+            bucket: Some("recordings-bucket".into()),
+            region: Some("test".into()),
+            access_key: Some("test".into()),
+            secret_key: Some("test".into()),
+            endpoint: Some("http://127.0.0.1:9000".into()),
+            root: Some("recordings".into()),
+            ..Default::default()
+        };
+        let (hook, _upload_manager) =
+            RecordingUploadHook::new(policy).expect("recording hook");
+        let now = chrono::Utc::now();
+        let mut record = CallRecord {
+            call_id: "preconstructed-url".into(),
+            start_time: now,
+            end_time: now + chrono::Duration::seconds(60),
+            recorder: vec![CallRecordMedia {
+                track_id: "mixed".into(),
+                path: recording.to_string_lossy().into_owned(),
+                size: 3,
+                extra: None,
+            }],
+            details: CallDetails::default(),
+            ..Default::default()
+        };
+
+        hook.on_record_enrich(std::slice::from_mut(&mut record)).await.expect("enrich");
+
+        let day = now.format("%Y%m%d");
+        let expected = format!(
+            "http://127.0.0.1:9000/recordings-bucket/recordings/{day}/call.wav"
+        );
+        assert_eq!(record.details.recording_url.as_deref(), Some(expected.as_str()));
+        assert_eq!(record.details.recording_duration_secs, Some(60));
+        assert_eq!(
+            record.recorder[0]
+                .extra
+                .as_ref()
+                .and_then(|extra| extra.get("uploadUrl"))
+                .and_then(|url| url.as_str()),
+            Some(expected.as_str())
+        );
+        assert!(Path::new(&record.recorder[0].path).exists());
+        assert!(!recording.exists());
+    }
+
+    #[tokio::test]
+    async fn s3_uploader_continues_after_failure_and_removes_successful_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let recorder_root = dir.path().join("recorders");
+        let dated_root = recorder_root.join("20260826");
+        tokio::fs::create_dir_all(&dated_root)
+            .await
+            .expect("create recorder root");
+        let missing = dated_root.join("missing.wav");
+        let recording = dated_root.join("call.wav");
+        tokio::fs::write(&recording, b"wav")
+            .await
+            .expect("write recording");
+        let object_root = dir.path().join("objects");
+        let storage = Storage::new(&StorageConfig::Local {
+            path: object_root.to_string_lossy().into_owned(),
+        })
+        .expect("local object storage");
+        let policy = RecordingPolicy {
+            path: Some(recorder_root.to_string_lossy().into_owned()),
+            root: Some("recordings".into()),
+            ..Default::default()
+        };
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        let mut manager = RecordingUploadManager {
+            policy,
+            storage,
+            receiver,
+        };
+        let uploader = crate::utils::spawn(async move {
+            manager.serve().await;
+        });
+
+        sender.send(missing).await.expect("queue missing path");
+        sender
+            .send(recording.clone())
+            .await
+            .expect("queue recording");
+        drop(sender);
+        uploader.await.expect("uploader task");
+
+        assert!(!recording.exists(), "successful upload removes local file");
+        assert_eq!(
+            tokio::fs::read(object_root.join("recordings/20260826/call.wav"))
+                .await
+                .expect("uploaded object"),
+            b"wav"
+        );
+    }
+
+    #[tokio::test]
     async fn uploads_file_recording_from_unanswered_early_media_call() {
         let requests = Arc::new(AtomicUsize::new(0));
         let request_count = requests.clone();
@@ -630,7 +896,8 @@ mod tests {
             url: Some(format!("http://{address}/recording")),
             ..Default::default()
         };
-        let hook = RecordingUploadHook::new(policy).expect("recording hook");
+        let (hook, _upload_manager) =
+            RecordingUploadHook::new(policy).expect("recording hook");
         let now = chrono::Utc::now();
         let mut record = CallRecord {
             call_id: "early-media-call".to_string(),
@@ -650,7 +917,7 @@ mod tests {
             },
             ..Default::default()
         };
-        hook.on_record_completed(&mut record)
+        hook.on_record_completed(std::slice::from_mut(&mut record))
             .await
             .expect("upload early media");
 
@@ -690,7 +957,8 @@ mod tests {
             url: Some("http://127.0.0.1:1/recording".to_string()),
             ..Default::default()
         };
-        let hook = RecordingUploadHook::new(policy).expect("recording hook");
+        let (hook, _upload_manager) =
+            RecordingUploadHook::new(policy).expect("recording hook");
         let now = chrono::Utc::now();
         let mut record = CallRecord {
             call_id: "upload-fail-call".to_string(),
@@ -706,7 +974,7 @@ mod tests {
             details: CallDetails::default(),
             ..Default::default()
         };
-        hook.on_record_completed(&mut record)
+        hook.on_record_completed(std::slice::from_mut(&mut record))
             .await
             .expect("hook should not fail hard");
 
@@ -737,7 +1005,7 @@ mod tests {
             subdir: Some("daily".into()),
             ..Default::default()
         };
-        let hook = RecordingUploadHook::new(policy).expect("hook");
+        let (hook, _upload_manager) = RecordingUploadHook::new(policy).expect("hook");
         let now = chrono::Utc::now();
         let mut record = CallRecord {
             call_id: "local-archive".into(),
@@ -753,7 +1021,7 @@ mod tests {
             details: CallDetails::default(),
             ..Default::default()
         };
-        hook.on_record_completed(&mut record)
+        hook.on_record_completed(std::slice::from_mut(&mut record))
             .await
             .expect("archive");
         let day = now.format("%Y%m%d").to_string();
@@ -779,7 +1047,7 @@ mod tests {
             subdir: Some("hourly".into()),
             ..Default::default()
         };
-        let hook = RecordingUploadHook::new(policy).expect("hook");
+        let (hook, _upload_manager) = RecordingUploadHook::new(policy).expect("hook");
         let now = chrono::Utc::now();
         let mut record = CallRecord {
             call_id: "local-hourly".into(),
@@ -795,7 +1063,7 @@ mod tests {
             details: CallDetails::default(),
             ..Default::default()
         };
-        hook.on_record_completed(&mut record)
+        hook.on_record_completed(std::slice::from_mut(&mut record))
             .await
             .expect("archive");
         let day = now.format("%Y%m%d").to_string();
@@ -840,7 +1108,7 @@ mod tests {
             url: Some(format!("http://{address}/recording")),
             ..Default::default()
         };
-        let hook = RecordingUploadHook::new(policy).unwrap();
+        let (hook, _upload_manager) = RecordingUploadHook::new(policy).unwrap();
         let now = chrono::Utc::now();
         let mut record = CallRecord {
             call_id: "multi-artifact".into(),
@@ -864,7 +1132,7 @@ mod tests {
             details: CallDetails::default(),
             ..Default::default()
         };
-        hook.on_record_completed(&mut record).await.unwrap();
+        hook.on_record_completed(std::slice::from_mut(&mut record)).await.unwrap();
 
         assert_eq!(requests.load(Ordering::Relaxed), 2);
         assert!(!Path::new(&wav_s).exists());
@@ -903,7 +1171,7 @@ mod tests {
             subdir: Some("daily".into()),
             ..Default::default()
         };
-        let hook = RecordingUploadHook::new(policy).expect("hook");
+        let (hook, _upload_manager) = RecordingUploadHook::new(policy).expect("hook");
         let now = chrono::Utc::now();
         let mut record = CallRecord {
             call_id: "enrich-archive".into(),
@@ -940,7 +1208,7 @@ mod tests {
             ..Default::default()
         };
 
-        hook.on_record_enrich(&mut record).await.expect("enrich");
+        hook.on_record_enrich(std::slice::from_mut(&mut record)).await.expect("enrich");
 
         let day = now.format("%Y%m%d").to_string();
         let archived_wav = Path::new(&root).join(&day).join("sess.wav");
@@ -971,7 +1239,7 @@ mod tests {
         );
 
         // completed after enrich is idempotent: no second move, URL stable.
-        hook.on_record_completed(&mut record)
+        hook.on_record_completed(std::slice::from_mut(&mut record))
             .await
             .expect("completed");
         assert!(archived_wav.exists() && archived_jsonl.exists());
@@ -1003,7 +1271,7 @@ mod tests {
             subdir: Some("daily".into()),
             ..Default::default()
         };
-        let hook = RecordingUploadHook::new(policy).expect("hook");
+        let (hook, _upload_manager) = RecordingUploadHook::new(policy).expect("hook");
         let now = chrono::Utc::now();
         let mut record = CallRecord {
             call_id: "custom-path".into(),
@@ -1020,7 +1288,7 @@ mod tests {
             ..Default::default()
         };
 
-        hook.on_record_enrich(&mut record).await.expect("enrich");
+        hook.on_record_enrich(std::slice::from_mut(&mut record)).await.expect("enrich");
         assert!(
             wav.exists(),
             "enrich must not move files outside the recorder root"

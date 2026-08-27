@@ -2,8 +2,9 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::StreamExt;
 use object_store::{
-    ObjectMeta, ObjectStore, ObjectStoreExt, aws::AmazonS3Builder, azure::MicrosoftAzureBuilder,
-    gcp::GoogleCloudStorageBuilder, local::LocalFileSystem, path::Path as ObjectPath,
+    ObjectMeta, ObjectStore, ObjectStoreExt, PutOptions, aws::AmazonS3Builder,
+    azure::MicrosoftAzureBuilder, gcp::GoogleCloudStorageBuilder, local::LocalFileSystem,
+    path::Path as ObjectPath,
 };
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
@@ -150,6 +151,17 @@ impl Storage {
         }
         let object_path = self.object_path(path)?;
         self.inner.put(&object_path, bytes.into()).await?;
+        Ok(())
+    }
+
+    pub async fn write_opts(&self, path: &str, bytes: Bytes, options: PutOptions) -> Result<()> {
+        if self.is_local {
+            return self.write(path, bytes).await;
+        }
+        let object_path = self.object_path(path)?;
+        self.inner
+            .put_opts(&object_path, bytes.into(), options)
+            .await?;
         Ok(())
     }
 

@@ -1,10 +1,13 @@
 use crate::{
-    config::{CallRecordConfig, CallRecordStorageConfig, DEFAULT_CALL_RECORD_MAX_CONCURRENT},
+    config::{
+        CallRecordConfig, CallRecordStorageConfig, DEFAULT_CALL_RECORD_BATCH_SIZE,
+        DEFAULT_CALL_RECORD_CHANNEL_CAPACITY,
+    },
     utils::sanitize_id,
 };
 use anyhow::Result;
 use chrono::Utc;
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::future::try_join_all;
 use reqwest;
 use rustpbx_models::DatabasePoolConfig;
 use sea_orm::{
@@ -30,7 +33,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-pub mod database_hook;
+pub(crate) mod database;
 pub mod recording_artifacts;
 pub mod recording_upload;
 pub mod sipflow;
@@ -382,7 +385,7 @@ impl CallRecordHangupReason {
 
 #[async_trait::async_trait]
 pub trait CallRecordHook: Send + Sync {
-    /// Enrichment phase: runs in registration order **before** the record is
+    /// Enrichment phase: runs in registration order **before** the batch is
     /// saved and **before** any side-effect (`on_record_completed`) hook.
     ///
     /// Addons use this to fill generic core fields (e.g. `agent_id`) from the
@@ -390,13 +393,13 @@ pub trait CallRecordHook: Send + Sync {
     /// (upload, billing, CSAT) and the saver see the completed record. This
     /// keeps the core free of addon-specific knowledge: core only carries the
     /// generic fields, the addon populates them.
-    async fn on_record_enrich(&self, _record: &mut CallRecord) -> anyhow::Result<()> {
+    async fn on_record_enrich(&self, _records: &mut [CallRecord]) -> anyhow::Result<()> {
         Ok(())
     }
 
-    /// Side-effect phase: runs **after** the record has been saved. Used for
+    /// Side-effect phase: runs **after** the batch has been saved. Used for
     /// uploads, webhook emission, billing, CSAT linkage, metrics, etc.
-    async fn on_record_completed(&self, _record: &mut CallRecord) -> anyhow::Result<()> {
+    async fn on_record_completed(&self, _records: &mut [CallRecord]) -> anyhow::Result<()> {
         Ok(())
     }
 }
@@ -408,14 +411,16 @@ pub trait CallRecordHook: Send + Sync {
 /// could exhaust process memory. It is now a bounded channel: when the
 /// saver falls behind, the producer drops new records (logged at warn)
 /// instead of buffering indefinitely. Real deployments should never hit
-/// the cap under normal load — the bound is a safety net, not a target.
-pub const CALL_RECORD_CHANNEL_CAPACITY: usize = 1024;
+/// the configured cap under normal load — the bound is a safety net, not a
+/// target.
+pub const CALL_RECORD_CHANNEL_CAPACITY: usize = DEFAULT_CALL_RECORD_CHANNEL_CAPACITY;
 pub type CallRecordSender = tokio::sync::mpsc::Sender<CallRecord>;
 pub type CallRecordReceiver = tokio::sync::mpsc::Receiver<CallRecord>;
 
 #[async_trait::async_trait]
 pub trait CallRecordSaver: Send + Sync {
-    async fn save(&self, record: &CallRecord) -> Result<String>;
+    /// Persist a batch and return one storage path per input record, in order.
+    async fn save(&self, records: &[CallRecord]) -> Result<Vec<String>>;
 }
 
 pub async fn write_call_record_event<T: Serialize>(
@@ -530,7 +535,7 @@ pub fn format_sipflow_signaling_file_name(record: &CallRecord) -> String {
 }
 
 pub struct CallRecordManager {
-    pub max_concurrent: usize,
+    pub batch_size: usize,
     pub sender: CallRecordSender,
     pub stats: Arc<CallRecordStats>,
     cancel_token: CancellationToken,
@@ -542,7 +547,8 @@ pub struct CallRecordManager {
 pub struct CallRecordManagerBuilder {
     pub cancel_token: Option<CancellationToken>,
     pub config: Option<CallRecordConfig>,
-    pub max_concurrent: Option<usize>,
+    pub channel_capacity: Option<usize>,
+    pub batch_size: Option<usize>,
     hooks: Vec<Box<dyn CallRecordHook>>,
     main_db: Option<DatabaseConnection>,
     pool_config: Option<DatabasePoolConfig>,
@@ -559,7 +565,8 @@ impl CallRecordManagerBuilder {
         Self {
             cancel_token: None,
             config: None,
-            max_concurrent: None,
+            channel_capacity: None,
+            batch_size: None,
             hooks: Vec::new(),
             main_db: None,
             pool_config: None,
@@ -590,8 +597,14 @@ impl CallRecordManagerBuilder {
         self.hooks.push(hook);
         self
     }
-    pub fn with_max_concurrent(mut self, max_concurrent: usize) -> Self {
-        self.max_concurrent = Some(max_concurrent.max(1));
+
+    pub fn with_channel_capacity(mut self, channel_capacity: usize) -> Self {
+        self.channel_capacity = Some(channel_capacity.max(1));
+        self
+    }
+
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = Some(batch_size.max(1));
         self
     }
 
@@ -599,13 +612,22 @@ impl CallRecordManagerBuilder {
         let Self {
             cancel_token,
             config,
-            max_concurrent,
+            channel_capacity,
+            batch_size,
             hooks,
             main_db,
             pool_config,
         } = self;
         let cancel_token = cancel_token.unwrap_or_default();
-        let (sender, receiver) = tokio::sync::mpsc::channel(CALL_RECORD_CHANNEL_CAPACITY);
+        let channel_capacity = channel_capacity
+            .or_else(|| config.as_ref().map(|c| c.channel_capacity))
+            .unwrap_or(DEFAULT_CALL_RECORD_CHANNEL_CAPACITY)
+            .max(1);
+        let batch_size = batch_size
+            .or_else(|| config.as_ref().map(|c| c.batch_size))
+            .unwrap_or(DEFAULT_CALL_RECORD_BATCH_SIZE)
+            .max(1);
+        let (sender, receiver) = tokio::sync::mpsc::channel(channel_capacity);
         let saver: Box<dyn CallRecordSaver> = match config.map(|c| c.storage) {
             // No [callrecord] section → default: database → rustpbx_call_records
             None => {
@@ -738,12 +760,8 @@ impl CallRecordManagerBuilder {
                 })
             }
         };
-        let max_concurrent = max_concurrent
-            .unwrap_or(DEFAULT_CALL_RECORD_MAX_CONCURRENT)
-            .max(1);
-
         Ok(CallRecordManager {
-            max_concurrent,
+            batch_size,
             stats: Arc::new(CallRecordStats::new()),
             cancel_token,
             sender,
@@ -758,8 +776,8 @@ pub struct NoopCallRecordSaver;
 
 #[async_trait::async_trait]
 impl CallRecordSaver for NoopCallRecordSaver {
-    async fn save(&self, _record: &CallRecord) -> Result<String> {
-        Ok(String::new())
+    async fn save(&self, records: &[CallRecord]) -> Result<Vec<String>> {
+        Ok(vec![String::new(); records.len()])
     }
 }
 
@@ -769,27 +787,29 @@ struct LocalCallRecordSaver {
 
 #[async_trait::async_trait]
 impl CallRecordSaver for LocalCallRecordSaver {
-    async fn save(&self, record: &CallRecord) -> Result<String> {
-        let start = std::time::Instant::now();
-        let file_content = format_call_record(record)?;
-        let file_name = format_file_name(&self.root, record);
+    async fn save(&self, records: &[CallRecord]) -> Result<Vec<String>> {
+        try_join_all(records.iter().map(|record| async move {
+            let start = std::time::Instant::now();
+            let file_content = format_call_record(record)?;
+            let file_name = format_file_name(&self.root, record);
 
-        // Ensure parent directory exists
-        if let Some(parent) = Path::new(&file_name).parent() {
-            fs::create_dir_all(parent).await?;
-        }
+            if let Some(parent) = Path::new(&file_name).parent() {
+                fs::create_dir_all(parent).await?;
+            }
 
-        let mut file = File::create(&file_name).await.map_err(|e| {
-            anyhow::anyhow!("Failed to create call record file {}: {}", file_name, e)
-        })?;
-        file.write_all(file_content.as_bytes()).await?;
-        file.flush().await?;
-        let elapsed = start.elapsed().as_secs_f64();
-        crate::metrics::db::query_latency_seconds("local_cdr_save", elapsed);
-        if elapsed > 0.1 {
-            crate::metrics::db::slow_query_total("local_cdr_save", 100);
-        }
-        Ok(file_name.to_string())
+            let mut file = File::create(&file_name).await.map_err(|e| {
+                anyhow::anyhow!("Failed to create call record file {}: {}", file_name, e)
+            })?;
+            file.write_all(file_content.as_bytes()).await?;
+            file.flush().await?;
+            let elapsed = start.elapsed().as_secs_f64();
+            crate::metrics::db::query_latency_seconds("local_cdr_save", elapsed);
+            if elapsed > 0.1 {
+                crate::metrics::db::slow_query_total("local_cdr_save", 100);
+            }
+            Ok(file_name)
+        }))
+        .await
     }
 }
 
@@ -801,27 +821,30 @@ struct HttpCallRecordSaver {
 
 #[async_trait::async_trait]
 impl CallRecordSaver for HttpCallRecordSaver {
-    async fn save(&self, record: &CallRecord) -> Result<String> {
-        let call_log_json = format_call_record(record)?;
-        let form = reqwest::multipart::Form::new().text("calllog.json", call_log_json);
+    async fn save(&self, records: &[CallRecord]) -> Result<Vec<String>> {
+        try_join_all(records.iter().map(|record| async move {
+            let call_log_json = format_call_record(record)?;
+            let form = reqwest::multipart::Form::new().text("calllog.json", call_log_json);
 
-        let mut request = self.client.post(&self.url).multipart(form);
-        if let Some(headers_map) = &self.headers {
-            for (key, value) in headers_map {
-                request = request.header(key, value);
+            let mut request = self.client.post(&self.url).multipart(form);
+            if let Some(headers_map) = &self.headers {
+                for (key, value) in headers_map {
+                    request = request.header(key, value);
+                }
             }
-        }
-        let response = request.send().await?;
-        if response.status().is_success() {
-            let response_text = response.text().await.unwrap_or_default();
-            Ok(format!("HTTP upload successful: {}", response_text))
-        } else {
-            Err(anyhow::anyhow!(
-                "HTTP upload failed with status: {} - {}",
-                response.status(),
-                response.text().await.unwrap_or_default()
-            ))
-        }
+            let response = request.send().await?;
+            if response.status().is_success() {
+                let response_text = response.text().await.unwrap_or_default();
+                Ok(format!("HTTP upload successful: {}", response_text))
+            } else {
+                Err(anyhow::anyhow!(
+                    "HTTP upload failed with status: {} - {}",
+                    response.status(),
+                    response.text().await.unwrap_or_default()
+                ))
+            }
+        }))
+        .await
     }
 }
 
@@ -834,39 +857,42 @@ struct S3CallRecordSaver {
 
 #[async_trait::async_trait]
 impl CallRecordSaver for S3CallRecordSaver {
-    async fn save(&self, record: &CallRecord) -> Result<String> {
-        let start_time = Instant::now();
-        let call_log_json = format_call_record(record)?;
-        let filename = format_file_name(&self.root, record);
-        let buf_size = call_log_json.len();
-        match self.storage.write(&filename, call_log_json.into()).await {
-            Ok(_) => {
-                info!(
-                    elapsed = start_time.elapsed().as_secs_f64(),
-                    filename, buf_size, "upload call record"
-                );
+    async fn save(&self, records: &[CallRecord]) -> Result<Vec<String>> {
+        try_join_all(records.iter().map(|record| async move {
+            let start_time = Instant::now();
+            let call_log_json = format_call_record(record)?;
+            let filename = format_file_name(&self.root, record);
+            let buf_size = call_log_json.len();
+            match self.storage.write(&filename, call_log_json.into()).await {
+                Ok(_) => {
+                    info!(
+                        elapsed = start_time.elapsed().as_secs_f64(),
+                        filename, buf_size, "upload call record"
+                    );
+                }
+                Err(e) => {
+                    warn!(filename, "failed to upload call record: {}", e);
+                }
             }
-            Err(e) => {
-                warn!(filename, "failed to upload call record: {}", e);
-            }
-        }
 
-        let path = format!(
-            "{}/{}",
-            self.bucket.trim_matches('/'),
-            filename.trim_start_matches('/')
-        );
-        Ok(match self.endpoint.as_ref() {
-            Some(ep) if !ep.is_empty() => format!("{}/{}", ep.trim_end_matches('/'), path),
-            _ => path,
-        })
+            let path = format!(
+                "{}/{}",
+                self.bucket.trim_matches('/'),
+                filename.trim_start_matches('/')
+            );
+            Ok(match self.endpoint.as_ref() {
+                Some(ep) if !ep.is_empty() => format!("{}/{}", ep.trim_end_matches('/'), path),
+                _ => path,
+            })
+        }))
+        .await
     }
 }
 
 // ── Unified Call Record Savers ─────────────────────────────────────────────────
 
 /// Shared extraction of typed call-record values used by both the
-/// SeaORM-based `persist_call_record` path and raw-SQL savers.
+/// Column order shared by the SeaORM persistence path and raw-SQL savers.
 pub(crate) struct CallRecordRow {
     pub call_id: String,
     pub direction: String,
@@ -996,16 +1022,19 @@ impl CallRecordRow {
 }
 
 /// Default database saver: writes to `rustpbx_call_records` via
-/// SeaORM `persist_call_record` (same path as the old DatabaseHook).
+/// SeaORM-based saver for the built-in `rustpbx_call_records` table.
 pub(crate) struct BuiltinDatabaseSaver {
     pub db: DatabaseConnection,
 }
 
 #[async_trait::async_trait]
 impl CallRecordSaver for BuiltinDatabaseSaver {
-    async fn save(&self, record: &CallRecord) -> Result<String> {
-        database_hook::persist_call_record(&self.db, record).await?;
-        Ok(format!("rustpbx_call_records/{}", record.call_id))
+    async fn save(&self, records: &[CallRecord]) -> Result<Vec<String>> {
+        database::persist_call_records(&self.db, records).await?;
+        Ok(records
+            .iter()
+            .map(|record| format!("rustpbx_call_records/{}", record.call_id))
+            .collect())
     }
 }
 
@@ -1018,17 +1047,24 @@ pub(crate) struct CustomDatabaseSaver {
 
 #[async_trait::async_trait]
 impl CallRecordSaver for CustomDatabaseSaver {
-    async fn save(&self, record: &CallRecord) -> Result<String> {
-        let row = CallRecordRow::from_record(record);
-        let mut insert = Query::insert();
-        insert
-            .into_table(Alias::new(&self.table_name))
-            .columns(call_record_columns())
-            .values_panic(build_call_record_values(&row));
-        self.db
-            .execute_raw(self.db.get_database_backend().build(&insert))
-            .await?;
-        Ok(format!("{}/{}", self.table_name, record.call_id))
+    async fn save(&self, records: &[CallRecord]) -> Result<Vec<String>> {
+        if !records.is_empty() {
+            let mut insert = Query::insert();
+            insert
+                .into_table(Alias::new(&self.table_name))
+                .columns(call_record_columns());
+            for record in records {
+                let row = CallRecordRow::from_record(record);
+                insert.values_panic(build_call_record_values(&row));
+            }
+            self.db
+                .execute_raw(self.db.get_database_backend().build(&insert))
+                .await?;
+        }
+        Ok(records
+            .iter()
+            .map(|record| format!("{}/{}", self.table_name, record.call_id))
+            .collect())
     }
 }
 
@@ -1049,7 +1085,7 @@ pub(crate) struct RotatingSqliteSaver {
 
 #[async_trait::async_trait]
 impl CallRecordSaver for RotatingSqliteSaver {
-    async fn save(&self, record: &CallRecord) -> Result<String> {
+    async fn save(&self, records: &[CallRecord]) -> Result<Vec<String>> {
         let today = today_string();
         let db = {
             let mut st = self.state.lock().await;
@@ -1066,18 +1102,27 @@ impl CallRecordSaver for RotatingSqliteSaver {
             }
             st.db.clone()
         };
-        let row = CallRecordRow::from_record(record);
-        let mut insert = Query::insert();
-        insert
-            .into_table(Alias::new(&self.table_name))
-            .columns(call_record_columns())
-            .values_panic(build_call_record_values(&row));
-        db.execute_raw(db.get_database_backend().build(&insert))
-            .await?;
-        Ok(format!(
-            "{}/{}/{}",
-            self.base_url, self.table_name, record.call_id
-        ))
+        if !records.is_empty() {
+            let mut insert = Query::insert();
+            insert
+                .into_table(Alias::new(&self.table_name))
+                .columns(call_record_columns());
+            for record in records {
+                let row = CallRecordRow::from_record(record);
+                insert.values_panic(build_call_record_values(&row));
+            }
+            db.execute_raw(db.get_database_backend().build(&insert))
+                .await?;
+        }
+        Ok(records
+            .iter()
+            .map(|record| {
+                format!(
+                    "{}/{}/{}",
+                    self.base_url, self.table_name, record.call_id
+                )
+            })
+            .collect())
     }
 }
 
@@ -1287,86 +1332,80 @@ pub fn derive_daily_url(base_url: &str, date: &str) -> String {
 impl CallRecordManager {
     pub async fn serve(&mut self) {
         let token = self.cancel_token.clone();
-        info!("CallRecordManager serving");
-        let max_concurrent = self.max_concurrent.max(1);
+        let batch_size = self.batch_size.max(1);
+        info!(batch_size, "CallRecordManager serving");
         let receiver = &mut self.receiver;
         let saver = self.saver.as_ref();
         let hooks = &self.hooks;
-        let mut futures = FuturesUnordered::new();
+        let mut records = Vec::with_capacity(batch_size);
         let mut receiver_closed = false;
         let mut shutting_down = false;
         let mut shutdown_timeout: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(pending());
 
         loop {
-            if (receiver_closed || shutting_down) && futures.is_empty() {
+            if receiver_closed {
                 break;
             }
 
-            let can_receive = !receiver_closed && !shutting_down && futures.len() < max_concurrent;
-
+            records.clear();
             tokio::select! {
-                record = receiver.recv(), if can_receive => {
-                    let Some(record) = record else {
+                received = receiver.recv_many(&mut records, batch_size) => {
+                    if received == 0 {
                         receiver_closed = true;
                         continue;
-                    };
+                    }
 
-                    futures.push(async move {
-                        let mut record = record;
-                        let start_time = Instant::now();
-
-                        // Enrichment phase: addons fill generic core fields
-                        // (e.g. agent_id) BEFORE the record is saved or any
-                        // side-effect hook (upload/billing/CSAT) runs.
-                        for hook in hooks.iter() {
-                            if let Err(e) = hook.on_record_enrich(&mut record).await {
-                                warn!("CallRecordHook enrich failed: {}", e);
-                            }
+                    let started_at = Instant::now();
+                    for hook in hooks {
+                        if let Err(e) = hook.on_record_enrich(&mut records).await {
+                            warn!(batch_size = records.len(), "CallRecordHook enrich failed: {}", e);
                         }
+                    }
 
-                        match saver.save(&record).await {
-                            Ok(file_name) => {
-                                // Remember where the CDR file was actually written
-                                // so the DB record can locate it later even if the
-                                // storage root is changed afterwards (issue #237).
-                                record.details.cdr_file_path = Some(file_name.clone());
-                                let elapsed = start_time.elapsed();
-                                info!(
-                                    ?elapsed,
-                                    call_id = record.call_id,
-                                    file_name,
-                                    "CallRecordManager saved"
+                    match saver.save(&records).await {
+                        Ok(file_names) => {
+                            if file_names.len() != records.len() {
+                                warn!(
+                                    batch_size = records.len(),
+                                    paths = file_names.len(),
+                                    "CallRecordSaver returned an unexpected number of paths"
                                 );
                             }
-                            Err(err) => {
-                                warn!("Failed to save call record: {}", err);
+                            for (record, file_name) in records.iter_mut().zip(file_names) {
+                                record.details.cdr_file_path = Some(file_name);
                             }
+                            info!(
+                                elapsed = ?started_at.elapsed(),
+                                batch_size = records.len(),
+                                "CallRecordManager saved batch"
+                            );
                         }
+                        Err(err) => {
+                            warn!(batch_size = records.len(), "Failed to save call record batch: {}", err);
+                        }
+                    }
 
-                        for hook in hooks.iter() {
-                            if let Err(e) = hook.on_record_completed(&mut record).await {
-                                warn!("CallRecordHook failed: {}", e);
-                            }
+                    for hook in hooks {
+                        if let Err(e) = hook.on_record_completed(&mut records).await {
+                            warn!(batch_size = records.len(), "CallRecordHook failed: {}", e);
                         }
-                    });
+                    }
                 }
-                Some(()) = futures.next(), if !futures.is_empty() => {}
                 _ = token.cancelled(), if !shutting_down => {
                     shutting_down = true;
-                    let pending = futures.len();
-                    info!(pending, "CallRecordManager received shutdown");
+                    info!(pending = receiver.len(), "CallRecordManager received shutdown");
                     shutdown_timeout = Box::pin(sleep(Duration::from_secs(5)));
                 }
                 _ = &mut shutdown_timeout, if shutting_down => {
                     warn!(
-                        pending = futures.len(),
-                        "CallRecordManager shutdown timed out before all tasks finished"
+                        pending = receiver.len(),
+                        "CallRecordManager shutdown timed out before the channel drained"
                     );
                     break;
                 }
             }
         }
-        info!(pending = futures.len(), "CallRecordManager exiting");
+        info!(pending = receiver.len(), "CallRecordManager exiting");
     }
 }
 

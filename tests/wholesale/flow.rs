@@ -208,7 +208,7 @@ async fn test_wholesale_billing_flow() {
     let addon = WholesaleAddon::new();
     let hook = addon.call_record_hook(&db).expect("hook exists");
 
-    hook.on_record_completed(&mut record)
+    hook.on_record_completed(std::slice::from_mut(&mut record))
         .await
         .expect("hook execution success");
 
@@ -291,7 +291,7 @@ async fn partial_billing_context_creates_failed_wholesale_cdr() {
 
     let addon = WholesaleAddon::new();
     let hook = addon.call_record_hook(&db).expect("hook exists");
-    hook.on_record_completed(&mut record)
+    hook.on_record_completed(std::slice::from_mut(&mut record))
         .await
         .expect("hook execution success");
 
@@ -360,7 +360,7 @@ async fn enrich_hook_injects_wholesale_reject_code() {
 
     let addon = WholesaleAddon::new();
     let hook = addon.call_record_hook(&db).expect("hook exists");
-    hook.on_record_enrich(&mut record)
+    hook.on_record_enrich(std::slice::from_mut(&mut record))
         .await
         .expect("enrich success");
 

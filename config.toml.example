@@ -17,10 +17,13 @@ database_url = "sqlite://rustpbx.sqlite3"
 # MySQL / PostgreSQL database example:
 # database_url = "postgres://user:pass@localhost/rustpbx"
 
-# Database connection pool settings (applies to PostgreSQL/MySQL)
-# When not configured, max_connections defaults to 64.
+# Database connection pool settings. The main pool is shared by the console,
+# call records, and enabled addons (including contact center and wholesale).
+# Separate custom call-record and database-user connections use the same limits.
+# When not configured, max_connections defaults to 16. Increase it only after
+# observing pool wait time under the expected production load.
 # [database_pool]
-# max_connections = 64
+# max_connections = 16
 # min_connections = 0
 # acquire_timeout_secs = 30
 # idle_timeout_secs = 600
@@ -338,7 +341,8 @@ auto_start_at = "media" # default; use "answer" to wait for 200
 # [callrecord]
 # type = "database"
 # table_name = "rustpbx_call_records"
-# max_concurrent = 64
+# channel_capacity = 2048
+# batch_size = 16
 #
 # External PostgreSQL:
 # [callrecord]

@@ -48,7 +48,8 @@ impl SipFlowUploadHook {
 
 #[async_trait]
 impl CallRecordHook for SipFlowUploadHook {
-    async fn on_record_completed(&self, record: &mut CallRecord) -> anyhow::Result<()> {
+    async fn on_record_completed(&self, records: &mut [CallRecord]) -> anyhow::Result<()> {
+        for record in records {
         let call_id = record.call_id.as_str();
         let start = Local.from_utc_datetime(&record.start_time.naive_utc());
         let end = Local.from_utc_datetime(&record.end_time.naive_utc());
@@ -91,6 +92,7 @@ impl CallRecordHook for SipFlowUploadHook {
             record
                 .extensions
                 .insert(crate::callrecord::RecordingFileSize(size));
+        }
         }
 
         Ok(())
@@ -555,7 +557,7 @@ mod tests {
         )
         .unwrap();
         let mut record = make_record();
-        hook.on_record_completed(&mut record).await.unwrap();
+        hook.on_record_completed(std::slice::from_mut(&mut record)).await.unwrap();
         assert!(record.details.recording_url.is_none());
         assert_eq!(flush_count.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
@@ -582,7 +584,7 @@ mod tests {
         let mut record = make_record();
         record.answer_time = None;
 
-        hook.on_record_completed(&mut record).await.unwrap();
+        hook.on_record_completed(std::slice::from_mut(&mut record)).await.unwrap();
 
         assert_eq!(flush_count.load(std::sync::atomic::Ordering::Relaxed), 1);
     }

@@ -354,8 +354,9 @@ pub struct MetricsCallRecordHook;
 impl crate::callrecord::CallRecordHook for MetricsCallRecordHook {
     async fn on_record_completed(
         &self,
-        record: &mut crate::callrecord::CallRecord,
+        records: &mut [crate::callrecord::CallRecord],
     ) -> anyhow::Result<()> {
+        for record in records {
         let direction = record.details.direction.as_str();
 
         // Total elapsed time from INVITE to BYE.
@@ -399,6 +400,7 @@ impl crate::callrecord::CallRecordHook for MetricsCallRecordHook {
                 "direction" => direction.to_string()
             )
             .record(talk);
+        }
         }
 
         Ok(())
@@ -486,7 +488,7 @@ mod tests {
         ObservabilityAddon::install_recorder().ok();
         let hook = MetricsCallRecordHook;
         let mut record = make_record("inbound", 200, true);
-        hook.on_record_completed(&mut record)
+        hook.on_record_completed(std::slice::from_mut(&mut record))
             .await
             .expect("hook must not error");
     }
@@ -497,7 +499,7 @@ mod tests {
         ObservabilityAddon::install_recorder().ok();
         let hook = MetricsCallRecordHook;
         let mut record = make_record("outbound", 200, false);
-        hook.on_record_completed(&mut record)
+        hook.on_record_completed(std::slice::from_mut(&mut record))
             .await
             .expect("hook must not error");
     }
@@ -508,7 +510,7 @@ mod tests {
         ObservabilityAddon::install_recorder().ok();
         let hook = MetricsCallRecordHook;
         let mut record = make_record("inbound", 486, false); // 486 Busy Here
-        hook.on_record_completed(&mut record)
+        hook.on_record_completed(std::slice::from_mut(&mut record))
             .await
             .expect("hook must not error");
     }
@@ -519,7 +521,7 @@ mod tests {
         ObservabilityAddon::install_recorder().ok();
         let hook = MetricsCallRecordHook;
         let mut record = make_record("outbound", 503, false);
-        hook.on_record_completed(&mut record)
+        hook.on_record_completed(std::slice::from_mut(&mut record))
             .await
             .expect("hook must not error");
     }
@@ -530,7 +532,7 @@ mod tests {
         ObservabilityAddon::install_recorder().ok();
         let hook = MetricsCallRecordHook;
         let mut record = make_record("internal", 302, false);
-        hook.on_record_completed(&mut record)
+        hook.on_record_completed(std::slice::from_mut(&mut record))
             .await
             .expect("hook must not error");
     }
@@ -554,7 +556,7 @@ mod tests {
             },
             ..Default::default()
         };
-        hook.on_record_completed(&mut record)
+        hook.on_record_completed(std::slice::from_mut(&mut record))
             .await
             .expect("zero duration must not error");
     }

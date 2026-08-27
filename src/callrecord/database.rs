@@ -1,17 +1,6 @@
 use sea_orm::{DatabaseConnection, EntityTrait, Set};
 
-use crate::callrecord::{CallRecord, CallRecordHook};
-
-pub struct DatabaseHook {
-    pub db: DatabaseConnection,
-}
-
-#[async_trait::async_trait]
-impl CallRecordHook for DatabaseHook {
-    async fn on_record_completed(&self, record: &mut CallRecord) -> anyhow::Result<()> {
-        persist_call_record(&self.db, record).await
-    }
-}
+use crate::callrecord::CallRecord;
 
 /// Null out a FK id when the referenced row no longer exists (e.g. an
 /// auto-created trunk / extension that was never persisted, or was deleted
@@ -43,11 +32,11 @@ macro_rules! fk_id_or_none {
     }};
 }
 
-pub async fn persist_call_record(
+async fn build_active_model(
     db: &DatabaseConnection,
     record: &CallRecord,
-) -> anyhow::Result<()> {
-    use rustpbx_models::call_record::{ActiveModel, Column, Entity};
+) -> anyhow::Result<rustpbx_models::call_record::ActiveModel> {
+    use rustpbx_models::call_record::ActiveModel;
 
     let details = &record.details;
 
@@ -179,7 +168,24 @@ pub async fn persist_call_record(
         ..Default::default()
     };
 
-    Entity::insert(active)
+    Ok(active)
+}
+
+pub(crate) async fn persist_call_records(
+    db: &DatabaseConnection,
+    records: &[CallRecord],
+) -> anyhow::Result<()> {
+    use rustpbx_models::call_record::{Column, Entity};
+
+    if records.is_empty() {
+        return Ok(());
+    }
+
+    let mut active_models = Vec::with_capacity(records.len());
+    for record in records {
+        active_models.push(build_active_model(db, record).await?);
+    }
+    Entity::insert_many(active_models)
         .on_conflict(
             sea_orm::sea_query::OnConflict::column(Column::CallId)
                 .update_columns([

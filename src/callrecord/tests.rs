@@ -163,11 +163,35 @@ async fn test_builtin_saver_writes_to_rustpbx_call_records() {
         .unwrap();
     let saver = crate::callrecord::BuiltinDatabaseSaver { db: db.clone() };
     let record = make_record();
-    let result = saver.save(&record).await;
+    let result = saver.save(std::slice::from_ref(&record)).await;
     assert!(
         result.is_ok(),
         "builtin saver should succeed: {:?}",
         result.err()
+    );
+}
+
+#[tokio::test]
+async fn test_builtin_saver_inserts_a_batch() {
+    let db = in_memory_db().await;
+    create_call_record_table(&db, "rustpbx_call_records")
+        .await
+        .unwrap();
+    let saver = crate::callrecord::BuiltinDatabaseSaver { db: db.clone() };
+    let records: Vec<_> = (0..DEFAULT_CALL_RECORD_BATCH_SIZE)
+        .map(|index| {
+            let mut record = make_record();
+            record.call_id = format!("test-call-id-{index}");
+            record
+        })
+        .collect();
+
+    let paths = saver.save(&records).await.unwrap();
+
+    assert_eq!(paths.len(), DEFAULT_CALL_RECORD_BATCH_SIZE);
+    assert_eq!(
+        count_rows(&db, "rustpbx_call_records").await,
+        DEFAULT_CALL_RECORD_BATCH_SIZE as i64
     );
 }
 
@@ -190,7 +214,11 @@ async fn test_persist_call_record_nulls_stale_fk_ids() {
     record.details.sip_trunk_id = Some(424244);
     record.details.route_id = Some(424245);
 
-    let result = crate::callrecord::database_hook::persist_call_record(&db, &record).await;
+    let result = crate::callrecord::database::persist_call_records(
+        &db,
+        std::slice::from_ref(&record),
+    )
+    .await;
     assert!(result.is_ok(), "persist should succeed: {:?}", result.err());
 
     // The stale ids must have been nulled in the persisted row.
@@ -244,7 +272,11 @@ async fn test_persist_call_record_keeps_existing_fk_ids() {
 
     let mut record = make_record();
     record.details.extension_id = Some(ext.id);
-    let result = crate::callrecord::database_hook::persist_call_record(&db, &record).await;
+    let result = crate::callrecord::database::persist_call_records(
+        &db,
+        std::slice::from_ref(&record),
+    )
+    .await;
     assert!(result.is_ok(), "persist should succeed: {:?}", result.err());
 
     let row = <rustpbx_models::call_record::Entity as sea_orm::EntityTrait>::find()
@@ -267,13 +299,20 @@ async fn test_custom_saver_writes_full_schema() {
         db: db.clone(),
         table_name: table.to_string(),
     };
-    let record = make_record();
-    let result = saver.save(&record).await;
+    let records: Vec<_> = (0..DEFAULT_CALL_RECORD_BATCH_SIZE)
+        .map(|index| {
+            let mut record = make_record();
+            record.call_id = format!("custom-call-id-{index}");
+            record
+        })
+        .collect();
+    let result = saver.save(&records).await;
     assert!(
         result.is_ok(),
         "custom saver should succeed: {:?}",
         result.err()
     );
+    assert_eq!(count_rows(&db, table).await, 16);
 }
 
 // ── RotatingSqliteSaver ─────────────────────────────────────────────────────
@@ -298,7 +337,7 @@ async fn test_rotating_sqlite_saver_creates_daily_file() {
         })),
     };
     let record = make_record();
-    let result = saver.save(&record).await;
+    let result = saver.save(std::slice::from_ref(&record)).await;
     assert!(
         result.is_ok(),
         "rotating saver should succeed: {:?}",
@@ -327,13 +366,13 @@ async fn test_builder_without_callrecord_config_uses_builtin_saver() {
         .await
         .unwrap();
     let record = make_record();
-    let result = manager.saver.save(&record).await;
+    let result = manager.saver.save(std::slice::from_ref(&record)).await;
     assert!(
         result.is_ok(),
         "default saver should succeed: {:?}",
         result.err()
     );
-    assert!(result.unwrap().starts_with("rustpbx_call_records/"));
+    assert!(result.unwrap()[0].starts_with("rustpbx_call_records/"));
 }
 
 // ── Builder with custom database requires main_db or database_url ─────────────
@@ -342,7 +381,8 @@ async fn test_builder_without_callrecord_config_uses_builtin_saver() {
 async fn test_database_saver_without_url_needs_main_db() {
     let err = CallRecordManagerBuilder::new()
         .with_config(CallRecordConfig {
-            max_concurrent: 64,
+            channel_capacity: 2048,
+            batch_size: 64,
             storage: CallRecordStorageConfig::Database {
                 database_url: None,
                 table_name: "custom_table".to_string(),
@@ -388,7 +428,8 @@ async fn test_local_config_without_main_db_ok() {
 
     let manager = CallRecordManagerBuilder::new()
         .with_config(CallRecordConfig {
-            max_concurrent: 4,
+            channel_capacity: 2048,
+            batch_size: 4,
             storage: CallRecordStorageConfig::Local { root: root.clone() },
         })
         .build()
@@ -396,16 +437,35 @@ async fn test_local_config_without_main_db_ok() {
         .expect("Local config should not require main_db");
 
     let record = make_record();
-    let result = manager.saver.save(&record).await;
+    let result = manager.saver.save(std::slice::from_ref(&record)).await;
     assert!(result.is_ok(), "save should succeed: {:?}", result.err());
 
     // File should exist on disk
-    let saved_path = result.unwrap();
+    let saved_path = result.unwrap().remove(0);
     assert!(
         std::path::Path::new(&saved_path).exists(),
         "local file should exist: {}",
         saved_path
     );
+}
+
+#[tokio::test]
+async fn test_builder_uses_configured_channel_and_batch_settings() {
+    let tmp = TempDir::new().unwrap();
+    let manager = CallRecordManagerBuilder::new()
+        .with_config(CallRecordConfig {
+            channel_capacity: 17,
+            batch_size: 3,
+            storage: CallRecordStorageConfig::Local {
+                root: tmp.path().to_string_lossy().into_owned(),
+            },
+        })
+        .build()
+        .await
+        .unwrap();
+
+    assert_eq!(manager.sender.max_capacity(), 17);
+    assert_eq!(manager.batch_size, 3);
 }
 
 // ── HTTP config + no main_db → OK ──────────────────────────────────────────────
@@ -414,7 +474,8 @@ async fn test_local_config_without_main_db_ok() {
 async fn test_http_config_without_main_db_ok() {
     let manager = CallRecordManagerBuilder::new()
         .with_config(CallRecordConfig {
-            max_concurrent: 4,
+            channel_capacity: 2048,
+            batch_size: 4,
             storage: CallRecordStorageConfig::Http {
                 url: "http://127.0.0.1:1/cdr".to_string(),
                 headers: None,
@@ -428,7 +489,7 @@ async fn test_http_config_without_main_db_ok() {
 
     // Saver is built; actual POST will fail (no server) but build() itself succeeds.
     let record = make_record();
-    let _ = manager.saver.save(&record).await; // expected to fail (connection refused)
+    let _ = manager.saver.save(std::slice::from_ref(&record)).await; // expected to fail (connection refused)
 }
 
 // ── S3 config + no main_db → OK (Storage::new doesn't actually connect) ────────
@@ -437,7 +498,8 @@ async fn test_http_config_without_main_db_ok() {
 async fn test_s3_config_without_main_db_ok() {
     let manager = CallRecordManagerBuilder::new()
         .with_config(CallRecordConfig {
-            max_concurrent: 4,
+            channel_capacity: 2048,
+            batch_size: 4,
             storage: CallRecordStorageConfig::S3 {
                 vendor: crate::config::S3Vendor::Minio,
                 bucket: "test-bucket".to_string(),
@@ -456,7 +518,7 @@ async fn test_s3_config_without_main_db_ok() {
 
     // Saver is built; actual upload will fail (no server) but build() succeeds.
     let record = make_record();
-    let _ = manager.saver.save(&record).await; // expected to fail (connection refused)
+    let _ = manager.saver.save(std::slice::from_ref(&record)).await; // expected to fail (connection refused)
 }
 
 // ── Database config + database_url + no main_db → OK ───────────────────────────
@@ -465,7 +527,8 @@ async fn test_s3_config_without_main_db_ok() {
 async fn test_database_with_url_without_main_db_ok() {
     let manager = CallRecordManagerBuilder::new()
         .with_config(CallRecordConfig {
-            max_concurrent: 4,
+            channel_capacity: 2048,
+            batch_size: 4,
             storage: CallRecordStorageConfig::Database {
                 database_url: Some("sqlite::memory:".to_string()),
                 table_name: "custom_cdr".to_string(),
@@ -478,7 +541,7 @@ async fn test_database_with_url_without_main_db_ok() {
         .expect("Database config with database_url should not require main_db");
 
     let record = make_record();
-    let result = manager.saver.save(&record).await;
+    let result = manager.saver.save(std::slice::from_ref(&record)).await;
     assert!(result.is_ok(), "save should succeed: {:?}", result.err());
 }
 
@@ -497,7 +560,8 @@ async fn test_local_saver_does_not_write_to_db() {
     let manager = CallRecordManagerBuilder::new()
         .with_main_db(db.clone())
         .with_config(CallRecordConfig {
-            max_concurrent: 4,
+            channel_capacity: 2048,
+            batch_size: 4,
             storage: CallRecordStorageConfig::Local { root: root.clone() },
         })
         .build()
@@ -505,7 +569,11 @@ async fn test_local_saver_does_not_write_to_db() {
         .unwrap();
 
     let record = make_record();
-    manager.saver.save(&record).await.unwrap();
+    manager
+        .saver
+        .save(std::slice::from_ref(&record))
+        .await
+        .unwrap();
 
     // Verify the DB table is empty — Local saver must not have written to it.
     let count = count_rows(&db, "rustpbx_call_records").await;
@@ -531,7 +599,11 @@ async fn test_default_db_saver_writes_to_db() {
         .unwrap();
 
     let record = make_record();
-    manager.saver.save(&record).await.unwrap();
+    manager
+        .saver
+        .save(std::slice::from_ref(&record))
+        .await
+        .unwrap();
 
     let count = count_rows(&db, "rustpbx_call_records").await;
     assert_eq!(count, 1, "default DB saver should write exactly one row");
@@ -555,7 +627,11 @@ async fn test_db_saver_persists_cdr_path_in_metadata() {
 
     let mut record = make_record();
     record.details.cdr_file_path = Some("/old/root/20260728/test-call-id.json".to_string());
-    manager.saver.save(&record).await.unwrap();
+    manager
+        .saver
+        .save(std::slice::from_ref(&record))
+        .await
+        .unwrap();
 
     use crate::models::call_record::Entity as CallRecordEntity;
     use sea_orm::ColumnTrait;
@@ -606,12 +682,12 @@ async fn test_save_with_http_without_media() {
         headers,
         client: reqwest::Client::new(),
     }
-    .save(&record)
+    .save(std::slice::from_ref(&record))
     .await;
 
     // We expect this to succeed for the JSON upload
     if result.is_ok() {
-        println!("HTTP upload test passed: {}", result.unwrap());
+        println!("HTTP upload test passed: {:?}", result.unwrap());
     } else {
         println!(
             "HTTP upload test failed (expected if no internet): {:?}",
@@ -656,11 +732,11 @@ async fn test_save_with_http_with_media() {
         headers,
         client: reqwest::Client::new(),
     }
-    .save(&record)
+    .save(std::slice::from_ref(&record))
     .await;
 
     if result.is_ok() {
-        println!("HTTP upload with media test passed: {}", result.unwrap());
+        println!("HTTP upload with media test passed: {:?}", result.unwrap());
     } else {
         println!(
             "HTTP upload with media test failed (expected if no internet): {:?}",
@@ -693,11 +769,11 @@ async fn test_save_with_http_with_custom_headers() {
         headers: Some(headers),
         client: reqwest::Client::new(),
     }
-    .save(&record)
+    .save(std::slice::from_ref(&record))
     .await;
 
     if result.is_ok() {
-        println!("HTTP upload with headers test passed: {}", result.unwrap());
+        println!("HTTP upload with headers test passed: {:?}", result.unwrap());
     } else {
         println!(
             "HTTP upload with headers test failed (expected if no internet): {:?}",
@@ -730,11 +806,11 @@ async fn test_save_with_s3_like_with_custom_headers() {
         headers: Some(headers),
         client: reqwest::Client::new(),
     }
-    .save(&record)
+    .save(std::slice::from_ref(&record))
     .await;
 
     if result.is_ok() {
-        println!("HTTP upload with headers test passed: {}", result.unwrap());
+        println!("HTTP upload with headers test passed: {:?}", result.unwrap());
     } else {
         println!(
             "HTTP upload with headers test failed (expected if no internet): {:?}",
@@ -804,14 +880,14 @@ async fn test_save_with_s3_like_with_media() {
                     endpoint: Some(endpoint),
                     storage,
                 }
-                .save(&record)
+                .save(std::slice::from_ref(&record))
                 .await
             }
             Err(e) => Err(e),
         };
 
         match result {
-            Ok(message) => println!("S3 {:?} upload with media test passed: {}", vendor, message),
+            Ok(message) => println!("S3 {:?} upload with media test passed: {:?}", vendor, message),
             Err(e) => println!(
                 "S3 {:?} upload with media test failed (expected without real credentials): {:?}",
                 vendor, e
@@ -911,14 +987,16 @@ struct CompletedProbe {
 
 #[async_trait::async_trait]
 impl CallRecordHook for CompletedProbe {
-    async fn on_record_completed(&self, record: &mut CallRecord) -> anyhow::Result<()> {
+    async fn on_record_completed(&self, records: &mut [CallRecord]) -> anyhow::Result<()> {
         // completed runs after enrich → the field set by the enrich probe
         // must already be visible here.
-        assert_eq!(
-            record.details.queue.as_deref(),
-            Some(self.expect_queue),
-            "enrich must run before completed"
-        );
+        for record in records {
+            assert_eq!(
+                record.details.queue.as_deref(),
+                Some(self.expect_queue),
+                "enrich must run before completed"
+            );
+        }
         self.log.lock().unwrap().push(self.tag);
         Ok(())
     }
@@ -927,10 +1005,151 @@ impl CallRecordHook for CompletedProbe {
 struct EnrichSetsQueue;
 #[async_trait::async_trait]
 impl CallRecordHook for EnrichSetsQueue {
-    async fn on_record_enrich(&self, record: &mut CallRecord) -> anyhow::Result<()> {
-        record.details.queue = Some("from-enrich".to_string());
+    async fn on_record_enrich(&self, records: &mut [CallRecord]) -> anyhow::Result<()> {
+        for record in records {
+            record.details.queue = Some("from-enrich".to_string());
+        }
         Ok(())
     }
+}
+
+struct BatchSizeProbe {
+    sizes: Arc<Mutex<Vec<usize>>>,
+}
+
+#[async_trait::async_trait]
+impl CallRecordHook for BatchSizeProbe {
+    async fn on_record_completed(&self, records: &mut [CallRecord]) -> anyhow::Result<()> {
+        self.sizes.lock().unwrap().push(records.len());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_manager_flushes_when_batch_size_is_reached() {
+    let sizes = Arc::new(Mutex::new(Vec::new()));
+    let db = in_memory_db().await;
+    create_call_record_table(&db, "rustpbx_call_records")
+        .await
+        .unwrap();
+    let manager = CallRecordManagerBuilder::new()
+        .with_main_db(db)
+        .with_batch_size(2)
+        .with_hook(Box::new(BatchSizeProbe {
+            sizes: sizes.clone(),
+        }))
+        .build()
+        .await
+        .unwrap();
+    let sender = manager.sender.clone();
+    let cancel = manager.cancel_token.clone();
+    let first = make_record();
+    let mut second = make_record();
+    second.call_id = "batch-size-2".to_string();
+    sender.send(first).await.unwrap();
+    sender.send(second).await.unwrap();
+    cancel.cancel();
+
+    let serve_handle = tokio::spawn(async move {
+        let mut manager = manager;
+        manager.serve().await;
+    });
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if sizes.lock().unwrap().as_slice() == [2] {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("full batch should flush without waiting for its duration");
+    serve_handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_manager_processes_non_empty_recv_many_batch() {
+    let sizes = Arc::new(Mutex::new(Vec::new()));
+    let db = in_memory_db().await;
+    create_call_record_table(&db, "rustpbx_call_records")
+        .await
+        .unwrap();
+    let manager = CallRecordManagerBuilder::new()
+        .with_main_db(db)
+        .with_batch_size(3)
+        .with_hook(Box::new(BatchSizeProbe {
+            sizes: sizes.clone(),
+        }))
+        .build()
+        .await
+        .unwrap();
+    let sender = manager.sender.clone();
+    let cancel = manager.cancel_token.clone();
+    let serve_handle = tokio::spawn(async move {
+        let mut manager = manager;
+        manager.serve().await;
+    });
+
+    sender.send(make_record()).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if sizes.lock().unwrap().as_slice() == [1] {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("a non-empty recv_many batch should be processed immediately");
+    cancel.cancel();
+    serve_handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_manager_cancellation_accepts_records_until_shutdown_timeout() {
+    let sizes = Arc::new(Mutex::new(Vec::new()));
+    let db = in_memory_db().await;
+    create_call_record_table(&db, "rustpbx_call_records")
+        .await
+        .unwrap();
+    let manager = CallRecordManagerBuilder::new()
+        .with_main_db(db)
+        .with_hook(Box::new(BatchSizeProbe {
+            sizes: sizes.clone(),
+        }))
+        .build()
+        .await
+        .unwrap();
+    let sender = manager.sender.clone();
+    let cancel = manager.cancel_token.clone();
+    let serve_handle = tokio::spawn(async move {
+        let mut manager = manager;
+        manager.serve().await;
+    });
+
+    tokio::task::yield_now().await;
+    cancel.cancel();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    sender.send(make_record()).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if sizes.lock().unwrap().as_slice() == [1] {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("a record sent during shutdown should still be processed");
+
+    tokio::time::timeout(Duration::from_secs(6), serve_handle)
+        .await
+        .expect("the manager should exit when the shutdown timeout is reached")
+        .unwrap();
 }
 
 #[tokio::test]
@@ -1016,9 +1235,9 @@ async fn test_recording_upload_uses_sipflow_stashed_url() {
         recording_type: Some(RecordingType::Local),
         ..Default::default()
     };
-    let hook = RecordingUploadHook::new(policy)
-        .expect("failed to create RecordingUploadHook")
-        .with_rwi_gateway(gateway.clone());
+    let (hook, _upload_manager) =
+        RecordingUploadHook::new(policy).expect("failed to create RecordingUploadHook");
+    let hook = hook.with_rwi_gateway(gateway.clone());
 
     // Simulate a record where sipflow captured media:
     //   - recorder is empty (no local WAV file)
@@ -1058,7 +1277,7 @@ async fn test_recording_upload_uses_sipflow_stashed_url() {
     };
 
     // Execute — this should read the stashed URL and emit events.
-    hook.on_record_completed(&mut record)
+    hook.on_record_completed(std::slice::from_mut(&mut record))
         .await
         .expect("on_record_completed failed");
 
@@ -1147,9 +1366,8 @@ async fn test_recording_metadata_filename_falls_back_to_call_id_wav() {
         recording_type: Some(RecordingType::Local),
         ..Default::default()
     };
-    let hook = RecordingUploadHook::new(policy)
-        .unwrap()
-        .with_rwi_gateway(gateway.clone());
+    let (hook, _upload_manager) = RecordingUploadHook::new(policy).unwrap();
+    let hook = hook.with_rwi_gateway(gateway.clone());
 
     let now = Utc::now();
     let mut record = CallRecord {
@@ -1169,7 +1387,7 @@ async fn test_recording_metadata_filename_falls_back_to_call_id_wav() {
         ..Default::default()
     };
 
-    hook.on_record_completed(&mut record)
+    hook.on_record_completed(std::slice::from_mut(&mut record))
         .await
         .expect("on_record_completed failed");
 
@@ -1217,9 +1435,8 @@ async fn test_recording_metadata_file_size_uses_stashed_sipflow_size() {
         recording_type: Some(RecordingType::Local),
         ..Default::default()
     };
-    let hook = RecordingUploadHook::new(policy)
-        .unwrap()
-        .with_rwi_gateway(gateway.clone());
+    let (hook, _upload_manager) = RecordingUploadHook::new(policy).unwrap();
+    let hook = hook.with_rwi_gateway(gateway.clone());
 
     let now = Utc::now();
     let mut record = CallRecord {
@@ -1241,7 +1458,7 @@ async fn test_recording_metadata_file_size_uses_stashed_sipflow_size() {
     // Simulate SipFlowUploadHook stashing the uploaded file size.
     record.extensions.insert(RecordingFileSize(42_000));
 
-    hook.on_record_completed(&mut record)
+    hook.on_record_completed(std::slice::from_mut(&mut record))
         .await
         .expect("on_record_completed failed");
 

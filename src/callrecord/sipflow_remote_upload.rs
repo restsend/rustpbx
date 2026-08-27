@@ -44,7 +44,8 @@ impl SipFlowRemoteUploadHook {
 
 #[async_trait]
 impl CallRecordHook for SipFlowRemoteUploadHook {
-    async fn on_record_completed(&self, record: &mut CallRecord) -> Result<()> {
+    async fn on_record_completed(&self, records: &mut [CallRecord]) -> Result<()> {
+        for record in records {
         let call_id = record.call_id.as_str();
         let start = Local.from_utc_datetime(&record.start_time.naive_utc());
         let end = Local.from_utc_datetime(&record.end_time.naive_utc());
@@ -96,7 +97,7 @@ impl CallRecordHook for SipFlowRemoteUploadHook {
                             call_id,
                             upload_url, "SipFlowRemoteUploadHook: decode response failed: {e}"
                         );
-                        return Ok(());
+                        continue;
                     }
                 },
                 Ok(r) => {
@@ -106,14 +107,14 @@ impl CallRecordHook for SipFlowRemoteUploadHook {
                         call_id,
                         upload_url, "SipFlowRemoteUploadHook: upload failed: {status} – {body}"
                     );
-                    return Ok(());
+                    continue;
                 }
                 Err(e) => {
                     warn!(
                         call_id,
                         upload_url, "SipFlowRemoteUploadHook: request failed: {e}"
                     );
-                    return Ok(());
+                    continue;
                 }
             };
 
@@ -138,6 +139,7 @@ impl CallRecordHook for SipFlowRemoteUploadHook {
             record
                 .extensions
                 .insert(crate::callrecord::RecordingFileSize(resp.media_size));
+        }
         }
 
         Ok(())
@@ -203,7 +205,7 @@ mod tests {
             ..Default::default()
         };
 
-        hook.on_record_completed(&mut record)
+        hook.on_record_completed(std::slice::from_mut(&mut record))
             .await
             .expect("delegate early media upload");
 
