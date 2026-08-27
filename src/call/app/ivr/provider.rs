@@ -40,6 +40,14 @@ pub trait ActionProvider: Send + Sync {
         Ok(())
     }
 
+    async fn on_session_end_context(
+        &self,
+        reason: &SessionEndReason,
+        context: &SessionContext,
+    ) -> anyhow::Result<()> {
+        self.on_session_end(reason, &context.session_id).await
+    }
+
     /// Called when a DtmfMenu resolves a DTMF key locally (no round‑trip to
     /// the provider).  Fire‑and‑forget notification so the provider stays
     /// informed about which keys were pressed and what action was taken.
@@ -51,11 +59,13 @@ pub trait ActionProvider: Send + Sync {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionContext {
     pub session_id: String,
+    pub app_execution_id: u64,
     pub caller: String,
     pub callee: String,
     pub direction: String,
     pub tenant_id: Option<String>,
     pub ivr_id: Option<String>,
+    pub variables: HashMap<String, String>,
     /// All SIP headers from the original INVITE request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sip_headers: Option<HashMap<String, String>>,
@@ -74,6 +84,7 @@ pub struct SessionContext {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderContext {
     pub session_id: String,
+    pub app_execution_id: u64,
     pub caller: String,
     pub callee: String,
     pub direction: String,
@@ -449,14 +460,15 @@ impl ActionProvider for StepProvider {
         Ok(())
     }
 
-    async fn on_session_end(
+    async fn on_session_end_context(
         &self,
         reason: &SessionEndReason,
-        session_id: &str,
+        context: &SessionContext,
     ) -> anyhow::Result<()> {
         let url = self.endpoint_url(Some("end"));
         let body = serde_json::json!({
-            "session_id": session_id,
+            "session_id": context.session_id,
+            "app_execution_id": context.app_execution_id,
             "reason": reason.reason,
             "detail": reason.detail,
         });

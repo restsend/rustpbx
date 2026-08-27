@@ -27,6 +27,7 @@ const DEFAULT_MAX_REPEAT_PROMPTS: u32 = 10;
 
 pub struct StepIvrApp {
     provider: Box<dyn ActionProvider>,
+    provider_session: Option<SessionContext>,
     current_node: Option<ActionNode>,
     sess: SessionData,
     pending_menu: Option<PendingMenu>,
@@ -119,6 +120,7 @@ impl StepIvrApp {
         let provider = Box::new(super::provider::StepProvider::new(url));
         Self {
             provider,
+            provider_session: None,
             current_node: None,
             sess: SessionData::default(),
             pending_menu: None,
@@ -159,6 +161,7 @@ impl StepIvrApp {
     pub fn with_provider(provider: Box<dyn ActionProvider>) -> Self {
         Self {
             provider,
+            provider_session: None,
             current_node: None,
             sess: SessionData::default(),
             pending_menu: None,
@@ -333,12 +336,7 @@ impl StepIvrApp {
 
     fn increment_total_steps(&self) {
         if let Some(t) = self.effective_trace() {
-            let sid = self
-                .sess
-                .variables
-                .get("session_id")
-                .cloned()
-                .unwrap_or_default();
+            let sid = self.provider_session_context().session_id;
             crate::utils::spawn(async move {
                 t.increment_steps(&sid).await;
             });
@@ -371,12 +369,7 @@ impl StepIvrApp {
     }
 
     async fn record_session_end(&self, status: &str) {
-        let session_id = self
-            .sess
-            .variables
-            .get("session_id")
-            .cloned()
-            .unwrap_or_default();
+        let session_id = self.provider_session_context().session_id;
         if let Some(t) = self.effective_trace() {
             let sid = session_id;
             let st = status.to_string();
@@ -512,24 +505,10 @@ impl StepIvrApp {
 
         self.current_trigger = None;
 
-        let session_id = self
-            .sess
-            .variables
-            .get("session_id")
-            .cloned()
-            .unwrap_or_default();
-        let caller = self
-            .sess
-            .variables
-            .get("caller")
-            .cloned()
-            .unwrap_or_default();
-        let callee = self
-            .sess
-            .variables
-            .get("callee")
-            .cloned()
-            .unwrap_or_default();
+        let provider_session = self.provider_session_context();
+        let session_id = provider_session.session_id;
+        let caller = provider_session.caller;
+        let callee = provider_session.callee;
 
         match result {
             Ok(action_result) => {
@@ -581,6 +560,36 @@ impl StepIvrApp {
                             }
                             TerminalAction::Exit => AppAction::Exit,
                         }
+                    }
+                    ActionResult::ImmediateAudioComplete => {
+                        // Reuse pending-trace completion so the no-media Prompt remains observable.
+                        self.pending_start_instant = self.step_start_instant;
+                        self.pending_trace = Some(IvrTraceEntry {
+                            session_id: session_id.clone(),
+                            caller: caller.clone(),
+                            callee: callee.clone(),
+                            step_index: self.step_index,
+                            trigger: trigger.clone(),
+                            provider_url: None,
+                            action_type: node_type_str,
+                            action_json,
+                            error: None,
+                            step_id: step_id.clone(),
+                            step_name: step_name.clone(),
+                            step_start_time: self.current_step_start_time.clone(),
+                            step_end_time: None,
+                            duration_ms: 0,
+                            extra: self.extra.clone(),
+                            end_reason: None,
+                            end_detail: None,
+                        });
+                        self.current_node = Some(
+                            self.request_next(Some(ProviderEvent::AudioComplete {
+                                interrupted: false,
+                            }))
+                            .await?,
+                        );
+                        return Box::pin(self.__exec_node(ctrl, ctx)).await;
                     }
                     ActionResult::ChainedTo(next) => {
                         self.current_trigger = Some(crate::rwi::TriggerInfo::new("chained"));
@@ -769,6 +778,45 @@ impl StepIvrApp {
         }
     }
 
+    fn provider_session_context(&self) -> SessionContext {
+        self.provider_session
+            .clone()
+            .unwrap_or_else(|| SessionContext {
+                session_id: self
+                    .sess
+                    .variables
+                    .get("session_id")
+                    .cloned()
+                    .unwrap_or_default(),
+                app_execution_id: 0,
+                caller: self
+                    .sess
+                    .variables
+                    .get("caller")
+                    .cloned()
+                    .unwrap_or_default(),
+                callee: self
+                    .sess
+                    .variables
+                    .get("callee")
+                    .cloned()
+                    .unwrap_or_default(),
+                direction: self
+                    .sess
+                    .variables
+                    .get("direction")
+                    .cloned()
+                    .unwrap_or_default(),
+                tenant_id: self.sess.variables.get("tenant_id").cloned(),
+                ivr_id: self.sess.variables.get("ivr_id").cloned(),
+                variables: self.sess.variables.clone(),
+                sip_headers: self.get_sip_headers(),
+                route_name: self.route_name.clone(),
+                custom_data: self.custom_data.clone(),
+                transferred_from: self.transferred_from.clone(),
+            })
+    }
+
     fn fallback_already_used(&self) -> bool {
         self.sess
             .variables
@@ -812,24 +860,10 @@ impl StepIvrApp {
 
     /// Record a trace entry + RWI `ivr_step_trace` event for a fallback decision.
     fn record_fallback_trace(&self, reason: &str, target: Option<&str>) {
-        let session_id = self
-            .sess
-            .variables
-            .get("session_id")
-            .cloned()
-            .unwrap_or_default();
-        let caller = self
-            .sess
-            .variables
-            .get("caller")
-            .cloned()
-            .unwrap_or_default();
-        let callee = self
-            .sess
-            .variables
-            .get("callee")
-            .cloned()
-            .unwrap_or_default();
+        let provider_session = self.provider_session_context();
+        let session_id = provider_session.session_id;
+        let caller = provider_session.caller;
+        let callee = provider_session.callee;
         let now = chrono::Utc::now().to_rfc3339();
         self.record_trace(IvrTraceEntry {
             session_id,
@@ -858,7 +892,7 @@ impl StepIvrApp {
         });
     }
 
-    /// Session-level recovery: match `[proxy.ivr_fallback]` → JumpIvr, else hangup.
+    /// Session-level recovery: match `[proxy.ivr_fallback]` → direct IVR, else hangup.
     fn enter_ivr_fallback_node(&mut self, reason: &str) -> ActionNode {
         if self.fallback_already_used() {
             tracing::warn!(
@@ -878,18 +912,9 @@ impl StepIvrApp {
             return Self::hangup_error_node();
         };
 
-        let caller = self
-            .sess
-            .variables
-            .get("caller")
-            .cloned()
-            .unwrap_or_default();
-        let callee = self
-            .sess
-            .variables
-            .get("callee")
-            .cloned()
-            .unwrap_or_default();
+        let provider_session = self.provider_session_context();
+        let caller = provider_session.caller;
+        let callee = provider_session.callee;
         let headers = self.get_sip_headers();
 
         let Some(target) =
@@ -907,44 +932,28 @@ impl StepIvrApp {
         tracing::warn!(
             reason = %reason,
             target = %target,
-            "StepIvrApp: entering IVR fallback via toivr"
+            "StepIvrApp: entering direct IVR fallback"
         );
         self.record_fallback_trace(reason, Some(&target));
         let mut params = HashMap::new();
         params.insert(IVR_FALLBACK_USED_KEY.into(), "1".into());
-        ActionNode::new(EntryAction::JumpIvr {
-            route_point: target,
+        ActionNode::new(EntryAction::Transfer {
+            target: format!("ivr:{target}"),
             params,
+            return_app: None,
+            return_target: None,
         })
     }
 
     fn build_fail_provider_context(&self, reason: String) -> ProviderContext {
         let now_rfc3339 = chrono::Utc::now().to_rfc3339();
+        let session = self.provider_session_context();
         ProviderContext {
-            session_id: self
-                .sess
-                .variables
-                .get("session_id")
-                .cloned()
-                .unwrap_or_default(),
-            caller: self
-                .sess
-                .variables
-                .get("caller")
-                .cloned()
-                .unwrap_or_default(),
-            callee: self
-                .sess
-                .variables
-                .get("callee")
-                .cloned()
-                .unwrap_or_default(),
-            direction: self
-                .sess
-                .variables
-                .get("direction")
-                .cloned()
-                .unwrap_or_default(),
+            session_id: session.session_id,
+            app_execution_id: session.app_execution_id,
+            caller: session.caller,
+            callee: session.callee,
+            direction: session.direction,
             tenant_id: self.sess.variables.get("tenant_id").cloned(),
             ivr_id: self.sess.variables.get("ivr_id").cloned(),
             variables: self.sess.variables.clone(),
@@ -1054,31 +1063,13 @@ impl StepIvrApp {
 
         let now_rfc3339 = chrono::Utc::now().to_rfc3339();
         let prev_step_duration_ms = self.step_prev_duration_ms;
+        let session = self.provider_session_context();
         let ctx = ProviderContext {
-            session_id: self
-                .sess
-                .variables
-                .get("session_id")
-                .cloned()
-                .unwrap_or_default(),
-            caller: self
-                .sess
-                .variables
-                .get("caller")
-                .cloned()
-                .unwrap_or_default(),
-            callee: self
-                .sess
-                .variables
-                .get("callee")
-                .cloned()
-                .unwrap_or_default(),
-            direction: self
-                .sess
-                .variables
-                .get("direction")
-                .cloned()
-                .unwrap_or_default(),
+            session_id: session.session_id,
+            app_execution_id: session.app_execution_id,
+            caller: session.caller,
+            callee: session.callee,
+            direction: session.direction,
             tenant_id: self.sess.variables.get("tenant_id").cloned(),
             ivr_id: self.sess.variables.get("ivr_id").cloned(),
             variables: self.sess.variables.clone(),
@@ -1407,6 +1398,17 @@ impl CallApp for StepIvrApp {
         self.set_runtime_status(context, "starting");
         ctrl.answer().await?;
 
+        let invocation =
+            context
+                .invocation
+                .clone()
+                .unwrap_or_else(|| crate::call::app::AppInvocationContext {
+                    app_execution_id: 0,
+                    callee: context.call_info.callee.clone(),
+                    sip_headers: context.call_info.sip_headers.clone(),
+                    variables: HashMap::new(),
+                });
+
         self.sess
             .variables
             .insert("session_id".into(), context.call_info.session_id.clone());
@@ -1415,14 +1417,14 @@ impl CallApp for StepIvrApp {
             .insert("caller".into(), context.call_info.caller.clone());
         self.sess
             .variables
-            .insert("callee".into(), context.call_info.callee.clone());
+            .insert("callee".into(), invocation.callee.clone());
         self.sess
             .variables
             .insert("direction".into(), context.call_info.direction.clone());
 
         // Clone SIP headers once; store in self.sess for future request_next calls,
         // then move into SessionContext to avoid a second full clone.
-        let headers = context.call_info.sip_headers.clone();
+        let headers = invocation.sip_headers.clone();
 
         for (name, value) in &headers {
             let key = format!("sip_{}", name.replace(|c: char| !c.is_alphanumeric(), "_"));
@@ -1430,6 +1432,15 @@ impl CallApp for StepIvrApp {
         }
 
         self.sess.sip_headers = headers.clone();
+
+        for variable in context.session_vars.iter() {
+            self.sess
+                .variables
+                .insert(variable.key().clone(), variable.value().clone());
+        }
+        for (name, value) in &invocation.variables {
+            self.sess.variables.insert(name.clone(), value.clone());
+        }
 
         // Merge ivr_params (from JumpIvr query string) into session variables
         // so they are available for $var$ substitution and sent to the provider.
@@ -1447,26 +1458,29 @@ impl CallApp for StepIvrApp {
 
         let sess_ctx = SessionContext {
             session_id: context.call_info.session_id.clone(),
+            app_execution_id: invocation.app_execution_id,
             caller: context.call_info.caller.clone(),
-            callee: context.call_info.callee.clone(),
+            callee: invocation.callee,
             direction: context.call_info.direction.clone(),
             tenant_id: None,
             ivr_id: None,
+            variables: self.sess.variables.clone(),
             sip_headers: Some(headers),
             route_name: self.route_name.clone(),
             custom_data: self.custom_data.clone(),
             transferred_from: self.transferred_from.clone(),
         };
+        self.provider_session = Some(sess_ctx.clone());
         self.set_runtime_status(context, "provider_start");
         self.provider.on_session_start(&sess_ctx).await.ok();
 
         self.step_prev_start_time = Some(chrono::Utc::now().to_rfc3339());
 
         self.record_session_start(
-            &context.call_info.session_id,
-            &context.call_info.caller,
-            &context.call_info.callee,
-            &context.call_info.direction,
+            &sess_ctx.session_id,
+            &sess_ctx.caller,
+            &sess_ctx.callee,
+            &sess_ctx.direction,
         )
         .await;
 
@@ -1811,12 +1825,8 @@ impl CallApp for StepIvrApp {
             end_reason.reason = SessionEndTag::Timeout;
             end_reason_label = "timeout".to_string();
         }
-        let session_id = self
-            .sess
-            .variables
-            .get("session_id")
-            .cloned()
-            .unwrap_or_default();
+        let provider_session = self.provider_session_context();
+        let session_id = provider_session.session_id;
         let end_sr = end_reason.clone();
 
         // Always record the session_end trace entry — including on
@@ -1842,18 +1852,8 @@ impl CallApp for StepIvrApp {
                 None,
             ),
         };
-        let caller = self
-            .sess
-            .variables
-            .get("caller")
-            .cloned()
-            .unwrap_or_default();
-        let callee = self
-            .sess
-            .variables
-            .get("callee")
-            .cloned()
-            .unwrap_or_default();
+        let caller = provider_session.caller;
+        let callee = provider_session.callee;
         self.record_trace(IvrTraceEntry {
             session_id: session_id.clone(),
             caller,
@@ -1875,8 +1875,9 @@ impl CallApp for StepIvrApp {
         });
 
         if !skip_provider_end {
+            let provider_session = self.provider_session_context();
             self.provider
-                .on_session_end(&end_reason, &session_id)
+                .on_session_end_context(&end_reason, &provider_session)
                 .await
                 .ok();
         }
@@ -1980,7 +1981,10 @@ mod tests {
         nodes: Vec<ActionNode>,
         idx: std::sync::Mutex<usize>,
         start_called: std::sync::Mutex<bool>,
+        start_context: std::sync::Mutex<Option<SessionContext>>,
         end_called: std::sync::Mutex<bool>,
+        events: std::sync::Mutex<Vec<Option<ProviderEvent>>>,
+        contexts: std::sync::Mutex<Vec<ProviderContext>>,
     }
 
     impl MockProvider {
@@ -1989,7 +1993,10 @@ mod tests {
                 nodes,
                 idx: std::sync::Mutex::new(0),
                 start_called: std::sync::Mutex::new(false),
+                start_context: std::sync::Mutex::new(None),
                 end_called: std::sync::Mutex::new(false),
+                events: std::sync::Mutex::new(Vec::new()),
+                contexts: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -1998,7 +2005,9 @@ mod tests {
 
     #[async_trait]
     impl ActionProvider for MockProvider {
-        async fn next_action(&self, _ctx: ProviderContext) -> anyhow::Result<ActionNode> {
+        async fn next_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode> {
+            self.events.lock().unwrap().push(ctx.event.clone());
+            self.contexts.lock().unwrap().push(ctx);
             let mut idx = self.idx.lock().unwrap();
             if *idx < self.nodes.len() {
                 let node = self.nodes[*idx].clone();
@@ -2009,8 +2018,9 @@ mod tests {
             }
         }
 
-        async fn on_session_start(&self, _ctx: &SessionContext) -> anyhow::Result<()> {
+        async fn on_session_start(&self, ctx: &SessionContext) -> anyhow::Result<()> {
             *self.start_called.lock().unwrap() = true;
+            *self.start_context.lock().unwrap() = Some(ctx.clone());
             Ok(())
         }
 
@@ -2061,6 +2071,54 @@ mod tests {
             },
             Arc::new(Config::default()),
         )
+    }
+
+    #[tokio::test]
+    async fn step_provider_uses_invocation_identity_and_keeps_business_variables_separate() {
+        let provider = Arc::new(MockProvider::new(vec![ActionNode::new(
+            EntryAction::Transfer {
+                target: "2001".into(),
+                params: HashMap::new(),
+                return_app: None,
+                return_target: None,
+            },
+        )]));
+        let mut context = make_test_context();
+        context.invocation = Some(crate::call::app::AppInvocationContext {
+            app_execution_id: 2,
+            callee: "39230".into(),
+            sip_headers: HashMap::from([("X-Business-Type".into(), "34".into())]),
+            variables: HashMap::from([
+                ("session_id".into(), "business-value".into()),
+                ("order_id".into(), "order-001".into()),
+            ]),
+        });
+        let app = StepIvrApp::with_provider(Box::new(MockProviderHandle(provider.clone())));
+        let mut stack = MockCallStack::run_with_context(Box::new(app), context);
+
+        stack
+            .assert_cmd(200, "accept", |command| {
+                matches!(command, CallCommand::Answer { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |command| matches!(command, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        let start = provider.start_context.lock().unwrap().clone().unwrap();
+        assert_eq!(start.session_id, "test-session");
+        assert_eq!(start.app_execution_id, 2);
+        assert_eq!(start.callee, "39230");
+        assert_eq!(start.sip_headers.as_ref().unwrap()["X-Business-Type"], "34");
+        assert_eq!(start.variables["session_id"], "business-value");
+        let contexts = provider.contexts.lock().unwrap();
+        assert_eq!(contexts[0].session_id, "test-session");
+        assert_eq!(contexts[0].app_execution_id, 2);
+        assert_eq!(contexts[0].variables["session_id"], "business-value");
     }
 
     struct BlockingProvider {
@@ -2280,6 +2338,95 @@ mod tests {
             "session_start"
         );
         assert_eq!(transfer_trace.event.payload["step_id"], "transfer-step");
+    }
+
+    #[tokio::test]
+    async fn test_empty_prompt_completes_without_audio() {
+        use crate::rwi::gateway::RwiGateway;
+
+        let prompt: ActionNode = serde_json::from_value(serde_json::json!({
+            "type": "prompt",
+            "tts_text": "",
+            "step_id": "empty-prompt-step",
+            "extra": { "nodetype": "dynamic_prompt" }
+        }))
+        .expect("provider-shaped empty Prompt must deserialize");
+        let mut transfer = ActionNode::new(EntryAction::Transfer {
+            target: "2001".into(),
+            params: HashMap::new(),
+            return_app: None,
+            return_target: None,
+        });
+        transfer.step_id = Some("next-step".into());
+        let gateway = RwiGateway::new();
+        let mut events = gateway.subscribe_events();
+        let mut app = mock_app(vec![prompt, transfer]);
+        app.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gateway)));
+
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        let prompt_trace = events
+            .try_recv()
+            .expect("empty prompt trace must be enqueued");
+        let transfer_trace = events.try_recv().expect("next step trace must be enqueued");
+        assert_eq!(prompt_trace.event.payload["step_id"], "empty-prompt-step");
+        assert_eq!(prompt_trace.event.payload["action_type"], "Prompt");
+        assert_eq!(
+            prompt_trace.event.payload["extra"]["nodetype"],
+            "dynamic_prompt"
+        );
+        assert_eq!(transfer_trace.event.payload["step_id"], "next-step");
+        assert_eq!(
+            transfer_trace.event.payload["trigger"]["type"],
+            "audio_complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_missing_prompt_audio_reports_provider_error() {
+        let prompt: ActionNode = serde_json::from_value(serde_json::json!({
+            "type": "prompt",
+            "step_id": "missing-audio-step"
+        }))
+        .expect("provider-shaped Prompt without media must deserialize");
+        let mut transfer = ActionNode::new(EntryAction::Transfer {
+            target: "2001".into(),
+            params: HashMap::new(),
+            return_app: None,
+            return_target: None,
+        });
+        transfer.step_id = Some("error-step".into());
+        let provider = Arc::new(MockProvider::new(vec![prompt, transfer]));
+        let app = StepIvrApp::with_provider(Box::new(MockProviderHandle(provider.clone())));
+
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        assert!(provider.events.lock().unwrap().iter().any(|event| {
+            matches!(
+                event,
+                Some(ProviderEvent::Error { reason }) if reason == "TTS service not available"
+            )
+        }));
     }
 
     #[tokio::test]
@@ -3317,24 +3464,34 @@ mod tests {
                 fallback_action: None,
             })
             .with_prefer_ivr_fallback(true);
-        let mut stack = MockCallStack::run(
+        let mut context = make_test_context();
+        context.invocation = Some(crate::call::app::AppInvocationContext {
+            app_execution_id: 2,
+            callee: "39230".into(),
+            sip_headers: HashMap::new(),
+            variables: HashMap::from([
+                ("caller".into(), "business-caller".into()),
+                ("callee".into(), "business-callee".into()),
+                ("session_id".into(), "business-session".into()),
+            ]),
+        });
+        let mut stack = MockCallStack::run_with_context(
             Box::new(
                 StepIvrApp::with_provider(Box::new(provider))
                     .with_name("fail-fb")
                     .with_ivr_fallback(Some(fb)),
             ),
-            "1001",
-            "2000",
+            context,
         );
         stack
             .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(2000, "toivr fallback", |c| {
+            .assert_cmd(2000, "direct IVR fallback", |c| {
                 matches!(
                     c,
                     CallCommand::Transfer { target, .. }
-                        if target.starts_with("toivr:builtin_vip")
+                        if target.starts_with("ivr:builtin_vip")
                 )
             })
             .await;
@@ -3389,13 +3546,13 @@ mod tests {
         stack
             .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
-        // prefer_ivr_fallback must skip retry.fallback hangup and JumpIvr instead.
+        // prefer_ivr_fallback must skip retry.fallback hangup and use direct IVR instead.
         stack
-            .assert_cmd(2000, "toivr default", |c| {
+            .assert_cmd(2000, "direct default IVR", |c| {
                 matches!(
                     c,
                     CallCommand::Transfer { target, .. }
-                        if target.starts_with("toivr:default_ivr")
+                        if target.starts_with("ivr:default_ivr")
                 )
             })
             .await;
@@ -5251,6 +5408,7 @@ mod tests {
     /// returns.
     struct MockStepProviderServer {
         url: String,
+        requests: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
         _listener: std::net::TcpListener,
     }
 
@@ -5261,21 +5419,28 @@ mod tests {
             listener.local_addr().expect("mock provider addr")
         );
         let accept_listener = listener.try_clone().expect("clone mock provider listener");
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded_requests = requests.clone();
         std::thread::spawn(move || {
             for stream in accept_listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                std::thread::spawn(|| {
-                    let _ = serve_connection(stream);
+                let connection_requests = recorded_requests.clone();
+                std::thread::spawn(move || {
+                    let _ = serve_connection(stream, connection_requests);
                 });
             }
         });
         MockStepProviderServer {
             url,
+            requests,
             _listener: listener,
         }
     }
 
-    fn serve_connection(mut stream: std::net::TcpStream) -> std::io::Result<()> {
+    fn serve_connection(
+        mut stream: std::net::TcpStream,
+        requests: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
+    ) -> std::io::Result<()> {
         use std::io::{BufRead, BufReader, Read, Write};
 
         stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
@@ -5308,6 +5473,9 @@ mod tests {
             }
             let mut body = vec![0u8; content_length];
             reader.read_exact(&mut body)?;
+            if let Ok(value) = serde_json::from_slice(&body) {
+                requests.lock().unwrap().push((path.clone(), value));
+            }
             let payload = mock_step_response(&path, &body);
             let head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
@@ -5347,12 +5515,17 @@ mod tests {
 
         let session = SessionContext {
             session_id: "test-session".to_string(),
+            app_execution_id: 2,
             caller: "1001".to_string(),
             callee: "2000".to_string(),
             direction: "inbound".to_string(),
             tenant_id: None,
             ivr_id: None,
-            sip_headers: None,
+            variables: HashMap::from([("order_id".to_string(), "order-001".to_string())]),
+            sip_headers: Some(HashMap::from([(
+                "X-Business-Type".to_string(),
+                "34".to_string(),
+            )])),
             route_name: None,
             custom_data: None,
             transferred_from: None,
@@ -5361,6 +5534,7 @@ mod tests {
 
         let ctx = ProviderContext {
             session_id: session.session_id.clone(),
+            app_execution_id: session.app_execution_id,
             caller: session.caller.clone(),
             callee: session.callee.clone(),
             direction: session.direction.clone(),
@@ -5389,6 +5563,7 @@ mod tests {
             }),
             ..ProviderContext {
                 session_id: session.session_id.clone(),
+                app_execution_id: session.app_execution_id,
                 caller: session.caller.clone(),
                 callee: session.callee.clone(),
                 direction: session.direction.clone(),
@@ -5414,15 +5589,46 @@ mod tests {
         );
 
         step_provider
-            .on_session_end(
+            .on_session_end_context(
                 &SessionEndReason {
                     reason: SessionEndTag::Normal,
                     detail: None,
                 },
-                "test-session",
+                &session,
             )
             .await
             .unwrap();
+
+        let requests = provider.requests.lock().unwrap();
+        let start = requests
+            .iter()
+            .find(|(path, _)| path == "/ivr/step/start")
+            .map(|(_, body)| body)
+            .expect("start request");
+        assert_eq!(start["session_id"], "test-session");
+        assert_eq!(start["app_execution_id"], 2);
+        assert_eq!(start["variables"]["order_id"], "order-001");
+        assert_eq!(start["sip_headers"]["X-Business-Type"], "34");
+
+        let step_requests = requests
+            .iter()
+            .filter(|(path, _)| path == "/ivr/step")
+            .map(|(_, body)| body)
+            .collect::<Vec<_>>();
+        assert_eq!(step_requests.len(), 2);
+        assert!(
+            step_requests.iter().all(|body| {
+                body["session_id"] == "test-session" && body["app_execution_id"] == 2
+            })
+        );
+
+        let end = requests
+            .iter()
+            .find(|(path, _)| path == "/ivr/step/end")
+            .map(|(_, body)| body)
+            .expect("end request");
+        assert_eq!(end["session_id"], "test-session");
+        assert_eq!(end["app_execution_id"], 2);
     }
 
     // ── DTMF delivery in step-provider mode ──────────────────────────────
@@ -5748,11 +5954,8 @@ mod tests {
             .await
             .expect("fallback node");
         match node.action {
-            EntryAction::JumpIvr {
-                route_point,
-                params,
-            } => {
-                assert_eq!(route_point, "builtin_vip");
+            EntryAction::Transfer { target, params, .. } => {
+                assert_eq!(target, "ivr:builtin_vip");
                 assert_eq!(
                     params
                         .get(crate::call::app::ivr::fallback::IVR_FALLBACK_USED_KEY)
@@ -5760,7 +5963,7 @@ mod tests {
                     Some("1")
                 );
             }
-            other => panic!("expected JumpIvr fallback, got {other:?}"),
+            other => panic!("expected direct IVR fallback, got {other:?}"),
         }
         assert!(app.fallback_already_used());
     }
@@ -5786,8 +5989,8 @@ mod tests {
 
         let node = app.enter_ivr_fallback_node("step:test");
         match node.action {
-            EntryAction::JumpIvr { route_point, .. } => assert_eq!(route_point, "default_ivr"),
-            other => panic!("expected default JumpIvr, got {other:?}"),
+            EntryAction::Transfer { target, .. } => assert_eq!(target, "ivr:default_ivr"),
+            other => panic!("expected default direct IVR transfer, got {other:?}"),
         }
     }
 

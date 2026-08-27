@@ -3174,6 +3174,91 @@ fn test_forward_route_config() -> crate::config::ProxyConfig {
     config
 }
 
+fn test_application_route_config() -> crate::config::ProxyConfig {
+    use crate::config::ProxyConfig;
+    use crate::proxy::routing::{MatchConditions, RewriteRules, RouteAction, RouteRule};
+
+    let mut config = ProxyConfig::default();
+    config.routes = Some(vec![RouteRule {
+        name: "alfred-route-point".to_string(),
+        priority: 100,
+        match_conditions: MatchConditions {
+            request_uri_user: Some("39230".to_string()),
+            headers: HashMap::from([("header.X-Carried".to_string(), "original".to_string())]),
+            ..Default::default()
+        },
+        rewrite: Some(RewriteRules {
+            headers: HashMap::from([("header.X-Business-Type".to_string(), "34".to_string())]),
+            ..Default::default()
+        }),
+        action: RouteAction {
+            action: Some("application".to_string()),
+            app: Some("step_ivr".to_string()),
+            app_params: Some(serde_json::json!({"url": "http://127.0.0.1/ivr/step"})),
+            auto_answer: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    }]);
+    config
+}
+
+#[tokio::test]
+async fn route_leg_resolves_application_with_carried_and_rewritten_headers() {
+    use crate::call::{DialDirection, TransactionCookie};
+    use crate::proxy::proxy_call::sip_session::util::route_leg;
+    use crate::proxy::tests::common::create_test_server_with_config;
+
+    let (server, _) = create_test_server_with_config(test_application_route_config()).await;
+    let target: rsipstack::sip::Uri = format!("sip:{}{}{}", "39230", "@", "rustpbx.test")
+        .try_into()
+        .unwrap();
+    let caller: rsipstack::sip::Uri = format!("sip:{}{}{}", "alice", "@", "rustpbx.test")
+        .try_into()
+        .unwrap();
+    let contact = caller.clone();
+    let carry_headers = vec![rsipstack::sip::Header::Other(
+        "X-Carried".to_string(),
+        "original".to_string(),
+    )];
+
+    let result = route_leg(
+        &server,
+        &target,
+        &caller,
+        &contact,
+        Some(carry_headers),
+        &DialDirection::Inbound,
+        TransactionCookie::default(),
+    )
+    .await
+    .expect("route_leg should not error")
+    .expect("route should be handled");
+
+    match result {
+        crate::config::RouteResult::Application {
+            option,
+            app_name,
+            app_params,
+            auto_answer,
+            ..
+        } => {
+            assert_eq!(app_name, "step_ivr");
+            assert_eq!(
+                app_params,
+                Some(serde_json::json!({"url": "http://127.0.0.1/ivr/step"}))
+            );
+            assert!(auto_answer);
+            assert!(option.headers.as_ref().is_some_and(|headers| {
+                headers.iter().any(|header| {
+                    header.name().eq_ignore_ascii_case("X-Business-Type") && header.value() == "34"
+                })
+            }));
+        }
+        _ => panic!("expected Application route"),
+    }
+}
+
 /// `route_outbound_leg` routes an external target through the route table
 /// when the global `route_originated_calls` flag is on, stamping the
 /// matched trunk's destination + credential onto the returned InviteOption.

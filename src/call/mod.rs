@@ -256,6 +256,8 @@ pub enum TransferEndpoint {
     /// Raw SIP URI or plain extension number.
     Uri(String),
     Queue(String),
+    /// Route through call routing and start the matched application.
+    RoutePoint(String),
     /// Forward to an IVR project by name (config/ivr/<name>.toml).
     Ivr(String),
     /// Forward to a voicemail mailbox identified by extension.
@@ -267,7 +269,7 @@ pub enum TransferEndpoint {
 impl TransferEndpoint {
     /// Parse a prefix‑based destination string.
     ///
-    /// Handles `queue:`, `ivr:`, `voicemail:`, `conference:`.
+    /// Handles `queue:`, `toivr:`, `ivr:`, `voicemail:`, `conference:`.
     /// Plain strings (no recognised prefix) are returned as `Uri(String)`.
     /// Does **not** add a `sip:` scheme – callers that need it should use
     /// [`build_sip_uri`] afterwards.
@@ -279,7 +281,7 @@ impl TransferEndpoint {
 
         let prefixes: &[(&str, fn(String) -> TransferEndpoint)] = &[
             ("queue:", |v| TransferEndpoint::Queue(v)),
-            ("toivr:", |v| TransferEndpoint::Ivr(v)),
+            ("toivr:", |v| TransferEndpoint::RoutePoint(v)),
             ("ivr:", |v| TransferEndpoint::Ivr(v)),
             ("voicemail:", |v| TransferEndpoint::Voicemail(v)),
             ("conference:", |v| TransferEndpoint::Conference(v)),
@@ -305,6 +307,7 @@ impl std::fmt::Display for TransferEndpoint {
         match self {
             TransferEndpoint::Uri(uri) => write!(f, "{}", uri),
             TransferEndpoint::Queue(name) => write!(f, "queue:{}", name),
+            TransferEndpoint::RoutePoint(name) => write!(f, "toivr:{}", name),
             TransferEndpoint::Ivr(name) => write!(f, "ivr:{}", name),
             TransferEndpoint::Voicemail(ext) => write!(f, "voicemail:{}", ext),
             TransferEndpoint::Conference(id) => write!(f, "conference:{}", id),
@@ -1296,6 +1299,13 @@ impl RoutingState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn route_point_transfer_endpoint_preserves_distinct_prefix() {
+        let endpoint = TransferEndpoint::parse("toivr:39230").expect("route point must parse");
+
+        assert_eq!(endpoint.to_string(), "toivr:39230");
+    }
 
     fn minimal_request() -> rsipstack::sip::Request {
         let uri = rsipstack::sip::Uri {

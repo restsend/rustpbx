@@ -890,6 +890,7 @@ mod tests {
     fn test_provider_ctx(event: ProviderEvent) -> ProviderContext {
         ProviderContext {
             session_id: "s1".into(),
+            app_execution_id: 1,
             caller: "1001".into(),
             callee: "2000".into(),
             direction: "inbound".into(),

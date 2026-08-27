@@ -66,6 +66,23 @@ pub trait AppRuntime: Send + Sync {
         auto_answer: bool,
     ) -> AppResult<()>;
 
+    /// Start an application with invocation-local route metadata.
+    async fn start_app_with_route_context(
+        &self,
+        app_name: &str,
+        params: Option<serde_json::Value>,
+        auto_answer: bool,
+        route_context: crate::call::app::AppRouteContext,
+    ) -> AppResult<()> {
+        let _ = route_context;
+        self.start_app(app_name, params, auto_answer).await
+    }
+
+    /// Return the immutable metadata for the currently installed generation.
+    async fn current_app_invocation(&self) -> Option<crate::call::app::AppInvocationContext> {
+        None
+    }
+
     /// Stop the current application
     ///
     /// # Arguments

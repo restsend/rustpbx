@@ -2,6 +2,7 @@ use super::common::{
     create_test_request, create_test_server, create_test_server_with_config,
     create_test_server_with_config_and_sipflow_backend, create_transaction,
 };
+use crate::call::app::{AppInvocationContext, ApplicationContext, CallInfo};
 use crate::call::domain::{CallCommand, Leg, LegId, LegState, MediaPathMode, ReturnAppSpec};
 use crate::call::runtime::{AppRuntime, AppRuntimeError, BridgeConfig};
 use crate::call::{
@@ -211,6 +212,71 @@ impl AppRuntime for StartOnlyRuntime {
 /// assert which app (e.g. "ivr" vs "queue") a fallback path launched.
 struct NameCapturingRuntime {
     started_apps: std::sync::Mutex<Vec<String>>,
+}
+
+struct RoutePointRuntime {
+    started_apps: std::sync::Mutex<Vec<(String, Option<serde_json::Value>)>>,
+    failed_apps: Vec<String>,
+    invocation: Option<AppInvocationContext>,
+    context: Option<Arc<ApplicationContext>>,
+}
+
+impl RoutePointRuntime {
+    fn new(failed_apps: &[&str]) -> Self {
+        Self {
+            started_apps: std::sync::Mutex::new(Vec::new()),
+            failed_apps: failed_apps.iter().map(|name| name.to_string()).collect(),
+            invocation: None,
+            context: None,
+        }
+    }
+
+    fn started_apps(&self) -> Vec<(String, Option<serde_json::Value>)> {
+        self.started_apps.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl AppRuntime for RoutePointRuntime {
+    fn app_context(&self) -> Option<&Arc<ApplicationContext>> {
+        self.context.as_ref()
+    }
+
+    async fn start_app(
+        &self,
+        app_name: &str,
+        params: Option<serde_json::Value>,
+        _auto_answer: bool,
+    ) -> crate::call::runtime::AppResult<()> {
+        self.started_apps
+            .lock()
+            .unwrap()
+            .push((app_name.to_string(), params));
+        if self.failed_apps.iter().any(|name| name == app_name) {
+            return Err(AppRuntimeError::UnknownApp(app_name.to_string()));
+        }
+        Ok(())
+    }
+
+    async fn current_app_invocation(&self) -> Option<AppInvocationContext> {
+        self.invocation.clone()
+    }
+
+    async fn stop_app(&self, _reason: Option<String>) -> crate::call::runtime::AppResult<()> {
+        Ok(())
+    }
+
+    fn inject_event(&self, _event: serde_json::Value) -> crate::call::runtime::AppResult<()> {
+        Ok(())
+    }
+
+    fn is_running(&self) -> bool {
+        false
+    }
+
+    fn current_app(&self) -> Option<String> {
+        None
+    }
 }
 
 impl NameCapturingRuntime {
@@ -2606,6 +2672,232 @@ fn merge_leg_invite_headers_no_location_headers() {
 }
 
 // ── IVR start-failure fallback guards ──
+
+fn route_point_config(action: crate::proxy::routing::RouteAction) -> ProxyConfig {
+    use crate::proxy::routing::{MatchConditions, RouteRule};
+
+    let mut config = ProxyConfig::default();
+    config.routes = Some(vec![RouteRule {
+        name: "route-point".to_string(),
+        priority: 100,
+        match_conditions: MatchConditions {
+            request_uri_user: Some("39230".to_string()),
+            ..Default::default()
+        },
+        action,
+        ..Default::default()
+    }]);
+    config
+}
+
+fn route_point_dialplan() -> Dialplan {
+    build_dialplan_with_mode(MediaProxyMode::Auto)
+        .with_caller("sip:alice@rustpbx.test".try_into().unwrap())
+}
+
+async fn execute_route_point_transfer(
+    session: &mut SipSession,
+) -> crate::call::runtime::CommandResult {
+    assert!(session.update_leg_state(&LegId::from("caller"), LegState::Connected));
+    let (_callee_tx, mut callee_rx) = mpsc::unbounded_channel();
+    session
+        .execute_command(
+            CallCommand::Transfer {
+                leg_id: LegId::from("caller"),
+                target: "toivr:39230".to_string(),
+                attended: false,
+            },
+            Some(&mut callee_rx),
+        )
+        .await
+}
+
+fn assert_route_point_handoff_terminated(session: &SipSession) {
+    assert_eq!(
+        session
+            .legs
+            .get(&LegId::from("caller"))
+            .map(|leg| leg.state),
+        Some(LegState::Ended)
+    );
+    assert!(session.pending_hangup.contains(&session.caller_dialog_id()));
+}
+
+#[tokio::test]
+async fn route_point_fallback_matches_current_invocation_context() {
+    use crate::proxy::routing::MatchConditions;
+    use sea_orm::DatabaseConnection;
+
+    let mut config = ProxyConfig::default();
+    config.ivr_fallback = Some(crate::config::IvrFallbackConfig {
+        default: Some("original-safe".to_string()),
+        rules: vec![crate::config::IvrFallbackRule {
+            name: Some("routed-context".to_string()),
+            priority: 100,
+            match_conditions: MatchConditions {
+                callee: Some("route-200".to_string()),
+                headers: HashMap::from([("header.X-Business-Type".to_string(), "34".to_string())]),
+                ..Default::default()
+            },
+            target: "routed-safe".to_string(),
+        }],
+    });
+    let mut session = build_session_with_config(route_point_dialplan(), config).await;
+    let app_context = Arc::new(ApplicationContext::new(
+        DatabaseConnection::default(),
+        CallInfo {
+            session_id: "test-session".to_string(),
+            caller: "alice".to_string(),
+            callee: "original-100".to_string(),
+            direction: "inbound".to_string(),
+            started_at: chrono::Utc::now(),
+            sip_headers: HashMap::from([("X-Business-Type".to_string(), "old".to_string())]),
+            route_name: None,
+        },
+        Arc::new(crate::config::Config::default()),
+    ));
+    let mut runtime = RoutePointRuntime::new(&[]);
+    runtime.context = Some(app_context);
+    runtime.invocation = Some(AppInvocationContext {
+        app_execution_id: 2,
+        callee: "route-200".to_string(),
+        sip_headers: HashMap::from([("X-Business-Type".to_string(), "34".to_string())]),
+        variables: HashMap::new(),
+    });
+    let runtime = Arc::new(runtime);
+    session.app_runtime = runtime.clone();
+
+    session
+        .try_ivr_fallback_after_start_failure(
+            anyhow::anyhow!("route application failed"),
+            "toivr:39230",
+            &HashMap::new(),
+        )
+        .await
+        .expect("current invocation should select a direct IVR fallback");
+
+    let starts = runtime.started_apps();
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0].0, "ivr");
+    assert!(
+        starts[0]
+            .1
+            .as_ref()
+            .and_then(|params| params.get("file"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|file| file.contains("routed-safe"))
+    );
+}
+
+#[tokio::test]
+async fn route_point_abort_terminates_without_fallback() {
+    use crate::proxy::routing::RouteAction;
+
+    let mut config = route_point_config(RouteAction {
+        action: Some("busy".to_string()),
+        ..Default::default()
+    });
+    config.ivr_fallback = Some(crate::config::IvrFallbackConfig {
+        default: Some("safe-ivr".to_string()),
+        rules: vec![],
+    });
+    let mut session = build_session_with_config(route_point_dialplan(), config).await;
+    let runtime = Arc::new(RoutePointRuntime::new(&[]));
+    session.app_runtime = runtime.clone();
+
+    let result = execute_route_point_transfer(&mut session).await;
+
+    assert!(!result.success);
+    assert!(runtime.started_apps().is_empty());
+    assert_route_point_handoff_terminated(&session);
+}
+
+#[tokio::test]
+async fn route_point_miss_without_fallback_terminates() {
+    let mut session =
+        build_session_with_config(route_point_dialplan(), ProxyConfig::default()).await;
+    session.app_runtime = Arc::new(RoutePointRuntime::new(&[]));
+
+    let result = execute_route_point_transfer(&mut session).await;
+
+    assert!(!result.success);
+    assert_route_point_handoff_terminated(&session);
+}
+
+#[tokio::test]
+async fn route_point_queue_result_starts_direct_ivr_fallback_once() {
+    use crate::proxy::routing::RouteAction;
+
+    let mut config = route_point_config(RouteAction {
+        action: Some("queue".to_string()),
+        queue: Some("support".to_string()),
+        ..Default::default()
+    });
+    config.queues.insert(
+        "support".to_string(),
+        RouteQueueConfig {
+            name: Some("support".to_string()),
+            strategy: RouteQueueStrategyConfig {
+                targets: vec![RouteQueueTargetConfig {
+                    uri: "sip:agent@rustpbx.test".to_string(),
+                    label: None,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    config.ivr_fallback = Some(crate::config::IvrFallbackConfig {
+        default: Some("safe-ivr".to_string()),
+        rules: vec![],
+    });
+    let mut session = build_session_with_config(route_point_dialplan(), config).await;
+    let runtime = Arc::new(RoutePointRuntime::new(&[]));
+    session.app_runtime = runtime.clone();
+
+    let result = execute_route_point_transfer(&mut session).await;
+
+    assert!(result.success);
+    assert_eq!(
+        runtime
+            .started_apps()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>(),
+        vec!["ivr".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn route_point_app_and_fallback_start_failure_terminates() {
+    use crate::proxy::routing::RouteAction;
+
+    let mut config = route_point_config(RouteAction {
+        action: Some("application".to_string()),
+        app: Some("step_ivr".to_string()),
+        ..Default::default()
+    });
+    config.ivr_fallback = Some(crate::config::IvrFallbackConfig {
+        default: Some("safe-ivr".to_string()),
+        rules: vec![],
+    });
+    let mut session = build_session_with_config(route_point_dialplan(), config).await;
+    let runtime = Arc::new(RoutePointRuntime::new(&["step_ivr", "ivr"]));
+    session.app_runtime = runtime.clone();
+
+    let result = execute_route_point_transfer(&mut session).await;
+
+    assert!(!result.success);
+    assert_eq!(
+        runtime
+            .started_apps()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>(),
+        vec!["step_ivr".to_string(), "ivr".to_string()]
+    );
+    assert_route_point_handoff_terminated(&session);
+}
 
 /// With no `[proxy.ivr_fallback]` configured the original start error must
 /// surface unchanged — no silent swallowing.

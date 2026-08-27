@@ -142,6 +142,10 @@ pub(crate) enum TransferTarget {
         name: String,
         params: HashMap<String, String>,
     },
+    RoutePoint {
+        name: String,
+        params: HashMap<String, String>,
+    },
     Voicemail {
         extension: String,
     },
@@ -295,26 +299,12 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                     }
                 }
             }
-            crate::call::TransferEndpoint::Ivr(mut raw_name) => {
-                let query_str = raw_name.find('?').map(|pos| {
-                    let qs = raw_name[pos + 1..].to_string();
-                    raw_name.truncate(pos);
-                    qs
-                });
-                let name = raw_name.trim().to_string();
-                let mut params = HashMap::new();
-                if let Some(ref query) = query_str {
-                    for pair in query.split('&') {
-                        if pair.is_empty() {
-                            continue;
-                        }
-                        let mut parts = pair.splitn(2, '=');
-                        let key = parts.next().unwrap_or("");
-                        let value = parts.next().unwrap_or("");
-                        let decoded = super::pct_decode_query(value);
-                        params.insert(key.to_string(), decoded);
-                    }
-                }
+            crate::call::TransferEndpoint::RoutePoint(raw_name) => {
+                let (name, params) = parse_named_target(raw_name);
+                TransferTarget::RoutePoint { name, params }
+            }
+            crate::call::TransferEndpoint::Ivr(raw_name) => {
+                let (name, params) = parse_named_target(raw_name);
                 TransferTarget::Ivr { name, params }
             }
             crate::call::TransferEndpoint::Voicemail(extension) => {
@@ -378,6 +368,28 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
         return_app: None,
         from_user: None,
     }
+}
+
+fn parse_named_target(mut raw_name: String) -> (String, HashMap<String, String>) {
+    let query_str = raw_name.find('?').map(|pos| {
+        let qs = raw_name[pos + 1..].to_string();
+        raw_name.truncate(pos);
+        qs
+    });
+    let name = raw_name.trim().to_string();
+    let mut params = HashMap::new();
+    if let Some(query) = query_str {
+        for pair in query.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            let mut parts = pair.splitn(2, '=');
+            let key = parts.next().unwrap_or("");
+            let value = parts.next().unwrap_or("");
+            params.insert(key.to_string(), super::pct_decode_query(value));
+        }
+    }
+    (name, params)
 }
 
 impl SipSession {
@@ -501,6 +513,10 @@ impl SipSession {
             TransferTarget::Ivr { name, params } => {
                 info!(session_id = %self.id, %leg_id, ivr = %name, "Handling IVR transfer by starting IvrApp");
                 self.start_ivr_app(&name, params).await
+            }
+            TransferTarget::RoutePoint { name, params } => {
+                info!(session_id = %self.id, %leg_id, route_point = %name, "Handling IVR route-point transfer");
+                self.start_route_point_app(&name, params).await
             }
             TransferTarget::Voicemail { extension } => {
                 info!(session_id = %self.id, %leg_id, %extension, "Handling voicemail transfer by starting VoicemailApp");
@@ -952,6 +968,176 @@ impl SipSession {
         self.start_queue_app(fallback_plan).await
     }
 
+    async fn start_route_point_app(
+        &mut self,
+        route_point: &str,
+        variables: HashMap<String, String>,
+    ) -> Result<()> {
+        let caller = self
+            .context
+            .dialplan
+            .caller
+            .clone()
+            .ok_or_else(|| anyhow!("route-point transfer has no caller identity"))?;
+        let contact = self
+            .context
+            .dialplan
+            .caller_contact
+            .as_ref()
+            .map(|contact| contact.uri.clone())
+            .unwrap_or_else(|| caller.clone());
+        let realm = self.server.proxy_config.load().select_realm("");
+        let target = crate::call::build_sip_uri(route_point, &realm);
+        let target_uri = rsipstack::sip::Uri::try_from(target.as_str())
+            .map_err(|error| anyhow!("invalid route-point target: {error}"))?;
+        let current_invocation = self.app_runtime.current_app_invocation().await;
+        let current_headers = current_invocation
+            .as_ref()
+            .map(|context| context.sip_headers.clone())
+            .unwrap_or_else(|| {
+                self.app_runtime
+                    .app_context()
+                    .map(|context| context.call_info.sip_headers.clone())
+                    .unwrap_or_default()
+            });
+        let carry_headers = current_headers
+            .iter()
+            .map(|(name, value)| rsipstack::sip::Header::Other(name.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        let routed = super::util::route_leg(
+            &self.server,
+            &target_uri,
+            &caller,
+            &contact,
+            (!carry_headers.is_empty()).then_some(carry_headers),
+            &self.context.dialplan.direction,
+            self.context.cookie.clone(),
+        )
+        .await?;
+
+        match routed {
+            Some(crate::config::RouteResult::Application {
+                option,
+                app_name,
+                app_params,
+                auto_answer,
+                hints,
+            }) => {
+                self.track_routed_leg_hints(hints);
+                let sip_headers = crate::call::app::merge_sip_headers(
+                    &current_headers,
+                    option.headers.as_deref().unwrap_or_default(),
+                );
+                let route_context = crate::call::app::AppRouteContext {
+                    callee: route_point.to_string(),
+                    sip_headers,
+                    variables: variables.clone(),
+                };
+                if let Err(error) = self
+                    .ensure_app_running_with_route_context(
+                        &app_name,
+                        app_params,
+                        auto_answer,
+                        &format!("route-point application '{app_name}'"),
+                        route_context,
+                    )
+                    .await
+                {
+                    return self
+                        .try_route_point_fallback_or_terminate(
+                            error,
+                            &format!("toivr:{route_point}"),
+                            &variables,
+                        )
+                        .await;
+                }
+                Ok(())
+            }
+            Some(crate::config::RouteResult::Abort(code, reason)) => {
+                let status = code.code();
+                self.terminate_route_point_handoff(
+                    anyhow!(
+                        "route aborted for IVR route point: {} {}",
+                        status,
+                        reason.unwrap_or_default()
+                    ),
+                    super::util::sip_status_to_hangup_reason(status),
+                    Some(status),
+                )
+                .await
+            }
+            Some(crate::config::RouteResult::Forward(_, hints))
+            | Some(crate::config::RouteResult::NotHandled(_, hints)) => {
+                self.track_routed_leg_hints(hints);
+                self.try_route_point_fallback_or_terminate(
+                    anyhow!("route point did not resolve to an application"),
+                    &format!("toivr:{route_point}"),
+                    &variables,
+                )
+                .await
+            }
+            Some(crate::config::RouteResult::Queue { hints, .. }) => {
+                self.track_routed_leg_hints(hints);
+                self.try_route_point_fallback_or_terminate(
+                    anyhow!("route point resolved to an unsupported queue"),
+                    &format!("toivr:{route_point}"),
+                    &variables,
+                )
+                .await
+            }
+            None => {
+                self.try_route_point_fallback_or_terminate(
+                    anyhow!("route point was not handled"),
+                    &format!("toivr:{route_point}"),
+                    &variables,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn try_route_point_fallback_or_terminate(
+        &mut self,
+        error: anyhow::Error,
+        route_point: &str,
+        variables: &HashMap<String, String>,
+    ) -> Result<()> {
+        match self
+            .try_ivr_fallback_after_start_failure(error, route_point, variables)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let failure = crate::call::app::error_catalog::IVR_START_FAILED;
+                self.terminate_route_point_handoff(
+                    error,
+                    failure.hangup_reason.clone(),
+                    failure.sip_status,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn terminate_route_point_handoff(
+        &mut self,
+        error: anyhow::Error,
+        reason: crate::callrecord::CallRecordHangupReason,
+        code: Option<u16>,
+    ) -> Result<()> {
+        let hangup = self
+            .handle_hangup(&crate::call::domain::HangupCommand::all(Some(reason), code))
+            .await;
+        if !hangup.success {
+            return Err(anyhow!(
+                "{}; terminal hangup failed: {}",
+                error,
+                hangup.message.unwrap_or_default()
+            ));
+        }
+        Err(error)
+    }
+
     /// Resolve a raw [`ReturnTargetSpec`] (extracted from query params) into a
     /// concrete [`ReturnAppSpec`] ready to be stored on `CallMeta`.
     ///
@@ -1044,17 +1230,23 @@ impl SipSession {
             return Err(original);
         };
 
-        let (caller, callee, headers) = self
+        let invocation = self.app_runtime.current_app_invocation().await;
+        let call_info = self
             .app_runtime
             .app_context()
-            .map(|ctx| {
-                (
-                    ctx.call_info.caller.clone(),
-                    ctx.call_info.callee.clone(),
-                    Some(ctx.call_info.sip_headers.clone()),
-                )
-            })
+            .map(|context| context.call_info.clone());
+        let caller = call_info
+            .as_ref()
+            .map(|info| info.caller.clone())
             .unwrap_or_default();
+        let callee = invocation
+            .as_ref()
+            .map(|context| context.callee.clone())
+            .or_else(|| call_info.as_ref().map(|info| info.callee.clone()))
+            .unwrap_or_default();
+        let headers = invocation
+            .map(|context| context.sip_headers)
+            .or_else(|| call_info.map(|info| info.sip_headers));
 
         let Some(target) =
             fallback::resolve_fallback_target(fb, &caller, &callee, headers.as_ref())
@@ -2043,6 +2235,18 @@ mod tests {
             TransferTarget::Ivr {
                 name: "main".to_string(),
                 params: HashMap::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_transfer_target_route_point() {
+        let t = parse_transfer_target("toivr:39230?order_id=order-001");
+        assert_eq!(
+            t,
+            TransferTarget::RoutePoint {
+                name: "39230".to_string(),
+                params: HashMap::from([("order_id".to_string(), "order-001".to_string())]),
             }
         );
     }

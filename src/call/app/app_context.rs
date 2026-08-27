@@ -30,6 +30,21 @@ pub struct CallInfo {
     pub route_name: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AppRouteContext {
+    pub callee: String,
+    pub sip_headers: HashMap<String, String>,
+    pub variables: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AppInvocationContext {
+    pub app_execution_id: u64,
+    pub callee: String,
+    pub sip_headers: HashMap<String, String>,
+    pub variables: HashMap<String, String>,
+}
+
 pub struct AppSharedState {
     /// Arbitrary typed data, keyed by string.
     ///
@@ -100,6 +115,9 @@ pub struct ApplicationContext {
     /// Call metadata.
     pub call_info: CallInfo,
 
+    /// Immutable metadata owned by the current application generation.
+    pub invocation: Option<AppInvocationContext>,
+
     /// System configuration.
     pub config: Arc<Config>,
 
@@ -144,6 +162,7 @@ impl ApplicationContext {
             http_client: crate::http_util::build_keepalive_client(None, None)
                 .unwrap_or_else(|_| reqwest::Client::new()),
             call_info,
+            invocation: None,
             config,
             rwi_gateway: None,
             ivr_trace: None,
@@ -196,6 +215,21 @@ pub fn extract_sip_headers(request: &rsipstack::sip::Request) -> HashMap<String,
         }
     }
     headers
+}
+
+/// Merge route-produced headers into an existing snapshot using SIP's
+/// case-insensitive header-name semantics.
+pub fn merge_sip_headers(
+    base: &HashMap<String, String>,
+    routed: &[rsipstack::sip::Header],
+) -> HashMap<String, String> {
+    let mut merged = base.clone();
+    for header in routed {
+        let name = header.name().to_string();
+        merged.retain(|key, _| !key.eq_ignore_ascii_case(&name));
+        merged.insert(name, header.value().to_string());
+    }
+    merged
 }
 
 impl std::fmt::Debug for ApplicationContext {
@@ -266,6 +300,7 @@ mod tests {
             version: rsipstack::sip::Version::V2,
             headers: vec![
                 Header::Other("X-Custom".to_string(), "original-value".to_string()),
+                Header::Other("x-custom".to_string(), "duplicate-value".to_string()),
                 Header::Other("X-Forwarded-For".to_string(), "192.168.1.1".to_string()),
             ]
             .into(),
@@ -283,6 +318,7 @@ mod tests {
 
         let original = extract_sip_headers(&req);
         assert_eq!(original.get("X-Custom").unwrap(), "original-value");
+        assert_eq!(original.get("x-custom").unwrap(), "duplicate-value");
         assert_eq!(original.get("X-Forwarded-For").unwrap(), "192.168.1.1");
         assert!(
             original.get("From").is_none(),
@@ -291,7 +327,7 @@ mod tests {
 
         // Simulate routing-modified headers (overriding X-Custom, adding P-Asserted-Identity)
         let routed_headers: Option<Vec<Header>> = Some(vec![
-            Header::Other("X-Custom".to_string(), "routing-value".to_string()),
+            Header::Other("x-custom".to_string(), "routing-value".to_string()),
             Header::Other(
                 "P-Asserted-Identity".to_string(),
                 "<sip:routing@pbx.com>".to_string(),
@@ -299,18 +335,20 @@ mod tests {
         ]);
 
         // Apply the same merge logic as in sip_session.rs
-        let mut merged = original;
-        if let Some(ref routed) = routed_headers {
-            for h in routed {
-                merged.insert(h.name().to_string(), h.value().to_string());
-            }
-        }
+        let merged = merge_sip_headers(&original, routed_headers.as_deref().unwrap_or_default());
 
         // Verify routing headers override originals
         assert_eq!(
-            merged.get("X-Custom").unwrap(),
+            merged.get("x-custom").unwrap(),
             "routing-value",
             "routed headers should override original"
+        );
+        assert_eq!(
+            merged
+                .keys()
+                .filter(|key| key.eq_ignore_ascii_case("X-Custom"))
+                .count(),
+            1
         );
         // Verify unmodified original headers are preserved
         assert_eq!(
