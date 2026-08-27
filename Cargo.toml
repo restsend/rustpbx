@@ -146,6 +146,7 @@ tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 tracing = "0.1.43"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2.5"
+tracing-panic = "0.1.2"
 url = { version = "2.5.8", optional = true }
 uuid = { version = "1.23.3", features = ["v4"] }
 clap = { version = "4.6.1", features = ["derive"] }

@@ -1948,3 +1948,94 @@ async fn test_resolve_escalation_targets_non_fair_primary_first() {
         "non-fair widening keeps a primary-group agent at the head, got {ids:?}"
     );
 }
+
+/// After a queue call ends, `current_calls` must drop to 0 so a second call
+/// can be dispatched once the agent returns to Idle (regression for production
+/// offline/current_calls=1 stuck state).
+#[tokio::test]
+async fn test_second_call_dispatch_after_wrapup_releases_capacity() {
+    use std::time::Instant;
+
+    let cc_registry = Arc::new(AgentRegistry::new());
+    cc_registry
+        .register("agent-001".to_string(), vec!["support".to_string()], 1)
+        .await
+        .unwrap();
+    cc_registry
+        .update_status("agent-001", AgentStatus::Idle)
+        .await
+        .unwrap();
+
+    let adapter = CcAgentRegistryAdapter::new(
+        cc_registry.clone(),
+        acd_with_longest_idle_policy("cap-policy"),
+        "localhost",
+    );
+
+    cc_registry
+        .increment_call_count("agent-001")
+        .await
+        .unwrap();
+    cc_registry
+        .update_status(
+            "agent-001",
+            AgentStatus::Busy {
+                call_id: "call-1".to_string(),
+                since: Instant::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let blocked = adapter
+        .select_agent_with_policy(
+            &["support".to_string()],
+            RoutingStrategy::LongestIdle,
+            Some("cap-policy"),
+            "call-2",
+        )
+        .await;
+    assert!(
+        blocked.is_none(),
+        "agent at max_concurrency must not receive a second dispatch while busy"
+    );
+
+    cc_registry
+        .update_status_with_call_delta(
+            "agent-001",
+            AgentStatus::Wrapup {
+                call_id: "call-1".to_string(),
+                since: Instant::now(),
+            },
+            -1,
+        )
+        .await
+        .unwrap();
+
+    let agent = cc_registry.get_agent("agent-001").await.unwrap();
+    assert_eq!(agent.current_calls, 0);
+
+    assert!(
+        cc_registry
+            .find_candidates(&["support".to_string()])
+            .await
+            .is_empty(),
+        "wrapup agent is not idle yet — default routing must wait"
+    );
+
+    cc_registry
+        .update_status("agent-001", AgentStatus::Idle)
+        .await
+        .unwrap();
+
+    let selected = adapter
+        .select_agent_with_policy(
+            &["support".to_string()],
+            RoutingStrategy::LongestIdle,
+            Some("cap-policy"),
+            "call-2",
+        )
+        .await;
+    assert!(selected.is_some(), "second call should dispatch after capacity release");
+    assert_eq!(selected.unwrap().agent_id, "agent-001");
+}

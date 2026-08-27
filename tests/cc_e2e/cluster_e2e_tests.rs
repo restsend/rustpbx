@@ -56,6 +56,7 @@ async fn cluster_agent_status_cross_node_visibility() {
         2,
         0,
         15,
+        1,
     )
     .await;
 
@@ -143,6 +144,7 @@ async fn cluster_event_messages_serialize_correctly() {
         current_calls: 1,
         priority: 5,
         instance_id: "node-a".into(),
+        revision: 1,
     };
     let json = serde_json::to_string(&agent_msg).unwrap();
     let parsed: ClusterAgentStatusMessage = serde_json::from_str(&json).unwrap();
@@ -200,6 +202,7 @@ async fn cluster_multi_node_multi_agent_scenario() {
             1,
             0,
             0,
+            1,
         )
         .await;
     }
@@ -214,6 +217,7 @@ async fn cluster_multi_node_multi_agent_scenario() {
         1,
         0,
         0,
+        1,
     )
     .await;
 
@@ -290,6 +294,7 @@ async fn cluster_reaper_releases_stale_claims_after_node_crash() {
         1,
         0,
         0,
+        1,
     )
     .await;
 
@@ -365,6 +370,7 @@ async fn cluster_affinity_peer_does_not_steal_live_call() {
         1,
         0,
         0,
+        1,
     )
     .await;
 
@@ -380,6 +386,7 @@ async fn cluster_affinity_peer_does_not_steal_live_call() {
         1,
         0,
         0,
+        1,
     )
     .await;
 
@@ -568,6 +575,7 @@ async fn cluster_merged_presence_feeds_longest_idle() {
         1,
         0,
         0,
+        1,
     )
     .await;
 
@@ -582,6 +590,7 @@ async fn cluster_merged_presence_feeds_longest_idle() {
         1,
         0,
         0,
+        1,
     )
     .await;
 

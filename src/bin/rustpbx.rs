@@ -504,6 +504,14 @@ fn main() -> Result<()> {
 
     let _ = guard_holder; // keep the guard alive
 
+    // Route panics (including tokio worker threads) into tracing while keeping
+    // the default stderr output. Must be installed after the subscriber is set.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        prev_hook(info);
+        tracing_panic::panic_hook(info);
+    }));
+
     let mut cached_config = Some(config);
     let mut next_config_path = config_path.clone();
     let mut retry_count = 0;

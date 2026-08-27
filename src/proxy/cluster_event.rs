@@ -198,6 +198,9 @@ pub struct ClusterAgentStatusMessage {
     pub priority: i32,
     /// Which node owns this agent (RUSTPBX_INSTANCE_ID / hostname).
     pub instance_id: String,
+    /// Monotonic snapshot revision for stale-write rejection.
+    #[serde(default)]
+    pub revision: i64,
 }
 
 /// Wire format for ACD queue events forwarded between cluster peers.
@@ -1294,6 +1297,7 @@ mod tests {
             current_calls: 0,
             priority: 10,
             instance_id: "node-a".to_string(),
+            revision: 1,
         };
         let body = ClusterMessageBody::AgentStatus(msg.clone());
         let json = serde_json::to_string(&body).unwrap();
@@ -1320,6 +1324,7 @@ mod tests {
             current_calls: 1,
             priority: 0,
             instance_id: "node-b".to_string(),
+            revision: 2,
         };
         let json = serde_json::to_string(&ClusterMessageBody::AgentStatus(msg)).unwrap();
         assert!(
