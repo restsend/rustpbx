@@ -2,9 +2,9 @@ use super::builtin_app_factory::BuiltinAppFactory;
 use super::peer_audio::PeerConnectionAudioReceiver;
 use super::prelude::*;
 use super::util::{
-    CalleeError, format_duration_ms, forward_dtmf_event, into_callee_err, normalize_call_hangup_by,
-    other_header_ci, parse_dial_target, parse_dtmf_digit, parse_sipfrag_status, route_outbound_leg,
-    sip_status_to_hangup_reason, trunk_host_port,
+    CalleeError, format_duration_ms, forward_dtmf_event, inject_dtmf_into_app, into_callee_err,
+    normalize_call_hangup_by, other_header_ci, parse_dial_target, parse_dtmf_digit,
+    parse_sipfrag_status, route_outbound_leg, sip_status_to_hangup_reason, trunk_host_port,
 };
 use super::{live_transcription, transfer};
 use crate::proxy::call::parse_allowed_codecs;
@@ -1871,20 +1871,72 @@ impl SipSession {
         let rwi_gateway = self.server.rwi_gateway.clone();
         let bridge_dtmf_tx = self.bridge_dtmf_tx.clone();
         let session_id = self.context.session_id.clone();
+        // App flows start asynchronously AFTER the answer (the IVR/queue step
+        // provider may involve external HTTP roundtrips). Digits pressed in
+        // that window used to be silently discarded (`app_runtime.is_running()`
+        // false) — the classic "first DTMF lost". Buffer them (bounded, with
+        // a TTL) and replay in order once the app is running. Sessions that
+        // never run an app keep the previous drop-on-no-app behaviour.
+        let app_expected = matches!(
+            self.context.dialplan.flow,
+            crate::call::DialplanFlow::Application { .. } | crate::call::DialplanFlow::Queue { .. }
+        );
         crate::utils::spawn(async move {
-            while let Ok((side, ev)) = rx.recv().await {
-                let leg_id = match side {
-                    crate::media::media_bridge::LegSide::A => "caller",
-                    crate::media::media_bridge::LegSide::B => "callee",
-                };
-                forward_dtmf_event(
-                    ev.digit,
-                    leg_id,
-                    &session_id,
-                    &app_runtime,
-                    &rwi_gateway,
-                    &bridge_dtmf_tx,
-                );
+            const MAX_PENDING: usize = 16;
+            const PENDING_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+            let mut pending: std::collections::VecDeque<(char, &'static str, std::time::Instant)> =
+                Default::default();
+            let mut retry = tokio::time::interval(std::time::Duration::from_millis(50));
+            retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    biased;
+                    ev = rx.recv() => match ev {
+                        Ok((side, ev)) => {
+                            let leg_id = match side {
+                                crate::media::media_bridge::LegSide::A => "caller",
+                                crate::media::media_bridge::LegSide::B => "callee",
+                            };
+                            let injected = forward_dtmf_event(
+                                ev.digit,
+                                leg_id,
+                                &session_id,
+                                &app_runtime,
+                                &rwi_gateway,
+                                &bridge_dtmf_tx,
+                            );
+                            if !injected && app_expected {
+                                pending.push_back((ev.digit, leg_id, std::time::Instant::now()));
+                                while pending.len() > MAX_PENDING {
+                                    pending.pop_front();
+                                }
+                            }
+                        }
+                        Err(_) => break,
+                    },
+                    _ = retry.tick(), if !pending.is_empty() => {
+                        // Drop entries that waited past the TTL (app never came
+                        // up, e.g. a failed start) so the ticker stops.
+                        let now = std::time::Instant::now();
+                        while pending
+                            .front()
+                            .is_some_and(|(_, _, at)| now.duration_since(*at) > PENDING_TTL)
+                        {
+                            pending.pop_front();
+                        }
+                        while app_runtime.is_running()
+                            && let Some((digit, leg_id, _)) = pending.pop_front()
+                        {
+                            inject_dtmf_into_app(
+                                digit,
+                                leg_id,
+                                &session_id,
+                                &app_runtime,
+                                &rwi_gateway,
+                            );
+                        }
+                    }
+                }
             }
         });
     }

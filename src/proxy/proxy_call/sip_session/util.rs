@@ -182,25 +182,33 @@ pub(super) fn parse_dtmf_digit(body_text: &str) -> Option<char> {
     None
 }
 
-pub(super) fn forward_dtmf_event(
+/// Inject a DTMF digit into the running app (and notify the RWI owner when
+/// the injection succeeds). Returns `true` only when a running app consumed
+/// the event — `false` means no app is running (starting up / between apps /
+/// none scheduled) and the caller may want to buffer the digit.
+pub(super) fn inject_dtmf_into_app(
     digit: char,
     leg_id: &str,
     session_id: &str,
     app_runtime: &Arc<dyn AppRuntime>,
     rwi_gateway: &Option<crate::rwi::RwiGatewayRef>,
-    bridge_dtmf_tx: &Arc<parking_lot::RwLock<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
-) {
+) -> bool {
+    if !app_runtime.is_running() {
+        return false;
+    }
     let digit_str = digit.to_string();
     let event = serde_json::json!({
         "type": "dtmf",
         "leg_id": leg_id,
         "digit": digit_str,
     });
-    if app_runtime.is_running() {
-        if let Err(e) = app_runtime.inject_event(event.clone()) {
+    match app_runtime.inject_event(event) {
+        Err(e) => {
             debug!(session_id = %session_id, digit = %digit_str, error = %e,
                 "DTMF app injection failed");
-        } else {
+            false
+        }
+        Ok(()) => {
             debug!(session_id = %session_id, leg_id, digit = %digit_str, "DTMF injected into app");
             if let Some(gw) = rwi_gateway.as_ref() {
                 let g = gw.read();
@@ -211,8 +219,25 @@ pub(super) fn forward_dtmf_event(
                     extra: None,
                 });
             }
+            true
         }
     }
+}
+
+/// Returns `true` when the digit was injected into a running app. The
+/// bridge websocket forward always fires immediately regardless of app
+/// state, so replaying a buffered digit later must use
+/// [`inject_dtmf_into_app`] instead of calling this again.
+pub(super) fn forward_dtmf_event(
+    digit: char,
+    leg_id: &str,
+    session_id: &str,
+    app_runtime: &Arc<dyn AppRuntime>,
+    rwi_gateway: &Option<crate::rwi::RwiGatewayRef>,
+    bridge_dtmf_tx: &Arc<parking_lot::RwLock<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
+) -> bool {
+    let injected = inject_dtmf_into_app(digit, leg_id, session_id, app_runtime, rwi_gateway);
+    let digit_str = digit.to_string();
     if let Some(tx) = bridge_dtmf_tx.read().as_ref() {
         let _ = tx.send(
             serde_json::json!({
@@ -223,6 +248,7 @@ pub(super) fn forward_dtmf_event(
             .to_string(),
         );
     }
+    injected
 }
 
 pub(super) fn trunk_host_port(dest: &str) -> Option<(String, u16)> {

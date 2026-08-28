@@ -380,37 +380,17 @@ impl LegInner {
         }))
     }
 
-    /// Attach the ingress tap observer to the RTP transport(s). A new
-    /// PeerConnection has no RTP transport to attach to: direct RTP creates it
-    /// while applying remote SDP, while WebRTC creates it later after ICE
-    /// selects a pair. Call this after SDP is applied.
-    /// Spawns a background task so it never blocks SDP negotiation. The task
-    /// handle is stored so `stop` can abort it; a transport that never becomes
-    /// ready logs a warning instead of silently dropping stats/DTMF/recording.
+    /// Attach the ingress tap observer to the RTP transport(s). With
+    /// rustrtc's PC-level observer registry the tap can be registered before
+    /// any transport exists: transports created later (WebRTC after ICE
+    /// selects a pair, direct RTP during SDP application) re-attach it
+    /// automatically, so no inbound packet — including the very first
+    /// telephone-event (DTMF) — can slip through a late-attach window.
     fn ensure_observer(&self) {
         if self.observer_attached.swap(true, Ordering::SeqCst) {
             return;
         }
-        let pc = self.pc.clone();
-        let tap = self.tap.clone();
-        let attached = Arc::clone(&self.observer_attached);
-        let handle = tokio::spawn(async move {
-            if pc
-                .wait_for_rtp_transport_ready(std::time::Duration::from_secs(5))
-                .await
-                .is_err()
-            {
-                // Allow a later refresh_observer/ensure_observer to retry —
-                // otherwise a transient miss permanently disables recording.
-                attached.store(false, Ordering::SeqCst);
-                tracing::warn!(
-                    "RTP transport never became ready; ingress tap NOT attached (no stats/DTMF/recording for this leg)"
-                );
-                return;
-            }
-            pc.add_observer(tap);
-        });
-        *self.observer_task.lock() = Some(handle);
+        self.pc.add_observer(self.tap.clone());
     }
 
     /// Attach the existing ingress observer to transports created by a later
