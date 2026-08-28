@@ -78,6 +78,7 @@ async fn step_provider_waits_for_configured_retry_delay() {
     });
     let context = ProviderContext {
         session_id: "retry-delay-test".into(),
+        app_execution_id: 1,
         caller: "1001".into(),
         callee: "2000".into(),
         direction: "inbound".into(),
