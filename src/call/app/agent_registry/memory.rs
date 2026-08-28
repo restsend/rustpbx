@@ -177,6 +177,37 @@ impl AgentRegistry for MemoryRegistry {
         // CC addon should provide a custom registry implementation.
         vec![]
     }
+
+    async fn release_call(&self, agent_id: &str, call_id: &str) -> bool {
+        let bound = |presence: &PresenceState| {
+            matches!(
+                presence,
+                PresenceState::Ringing {
+                    call_id: Some(cid),
+                }
+                | PresenceState::Busy {
+                    call_id: Some(cid),
+                } if cid == call_id
+            )
+        };
+        let matches = self
+            .agents
+            .get(agent_id)
+            .map(|a| bound(&a.presence))
+            .unwrap_or(false);
+        if !matches {
+            return false;
+        }
+        let mut agent = match self.agents.get_mut(agent_id) {
+            Some(a) => a,
+            None => return false,
+        };
+        // No wrapup machinery in the memory backend (no timer to end the
+        // wrapup), so phantom states release straight back to Idle.
+        agent.presence = PresenceState::Idle;
+        agent.last_state_change = Instant::now();
+        true
+    }
 }
 
 #[cfg(test)]
@@ -249,5 +280,61 @@ mod tests {
             .select_agent(&["support".to_string()], RoutingStrategy::RoundRobin)
             .await;
         assert_ne!(a1.unwrap().agent_id, a2.unwrap().agent_id);
+    }
+
+    #[tokio::test]
+    async fn test_release_call_releases_bound_states_only() {
+        let registry = MemoryRegistry::new();
+        registry
+            .register(
+                "agent-rel".to_string(),
+                "Rel".to_string(),
+                "sip:2001@localhost".to_string(),
+                vec![],
+                1,
+            )
+            .await
+            .unwrap();
+
+        // Unrelated state: not released.
+        registry
+            .update_presence(
+                "agent-rel",
+                PresenceState::Busy {
+                    call_id: Some("call-other".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!registry.release_call("agent-rel", "call-mine").await);
+
+        // Bound Ringing: released to Idle.
+        registry
+            .update_presence(
+                "agent-rel",
+                PresenceState::Ringing {
+                    call_id: Some("call-mine".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(registry.release_call("agent-rel", "call-mine").await);
+        let agent = registry.get_agent("agent-rel").await.unwrap();
+        assert!(matches!(agent.presence, PresenceState::Idle));
+
+        // Bound Busy: released (memory backend has no wrapup timer, so
+        // straight to Idle).
+        registry
+            .update_presence(
+                "agent-rel",
+                PresenceState::Busy {
+                    call_id: Some("call-mine".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(registry.release_call("agent-rel", "call-mine").await);
+        let agent = registry.get_agent("agent-rel").await.unwrap();
+        assert!(matches!(agent.presence, PresenceState::Idle));
     }
 }

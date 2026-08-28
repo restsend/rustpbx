@@ -104,6 +104,16 @@ pub struct SipSession {
     pub bridge_dtmf_tx:
         Arc<parking_lot::RwLock<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
 
+    /// Originating IVR node context of the active bridge (step_id / extra).
+    /// Armed by `connect_bridge()` from `_rst_*` URI params injected by the
+    /// step executor; used to report bridge DTMF as `ivr_step_trace`.
+    pub(crate) bridge_trace_context:
+        Arc<parking_lot::Mutex<Option<super::transfer::BridgeTraceContext>>>,
+
+    /// DTMF digits captured while a bridge was active, replayed into the
+    /// return-app IVR params when the bridge disconnects.
+    pub(crate) bridge_dtmf_digits: Arc<parking_lot::Mutex<Vec<String>>>,
+
     pub cmd_tx: Option<mpsc::Sender<CallCommand>>,
 
     /// Cluster session-registry RAII guard: registers this session's owning
@@ -992,6 +1002,8 @@ impl SipSession {
                     .with_session_id(session_id_str.clone()),
             ),
             bridge_dtmf_tx: Arc::new(parking_lot::RwLock::new(None)),
+            bridge_trace_context: Arc::new(parking_lot::Mutex::new(None)),
+            bridge_dtmf_digits: Arc::new(parking_lot::Mutex::new(Vec::new())),
             cmd_tx: Some(cmd_tx.clone()),
             handle: sip_handle.clone(),
             session_registry_guard: None,
@@ -1870,6 +1882,11 @@ impl SipSession {
         let app_runtime = self.app_runtime.clone();
         let rwi_gateway = self.server.rwi_gateway.clone();
         let bridge_dtmf_tx = self.bridge_dtmf_tx.clone();
+        let bridge_trace_context = self.bridge_trace_context.clone();
+        let bridge_dtmf_digits = self.bridge_dtmf_digits.clone();
+        let original_caller = self.context.original_caller.clone();
+        let original_callee = self.context.original_callee.clone();
+        let routing_metadata = self.context.metadata.clone();
         let session_id = self.context.session_id.clone();
         // App flows start asynchronously AFTER the answer (the IVR/queue step
         // provider may involve external HTTP roundtrips). Digits pressed in
@@ -1904,6 +1921,11 @@ impl SipSession {
                                 &app_runtime,
                                 &rwi_gateway,
                                 &bridge_dtmf_tx,
+                                &bridge_trace_context,
+                                &bridge_dtmf_digits,
+                                &original_caller,
+                                &original_callee,
+                                routing_metadata.clone(),
                             );
                             if !injected && app_expected {
                                 pending.push_back((ev.digit, leg_id, std::time::Instant::now()));
@@ -2981,6 +3003,11 @@ impl SipSession {
                     &self.app_runtime,
                     &self.server.rwi_gateway,
                     &self.bridge_dtmf_tx,
+                    &self.bridge_trace_context,
+                    &self.bridge_dtmf_digits,
+                    &self.context.original_caller,
+                    &self.context.original_callee,
+                    self.context.metadata.clone(),
                 );
             }
             // Forward DTMF INFO to the peer dialog
@@ -9515,11 +9542,29 @@ impl SipSession {
         }
 
         // 2. Return app from CallMeta.
-        if let Some(spec) = self.meta.transfer_return_app.take() {
+        if let Some(mut spec) = self.meta.transfer_return_app.take() {
             info!(session_id = %self.id,
                 app = %spec.app_name,
                 "B‑leg disconnected; starting return app"
             );
+            // Replay DTMF captured during the bridge into the return IVR's
+            // params so the resumed flow (and its step provider) can see the
+            // keys the caller pressed while the bridge owned the media.
+            let digits: Vec<String> = std::mem::take(&mut *self.bridge_dtmf_digits.lock());
+            if !digits.is_empty()
+                && spec.app_name == "ivr"
+                && let Some(obj) = spec.params.as_object_mut()
+            {
+                let ivr_params = obj
+                    .entry("ivr_params")
+                    .or_insert_with(|| serde_json::json!({}));
+                if let Some(ip) = ivr_params.as_object_mut() {
+                    ip.insert(
+                        "bridge_dtmf_digits".to_string(),
+                        serde_json::Value::String(digits.join(",")),
+                    );
+                }
+            }
             self.bridge.clear();
             let label = format!("Return app '{}'", spec.app_name);
             match self

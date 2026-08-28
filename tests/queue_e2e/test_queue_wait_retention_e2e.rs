@@ -218,6 +218,7 @@ async fn start_harness(
             users,
             session_hook: None,
             agent_registry: Some(adapter.clone()),
+            rwi_gateway: None,
         },
     )
     .await?;

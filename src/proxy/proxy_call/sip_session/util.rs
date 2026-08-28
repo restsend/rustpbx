@@ -228,6 +228,13 @@ pub(super) fn inject_dtmf_into_app(
 /// bridge websocket forward always fires immediately regardless of app
 /// state, so replaying a buffered digit later must use
 /// [`inject_dtmf_into_app`] instead of calling this again.
+///
+/// While a bridge is active (`bridge_dtmf_tx` armed) the digit is also
+/// 1. buffered for the return-app IVR (`bridge_dtmf_digits`), and
+/// 2. reported as an `ivr_step_trace` with the originating node context
+///    (`bridge_trace_context`) so consumers see `trigger.detail.digit` for
+///    menu/TTS nodes executed via a bridge (consumer contract).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn forward_dtmf_event(
     digit: char,
     leg_id: &str,
@@ -235,6 +242,11 @@ pub(super) fn forward_dtmf_event(
     app_runtime: &Arc<dyn AppRuntime>,
     rwi_gateway: &Option<crate::rwi::RwiGatewayRef>,
     bridge_dtmf_tx: &Arc<parking_lot::RwLock<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
+    bridge_trace_context: &parking_lot::Mutex<Option<super::transfer::BridgeTraceContext>>,
+    bridge_dtmf_digits: &parking_lot::Mutex<Vec<String>>,
+    caller: &str,
+    callee: &str,
+    sip_headers: Option<std::collections::HashMap<String, String>>,
 ) -> bool {
     let injected = inject_dtmf_into_app(digit, leg_id, session_id, app_runtime, rwi_gateway);
     let digit_str = digit.to_string();
@@ -247,6 +259,37 @@ pub(super) fn forward_dtmf_event(
             })
             .to_string(),
         );
+        // Bridge active: buffer + report.
+        bridge_dtmf_digits.lock().push(digit_str.clone());
+        let ctx = bridge_trace_context.lock().clone();
+        if let Some(gw) = rwi_gateway.as_ref()
+            && let Some(ctx) = ctx
+        {
+            let ev = crate::rwi::IvrStepTrace {
+                call_id: session_id.to_string(),
+                session_id: session_id.to_string(),
+                caller: caller.to_string(),
+                callee: callee.to_string(),
+                step_index: 0,
+                trigger: crate::rwi::TriggerInfo::with_detail(
+                    "dtmf",
+                    serde_json::json!({ "digit": digit_str }),
+                ),
+                action_type: "Bridge".to_string(),
+                action_json: None,
+                duration_ms: 0,
+                error: None,
+                step_id: ctx.step_id,
+                step_name: ctx.step_name,
+                step_start_time: None,
+                step_end_time: Some(chrono::Utc::now().to_rfc3339()),
+                extra: ctx.extra,
+                sip_headers,
+                end_reason: None,
+                end_detail: None,
+            };
+            gw.read().fan_out(session_id, &ev);
+        }
     }
     injected
 }

@@ -386,6 +386,25 @@ pub trait AgentRegistry: Send + Sync {
     ) {
     }
 
+    /// Release an agent state bound to `call_id` when the owning queue/call
+    /// finishes without the agent having connected.
+    ///
+    /// Semantics (only when the agent's current state carries exactly this
+    /// `call_id`):
+    /// - `Ringing{call_id}` (unanswered reservation, e.g. originate failure or
+    ///   a parallel leg cancelled by another agent's answer) → back to Idle —
+    ///   the agent never answered and is immediately schedulable again.
+    /// - `Busy{call_id}` (phantom busy, e.g. the agent rejected with 486 while
+    ///   the call was served by another agent) → Wrapup — short unschedulable
+    ///   (the backend starts its own wrapup timer when available), guaranteeing
+    ///   recovery instead of being stuck Busy forever.
+    ///
+    /// Any other state is untouched (the agent's real call or manual state
+    /// owns it). Returns `true` when a state change was applied.
+    async fn release_call(&self, _agent_id: &str, _call_id: &str) -> bool {
+        false
+    }
+
     /// Check if state transition is valid
     fn is_valid_transition(from: &PresenceState, to: &PresenceState) -> bool
     where

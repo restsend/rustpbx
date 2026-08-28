@@ -321,7 +321,7 @@ async fn test_skill_group_resolution_with_policy_graceful_when_acd_disabled() {
 }
 
 #[tokio::test]
-async fn test_skill_group_resolution_fallback_normalizes_extension_endpoint() {
+async fn test_skill_group_resolution_offline_extension_endpoint_queues() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     rustpbx::addons::cc::migration::Migrator::up(&db, None)
         .await
@@ -347,7 +347,10 @@ async fn test_skill_group_resolution_fallback_normalizes_extension_endpoint() {
         .register("22".to_string(), vec!["阿第三方".to_string()], 1)
         .await
         .unwrap();
-    // Keep Offline to force status-agnostic fallback path.
+    // Keep Offline: resolve must NOT dial non-Idle agents (wait retention
+    // semantics — QueueApp holds and re-polls until the agent becomes Idle).
+    // Historical note: this test once asserted the status-agnostic fallback
+    // dial URI; that behavior was removed in 2e8830a / 55abce10.
 
     cc_agent_endpoint::ActiveModel {
         agent_id: Set("22".to_string()),
@@ -361,10 +364,28 @@ async fn test_skill_group_resolution_fallback_normalizes_extension_endpoint() {
     .await
     .unwrap();
 
-    let adapter = disabled_adapter(cc_registry);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let adapter = disabled_adapter(cc_registry).with_skill_group_event_tx(tx);
     let uris = adapter.resolve_target("skill-group:asdf").await;
 
-    assert_eq!(uris, vec!["sip:22@localhost".to_string()]);
+    assert!(
+        uris.is_empty(),
+        "Offline agent must NOT be a dial target (wait retention), got {:?}",
+        uris
+    );
+    let mut saw_queued = false;
+    while let Ok(ev) = rx.try_recv() {
+        if matches!(
+            ev,
+            rustpbx::addons::cc::agent_registry_adapter::SkillGroupEvent::CallQueued { .. }
+        ) {
+            saw_queued = true;
+        }
+    }
+    assert!(
+        saw_queued,
+        "skill_group_call_queued must fire for the Offline member"
+    );
 }
 
 // ─── Cache-miss → DB fallback regression tests ─────────────────────────

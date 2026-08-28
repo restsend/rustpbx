@@ -221,6 +221,7 @@ mod escalation_e2e {
                     .collect(),
                 session_hook: Some(hook),
                 agent_registry: Some(adapter),
+                rwi_gateway: None,
             },
         )
         .await

@@ -53,9 +53,82 @@ fn forward_dtmf_skips_app_injection_when_no_app_is_running() {
         &app_runtime,
         &None,
         &bridge_dtmf_tx,
+        &Arc::new(parking_lot::Mutex::new(None)),
+        &Arc::new(parking_lot::Mutex::new(Vec::new())),
+        "1001",
+        "2000",
+        None,
     );
 
     assert_eq!(runtime.inject_calls.load(Ordering::SeqCst), 0);
+}
+
+/// While a bridge is active (armed `bridge_dtmf_tx`), a digit must be
+/// 1. forwarded to the bridge WebSocket (pre-existing behaviour),
+/// 2. buffered for the return-app flow, and
+/// 3. reported as an `ivr_step_trace` carrying the originating node context
+///    and the digit (consumer contract for menu/TTS nodes).
+#[test]
+fn forward_dtmf_with_active_bridge_emits_trace_and_buffers_digit() {
+    use crate::proxy::proxy_call::sip_session::transfer::BridgeTraceContext;
+    use crate::rwi::gateway::RwiGateway;
+
+    let runtime = Arc::new(DtmfAppRuntime {
+        running: false,
+        inject_calls: AtomicUsize::new(0),
+    });
+    let app_runtime: Arc<dyn AppRuntime> = runtime.clone();
+
+    let gateway = RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let gw_ref = Arc::new(parking_lot::RwLock::new(gateway));
+
+    // Bridge active: an open channel counts as "bridge running".
+    let (tx, mut ws_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let bridge_dtmf_tx = Arc::new(parking_lot::RwLock::new(Some(tx)));
+
+    let trace_ctx = Arc::new(parking_lot::Mutex::new(Some(BridgeTraceContext {
+        step_id: Some("step-menu-tts".to_string()),
+        step_name: Some("菜单".to_string()),
+        extra: Some(serde_json::json!({"nodetype": "menu_tts", "businessnodeid": "42"})),
+    })));
+    let digits = Arc::new(parking_lot::Mutex::new(Vec::new()));
+
+    forward_dtmf_event(
+        '1',
+        "caller",
+        "test-session",
+        &app_runtime,
+        &Some(gw_ref),
+        &bridge_dtmf_tx,
+        &trace_ctx,
+        &digits,
+        "sip:1001@x",
+        "sip:2000@x",
+        None,
+    );
+
+    // 1. digit forwarded to the bridge websocket
+    let ws_json = ws_rx.try_recv().expect("digit must reach the ws channel");
+    let v: serde_json::Value = serde_json::from_str(&ws_json).unwrap();
+    assert_eq!(v["type"], "dtmf");
+    assert_eq!(v["digit"], "1");
+
+    // 2. buffered for the return-app flow
+    assert_eq!(digits.lock().clone(), vec!["1".to_string()]);
+
+    // 3. ivr_step_trace emitted with digit + node context
+    let ev = events
+        .try_recv()
+        .expect("bridge DTMF must emit an ivr_step_trace event");
+    assert_eq!(ev.event.event_type, "ivr_step_trace");
+    assert_eq!(ev.event.payload["trigger"]["type"], "dtmf");
+    assert_eq!(ev.event.payload["trigger"]["detail"]["digit"], "1");
+    assert_eq!(ev.event.payload["step_id"], "step-menu-tts");
+    assert_eq!(ev.event.payload["action_type"], "Bridge");
+    assert_eq!(ev.event.payload["extra"]["nodetype"], "menu_tts");
+    assert_eq!(ev.event.payload["caller"], "sip:1001@x");
+    assert!(ev.event.payload["end_reason"].is_null());
 }
 
 // ── parse_dial_target ─────────────────────────────────────────────────

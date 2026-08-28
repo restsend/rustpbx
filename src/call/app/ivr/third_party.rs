@@ -263,8 +263,8 @@ impl ThirdPartyTreeProvider {
             })
     }
 
-    fn build_linear_chain(tree: &ThirdPartyTree, node: &ThirdPartyNode) -> ActionNode {
-        let action = convert_node_static(node);
+    fn build_linear_chain(&self, tree: &ThirdPartyTree, node: &ThirdPartyNode) -> ActionNode {
+        let action = self.convert_node(node);
         let next_id = Self::get_next_linear_child(node);
         let next = next_id.and_then(|id| {
             tree.nodes.get(&id).and_then(|n| {
@@ -275,7 +275,7 @@ impl ThirdPartyTreeProvider {
                 if Self::is_menu_nodetype(&n.nodetype) || Self::is_terminal_nodetype(&n.nodetype) {
                     None
                 } else {
-                    Some(Box::new(Self::build_linear_chain(tree, n)))
+                    Some(Box::new(self.build_linear_chain(tree, n)))
                 }
             })
         });
@@ -311,7 +311,7 @@ impl ThirdPartyTreeProvider {
         } else if Self::is_terminal_nodetype(&node.nodetype) {
             ActionNode::new(self.convert_node(node))
         } else {
-            Self::build_linear_chain(tree, node)
+            self.build_linear_chain(tree, node)
         }
     }
 
@@ -356,127 +356,6 @@ impl ThirdPartyTreeProvider {
                     .map(|n| n.to_string())
             })
             .unwrap_or_else(|| "0".to_string())
-    }
-}
-
-fn convert_node_static(node: &ThirdPartyNode) -> EntryAction {
-    match node.nodetype.as_str() {
-        "api" => EntryAction::Api {
-            url: node.nodename.clone(),
-            method: Some("GET".into()),
-            headers: HashMap::new(),
-            variables: None,
-            timeout: 10,
-            get_dynamic_tree: if node.controltype == "getDynamicTree" {
-                Some(true)
-            } else {
-                None
-            },
-        },
-        "menu" => {
-            let timeout: u64 = node.nodevalue.parse().unwrap_or(5);
-            EntryAction::DtmfMenu {
-                greeting: Some(node.nodename.clone()).filter(|g| !g.is_empty()),
-                greeting_text: None,
-                greeting_record_list: None,
-                greeting_voice: None,
-                timeout_ms: timeout * 1000,
-                max_retries: 3,
-                entries: HashMap::new(),
-                timeout_action: None,
-                invalid_action: None,
-                greeting_api_url: None,
-            }
-        }
-        "menu_tts" => {
-            let timeout: u64 = node.nodevalue.parse().unwrap_or(5);
-            EntryAction::DtmfMenu {
-                greeting: None,
-                greeting_text: Some(node.nodename.clone()).filter(|t| !t.is_empty()),
-                greeting_record_list: None,
-                greeting_voice: None,
-                timeout_ms: timeout * 1000,
-                max_retries: 3,
-                entries: HashMap::new(),
-                timeout_action: None,
-                invalid_action: None,
-                greeting_api_url: None,
-            }
-        }
-        "menu_tts_api" => EntryAction::DtmfMenu {
-            greeting: None,
-            greeting_text: None,
-            greeting_record_list: None,
-            greeting_voice: None,
-            timeout_ms: node.nodevalue.parse().unwrap_or(5) * 1000,
-            max_retries: 3,
-            entries: HashMap::new(),
-            timeout_action: None,
-            invalid_action: None,
-            greeting_api_url: Some(format!("placeholder://api?nodeid={}", node.businessnodeid)),
-        },
-        "prompt" => EntryAction::Prompt {
-            file: Some(node.nodename.clone()).filter(|f| !f.is_empty()),
-            tts_text: None,
-            tts_voice: None,
-            record_name_list: None,
-            interruptible: false,
-            tts_api_url: None,
-        },
-        "prompt_break" => EntryAction::Prompt {
-            file: Some(node.nodename.clone()).filter(|f| !f.is_empty()),
-            tts_text: None,
-            tts_voice: None,
-            record_name_list: None,
-            interruptible: true,
-            tts_api_url: None,
-        },
-        "prompt_tts_break_api" => EntryAction::Prompt {
-            file: None,
-            tts_text: None,
-            tts_voice: None,
-            record_name_list: None,
-            interruptible: true,
-            tts_api_url: Some(format!("placeholder://api?nodeid={}", node.businessnodeid)),
-        },
-        "toagent_by_kfb" => {
-            let (skill_group_id, key_id) =
-                ThirdPartyTreeProvider::parse_toagent_nodevalue(&node.nodevalue);
-            EntryAction::RouteToAgent {
-                target: node.nodename.clone(),
-                skill_group_id,
-                key_id,
-                channel_code: None,
-            }
-        }
-        "toivr" => EntryAction::JumpIvr {
-            route_point: node.nodename.clone(),
-            params: HashMap::new(),
-        },
-        "syshangup" => EntryAction::Hangup {
-            prompt: None,
-            prompt_text: None,
-            prompt_voice: None,
-        },
-        "input_phone" => EntryAction::InputPhone {
-            prompt: Some(node.nodename.clone()).filter(|p| !p.is_empty()),
-            prompt_text: None,
-            prompt_voice: None,
-            min_digits: 11,
-            max_digits: 11,
-            timeout_ms: 10_000,
-            inter_digit_timeout_ms: 3_000,
-            terminator: "#".into(),
-        },
-        "input_voice" => EntryAction::InputVoice {
-            scene: node.nodename.clone(),
-            timeout_ms: node.nodevalue.parse().unwrap_or(5000),
-        },
-        _ => EntryAction::Hangup {
-            prompt: None,
-            prompt_text: None,
-            prompt_voice: None,
-        },
     }
 }
 
@@ -868,8 +747,11 @@ mod tests {
     #[test]
     fn test_build_linear_chain() {
         let tree = ThirdPartyTree::from_json(&sample_tree_json()).unwrap();
+        let provider =
+            ThirdPartyTreeProvider::from_json(&sample_tree_json(), "http://localhost".into())
+                .unwrap();
         let node = tree.nodes.get("prompt_1").unwrap().clone();
-        let chain = ThirdPartyTreeProvider::build_linear_chain(&tree, &node);
+        let chain = provider.build_linear_chain(&tree, &node);
         match &chain.action {
             EntryAction::Prompt {
                 file,

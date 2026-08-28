@@ -342,6 +342,16 @@ pub struct QueueApp {
     comfort_token: Option<PlaybackToken>,
     final_token: Option<PlaybackToken>,
     abandoned_recorded: bool,
+    /// Agent ids this queue entry has dialed (resolve-time or wait-retention
+    /// assignments). Used at connect/exit to release *phantom* states: an
+    /// agent the queue marked Busy/Ringing for this call that never actually
+    /// connected (e.g. rejected with 486 while another agent answered).
+    attempted_agents: Vec<String>,
+    /// Whether the `max_wait_timeout` has been armed for this queue entry.
+    /// Re-entering wait retention (e.g. after a failed dial round) must NOT
+    /// re-arm it — `set_timeout` replaces timers, which would extend the
+    /// caller's promised max wait on every failed cycle.
+    max_wait_armed: bool,
 }
 
 impl QueueApp {
@@ -372,6 +382,8 @@ impl QueueApp {
             comfort_token: None,
             final_token: None,
             abandoned_recorded: false,
+            attempted_agents: Vec::new(),
+            max_wait_armed: false,
         }
     }
 
@@ -477,9 +489,72 @@ impl QueueApp {
         self.config.skill_group.is_some() && self.agent_registry.is_some()
     }
 
-    fn arm_max_wait_timeout(&self, ctrl: &mut CallController) {
+    fn arm_max_wait_timeout(&mut self, ctrl: &mut CallController) {
+        if self.max_wait_armed {
+            // Already armed (initial entry or earlier wait-retention round) —
+            // keep the original deadline so failed dial rounds cannot extend
+            // the caller's promised max wait.
+            return;
+        }
+        self.max_wait_armed = true;
         let secs = self.config.max_wait_secs.max(1);
         ctrl.set_timeout("max_wait_timeout", Duration::from_secs(secs));
+    }
+
+    /// Remember an agent id this queue entry dialed (for phantom release).
+    fn record_attempted_agent(&mut self, agent_id: String) {
+        if agent_id.is_empty() {
+            return;
+        }
+        if !self.attempted_agents.contains(&agent_id) {
+            self.attempted_agents.push(agent_id);
+        }
+    }
+
+    /// Resolve the registry agent_id behind a dialed URI (falls back to the
+    /// URI user part).
+    async fn agent_id_for_uri(&self, uri: &str) -> String {
+        if let Some(ref registry) = self.agent_registry {
+            let agents = registry.list_agents().await;
+            if let Some(a) = agents.iter().find(|a| a.uri == uri) {
+                return a.agent_id.clone();
+            }
+        }
+        extract_sip_username(uri).unwrap_or_else(|| uri.to_string())
+    }
+
+    /// Release phantom agent states bound to THIS call (never-connected
+    /// Ringing reservations / phantom Busy from rejections).
+    ///
+    /// - `Ringing{call_id}` → Idle (agent never answered; leg cancelled or
+    ///   originate failed) — immediately schedulable again.
+    /// - `Busy{call_id}` → Wrapup (agent rejected; short unschedulable via
+    ///   the backend's wrapup timer) — bounded recovery, never stuck Busy.
+    ///
+    /// `exclude` skips the agent that actually connected (its real lifecycle
+    /// is owned by the call-session hooks).
+    async fn release_phantom_agents(&mut self, exclude: Option<&str>) {
+        if self.attempted_agents.is_empty() {
+            return;
+        }
+        let Some(ref registry) = self.agent_registry else {
+            self.attempted_agents.clear();
+            return;
+        };
+        let attempted = std::mem::take(&mut self.attempted_agents);
+        for agent_id in attempted {
+            if Some(agent_id.as_str()) == exclude {
+                continue;
+            }
+            let released = registry.release_call(&agent_id, &self.call_id).await;
+            if released {
+                info!(
+                    agent = %agent_id,
+                    call_id = %self.call_id,
+                    "Queue: released phantom agent state bound to this call"
+                );
+            }
+        }
     }
 
     fn arm_queue_retry(&self, ctrl: &mut CallController) {
@@ -870,6 +945,17 @@ impl QueueApp {
                 return Ok(AppAction::Continue);
             }
 
+            if self.allows_wait_retention() {
+                // Skill-group queue: the resolved round is exhausted — go back
+                // to wait retention (another agent may appear) instead of
+                // killing the call with the busy prompt.
+                info!("Queue: parallel round exhausted — returning to wait retention");
+                self.release_phantom_agents(None).await;
+                self.dynamic_agents = None;
+                self.current_agent_idx = 0;
+                return self.enter_waiting_for_agent(ctrl).await;
+            }
+
             return self
                 .play_unavailable_prompt_and_then_fallback(ctrl, reason)
                 .await;
@@ -879,6 +965,16 @@ impl QueueApp {
 
         let agents = self.get_agents();
         if self.current_agent_idx >= agents.len() {
+            if self.allows_wait_retention() {
+                // Skill-group queue: every resolved agent failed — return to
+                // wait retention and poll for the next Idle agent instead of
+                // falling back (the call keeps its queue position).
+                info!("Queue: agent round exhausted — returning to wait retention");
+                self.release_phantom_agents(None).await;
+                self.dynamic_agents = None;
+                self.current_agent_idx = 0;
+                return self.enter_waiting_for_agent(ctrl).await;
+            }
             return self
                 .play_unavailable_prompt_and_then_fallback(ctrl, reason)
                 .await;
@@ -1057,6 +1153,8 @@ impl QueueApp {
             "Queue: dialing next agent {} (idx={})",
             uri, self.current_agent_idx
         );
+        let attempt_agent_id = self.agent_id_for_uri(&uri).await;
+        self.record_attempted_agent(attempt_agent_id.clone());
         // In sequential mode only one agent rings at a time; clear stale
         // entries so the ring-timeout handler sees the correct agent.
         if !self.is_parallel() {
@@ -1071,6 +1169,16 @@ impl QueueApp {
             }
             Err(e) => {
                 warn!("Queue: failed to dial agent {}: {}", uri, e);
+                // The resolve-time reservation (Idle → Ringing) is still held:
+                // the INVITE never went out, so the agent must be released
+                // immediately or it stays Ringing forever.
+                if let Some(ref registry) = self.agent_registry
+                    && registry
+                        .release_call(&attempt_agent_id, &self.call_id)
+                        .await
+                {
+                    info!(agent = %uri, "Queue: released reservation after originate failure");
+                }
                 // Advance to the next agent instead of falling back immediately.
                 self.current_agent_idx += 1;
                 self.dial_attempts += 1;
@@ -1237,6 +1345,8 @@ impl QueueApp {
         failure_log: &str,
     ) {
         for uri in uris {
+            let agent_id = self.agent_id_for_uri(uri).await;
+            self.record_attempted_agent(agent_id);
             match ctrl.originate_call(uri, Some(self.call_id.clone())).await {
                 Ok(call_id) => {
                     info!(agent = %uri, call_id = %call_id, "{success_log}");
@@ -1465,6 +1575,7 @@ impl CallApp for QueueApp {
                     .originate_call(&agent.uri, Some(self.call_id.clone()))
                     .await?;
 
+                self.record_attempted_agent(agent.agent_id.clone());
                 self.pending_agents.push((agent.uri.clone(), call_id));
 
                 self.maybe_start_transfer_prompt(ctrl).await?;
@@ -1547,9 +1658,15 @@ impl CallApp for QueueApp {
                     agents.len()
                 );
                 let mut pending = Vec::with_capacity(agents.len());
-                for (idx, agent) in agents.iter().enumerate() {
-                    let uri = agent.aor.to_string();
-                    let leg_headers = agent.headers.clone().unwrap_or_default();
+                let parallel_uris: Vec<(String, Option<Vec<rsipstack::sip::Header>>)> = agents
+                    .iter()
+                    .map(|a| (a.aor.to_string(), a.headers.clone()))
+                    .collect();
+                drop(agents);
+                for (idx, (uri, leg_headers)) in parallel_uris.into_iter().enumerate() {
+                    let leg_headers = leg_headers.unwrap_or_default();
+                    let attempt_agent_id = self.agent_id_for_uri(&uri).await;
+                    self.record_attempted_agent(attempt_agent_id);
                     match ctrl
                         .originate_call_with_headers(&uri, Some(self.call_id.clone()), leg_headers)
                         .await
@@ -1762,14 +1879,22 @@ impl CallApp for QueueApp {
                             let _ = registry.start_call(agent_id).await;
                         }
 
-                        // Emit RWI queue lifecycle events at connect time: agent
-                        // connected, then the call left the queue (dequeue). This
-                        // mirrors the ACD engine's Connected/CallDequeued emission.
+                        // Release phantom states of agents dialed for this call
+                        // that never connected (e.g. an agent that rejected with
+                        // 486 got a phantom `Busy{call_id}` from the agent_busy
+                        // handler). The connected agent is excluded — its real
+                        // lifecycle is owned by the call-session hooks.
                         let connected_agent_id = data
                             .get("agent_id")
                             .and_then(|v| v.as_str())
                             .unwrap_or(agent_uri)
                             .to_string();
+                        self.release_phantom_agents(Some(connected_agent_id.as_str()))
+                            .await;
+
+                        // Emit RWI queue lifecycle events at connect time: agent
+                        // connected, then the call left the queue (dequeue). This
+                        // mirrors the ACD engine's Connected/CallDequeued emission.
                         self.emit_rwi(&crate::rwi::event::QueueAgentConnected {
                             call_id: self.call_id.clone(),
                             queue_id: queue_id.clone(),
@@ -2005,6 +2130,13 @@ impl CallApp for QueueApp {
 
     async fn on_exit(&mut self, reason: super::ExitReason) -> anyhow::Result<()> {
         info!(?reason, "Queue: exiting queue application");
+
+        // Release any phantom agent states still bound to this call (e.g. an
+        // agent that rejected with 486 and never connected while the call was
+        // served by another agent). Without this the agent stays Busy forever
+        // — `on_call_ended` attributes the session to the agent that actually
+        // answered, so nobody else clears the phantom.
+        self.release_phantom_agents(None).await;
 
         // Update statistics if call was not connected (abandoned). A transfer
         // prompt with `connected_agent: Some(_)` means the agent already

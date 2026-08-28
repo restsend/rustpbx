@@ -30,6 +30,11 @@ pub struct E2eTestServerInject {
     /// App-level agent registry installed after the standard modules
     /// (e.g. a `CcAgentRegistryAdapter` for skill-group queues).
     pub agent_registry: Option<Arc<dyn rustpbx::call::app::agent_registry::AgentRegistry>>,
+    /// RWI gateway installed via `with_rwi_gateway`. When set, every app
+    /// (IVR/queue) and session-level lifecycle event (`call_*`) is emitted
+    /// through it — drive it with a webhook handler to capture full event
+    /// sequences.
+    pub rwi_gateway: Option<rustpbx::rwi::RwiGatewayRef>,
 }
 
 impl Default for E2eTestServerInject {
@@ -38,6 +43,7 @@ impl Default for E2eTestServerInject {
             users: Vec::new(),
             session_hook: None,
             agent_registry: None,
+            rwi_gateway: None,
         }
     }
 }
@@ -241,6 +247,9 @@ impl E2eTestServer {
             .with_callrecord_sender(Some(cdr_sender));
         if let Some(hook) = &inject.session_hook {
             builder = builder.with_session_hook(hook.clone());
+        }
+        if let Some(gateway) = &inject.rwi_gateway {
+            builder = builder.with_rwi_gateway(gateway.clone());
         }
         Ok((builder, cdr_capture, cancel_token))
     }

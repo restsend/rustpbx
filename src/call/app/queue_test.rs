@@ -2546,6 +2546,120 @@ mod tests {
         let _ = stack.join().await;
     }
 
+    /// A1 regression: in a skill-group queue, after the resolved agent round
+    /// is exhausted (single agent rings, times out), the call must return to
+    /// wait retention — hold music restarts, `queue_retry` re-arms, and the
+    /// next empty poll keeps waiting — instead of falling through to the busy
+    /// prompt / hangup. `max_wait_timeout` must NOT be re-armed (the caller's
+    /// promised deadline is preserved across failed dial rounds).
+    #[tokio::test]
+    async fn test_queue_ring_timeout_after_wait_assignment_returns_to_wait_retention() {
+        use std::sync::Arc;
+        let registry = Arc::new(HookRecordingRegistry::new().with_resolve_uris(vec![
+            vec!["sip:agent-001@localhost".to_string()],
+            vec![],
+            vec![],
+        ]));
+        registry
+            .inner
+            .register(
+                "agent-001".to_string(),
+                "Alice".to_string(),
+                "sip:agent-001@localhost".to_string(),
+                vec!["support".to_string()],
+                1,
+            )
+            .await
+            .unwrap();
+        registry
+            .inner
+            .update_presence(
+                "agent-001",
+                crate::call::app::agent_registry::PresenceState::Idle,
+            )
+            .await
+            .unwrap();
+
+        let mut config = build_simple_queue_config();
+        // skill_group (not skill_routing_enabled) — wait retention polls the
+        // skill-group target; resolve_agents at on_enter must NOT eagerly pick
+        // up the registered Idle agent (the poll is what drives assignment).
+        config.skill_routing_enabled = false;
+        config.skill_group = Some("support".to_string());
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.hold = Some(QueueHoldConfig {
+            audio_file: Some("sounds/hold_music.wav".to_string()),
+            loop_playback: true,
+        });
+        config.retry_interval_secs = 1;
+        config.max_wait_secs = 300;
+        config.accept_immediately = true;
+        config.ring_timeout = Some(Duration::from_secs(5));
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(registry.clone());
+        queue = queue.with_call_id("call-wait-3".to_string());
+        queue = queue.with_skill_group("support".to_string());
+
+        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
+        stack
+            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        let _hold = stack.next_cmd(200).await.expect("hold while waiting");
+
+        // Poll #1 resolves an Idle agent → dial.
+        stack.timeout("queue_retry");
+        let mut saw_dial = false;
+        for _ in 0..10 {
+            if let Some(cmd) = stack.next_cmd(300).await {
+                if matches!(cmd, CallCommand::LegAdd { .. }) {
+                    saw_dial = true;
+                    break;
+                }
+            }
+        }
+        assert!(saw_dial, "wait-retention poll must dial the resolved agent");
+
+        // The agent never answers → ring timeout → round exhausted → the app
+        // must go back to waiting (hold restarts), not hang up.
+        stack.timeout("agent_ring_timeout");
+        let mut hold_restarted = false;
+        let mut hung_up = false;
+        for _ in 0..10 {
+            match stack.next_cmd(300).await {
+                Some(CallCommand::Play { .. }) => {
+                    hold_restarted = true;
+                    break;
+                }
+                Some(CallCommand::Hangup(_)) => {
+                    hung_up = true;
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        assert!(hold_restarted, "must restart hold music in wait retention");
+        assert!(
+            !hung_up,
+            "exhausted round must NOT hang up a skill-group call"
+        );
+
+        // Poll #2 resolves nothing → keep waiting (no hangup).
+        stack.timeout("queue_retry");
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        for cmd in stack.drain_cmds() {
+            assert!(
+                !matches!(cmd, CallCommand::Hangup(_)),
+                "empty poll must keep the call waiting, got {cmd:?}"
+            );
+        }
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
     /// Agent ring timeout must emit the `queue_agent_no_answer` RWI event via
     /// the gateway.
     #[tokio::test]

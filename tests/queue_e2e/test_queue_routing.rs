@@ -111,6 +111,7 @@ async fn test_call_queue_routing_e2e() -> Result<()> {
             ],
             session_hook: Some(hook),
             agent_registry: None,
+            rwi_gateway: None,
         },
     )
     .await?;

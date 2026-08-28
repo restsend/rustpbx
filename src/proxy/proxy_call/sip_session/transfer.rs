@@ -127,6 +127,23 @@ impl ReturnTargetSpec {
     }
 }
 
+/// Node identity attached by the step-IVR executor to a `bridge:` target (via
+/// `_rst_*` query params) so DTMF pressed during the WebSocket bridge can be
+/// reported as an `ivr_step_trace` carrying the originating node context.
+/// Consumer contract: menu nodes must surface `trigger.detail.digit`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct BridgeTraceContext {
+    pub step_id: Option<String>,
+    pub step_name: Option<String>,
+    pub extra: Option<serde_json::Value>,
+}
+
+impl BridgeTraceContext {
+    fn is_empty(&self) -> bool {
+        self.step_id.is_none() && self.step_name.is_none() && self.extra.is_none()
+    }
+}
+
 /// Parsed representation of a transfer target URI.
 ///
 /// Extracted so that the string-prefix dispatch in `handle_blind_transfer` is
@@ -161,6 +178,8 @@ pub(crate) enum TransferTarget {
         timeout_ms: Option<u64>,
         /// App to return to when the bridge disconnects.
         return_app: Option<ReturnTargetSpec>,
+        /// Originating IVR node context for DTMF trace reporting.
+        trace_context: Option<BridgeTraceContext>,
     },
     /// B2BUA SIP call leg, optionally with return-app on B‑leg hangup.
     Sip {
@@ -189,6 +208,7 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
             let mut return_query: Vec<(&str, String)> = Vec::new();
             let mut headers = HashMap::new();
             let mut passthrough_params = Vec::new();
+            let mut trace_context = BridgeTraceContext::default();
 
             if let Ok(uri) = raw.parse::<http::Uri>() {
                 if let Some(query) = uri.query() {
@@ -220,6 +240,15 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                             k if k.starts_with("return_") => {
                                 return_query.push((k, decoded_val));
                             }
+                            // Reserved: originating IVR node context injected
+                            // by the step executor. Never forwarded to the
+                            // bridge endpoint.
+                            "_rst_step_id" => trace_context.step_id = Some(decoded_val),
+                            "_rst_step_name" => trace_context.step_name = Some(decoded_val),
+                            "_rst_extra" => {
+                                trace_context.extra = serde_json::from_str(&decoded_val).ok()
+                            }
+                            k if k.starts_with("_rst_") => {}
                             _ => passthrough_params.push(pair.to_string()),
                         }
                     }
@@ -246,6 +275,11 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                     return_app: ReturnTargetSpec::from_query_pairs(
                         return_query.into_iter().map(|(k, v)| (k.as_ref(), v)),
                     ),
+                    trace_context: if trace_context.is_empty() {
+                        None
+                    } else {
+                        Some(trace_context)
+                    },
                 };
             }
         }
@@ -533,8 +567,9 @@ impl SipSession {
                 codec,
                 timeout_ms,
                 return_app,
+                trace_context,
             } => {
-                info!(session_id = %self.id, %leg_id, endpoint = %endpoint, sample_rate, codec = %codec, ?return_app, "Handling Bridge transfer");
+                info!(session_id = %self.id, %leg_id, endpoint = %endpoint, sample_rate, codec = %codec, ?return_app, ?trace_context, "Handling Bridge transfer");
                 self.meta.transferred = true;
                 self.connect_bridge(
                     leg_id,
@@ -544,6 +579,7 @@ impl SipSession {
                     codec.clone(),
                     timeout_ms,
                     return_app.clone(),
+                    trace_context.clone(),
                 )
                 .await
             }
@@ -1338,8 +1374,15 @@ impl SipSession {
         codec: String,
         timeout_ms: Option<u64>,
         return_app: Option<ReturnTargetSpec>,
+        trace_context: Option<BridgeTraceContext>,
     ) -> Result<()> {
         info!(session_id = %self.id, %leg_id, endpoint = %endpoint, sample_rate, codec = %codec, "Connecting Bridge");
+
+        // Arm the DTMF trace context BEFORE the media loops start so digits
+        // arriving during the bridge are reported against the originating
+        // IVR node (and buffered for the return-app flow).
+        *self.bridge_trace_context.lock() = trace_context;
+        self.bridge_dtmf_digits.lock().clear();
 
         // Captured for the spawn'd forward/reverse loops (self is moved).
         let session_id = self.id.to_string();
@@ -2478,6 +2521,56 @@ mod tests {
                 assert_eq!(timeout_ms, Some(5000));
             }
             _ => panic!("expected Bridge, got {:?}", parsed),
+        }
+    }
+
+    /// `_rst_*` params carry the originating IVR node context: they must be
+    /// captured into `trace_context` and NEVER leak into the endpoint URL
+    /// forwarded to the bridge server.
+    #[test]
+    fn test_parse_voip_bridge_captures_trace_context() {
+        use urlencoding::encode;
+        let extra = serde_json::json!({
+            "businessnodeid": "1000141102024500020001",
+            "nodetype": "menu_tts",
+            "nodename": "测试啊，按1转人工，按2挂机",
+        });
+        let target = format!(
+            "bridge:wss://facade.example.com/ivr/tts/bridge/RI_x?samplerate=8000&timeout_ms=30000&return_app=ivr&return_target=lf-step-ivr&_rst_step_id={}&_rst_step_name={}&_rst_extra={}",
+            encode("step-1"),
+            encode("菜单"),
+            encode(&extra.to_string()),
+        );
+        let parsed = super::parse_transfer_target(&target);
+        match parsed {
+            TransferTarget::Bridge {
+                endpoint,
+                trace_context,
+                ..
+            } => {
+                assert_eq!(
+                    endpoint, "wss://facade.example.com/ivr/tts/bridge/RI_x",
+                    "_rst_* params must not be forwarded to the bridge endpoint"
+                );
+                let ctx = trace_context.expect("trace context must be captured");
+                assert_eq!(ctx.step_id.as_deref(), Some("step-1"));
+                assert_eq!(ctx.step_name.as_deref(), Some("菜单"));
+                assert_eq!(ctx.extra, Some(extra));
+            }
+            other => panic!("expected Bridge, got {other:?}"),
+        }
+    }
+
+    /// A bridge target without `_rst_*` params has no trace context.
+    #[test]
+    fn test_parse_voip_bridge_without_trace_context() {
+        let parsed =
+            super::parse_transfer_target("bridge:wss://room.example.com/ws?timeout_ms=1000");
+        match parsed {
+            TransferTarget::Bridge { trace_context, .. } => {
+                assert!(trace_context.is_none());
+            }
+            other => panic!("expected Bridge, got {other:?}"),
         }
     }
 

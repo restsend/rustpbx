@@ -563,6 +563,28 @@ impl TestUa {
     }
 
     /// Answer an incoming call with optional SDP
+    /// Send a 180 Ringing provisional response for an incoming call —
+    /// simulates a real phone ringing before the agent answers. The session
+    /// turns this into `call_ringing` / `queue_agent_offered` RWI events.
+    pub async fn ring_call(&self, dialog_id: &DialogId) -> Result<()> {
+        let dialog_layer = self
+            .dialog_layer
+            .as_ref()
+            .ok_or_else(|| anyhow!("TestUa not started"))?;
+        if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
+            match dialog {
+                Dialog::Invite(d) => {
+                    d.ringing(None, None).map_err(|e| e.into_anyhow())?;
+                    Ok(())
+                }
+                _ => Err(anyhow!("Invalid dialog type for ringing")),
+            }
+        } else {
+            Err(anyhow!("Dialog not found: {}", dialog_id))
+        }
+    }
+
+    /// Answer an incoming call with a 200 OK (optionally carrying an SDP answer).
     pub async fn answer_call(
         &self,
         dialog_id: &DialogId,

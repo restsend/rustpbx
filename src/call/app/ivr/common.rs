@@ -617,6 +617,27 @@ pub async fn execute_action(
             }
             let mut uri = uri;
             super::exec::append_return_app_to_uri(&mut uri, return_app, return_target);
+            // Attach the originating node identity (`_rst_*` reserved params,
+            // never forwarded to the bridge endpoint) so the proxy can report
+            // DTMF pressed during the bridge as `ivr_step_trace` events for
+            // this node — menu nodes must surface `trigger.detail.digit`.
+            let mut trace_pairs: Vec<String> = Vec::new();
+            for (var, param) in [
+                ("_bridge_step_id", "_rst_step_id"),
+                ("_bridge_step_name", "_rst_step_name"),
+                ("_bridge_extra", "_rst_extra"),
+            ] {
+                if let Some(v) = sess.variables.remove(var) {
+                    if !v.is_empty() {
+                        trace_pairs.push(format!("{param}={}", urlencoding::encode(&v)));
+                    }
+                }
+            }
+            if !trace_pairs.is_empty() {
+                let sep = if uri.contains('?') { "&" } else { "?" };
+                uri.push_str(sep);
+                uri.push_str(&trace_pairs.join("&"));
+            }
             if success.is_some() || failure.is_some() {
                 sess.variables.insert("bridge_branch".into(), "true".into());
                 Ok(ActionResult::Terminal(TerminalAction::Transfer(format!(
