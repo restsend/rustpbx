@@ -10,9 +10,7 @@
 use anyhow::{Result, anyhow};
 use rustpbx::addons::cc::acd::{AcdConfig, AcdEngine};
 use rustpbx::addons::cc::agent::AgentRegistry as CcAgentRegistry;
-use rustpbx::addons::cc::agent_registry_adapter::{
-    CcAgentRegistryAdapter, SkillGroupEvent,
-};
+use rustpbx::addons::cc::agent_registry_adapter::{CcAgentRegistryAdapter, SkillGroupEvent};
 use rustpbx::addons::cc::skill_group::CreateSkillGroupRequest;
 use rustpbx::addons::cc::translate_skill_group_event;
 use rustpbx::call::user::SipUser;
@@ -21,9 +19,7 @@ use rustpbx::proxy::routing::{
     MatchConditions, QueueDialMode, RouteAction, RouteQueueConfig, RouteQueueFallbackConfig,
     RouteQueueStrategyConfig, RouteQueueTargetConfig, RouteRule,
 };
-use rustpbx::rwi::{
-    RwiGateway, RwiGatewayRef, webhook::start_rwi_webhook_handler,
-};
+use rustpbx::rwi::{RwiGateway, RwiGatewayRef, webhook::start_rwi_webhook_handler};
 use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
 use std::sync::Arc;
@@ -409,10 +405,13 @@ async fn test_busy_agent_second_caller_wait_retention_rwi_events() -> Result<()>
     // Abandon while waiting.
     caller2.hangup(&dialog2).await?;
 
-    let abandoned =
-        wait_webhook_event(&capture, "skill_group_call_abandoned", Duration::from_secs(5))
-            .await
-            .expect("RWI webhook must receive skill_group_call_abandoned");
+    let abandoned = wait_webhook_event(
+        &capture,
+        "skill_group_call_abandoned",
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("RWI webhook must receive skill_group_call_abandoned");
     assert_eq!(
         abandoned["event"]["skill_group_id"].as_str(),
         Some(SKILL_GROUP),
@@ -420,11 +419,7 @@ async fn test_busy_agent_second_caller_wait_retention_rwi_events() -> Result<()>
     );
 
     // Bob must still not have been rung again.
-    assert_eq!(
-        bob_stats.invites(),
-        1,
-        "abandon path must not dial bob"
-    );
+    assert_eq!(bob_stats.invites(), 1, "abandon path must not dial bob");
 
     // Exactly one abandoned webhook for caller2 (no duplicate on_exit).
     {

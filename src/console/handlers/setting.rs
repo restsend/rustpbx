@@ -466,8 +466,9 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
             } else {
                 url
             };
-            key_items
-                .push(json!({ "label": "RTP external IP", "value": format!("auto ({})", display) }));
+            key_items.push(
+                json!({ "label": "RTP external IP", "value": format!("auto ({})", display) }),
+            );
         }
         if let Some(ext) = config.sip_external_ip.as_ref() {
             key_items.push(json!({ "label": "SIP Contact IP", "value": ext }));
@@ -477,9 +478,8 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
             } else {
                 url
             };
-            key_items.push(
-                json!({ "label": "SIP Contact IP", "value": format!("auto ({})", display) }),
-            );
+            key_items
+                .push(json!({ "label": "SIP Contact IP", "value": format!("auto ({})", display) }));
         } else if config.external_ip.is_some() || config.auto_external_ip.is_some() {
             key_items.push(json!({ "label": "SIP Contact IP", "value": "follow RTP external IP" }));
         } else {
@@ -2002,10 +2002,7 @@ fn validate_network_profiles_update(
         .iter()
         .map(|p| p.id.clone())
         .collect();
-    let new_ids: HashSet<String> = profiles
-        .iter()
-        .map(|p| p.id.trim().to_string())
-        .collect();
+    let new_ids: HashSet<String> = profiles.iter().map(|p| p.id.trim().to_string()).collect();
     for removed in old_ids.difference(&new_ids) {
         for (name, trunk) in &config.proxy.trunks {
             if trunk.profile.as_deref() == Some(removed.as_str()) {
@@ -2090,11 +2087,9 @@ pub(crate) async fn update_network_profiles(
         return resp;
     }
 
-    if let Err(resp) = write_network_profiles_document(
-        &mut doc,
-        &payload.profiles,
-        payload.default.as_deref(),
-    ) {
+    if let Err(resp) =
+        write_network_profiles_document(&mut doc, &payload.profiles, payload.default.as_deref())
+    {
         return resp;
     }
 
@@ -3182,13 +3177,17 @@ async fn fetch_peer_log_payload(
     query: &str,
 ) -> Result<JsonValue, Response> {
     let url = format!("{}/cluster/logs/{}?{}", target.base_url, kind, query);
-    let opts = crate::http_util::HttpFetchOptions::new()
-        .with_timeout(std::time::Duration::from_secs(CLUSTER_LOG_FETCH_TIMEOUT_SECS));
+    let opts = crate::http_util::HttpFetchOptions::new().with_timeout(
+        std::time::Duration::from_secs(CLUSTER_LOG_FETCH_TIMEOUT_SECS),
+    );
     let request = state.http_client().get(&url);
     match crate::http_util::execute_request(request, &opts.headers, opts.timeout).await {
         Ok(response) => {
             let status = response.status();
-            let body = response.json::<JsonValue>().await.unwrap_or(JsonValue::Null);
+            let body = response
+                .json::<JsonValue>()
+                .await
+                .unwrap_or(JsonValue::Null);
             if !status.is_success() {
                 let detail = body
                     .get("message")
@@ -3196,7 +3195,10 @@ async fn fetch_peer_log_payload(
                     .unwrap_or("no detail");
                 return Err(json_error(
                     StatusCode::BAD_GATEWAY,
-                    format!("Node {} responded with HTTP {status}: {detail}", target.label),
+                    format!(
+                        "Node {} responded with HTTP {status}: {detail}",
+                        target.label
+                    ),
                 ));
             }
             let mut body = body;
@@ -3227,15 +3229,19 @@ fn peer_log_stream(
             time::sleep(StdDuration::from_millis(1000)).await;
 
             let fetch_url = format!("{url}?position={cursor}&limit={limit}");
-            let opts = crate::http_util::HttpFetchOptions::new()
-                .with_timeout(std::time::Duration::from_secs(CLUSTER_LOG_FETCH_TIMEOUT_SECS));
+            let opts = crate::http_util::HttpFetchOptions::new().with_timeout(
+                std::time::Duration::from_secs(CLUSTER_LOG_FETCH_TIMEOUT_SECS),
+            );
             let request = client.get(&fetch_url);
 
             let (mut payload, next_cursor) =
                 match crate::http_util::execute_request(request, &opts.headers, opts.timeout).await
                 {
                     Ok(response) if response.status().is_success() => {
-                        let body = response.json::<JsonValue>().await.unwrap_or(JsonValue::Null);
+                        let body = response
+                            .json::<JsonValue>()
+                            .await
+                            .unwrap_or(JsonValue::Null);
                         let next = body
                             .get("next_position")
                             .and_then(|v| v.as_u64())
@@ -4080,9 +4086,6 @@ mod tests {
             .find(|profile| profile["id"] == "callrecord-database")
             .expect("default database profile");
         assert_eq!(profile["config"]["type"], "database");
-        assert_eq!(
-            profile["config"]["table_name"],
-            "rustpbx_call_records"
-        );
+        assert_eq!(profile["config"]["table_name"], "rustpbx_call_records");
     }
 }

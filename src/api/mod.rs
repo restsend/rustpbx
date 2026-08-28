@@ -118,8 +118,8 @@ async fn api_auth_middleware(
         // SSO broker tokens (enterprise JWT passthrough or rustpbx-minted).
         // Unmatched bearers still fall through to the session check below.
         #[cfg(feature = "commerce")]
-        if let Some(user) = crate::auth::sso::resolve_user_for_bearer(&auth_state.console, &bearer)
-            .await
+        if let Some(user) =
+            crate::auth::sso::resolve_user_for_bearer(&auth_state.console, &bearer).await
         {
             req.extensions_mut().insert(ApiTokenAuth(user));
             return next.run(req).await;

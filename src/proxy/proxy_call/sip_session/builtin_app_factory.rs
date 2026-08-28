@@ -206,20 +206,13 @@ impl BuiltinAppFactory {
                     // when the proxy runs with `generated_db = true`.
                     let file = params.as_ref()?.get("file")?.as_str()?;
 
-                    if let Some(builtin_name) =
-                        crate::call::app::ivr::builtin::parse_uri(file)
-                    {
+                    if let Some(builtin_name) = crate::call::app::ivr::builtin::parse_uri(file) {
                         match crate::call::app::ivr::builtin::get(builtin_name) {
                             Some(defn) => {
-                                return Some(Self::build_tree_ivr_app(
-                                    defn,
-                                    params.as_ref(),
-                                ));
+                                return Some(Self::build_tree_ivr_app(defn, params.as_ref()));
                             }
                             None => {
-                                *diagnostic = Some(format!(
-                                    "unknown builtin IVR '{builtin_name}'"
-                                ));
+                                *diagnostic = Some(format!("unknown builtin IVR '{builtin_name}'"));
                                 return None;
                             }
                         }
@@ -322,10 +315,7 @@ impl BuiltinAppFactory {
                         Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
                     } else {
                         // Tree mode from TOML
-                        Some(Self::build_tree_ivr_app(
-                            file_config.ivr,
-                            params.as_ref(),
-                        ))
+                        Some(Self::build_tree_ivr_app(file_config.ivr, params.as_ref()))
                     }
                 }
             }
@@ -410,9 +400,10 @@ impl BuiltinAppFactory {
                     }
                     // Ensure hold + comfort (wait retention) have audio.
                     if plan.hold.is_none() {
-                        plan.hold = Some(crate::call::QueueHoldConfig::default().with_audio_file(
-                            crate::call::DEFAULT_QUEUE_HOLD_AUDIO.to_string(),
-                        ));
+                        plan.hold = Some(
+                            crate::call::QueueHoldConfig::default()
+                                .with_audio_file(crate::call::DEFAULT_QUEUE_HOLD_AUDIO.to_string()),
+                        );
                         config.hold = plan.hold.clone();
                     }
                     if plan.voice_prompts.is_none() {

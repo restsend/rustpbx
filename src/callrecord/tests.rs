@@ -214,11 +214,8 @@ async fn test_persist_call_record_nulls_stale_fk_ids() {
     record.details.sip_trunk_id = Some(424244);
     record.details.route_id = Some(424245);
 
-    let result = crate::callrecord::database::persist_call_records(
-        &db,
-        std::slice::from_ref(&record),
-    )
-    .await;
+    let result =
+        crate::callrecord::database::persist_call_records(&db, std::slice::from_ref(&record)).await;
     assert!(result.is_ok(), "persist should succeed: {:?}", result.err());
 
     // The stale ids must have been nulled in the persisted row.
@@ -272,11 +269,8 @@ async fn test_persist_call_record_keeps_existing_fk_ids() {
 
     let mut record = make_record();
     record.details.extension_id = Some(ext.id);
-    let result = crate::callrecord::database::persist_call_records(
-        &db,
-        std::slice::from_ref(&record),
-    )
-    .await;
+    let result =
+        crate::callrecord::database::persist_call_records(&db, std::slice::from_ref(&record)).await;
     assert!(result.is_ok(), "persist should succeed: {:?}", result.err());
 
     let row = <rustpbx_models::call_record::Entity as sea_orm::EntityTrait>::find()
@@ -773,7 +767,10 @@ async fn test_save_with_http_with_custom_headers() {
     .await;
 
     if result.is_ok() {
-        println!("HTTP upload with headers test passed: {:?}", result.unwrap());
+        println!(
+            "HTTP upload with headers test passed: {:?}",
+            result.unwrap()
+        );
     } else {
         println!(
             "HTTP upload with headers test failed (expected if no internet): {:?}",
@@ -810,7 +807,10 @@ async fn test_save_with_s3_like_with_custom_headers() {
     .await;
 
     if result.is_ok() {
-        println!("HTTP upload with headers test passed: {:?}", result.unwrap());
+        println!(
+            "HTTP upload with headers test passed: {:?}",
+            result.unwrap()
+        );
     } else {
         println!(
             "HTTP upload with headers test failed (expected if no internet): {:?}",
@@ -887,7 +887,10 @@ async fn test_save_with_s3_like_with_media() {
         };
 
         match result {
-            Ok(message) => println!("S3 {:?} upload with media test passed: {:?}", vendor, message),
+            Ok(message) => println!(
+                "S3 {:?} upload with media test passed: {:?}",
+                vendor, message
+            ),
             Err(e) => println!(
                 "S3 {:?} upload with media test failed (expected without real credentials): {:?}",
                 vendor, e

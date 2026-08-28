@@ -169,12 +169,7 @@ mod tests {
     #[test]
     fn resolve_contact_host_uses_sip_external_without_destination() {
         let contact = sample_contact();
-        let host = resolve_contact_host(
-            &contact,
-            "192.168.1.10",
-            Some("203.0.113.10"),
-            None,
-        );
+        let host = resolve_contact_host(&contact, "192.168.1.10", Some("203.0.113.10"), None);
         assert_eq!(host, "203.0.113.10");
     }
 

@@ -1116,12 +1116,7 @@ impl CallRecordSaver for RotatingSqliteSaver {
         }
         Ok(records
             .iter()
-            .map(|record| {
-                format!(
-                    "{}/{}/{}",
-                    self.base_url, self.table_name, record.call_id
-                )
-            })
+            .map(|record| format!("{}/{}/{}", self.base_url, self.table_name, record.call_id))
             .collect())
     }
 }

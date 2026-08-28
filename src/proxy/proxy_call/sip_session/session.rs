@@ -2886,10 +2886,7 @@ impl SipSession {
                 } else {
                     rsipstack::sip::StatusCode::OK
                 };
-                tx_handle
-                    .respond(code, None, None)
-                    .await
-                    .ok();
+                tx_handle.respond(code, None, None).await.ok();
             }
             DialogState::Info(_, request, tx_handle) => {
                 self.handle_dialog_info(DialogSide::Caller, request, tx_handle)
@@ -3362,8 +3359,7 @@ impl SipSession {
                     .map(|s| s.to_string())
             });
         let mut ivr_params = ivr_params.unwrap_or(serde_json::json!({}));
-        let has_file_or_mode =
-            ivr_params.get("file").is_some() || ivr_params.get("mode").is_some();
+        let has_file_or_mode = ivr_params.get("file").is_some() || ivr_params.get("mode").is_some();
         if let (Some(route_point), false) = (&route_point, has_file_or_mode) {
             let route_point = route_point.trim();
             if !route_point.is_empty() {
@@ -3729,10 +3725,7 @@ impl SipSession {
                 } else {
                     rsipstack::sip::StatusCode::OK
                 };
-                tx_handle
-                    .respond(code, None, None)
-                    .await
-                    .ok();
+                tx_handle.respond(code, None, None).await.ok();
             }
             DialogState::Info(_, request, tx_handle) => {
                 self.handle_dialog_info(DialogSide::Callee, request, tx_handle)
@@ -4542,7 +4535,9 @@ impl SipSession {
     /// tone loops until the callee answers; the caller-side handle is dropped.
     async fn send_early_media_tone(&mut self, audio_path: &str) -> Result<()> {
         let loop_playback = !audio_path.starts_with("tone://");
-        self.send_early_media(audio_path, loop_playback).await.map(|_| ())
+        self.send_early_media(audio_path, loop_playback)
+            .await
+            .map(|_| ())
     }
 
     /// Play a one-shot early-media cue (e.g. a failure/beep tone) through the

@@ -1294,7 +1294,10 @@ async fn test_no_policy_unavailable_emits_call_queued() {
         saw_queued,
         "skill_group_call_queued must fire without a policy when no agent is available"
     );
-    assert!(!saw_assigned, "must not assign when enqueueing for wait retention");
+    assert!(
+        !saw_assigned,
+        "must not assign when enqueueing for wait retention"
+    );
 }
 
 /// No policy but an idle agent available: dial immediately, NO call_queued.
@@ -1972,10 +1975,7 @@ async fn test_second_call_dispatch_after_wrapup_releases_capacity() {
         "localhost",
     );
 
-    cc_registry
-        .increment_call_count("agent-001")
-        .await
-        .unwrap();
+    cc_registry.increment_call_count("agent-001").await.unwrap();
     cc_registry
         .update_status(
             "agent-001",
@@ -2036,6 +2036,9 @@ async fn test_second_call_dispatch_after_wrapup_releases_capacity() {
             "call-2",
         )
         .await;
-    assert!(selected.is_some(), "second call should dispatch after capacity release");
+    assert!(
+        selected.is_some(),
+        "second call should dispatch after capacity release"
+    );
     assert_eq!(selected.unwrap().agent_id, "agent-001");
 }

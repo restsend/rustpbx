@@ -94,10 +94,7 @@ pub fn take_pending_return(ctx: &ApplicationContext) -> Option<ReturnAppSpec> {
         .map(|(_, v)| v)
         .unwrap_or_else(|| "{}".to_string());
     let params = serde_json::from_str(&params_raw).unwrap_or(serde_json::json!({}));
-    Some(ReturnAppSpec {
-        app_name,
-        params,
-    })
+    Some(ReturnAppSpec { app_name, params })
 }
 
 /// Resolve a `start_app` action: optionally store return metadata, then build the sub-app.

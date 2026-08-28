@@ -2442,9 +2442,8 @@ mod tests {
     #[tokio::test]
     async fn test_queue_wait_retention_abandon_notifies() {
         use std::sync::Arc;
-        let registry = Arc::new(
-            HookRecordingRegistry::new().with_resolve_uris(vec![vec![], vec![]]),
-        );
+        let registry =
+            Arc::new(HookRecordingRegistry::new().with_resolve_uris(vec![vec![], vec![]]));
         let mut config = build_simple_queue_config();
         config.skill_routing_enabled = true;
         config.skill_group = Some("support".to_string());
@@ -2499,10 +2498,10 @@ mod tests {
     #[tokio::test]
     async fn test_queue_wait_retention_retry_dials_when_idle() {
         use std::sync::Arc;
-        let registry = Arc::new(HookRecordingRegistry::new().with_resolve_uris(vec![
-            vec![],
-            vec!["sip:agent-1@localhost".to_string()],
-        ]));
+        let registry = Arc::new(
+            HookRecordingRegistry::new()
+                .with_resolve_uris(vec![vec![], vec!["sip:agent-1@localhost".to_string()]]),
+        );
         let mut config = build_simple_queue_config();
         config.skill_routing_enabled = true;
         config.skill_group = Some("support".to_string());

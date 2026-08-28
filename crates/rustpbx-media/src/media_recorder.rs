@@ -34,8 +34,7 @@ const DEFAULT_CAPTURE_QUEUE_CAPACITY: usize = 256;
 /// that load must not compete with latency-sensitive SIP transaction
 /// processing on the SIP runtime. Falls back to the ambient runtime when
 /// unset (tests, embedders).
-static RECORDER_RUNTIME: std::sync::OnceLock<tokio::runtime::Handle> =
-    std::sync::OnceLock::new();
+static RECORDER_RUNTIME: std::sync::OnceLock<tokio::runtime::Handle> = std::sync::OnceLock::new();
 
 /// Set the runtime on which recorder tasks are spawned. Must be called
 /// before the first recording starts.

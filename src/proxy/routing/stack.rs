@@ -374,8 +374,7 @@ pub fn default_phase_legend() -> Vec<RoutingPhaseInfo> {
         RoutingPhaseInfo {
             phase: RoutingPhase::SessionBehavior,
             label: "Session behavior".to_string(),
-            description: "Runtime chaining after dial (e.g. no-answer → voicemail)."
-                .to_string(),
+            description: "Runtime chaining after dial (e.g. no-answer → voicemail).".to_string(),
             priority_direction: PriorityDirection::HigherFirst,
         },
     ]
@@ -588,9 +587,13 @@ mod tests {
             vec![],
         );
         let ids: Vec<_> = stack.contributions.iter().map(|c| c.id.as_str()).collect();
-        assert!(ids.iter().position(|&id| id == "core.emergency").unwrap()
-            < ids.iter().position(|&id| id == "core.route_table").unwrap());
-        assert!(ids.iter().position(|&id| id == "core.route_table").unwrap()
-            < ids.iter().position(|&id| id == "voicemail.check").unwrap());
+        assert!(
+            ids.iter().position(|&id| id == "core.emergency").unwrap()
+                < ids.iter().position(|&id| id == "core.route_table").unwrap()
+        );
+        assert!(
+            ids.iter().position(|&id| id == "core.route_table").unwrap()
+                < ids.iter().position(|&id| id == "voicemail.check").unwrap()
+        );
     }
 }

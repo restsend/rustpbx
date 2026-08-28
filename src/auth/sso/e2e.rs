@@ -62,7 +62,11 @@ fn query_param(uri: &str, key: &str) -> String {
         .unwrap_or("")
         .split('&')
         .find_map(|pair| pair.strip_prefix(&format!("{key}=")))
-        .map(|v| urlencoding::decode(v).map(|c| c.into_owned()).unwrap_or_default())
+        .map(|v| {
+            urlencoding::decode(v)
+                .map(|c| c.into_owned())
+                .unwrap_or_default()
+        })
         .unwrap_or_default()
 }
 
@@ -98,10 +102,7 @@ fn mint_upstream_jwt(exp_in_secs: i64) -> String {
     )
 }
 
-async fn drive_to_code(
-    app: axum::Router,
-    client_state: &str,
-) -> (StatusCode, String, String) {
+async fn drive_to_code(app: axum::Router, client_state: &str) -> (StatusCode, String, String) {
     // Node 1: authorize seals a flow envelope into the upstream redirect.
     let (status, location, _) = run_get(
         app.clone(),
@@ -115,7 +116,10 @@ async fn drive_to_code(
     if !status.is_redirection() {
         return (status, String::new(), String::new());
     }
-    assert!(location.starts_with("https://sso.example.com/login"), "{location}");
+    assert!(
+        location.starts_with("https://sso.example.com/login"),
+        "{location}"
+    );
     let flow_envelope = query_param(&location, "state");
     assert!(!flow_envelope.is_empty());
 
@@ -144,12 +148,23 @@ async fn passthrough_flow_across_handlers() {
     let app = mounted_app();
 
     // Mounting contract: nested under base_path ONLY — root paths 404.
-    let (status, _, _) =
-        run_get(app.clone(), "/authorize?code_challenge=x&code_challenge_method=S256&state=z").await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "/authorize must not exist at root");
+    let (status, _, _) = run_get(
+        app.clone(),
+        "/authorize?code_challenge=x&code_challenge_method=S256&state=z",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "/authorize must not exist at root"
+    );
 
     let (status, _, _) = run_get(app.clone(), "/sso/authorize").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "missing params → 400, not 404");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "missing params → 400, not 404"
+    );
 
     let (_, _, code_envelope) = drive_to_code(app.clone(), "client-st-1").await;
 
@@ -162,12 +177,17 @@ async fn passthrough_flow_across_handlers() {
     let req = Request::builder()
         .method(http::Method::POST)
         .uri(&format!("{BASE}/token"))
-        .header(http::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(
+            http::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        )
         .body(Body::from(body))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(json["access_token"].as_str().is_some());
     assert_eq!(json["token_type"], "Bearer");
@@ -246,7 +266,10 @@ async fn token_rejects_pkce_mismatch() {
     let req = Request::builder()
         .method(http::Method::POST)
         .uri(&format!("{BASE}/token"))
-        .header(http::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(
+            http::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        )
         .body(Body::from(body))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -281,6 +304,8 @@ async fn minted_token_validates_on_api_chain() {
     assert_eq!(uid, "1001");
     assert_eq!(decoded["iss"], "rustpbx");
     // ...and enterprise passthrough tokens.
-    let (uid2, _) = state.authenticate_api_token(&mint_upstream_jwt(300)).unwrap();
+    let (uid2, _) = state
+        .authenticate_api_token(&mint_upstream_jwt(300))
+        .unwrap();
     assert_eq!(uid2, "1001");
 }

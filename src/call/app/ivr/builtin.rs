@@ -96,7 +96,10 @@ mod tests {
 
     #[test]
     fn parse_builtin_uri() {
-        assert_eq!(parse_uri("builtin://post_call_csat"), Some("post_call_csat"));
+        assert_eq!(
+            parse_uri("builtin://post_call_csat"),
+            Some("post_call_csat")
+        );
         assert_eq!(parse_uri("config/ivr/x.toml"), None);
     }
 

@@ -56,7 +56,11 @@ pub fn read_recent_log_lines(path: &str, limit: usize) -> io::Result<(Vec<String
     Ok((lines.into_iter().collect(), next_position, truncated))
 }
 
-pub fn read_follow_log_lines(path: &str, position: u64, limit: usize) -> io::Result<FollowReadResult> {
+pub fn read_follow_log_lines(
+    path: &str,
+    position: u64,
+    limit: usize,
+) -> io::Result<FollowReadResult> {
     let file = File::open(path)?;
     let file_len = file.metadata()?.len();
 
@@ -295,8 +299,8 @@ mod tests {
 
     #[test]
     fn follow_log_payload_reports_missing_file() {
-        let payload = follow_log_payload(Some("/nonexistent/rustpbx-log-test.log"), 5, 100)
-            .expect("payload");
+        let payload =
+            follow_log_payload(Some("/nonexistent/rustpbx-log-test.log"), 5, 100).expect("payload");
         assert_eq!(payload["status"], "ok");
         assert_eq!(payload["exists"], false);
         assert_eq!(payload["reset"], true);

@@ -10,8 +10,8 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::response::{IntoResponse, Response};
 use axum::Json;
+use axum::response::{IntoResponse, Response};
 use dashmap::DashMap;
 use serde_json::Value;
 
@@ -167,7 +167,10 @@ pub fn mint_access_token(
     let mut claims = serde_json::Map::new();
     claims.insert("iss".into(), Value::String("rustpbx".into()));
     claims.insert("sub".into(), Value::String(subject.to_string()));
-    claims.insert(user_id_claim.to_string(), Value::String(subject.to_string()));
+    claims.insert(
+        user_id_claim.to_string(),
+        Value::String(subject.to_string()),
+    );
     claims.insert("sid".into(), Value::String(sid.to_string()));
     claims.insert("iat".into(), Value::from(now));
     claims.insert("exp".into(), Value::from(exp));
@@ -206,7 +209,12 @@ mod tests {
     fn refresh_rotation_single_use() {
         let store = RefreshStore::new();
         let rt1 = store
-            .insert("sid-1".into(), "1001".into(), valid_claims(), Duration::from_secs(3600))
+            .insert(
+                "sid-1".into(),
+                "1001".into(),
+                valid_claims(),
+                Duration::from_secs(3600),
+            )
             .unwrap();
 
         let (rt2, sid, subject, _) = store.rotate(&rt1).expect("first rotation");
@@ -249,7 +257,9 @@ mod tests {
             dev_mint_enabled: false,
         };
         let validator = crate::auth::jwt_validator::JwtValidator::new(&cfg);
-        let decoded = validator.validate(&token).expect("minted token must validate");
+        let decoded = validator
+            .validate(&token)
+            .expect("minted token must validate");
         assert_eq!(decoded["sub"], "1001");
         assert_eq!(decoded["email"], "a@b.c");
         assert_eq!(decoded["sid"], "sid-9");

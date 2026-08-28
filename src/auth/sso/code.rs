@@ -92,18 +92,14 @@ fn envelope_validator(secret: &str) -> crate::auth::jwt_validator::JwtValidator 
 
 /// Open a sealed envelope: verifies signature, expiry, issuer and kind tag,
 /// returning the raw claims.
-pub fn unseal(
-    artifact: &str,
-    secret: &str,
-    kind: &str,
-) -> Result<Value, UnsealError> {
+pub fn unseal(artifact: &str, secret: &str, kind: &str) -> Result<Value, UnsealError> {
     let validator = envelope_validator(secret);
     use crate::auth::jwt_validator::JwtError as E;
     let claims = match validator.validate(artifact.trim()) {
         Ok(claims) => claims,
         Err(E::Expired) => return Err(UnsealError::Expired),
         Err(E::InvalidSignature | E::InvalidIssuer | E::InvalidAudience) => {
-            return Err(UnsealError::BadSignature)
+            return Err(UnsealError::BadSignature);
         }
         Err(_) => return Err(UnsealError::Malformed),
     };
@@ -124,7 +120,10 @@ mod tests {
         let challenge =
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier));
         assert!(verify_pkce_s256(&challenge, verifier));
-        assert!(!verify_pkce_s256(&challenge, "different-verifier-at-least-43-chars-long!!!!!"));
+        assert!(!verify_pkce_s256(
+            &challenge,
+            "different-verifier-at-least-43-chars-long!!!!!"
+        ));
         assert!(!verify_pkce_s256(&challenge, "short"));
     }
 

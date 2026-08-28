@@ -357,50 +357,50 @@ impl crate::callrecord::CallRecordHook for MetricsCallRecordHook {
         records: &mut [crate::callrecord::CallRecord],
     ) -> anyhow::Result<()> {
         for record in records {
-        let direction = record.details.direction.as_str();
+            let direction = record.details.direction.as_str();
 
-        // Total elapsed time from INVITE to BYE.
-        let elapsed = (record.end_time - record.start_time)
-            .num_milliseconds()
-            .max(0) as f64
-            / 1_000.0;
+            // Total elapsed time from INVITE to BYE.
+            let elapsed = (record.end_time - record.start_time)
+                .num_milliseconds()
+                .max(0) as f64
+                / 1_000.0;
 
-        // Actual talk time (only if the call was answered).
-        let talk_secs = record
-            .answer_time
-            .map(|a| (record.end_time - a).num_milliseconds().max(0) as f64 / 1_000.0);
+            // Actual talk time (only if the call was answered).
+            let talk_secs = record
+                .answer_time
+                .map(|a| (record.end_time - a).num_milliseconds().max(0) as f64 / 1_000.0);
 
-        // Classify the result.
-        let result = if record.status_code < 300 {
-            "ok"
-        } else if record.status_code < 400 {
-            "redirect"
-        } else if record.status_code < 500 {
-            "rejected"
-        } else {
-            "failed"
-        };
+            // Classify the result.
+            let result = if record.status_code < 300 {
+                "ok"
+            } else if record.status_code < 400 {
+                "redirect"
+            } else if record.status_code < 500 {
+                "rejected"
+            } else {
+                "failed"
+            };
 
-        metrics::counter!(
-            "rustpbx_calls_total",
-            "direction" => direction.to_string(),
-            "result"    => result
-        )
-        .increment(1);
+            metrics::counter!(
+                "rustpbx_calls_total",
+                "direction" => direction.to_string(),
+                "result"    => result
+            )
+            .increment(1);
 
-        metrics::histogram!(
-            "rustpbx_call_duration_seconds",
-            "direction" => direction.to_string()
-        )
-        .record(elapsed);
-
-        if let Some(talk) = talk_secs {
             metrics::histogram!(
-                "rustpbx_call_talk_time_seconds",
+                "rustpbx_call_duration_seconds",
                 "direction" => direction.to_string()
             )
-            .record(talk);
-        }
+            .record(elapsed);
+
+            if let Some(talk) = talk_secs {
+                metrics::histogram!(
+                    "rustpbx_call_talk_time_seconds",
+                    "direction" => direction.to_string()
+                )
+                .record(talk);
+            }
         }
 
         Ok(())

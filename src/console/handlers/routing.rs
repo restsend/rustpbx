@@ -98,13 +98,7 @@ async fn load_routing_stack_warnings(
     let pattern_refs: Vec<(i64, String, bool, Option<&str>, Option<&str>)> = pattern_routes
         .iter()
         .map(|(id, name, active, dest, src)| {
-            (
-                *id,
-                name.clone(),
-                *active,
-                dest.as_deref(),
-                src.as_deref(),
-            )
+            (*id, name.clone(), *active, dest.as_deref(), src.as_deref())
         })
         .collect();
     crate::proxy::routing::stack::detect_route_pattern_conflicts(&shortcode, &pattern_refs)
@@ -161,7 +155,9 @@ pub async fn patch_routing_stack(
         return bad_request(format!("Unknown routing stack contribution: {id}"));
     };
     if !contribution.editable {
-        return bad_request(format!("Contribution \"{id}\" is not editable from the routing stack"));
+        return bad_request(format!(
+            "Contribution \"{id}\" is not editable from the routing stack"
+        ));
     }
     if let Some(priority) = body.priority
         && !(0..=10_000).contains(&priority)
@@ -184,8 +180,7 @@ pub async fn patch_routing_stack(
         body.priority,
         eval_mode,
     );
-    if let Err(err) =
-        crate::proxy::routing::stack::save_routing_stack_file(config.as_ref(), &file)
+    if let Err(err) = crate::proxy::routing::stack::save_routing_stack_file(config.as_ref(), &file)
     {
         warn!(error = %err, "failed to persist routing_stack.toml");
         return internal_error(format!("Failed to save routing stack: {err}"));

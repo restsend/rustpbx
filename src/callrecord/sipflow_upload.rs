@@ -50,49 +50,49 @@ impl SipFlowUploadHook {
 impl CallRecordHook for SipFlowUploadHook {
     async fn on_record_completed(&self, records: &mut [CallRecord]) -> anyhow::Result<()> {
         for record in records {
-        let call_id = record.call_id.as_str();
-        let start = Local.from_utc_datetime(&record.start_time.naive_utc());
-        let end = Local.from_utc_datetime(&record.end_time.naive_utc());
-        let duration_secs = (record.end_time - record.start_time).num_seconds() as i32;
+            let call_id = record.call_id.as_str();
+            let start = Local.from_utc_datetime(&record.start_time.naive_utc());
+            let end = Local.from_utc_datetime(&record.end_time.naive_utc());
+            let duration_secs = (record.end_time - record.start_time).num_seconds() as i32;
 
-        let media_key = format_sipflow_media_key(record);
-        let signaling_key = format_sipflow_signaling_key(record);
-        let signaling_file_name = format_sipflow_signaling_file_name(record);
+            let media_key = format_sipflow_media_key(record);
+            let signaling_key = format_sipflow_signaling_key(record);
+            let signaling_file_name = format_sipflow_signaling_file_name(record);
 
-        // When the call used file media (local/http/s3), WAV artifacts are in
-        // `record.recorder` and RecordingUploadHook owns media upload. Skip
-        // sipflow media upload to avoid a redundant empty WAV — but still
-        // upload signalling if configured.
-        let skip_media = record.recorder.iter().any(|m| m.track_id != "signaling");
+            // When the call used file media (local/http/s3), WAV artifacts are in
+            // `record.recorder` and RecordingUploadHook owns media upload. Skip
+            // sipflow media upload to avoid a redundant empty WAV — but still
+            // upload signalling if configured.
+            let skip_media = record.recorder.iter().any(|m| m.track_id != "signaling");
 
-        // File-media hybrid: default signaling upload on when unset.
-        // Full sipflow media path: keep historical default (signaling off).
-        let signaling_default = skip_media;
+            // File-media hybrid: default signaling upload on when unset.
+            // Full sipflow media path: keep historical default (signaling off).
+            let signaling_default = skip_media;
 
-        if let Some((url, size)) = crate::callrecord::sipflow_upload::do_upload(
-            self.backend.as_ref(),
-            &self.upload_config,
-            self.db.as_ref(),
-            &self.client,
-            self.s3_storage.as_ref(),
-            call_id,
-            start,
-            end,
-            duration_secs,
-            &media_key,
-            &signaling_key,
-            &signaling_file_name,
-            skip_media,
-            signaling_default,
-        )
-        .await
-        {
-            record.details.recording_url = Some(url);
-            record.details.recording_duration_secs = Some(duration_secs.max(0));
-            record
-                .extensions
-                .insert(crate::callrecord::RecordingFileSize(size));
-        }
+            if let Some((url, size)) = crate::callrecord::sipflow_upload::do_upload(
+                self.backend.as_ref(),
+                &self.upload_config,
+                self.db.as_ref(),
+                &self.client,
+                self.s3_storage.as_ref(),
+                call_id,
+                start,
+                end,
+                duration_secs,
+                &media_key,
+                &signaling_key,
+                &signaling_file_name,
+                skip_media,
+                signaling_default,
+            )
+            .await
+            {
+                record.details.recording_url = Some(url);
+                record.details.recording_duration_secs = Some(duration_secs.max(0));
+                record
+                    .extensions
+                    .insert(crate::callrecord::RecordingFileSize(size));
+            }
         }
 
         Ok(())
@@ -557,7 +557,9 @@ mod tests {
         )
         .unwrap();
         let mut record = make_record();
-        hook.on_record_completed(std::slice::from_mut(&mut record)).await.unwrap();
+        hook.on_record_completed(std::slice::from_mut(&mut record))
+            .await
+            .unwrap();
         assert!(record.details.recording_url.is_none());
         assert_eq!(flush_count.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
@@ -584,7 +586,9 @@ mod tests {
         let mut record = make_record();
         record.answer_time = None;
 
-        hook.on_record_completed(std::slice::from_mut(&mut record)).await.unwrap();
+        hook.on_record_completed(std::slice::from_mut(&mut record))
+            .await
+            .unwrap();
 
         assert_eq!(flush_count.load(std::sync::atomic::Ordering::Relaxed), 1);
     }

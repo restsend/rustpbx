@@ -30,21 +30,21 @@ pub mod token;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
 use axum::extract::{Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use serde_json::Value;
 use tracing::{info, warn};
 
 use crate::auth::jwt_validator::{JwtError, JwtValidator};
 use crate::config::{Config, SsoConfig, SsoJwtConfig};
 
-use self::code::{now_epoch, seal, unseal, UnsealError, ENVELOPE_ISSUER};
+use self::code::{ENVELOPE_ISSUER, UnsealError, now_epoch, seal, unseal};
 use self::token::{
-    mint_access_token, passthrough_response, token_error, token_success, RefreshStore,
-    IssuanceInput, TOKEN_MODE_MINTED, TOKEN_MODE_PASSTHROUGH,
+    IssuanceInput, RefreshStore, TOKEN_MODE_MINTED, TOKEN_MODE_PASSTHROUGH, mint_access_token,
+    passthrough_response, token_error, token_success,
 };
 
 // ---------------------------------------------------------------------------
@@ -134,17 +134,23 @@ impl SsoState {
         let token_mode = jwt.token_mode.as_str();
         // Envelope sealing must work cluster-wide: every node needs the same
         // secret ([proxy.jwt_auth].secret preferred, else [sso.jwt].secret).
-        let envelope_secret = jwt_auth_secret.clone().unwrap_or_else(|| jwt.secret.clone());
-        let mint_secret =
-            if token_mode == TOKEN_MODE_MINTED { Some(envelope_secret.clone()) } else { None };
+        let envelope_secret = jwt_auth_secret
+            .clone()
+            .unwrap_or_else(|| jwt.secret.clone());
+        let mint_secret = if token_mode == TOKEN_MODE_MINTED {
+            Some(envelope_secret.clone())
+        } else {
+            None
+        };
         let base_path = normalize_base_path(&sso_cfg.base_path)
             .ok_or("[sso] base_path \"/\" is not allowed (use e.g. \"/sso\")")?;
         // Validates rustpbx-minted access tokens on local chains (iss=rustpbx,
         // signed with the mint secret) — distinct from the upstream validator.
         let mint_validator = if token_mode == TOKEN_MODE_MINTED {
             let mut jwt_minted = jwt.clone();
-            jwt_minted.secret =
-                mint_secret.clone().unwrap_or_else(|| jwt_minted.secret.clone());
+            jwt_minted.secret = mint_secret
+                .clone()
+                .unwrap_or_else(|| jwt_minted.secret.clone());
             jwt_minted.issuer = Some("rustpbx".to_string());
             jwt_minted.audience = None;
             Some(build_validator(&jwt_minted))
@@ -286,11 +292,7 @@ fn normalize_base_path(path: &str) -> Option<String> {
     while out.len() > 1 && out.ends_with('/') {
         out.pop();
     }
-    if out == "/" {
-        None
-    } else {
-        Some(out)
-    }
+    if out == "/" { None } else { Some(out) }
 }
 
 // ---------------------------------------------------------------------------
@@ -393,12 +395,19 @@ async fn authorize_handler(
     // Hand control to the enterprise login page; it must echo `state` back.
     let login_url = state.runtime.upstream_login_url.clone();
     let sep = if login_url.contains('?') { '&' } else { '?' };
-    let location = format!("{login_url}{sep}state={}", urlencoding::encode(&flow_envelope));
+    let location = format!(
+        "{login_url}{sep}state={}",
+        urlencoding::encode(&flow_envelope)
+    );
     Redirect::to(&location).into_response()
 }
 
 fn non_empty(params: &std::collections::HashMap<String, String>, key: &str) -> Option<String> {
-    params.get(key).map(|s| s.trim()).filter(|s| !s.is_empty()).map(str::to_string)
+    params
+        .get(key)
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 fn bad_request(message: &str) -> Response {
@@ -419,8 +428,7 @@ async fn callback_handler(
     // Upstream-reported failure path: surface to the app via the deep link.
     if let Some(err) = non_empty(&params, "error") {
         if let Some(flow_envelope) = non_empty(&params, "state")
-            && let Ok(flow) =
-                unseal(&flow_envelope, &state.runtime.envelope_secret, "flow")
+            && let Ok(flow) = unseal(&flow_envelope, &state.runtime.envelope_secret, "flow")
         {
             let q = format!(
                 "error={}&state={}",
@@ -509,7 +517,10 @@ async fn token_handler(State(state): State<SsoState>, body: String) -> Response 
             if !code::verify_pkce_s256(challenge, &verifier) {
                 return token_error("invalid_grant");
             }
-            let uid = code_claims.get("uid").and_then(|v| v.as_str()).unwrap_or("");
+            let uid = code_claims
+                .get("uid")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let ecl = code_claims.get("ecl").cloned().unwrap_or(Value::Null);
             state.issue_response_for(IssuanceInput {
                 access_token,

@@ -2219,7 +2219,9 @@ mod tests {
             .await;
         stack
             .event_sender()
-            .send(ControllerEvent::TransferResult(TransferOutcome::NotConnected))
+            .send(ControllerEvent::TransferResult(
+                TransferOutcome::NotConnected,
+            ))
             .unwrap();
         stack
             .assert_cmd(200, "hangup", |c| matches!(c, CallCommand::Hangup { .. }))
@@ -5195,7 +5197,9 @@ mod tests {
             )
             .await;
 
-        let ordinary = events.try_recv().expect("input phone trace must be enqueued");
+        let ordinary = events
+            .try_recv()
+            .expect("input phone trace must be enqueued");
         let completed = events
             .try_recv()
             .expect("input phone completion trace must be enqueued");

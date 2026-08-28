@@ -384,7 +384,8 @@ impl RouteInvite for ChainedRouteInvite {
         direction: &DialDirection,
         cookie: &TransactionCookie,
     ) -> Result<RouteResult> {
-        self.dispatch(option, origin, direction, cookie, false).await
+        self.dispatch(option, origin, direction, cookie, false)
+            .await
     }
 
     async fn preview_route(
@@ -854,7 +855,11 @@ impl CallModule {
             let target = crate::call::build_sip_uri(route_point, &callee_realm);
             let target_uri = rsipstack::sip::Uri::try_from(target.as_str()).map_err(|e| {
                 RouteError::from((
-                    anyhow!("invalid always-forwarding route point '{}': {}", route_point, e),
+                    anyhow!(
+                        "invalid always-forwarding route point '{}': {}",
+                        route_point,
+                        e
+                    ),
                     Some(rsipstack::sip::StatusCode::ServerInternalError),
                 ))
                 .with_code(&crate::proxy::error_catalog::ALWAYS_FWD_URI_INVALID)
@@ -879,85 +884,84 @@ impl CallModule {
         }
 
         let mut routed_headers: Option<Vec<rsipstack::sip::Header>> = None;
-        let (preview_forward, pending_queue, pending_app, dialplan_hints) = if always_forwarding
-            && forced_route_point.is_none()
-        {
-            (
-                forced_preview_forward,
-                forced_pending_queue,
-                forced_pending_app,
-                None,
-            )
-        } else {
-            let mut preview_outcome = route_invite
-                .preview_route(
-                    preview_option,
-                    route_origin.as_ref().unwrap_or(original),
-                    &direction,
-                    cookie,
+        let (preview_forward, pending_queue, pending_app, dialplan_hints) =
+            if always_forwarding && forced_route_point.is_none() {
+                (
+                    forced_preview_forward,
+                    forced_pending_queue,
+                    forced_pending_app,
+                    None,
                 )
-                .await
-                .map_err(|e| {
-                    RouteError::from((
-                        anyhow::anyhow!(e),
+            } else {
+                let mut preview_outcome = route_invite
+                    .preview_route(
+                        preview_option,
+                        route_origin.as_ref().unwrap_or(original),
+                        &direction,
+                        cookie,
+                    )
+                    .await
+                    .map_err(|e| {
+                        RouteError::from((
+                            anyhow::anyhow!(e),
+                            Some(rsipstack::sip::StatusCode::ServerInternalError),
+                        ))
+                        .with_code(&crate::proxy::error_catalog::ROUTE_PREVIEW_ERROR)
+                    })?;
+
+                if forced_route_point.is_some()
+                    && !matches!(
+                        &preview_outcome,
+                        RouteResult::Application { .. } | RouteResult::Abort(_, _)
+                    )
+                {
+                    // Rejecting a non-application result must release policy slots acquired by routing.
+                    let hints = match &mut preview_outcome {
+                        RouteResult::Queue { hints, .. }
+                        | RouteResult::Forward(_, hints)
+                        | RouteResult::NotHandled(_, hints) => hints.as_mut(),
+                        _ => None,
+                    };
+                    if let Some(hints) = hints {
+                        if let Some(guard) = self.inner.routing_state.policy_guard.as_ref() {
+                            crate::call::policy::PolicyGuard::release_concurrency_holds(
+                                &hints.concurrency_holds,
+                                guard.limiter().as_ref(),
+                            )
+                            .await;
+                        }
+                        hints.concurrency_holds.clear();
+                    }
+                    return Err(RouteError::from((
+                        anyhow!("always-forwarding route point did not resolve to an application"),
                         Some(rsipstack::sip::StatusCode::ServerInternalError),
                     ))
-                    .with_code(&crate::proxy::error_catalog::ROUTE_PREVIEW_ERROR)
-                })?;
+                    .with_code(&crate::proxy::error_catalog::ROUTE_PREVIEW_ERROR));
+                }
 
-            if forced_route_point.is_some()
-                && !matches!(
-                    &preview_outcome,
-                    RouteResult::Application { .. } | RouteResult::Abort(_, _)
-                )
-            {
-                // Rejecting a non-application result must release policy slots acquired by routing.
-                let hints = match &mut preview_outcome {
-                    RouteResult::Queue { hints, .. }
-                    | RouteResult::Forward(_, hints)
-                    | RouteResult::NotHandled(_, hints) => hints.as_mut(),
-                    _ => None,
-                };
-                if let Some(hints) = hints {
-                    if let Some(guard) = self.inner.routing_state.policy_guard.as_ref() {
-                        crate::call::policy::PolicyGuard::release_concurrency_holds(
-                            &hints.concurrency_holds,
-                            guard.limiter().as_ref(),
-                        )
-                        .await;
+                match preview_outcome {
+                    RouteResult::Queue { queue, hints, .. } => (None, Some(queue), None, hints),
+                    RouteResult::Forward(option, hints) => (Some(option), None, None, hints),
+                    RouteResult::NotHandled(_, hints) => (None, None, None, hints),
+                    RouteResult::Abort(code, reason) => {
+                        let err = anyhow::anyhow!(
+                            reason.unwrap_or_else(|| "route aborted during preview".to_string())
+                        );
+                        return Err(RouteError::from((err, Some(code)))
+                            .with_code(&crate::proxy::error_catalog::ROUTE_ABORTED));
                     }
-                    hints.concurrency_holds.clear();
+                    RouteResult::Application {
+                        option,
+                        app_name,
+                        app_params,
+                        auto_answer,
+                        hints,
+                    } => {
+                        routed_headers = option.headers;
+                        (None, None, Some((app_name, app_params, auto_answer)), hints)
+                    }
                 }
-                return Err(RouteError::from((
-                    anyhow!("always-forwarding route point did not resolve to an application"),
-                    Some(rsipstack::sip::StatusCode::ServerInternalError),
-                ))
-                .with_code(&crate::proxy::error_catalog::ROUTE_PREVIEW_ERROR));
-            }
-
-            match preview_outcome {
-                RouteResult::Queue { queue, hints, .. } => (None, Some(queue), None, hints),
-                RouteResult::Forward(option, hints) => (Some(option), None, None, hints),
-                RouteResult::NotHandled(_, hints) => (None, None, None, hints),
-                RouteResult::Abort(code, reason) => {
-                    let err = anyhow::anyhow!(
-                        reason.unwrap_or_else(|| "route aborted during preview".to_string())
-                    );
-                    return Err(RouteError::from((err, Some(code)))
-                        .with_code(&crate::proxy::error_catalog::ROUTE_ABORTED));
-                }
-                RouteResult::Application {
-                    option,
-                    app_name,
-                    app_params,
-                    auto_answer,
-                    hints,
-                } => {
-                    routed_headers = option.headers;
-                    (None, None, Some((app_name, app_params, auto_answer)), hints)
-                }
-            }
-        };
+            };
 
         let queue_targets = pending_queue
             .as_ref()
@@ -1636,7 +1640,13 @@ impl CallModule {
             dialplan = dialplan.with_caller_contact(contact);
         }
         let inspectors: Vec<Arc<crate::proxy::routing::inspector_stack::OrderedDialplanInspector>> =
-            self.inner.server.dialplan_inspectors.read().iter().cloned().collect();
+            self.inner
+                .server
+                .dialplan_inspectors
+                .read()
+                .iter()
+                .cloned()
+                .collect();
         for entry in inspectors {
             if !entry.enabled {
                 continue;
@@ -3996,7 +4006,9 @@ mod tests {
             } => {
                 assert_eq!(app_name, "step_ivr");
                 assert_eq!(
-                    app_params.as_ref().and_then(|params| params.get("businessKey")),
+                    app_params
+                        .as_ref()
+                        .and_then(|params| params.get("businessKey")),
                     Some(&serde_json::json!("driver-spring-festival"))
                 );
                 assert!(*auto_answer);
@@ -4004,9 +4016,10 @@ mod tests {
             other => panic!("expected application flow, got {other:?}"),
         }
         assert_eq!(
-            dialplan.routed_headers.as_ref().and_then(|headers| headers
-                .iter()
-                .find_map(|header| match header {
+            dialplan
+                .routed_headers
+                .as_ref()
+                .and_then(|headers| headers.iter().find_map(|header| match header {
                     rsipstack::sip::Header::Other(name, value)
                         if name.eq_ignore_ascii_case("X-Business-Key") =>
                     {

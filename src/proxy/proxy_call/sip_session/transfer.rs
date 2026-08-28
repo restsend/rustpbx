@@ -565,7 +565,13 @@ impl SipSession {
                     disposition,
                 ) {
                     return self
-                        .dial_blind_transfer_b2bua(leg_id, &uri, &refer_to_uri, from_user, callee_state_rx)
+                        .dial_blind_transfer_b2bua(
+                            leg_id,
+                            &uri,
+                            &refer_to_uri,
+                            from_user,
+                            callee_state_rx,
+                        )
                         .await;
                 }
 

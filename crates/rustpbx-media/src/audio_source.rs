@@ -1232,7 +1232,7 @@ mod tests {
                             if error.kind() == std::io::ErrorKind::WouldBlock
                                 || error.kind() == std::io::ErrorKind::TimedOut =>
                         {
-                            return false
+                            return false;
                         }
                         Err(_) => return false,
                     }
@@ -1303,7 +1303,7 @@ mod tests {
                             if error.kind() == std::io::ErrorKind::WouldBlock
                                 || error.kind() == std::io::ErrorKind::TimedOut =>
                         {
-                            return false
+                            return false;
                         }
                         Err(_) => return false,
                     }
@@ -1337,7 +1337,9 @@ mod tests {
                 pooled
                     .write_all(partial_header.as_bytes())
                     .expect("write partial headers");
-                pooled.write_all(&body[..body.len() / 2]).expect("write partial body");
+                pooled
+                    .write_all(&body[..body.len() / 2])
+                    .expect("write partial body");
                 pooled.flush().expect("flush partial response");
                 drop(pooled);
             }
@@ -1410,7 +1412,7 @@ mod tests {
                             if error.kind() == std::io::ErrorKind::WouldBlock
                                 || error.kind() == std::io::ErrorKind::TimedOut =>
                         {
-                            return false
+                            return false;
                         }
                         Err(_) => return false,
                     }
