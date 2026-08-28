@@ -368,6 +368,9 @@ pub struct Config {
     pub cluster: Option<ClusterConfig>,
     #[serde(default)]
     pub outbound: Option<OutboundConfig>,
+    /// Graceful shutdown (drain) tuning — see `GracefulShutdownConfig`.
+    #[serde(default)]
+    pub graceful_shutdown: Option<GracefulShutdownConfig>,
     /// Maximum size (in bytes) for audio files downloaded over HTTP from the
     /// console (queue prompts, voicemail prompts, ...). Defaults to 20 MB.
     #[serde(default = "default_max_audio_download_bytes")]
@@ -818,7 +821,11 @@ impl NetworkProfile {
         }
     }
 
-    pub fn effective_bind_ip<'a>(&'a self, proxy_bind: &'a str, rtp_bind: Option<&'a str>) -> &'a str {
+    pub fn effective_bind_ip<'a>(
+        &'a self,
+        proxy_bind: &'a str,
+        rtp_bind: Option<&'a str>,
+    ) -> &'a str {
         self.bind_ip
             .as_deref()
             .filter(|s| !s.is_empty())
@@ -1416,6 +1423,44 @@ pub struct AmiConfig {
     pub allows: Option<Vec<String>>,
 }
 
+/// `[graceful_shutdown]` — drain-then-exit behaviour shared by the AMI
+/// `/shutdown` endpoint and SIGTERM/SIGINT (docker stop / systemctl stop).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GracefulShutdownConfig {
+    /// Fallback max seconds to wait for active calls to finish before
+    /// force exiting, when the caller did not give an explicit timeout
+    /// (signal-triggered drains, AMI `/shutdown` without `timeout_secs`).
+    #[serde(default = "default_graceful_shutdown_drain_timeout")]
+    pub drain_timeout_secs: u64,
+    /// Start the process already draining (maintenance hold: replies
+    /// 503/500 to everything out-of-dialog, never takes traffic until a
+    /// restart without the flag). Default `false`.
+    #[serde(default)]
+    pub enabled_at_startup: bool,
+}
+
+impl Default for GracefulShutdownConfig {
+    fn default() -> Self {
+        Self {
+            drain_timeout_secs: default_graceful_shutdown_drain_timeout(),
+            enabled_at_startup: false,
+        }
+    }
+}
+
+fn default_graceful_shutdown_drain_timeout() -> u64 {
+    300
+}
+
+impl GracefulShutdownConfig {
+    /// Effective drain timeout: `None` (wait indefinitely) only when the
+    /// user explicitly configured zero.
+    pub fn effective_timeout(&self) -> Option<std::time::Duration> {
+        (self.drain_timeout_secs > 0)
+            .then(|| std::time::Duration::from_secs(self.drain_timeout_secs))
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OutboundConfig {
     #[serde(default = "default_outbound_enabled")]
@@ -1753,6 +1798,7 @@ impl Default for Config {
             ice_servers: None,
             media: None,
             ami: Some(AmiConfig::default()),
+            graceful_shutdown: None,
             external_ip: None,
             auto_external_ip: None,
             sip_external_ip: None,
@@ -1788,6 +1834,24 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Drain timeout used by signal-triggered graceful shutdowns and by
+    /// AMI `/shutdown` calls that omit `timeout_secs`. Section absent →
+    /// default 300s; `drain_timeout_secs = 0` → `None` (wait forever).
+    pub fn graceful_shutdown_timeout(&self) -> Option<std::time::Duration> {
+        match &self.graceful_shutdown {
+            Some(c) => c.effective_timeout(),
+            None => Some(std::time::Duration::from_secs(300)),
+        }
+    }
+
+    /// Whether the process should boot already draining (maintenance
+    /// hold). See `GracefulShutdownConfig::enabled_at_startup`.
+    pub fn start_draining_at_startup(&self) -> bool {
+        self.graceful_shutdown
+            .as_ref()
+            .is_some_and(|c| c.enabled_at_startup)
+    }
+
     pub fn load(path: &str) -> Result<Self, Error> {
         let mut config: Self = toml::from_str(
             &std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{}: {}", e, path))?,
@@ -2243,9 +2307,15 @@ mod tests {
         assert_eq!(config.default_network_profile_id(), "wan");
         let wan = config.network_profile("wan").unwrap();
         assert_eq!(wan.external_ip.as_deref(), Some("203.0.113.10"));
-        assert_eq!(wan.sip_contact_config().sip_external_ip.as_deref(), Some("203.0.113.11"));
+        assert_eq!(
+            wan.sip_contact_config().sip_external_ip.as_deref(),
+            Some("203.0.113.11")
+        );
         let overlay = config.network_profile("overlay").unwrap();
-        assert_eq!(overlay.effective_bind_ip("0.0.0.0", Some("192.168.1.5")), "100.64.0.5");
+        assert_eq!(
+            overlay.effective_bind_ip("0.0.0.0", Some("192.168.1.5")),
+            "100.64.0.5"
+        );
         let no_bind = NetworkProfile {
             id: "x".to_string(),
             label: None,
@@ -2261,7 +2331,10 @@ mod tests {
             rtp_start_port: None,
             rtp_end_port: None,
         };
-        assert_eq!(no_bind.effective_bind_ip("10.0.0.1", Some("192.168.1.5")), "192.168.1.5");
+        assert_eq!(
+            no_bind.effective_bind_ip("10.0.0.1", Some("192.168.1.5")),
+            "192.168.1.5"
+        );
         assert_eq!(no_bind.effective_bind_ip("10.0.0.1", None), "10.0.0.1");
     }
 
@@ -2296,10 +2369,11 @@ mod tests {
         let config = Config::default();
         let sip = config.sip_contact_config();
         assert!(!sip.local_networks.is_empty());
-        assert!(sip
-            .local_networks
-            .iter()
-            .any(|n| n.contains(&"10.1.2.3".parse::<IpAddr>().unwrap())));
+        assert!(
+            sip.local_networks
+                .iter()
+                .any(|n| n.contains(&"10.1.2.3".parse::<IpAddr>().unwrap()))
+        );
     }
 
     #[cfg(feature = "commerce")]

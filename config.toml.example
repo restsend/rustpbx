@@ -106,6 +106,16 @@ static_path = "/static"
 # Defaults to localhost only when omitted.
 allows = ["127.0.0.1", "::1", "10.0.0.0/8"]
 
+[graceful_shutdown]
+# Drain-then-exit shared by SIGTERM/SIGINT (docker stop / systemctl
+# stop) and AMI POST /ami/v1/shutdown: out-of-dialog requests get 503,
+# OPTIONS/health report 500 (the front LB stops routing here), active
+# calls finish, then the process exits.
+# Fallback wait for active calls before force exit (0 = wait forever).
+drain_timeout_secs = 300
+# Boot straight into the draining hold (maintenance; off by default).
+# enabled_at_startup = false
+
 [proxy]
 modules = ["acl", "auth", "presence", "registrar", "call"]
 addr = "0.0.0.0"

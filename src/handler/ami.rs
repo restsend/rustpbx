@@ -211,11 +211,7 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
     if crate::shutdown::is_draining() {
         // A draining node reports 500 so load balancers / cluster peers
         // (e.g. siprouted health checks) stop sending new traffic here.
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(health),
-        )
-            .into_response()
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(health)).into_response()
     } else {
         Json(health).into_response()
     }
@@ -267,35 +263,20 @@ async fn shutdown_handler(
 
     let drain_state = state.clone();
     tokio::spawn(async move {
-        let deadline = req
+        // Explicit request timeout wins; otherwise the configured
+        // [graceful_shutdown].drain_timeout_secs (default 300s).
+        let timeout = req
             .timeout_secs
-            .map(|s| tokio::time::Instant::now() + Duration::from_secs(s));
-        loop {
-            let active_calls = drain_state.sip_server().inner.active_call_registry.count();
-            let dialogs = drain_state.sip_server().inner.dialog_layer.len();
-            if active_calls == 0 && dialogs == 0 {
-                // Settle briefly so in-flight teardown (BYE/ACK) finishes,
-                // then exit the process.
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                if drain_state.sip_server().inner.active_call_registry.count() == 0 {
-                    info!("Drain complete: no active calls/dialogs; exiting");
-                    drain_state.token().cancel();
-                    return;
-                }
-            }
-            if let Some(dl) = deadline {
-                if tokio::time::Instant::now() >= dl {
-                    warn!(
-                        active_calls,
-                        dialogs,
-                        "Drain timeout reached; force exiting with active calls remaining"
-                    );
-                    drain_state.token().cancel();
-                    return;
-                }
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
+            .map(Duration::from_secs)
+            .or_else(|| drain_state.config().graceful_shutdown_timeout());
+        let sip = drain_state.sip_server();
+        let outcome = crate::shutdown::wait_until_drained(
+            || sip.inner.active_call_registry.count() == 0 && sip.inner.dialog_layer.is_empty(),
+            timeout,
+        )
+        .await;
+        crate::shutdown::log_drain_outcome(outcome);
+        drain_state.token().cancel();
     });
 
     Json(serde_json::json!({

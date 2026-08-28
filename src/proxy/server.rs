@@ -81,8 +81,11 @@ pub struct SipServerInner {
     pub user_backend: Box<dyn UserBackend>,
     pub auth_backend: Vec<Box<dyn AuthBackend>>,
     pub call_router: Option<Box<dyn CallRouter>>,
-    pub dialplan_inspectors:
-        Arc<parking_lot::RwLock<Vec<Arc<crate::proxy::routing::inspector_stack::OrderedDialplanInspector>>>>,
+    pub dialplan_inspectors: Arc<
+        parking_lot::RwLock<
+            Vec<Arc<crate::proxy::routing::inspector_stack::OrderedDialplanInspector>>,
+        >,
+    >,
     pub locator: Arc<Box<dyn Locator>>,
     pub callrecord_sender: Option<CallRecordSender>,
     pub endpoint: Endpoint,
@@ -585,9 +588,8 @@ impl SipServerBuilder {
         let locator = Arc::new(locator);
         let mut rtp_config = self.rtp_config.unwrap_or_default();
         let mut sip_contact_config = self.sip_contact_config.unwrap_or_default();
-        let network_profiles = self
-            .network_profiles
-            .unwrap_or_else(|| vec![NetworkProfile {
+        let network_profiles = self.network_profiles.unwrap_or_else(|| {
+            vec![NetworkProfile {
                 id: "default".to_string(),
                 label: Some("Default".to_string()),
                 description: None,
@@ -601,10 +603,14 @@ impl SipServerBuilder {
                 bind_ip: rtp_config.bind_ip.clone(),
                 rtp_start_port: rtp_config.start_port,
                 rtp_end_port: rtp_config.end_port,
-            }]);
-        let default_network_profile_id = self
-            .default_network_profile_id
-            .unwrap_or_else(|| network_profiles.first().map(|p| p.id.clone()).unwrap_or_else(|| "default".to_string()));
+            }]
+        });
+        let default_network_profile_id = self.default_network_profile_id.unwrap_or_else(|| {
+            network_profiles
+                .first()
+                .map(|p| p.id.clone())
+                .unwrap_or_else(|| "default".to_string())
+        });
         let cancel_token = self.cancel_token.unwrap_or_default();
         let config = self.config.clone();
         #[cfg(unix)]
@@ -1343,6 +1349,7 @@ impl SipServer {
                     _ = interval.tick() => {
                         let count = registry_for_metrics.count();
                         crate::metrics::sip::set_active_dialogs(count);
+                        crate::metrics::sip::set_draining(crate::shutdown::is_draining());
                     }
                 }
             }
@@ -1441,12 +1448,11 @@ impl SipServer {
                     .ok()
                     .flatten();
                 if to_tag.is_none() {
-                    let code =
-                        if tx.original.method == rsipstack::sip::Method::Options {
-                            rsipstack::sip::StatusCode::ServerInternalError
-                        } else {
-                            rsipstack::sip::StatusCode::ServiceUnavailable
-                        };
+                    let code = if tx.original.method == rsipstack::sip::Method::Options {
+                        rsipstack::sip::StatusCode::ServerInternalError
+                    } else {
+                        rsipstack::sip::StatusCode::ServiceUnavailable
+                    };
                     crate::metrics::transaction::rejected("shutting_down");
                     warn!(
                         key = %tx.key,
@@ -1631,12 +1637,7 @@ impl SipServerInner {
         port_override: Option<u16>,
         destination: Option<IpAddr>,
     ) -> Option<rsipstack::sip::Uri> {
-        self.contact_uri_for_transport_with_sip_contact(
-            transport,
-            port_override,
-            destination,
-            None,
-        )
+        self.contact_uri_for_transport_with_sip_contact(transport, port_override, destination, None)
     }
 
     pub fn contact_uri_for_transport_with_sip_contact(
@@ -1723,15 +1724,11 @@ impl SipServerInner {
             .destination
             .as_ref()
             .and_then(|d| d.addr.port.map(|p| p.0));
-        let destination = target.destination.as_ref().and_then(|d| {
-            super::sip_contact::ip_from_sip_host(&d.addr.host.to_string())
-        });
-        self.contact_uri_for_transport_with_sip_contact(
-            transport,
-            port,
-            destination,
-            sip_contact,
-        )
+        let destination = target
+            .destination
+            .as_ref()
+            .and_then(|d| super::sip_contact::ip_from_sip_host(&d.addr.host.to_string()));
+        self.contact_uri_for_transport_with_sip_contact(transport, port, destination, sip_contact)
     }
 
     pub fn network_profile(&self, id: &str) -> Option<NetworkProfile> {
@@ -1757,17 +1754,10 @@ impl SipServerInner {
                 external_ip: self.rtp_config.load().external_ip.clone(),
                 auto_external_ip: self.rtp_config.load().auto_external_ip.clone(),
                 sip_external_ip: self.sip_contact_config.load().sip_external_ip.clone(),
-                auto_sip_external_ip: self
-                    .sip_contact_config
-                    .load()
-                    .auto_sip_external_ip
-                    .clone(),
+                auto_sip_external_ip: self.sip_contact_config.load().auto_sip_external_ip.clone(),
                 local_networks: Vec::new(),
                 contact_lan_use_bind: self.sip_contact_config.load().contact_lan_use_bind,
-                sip_contact_always_bind: self
-                    .sip_contact_config
-                    .load()
-                    .sip_contact_always_bind,
+                sip_contact_always_bind: self.sip_contact_config.load().sip_contact_always_bind,
                 bind_ip: self.rtp_config.load().bind_ip.clone(),
                 rtp_start_port: self.rtp_config.load().start_port,
                 rtp_end_port: self.rtp_config.load().end_port,

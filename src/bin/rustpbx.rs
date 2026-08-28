@@ -22,6 +22,42 @@ use tracing_subscriber::{
     EnvFilter, fmt::time::LocalTime, layer::SubscriberExt, util::SubscriberInitExt,
 };
 
+/// Signal-triggered graceful shutdown: enter drain mode (new calls and
+/// registrations rejected with 503, OPTIONS/health report 500 — the
+/// in-front load balancer stops routing here within one probe), wait
+/// for active calls to finish, then cancel the runtime token.
+///
+/// Same behaviour as AMI `POST /shutdown`: `docker stop` /
+/// `systemctl stop` and the HTTP endpoint are interchangeable. The
+/// drain timeout comes from `[graceful_shutdown].drain_timeout_secs`
+/// (default 300s, 0 = wait forever).
+async fn drain_and_stop(state: &rustpbx::app::AppState) {
+    let first = rustpbx::shutdown::initiate();
+    let timeout = state.config().graceful_shutdown_timeout();
+    let sip = state.sip_server();
+    if first {
+        let active_calls = sip.inner.active_call_registry.count();
+        info!(
+            ?timeout,
+            active_calls,
+            "draining: rejecting new calls/registrations, waiting for active calls to end"
+        );
+    } else {
+        // Already draining (AMI /shutdown raced the signal): join the
+        // same wait instead of cancelling now — an immediate cancel
+        // would cut active calls the drain is protecting. Cancelling
+        // the token afterwards is idempotent.
+        info!("already draining; joining the drain wait");
+    }
+    let outcome = rustpbx::shutdown::wait_until_drained(
+        || sip.inner.active_call_registry.count() == 0 && sip.inner.dialog_layer.is_empty(),
+        timeout,
+    )
+    .await;
+    rustpbx::shutdown::log_drain_outcome(outcome);
+    state.token().cancel();
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LogRotationMode {
     Never,
@@ -599,6 +635,18 @@ fn main() -> Result<()> {
                 }
             }
 
+            // [graceful_shutdown].enabled_at_startup: boot straight into
+            // the draining hold (maintenance mode). The process answers
+            // 500/503 to everything out-of-dialog and takes no traffic
+            // until restarted without the flag.
+            if state.config().start_draining_at_startup() {
+                rustpbx::shutdown::initiate();
+                info!(
+                    "booting in drain mode ([graceful_shutdown].enabled_at_startup = true): \
+                     new calls/registrations rejected until restart"
+                );
+            }
+
             info!("starting rustpbx on {}", state.config().http_addr);
             let router = create_router(state.clone());
             let mut app_future = Box::pin(rustpbx::app::run(state.clone(), router));
@@ -623,13 +671,13 @@ fn main() -> Result<()> {
                         }
                     }
                     _ = tokio::signal::ctrl_c() => {
-                        info!("received CTRL+C, shutting down");
-                        state.token().cancel();
+                        info!("received CTRL+C, initiating graceful drain");
+                        drain_and_stop(&state).await;
                         let _ = app_future.await;
                     }
                     _ = sigterm_stream.recv() => {
-                        info!("received SIGTERM, shutting down");
-                        state.token().cancel();
+                        info!("received SIGTERM, initiating graceful drain");
+                        drain_and_stop(&state).await;
                         let _ = app_future.await;
                     }
                 }
@@ -646,8 +694,8 @@ fn main() -> Result<()> {
                         }
                     }
                     _ = tokio::signal::ctrl_c() => {
-                        info!("received CTRL+C, shutting down");
-                        state.token().cancel();
+                        info!("received CTRL+C, initiating graceful drain");
+                        drain_and_stop(&state).await;
                         let _ = app_future.await;
                     }
                 }

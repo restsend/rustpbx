@@ -70,6 +70,13 @@ pub mod sip {
         metrics::gauge!("rustpbx_sip_dialogs_active").set(count as f64);
     }
 
+    /// 1 while the node is draining (graceful shutdown in progress):
+    /// new calls/registrations rejected, waiting for active calls to
+    /// end before exit. Sampled alongside the dialog gauge.
+    pub fn set_draining(draining: bool) {
+        metrics::gauge!("rustpbx_draining").set(draining as u8 as f64);
+    }
+
     pub fn response(status_code: u16, method: &str) {
         let code_class = status_code / 100;
         metrics::counter!(

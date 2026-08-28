@@ -165,6 +165,7 @@ impl StatsLogger {
         json!({
             "ts": Local::now().to_rfc3339(),
             "uptime": (chrono::Utc::now() - state.uptime).num_seconds().max(0),
+            "draining": crate::shutdown::is_draining(),
             "calls": {
                 "total": state.total_calls.load(Ordering::Relaxed),
                 "failed": state.total_failed_calls.load(Ordering::Relaxed),
