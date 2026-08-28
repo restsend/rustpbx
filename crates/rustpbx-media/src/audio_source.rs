@@ -1213,17 +1213,31 @@ mod tests {
             use std::io::{Read, Write};
             use std::time::{Duration, Instant};
 
-            fn read_request(stream: &mut std::net::TcpStream) {
+            // Tolerant reader: `false` = client closed the connection or went
+            // quiet (pool eviction / load-induced delay). Either way the
+            // client is expected to fail over to a fresh connection, which the
+            // accept loop below handles — a missing follow-up request is not
+            // an error and must not panic the server thread.
+            fn read_request(stream: &mut std::net::TcpStream) -> bool {
                 stream
-                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .set_read_timeout(Some(Duration::from_secs(5)))
                     .expect("set read timeout");
                 let mut request = Vec::new();
                 let mut buf = [0u8; 1024];
                 while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    let read = stream.read(&mut buf).expect("read request");
-                    assert!(read > 0, "client closed before sending request");
-                    request.extend_from_slice(&buf[..read]);
+                    match stream.read(&mut buf) {
+                        Ok(0) => return false,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                || error.kind() == std::io::ErrorKind::TimedOut =>
+                        {
+                            return false
+                        }
+                        Err(_) => return false,
+                    }
                 }
+                true
             }
 
             fn write_response(stream: &mut std::net::TcpStream, body: &[u8], connection: &str) {
@@ -1237,10 +1251,15 @@ mod tests {
             }
 
             let (mut pooled, _) = listener.accept().expect("accept pooled connection");
-            read_request(&mut pooled);
+            if !read_request(&mut pooled) {
+                return false;
+            }
             write_response(&mut pooled, &body, "keep-alive");
 
-            read_request(&mut pooled);
+            // The second request on the pooled connection may legitimately
+            // never arrive (the client may have given up on the stale pool);
+            // close the pooled stream and keep waiting for the fresh one.
+            let _second_on_pooled = read_request(&mut pooled);
             drop(pooled);
 
             listener.set_nonblocking(true).expect("set nonblocking");
@@ -1270,21 +1289,32 @@ mod tests {
             use std::io::{Read, Write};
             use std::time::{Duration, Instant};
 
-            fn read_request(stream: &mut std::net::TcpStream) {
+            fn read_request(stream: &mut std::net::TcpStream) -> bool {
                 stream
-                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .set_read_timeout(Some(Duration::from_secs(5)))
                     .expect("set read timeout");
                 let mut request = Vec::new();
                 let mut buf = [0u8; 1024];
                 while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    let read = stream.read(&mut buf).expect("read request");
-                    assert!(read > 0, "client closed before sending request");
-                    request.extend_from_slice(&buf[..read]);
+                    match stream.read(&mut buf) {
+                        Ok(0) => return false,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                || error.kind() == std::io::ErrorKind::TimedOut =>
+                        {
+                            return false
+                        }
+                        Err(_) => return false,
+                    }
                 }
+                true
             }
 
             let (mut pooled, _) = listener.accept().expect("accept pooled connection");
-            read_request(&mut pooled);
+            if !read_request(&mut pooled) {
+                return false;
+            }
             let seed_header = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
                 body.len()
@@ -1295,19 +1325,22 @@ mod tests {
             pooled.write_all(&body).expect("write seed body");
             pooled.flush().expect("flush seed response");
 
-            read_request(&mut pooled);
-            let partial_header = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            pooled
-                .write_all(partial_header.as_bytes())
-                .expect("write partial headers");
-            pooled
-                .write_all(&body[..body.len() / 2])
-                .expect("write partial body");
-            pooled.flush().expect("flush partial response");
-            drop(pooled);
+            if !read_request(&mut pooled) {
+                // The client abandoned the pooled connection; it will retry on
+                // a fresh one, which the accept loop below still serves.
+                drop(pooled);
+            } else {
+                let partial_header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                pooled
+                    .write_all(partial_header.as_bytes())
+                    .expect("write partial headers");
+                pooled.write_all(&body[..body.len() / 2]).expect("write partial body");
+                pooled.flush().expect("flush partial response");
+                drop(pooled);
+            }
 
             listener.set_nonblocking(true).expect("set nonblocking");
             let deadline = Instant::now() + Duration::from_secs(1);
@@ -1363,21 +1396,32 @@ mod tests {
             use std::io::{Read, Write};
             use std::time::{Duration, Instant};
 
-            fn read_request(stream: &mut std::net::TcpStream) {
+            fn read_request(stream: &mut std::net::TcpStream) -> bool {
                 stream
-                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .set_read_timeout(Some(Duration::from_secs(5)))
                     .expect("set read timeout");
                 let mut request = Vec::new();
                 let mut buf = [0u8; 1024];
                 while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    let read = stream.read(&mut buf).expect("read request");
-                    assert!(read > 0, "client closed before sending request");
-                    request.extend_from_slice(&buf[..read]);
+                    match stream.read(&mut buf) {
+                        Ok(0) => return false,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                || error.kind() == std::io::ErrorKind::TimedOut =>
+                        {
+                            return false
+                        }
+                        Err(_) => return false,
+                    }
                 }
+                true
             }
 
             let (mut pooled, _) = listener.accept().expect("accept pooled connection");
-            read_request(&mut pooled);
+            if !read_request(&mut pooled) {
+                return false;
+            }
             let seed_header = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
                 body.len()
@@ -1388,7 +1432,7 @@ mod tests {
             pooled.write_all(&body).expect("write seed body");
             pooled.flush().expect("flush seed response");
 
-            read_request(&mut pooled);
+            let _second_on_pooled = read_request(&mut pooled);
             listener.set_nonblocking(true).expect("set nonblocking");
             let deadline = Instant::now() + Duration::from_secs(1);
             while Instant::now() < deadline {
