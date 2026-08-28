@@ -463,6 +463,8 @@ engine = "flowdb"
 # bind_ip = "100.64.0.5"                # optional per-trunk RTP bind override
 # # Forward original custom headers to this trunk's outgoing INVITE.
 # # Unset (default) -> forward nothing; internal destinations forward everything.
+# # Applies to all callee legs (direct dial, fork, queue agents, transfers,
+# # app-originated legs). Standard SIP headers are never forwarded.
 # # header_passthrough = { mode = "all" }
 # # header_passthrough = { mode = "whitelist", whitelist = ["X-Smart2Agent", "X-SmartParams"] }
 # # header_passthrough = { mode = "blacklist", blacklist = ["X-Token"] }

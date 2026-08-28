@@ -2606,6 +2606,23 @@ impl SipSession {
             );
         }
 
+        let passthrough_rule = match self.context.dialplan.header_passthrough.clone() {
+            Some(rule) => Some(rule),
+            None => {
+                self.server
+                    .header_passthrough_for(target, false, &callee_uri)
+                    .await
+            }
+        };
+        if let Some(rule) = &passthrough_rule {
+            let selected = crate::call::Dialplan::select_passthrough_headers(
+                &self.context.dialplan.original.headers.0,
+                &headers,
+                rule,
+            );
+            headers.extend(selected);
+        }
+
         let callee_is_webrtc = Self::callee_supports_webrtc(target);
         let leg_id = leg_id_override.unwrap_or("callee");
         self.legs.set_transport(

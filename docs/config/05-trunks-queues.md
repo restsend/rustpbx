@@ -50,6 +50,27 @@ inbound_hosts = ["203.0.113.50"] # Whitelist IPs
 | `profile` | string | none | Network profile id from `[[network_profile]]` in the main config (Console: trunk **Media Option → Network profile**). Applies grouped RTP/SDP and SIP Contact settings; per-trunk `external_ip` / `bind_ip` override the profile when set |
 | `header_passthrough` | table | none | Control which custom headers from the original INVITE are forwarded to this trunk's outbound INVITE. `mode` is `"all"` (default), `"whitelist"`, or `"blacklist"`; `whitelist`/`blacklist` are header-name lists (case-insensitive). Standard SIP headers (`Via`/`From`/`To`/`Call-ID`/`CSeq`/`Contact`/...) are never forwarded. Unset (default) = forward nothing to external trunks; internal destinations (same realm / registered / home-proxy) always forward everything unless overridden by the route's `with_original_headers` |
 
+### Custom Header Passthrough
+
+Controls whether custom headers from the **original inbound INVITE** (e.g. `X-CRM-Ticket-Id`) are copied onto the outbound INVITE for the callee leg. Resolution order per callee target:
+
+1. **Internal targets** (same realm, registered AOR, or home-proxy) → forward all custom headers.
+2. **External trunk targets** → use the trunk's `header_passthrough` config; if unset, forward nothing.
+3. **HTTP dynamic router** → the response's `with_original_headers` overrides the above (`true` = forward all, `false` = forward none). See [04-routing.md](04-routing.md).
+
+This applies to every callee leg: direct dial, parallel fork, queue agent legs, transfers, and app-originated legs (targets resolved inside the session fall back to the per-target resolution above).
+
+Example trunk configuration:
+
+```toml
+[proxy.trunks.provider_a]
+header_passthrough = { mode = "all" }                # forward all custom headers
+# header_passthrough = { mode = "whitelist", whitelist = ["X-Smart2Agent", "X-SmartParams"] }
+# header_passthrough = { mode = "blacklist", blacklist = ["X-Token"] }
+```
+
+Standard SIP headers are never forwarded; only custom (non-standard) headers are subject to this rule.
+
 ### Trunk Registration
 
 For trunks that require outbound registration:
@@ -129,6 +150,8 @@ incoming_to_user_prefix = ""      # Strip prefix from inbound callee
 
 ## Queues (`[proxy.queues]`)
 Call distribution logic (ACD).
+
+Calls dispatched to queue agents follow the same [custom header passthrough](#custom-header-passthrough) resolution: original INVITE custom headers are forwarded to internal agent legs, and to external agent trunks per their `header_passthrough` config.
 
 ```toml
 [proxy.queues.support_main]
