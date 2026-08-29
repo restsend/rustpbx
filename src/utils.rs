@@ -6,6 +6,19 @@ use tokio::runtime::Handle;
 
 use dashmap::DashMap;
 
+/// IPs of the local network interfaces — used to skip fan-out targets that
+/// are actually this node (cluster configs commonly list every member,
+/// including self).
+pub fn local_ips() -> std::collections::HashSet<String> {
+    let mut ips = std::collections::HashSet::new();
+    if let Ok(addrs) = local_ip_address::list_afinet_netifas() {
+        for (_name, ip) in addrs {
+            ips.insert(ip.to_string());
+        }
+    }
+    ips
+}
+
 /// Strip control characters (`\r`, `\n`, `\0`, etc.) from a header value
 /// to prevent HTTP response splitting / header injection.
 pub fn sanitize_header_value(value: &str) -> String {

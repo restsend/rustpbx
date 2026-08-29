@@ -215,6 +215,7 @@ object_store = { version = "0.14.0", default-features = false, features = [
     "ring",
 ] }
 humantime = "2.3.0"
+serde_urlencoded = "0.7"
 serde_with = "3.21.0"
 async-compression = { version = "0.4", default-features = false, features = [
     "tokio",
@@ -282,7 +283,6 @@ rustpbx-media = { path = "crates/rustpbx-media" }
 [dev-dependencies]
 portpicker = "0.1.1"
 tower = { version = "0.5", features = ["util"] }
-serde_urlencoded = "0.7"
 ctor = "1.0.7"
 metrics-util = "0.20.4"
 sea-orm = { version = "2", features = [

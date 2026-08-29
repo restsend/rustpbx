@@ -15,7 +15,7 @@ use crate::config::ClusterPeer;
 const CLUSTER_FORWARD_TIMEOUT_SECS: u64 = 5;
 
 /// The AMI cluster base path for a peer (scheme://host:port/path-prefix).
-fn peer_ami_base(peer: &ClusterPeer, ami_path: &str) -> String {
+pub(crate) fn peer_ami_base(peer: &ClusterPeer, ami_path: &str) -> String {
     format!("http://{}:{}{}", peer.addr, peer.ami_port, ami_path)
 }
 
@@ -27,7 +27,7 @@ fn peer_for_node_id<'a>(peers: &'a [ClusterPeer], node_id: &str) -> Option<&'a C
 }
 
 /// Issue a JSON request to one peer's AMI cluster endpoint.
-async fn forward_json(
+pub(crate) async fn forward_json(
     client: &reqwest::Client,
     url: &str,
     method: reqwest::Method,

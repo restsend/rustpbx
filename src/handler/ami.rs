@@ -46,6 +46,8 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
         )
         .route("/sipflow/flow/{call_id}", get(query_sipflow_flow))
         .route("/sipflow/media/{call_id}", get(query_sipflow_media));
+    #[cfg(feature = "commerce")]
+    let r = r.route("/calls", get(calls_query_handler));
 
     // Outbound dial SSE endpoint — config-gated.
     let r = if app_state
@@ -979,6 +981,234 @@ fn parse_datetime(s: &str) -> Option<chrono::DateTime<chrono::Local>> {
     }
 
     None
+}
+
+// ── Active-call query endpoint ───────────────────────────────────────────────
+
+/// Query parameters for `GET {ami_path}/calls`.
+#[cfg(feature = "commerce")]
+#[derive(Debug, Clone, Deserialize)]
+struct CallsQuery {
+    /// Exact match against the proxy session id or a dialog Call-ID alias.
+    call_id: Option<String>,
+    /// Case-insensitive substring match on the caller (number or URI).
+    caller: Option<String>,
+    /// Case-insensitive substring match on the callee (number or URI).
+    callee: Option<String>,
+    /// Max entries returned. Default 50, clamped to 1..=500.
+    limit: Option<usize>,
+    /// When false, only this node answers. Set internally when fanning out to
+    /// peers so a query never cascades cluster-wide more than once.
+    #[serde(default)]
+    remote: Option<bool>,
+}
+
+#[cfg(feature = "commerce")]
+/// Default cap applied when `limit` is absent.
+const CALLS_QUERY_DEFAULT_LIMIT: usize = 50;
+#[cfg(feature = "commerce")]
+/// Hard cap for `limit` — protects both the local scan and peer fan-out.
+const CALLS_QUERY_MAX_LIMIT: usize = 500;
+
+/// `GET {ami_path}/calls?call_id=&caller=&callee=&limit=&remote=`
+///
+/// Lists active calls matching the given filters with per-entry summary
+/// fields. When `remote` is true (default) and `[cluster] peers` are
+/// configured, the query is fanned out to every peer's `/calls` endpoint
+/// (with `remote=false`) and results are merged, deduplicated by session id,
+/// newest first.
+///
+/// Peer failures are reported in `errors` and never fail the whole query.
+#[cfg(feature = "commerce")]
+async fn calls_query_handler(
+    State(state): State<AppState>,
+    Query(query): Query<CallsQuery>,
+) -> Response {
+    let started = std::time::Instant::now();
+    let limit = query
+        .limit
+        .unwrap_or(CALLS_QUERY_DEFAULT_LIMIT)
+        .clamp(1, CALLS_QUERY_MAX_LIMIT);
+    let registry = state.sip_server().inner.active_call_registry.clone();
+
+    // A dialog Call-ID alias resolves to the owning proxy session id.
+    let mut alias_session_ids: Vec<String> = Vec::new();
+    if let Some(cid) = query.call_id.as_deref()
+        && let Some(handle) = registry.get_handle_by_dialog(cid)
+    {
+        alias_session_ids.push(handle.session_id().to_string());
+    }
+
+    let mut entries: Vec<serde_json::Value> = registry
+        .list_recent(usize::MAX)
+        .iter()
+        .filter(|e| calls_query_entry_matches(e, &query, &alias_session_ids))
+        .map(|e| calls_query_entry_json(e, "local"))
+        .collect();
+
+    let mut errors: Vec<String> = Vec::new();
+    let peers: Vec<crate::config::ClusterPeer> = if query.remote.unwrap_or(true) {
+        state
+            .config()
+            .cluster
+            .as_ref()
+            .map(|c| c.peers.clone())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    if !peers.is_empty() {
+        let local_ips = crate::utils::local_ips();
+        let ami_path = state
+            .config()
+            .proxy
+            .ami_path
+            .clone()
+            .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string());
+        let qs = calls_query_peer_query_string(&query);
+        let client = state.http_client.clone();
+
+        let mut handles = Vec::new();
+        for peer in &peers {
+            // Skip self (configs may list every member including this node).
+            if local_ips.contains(&peer.addr) {
+                continue;
+            }
+            let node = format!("{}:{}", peer.addr, peer.sip_port);
+            let url = format!(
+                "{}/calls?{}",
+                crate::proxy::cluster_forward::peer_ami_base(peer, &ami_path),
+                qs
+            );
+            let client = client.clone();
+            handles.push((node, tokio::spawn(async move {
+                crate::proxy::cluster_forward::forward_json(
+                    &client,
+                    &url,
+                    reqwest::Method::GET,
+                    None,
+                )
+                .await
+            })));
+        }
+
+        for (node, handle) in handles {
+            match handle.await {
+                Ok(Some((status, body))) if status.is_success() => {
+                    match body.get("data").and_then(|d| d.as_array()).cloned() {
+                        Some(items) => {
+                            for mut item in items {
+                                item["node"] = serde_json::Value::String(node.clone());
+                                entries.push(item);
+                            }
+                        }
+                        None => errors.push(format!("{}: malformed response", node)),
+                    }
+                }
+                Ok(Some((status, _))) => errors.push(format!("{}: HTTP {}", node, status)),
+                Ok(None) => errors.push(format!("{}: unreachable or timed out", node)),
+                Err(e) => errors.push(format!("{}: {}", node, e)),
+            }
+        }
+    }
+
+    calls_query_finalize(&mut entries, limit);
+
+    Json(serde_json::json!({
+        "success": true,
+        "total": entries.len(),
+        "elapsed_ms": started.elapsed().as_millis() as u64,
+        "data": entries,
+        "errors": errors,
+    }))
+    .into_response()
+}
+
+/// Filter predicate: exact `call_id` (session id or dialog alias), plus
+/// case-insensitive substring matches on caller/callee.
+#[cfg(feature = "commerce")]
+fn calls_query_entry_matches(
+    entry: &crate::proxy::active_call_registry::ActiveProxyCallEntry,
+    query: &CallsQuery,
+    alias_session_ids: &[String],
+) -> bool {
+    if let Some(cid) = query.call_id.as_deref()
+        && entry.session_id != cid
+        && !alias_session_ids.iter().any(|a| a == &entry.session_id)
+    {
+        return false;
+    }
+    if let Some(want) = query.caller.as_deref()
+        && !calls_query_contains_ci(entry.caller.as_deref(), want)
+    {
+        return false;
+    }
+    if let Some(want) = query.callee.as_deref()
+        && !calls_query_contains_ci(entry.callee.as_deref(), want)
+    {
+        return false;
+    }
+    true
+}
+
+#[cfg(feature = "commerce")]
+fn calls_query_contains_ci(field: Option<&str>, needle: &str) -> bool {
+    field.is_some_and(|v| v.to_lowercase().contains(&needle.to_lowercase()))
+}
+
+#[cfg(feature = "commerce")]
+fn calls_query_entry_json(
+    entry: &crate::proxy::active_call_registry::ActiveProxyCallEntry,
+    node: &str,
+) -> serde_json::Value {
+    let mut v = serde_json::to_value(entry).unwrap_or_default();
+    v["node"] = serde_json::Value::String(node.to_string());
+    v
+}
+
+/// Query string sent to peers: same filters with `remote=false` so a query
+/// never cascades through the cluster more than once.
+#[cfg(feature = "commerce")]
+fn calls_query_peer_query_string(query: &CallsQuery) -> String {
+    fn encode_pair(k: &str, v: &str) -> String {
+        serde_urlencoded::to_string([(k, v)]).unwrap_or_default()
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(v) = &query.call_id {
+        parts.push(encode_pair("call_id", v));
+    }
+    if let Some(v) = &query.caller {
+        parts.push(encode_pair("caller", v));
+    }
+    if let Some(v) = &query.callee {
+        parts.push(encode_pair("callee", v));
+    }
+    if let Some(v) = query.limit {
+        parts.push(format!("limit={v}"));
+    }
+    parts.push("remote=false".to_string());
+    parts.join("&")
+}
+
+/// Merge step shared by the local result set and peer payloads: dedupe by
+/// session id (first wins — local entries are inserted before peer ones),
+/// sort newest first, cap at `limit`.
+#[cfg(feature = "commerce")]
+fn calls_query_finalize(entries: &mut Vec<serde_json::Value>, limit: usize) {
+    let mut seen = std::collections::HashSet::new();
+    entries.retain(|e| {
+        e.get("session_id")
+            .and_then(|s| s.as_str())
+            .map(|s| seen.insert(s.to_string()))
+            .unwrap_or(true)
+    });
+    entries.sort_by(|a, b| {
+        let ka = a.get("started_at").and_then(|v| v.as_str()).unwrap_or("");
+        let kb = b.get("started_at").and_then(|v| v.as_str()).unwrap_or("");
+        kb.cmp(ka)
+    });
+    entries.truncate(limit);
 }
 
 // ── Cluster endpoints ─────────────────────────────────────────────────────────
@@ -2097,6 +2327,140 @@ mod reload_addon_tests {
     fn build_local_reload_map_empty() {
         let map = build_local_reload_map(&[], vec![]);
         assert!(map.as_object().unwrap().is_empty());
+    }
+}
+
+#[cfg(feature = "commerce")]
+#[cfg(test)]
+mod calls_query_tests {
+    use super::*;
+    use crate::proxy::active_call_registry::{ActiveProxyCallEntry, ActiveProxyCallStatus};
+
+    fn entry(
+        session_id: &str,
+        caller: Option<&str>,
+        callee: Option<&str>,
+    ) -> ActiveProxyCallEntry {
+        ActiveProxyCallEntry {
+            session_id: session_id.to_string(),
+            caller: caller.map(|s| s.to_string()),
+            callee: callee.map(|s| s.to_string()),
+            direction: "inbound".to_string(),
+            started_at: chrono::Utc::now(),
+            answered_at: None,
+            status: ActiveProxyCallStatus::Talking,
+        }
+    }
+
+    fn no_filters() -> CallsQuery {
+        CallsQuery {
+            call_id: None,
+            caller: None,
+            callee: None,
+            limit: None,
+            remote: None,
+        }
+    }
+
+    #[test]
+    fn matches_without_filters() {
+        let q = no_filters();
+        let e = entry("s1", Some("sip:1001@x"), Some("sip:2002@y"));
+        assert!(calls_query_entry_matches(&e, &q, &[]));
+    }
+
+    #[test]
+    fn matches_call_id_direct_session() {
+        let q = CallsQuery {
+            call_id: Some("s1".into()),
+            ..no_filters()
+        };
+        let e = entry("s1", None, None);
+        assert!(calls_query_entry_matches(&e, &q, &[]));
+        let other = entry("s2", None, None);
+        assert!(!calls_query_entry_matches(&other, &q, &[]));
+    }
+
+    #[test]
+    fn matches_call_id_via_dialog_alias() {
+        let q = CallsQuery {
+            call_id: Some("dlg-call-id@host".into()),
+            ..no_filters()
+        };
+        let e = entry("s1", None, None);
+        // Alias resolution maps the dialog Call-ID to session "s1" beforehand.
+        assert!(calls_query_entry_matches(&e, &q, &["s1".to_string()]));
+    }
+
+    #[test]
+    fn matches_caller_callee_case_insensitive_substring() {
+        let q_caller = CallsQuery {
+            caller: Some("1001".into()),
+            ..no_filters()
+        };
+        let e = entry("s1", Some("sip:1001@x"), None);
+        assert!(calls_query_entry_matches(&e, &q_caller, &[]));
+        let q_upper = CallsQuery {
+            caller: Some("SIP:1001".into()),
+            ..no_filters()
+        };
+        assert!(calls_query_entry_matches(&e, &q_upper, &[]));
+        let q_miss = CallsQuery {
+            caller: Some("9999".into()),
+            ..no_filters()
+        };
+        assert!(!calls_query_entry_matches(&e, &q_miss, &[]));
+
+        let q_callee = CallsQuery {
+            callee: Some("2002".into()),
+            ..no_filters()
+        };
+        let e2 = entry("s2", None, Some("sip:2002@y"));
+        assert!(calls_query_entry_matches(&e2, &q_callee, &[]));
+        // None field never matches a filter.
+        assert!(!calls_query_entry_matches(&e, &q_callee, &[]));
+    }
+
+    #[test]
+    fn peer_query_string_appends_remote_false_and_encodes() {
+        let q = CallsQuery {
+            call_id: Some("abc@host".into()),
+            caller: Some("1001".into()),
+            callee: None,
+            limit: Some(10),
+            remote: Some(true),
+        };
+        let qs = calls_query_peer_query_string(&q);
+        assert!(qs.contains("call_id=abc%40host"), "qs: {qs}");
+        assert!(qs.contains("caller=1001"));
+        assert!(qs.contains("limit=10"));
+        assert!(qs.contains("remote=false"));
+        assert!(!qs.contains("callee"));
+    }
+
+    #[test]
+    fn finalize_dedupes_keeps_first_sorts_and_truncates() {
+        let mut entries = vec![
+            serde_json::json!({"session_id": "a", "started_at": "2026-01-01T00:00:00Z"}),
+            serde_json::json!({"session_id": "b", "started_at": "2026-01-03T00:00:00Z"}),
+            // Duplicate "a" (peer echo of the local entry) — first wins.
+            serde_json::json!({"session_id": "a", "started_at": "2026-01-01T00:00:00Z"}),
+            serde_json::json!({"session_id": "c", "started_at": "2026-01-02T00:00:00Z"}),
+        ];
+        calls_query_finalize(&mut entries, 2);
+        let ids: Vec<&str> = entries
+            .iter()
+            .map(|e| e["session_id"].as_str().unwrap())
+            .collect();
+        // Newest first after merge, capped at limit.
+        assert_eq!(ids, vec!["b", "c"]);
+    }
+
+    #[test]
+    fn finalize_keeps_entries_without_session_id() {
+        let mut entries = vec![serde_json::json!({"foo": 1})];
+        calls_query_finalize(&mut entries, 10);
+        assert_eq!(entries.len(), 1);
     }
 }
 

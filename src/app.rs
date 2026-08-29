@@ -1083,11 +1083,5 @@ pub fn create_router(state: AppState) -> Router {
 /// Collect all IP addresses bound to local network interfaces.
 /// Used to exclude self from the AMI cluster peer list.
 fn get_local_ips() -> std::collections::HashSet<String> {
-    let mut ips = std::collections::HashSet::new();
-    if let Ok(addrs) = local_ip_address::list_afinet_netifas() {
-        for (_name, ip) in addrs {
-            ips.insert(ip.to_string());
-        }
-    }
-    ips
+    crate::utils::local_ips()
 }
