@@ -281,6 +281,7 @@ impl ThirdPartyTreeProvider {
         });
         ActionNode {
             action,
+            ignore_prompt_dtmf: false,
             wait_for_result: false,
             next,
             step_id: None,

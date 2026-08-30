@@ -448,6 +448,9 @@ impl EntryAction {
 pub struct ActionNode {
     #[serde(flatten)]
     pub action: EntryAction,
+    /// Ignore caller digits while this non-interruptible prompt is playing.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ignore_prompt_dtmf: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub wait_for_result: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -464,6 +467,7 @@ impl ActionNode {
     pub fn new(action: EntryAction) -> Self {
         Self {
             action,
+            ignore_prompt_dtmf: false,
             wait_for_result: false,
             next: None,
             step_id: None,
@@ -475,6 +479,7 @@ impl ActionNode {
     pub fn with_next(action: EntryAction, next: ActionNode) -> Self {
         Self {
             action,
+            ignore_prompt_dtmf: false,
             wait_for_result: false,
             next: Some(Box::new(next)),
             step_id: None,
