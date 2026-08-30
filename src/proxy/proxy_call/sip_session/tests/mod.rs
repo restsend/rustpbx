@@ -63,18 +63,16 @@ fn forward_dtmf_skips_app_injection_when_no_app_is_running() {
     assert_eq!(runtime.inject_calls.load(Ordering::SeqCst), 0);
 }
 
-/// While a bridge is active (armed `bridge_dtmf_tx`), a digit must be
-/// 1. forwarded to the bridge WebSocket (pre-existing behaviour),
-/// 2. buffered for the return-app flow, and
-/// 3. reported as an `ivr_step_trace` carrying the originating node context
-///    and the digit (consumer contract for menu/TTS nodes).
+/// While a bridge is active (armed `bridge_dtmf_tx`), the bridge owns the
+/// digit. It must be forwarded, buffered for the return app, and traced, but
+/// never also injected into the suspended app as a second business input.
 #[test]
-fn forward_dtmf_with_active_bridge_emits_trace_and_buffers_digit() {
+fn forward_dtmf_with_active_bridge_owns_digit_without_app_injection() {
     use crate::proxy::proxy_call::sip_session::transfer::BridgeTraceContext;
     use crate::rwi::gateway::RwiGateway;
 
     let runtime = Arc::new(DtmfAppRuntime {
-        running: false,
+        running: true,
         inject_calls: AtomicUsize::new(0),
     });
     let app_runtime: Arc<dyn AppRuntime> = runtime.clone();
@@ -113,6 +111,7 @@ fn forward_dtmf_with_active_bridge_emits_trace_and_buffers_digit() {
     let v: serde_json::Value = serde_json::from_str(&ws_json).unwrap();
     assert_eq!(v["type"], "dtmf");
     assert_eq!(v["digit"], "1");
+    assert_eq!(runtime.inject_calls.load(Ordering::SeqCst), 0);
 
     // 2. buffered for the return-app flow
     assert_eq!(digits.lock().clone(), vec!["1".to_string()]);

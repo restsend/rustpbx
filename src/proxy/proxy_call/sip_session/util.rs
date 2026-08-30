@@ -224,9 +224,8 @@ pub(super) fn inject_dtmf_into_app(
     }
 }
 
-/// Returns `true` when the digit was injected into a running app. The
-/// bridge websocket forward always fires immediately regardless of app
-/// state, so replaying a buffered digit later must use
+/// Returns `true` when the digit was accepted by the active bridge or injected
+/// into a running app. Replaying a buffered digit later must use
 /// [`inject_dtmf_into_app`] instead of calling this again.
 ///
 /// While a bridge is active (`bridge_dtmf_tx` armed) the digit is also
@@ -248,7 +247,6 @@ pub(super) fn forward_dtmf_event(
     callee: &str,
     sip_headers: Option<std::collections::HashMap<String, String>>,
 ) -> bool {
-    let injected = inject_dtmf_into_app(digit, leg_id, session_id, app_runtime, rwi_gateway);
     let digit_str = digit.to_string();
     if let Some(tx) = bridge_dtmf_tx.read().as_ref() {
         let _ = tx.send(
@@ -290,8 +288,11 @@ pub(super) fn forward_dtmf_event(
             };
             gw.read().fan_out(session_id, &ev);
         }
+        // The bridge owns media while active. Injecting the same digit into
+        // the suspended app would replay one physical key as a second input.
+        return true;
     }
-    injected
+    inject_dtmf_into_app(digit, leg_id, session_id, app_runtime, rwi_gateway)
 }
 
 pub(super) fn trunk_host_port(dest: &str) -> Option<(String, u16)> {
