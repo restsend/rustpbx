@@ -1698,8 +1698,22 @@ impl SipServerInner {
                 .or(port)
         };
 
-        // Inbound: without a reliable destination hint, prefer bind address (LAN-safe).
-        self.contact_uri_for_transport(transport, port_override, None)
+        // A wildcard is only a listener instruction; generate the Contact from this flow's local IP.
+        let contact = self.sip_contact_config.load();
+        let rtp = self.rtp_config.load();
+        let sip_addr = super::sip_contact::build_transaction_contact_sip_addr(
+            &proxy,
+            &contact,
+            rtp.external_ip.as_deref(),
+            transport,
+            port_override,
+            conn_addr,
+        )?;
+        Some(build_contact_uri(
+            &self.contact_username,
+            &sip_addr,
+            Some(transport),
+        ))
     }
 
     /// Contact URI for an outbound leg toward `target`.

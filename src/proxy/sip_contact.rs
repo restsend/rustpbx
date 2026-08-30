@@ -100,8 +100,54 @@ pub fn build_contact_sip_addr(
     port_override: Option<u16>,
     destination: Option<IpAddr>,
 ) -> Option<SipAddr> {
+    build_contact_sip_addr_with_bind_ip(
+        proxy,
+        contact,
+        rtp_external_ip,
+        transport,
+        port_override,
+        destination,
+        &proxy.addr,
+    )
+}
+
+pub fn build_transaction_contact_sip_addr(
+    proxy: &ProxyConfig,
+    contact: &SipContactConfig,
+    rtp_external_ip: Option<&str>,
+    transport: Transport,
+    port_override: Option<u16>,
+    connection: &SipAddr,
+) -> Option<SipAddr> {
+    // Wildcard binds cannot be advertised; the accepted flow carries the concrete local host.
+    let actual_bind_ip = proxy
+        .addr
+        .parse::<IpAddr>()
+        .ok()
+        .filter(IpAddr::is_unspecified)
+        .map(|_| connection.addr.host.to_string());
+    build_contact_sip_addr_with_bind_ip(
+        proxy,
+        contact,
+        rtp_external_ip,
+        transport,
+        port_override,
+        None,
+        actual_bind_ip.as_deref().unwrap_or(&proxy.addr),
+    )
+}
+
+fn build_contact_sip_addr_with_bind_ip(
+    proxy: &ProxyConfig,
+    contact: &SipContactConfig,
+    rtp_external_ip: Option<&str>,
+    transport: Transport,
+    port_override: Option<u16>,
+    destination: Option<IpAddr>,
+    bind_ip: &str,
+) -> Option<SipAddr> {
     let listener = listener_sip_addr(proxy, transport, port_override)?;
-    let host = resolve_contact_host(contact, &proxy.addr, rtp_external_ip, destination);
+    let host = resolve_contact_host(contact, bind_ip, rtp_external_ip, destination);
     Some(replace_contact_host(&listener, &host))
 }
 
@@ -248,5 +294,61 @@ mod tests {
         )
         .unwrap();
         assert_eq!(addr.addr.to_string(), "203.0.113.10:5061");
+    }
+
+    #[test]
+    fn build_contact_sip_addr_uses_actual_bind_ip_for_wildcard_listener() {
+        let proxy = ProxyConfig {
+            addr: "0.0.0.0".to_string(),
+            udp_port: Some(8060),
+            ..ProxyConfig::default()
+        };
+        let contact = SipContactConfig {
+            local_networks: default_local_networks(),
+            contact_lan_use_bind: true,
+            ..Default::default()
+        };
+
+        let connection = SipAddr {
+            r#type: Some(Transport::Udp),
+            addr: HostWithPort::try_from("192.0.2.10:8060").unwrap(),
+        };
+        let addr = build_transaction_contact_sip_addr(
+            &proxy,
+            &contact,
+            None,
+            Transport::Udp,
+            None,
+            &connection,
+        )
+        .unwrap();
+
+        assert_eq!(addr.addr.to_string(), "192.0.2.10:8060");
+    }
+
+    #[test]
+    fn build_transaction_contact_sip_addr_preserves_explicit_bind_ip() {
+        let proxy = ProxyConfig {
+            addr: "192.0.2.20".to_string(),
+            udp_port: Some(8060),
+            ..ProxyConfig::default()
+        };
+        let contact = SipContactConfig::default();
+        let connection = SipAddr {
+            r#type: Some(Transport::Udp),
+            addr: HostWithPort::try_from("192.0.2.10:8060").unwrap(),
+        };
+
+        let addr = build_transaction_contact_sip_addr(
+            &proxy,
+            &contact,
+            None,
+            Transport::Udp,
+            None,
+            &connection,
+        )
+        .unwrap();
+
+        assert_eq!(addr.addr.to_string(), "192.0.2.20:8060");
     }
 }
