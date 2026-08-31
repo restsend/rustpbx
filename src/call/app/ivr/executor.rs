@@ -33,6 +33,8 @@ pub struct StepIvrApp {
     pending_menu: Option<PendingMenu>,
     current_track_id: Option<String>,
     interrupt_on_dtmf: bool,
+    /// Whether digits must be ignored while the current non-interruptible prompt is playing.
+    ignore_prompt_dtmf: bool,
     /// Whether the IVR is currently expecting DTMF input.
     ///
     /// Set to `true` once a `DtmfMenu` greeting finishes playing (or when the
@@ -126,6 +128,7 @@ impl StepIvrApp {
             pending_menu: None,
             current_track_id: None,
             interrupt_on_dtmf: false,
+            ignore_prompt_dtmf: false,
             awaiting_dtmf: false,
             tts_service: None,
             trace: None,
@@ -167,6 +170,7 @@ impl StepIvrApp {
             pending_menu: None,
             current_track_id: None,
             interrupt_on_dtmf: false,
+            ignore_prompt_dtmf: false,
             awaiting_dtmf: false,
             tts_service: None,
             trace: None,
@@ -1287,6 +1291,8 @@ impl StepIvrApp {
                 self.pending_menu = Some(self.build_pending_menu(&node.action));
             } else if node.action.is_interruptible() {
                 self.interrupt_on_dtmf = true;
+            } else if matches!(node.action, EntryAction::Prompt { .. }) {
+                self.ignore_prompt_dtmf = node.ignore_prompt_dtmf;
             }
         }
         if matches!(&result, ActionResult::WaitFor(WaitEvent::NoAudio)) {
@@ -1539,6 +1545,13 @@ impl CallApp for StepIvrApp {
         ctrl: &mut CallController,
         context: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
+        // A provider may opt into legacy announcement semantics: finish the
+        // prompt but ignore digits handled while that prompt is active.
+        if self.ignore_prompt_dtmf {
+            tracing::info!("StepIvrApp: ignoring DTMF during non-interruptible prompt");
+            return Ok(AppAction::Continue);
+        }
+
         // DTMF received — clear any stale timeout flag so a later hangup is
         // not misclassified as timeout-induced.
         self.timeout_induced = false;
@@ -1682,6 +1695,7 @@ impl CallApp for StepIvrApp {
         let was_menu = self.pending_menu.is_some();
         self.current_track_id = None;
         self.interrupt_on_dtmf = false;
+        self.ignore_prompt_dtmf = false;
 
         if was_menu && track_id == "ivr_menu_greeting" {
             if let Some(ref menu) = self.pending_menu {
@@ -6238,7 +6252,7 @@ mod tests {
         if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
             let event_type = value["event"]["type"].as_str().unwrap_or("");
             if event_type == "session_start" {
-                return br#"{"type":"prompt","tts_text":"IVR step, press 1 or 2.","interruptible":true}"#
+                return br#"{"type":"prompt","tts_text":"IVR step announcement.","interruptible":false,"ignore_prompt_dtmf":true}"#
                     .to_vec();
             }
             if event_type == "dtmf" && value["event"]["digit"].as_str() == Some("2") {
@@ -6295,9 +6309,10 @@ mod tests {
         };
         let prompt = step_provider.next_action(ctx).await.unwrap();
         assert!(
-            matches!(prompt.action, EntryAction::Prompt { ref tts_text, interruptible: true, .. }
+            matches!(prompt.action, EntryAction::Prompt { ref tts_text, interruptible: false, .. }
                 if tts_text.as_deref().is_some_and(|text| text.contains("IVR step")))
         );
+        assert!(prompt.ignore_prompt_dtmf);
 
         let ctx = ProviderContext {
             event: Some(ProviderEvent::Dtmf {
@@ -6375,11 +6390,7 @@ mod tests {
 
     // ── DTMF delivery in step-provider mode ──────────────────────────────
     //
-    // Regression: a digit pressed while the current step is a non-interruptible
-    // prompt (or the provider response is in flight) used to be silently
-    // dropped by `on_dtmf` ("ignoring early DTMF"), so "press 2 → transfer"
-    // never reached the provider. It must now be buffered and delivered on the
-    // next step.
+    // DTMF delivery must preserve the current prompt's interruption contract.
 
     fn event_label(ev: &Option<ProviderEvent>) -> String {
         match ev {
@@ -6397,6 +6408,7 @@ mod tests {
     /// announcement; dtmf "2" → transfer to 2001; anything else → hangup.
     struct ScriptedProvider {
         log: Arc<std::sync::Mutex<Vec<String>>>,
+        ignore_prompt_dtmf: bool,
     }
 
     #[async_trait]
@@ -6413,14 +6425,16 @@ mod tests {
                     tts_api_url: None,
                 })),
                 Some(ProviderEvent::AudioComplete { .. }) => {
-                    Ok(ActionNode::new(EntryAction::Prompt {
+                    let mut node = ActionNode::new(EntryAction::Prompt {
                         file: Some("announce.wav".into()),
                         tts_text: None,
                         tts_voice: None,
                         record_name_list: None,
                         interruptible: false,
                         tts_api_url: None,
-                    }))
+                    });
+                    node.ignore_prompt_dtmf = self.ignore_prompt_dtmf;
+                    Ok(node)
                 }
                 Some(ProviderEvent::Dtmf { digit }) if digit == "2" => {
                     Ok(ActionNode::new(EntryAction::Transfer {
@@ -6461,9 +6475,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_step_provider_buffers_dtmf_during_non_interruptible_prompt() {
+    async fn test_step_provider_buffers_dtmf_by_default_during_non_interruptible_prompt() {
         let log = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let app = StepIvrApp::with_provider(Box::new(ScriptedProvider { log: log.clone() }));
+        let app = StepIvrApp::with_provider(Box::new(ScriptedProvider {
+            log: log.clone(),
+            ignore_prompt_dtmf: false,
+        }));
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(500, "play-welcome", |c| play_file_cmd(c, "welcome.wav"))
+            .await;
+        stack.audio_complete("ivr_prompt");
+        stack
+            .assert_cmd(500, "play-announce", |c| play_file_cmd(c, "announce.wav"))
+            .await;
+
+        stack.dtmf("2");
+        stack.audio_complete("ivr_prompt");
+        stack
+            .assert_cmd(
+                500,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        let log = log.lock().unwrap();
+        assert_eq!(
+            log.as_slice(),
+            ["session_start", "audio_complete", "dtmf:2"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_step_provider_ignores_dtmf_during_non_interruptible_prompt() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let app = StepIvrApp::with_provider(Box::new(ScriptedProvider {
+            log: log.clone(),
+            ignore_prompt_dtmf: true,
+        }));
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack
@@ -6479,33 +6533,33 @@ mod tests {
             .assert_cmd(500, "play-announce", |c| play_file_cmd(c, "announce.wav"))
             .await;
 
-        // Press 2 during the non-interruptible announcement — must be buffered,
-        // not dropped.
+        // Press 2 during the non-interruptible announcement. The announcement
+        // must finish naturally without forwarding the digit to the provider.
         stack.dtmf("2");
-        tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // Announcement completes → buffered digit is delivered to the provider
-        // (as a dtmf event) → provider returns transfer.
+        // Announcement completion remains an audio_complete event, so the
+        // provider returns its next announcement instead of the DTMF transfer.
         stack.audio_complete("ivr_prompt");
         stack
-            .assert_cmd(
-                500,
-                "transfer",
-                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
-            )
+            .assert_cmd(500, "play-next-announce", |c| {
+                play_file_cmd(c, "announce.wav")
+            })
             .await;
 
         let log = log.lock().unwrap();
-        assert!(
-            log.iter().any(|e| e == "dtmf:2"),
-            "provider never received the buffered dtmf:2 — got {log:?}"
+        assert_eq!(
+            log.as_slice(),
+            ["session_start", "audio_complete", "audio_complete"]
         );
     }
 
     #[tokio::test]
     async fn test_step_provider_barges_in_interruptible_prompt() {
         let log = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let app = StepIvrApp::with_provider(Box::new(ScriptedProvider { log: log.clone() }));
+        let app = StepIvrApp::with_provider(Box::new(ScriptedProvider {
+            log: log.clone(),
+            ignore_prompt_dtmf: false,
+        }));
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack

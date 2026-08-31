@@ -250,6 +250,7 @@ impl Default for RetryConfig {
                     prompt_text: None,
                     prompt_voice: None,
                 },
+                ignore_prompt_dtmf: false,
                 wait_for_result: false,
                 next: None,
                 step_id: None,

@@ -1871,9 +1871,9 @@ impl SipSession {
         }
     }
 
-    /// Subscribe to the MediaBridge DTMF bus and forward RTP RFC 2833 digits
-    /// to the running app + RWI gateway + bridge WebSocket. Called once at
-    /// session construction when media is anchored.
+    /// Subscribe to the MediaBridge DTMF bus and route RTP RFC 2833 digits to
+    /// the active bridge, or otherwise to the running app and RWI gateway.
+    /// Called once at session construction when media is anchored.
     fn spawn_dtmf_forwarder(&self) {
         let Some(mb) = self.media.bridge.as_ref() else {
             return;

@@ -20,7 +20,7 @@ use crate::proxy::routing::{
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -143,6 +143,22 @@ struct StartOnlyRuntime {
     start_calls: AtomicUsize,
 }
 
+struct BridgeReturnRuntime {
+    running: AtomicBool,
+    inject_calls: AtomicUsize,
+    started_params: std::sync::Mutex<Vec<Option<serde_json::Value>>>,
+}
+
+impl BridgeReturnRuntime {
+    fn new() -> Self {
+        Self {
+            running: AtomicBool::new(true),
+            inject_calls: AtomicUsize::new(0),
+            started_params: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
 impl StartOnlyRuntime {
     fn new() -> Self {
         Self {
@@ -205,6 +221,40 @@ impl AppRuntime for StartOnlyRuntime {
 
     fn current_app(&self) -> Option<String> {
         None
+    }
+}
+
+#[async_trait]
+impl AppRuntime for BridgeReturnRuntime {
+    async fn start_app(
+        &self,
+        app_name: &str,
+        params: Option<serde_json::Value>,
+        _auto_answer: bool,
+    ) -> crate::call::runtime::AppResult<()> {
+        if self.running.swap(true, Ordering::SeqCst) {
+            return Err(AppRuntimeError::AlreadyRunning(app_name.to_string()));
+        }
+        self.started_params.lock().unwrap().push(params);
+        Ok(())
+    }
+
+    async fn stop_app(&self, _reason: Option<String>) -> crate::call::runtime::AppResult<()> {
+        self.running.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn inject_event(&self, _event: serde_json::Value) -> crate::call::runtime::AppResult<()> {
+        self.inject_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    fn current_app(&self) -> Option<String> {
+        self.is_running().then(|| "ivr".to_string())
     }
 }
 
@@ -532,6 +582,70 @@ async fn test_connected_dynamic_leg_failure_returns_to_ivr_when_set() {
         .map(|d| d.id())
         .expect("caller dialog present");
     assert!(!session.pending_hangup.contains(&caller_dialog_id));
+}
+
+#[tokio::test]
+async fn bridge_rtp_dtmf_reaches_return_app_once_without_stale_app_injection() {
+    use crate::media::leg::{LegConfig, LegInner};
+    use crate::media::media_bridge::LegSide;
+    use rustrtc::peer_connection::RtpObserver;
+
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+        "ivr".to_string(),
+        None,
+        true,
+    );
+    let mut session = build_session(dialplan).await;
+    let runtime = Arc::new(BridgeReturnRuntime::new());
+    session.app_runtime = runtime.clone();
+
+    let (bridge_tx, mut bridge_rx) = mpsc::unbounded_channel();
+    *session.bridge_dtmf_tx.write() = Some(bridge_tx);
+    session.meta.transfer_return_app = Some(ReturnAppSpec {
+        app_name: "ivr".to_string(),
+        params: serde_json::json!({"file": "main-menu"}),
+    });
+
+    let caller_leg = LegInner::new("caller", &LegConfig::rtp_pcmu(), None).unwrap();
+    caller_leg.ingress_tap().set_dtmf_payload_types(vec![101]);
+    session
+        .media
+        .bridge
+        .as_mut()
+        .expect("anchored media bridge")
+        .replace_leg(LegSide::A, caller_leg.clone())
+        .await;
+
+    let packet = rustrtc::rtp::RtpPacket::new(
+        rustrtc::rtp::RtpHeader::new(101, 1, 160, 1234),
+        vec![6, 0x80, 0, 160],
+    );
+    caller_leg
+        .ingress_tap()
+        .on_ingress(&packet, "127.0.0.1:40000".parse().unwrap());
+
+    let bridge_event = tokio::time::timeout(std::time::Duration::from_secs(1), bridge_rx.recv())
+        .await
+        .expect("bridge DTMF timeout")
+        .expect("bridge DTMF channel closed");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&bridge_event).unwrap()["digit"],
+        "6"
+    );
+    assert_eq!(runtime.inject_calls.load(Ordering::SeqCst), 0);
+
+    // Bridge cleanup disarms forwarding before the stored return app resumes.
+    *session.bridge_dtmf_tx.write() = None;
+    session
+        .execute_command(CallCommand::StartReturnApp, None)
+        .await;
+
+    let started_params = runtime.started_params.lock().unwrap();
+    assert_eq!(started_params.len(), 1);
+    assert_eq!(
+        started_params[0].as_ref().unwrap()["ivr_params"]["bridge_dtmf_digits"],
+        "6"
+    );
 }
 
 #[tokio::test]
