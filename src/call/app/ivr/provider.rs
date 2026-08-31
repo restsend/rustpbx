@@ -289,8 +289,7 @@ impl StepProvider {
         Self {
             url: url.into(),
             headers: HashMap::new(),
-            http_client: crate::http_util::build_keepalive_client(None, None)
-                .unwrap_or_else(|_| reqwest::Client::new()),
+            http_client: crate::http_util::shared_keepalive_client().clone(),
             retry: RetryConfig::default(),
             prefer_ivr_fallback: false,
         }

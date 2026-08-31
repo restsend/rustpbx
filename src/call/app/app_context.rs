@@ -159,8 +159,7 @@ impl ApplicationContext {
         Self {
             session_vars: Arc::new(DashMap::new()),
             db,
-            http_client: crate::http_util::build_keepalive_client(None, None)
-                .unwrap_or_else(|_| reqwest::Client::new()),
+            http_client: crate::http_util::shared_keepalive_client().clone(),
             call_info,
             invocation: None,
             config,

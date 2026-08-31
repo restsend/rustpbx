@@ -35,8 +35,7 @@ impl HttpRegistry {
         Self {
             base_url,
             api_key,
-            client: crate::http_util::build_keepalive_client(None, None)
-                .unwrap_or_else(|_| reqwest::Client::new()),
+            client: crate::http_util::shared_keepalive_client().clone(),
             cache: DashMap::new(),
             rr_counter: RwLock::new(0),
             cache_ttl: Duration::from_secs(30),
