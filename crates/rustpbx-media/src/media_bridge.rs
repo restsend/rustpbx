@@ -860,6 +860,42 @@ impl MediaBridge {
         .await
     }
 
+    /// Play a procedurally generated tone on one leg without breaking the
+    /// opposite leg's egress.
+    pub async fn play_tone_side_only(
+        &mut self,
+        side: LegSide,
+        spec: &str,
+        minimum_duration: Duration,
+        loop_playback: bool,
+    ) -> Result<PlaybackHandle> {
+        let Some((frequency_hz, duration_ms)) = spec.split_once(',') else {
+            return Err(anyhow!(
+                "Invalid tone spec 'tone://{}': expected tone://frequency,duration_ms",
+                spec
+            ));
+        };
+        let frequency_hz = frequency_hz
+            .trim()
+            .parse()
+            .map_err(|e| anyhow!("Invalid frequency in tone spec 'tone://{}': {}", spec, e))?;
+        let duration_ms = duration_ms
+            .trim()
+            .parse()
+            .map_err(|e| anyhow!("Invalid duration in tone spec 'tone://{}': {}", spec, e))?;
+        let duration = Duration::from_millis(duration_ms).max(minimum_duration);
+        self.play_side_only(
+            side,
+            Box::new(crate::audio_source::ToneAudioSource::new(
+                frequency_hz,
+                duration,
+                8000,
+            )?),
+            loop_playback,
+        )
+        .await
+    }
+
     /// Play a file (or http URL) on a leg. Reads the file async and pre-decodes
     /// it into memory; the egress pacing task reads from the in-memory cache.
     ///
@@ -2235,53 +2271,6 @@ mod tests {
         mb.close();
     }
 
-    /// Minimal sine-wave AudioSource for exercising leg→PCM data flow.
-    struct SineSource {
-        pcm: Vec<i16>,
-        pos: usize,
-        sample_rate: u32,
-        channels: u16,
-    }
-
-    impl SineSource {
-        fn new(freq: f64, sample_rate: u32, duration_ms: u64) -> Self {
-            let n = (sample_rate as u64 * duration_ms / 1000) as usize;
-            let mut pcm = Vec::with_capacity(n);
-            for i in 0..n {
-                let t = i as f64 / sample_rate as f64;
-                pcm.push(((freq * 2.0 * std::f64::consts::PI * t).sin() * 8000.0) as i16);
-            }
-            Self {
-                pcm,
-                pos: 0,
-                sample_rate,
-                channels: 1,
-            }
-        }
-    }
-
-    impl crate::audio_source::AudioSource for SineSource {
-        fn read_samples(&mut self, buffer: &mut [i16]) -> usize {
-            let n = buffer.len().min(self.pcm.len() - self.pos);
-            buffer[..n].copy_from_slice(&self.pcm[self.pos..self.pos + n]);
-            self.pos += n;
-            n
-        }
-        fn sample_rate(&self) -> u32 {
-            self.sample_rate
-        }
-        fn channels(&self) -> u16 {
-            self.channels
-        }
-        fn has_data(&self) -> bool {
-            self.pos < self.pcm.len()
-        }
-        fn reset(&mut self) -> Result<()> {
-            self.pos = 0;
-            Ok(())
-        }
-    }
-
     /// P2.4 data-source migration: `leg_pcm_stream` decodes a leg's ingress
     /// RTP into PCM frames. Two RTP legs negotiate + bridge; leg A plays a
     /// sine tone; the stream on leg B must emit non-silence PCM.
@@ -2312,15 +2301,16 @@ mod tests {
         let mut stream = mb.leg_pcm_stream(LegSide::B).expect("leg B PCM stream");
 
         // Play a 440 Hz tone on leg A (egress → RTP → B ingress).
+        mb.unbridge().await.expect("unbridge before tone");
         let handle = mb
-            .play(
+            .play_tone_side_only(
                 LegSide::A,
-                Box::new(SineSource::new(440.0, 8000, 1000)),
+                "440,200",
+                Duration::ZERO,
                 false,
             )
             .await
             .expect("play tone on A");
-        let _ = handle;
 
         // Drain leg B PCM until we see a non-silence frame.
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -2344,6 +2334,11 @@ mod tests {
             saw_audio,
             "leg B PCM stream must decode the tone played on A"
         );
+        let result = tokio::time::timeout(Duration::from_secs(1), handle.done)
+            .await
+            .expect("tone playback must finish")
+            .expect("tone playback result");
+        assert!(!result.interrupted, "tone must finish at its natural EOF");
         mb.close();
     }
 

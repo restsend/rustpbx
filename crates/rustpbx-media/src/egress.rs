@@ -90,8 +90,8 @@ pub enum EgressSource {
     },
     /// Emit silence frames (mute / hold placeholder / idle).
     Silence,
-    /// Play an [`AudioSource`] (wav/mp3/http), decoding to PCM then encoding
-    /// to the target codec. When `loop_playback` is false and the source
+    /// Play an [`AudioSource`] (file, stream, or generated audio), converting
+    /// its PCM to the target codec. When `loop_playback` is false and the source
     /// reaches EOF the pipeline switches to [`EgressSource::Silence`] and
     /// fires `on_end(false)`. When the source is replaced (switch to another
     /// source or stop) while a Media source is active, `on_end(true)` is fired.

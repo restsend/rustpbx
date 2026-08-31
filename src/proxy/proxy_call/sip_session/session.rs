@@ -4627,21 +4627,26 @@ impl SipSession {
             }
         }
 
-        // Resolve audio path: map packaged `sounds/*` to `config/sounds/*`
-        // (same as handle_play), then generate a temp WAV for tone:// specs.
-        let mapped = Self::resolve_audio_file_path(audio_path);
-        let resolved_path = Self::resolve_audio_path(&mapped)?;
-
         // Play progress audio via MediaBridge
         if let Some(mb) = self.bridge_mut() {
             mb.unbridge().await?;
-            let handle = mb
-                .play_file_side_only(
+            let handle = if let Some(tone_spec) = audio_path.strip_prefix("tone://") {
+                mb.play_tone_side_only(
+                    crate::media::media_bridge::LegSide::A,
+                    tone_spec,
+                    Duration::from_millis(Self::MIN_TONE_DURATION_MS),
+                    loop_playback,
+                )
+                .await?
+            } else {
+                let resolved_path = Self::resolve_audio_file_path(audio_path);
+                mb.play_file_side_only(
                     crate::media::media_bridge::LegSide::A,
                     resolved_path,
                     loop_playback,
                 )
-                .await?;
+                .await?
+            };
             self.record_play_start("progress-media", "ringback");
             return Ok(Some(handle));
         }
@@ -4649,98 +4654,18 @@ impl SipSession {
         Ok(None)
     }
 
-    /// Resolve an audio path specification to an actual file path.
-    /// Supports:
-    ///   - Regular file paths (passthrough)
-    ///   - `tone://frequency,duration_ms` — generates a temporary WAV file with a sine wave
-    fn resolve_audio_path(spec: &str) -> Result<String> {
-        if let Some(tone_spec) = spec.strip_prefix("tone://") {
-            let parts: Vec<&str> = tone_spec.splitn(2, ',').collect();
-            if parts.len() != 2 {
-                return Err(anyhow!(
-                    "Invalid tone spec '{}': expected tone://frequency,duration_ms",
-                    spec
-                ));
-            }
-            let frequency: u32 = parts[0]
-                .trim()
-                .parse()
-                .map_err(|e| anyhow!("Invalid frequency in tone spec '{}': {}", spec, e))?;
-            let duration_ms: u64 = parts[1]
-                .trim()
-                .parse()
-                .map_err(|e| anyhow!("Invalid duration in tone spec '{}': {}", spec, e))?;
-            // A tone below the floor would sound like an instant click and the
-            // caller never perceives the failure cue. Enforce a minimum so a
-            // sloppily-specified tone still plays audibly before the rejection.
-            let duration_ms = duration_ms.max(Self::MIN_TONE_DURATION_MS);
-
-            let sample_rate = 8000u32;
-            let num_samples = (sample_rate as u64 * duration_ms / 1000) as usize;
-            let amplitude = 8192i16;
-
-            let pcm: Vec<i16> = (0..num_samples)
-                .map(|i| {
-                    let t = i as f64 / sample_rate as f64;
-                    (amplitude as f64 * (2.0 * std::f64::consts::PI * frequency as f64 * t).sin())
-                        as i16
-                })
-                .collect();
-
-            let temp_dir = std::env::temp_dir();
-            let temp_path = temp_dir.join(format!(
-                "rustpbx_tone_{}hz_{}ms_{}.wav",
-                frequency,
-                duration_ms,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0)
-            ));
-
-            let spec = crate::media::wav_reader::WavSpec {
-                channels: 1,
-                sample_rate: 8000,
-                bits_per_sample: 16,
-                sample_format: crate::media::wav_reader::SampleFormat::Int,
-            };
-            let mut writer = crate::media::wav_reader::WavWriter::create(&temp_path, spec)
-                .map_err(|e| anyhow!("Failed to create temp WAV for tone: {}", e))?;
-            for sample in &pcm {
-                writer
-                    .write_sample(*sample)
-                    .map_err(|e| anyhow!("Failed to write WAV sample: {}", e))?;
-            }
-            writer
-                .finalize()
-                .map_err(|e| anyhow!("Failed to finalize WAV: {}", e))?;
-
-            Ok(temp_path.to_string_lossy().to_string())
-        } else {
-            // Passthrough — regular file path
-            Ok(spec.to_string())
-        }
-    }
-
-    /// Parse the rendered duration of a `tone://frequency,duration_ms` spec
-    /// (with the minimum floor applied), for logging/visibility. Returns `None`
-    /// for anything that isn't a tone spec.
-    fn tone_spec_duration_ms(spec: &str) -> Option<u64> {
-        let tone_spec = spec.strip_prefix("tone://")?;
-        let duration_ms: u64 = tone_spec.splitn(2, ',').nth(1)?.trim().parse().ok()?;
-        Some(duration_ms.max(Self::MIN_TONE_DURATION_MS))
-    }
-
     /// Natural playback duration of a failure-tone spec: the tone:// duration
     /// (with the minimum floor), or the audio file's estimated length. Used to
     /// wait for the cue to play once before the rejection.
     fn failure_tone_duration(spec: &str) -> std::time::Duration {
-        if let Some(ms) = Self::tone_spec_duration_ms(spec) {
-            std::time::Duration::from_millis(ms)
-        } else {
-            let resolved = Self::resolve_audio_file_path(spec);
-            crate::media::audio_source::estimate_audio_duration(&resolved)
+        if let Some(tone_spec) = spec.strip_prefix("tone://")
+            && let Some((_, duration_ms)) = tone_spec.split_once(',')
+            && let Ok(duration_ms) = duration_ms.trim().parse::<u64>()
+        {
+            return Duration::from_millis(duration_ms.max(Self::MIN_TONE_DURATION_MS));
         }
+        let resolved = Self::resolve_audio_file_path(spec);
+        crate::media::audio_source::estimate_audio_duration(&resolved)
     }
 
     /// Reject the call with a specific status code, optionally playing a configured
@@ -4758,7 +4683,9 @@ impl SipSession {
             // `tone://` plays for its spec duration (with a minimum floor);
             // file tones play to natural completion. Either way the caller
             // hears the full cue before the rejection — never cut short.
-            let tone_ms = Self::tone_spec_duration_ms(path);
+            let tone_ms = path
+                .strip_prefix("tone://")
+                .map(|_| Self::failure_tone_duration(path).as_millis());
             info!(session_id = %self.id,
                 session_id = %self.context.session_id,
                 status = %status,

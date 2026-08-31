@@ -392,6 +392,80 @@ impl AudioSource for FileAudioSource {
     }
 }
 
+/// Finite, procedurally generated mono sine tone.
+///
+/// Samples are produced on demand as the egress pipeline polls the source, so
+/// generated tones do not require an intermediate PCM buffer or temporary WAV
+/// file. Playback cadence, encoding, and RTP packetization remain the egress
+/// pipeline's responsibility.
+pub struct ToneAudioSource {
+    sample_rate: u32,
+    total_samples: u64,
+    samples_emitted: u64,
+    phase: f64,
+    phase_step: f64,
+}
+
+impl ToneAudioSource {
+    pub fn new(frequency_hz: u32, duration: Duration, sample_rate: u32) -> Result<Self> {
+        if sample_rate == 0 {
+            return Err(anyhow!("Tone sample rate must be greater than zero"));
+        }
+
+        let total_samples = duration
+            .as_nanos()
+            .saturating_mul(sample_rate as u128)
+            / 1_000_000_000;
+        let total_samples = u64::try_from(total_samples)
+            .map_err(|_| anyhow!("Tone duration is too large"))?;
+
+        Ok(Self {
+            sample_rate,
+            total_samples,
+            samples_emitted: 0,
+            phase: 0.0,
+            phase_step: std::f64::consts::TAU * frequency_hz as f64 / sample_rate as f64,
+        })
+    }
+}
+
+impl AudioSource for ToneAudioSource {
+    fn read_samples(&mut self, buffer: &mut [i16]) -> usize {
+        let remaining = self.total_samples.saturating_sub(self.samples_emitted);
+        let count = buffer
+            .len()
+            .min(usize::try_from(remaining).unwrap_or(usize::MAX));
+
+        for sample in &mut buffer[..count] {
+            *sample = (self.phase.sin() * 8192.0) as i16;
+            self.phase += self.phase_step;
+            if self.phase >= std::f64::consts::TAU {
+                self.phase %= std::f64::consts::TAU;
+            }
+        }
+        self.samples_emitted += count as u64;
+        count
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    fn channels(&self) -> u16 {
+        1
+    }
+
+    fn has_data(&self) -> bool {
+        self.samples_emitted < self.total_samples
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        self.samples_emitted = 0;
+        self.phase = 0.0;
+        Ok(())
+    }
+}
+
 pub struct SilenceSource {
     sample_rate: u32,
 }
@@ -781,6 +855,42 @@ mod tests {
         let mut buffer = vec![1i16; 320];
         source.read_samples(&mut buffer);
         assert!(buffer.iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn test_tone_audio_source_streams_exact_duration() {
+        let mut source = ToneAudioSource::new(1000, Duration::from_millis(25), 8000)
+            .expect("valid tone source");
+        let mut buffer = vec![0i16; 160];
+
+        assert_eq!(source.sample_rate(), 8000);
+        assert_eq!(source.channels(), 1);
+        assert_eq!(source.read_samples(&mut buffer), 160);
+        assert_eq!(buffer[0], 0);
+        assert!((buffer[2] - 8192).abs() <= 1);
+        assert!(source.has_data());
+
+        assert_eq!(source.read_samples(&mut buffer), 40);
+        assert!(!source.has_data());
+        assert_eq!(source.read_samples(&mut buffer), 0);
+    }
+
+    #[test]
+    fn test_tone_audio_source_reset_restarts_waveform() {
+        let mut source = ToneAudioSource::new(440, Duration::from_millis(20), 8000)
+            .expect("valid tone source");
+        let mut first = [0i16; 16];
+        let mut replay = [0i16; 16];
+
+        assert_eq!(source.read_samples(&mut first), first.len());
+        source.reset().expect("reset tone source");
+        assert_eq!(source.read_samples(&mut replay), replay.len());
+        assert_eq!(replay, first);
+    }
+
+    #[test]
+    fn test_tone_audio_source_rejects_zero_sample_rate() {
+        assert!(ToneAudioSource::new(440, Duration::from_secs(1), 0).is_err());
     }
 
     #[test]
