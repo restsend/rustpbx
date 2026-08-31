@@ -1253,34 +1253,61 @@ pub fn extract_trusted_ip(
         return Some(socket_ip);
     }
 
-    let via = tx.original.via_header().ok()?;
-    let entries = split_via_values(via.value());
-    if entries.len() < 2 {
+    // A SIP proxy prepends its own Via. Once the transport peer has been
+    // verified as trusted, the next Via hop represents the source that sent
+    // the request to that proxy. Via values may be comma-separated or carried
+    // in separate header fields, so preserve their wire order across both
+    // representations.
+    let entries: Vec<&str> = tx
+        .original
+        .headers
+        .iter()
+        .filter_map(|header| match header {
+            rsipstack::sip::Header::Via(via) => Some(via.value()),
+            _ => None,
+        })
+        .flat_map(split_via_values)
+        .collect();
+    let Some(entry) = entries.get(1) else {
+        tracing::debug!(
+            %socket_ip,
+            via_count = entries.len(),
+            "trusted proxy request has no forwarded Via hop; using transport source"
+        );
         return Some(socket_ip);
-    }
+    };
 
-    for entry in entries.iter().skip(1) {
-        let typed = match rsipstack::sip::headers::typed::Via::parse(entry) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        let via_ip: IpAddr = match typed.sent_by().host.clone().try_into() {
-            Ok(ip) => ip,
-            Err(_) => continue,
-        };
-
-        if ip_matches_trusted(&via_ip, trusted_proxies) {
-            continue;
+    let typed = match rsipstack::sip::headers::typed::Via::parse(entry) {
+        Ok(via) => via,
+        Err(error) => {
+            tracing::debug!(
+                %socket_ip,
+                %error,
+                "trusted proxy forwarded Via is malformed; using transport source"
+            );
+            return Some(socket_ip);
         }
+    };
+    let received_ip = typed.received().and_then(Result::ok);
+    let sent_by_ip: Option<IpAddr> = typed.sent_by().host.clone().try_into().ok();
+    let Some(source_ip) = received_ip.or(sent_by_ip) else {
+        tracing::debug!(
+            %socket_ip,
+            sent_by = %typed.sent_by(),
+            "trusted proxy forwarded Via has no IP address; using transport source"
+        );
+        return Some(socket_ip);
+    };
 
-        if let Some(Ok(received)) = typed.received() {
-            return Some(received);
-        }
-        return Some(via_ip);
-    }
-
-    Some(socket_ip)
+    tracing::debug!(
+        %socket_ip,
+        %source_ip,
+        via_hop = 2,
+        sent_by = %typed.sent_by(),
+        received = ?received_ip,
+        "trusted proxy source resolved from forwarded Via"
+    );
+    Some(source_ip)
 }
 
 pub fn extract_from_user(origin: &rsipstack::sip::Request) -> Option<String> {

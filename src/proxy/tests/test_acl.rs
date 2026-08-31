@@ -1,8 +1,12 @@
-use super::common::{create_acl_request, create_transaction};
-use crate::call::TransactionCookie;
+use super::common::{
+    create_acl_request, create_test_request, create_test_server_with_config, create_transaction,
+};
+use crate::call::{TransactionCookie, TrunkContext};
 use crate::config::ProxyConfig;
 use crate::proxy::acl::AclModule;
+use crate::proxy::routing::{TrunkConfig, TrunkDirection};
 use crate::proxy::{ProxyAction, ProxyModule};
+use rsipstack::sip::Header;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -32,6 +36,116 @@ async fn test_acl_module_allow_normal_request() {
 
     // Should continue since it's a normal request
     assert!(matches!(result, ProxyAction::Continue));
+}
+
+#[tokio::test]
+async fn trusted_proxy_uses_second_separate_via_for_inbound_trunk() {
+    let mut config = ProxyConfig {
+        trusted_proxies: vec!["127.0.0.1".to_string()],
+        acl_rules: Some(vec!["deny all".to_string()]),
+        generated_dir: format!(
+            "target/test-generated/acl-trusted-proxy-via-{}",
+            std::process::id()
+        ),
+        ..Default::default()
+    };
+    config.trunks.insert(
+        "forwarded-carrier".to_string(),
+        TrunkConfig {
+            id: Some(401),
+            direction: Some(TrunkDirection::Inbound),
+            inbound_hosts: vec!["198.51.100.25".to_string()],
+            ..Default::default()
+        },
+    );
+    let (server, config) = create_test_server_with_config(config).await;
+    let module = AclModule::create(server, config).unwrap();
+
+    let mut request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    request.headers.retain(|header| !matches!(header, Header::Via(_)));
+    request.headers.push_front(Header::Via(
+        rsipstack::sip::headers::Via::new(
+            "SIP/2.0/UDP 10.0.0.10:5060;branch=z9hG4bK-origin;received=198.51.100.25",
+        ),
+    ));
+    request.headers.push_front(Header::Via(
+        rsipstack::sip::headers::Via::new(
+            "SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-proxy",
+        ),
+    ));
+    let (mut tx, _) = create_transaction(request).await;
+    let cookie = TransactionCookie::default();
+
+    let result = module
+        .on_transaction_begin(CancellationToken::new(), &mut tx, cookie.clone())
+        .await
+        .unwrap();
+
+    assert!(matches!(result, ProxyAction::Continue));
+    let trunk = cookie
+        .get_extension::<TrunkContext>()
+        .expect("second Via received IP should identify the inbound trunk");
+    assert_eq!(trunk.id, Some(401));
+    assert_eq!(trunk.name, "forwarded-carrier");
+}
+
+#[tokio::test]
+async fn untrusted_socket_ignores_forwarded_via_for_inbound_trunk() {
+    let mut config = ProxyConfig {
+        trusted_proxies: vec!["203.0.113.10".to_string()],
+        acl_rules: Some(vec!["deny all".to_string()]),
+        generated_dir: format!(
+            "target/test-generated/acl-untrusted-proxy-via-{}",
+            std::process::id()
+        ),
+        ..Default::default()
+    };
+    config.trunks.insert(
+        "forged-carrier".to_string(),
+        TrunkConfig {
+            id: Some(402),
+            direction: Some(TrunkDirection::Inbound),
+            inbound_hosts: vec!["198.51.100.25".to_string()],
+            ..Default::default()
+        },
+    );
+    let (server, config) = create_test_server_with_config(config).await;
+    let module = AclModule::create(server, config).unwrap();
+
+    let mut request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    request.headers.retain(|header| !matches!(header, Header::Via(_)));
+    request.headers.push_front(Header::Via(
+        rsipstack::sip::headers::Via::new(
+            "SIP/2.0/UDP 10.0.0.10:5060;branch=z9hG4bK-forged;received=198.51.100.25",
+        ),
+    ));
+    request.headers.push_front(Header::Via(
+        rsipstack::sip::headers::Via::new(
+            "SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-direct",
+        ),
+    ));
+    let (mut tx, _) = create_transaction(request).await;
+    let cookie = TransactionCookie::default();
+
+    let result = module
+        .on_transaction_begin(CancellationToken::new(), &mut tx, cookie.clone())
+        .await
+        .unwrap();
+
+    assert!(matches!(result, ProxyAction::Abort));
+    assert!(cookie.get_extension::<TrunkContext>().is_none());
 }
 
 #[tokio::test]
