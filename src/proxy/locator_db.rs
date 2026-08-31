@@ -226,6 +226,29 @@ impl DbLocator {
             .map_err(|e| anyhow::anyhow!("Migration error (add instance_id): {}", e))?;
         Ok(())
     }
+
+    async fn normalize_identity(
+        &self,
+        username: &str,
+        realm: Option<&str>,
+    ) -> Option<(String, String)> {
+        let username = username.trim().to_ascii_lowercase();
+        if username.is_empty() {
+            return None;
+        }
+        let realm = match realm {
+            Some(realm) if !realm.trim().is_empty() => {
+                let realm = realm.trim();
+                if self.is_local_realm(realm).await {
+                    "localhost".to_string()
+                } else {
+                    realm.to_ascii_lowercase()
+                }
+            }
+            _ => String::new(),
+        };
+        Some((username, realm))
+    }
 }
 
 fn parse_transport_token(value: &str) -> Option<rsipstack::sip::transport::Transport> {
@@ -360,21 +383,8 @@ impl Locator for DbLocator {
         // Default implementation for standard cases:
         let aor = location.aor.to_string();
         let expires = location.expires as i64;
-        let username_key = username.trim().to_ascii_lowercase();
-        if username_key.is_empty() {
+        let Some((username_key, realm_key)) = self.normalize_identity(username, realm).await else {
             return Err(anyhow::anyhow!("Cannot register location without username"));
-        }
-
-        let realm_key = match realm {
-            Some(r) if !r.trim().is_empty() => {
-                let r = r.trim();
-                if self.is_local_realm(r).await {
-                    "localhost".to_string()
-                } else {
-                    r.to_ascii_lowercase()
-                }
-            }
-            _ => String::new(),
         };
         let destination = match &location.destination {
             Some(dest) => dest,
@@ -589,21 +599,8 @@ impl Locator for DbLocator {
 
     async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()> {
         // Standard implementation for other cases
-        let username_key = username.trim().to_ascii_lowercase();
-        if username_key.is_empty() {
+        let Some((username_key, realm_key)) = self.normalize_identity(username, realm).await else {
             return Ok(());
-        }
-
-        let realm_key = match realm {
-            Some(r) if !r.trim().is_empty() => {
-                let r = r.trim();
-                if self.is_local_realm(r).await {
-                    "localhost".to_string()
-                } else {
-                    r.to_ascii_lowercase()
-                }
-            }
-            _ => String::new(),
         };
 
         Entity::delete_many()
@@ -614,6 +611,22 @@ impl Locator for DbLocator {
             .map_err(|e| anyhow::anyhow!("Database error on unregister: {}", e))?;
 
         Ok(())
+    }
+
+    async fn has_active_bindings(&self, username: &str, realm: Option<&str>) -> Result<bool> {
+        let Some((username, realm)) = self.normalize_identity(username, realm).await else {
+            return Ok(false);
+        };
+        let locations = Entity::find()
+            .filter(Column::Username.eq(username))
+            .filter(Column::Realm.eq(realm))
+            .all(&self.db)
+            .await
+            .map_err(|e| anyhow::anyhow!("Database error on active binding lookup: {}", e))?;
+        let now = now_epoch_secs();
+        Ok(locations
+            .into_iter()
+            .any(|location| !is_location_expired(location.expires, location.last_modified, now)))
     }
 
     async fn lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>> {

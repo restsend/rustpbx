@@ -2,7 +2,7 @@ use super::common::{
     create_register_request, create_test_request, create_test_server,
     create_test_server_with_config, create_transaction,
 };
-use crate::call::TransactionCookie;
+use crate::call::{Location, TransactionCookie};
 use crate::config::ProxyConfig;
 use crate::proxy::registrar::RegistrarModule;
 use crate::proxy::{ProxyAction, ProxyModule};
@@ -112,6 +112,66 @@ async fn test_registrar_unregister() {
     if let Ok(v) = locations {
         assert!(v.is_empty(), "Expected no locations after unregister")
     }
+}
+
+#[tokio::test]
+async fn test_registrar_unregister_keeps_user_online_with_another_binding() {
+    let config = ProxyConfig {
+        realms: Some(vec!["example.com".to_string()]),
+        ..Default::default()
+    };
+    let (server_inner, config) = create_test_server_with_config(config).await;
+    let module = RegistrarModule::new(server_inner.clone(), config);
+
+    let register_request = create_register_request("agent-a", "example.com", Some(60));
+    let registered_aor = register_request.uri.clone();
+    let registered_realm = registered_aor.host_with_port.to_string();
+    let (mut tx, _) = create_transaction(register_request).await;
+    module
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
+        .await
+        .unwrap();
+
+    let second_aor = create_register_request("new-device", "client.invalid", None).uri;
+    server_inner
+        .locator
+        .register(
+            "agent-a",
+            Some(&registered_realm),
+            Location {
+                aor: second_aor.clone(),
+                expires: 60,
+                registered_aor: Some(registered_aor.clone()),
+                instance_id: Some("new-binding".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut events = server_inner.locator_events.as_ref().unwrap().subscribe();
+    let unregister_request = create_register_request("agent-a", "example.com", Some(0));
+    let (mut tx, _) = create_transaction(unregister_request).await;
+    module
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
+        .await
+        .unwrap();
+
+    let locations = server_inner.locator.lookup(&registered_aor).await.unwrap();
+    assert_eq!(locations.len(), 1);
+    assert_eq!(locations[0].aor, second_aor);
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
 }
 
 #[tokio::test]
