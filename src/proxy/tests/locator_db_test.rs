@@ -53,6 +53,12 @@ async fn test_db_locator() {
     assert_eq!(locations.len(), 1);
     assert_eq!(locations[0].aor.to_string(), aor.to_string());
     assert_eq!(locations[0].expires, 3600);
+    assert!(
+        locator
+            .has_active_bindings("alice", Some("rustpbx.com"))
+            .await
+            .unwrap()
+    );
 
     // Match the relevant components of the SipAddr
     match &locations[0].destination {
@@ -74,6 +80,12 @@ async fn test_db_locator() {
         .unregister("alice", Some("rustpbx.com"))
         .await
         .unwrap();
+    assert!(
+        !locator
+            .has_active_bindings("alice", Some("rustpbx.com"))
+            .await
+            .unwrap()
+    );
 
     // Lookup should now return none (empty) or an error, both acceptable
     let result = locator

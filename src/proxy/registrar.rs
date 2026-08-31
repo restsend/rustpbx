@@ -11,7 +11,7 @@ use rsipstack::sip::{Header, Param, Transport, Uri};
 use rsipstack::{transaction::transaction::Transaction, transport::SipAddr};
 use std::{collections::HashMap, sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 #[derive(Clone)]
 pub struct RegistrarModule {
@@ -654,9 +654,30 @@ impl ProxyModule for RegistrarModule {
                     metrics::sip::registration_succeeded(&realm);
                     if let Some(locator_events) = &self.server.locator_events {
                         if location.expires == 0 {
-                            locator_events
-                                .send(LocatorEvent::Unregistered(location))
-                                .ok();
+                            match self
+                                .server
+                                .locator
+                                .has_active_bindings(
+                                    user.username.as_str(),
+                                    user.realm.as_deref(),
+                                )
+                                .await
+                            {
+                                Ok(true) => debug!(
+                                    username = %user.username,
+                                    "Binding removed while user remains registered"
+                                ),
+                                Ok(false) => {
+                                    locator_events
+                                        .send(LocatorEvent::Unregistered(location))
+                                        .ok();
+                                }
+                                Err(error) => warn!(
+                                    username = %user.username,
+                                    error = %error,
+                                    "Failed to verify remaining bindings after unregister"
+                                ),
+                            }
                         } else {
                             locator_events.send(LocatorEvent::Registered(location)).ok();
                         }

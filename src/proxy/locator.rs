@@ -79,6 +79,7 @@ pub trait Locator: Send + Sync {
     fn set_realm_checker(&self, _checker: RealmChecker) {}
     async fn register(&self, username: &str, realm: Option<&str>, location: Location)
     -> Result<()>;
+    async fn has_active_bindings(&self, username: &str, realm: Option<&str>) -> Result<bool>;
     async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()>;
     async fn unregister_with_address(&self, addr: &SipAddr) -> Result<Option<Vec<Location>>>;
     async fn lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>>;
@@ -643,6 +644,18 @@ impl Locator for MemoryLocator {
         self.locations.remove(&identifier);
         info!(%identifier, "unregistered all locations");
         Ok(())
+    }
+
+    async fn has_active_bindings(&self, username: &str, realm: Option<&str>) -> Result<bool> {
+        let identifier = self.get_identifier(username, realm).await;
+        if identifier.is_empty() {
+            return Ok(false);
+        }
+        let now = Instant::now();
+        Ok(self
+            .locations
+            .get(&identifier)
+            .is_some_and(|map| map.values().any(|location| !location.is_expired_at(now))))
     }
 
     async fn unregister_with_address(&self, addr: &SipAddr) -> Result<Option<Vec<Location>>> {
