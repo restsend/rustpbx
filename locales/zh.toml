@@ -1316,12 +1316,9 @@ local_networks = "本地网段"
 local_networks_desc = "每行一个 CIDR。下方选项开启时，目标在该网段内则 Contact 使用 bind 地址。留空则使用 RFC1918 默认。"
 contact_lan_use_bind = "目标为本地网段时 Contact 使用 bind 地址"
 network_profiles = "网络 Profile"
-network_profiles_tab_desc = "各出口的 RTP 与 SIP Contact"
-network_profiles_desc = "命名出口路径（公网 WAN、Overlay VPN 等）。Trunk 可绑定到指定 Profile。"
-network_profiles_synthetic_hint = "当前使用由 Platform 设置合成的 default Profile。在此保存后将写入显式 [[network_profile]] 配置。"
+network_profiles_desc = "命名出口路径（公网 WAN、Overlay VPN 等）。Trunk 可绑定到指定 Profile。只读展示 —— 请在配置文件 [[network_profile]] 中修改并重启。"
+network_profiles_synthetic_hint = "配置文件中无显式 [[network_profile]] 配置 —— 当前使用由 Platform 设置合成的 default Profile。"
 network_profiles_empty = "尚无 Profile。"
-network_profile_add = "添加 Profile"
-network_profile_remove = "删除 Profile"
 network_profile_id = "Profile ID"
 network_profile_label = "显示名称"
 network_profile_description = "说明"
@@ -2227,6 +2224,3 @@ internal = "内部 SIP"
 
 [rtp]
 "provider.net" = "运营商网络 (RTP)"
-
-[sbc]
-health_check = "SBC 健康检查"

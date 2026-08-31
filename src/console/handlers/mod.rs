@@ -108,8 +108,6 @@ pub async fn pending_reloads_handler(State(state): State<Arc<ConsoleState>>) -> 
         "pending": {
             "routes": targets.contains(&ReloadTarget::Routes),
             "trunks": targets.contains(&ReloadTarget::Trunks),
-            "sbc_routes": targets.contains(&ReloadTarget::SbcRoutes),
-            "sbc_trunks": targets.contains(&ReloadTarget::SbcTrunks),
             "queues": targets.contains(&ReloadTarget::Queues),
             "app": targets.contains(&ReloadTarget::App),
             "acl": targets.contains(&ReloadTarget::Acl),

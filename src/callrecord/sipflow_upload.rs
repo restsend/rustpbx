@@ -11,6 +11,7 @@ use crate::{
     callrecord::{
         CALL_RECORD_HTTP_CONNECT_TIMEOUT, CALL_RECORD_HTTP_TIMEOUT, CallRecord, CallRecordHook,
         format_sipflow_media_key, format_sipflow_signaling_file_name, format_sipflow_signaling_key,
+        sipflow::SipFlowSlot,
     },
     config::SipFlowUploadConfig,
     sipflow::SipFlowBackend,
@@ -19,6 +20,9 @@ use crate::{
 
 pub struct SipFlowUploadHook {
     backend: Arc<dyn SipFlowBackend>,
+    /// Late-bound handle to the SipFlow wrapper (writer batch + backend);
+    /// flushed before uploading so the tail messages are persisted.
+    sipflow: SipFlowSlot,
     upload_config: SipFlowUploadConfig,
     db: Option<DatabaseConnection>,
     client: reqwest::Client,
@@ -28,6 +32,7 @@ pub struct SipFlowUploadHook {
 impl SipFlowUploadHook {
     pub fn new(
         backend: Arc<dyn SipFlowBackend>,
+        sipflow: SipFlowSlot,
         upload_config: SipFlowUploadConfig,
         db: Option<DatabaseConnection>,
     ) -> Result<Self> {
@@ -35,6 +40,7 @@ impl SipFlowUploadHook {
 
         Ok(Self {
             backend,
+            sipflow,
             upload_config,
             db,
             client: crate::http_util::build_keepalive_client(
@@ -71,6 +77,7 @@ impl CallRecordHook for SipFlowUploadHook {
 
             if let Some((url, size)) = crate::callrecord::sipflow_upload::do_upload(
                 self.backend.as_ref(),
+                &self.sipflow,
                 &self.upload_config,
                 self.db.as_ref(),
                 &self.client,
@@ -102,6 +109,7 @@ impl CallRecordHook for SipFlowUploadHook {
 #[allow(clippy::too_many_arguments)]
 async fn do_upload(
     backend: &dyn SipFlowBackend,
+    sipflow: &crate::callrecord::sipflow::SipFlowSlot,
     upload_config: &SipFlowUploadConfig,
     db: Option<&DatabaseConnection>,
     client: &reqwest::Client,
@@ -116,9 +124,9 @@ async fn do_upload(
     skip_media: bool,
     signaling_default: bool,
 ) -> Option<(String, u64)> {
-    if let Err(e) = backend.flush().await {
-        warn!(call_id, "SipFlowUploadHook: flush failed: {e}");
-    }
+    // Flush the writer batch + backend pipeline so the tail messages (BYE /
+    // 200 OK) are persisted before querying/uploading.
+    crate::callrecord::sipflow::flush_hook_pipeline(sipflow, backend).await;
 
     let root = match upload_config {
         SipFlowUploadConfig::S3 { root, .. } => root.as_str(),
@@ -545,6 +553,7 @@ mod tests {
                 media: vec![],
                 flush_count: flush_count.clone(),
             }),
+            Arc::new(std::sync::OnceLock::new()),
             SipFlowUploadConfig::Http {
                 url: "http://localhost:9999/upload".to_string(),
                 headers: None,
@@ -572,6 +581,7 @@ mod tests {
                 media: vec![],
                 flush_count: flush_count.clone(),
             }),
+            Arc::new(std::sync::OnceLock::new()),
             SipFlowUploadConfig::Http {
                 url: "http://localhost:9999/upload".to_string(),
                 headers: None,

@@ -23,6 +23,17 @@ struct FlowQueryParams {
     start: Option<String>,
     #[serde(default)]
     end: Option<String>,
+    /// Set to `0`/`false` to skip the pre-query flush (stale-but-fast reads).
+    /// By default the pipeline is flushed first so a query issued right after
+    /// a call ends sees every message.
+    #[serde(default)]
+    flush: Option<String>,
+}
+
+impl FlowQueryParams {
+    fn flush_enabled(&self) -> bool {
+        !matches!(self.flush.as_deref(), Some("0") | Some("false"))
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -329,6 +340,7 @@ async fn query_flow(
     };
 
     // Parse time range
+    let flush_enabled = params.flush_enabled();
     let now = chrono::Local::now();
     let mut start_time = params.start.and_then(|s| parse_datetime(&s));
     let mut end_time = params.end.and_then(|s| parse_datetime(&s));
@@ -357,6 +369,12 @@ async fn query_flow(
 
     let start_time = start_time.unwrap_or_else(|| now - chrono::Duration::hours(1));
     let end_time = end_time.unwrap_or(now);
+
+    // A query issued right after a call ends must see the tail messages
+    // still in the write pipeline: flush first (bounded), then query.
+    if flush_enabled {
+        crate::callrecord::sipflow::flush_with_deadline(sipflow).await;
+    }
 
     match backend.query_flow(&call_id, start_time, end_time).await {
         Ok(items) => {

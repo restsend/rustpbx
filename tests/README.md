@@ -3,8 +3,8 @@
 ## Running locally
 
 ```bash
-cargo test-dev            # full local suite: --features addon-cc,addon-sbc
-                          #   (covers cc_openapi_contract_test + trunk_health_e2e)
+cargo test-dev            # full local suite: --features addon-cc
+                          #   (covers cc_openapi_contract_test)
 cargo test                # subset only: feature-gated integration tests are skipped
 cargo test --test call -- ringback_mode   # single test from the call suite
 cargo test --test rwi  -- --nocapture      # RWI suite, full output
@@ -20,13 +20,12 @@ cargo test --test rwi  -- --nocapture      # RWI suite, full output
   `cc_openapi_contract_test.rs`. Each binary runs its tests in parallel threads.
 - Feature-gated tests are skipped by a bare `cargo test`:
   - `cc_openapi_contract_test.rs` / `cc_e2e.rs` → require `addon-cc`
-  - `tests/call/trunk_health_e2e.rs` → requires `addon-sbc`
   - `wholesale.rs` → requires `addon-wholesale`
-  Use `cargo test-dev` (`--features addon-cc,addon-sbc`) or `cargo test-all`
-  (`--features commerce,wholesale,contact-center,addon-sbc`) for the full local suite.
+  Use `cargo test-dev` (`--features addon-cc`) or `cargo test-all`
+  (`--features commerce,wholesale,contact-center`) for the full local suite.
 - Ports are randomized via `portpicker` (`tests/helpers/test_server.rs`), so tests can
   run concurrently; flaky SIP/RTP tests can be re-run with the same `--test <name>` filter.
-- Coverage (optional): `cargo install cargo-llvm-cov && cargo llvm-cov --features addon-cc,addon-sbc`.
+- Coverage (optional): `cargo install cargo-llvm-cov && cargo llvm-cov --features addon-cc`.
 
 ## Python E2E (sipbot)
 
@@ -34,7 +33,7 @@ Python + sipbot end-to-end testing for RustPBX. There are two pytest suites:
 
 | Suite | Path | Focus |
 |---|---|---|
-| **Unified PBX E2E** (recommended) | [`e2e/`](../e2e) | P2P call, queue, IVR, CDR+record, sipflow, voicemail, wholesale, HTTP router, SBC |
+| **Unified PBX E2E** (recommended) | [`e2e/`](../e2e) | P2P call, queue, IVR, CDR+record, sipflow, voicemail, wholesale, HTTP router |
 | **CC e2e-regression** | [`src/addons/cc/e2e-regression/`](../src/addons/cc/e2e-regression) | CC addon: trunk/routing/IVR/queue/ACD/presence/webhook, Playwright widget |
 
 Both suites spawn `sipbot` as a subprocess (the external CLI) and drive a real
@@ -71,10 +70,10 @@ Runs default to `--tb=short --durations=15` and write an HTML report under
 `$RUSTPBX_E2E_REPORT_DIR/` when `pytest-html` is installed.
 
 Feature areas (pytest markers): `p2p`, `queue`, `ivr`, `cdr`, `record`,
-`sipflow`, `voicemail`, `wholesale`, `http_router`, `sbc`.
+`sipflow`, `voicemail`, `wholesale`, `http_router`.
 
 Requirements:
-1. `rustpbx` built with community addons: `cargo build --features "addon-cc addon-sbc addon-voicemail addon-wholesale"` (the suite also builds it automatically on first run).
+1. `rustpbx` built with community addons: `cargo build --features "addon-cc addon-voicemail addon-wholesale"` (the suite also builds it automatically on first run).
 2. `sipbot` installed: `cargo install sipbot`.
 
 Env overrides: `RUSTPBX_E2E_ADDONS` (core only; default `cc`), `RUSTPBX_SIP_PORT` (15070),

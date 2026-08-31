@@ -49,7 +49,7 @@ impl ErrSeverity {
 #[derive(Debug, Clone)]
 pub struct CallErrInfo {
     /// Subsystem that owns this error: `wholesale`, `proxy`, `acl`,
-    /// `http_router`, `sbc`, `ivr`, `voicemail`, `queue`, `dial`, `transfer`.
+    /// `http_router`, `ivr`, `voicemail`, `queue`, `dial`, `transfer`.
     pub app: &'static str,
     /// Stable hierarchical code, e.g. `wholesale.insufficient_funds`.
     /// Must start with `<app>.`.
@@ -177,7 +177,7 @@ fn build_registry_inner() -> CallErrRegistry {
     // Compiled-in addon catalogs. AppState may still merge a live AddonRegistry
     // and install_registry() (first-wins); including features here keeps unit
     // tests and early registry() callers consistent with the binary features.
-    #[cfg(any(feature = "addon-wholesale", feature = "addon-sbc"))]
+    #[cfg(feature = "addon-wholesale")]
     crate::addons::registry::merge_compiled_addon_error_catalogs(&mut reg);
 
     reg

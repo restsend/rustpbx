@@ -315,6 +315,11 @@ impl AppStateBuilder {
         let mut callrecord_stats = None;
         let mut callrecord_manager = None;
         let mut recording_upload_manager: Option<RecordingUploadManager> = None;
+        // Late-bound handle to the SipFlow wrapper, shared with the call-record
+        // upload hooks. Filled in as soon as the SIP server (owning SipFlow)
+        // has been built below.
+        let sipflow_slot: crate::callrecord::sipflow::SipFlowSlot =
+            Arc::new(std::sync::OnceLock::new());
         let callrecord_sender = if let Some(sender) = self.callrecord_sender {
             Some(sender)
         } else {
@@ -347,6 +352,9 @@ impl AppStateBuilder {
             // the record). They must run *before* RecordingUploadHook so the
             // uploaded URL is stashed on the record for the recording hook to
             // emit in a single RecordingMetadataAvailable event.
+            // The hooks receive a late-bound handle to the SipFlow wrapper:
+            // the server (which owns SipFlow) is built after this point, and
+            // the handle is filled in as soon as it exists.
             if let Some(upload_cfg) = sipflow_upload_config.as_ref() {
                 match config.sipflow.as_ref() {
                     // Remote + delegate_upload: POST upload params to the bin
@@ -361,6 +369,7 @@ impl AppStateBuilder {
                                 nodes.clone(),
                                 upload_cfg.clone(),
                                 Some(db_conn.clone()),
+                                sipflow_slot.clone(),
                             )?,
                         ));
                     }
@@ -370,6 +379,7 @@ impl AppStateBuilder {
                         if let Some(backend) = sipflow_backend_arc.as_ref() {
                             builder = builder.with_hook(Box::new(SipFlowUploadHook::new(
                                 backend.clone(),
+                                sipflow_slot.clone(),
                                 upload_cfg.clone(),
                                 Some(db_conn.clone()),
                             )?));
@@ -518,6 +528,13 @@ impl AppStateBuilder {
                 builder.build().await
             }
         }?;
+
+        // Late-bind the SipFlow wrapper into the call-record upload hooks:
+        // the server owns the SipFlow instance, and from this point on any
+        // hook flush drains the writer batch + backend pipeline.
+        if let Some(sipflow) = sip_server.inner.sip_flow.as_ref() {
+            let _ = sipflow_slot.set(sipflow.clone());
+        }
 
         // Note: CC addon state is created and managed by the addon itself during initialize()
         // The proxy_server_hook registers the AgentRegistry adapter with the SIP server

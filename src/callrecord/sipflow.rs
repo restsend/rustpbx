@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 const BATCH_SIZE: usize = 256;
 const BATCH_FLUSH_MS: u64 = 50;
@@ -101,7 +102,6 @@ enum WriteCommand {
         item: SipFlowItem,
         pool_idx: Option<usize>, // None if not from pool
     },
-    Flush,
     FlushSync {
         done: tokio::sync::oneshot::Sender<()>,
     },
@@ -109,6 +109,83 @@ enum WriteCommand {
 }
 
 struct Backend(Option<Arc<dyn SipFlowBackend>>);
+
+/// Bounded waits so a stuck writer thread cannot block a flush (and with it
+/// the query/CDR path) indefinitely.
+const WRITER_FLUSH_SEND_TIMEOUT: Duration = Duration::from_secs(1);
+const WRITER_FLUSH_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Enqueue a `FlushSync` on the writer channel with a bounded wait
+/// (`std::sync::mpsc` has no stable timed send). Returns the oneshot
+/// receiver on success, `None` on timeout / disconnected writer.
+async fn send_writer_flush_sync(
+    tx: &SyncSender<WriteCommand>,
+) -> Option<tokio::sync::oneshot::Receiver<()>> {
+    let deadline = std::time::Instant::now() + WRITER_FLUSH_SEND_TIMEOUT;
+    loop {
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        match tx.try_send(WriteCommand::FlushSync { done: done_tx }) {
+            Ok(()) => return Some(done_rx),
+            Err(mpsc::TrySendError::Full(_)) => {
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => return None,
+        }
+    }
+}
+
+/// Await a writer flush acknowledgement with a bounded wait.
+async fn await_writer_flush(rx: Option<tokio::sync::oneshot::Receiver<()>>) -> bool {
+    match rx {
+        Some(rx) => tokio::time::timeout(WRITER_FLUSH_WAIT_TIMEOUT, rx)
+            .await
+            .is_ok(),
+        None => false,
+    }
+}
+
+/// Maximum time a query-path flush may take before the query proceeds anyway
+/// (degraded: the result may miss records still sitting in write buffers).
+pub const QUERY_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Late-bound handle to the process-wide [`SipFlow`]. Call-record hooks are
+/// assembled before the SIP server (and thus the SipFlow) exists; the handle
+/// is filled in right after server construction. Hooks only run after calls
+/// finish — long after the handle has been set.
+pub type SipFlowSlot = Arc<std::sync::OnceLock<SipFlow>>;
+
+/// Flush a [`SipFlow`] pipeline with the query-path deadline. On timeout the
+/// caller should proceed with the (possibly stale) query and log a warning.
+pub async fn flush_with_deadline(sipflow: &SipFlow) {
+    if tokio::time::timeout(QUERY_FLUSH_TIMEOUT, sipflow.flush())
+        .await
+        .is_err()
+    {
+        metrics::counter!("sipflow_query_flush_timeout_total", "component" => "sipflow")
+            .increment(1);
+    }
+}
+
+/// Flush through a late-bound [`SipFlowSlot`] handle (drains the writer batch
+/// and then the backend), falling back to the bare backend when the handle
+/// has not been set (tests / backends without a SipFlow wrapper).
+pub async fn flush_hook_pipeline(slot: &SipFlowSlot, backend: &dyn SipFlowBackend) {
+    match slot.get() {
+        Some(sipflow) => flush_with_deadline(sipflow).await,
+        None => {
+            if tokio::time::timeout(QUERY_FLUSH_TIMEOUT, backend.flush())
+                .await
+                .is_err()
+            {
+                metrics::counter!("sipflow_query_flush_timeout_total", "component" => "sipflow")
+                    .increment(1);
+            }
+        }
+    }
+}
 
 struct SipFlowInner {
     shared_backend: Arc<ArcSwap<Backend>>,
@@ -231,15 +308,11 @@ impl SipFlow {
                             last_flush = std::time::Instant::now();
                         }
                     }
-                    WriteCommand::Flush => {
-                        if let Some(ref backend) = current_backend {
-                            Self::flush_batch(backend, &mut batch, &pool);
-                        }
-                        last_flush = std::time::Instant::now();
-                    }
                     WriteCommand::FlushSync { done } => {
                         if let Some(ref backend) = current_backend {
                             Self::flush_batch(backend, &mut batch, &pool);
+                        } else {
+                            Self::release_batch(&mut batch, &pool);
                         }
                         last_flush = std::time::Instant::now();
                         let _ = done.send(());
@@ -247,6 +320,8 @@ impl SipFlow {
                     WriteCommand::Shutdown => {
                         if let Some(ref backend) = current_backend {
                             Self::flush_batch(backend, &mut batch, &pool);
+                        } else {
+                            Self::release_batch(&mut batch, &pool);
                         }
                         break;
                     }
@@ -255,6 +330,8 @@ impl SipFlow {
                     // Channel closed, flush and exit
                     if let Some(ref backend) = current_backend {
                         Self::flush_batch(backend, &mut batch, &pool);
+                    } else {
+                        Self::release_batch(&mut batch, &pool);
                     }
                     break;
                 }
@@ -284,6 +361,18 @@ impl SipFlow {
             let _ = backend.record(Cow::Owned(call_id), item);
 
             // Return item to pool
+            if let Some(idx) = pool_idx {
+                pool.release(idx);
+            }
+        }
+    }
+
+    /// Drain the batch without a backend (backend was removed / disabled at
+    /// runtime): pooled items must still be returned, otherwise the pool
+    /// permanently loses slots and degenerates into fresh allocations.
+    #[inline]
+    fn release_batch(batch: &mut Vec<(String, SipFlowItem, Option<usize>)>, pool: &Arc<ItemPool>) {
+        for (_, _, pool_idx) in batch.drain(..) {
             if let Some(idx) = pool_idx {
                 pool.release(idx);
             }
@@ -438,9 +527,20 @@ impl SipFlow {
         (src, dst)
     }
 
+    /// Flush the async writer batch and then the backend pipeline, waiting
+    /// for each step. Ensures all recorded messages are persisted before
+    /// querying the backend — this is THE entry point for post-call flushes
+    /// (CDR hooks) and pre-query flushes (query endpoints).
+    ///
+    /// Waits are bounded so a stuck writer thread cannot block the caller
+    /// indefinitely; on timeout the backend flush proceeds anyway
+    /// (best-effort, counted).
     pub async fn flush(&self) {
         if let Some(ref tx) = self.inner.writer_tx {
-            let _ = tx.send(WriteCommand::Flush);
+            if !await_writer_flush(send_writer_flush_sync(tx).await).await {
+                metrics::counter!("sipflow_writer_flush_timeout_total", "component" => "sipflow")
+                    .increment(1);
+            }
         }
         if let Some(ref backend) = (*self.inner.shared_backend.load()).0 {
             let _ = backend.flush().await;
@@ -450,14 +550,7 @@ impl SipFlow {
     /// Synchronously flush the batch writer and wait for completion.
     /// Ensures all recorded messages are persisted before querying the backend.
     pub async fn flush_sync(&self) {
-        if let Some(ref tx) = self.inner.writer_tx {
-            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-            let _ = tx.send(WriteCommand::FlushSync { done: done_tx });
-            let _ = done_rx.await;
-        }
-        if let Some(ref backend) = (*self.inner.shared_backend.load()).0 {
-            let _ = backend.flush().await;
-        }
+        self.flush().await;
     }
 }
 
@@ -543,5 +636,133 @@ impl SipFlowBuilder {
 impl Default for SipFlowBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::SipFlowSubdirs;
+    use crate::sipflow::backend::local::LocalBackend;
+
+    const CALL_ID: &str = "sipflow-flush-regression-call";
+
+    fn sip_request(call_id: &str, cseq: u32) -> rsipstack::sip::SipMessage {
+        let raw = format!(
+            "INVITE sip:bob@example.com SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK{cseq}\r\n\
+             From: <sip:alice@example.com>;tag=tag{cseq}\r\n\
+             To: <sip:bob@example.com>\r\n\
+             Call-ID: {call_id}\r\n\
+             CSeq: {cseq} INVITE\r\n\
+             Max-Forwards: 70\r\n\
+             Content-Length: 0\r\n\r\n"
+        );
+        rsipstack::sip::SipMessage::try_from(raw).expect("valid SIP request")
+    }
+
+    /// flush_count / flush_interval are set high so nothing is persisted
+    /// unless an explicit flush drains the pipeline.
+    fn test_backend(root: &std::path::Path) -> Arc<dyn SipFlowBackend> {
+        Arc::new(
+            LocalBackend::new(
+                root.to_string_lossy().into_owned(),
+                SipFlowSubdirs::None,
+                1000,
+                3600,
+                128,
+                None,
+                2,
+                false,
+                16000,
+                false,
+            )
+            .expect("local backend"),
+        )
+    }
+
+    async fn query_count(backend: &Arc<dyn SipFlowBackend>, call_id: &str) -> usize {
+        let now = chrono::Local::now();
+        backend
+            .query_flow(
+                call_id,
+                now - chrono::Duration::hours(1),
+                now + chrono::Duration::hours(1),
+            )
+            .await
+            .expect("query flow")
+            .len()
+    }
+
+    /// Core regression for the post-call query race: CDR hooks and query
+    /// endpoints flush through `SipFlow::flush`, which must drain the async
+    /// writer thread — including the last messages still sitting in its 50ms
+    /// batch — before flushing the backend pipeline.
+    #[tokio::test]
+    async fn sipflow_flush_drains_writer_and_backend_before_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = test_backend(dir.path());
+        let sipflow = SipFlow::new(Some(backend.clone()), Vec::new(), true);
+
+        for cseq in 1..=5u32 {
+            sipflow.record_sip(false, &sip_request(CALL_ID, cseq), None);
+        }
+
+        // Simulate the post-call query path: flush exactly like
+        // SipFlowUploadHook / the endpoints do (via the SipFlow wrapper).
+        sipflow.flush().await;
+
+        assert_eq!(
+            query_count(&backend, CALL_ID).await,
+            5,
+            "every recorded message must be visible after SipFlow::flush"
+        );
+    }
+
+    /// Hot-reload: `swap_backend` installs a fresh backend instance. The
+    /// SipFlow wrapper is unchanged, so its flush must keep draining the
+    /// writer thread into the *current* backend.
+    #[tokio::test]
+    async fn flush_after_swap_backend_targets_new_backend() {
+        let dir1 = tempfile::tempdir().unwrap();
+        let dir2 = tempfile::tempdir().unwrap();
+        let b1 = test_backend(dir1.path());
+        let sipflow = SipFlow::new(Some(b1), Vec::new(), true);
+
+        sipflow.record_sip(false, &sip_request(CALL_ID, 1), None);
+
+        let b2 = test_backend(dir2.path());
+        sipflow.swap_backend(b2.clone());
+        for cseq in 2..=4u32 {
+            sipflow.record_sip(false, &sip_request(CALL_ID, cseq), None);
+        }
+
+        sipflow.flush().await;
+
+        // Message 1 was still queued in the writer batch when the swap
+        // happened; the writer flushes its batch into the *current* backend,
+        // so all four messages end up visible through b2.
+        assert_eq!(
+            query_count(&b2, CALL_ID).await,
+            4,
+            "flush after swap must drain the writer into the new backend"
+        );
+    }
+
+    /// Sync-writer mode (enable_async_writer = false) records directly into
+    /// the backend; SipFlow::flush must still make the messages visible.
+    #[tokio::test]
+    async fn sync_writer_records_visible_after_sipflow_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = test_backend(dir.path());
+        let sipflow = SipFlow::new(Some(backend.clone()), Vec::new(), false);
+
+        for cseq in 1..=3u32 {
+            sipflow.record_sip(false, &sip_request(CALL_ID, cseq), None);
+        }
+
+        sipflow.flush().await;
+
+        assert_eq!(query_count(&backend, CALL_ID).await, 3);
     }
 }

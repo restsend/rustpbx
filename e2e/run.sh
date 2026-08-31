@@ -176,7 +176,7 @@ case "$TIER" in
     run_pytest custom "$TIER"
     ;;
   *)
-    # Marker shorthand: p2p / ivr / queue / sbc / voicemail / ...
+    # Marker shorthand: p2p / ivr / queue / voicemail / ...
     ensure_core_addons
     run_pytest "$TIER" -m "$TIER"
     ;;

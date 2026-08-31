@@ -750,6 +750,15 @@ struct SipFlowQueryParams {
     start: Option<String>,
     #[serde(default)]
     end: Option<String>,
+    /// Set to `0`/`false` to skip the pre-query flush (stale-but-fast reads).
+    #[serde(default)]
+    flush: Option<String>,
+}
+
+impl SipFlowQueryParams {
+    fn flush_enabled(&self) -> bool {
+        !matches!(self.flush.as_deref(), Some("0") | Some("false"))
+    }
 }
 
 async fn query_sipflow_flow(
@@ -789,6 +798,7 @@ async fn query_sipflow_flow(
     };
 
     // Parse time range
+    let flush_enabled = params.flush_enabled();
     let now = chrono::Local::now();
     let mut start_time = params.start.and_then(|s| parse_datetime(&s));
     let mut end_time = params.end.and_then(|s| parse_datetime(&s));
@@ -818,6 +828,12 @@ async fn query_sipflow_flow(
 
     let start_time = start_time.unwrap_or_else(|| now - chrono::Duration::hours(1));
     let end_time = end_time.unwrap_or(now);
+
+    // A query issued right after a call ends must see the tail messages
+    // still in the write pipeline: flush first (bounded), then query.
+    if flush_enabled {
+        crate::callrecord::sipflow::flush_with_deadline(sipflow).await;
+    }
 
     match backend.query_flow(&call_id, start_time, end_time).await {
         Ok(items) => {
@@ -1082,15 +1098,18 @@ async fn calls_query_handler(
                 qs
             );
             let client = client.clone();
-            handles.push((node, tokio::spawn(async move {
-                crate::proxy::cluster_forward::forward_json(
-                    &client,
-                    &url,
-                    reqwest::Method::GET,
-                    None,
-                )
-                .await
-            })));
+            handles.push((
+                node,
+                tokio::spawn(async move {
+                    crate::proxy::cluster_forward::forward_json(
+                        &client,
+                        &url,
+                        reqwest::Method::GET,
+                        None,
+                    )
+                    .await
+                }),
+            ));
         }
 
         for (node, handle) in handles {
@@ -2336,11 +2355,7 @@ mod calls_query_tests {
     use super::*;
     use crate::proxy::active_call_registry::{ActiveProxyCallEntry, ActiveProxyCallStatus};
 
-    fn entry(
-        session_id: &str,
-        caller: Option<&str>,
-        callee: Option<&str>,
-    ) -> ActiveProxyCallEntry {
+    fn entry(session_id: &str, caller: Option<&str>, callee: Option<&str>) -> ActiveProxyCallEntry {
         ActiveProxyCallEntry {
             session_id: session_id.to_string(),
             caller: caller.map(|s| s.to_string()),

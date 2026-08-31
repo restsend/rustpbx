@@ -541,6 +541,22 @@ async fn flow_handler(
     let start_dt = Local.timestamp_opt(start_ts, 0).unwrap();
     let end_dt = Local.timestamp_opt(end_ts, 0).unwrap();
 
+    // Flush before querying (bounded): a query issued right after a call ends
+    // must see the tail messages that are still in the ingest pipeline.
+    // `flush=0` skips the flush for stale-but-fast reads.
+    const FLUSH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+    let flush_enabled = !matches!(
+        params.get("flush").map(|s| s.as_str()),
+        Some("0") | Some("false")
+    );
+    if flush_enabled
+        && tokio::time::timeout(FLUSH_DEADLINE, state.backend.flush())
+            .await
+            .is_err()
+    {
+        warn!(callid, "flow: flush timed out, proceeding with query");
+    }
+
     let _start = std::time::Instant::now();
     match state.backend.query_flow(&callid, start_dt, end_dt).await {
         Ok(flow) => {

@@ -118,8 +118,8 @@ build_all() {
   step "build release binary (features: default,commerce,wholesale,contact-center)"
   export CC=clang RUST_MIN_STACK=1073741824
   cargo build --release --features default,commerce,wholesale,contact-center
-  step "build e2e debug binary (features: default,contact-center,addon-sbc,addon-wholesale)"
-  cargo build --features default,contact-center,addon-sbc,addon-wholesale
+  step "build e2e debug binary (features: default,contact-center,addon-wholesale)"
+  cargo build --features default,contact-center,addon-wholesale
   cp target/debug/rustpbx "$RUSTPBX_E2E_BIN"
   log "✓ release: $RUSTPBX_RELEASE, e2e: $RUSTPBX_E2E_BIN"
 }

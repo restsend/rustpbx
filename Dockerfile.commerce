@@ -38,7 +38,6 @@ RUN ln -s /app/config/sounds /app/sounds
 COPY ./src/addons/acme/static /app/static/acme
 COPY ./src/addons/transcript/static /app/static/transcript
 COPY ./src/addons/queue/static /app/static/queue
-COPY ./src/addons/sbc/static /app/static/sbc
 COPY ./src/addons/cc/static /app/static/cc
 COPY ./src/addons/wholesale/static /app/static/wholesale
 COPY ./src/addons/voicemail/static /app/static/voicemail
@@ -48,11 +47,8 @@ COPY ./src/addons/acme/templates /app/templates/acme
 COPY ./src/addons/archive/templates /app/templates/archive
 COPY ./src/addons/queue/templates /app/templates/queue
 COPY ./src/addons/transcript/templates /app/templates/transcript
-COPY ./src/addons/sbc/templates /app/templates/sbc
 COPY ./src/addons/cc/templates /app/templates/cc
 COPY ./src/addons/wholesale/templates /app/templates/wholesale
-COPY ./src/addons/endpoint_manager/templates /app/templates/endpoint_manager
-COPY ./src/addons/enterprise_auth/templates /app/templates/enterprise_auth
 COPY ./src/addons/ivr_editor/templates /app/templates/ivr_editor
 COPY ./src/addons/voicemail/templates /app/templates/voicemail
 
@@ -61,11 +57,8 @@ COPY ./src/addons/acme/locales /app/locales/acme
 COPY ./src/addons/archive/locales /app/locales/archive
 COPY ./src/addons/queue/locales /app/locales/queue
 COPY ./src/addons/transcript/locales /app/locales/transcript
-COPY ./src/addons/sbc/locales /app/locales/sbc
 COPY ./src/addons/cc/locales /app/locales/cc
 COPY ./src/addons/wholesale/locales /app/locales/wholesale
-COPY ./src/addons/endpoint_manager/locales /app/locales/endpoint_manager
-COPY ./src/addons/enterprise_auth/locales /app/locales/enterprise_auth
 COPY ./src/addons/ivr_editor/locales /app/locales/ivr_editor
 COPY ./src/addons/voicemail/locales /app/locales/voicemail
 

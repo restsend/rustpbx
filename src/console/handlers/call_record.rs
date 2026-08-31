@@ -113,6 +113,15 @@ struct RecordingPlaybackQuery {
 struct SipFlowRequestQuery {
     #[serde(default)]
     detail: bool,
+    /// Set to `0`/`false` to skip the pre-query flush (stale-but-fast reads).
+    #[serde(default)]
+    flush: Option<bool>,
+}
+
+impl SipFlowRequestQuery {
+    fn flush_enabled(&self) -> bool {
+        self.flush.unwrap_or(true)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -487,6 +496,11 @@ async fn download_call_record_sip_flow(
         let mut leg_error: Option<String> = None;
 
         if query.detail {
+            // Flush first (bounded) so a query issued right after a call
+            // ends sees the tail messages still in the write pipeline.
+            if query.flush_enabled() {
+                crate::callrecord::sipflow::flush_with_deadline(sipflow).await;
+            }
             match backend.query_flow(cid, start_time, end_time).await {
                 Ok(items) => {
                     sip_msg_count = items.len();
@@ -672,13 +686,7 @@ async fn stream_call_recording(
         let start_time = (call_time - chrono::Duration::hours(1)).with_timezone(&chrono::Local);
         let end_time = (call_time + chrono::Duration::hours(2)).with_timezone(&chrono::Local);
 
-        if let Err(err) = backend.flush().await {
-            warn!(
-                call_id = %record.call_id,
-                "failed to flush SipFlow backend before recording query: {}",
-                err
-            );
-        }
+        crate::callrecord::sipflow::flush_with_deadline(sipflow).await;
 
         let wav_result: Result<tempfile::NamedTempFile, _> = backend
             .generate_wav_file(&record.call_id, start_time, end_time, stream_leg)

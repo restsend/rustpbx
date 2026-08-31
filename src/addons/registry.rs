@@ -57,16 +57,6 @@ impl AddonRegistry {
         #[cfg(feature = "addon-transcript")]
         addons.push(Box::new(super::transcript::TranscriptAddon::new()));
 
-        // Endpoint Manager Addon
-        #[cfg(feature = "addon-endpoint-manager")]
-        addons.push(Box::new(
-            super::endpoint_manager::EndpointManagerAddon::new(),
-        ));
-
-        // Enterprise Auth Addon
-        #[cfg(feature = "addon-enterprise-auth")]
-        addons.push(Box::new(super::enterprise_auth::EnterpriseAuthAddon::new()));
-
         // Voicemail Addon (Commercial)
         #[cfg(feature = "addon-voicemail")]
         addons.push(Box::new(super::voicemail::VoicemailAddon::new()));
@@ -74,10 +64,6 @@ impl AddonRegistry {
         // IVR Editor Addon (Commercial)
         #[cfg(feature = "addon-ivr-editor")]
         addons.push(Box::new(super::ivr_editor::IvrEditorAddon::new()));
-
-        // SBC Addon
-        #[cfg(feature = "addon-sbc")]
-        addons.push(Box::new(super::sbc::SbcAddon::new()));
 
         // Queue Addon
         addons.push(Box::new(super::queue::QueueAddon::new()));
@@ -164,18 +150,13 @@ impl AddonRegistry {
 /// Prefer [`AddonRegistry::merge_error_catalogs_into`] when a live registry is
 /// available (app startup). This free function remains for tests that cannot
 /// construct a full registry.
-#[cfg(any(feature = "addon-wholesale", feature = "addon-sbc", test))]
+#[cfg(any(feature = "addon-wholesale", test))]
 pub fn merge_compiled_addon_error_catalogs(reg: &mut crate::call_errors::CallErrRegistry) {
     let _ = &reg;
     #[cfg(feature = "addon-wholesale")]
     {
         use super::Addon;
         reg.merge_slice(super::wholesale::WholesaleAddon::new().error_catalog());
-    }
-    #[cfg(feature = "addon-sbc")]
-    {
-        use super::Addon;
-        reg.merge_slice(super::sbc::SbcAddon::new().error_catalog());
     }
 }
 

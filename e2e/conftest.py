@@ -177,8 +177,8 @@ def _parse_addon_list(raw: str) -> list[str]:
 # (file-based IVR/queue/p2p). Do NOT put wholesale here: WholesaleRouteInvite
 # replaces DefaultRouteInvite and returns NotHandled for non-wholesale trunks,
 # which makes every IVR/queue/app route look like "user offline" (480).
-# Wholesale / SBC / voicemail tests opt in via ConfigBuilder.set_wholesale(),
-# add_sbc_jsonrpc(), add_voicemail().
+# Wholesale / voicemail tests opt in via ConfigBuilder.set_wholesale(),
+# add_voicemail().
 _raw_addons = os.environ.get("RUSTPBX_E2E_ADDONS", "cc")
 DEFAULT_ADDONS = _parse_addon_list(_raw_addons)
 if "wholesale" in DEFAULT_ADDONS:
@@ -199,7 +199,7 @@ if not DEFAULT_ADDONS:
 DEFAULT_FEATURES = _parse_addon_list(
     os.environ.get(
         "RUSTPBX_E2E_FEATURES",
-        "addon-cc,addon-sbc,addon-voicemail,addon-wholesale",
+        "addon-cc,addon-voicemail,addon-wholesale",
     )
 )
 

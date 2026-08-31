@@ -171,8 +171,6 @@ See [API Integration Guide](docs/api_integration_guide.md) and [RWI Protocol](do
 | **VoIP Wholesale** (VOS3000 alt) | ❌ | ✅ |
 | **IVR Visual Editor** | ❌ | ✅ |
 | **Voicemail Pro** | ❌ | ✅ |
-| **Enterprise Auth** (LDAP/SAML/MFA) | ❌ | ✅ |
-| **Endpoint Manager** (auto-provisioning) | ❌ | ✅ |
 
 ---
 
@@ -260,10 +258,7 @@ Commerce addons are managed as git submodules under `src/addons/`:
 |-----------|-----------|
 | `src/addons/cc` | https://cnb.cool/miuda.ai/cc |
 | `src/addons/wholesale` | https://cnb.cool/miuda.ai/wholesale |
-| `src/addons/endpoint_manager` | https://cnb.cool/miuda.ai/endpoint_manager |
-| `src/addons/enterprise_auth` | https://cnb.cool/miuda.ai/enterprise_auth |
 | `src/addons/ivr_editor` | https://cnb.cool/miuda.ai/ivr_editor |
-| `src/addons/sbc` | https://cnb.cool/miuda.ai/sbc |
 | `src/addons/telemetry` | https://cnb.cool/miuda.ai/telemetry |
 | `src/addons/voicemail` | https://cnb.cool/miuda.ai/voicemail |
 

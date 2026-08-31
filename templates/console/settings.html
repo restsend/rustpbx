@@ -552,169 +552,102 @@
                         <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.network_profiles" | t }}</h2>
                         <p class="text-xs text-slate-500">{{ "settings_page.network_profiles_desc" | t }}</p>
                     </div>
-                    <div class="flex flex-wrap gap-2">
-                        <button type="button"
-                            class="inline-flex items-center justify-center rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
-                            @click="addNetworkProfile()" :disabled="networkProfilesProcessing">
-                            {{ "settings_page.network_profile_add" | t }}
-                        </button>
-                    </div>
                 </div>
-                <template x-if="!networkProfilesMeta.explicit && profileDrafts.length <= 1">
+                <template x-if="!networkProfilesMeta.explicit">
                     <div class="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
                         {{ "settings_page.network_profiles_synthetic_hint" | t }}
                     </div>
                 </template>
                 <div class="mt-6 grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)]">
                     <div class="space-y-2">
-                        <template x-for="profile in profileDrafts" :key="profile.id">
+                        <template x-for="profile in networkProfiles" :key="profile.id">
                             <button type="button"
                                 class="flex w-full flex-col rounded-lg border px-3 py-2 text-left text-sm transition"
                                 :class="selectedProfileId === profile.id ? 'border-sky-300 bg-sky-50 text-sky-800' : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'"
                                 @click="selectNetworkProfile(profile.id)">
                                 <span class="font-semibold" x-text="profile.label || profile.id"></span>
                                 <span class="text-[11px] text-slate-400 font-mono" x-text="profile.id"></span>
+                                <span class="mt-1 text-[10px] font-semibold text-sky-600"
+                                    x-show="profile.id === networkProfilesMeta.default">
+                                    {{ "settings_page.network_profile_default" | t }}
+                                </span>
                                 <span class="mt-1 text-[10px] text-slate-400"
                                     x-show="(profile.trunk_refs || []).length"
                                     x-text="`${(profile.trunk_refs || []).length} trunk(s)`"></span>
                             </button>
                         </template>
-                        <p x-show="!profileDrafts.length" class="text-xs text-slate-400">{{ "settings_page.network_profiles_empty" | t }}</p>
+                        <p x-show="!networkProfiles.length" class="text-xs text-slate-400">{{ "settings_page.network_profiles_empty" | t }}</p>
                     </div>
-                    <template x-if="selectedProfileDraft()">
-                        <form class="space-y-4 rounded-xl border border-slate-200 p-4" @submit.prevent="saveNetworkProfiles">
+                    <template x-if="selectedProfile()">
+                        <dl class="space-y-5 rounded-xl border border-slate-200 p-4 text-sm">
                             <div class="grid gap-4 md:grid-cols-2">
-                                <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                    {{ "settings_page.network_profile_id" | t }}
-                                    <input type="text" x-model="selectedProfileDraft().id" :disabled="networkProfilesProcessing || selectedProfileDraft()._locked"
-                                        class="font-mono rounded-md border border-slate-200 px-3 py-2 text-sm focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" />
-                                </label>
-                                <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                    {{ "settings_page.network_profile_label" | t }}
-                                    <input type="text" x-model="selectedProfileDraft().label" :disabled="networkProfilesProcessing"
-                                        class="rounded-md border border-slate-200 px-3 py-2 text-sm focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" />
-                                </label>
-                                <label class="md:col-span-2 flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                    {{ "settings_page.network_profile_description" | t }}
-                                    <input type="text" x-model="selectedProfileDraft().description" :disabled="networkProfilesProcessing"
-                                        class="rounded-md border border-slate-200 px-3 py-2 text-sm focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" />
-                                </label>
-                                <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                    {{ "settings_page.network_profile_default" | t }}
-                                    <select x-model="networkProfilesMeta.default" :disabled="networkProfilesProcessing"
-                                        class="rounded-md border border-slate-200 px-3 py-2 text-sm focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                        <template x-for="profile in profileDrafts" :key="'def-' + profile.id">
-                                            <option :value="profile.id" x-text="profile.label || profile.id"></option>
-                                        </template>
-                                    </select>
-                                </label>
-                                <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                    {{ "settings_page.network_profile_bind_ip" | t }}
-                                    <input type="text" x-model="selectedProfileDraft().bind_ip" :disabled="networkProfilesProcessing"
-                                        placeholder="0.0.0.0"
-                                        class="font-mono rounded-md border border-slate-200 px-3 py-2 text-sm focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" />
-                                </label>
+                                <div class="flex flex-col gap-1">
+                                    <dt class="text-xs font-medium uppercase tracking-wide text-slate-400">{{ "settings_page.network_profile_id" | t }}</dt>
+                                    <dd class="font-mono text-slate-800" x-text="selectedProfile().id"></dd>
+                                </div>
+                                <div class="flex flex-col gap-1">
+                                    <dt class="text-xs font-medium uppercase tracking-wide text-slate-400">{{ "settings_page.network_profile_label" | t }}</dt>
+                                    <dd class="text-slate-800" x-text="selectedProfile().label || '—'"></dd>
+                                </div>
+                                <div class="md:col-span-2 flex flex-col gap-1">
+                                    <dt class="text-xs font-medium uppercase tracking-wide text-slate-400">{{ "settings_page.network_profile_description" | t }}</dt>
+                                    <dd class="text-slate-800" x-text="selectedProfile().description || '—'"></dd>
+                                </div>
+                                <div class="flex flex-col gap-1">
+                                    <dt class="text-xs font-medium uppercase tracking-wide text-slate-400">{{ "settings_page.network_profile_default" | t }}</dt>
+                                    <dd class="text-slate-800" x-text="selectedProfile().id === networkProfilesMeta.default ? '{{ "common.yes" | t }}' : '{{ "common.no" | t }}'"></dd>
+                                </div>
+                                <div class="flex flex-col gap-1">
+                                    <dt class="text-xs font-medium uppercase tracking-wide text-slate-400">{{ "settings_page.network_profile_bind_ip" | t }}</dt>
+                                    <dd class="font-mono text-slate-800" x-text="selectedProfile().bind_ip || '—'"></dd>
+                                </div>
                             </div>
                             <div class="border-t border-slate-100 pt-4">
                                 <h3 class="text-sm font-semibold text-slate-800">{{ "settings_page.rtp_external_ip" | t }}</h3>
-                                <div class="mt-2 flex flex-wrap gap-2 text-xs font-semibold">
-                                    <label class="inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2"
-                                        :class="selectedProfileDraft().external_ip_mode === 'none' ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 bg-white text-slate-600'">
-                                        <input type="radio" value="none" x-model="selectedProfileDraft().external_ip_mode" class="sr-only">{{ "settings_page.ip_mode_none" | t }}
-                                    </label>
-                                    <label class="inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2"
-                                        :class="selectedProfileDraft().external_ip_mode === 'manual' ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 bg-white text-slate-600'">
-                                        <input type="radio" value="manual" x-model="selectedProfileDraft().external_ip_mode" class="sr-only">{{ "settings_page.ip_mode_manual" | t }}
-                                    </label>
-                                    <label class="inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2"
-                                        :class="selectedProfileDraft().external_ip_mode === 'auto' ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 bg-white text-slate-600'">
-                                        <input type="radio" value="auto" x-model="selectedProfileDraft().external_ip_mode" class="sr-only">{{ "settings_page.ip_mode_auto" | t }}
-                                    </label>
-                                </div>
-                                <div class="mt-2" x-show="selectedProfileDraft().external_ip_mode === 'manual'">
-                                    <input type="text" x-model="selectedProfileDraft().external_ip" :disabled="networkProfilesProcessing"
-                                        class="w-full font-mono rounded-md border border-slate-200 px-3 py-2 text-sm" />
-                                </div>
-                                <div class="mt-2" x-show="selectedProfileDraft().external_ip_mode === 'auto'">
-                                    <input type="text" x-model="selectedProfileDraft().auto_external_ip" :disabled="networkProfilesProcessing"
-                                        placeholder="http://ifconfig.me"
-                                        class="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" />
+                                <div class="mt-2 flex flex-col gap-1">
+                                    <dd class="text-slate-800">
+                                        <span x-show="selectedProfile().external_ip_mode === 'none'">{{ "settings_page.ip_mode_none" | t }}</span>
+                                        <span x-show="selectedProfile().external_ip_mode === 'manual'"
+                                            x-text="selectedProfile().external_ip"></span>
+                                        <span x-show="selectedProfile().external_ip_mode === 'auto'"
+                                            x-text="`{{ "settings_page.ip_mode_auto" | t }} (${selectedProfile().auto_external_ip})`"></span>
+                                    </dd>
                                 </div>
                             </div>
                             <div class="border-t border-slate-100 pt-4">
                                 <h3 class="text-sm font-semibold text-slate-800">{{ "settings_page.sip_contact_ip" | t }}</h3>
-                                <div class="mt-2 flex flex-wrap gap-2 text-xs font-semibold">
-                                    <label class="inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2"
-                                        :class="selectedProfileDraft().sip_external_ip_mode === 'follow_rtp' ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 bg-white text-slate-600'">
-                                        <input type="radio" value="follow_rtp" x-model="selectedProfileDraft().sip_external_ip_mode" class="sr-only">{{ "settings_page.sip_ip_mode_follow_rtp" | t }}
-                                    </label>
-                                    <label class="inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2"
-                                        :class="selectedProfileDraft().sip_external_ip_mode === 'bind' ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 bg-white text-slate-600'">
-                                        <input type="radio" value="bind" x-model="selectedProfileDraft().sip_external_ip_mode" class="sr-only">{{ "settings_page.sip_ip_mode_bind" | t }}
-                                    </label>
-                                    <label class="inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2"
-                                        :class="selectedProfileDraft().sip_external_ip_mode === 'manual' ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 bg-white text-slate-600'">
-                                        <input type="radio" value="manual" x-model="selectedProfileDraft().sip_external_ip_mode" class="sr-only">{{ "settings_page.ip_mode_manual" | t }}
-                                    </label>
-                                    <label class="inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2"
-                                        :class="selectedProfileDraft().sip_external_ip_mode === 'auto' ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 bg-white text-slate-600'">
-                                        <input type="radio" value="auto" x-model="selectedProfileDraft().sip_external_ip_mode" class="sr-only">{{ "settings_page.ip_mode_auto" | t }}
-                                    </label>
-                                </div>
-                                <div class="mt-2" x-show="selectedProfileDraft().sip_external_ip_mode === 'manual'">
-                                    <input type="text" x-model="selectedProfileDraft().sip_external_ip" :disabled="networkProfilesProcessing"
-                                        class="w-full font-mono rounded-md border border-slate-200 px-3 py-2 text-sm" />
-                                </div>
-                                <div class="mt-2" x-show="selectedProfileDraft().sip_external_ip_mode === 'auto'">
-                                    <input type="text" x-model="selectedProfileDraft().auto_sip_external_ip" :disabled="networkProfilesProcessing"
-                                        class="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" />
-                                </div>
-                                <label class="mt-3 flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                    {{ "settings_page.local_networks" | t }}
-                                    <textarea rows="3" x-model="selectedProfileDraft().local_networks" :disabled="networkProfilesProcessing"
-                                        class="font-mono rounded-md border border-slate-200 px-3 py-2 text-sm"></textarea>
-                                </label>
-                                <label class="mt-2 inline-flex items-center gap-2 text-sm text-slate-700">
-                                    <input type="checkbox" x-model="selectedProfileDraft().contact_lan_use_bind" :disabled="networkProfilesProcessing" class="rounded border-slate-300 text-sky-600" />
-                                    {{ "settings_page.contact_lan_use_bind" | t }}
-                                </label>
-                            </div>
-                            <div class="grid gap-4 md:grid-cols-2 border-t border-slate-100 pt-4">
-                                <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                    {{ "settings_page.rtp_start_port" | t }}
-                                    <input type="number" min="1" max="65535" x-model="selectedProfileDraft().rtp_start_port" :disabled="networkProfilesProcessing"
-                                        class="rounded-md border border-slate-200 px-3 py-2 text-sm" />
-                                </label>
-                                <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                    {{ "settings_page.rtp_end_port" | t }}
-                                    <input type="number" min="1" max="65535" x-model="selectedProfileDraft().rtp_end_port" :disabled="networkProfilesProcessing"
-                                        class="rounded-md border border-slate-200 px-3 py-2 text-sm" />
-                                </label>
-                            </div>
-                            <div class="flex items-center justify-between gap-2 border-t border-slate-200 pt-3 text-xs text-slate-500">
-                                <div class="flex gap-2">
-                                    <button type="button"
-                                        class="inline-flex items-center justify-center rounded-md border border-rose-200 px-3 py-2 text-xs font-semibold text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
-                                        @click="removeNetworkProfile(selectedProfileId)"
-                                        :disabled="networkProfilesProcessing || (selectedProfileDraft()?.trunk_refs || []).length > 0"
-                                        x-show="profileDrafts.length > 0">
-                                        {{ "settings_page.network_profile_remove" | t }}
-                                    </button>
-                                </div>
-                                <div class="flex gap-2">
-                                    <button type="button"
-                                        class="inline-flex items-center justify-center rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
-                                        @click="resetNetworkProfileDrafts()" :disabled="networkProfilesProcessing">
-                                        {{ "common.reset" | t }}
-                                    </button>
-                                    <button type="submit"
-                                        class="inline-flex items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
-                                        :disabled="networkProfilesProcessing">
-                                        <span x-text="networkProfilesProcessing ? tt('common.saving') : tt('common.save_changes')"></span>
-                                    </button>
+                                <div class="mt-2 flex flex-col gap-1">
+                                    <dd class="text-slate-800">
+                                        <span x-show="selectedProfile().sip_external_ip_mode === 'follow_rtp'">{{ "settings_page.sip_ip_mode_follow_rtp" | t }}</span>
+                                        <span x-show="selectedProfile().sip_external_ip_mode === 'bind'">{{ "settings_page.sip_ip_mode_bind" | t }}</span>
+                                        <span x-show="selectedProfile().sip_external_ip_mode === 'manual'"
+                                            x-text="selectedProfile().sip_external_ip"></span>
+                                        <span x-show="selectedProfile().sip_external_ip_mode === 'auto'"
+                                            x-text="`{{ "settings_page.ip_mode_auto" | t }} (${selectedProfile().auto_sip_external_ip})`"></span>
+                                    </dd>
+                                    <dd class="text-xs text-slate-500" x-show="selectedProfile().sip_external_ip_mode === 'bind'">
+                                        {{ "settings_page.contact_lan_use_bind" | t }}:
+                                        <span x-text="selectedProfile().contact_lan_use_bind ? '{{ "common.yes" | t }}' : '{{ "common.no" | t }}'"></span>
+                                    </dd>
                                 </div>
                             </div>
-                        </form>
+                            <div class="grid gap-4 border-t border-slate-100 pt-4 md:grid-cols-2">
+                                <div class="flex flex-col gap-1">
+                                    <dt class="text-xs font-medium uppercase tracking-wide text-slate-400">{{ "settings_page.local_networks" | t }}</dt>
+                                    <dd class="font-mono text-xs text-slate-800 whitespace-pre-line"
+                                        x-text="selectedProfile().local_networks.length ? selectedProfile().local_networks.join('\n') : '—'"></dd>
+                                </div>
+                                <div class="flex flex-col gap-1">
+                                    <dt class="text-xs font-medium uppercase tracking-wide text-slate-400">{{ "settings_page.rtp_start_port" | t }} – {{ "settings_page.rtp_end_port" | t }}</dt>
+                                    <dd class="font-mono text-slate-800"
+                                        x-text="selectedProfile().rtp_start_port || selectedProfile().rtp_end_port ? `${selectedProfile().rtp_start_port || '—'} – ${selectedProfile().rtp_end_port || '—'}` : '—'"></dd>
+                                </div>
+                            </div>
+                            <div class="border-t border-slate-100 pt-4 text-xs text-slate-500" x-show="(selectedProfile().trunk_refs || []).length">
+                                <span class="font-semibold" x-text="`${(selectedProfile().trunk_refs || []).length} trunk(s)`"></span>:
+                                <span class="font-mono" x-text="(selectedProfile().trunk_refs || []).join(', ')"></span>
+                            </div>
+                        </dl>
                     </template>
                 </div>
             </div>
@@ -3233,7 +3166,7 @@
                 const tt = options?.t || {};
                 return [
                     { id: 'platform', label: tget(tt, 'settings_page.platform_overview') || 'Platform overview' },
-                    { id: 'network_profiles', label: tget(tt, 'settings_page.network_profiles') || 'Network profiles', description: tget(tt, 'settings_page.network_profiles_tab_desc') || 'RTP & SIP Contact per path' },
+                    { id: 'network_profiles', label: tget(tt, 'settings_page.network_profiles') || 'Network profiles' },
                     { id: 'proxy', label: tget(tt, 'settings_page.proxy_settings') || 'Proxy settings' },
                     { id: 'recording_storage', label: tget(tt, 'settings_page.recording_storage') || 'Recording & Storage' },
                     { id: 'security', label: tget(tt, 'settings_page.security_posture') || 'Security posture' },
@@ -3272,9 +3205,8 @@
             },
             platformProcessing: false,
             networkProfilesMeta: { default: 'default', explicit: false },
-            profileDrafts: [],
+            networkProfiles: [],
             selectedProfileId: '',
-            networkProfilesProcessing: false,
             proxyDraft: {
                 realms: '',
                 locator_webhook: {
@@ -3577,7 +3509,7 @@
                     }
                 }
                 this.initPlatformDraft();
-                this.initNetworkProfileDrafts();
+                this.initNetworkProfiles();
                 this.initProxyDraft();
                 this.initStorageDraft();
                 this.initSecurityDraft();
@@ -4654,7 +4586,7 @@
                     const r = await fetch('{{ api_prefix | safe }}/pending-reloads');
                     if (r.ok) {
                         const d = await r.json();
-                        this.pendingReload = !!(d.pending?.routes || d.pending?.trunks || d.pending?.sbc_routes || d.pending?.sbc_trunks || d.pending?.queues || d.pending?.app || d.pending?.acl);
+                        this.pendingReload = !!(d.pending?.routes || d.pending?.trunks || d.pending?.queues || d.pending?.app || d.pending?.acl);
                     }
                 } catch (_) {}
             },
@@ -5365,21 +5297,21 @@
                     this.stopLogFollow();
                 }
             },
-            initNetworkProfileDrafts() {
+            initNetworkProfiles() {
                 const meta = this.rawSettingsNetworkProfiles();
                 this.networkProfilesMeta = {
                     default: meta.default || 'default',
                     explicit: !!meta.explicit,
                 };
                 const profiles = Array.isArray(meta.profiles) ? meta.profiles : [];
-                this.profileDrafts = profiles.map((p) => this.profileDraftFromApi(p));
-                if (!this.profileDrafts.length) {
-                    this.profileDrafts = [this.profileDraftFromApi({ id: 'default', label: 'Default' })];
+                this.networkProfiles = profiles.map((p) => this.profileFromApi(p));
+                if (!this.networkProfiles.length) {
+                    this.networkProfiles = [this.profileFromApi({ id: 'default', label: 'Default' })];
                 }
-                const selectedExists = this.profileDrafts.some((p) => p.id === this.selectedProfileId);
+                const selectedExists = this.networkProfiles.some((p) => p.id === this.selectedProfileId);
                 if (!selectedExists) {
                     this.selectedProfileId = this.networkProfilesMeta.default
-                        || this.profileDrafts[0]?.id
+                        || this.networkProfiles[0]?.id
                         || '';
                 }
             },
@@ -5389,7 +5321,7 @@
                     : (this.rawSettings || {});
                 return data.network_profiles || {};
             },
-            profileDraftFromApi(profile) {
+            profileFromApi(profile) {
                 const manualIp = profile?.external_ip || '';
                 const autoUrl = profile?.auto_external_ip || '';
                 const sipManual = profile?.sip_external_ip || '';
@@ -5409,148 +5341,20 @@
                     auto_sip_external_ip: sipAuto,
                     sip_external_ip_mode: sipMode,
                     local_networks: Array.isArray(profile?.local_networks)
-                        ? profile.local_networks.join('\n')
-                        : '',
+                        ? profile.local_networks.slice()
+                        : [],
                     contact_lan_use_bind: profile?.contact_lan_use_bind !== false,
                     bind_ip: profile?.bind_ip || '',
                     rtp_start_port: profile?.rtp_start_port != null ? String(profile.rtp_start_port) : '',
                     rtp_end_port: profile?.rtp_end_port != null ? String(profile.rtp_end_port) : '',
                     trunk_refs: Array.isArray(profile?.trunk_refs) ? profile.trunk_refs.slice() : [],
-                    _locked: false,
                 };
             },
-            selectedProfileDraft() {
-                return this.profileDrafts.find((p) => p.id === this.selectedProfileId) || null;
+            selectedProfile() {
+                return this.networkProfiles.find((p) => p.id === this.selectedProfileId) || null;
             },
             selectNetworkProfile(id) {
                 this.selectedProfileId = id;
-            },
-            addNetworkProfile() {
-                const base = `profile-${Date.now().toString(36)}`;
-                const draft = this.profileDraftFromApi({ id: base, label: base });
-                this.profileDrafts.push(draft);
-                this.selectedProfileId = base;
-                this.networkProfilesMeta.explicit = true;
-            },
-            removeNetworkProfile(id) {
-                if ((this.selectedProfileDraft()?.trunk_refs || []).length) return;
-                this.profileDrafts = this.profileDrafts.filter((p) => p.id !== id);
-                if (!this.profileDrafts.length) {
-                    this.selectedProfileId = '';
-                    this.networkProfilesMeta.default = '';
-                    return;
-                }
-                if (this.networkProfilesMeta.default === id) {
-                    this.networkProfilesMeta.default = this.profileDrafts[0].id;
-                }
-                if (this.selectedProfileId === id) {
-                    this.selectedProfileId = this.profileDrafts[0].id;
-                }
-            },
-            resetNetworkProfileDrafts() {
-                this.initNetworkProfileDrafts();
-            },
-            buildNetworkProfilePayload(draft) {
-                const startPort = this.parsePortValue(draft.rtp_start_port);
-                const endPort = this.parsePortValue(draft.rtp_end_port);
-                const payload = {
-                    id: (draft.id || '').trim(),
-                    label: this.normalizeOptionalString(draft.label),
-                    description: this.normalizeOptionalString(draft.description),
-                    external_ip: draft.external_ip_mode === 'manual'
-                        ? this.normalizeOptionalString(draft.external_ip)
-                        : null,
-                    auto_external_ip: draft.external_ip_mode === 'auto'
-                        ? this.normalizeOptionalString(draft.auto_external_ip)
-                        : null,
-                    sip_external_ip: draft.sip_external_ip_mode === 'manual'
-                        ? this.normalizeOptionalString(draft.sip_external_ip)
-                        : null,
-                    auto_sip_external_ip: draft.sip_external_ip_mode === 'auto'
-                        ? this.normalizeOptionalString(draft.auto_sip_external_ip)
-                        : null,
-                    local_networks: (draft.local_networks || '')
-                        .split('\n')
-                        .map((line) => line.trim())
-                        .filter(Boolean),
-                    contact_lan_use_bind: !!draft.contact_lan_use_bind,
-                    sip_contact_always_bind: draft.sip_external_ip_mode === 'bind',
-                    bind_ip: this.normalizeOptionalString(draft.bind_ip),
-                    rtp_start_port: startPort,
-                    rtp_end_port: endPort,
-                };
-                if (draft.sip_external_ip_mode === 'follow_rtp' || draft.sip_external_ip_mode === 'bind') {
-                    payload.sip_external_ip = null;
-                    payload.auto_sip_external_ip = null;
-                }
-                if (draft.sip_external_ip_mode === 'follow_rtp') {
-                    payload.sip_contact_always_bind = false;
-                }
-                return payload;
-            },
-            async saveNetworkProfiles() {
-                if (this.networkProfilesProcessing) return;
-                for (const draft of this.profileDrafts) {
-                    if (!(draft.id || '').trim()) {
-                        this.$dispatch('toast', { title: 'Invalid profile', message: 'Profile id is required.' });
-                        return;
-                    }
-                    const startPort = this.parsePortValue(draft.rtp_start_port);
-                    const endPort = this.parsePortValue(draft.rtp_end_port);
-                    if (startPort === undefined || endPort === undefined) {
-                        this.$dispatch('toast', { title: 'Invalid port', message: 'RTP ports must be between 1 and 65535.' });
-                        return;
-                    }
-                    if (startPort !== null && endPort !== null && startPort > endPort) {
-                        this.$dispatch('toast', { title: 'Invalid range', message: 'RTP start port must be <= end port.' });
-                        return;
-                    }
-                }
-                const ids = this.profileDrafts.map((p) => p.id.trim());
-                if (new Set(ids).size !== ids.length) {
-                    this.$dispatch('toast', { title: 'Duplicate id', message: 'Each profile must have a unique id.' });
-                    return;
-                }
-                const body = {
-                    default: this.networkProfilesMeta.default || ids[0] || null,
-                    profiles: this.profileDrafts.map((d) => this.buildNetworkProfilePayload(d)),
-                };
-                this.networkProfilesProcessing = true;
-                try {
-                    const response = await fetch(`${this.apiBase}/settings/config/network-profiles`, {
-                        method: 'PATCH',
-                        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-                        body: JSON.stringify(body),
-                    });
-                    const data = await response.json().catch(() => ({}));
-                    if (!response.ok) {
-                        throw new Error(data?.message || 'Failed to update network profiles');
-                    }
-                    const meta = data.network_profiles || {};
-                    this.networkProfilesMeta = {
-                        default: meta.default || body.default,
-                        explicit: meta.explicit !== false,
-                    };
-                    this.profileDrafts = (meta.profiles || []).map((p) => this.profileDraftFromApi(p));
-                    this.selectedProfileId = this.networkProfilesMeta.default || this.profileDrafts[0]?.id || '';
-                    this.$dispatch('toast', {
-                        title: 'Settings saved',
-                        message: data?.message || 'Network profiles saved.',
-                    });
-                    this.lastOperation = {
-                        label: 'Network profiles',
-                        timestamp: new Date().toLocaleString(),
-                        status: data?.applied ? 'Applied.' : 'Saved.',
-                    };
-                } catch (err) {
-                    console.error(err);
-                    this.$dispatch('toast', {
-                        title: 'Update failed',
-                        message: err?.message || 'Unable to update network profiles.',
-                    });
-                } finally {
-                    this.networkProfilesProcessing = false;
-                }
             },
             initPlatformDraft() {
                 const rtp = this.proxyConfig?.rtp || {};

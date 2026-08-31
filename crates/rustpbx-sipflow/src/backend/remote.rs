@@ -4,7 +4,7 @@ use bytes::BufMut;
 use chrono::{DateTime, Local};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 use std::time::Duration;
 use tokio::net::lookup_host;
@@ -67,7 +67,62 @@ const MIN_CHANNEL_CAPACITY: usize = 1;
 /// Per-node channel capacity as fraction of total ingress capacity.
 enum Command {
     RecordItem { call_id: String, item: SipFlowItem },
+    FlushBarrier { token: Arc<BarrierToken> },
 }
+
+/// Per-node channel command: either a data packet or a flush barrier marker.
+enum NodeCommand {
+    Packet(Packet),
+    FlushBarrier(Arc<BarrierToken>),
+}
+
+/// Countdown token shared by a flush barrier. Every per-node sender thread
+/// that receives the barrier first sends out its pending UDP batch and then
+/// decrements the counter; the last one notifies all waiters. Nodes whose
+/// barrier could not be enqueued (full/closed channel) are decremented by
+/// the dispatcher instead, so the countdown always reaches zero.
+struct BarrierToken {
+    remaining: AtomicUsize,
+    notify: tokio::sync::Notify,
+}
+
+impl BarrierToken {
+    fn new(total: usize) -> Self {
+        Self {
+            remaining: AtomicUsize::new(total),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn complete_one(&self) {
+        if self.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.notify.notify_waiters();
+        }
+    }
+
+    #[cfg(test)]
+    fn is_complete(&self) -> bool {
+        self.remaining.load(Ordering::Acquire) == 0
+    }
+
+    /// Returns true once every expected node has acknowledged the barrier.
+    async fn completed(&self) -> bool {
+        if self.remaining.load(Ordering::Acquire) == 0 {
+            return true;
+        }
+        // Register the waiter *before* re-checking the counter so a concurrent
+        // `complete_one` cannot be missed between check and await.
+        let notified = self.notify.notified();
+        if self.remaining.load(Ordering::Acquire) == 0 {
+            return true;
+        }
+        notified.await;
+        true
+    }
+}
+
+/// Maximum wait for all sender threads to acknowledge a flush barrier.
+const BARRIER_WAIT: Duration = Duration::from_secs(2);
 
 /// Remote backend that sends data to one of several remote sipflow servers
 /// via UDP (write) and HTTP (read). The target node is selected by
@@ -189,7 +244,7 @@ impl RemoteBackend {
         let mut sender_handles = Vec::with_capacity(node_count);
         let cancel_sender = cancel_token.clone();
         for i in 0..node_count {
-            let (node_tx, node_rx) = mpsc::sync_channel::<Packet>(per_node_cap);
+            let (node_tx, node_rx) = mpsc::sync_channel::<NodeCommand>(per_node_cap);
             node_senders.push(node_tx);
 
             let sent_count = Arc::new(AtomicU64::new(0));
@@ -327,9 +382,15 @@ fn build_packet(call_id: String, item: SipFlowItem, client_id: u32) -> Packet {
 /// hashing.  This is a pure routing layer — no accumulation, no batch
 /// processing, no compression.  Packets that cannot be enqueued to a node
 /// channel (channel full) are silently dropped and counted.
+///
+/// Flush barriers are forwarded to *every* node channel. Barrier forwarding
+/// uses `try_send` only — the dispatcher must never block on a full node
+/// channel (it would stall routing for all traffic). A node whose channel
+/// is full/closed acknowledges the barrier immediately from here, keeping
+/// the countdown correct.
 fn dispatcher_thread(
     rx: mpsc::Receiver<Command>,
-    node_senders: Vec<SyncSender<Packet>>,
+    node_senders: Vec<SyncSender<NodeCommand>>,
     cancel: CancellationToken,
     perf: Arc<PerfCounters>,
     client_id: u32,
@@ -342,46 +403,65 @@ fn dispatcher_thread(
         }
 
         match rx.recv_timeout(Duration::from_millis(5)) {
-            Ok(cmd) => {
-                let Command::RecordItem { call_id, item } = cmd;
-                let is_signaling = matches!(item.msg_type, SipFlowMsgType::Sip);
-                let packet = build_packet(call_id, item, client_id);
-                let idx =
-                    jump_consistent_hash(&packet.call_id.as_deref().unwrap_or(""), node_count);
+            Ok(cmd) => match cmd {
+                Command::RecordItem { call_id, item } => {
+                    let is_signaling = matches!(item.msg_type, SipFlowMsgType::Sip);
+                    let packet = build_packet(call_id, item, client_id);
+                    let idx =
+                        jump_consistent_hash(&packet.call_id.as_deref().unwrap_or(""), node_count);
 
-                match node_senders[idx].try_send(packet) {
-                    Ok(()) => {
-                        if is_signaling {
-                            perf.signaling_sent.fetch_add(1, Ordering::Relaxed);
-                        } else {
-                            perf.media_sent.fetch_add(1, Ordering::Relaxed);
+                    match node_senders[idx].try_send(NodeCommand::Packet(packet)) {
+                        Ok(()) => {
+                            if is_signaling {
+                                perf.signaling_sent.fetch_add(1, Ordering::Relaxed);
+                            } else {
+                                perf.media_sent.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        Err(_) => {
+                            perf.items_dropped.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                    Err(_) => {
-                        perf.items_dropped.fetch_add(1, Ordering::Relaxed);
-                    }
                 }
-            }
+                Command::FlushBarrier { token } => {
+                    let mut enqueued = 0;
+                    for tx in &node_senders {
+                        match tx.try_send(NodeCommand::FlushBarrier(token.clone())) {
+                            Ok(()) => enqueued += 1,
+                            Err(_) => {
+                                // Node cannot receive the barrier: acknowledge
+                                // on its behalf so the countdown still completes.
+                                token.complete_one();
+                            }
+                        }
+                    }
+                    metrics::gauge!("sipflow_barrier_enqueued", "component" => "sipflow")
+                        .set(enqueued as f64);
+                }
+            },
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
 }
 
-/// Sender thread: receives Packets from the dispatcher, accumulates into a
-/// Vec<Packet>, and flushes via MTU-aware batch encoding.
+/// Sender thread: receives NodeCommands from the dispatcher, accumulates
+/// Packets into a Vec<Packet>, and flushes via MTU-aware batch encoding.
 ///
 /// Flush triggers:
 ///   1. A packet is received and the current batch combined with it would
 ///      exceed the MTU — flush the current batch first, then start a new one.
 ///   2. No packet arrives within `FLUSH_DURATION` — flush any pending batch
 ///      to bound latency under low load.
-///   3. Channel disconnected — final flush and exit.
+///   3. A flush barrier arrives — flush the pending batch *immediately* and
+///      acknowledge the barrier, so the flushing caller knows all records
+///      enqueued before the barrier are on the wire.
+///   4. Channel disconnected — final flush and exit.
 ///
 /// No compression is applied.  Single-packet batches use the legacy
 /// single-packet wire format; multi-packet batches use the batched format.
 fn sender_thread(
-    rx: mpsc::Receiver<Packet>,
+    rx: mpsc::Receiver<NodeCommand>,
     target_addr: Arc<ArcSwap<SocketAddr>>,
     mtu: usize,
     node_index: usize,
@@ -420,7 +500,7 @@ fn sender_thread(
         }
 
         match rx.recv_timeout(FLUSH_DURATION) {
-            Ok(packet) => {
+            Ok(NodeCommand::Packet(packet)) => {
                 // When MTU is enabled and the next packet would cause the
                 // batch to exceed the MTU, flush first.  Estimation is
                 // conservative: 5-byte batch header + 4-byte frame_len per
@@ -429,6 +509,14 @@ fn sender_thread(
                     flush_and_count(&mut batch, &socket, &target_addr, &mut send_buf);
                 }
                 batch.push(packet);
+            }
+            Ok(NodeCommand::FlushBarrier(token)) => {
+                // All packets enqueued before the barrier are in `batch` (FIFO
+                // channel): push them onto the wire right now, then ack.
+                if !batch.is_empty() {
+                    flush_and_count(&mut batch, &socket, &target_addr, &mut send_buf);
+                }
+                token.complete_one();
             }
             Err(RecvTimeoutError::Timeout) => {
                 if !batch.is_empty() {
@@ -735,6 +823,52 @@ async fn report_loop(
 impl SipFlowBackend for RemoteBackend {
     fn kind(&self) -> &'static str {
         "remote"
+    }
+
+    /// End-to-end flush barrier:
+    /// 1. enqueue a flush barrier — the dispatcher forwards it to every node
+    ///    channel, and each sender thread immediately pushes its pending UDP
+    ///    batch onto the wire before acknowledging;
+    /// 2. wait (bounded) for all nodes to acknowledge.
+    ///
+    /// Callers that also run upstream batching layers (the `SipFlow` async
+    /// writer thread) must drain those first via `SipFlow::flush`, which
+    /// calls this afterwards.
+    ///
+    /// Best-effort by design: the barrier itself travels through lossy,
+    /// drop-on-full channels, so the wait is bounded by [`BARRIER_WAIT`] and
+    /// timeouts are counted, not fatal.
+    async fn flush(&self) -> Result<()> {
+        let token = Arc::new(BarrierToken::new(self.nodes.len()));
+        match self.sender.try_send(Command::FlushBarrier {
+            token: token.clone(),
+        }) {
+            Ok(()) => {
+                if tokio::time::timeout(BARRIER_WAIT, token.completed())
+                    .await
+                    .unwrap_or(false)
+                {
+                    // All sender threads flushed their pending batches.
+                } else {
+                    metrics::counter!(
+                        "sipflow_barrier_timeout_total",
+                        "component" => "sipflow"
+                    )
+                    .increment(1);
+                    warn!(
+                        "sipflow remote flush: barrier not fully acknowledged within {BARRIER_WAIT:?}"
+                    );
+                }
+            }
+            Err(_) => {
+                // Ingress full: records are being dropped under overload
+                // anyway; report the degraded flush instead of blocking.
+                metrics::counter!("sipflow_barrier_dropped_total", "component" => "sipflow")
+                    .increment(1);
+                warn!("sipflow remote flush: ingress channel full, barrier not enqueued");
+            }
+        }
+        Ok(())
     }
 
     fn record(&self, call_id: Cow<'_, str>, item: SipFlowItem) -> Result<()> {
@@ -1055,5 +1189,194 @@ mod tests {
         server_cancel.cancel();
 
         assert!(backend_cancel.is_cancelled());
+    }
+
+    fn barrier_test_rtp_item(seq: u8) -> SipFlowItem {
+        let mut payload = vec![0x80u8, 0x08, 0, seq];
+        payload.extend_from_slice(&[0u8; 8]);
+        payload.extend_from_slice(&[seq; 32]);
+        SipFlowItem {
+            timestamp: chrono::Utc::now().timestamp_micros() as u64,
+            seq: 0,
+            leg: Some(0),
+            msg_type: SipFlowMsgType::Rtp,
+            src_addr: "127.0.0.1:5004".into(),
+            dst_addr: "127.0.0.2:5006".into(),
+            payload: bytes::Bytes::from(payload),
+        }
+    }
+
+    fn barrier_test_packet() -> Packet {
+        Packet {
+            msg_type: MsgType::Rtp,
+            src: (IpAddr::from([127, 0, 0, 1]), 5004),
+            dst: (IpAddr::from([127, 0, 0, 2]), 5006),
+            timestamp: 0,
+            call_id: Some("barrier-test".to_string()),
+            leg: Some(0),
+            payload: bytes::Bytes::from(vec![0u8; 8]),
+            client_id: 1,
+        }
+    }
+
+    /// The barrier countdown must complete exactly when every expected node
+    /// acknowledged.
+    #[tokio::test]
+    async fn barrier_token_completes_when_all_nodes_ack() {
+        let token = Arc::new(BarrierToken::new(2));
+        assert!(!token.is_complete());
+        token.complete_one();
+        assert!(!token.is_complete());
+        token.complete_one();
+        assert!(token.is_complete());
+        // `completed` must return promptly once the countdown reached zero.
+        tokio::time::timeout(Duration::from_millis(100), token.completed())
+            .await
+            .expect("completed token must not block");
+    }
+
+    /// When a node channel is full (or closed), the dispatcher acknowledges
+    /// the barrier on the node's behalf — the countdown must still reach zero
+    /// without anyone draining the node channel.
+    #[test]
+    fn dispatcher_acks_barrier_when_node_channel_full() {
+        let (ingress_tx, ingress_rx) = mpsc::sync_channel::<Command>(8);
+        let (node_tx, _node_rx) = mpsc::sync_channel::<NodeCommand>(1);
+        // Fill the single node channel slot; nobody drains it.
+        node_tx
+            .try_send(NodeCommand::Packet(barrier_test_packet()))
+            .unwrap();
+
+        let token = Arc::new(BarrierToken::new(1));
+        ingress_tx
+            .send(Command::FlushBarrier {
+                token: token.clone(),
+            })
+            .unwrap();
+        drop(ingress_tx);
+
+        let handle = std::thread::spawn(move || {
+            dispatcher_thread(
+                ingress_rx,
+                vec![node_tx],
+                CancellationToken::new(),
+                PerfCounters::new_arc(),
+                1,
+            );
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(2), token.completed())
+                .await
+                .expect("barrier must be acked by dispatcher for full nodes");
+        });
+        handle.join().unwrap();
+    }
+
+    /// End-to-end: `flush()` must push all pending packets onto the wire
+    /// (sender threads flush their batch when they see the barrier) before
+    /// returning, so a collector query issued right after sees everything.
+    #[tokio::test]
+    async fn flush_delivers_pending_packets_before_returning() {
+        let recv = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        recv.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let addr = recv.local_addr().unwrap();
+
+        let cancel = CancellationToken::new();
+        let backend = RemoteBackend::new(
+            vec![SipFlowClusterNode {
+                udp: addr.to_string(),
+                http: format!("http://{addr}"),
+            }],
+            1,
+            64,
+            0,
+            0,
+            0,
+            cancel,
+        )
+        .await
+        .expect("remote backend");
+
+        let n = 5usize;
+        for i in 0..n {
+            backend
+                .record(
+                    Cow::Borrowed("barrier-e2e-call"),
+                    barrier_test_rtp_item(i as u8),
+                )
+                .expect("record into empty ingress");
+        }
+
+        backend.flush().await.expect("flush");
+
+        // Every recorded packet must now be on the wire (possibly batched
+        // into a single datagram).
+        let mut buf = [0u8; 65535];
+        let mut got = 0usize;
+        while got < n {
+            let (len, _) = recv
+                .recv_from(&mut buf)
+                .expect("datagrams must arrive before the read timeout");
+            got += crate::protocol::parse_datagram(&buf[..len])
+                .map(|packets| packets.len())
+                .unwrap_or(0);
+        }
+        assert_eq!(got, n, "all recorded packets must be delivered after flush");
+    }
+
+    /// Degraded mode: when the ingress channel is unavailable (full or — as
+    /// arranged here — disconnected during shutdown), the barrier is dropped
+    /// instead of blocking — `flush()` must return promptly.
+    #[tokio::test]
+    async fn flush_degrades_promptly_when_ingress_unavailable() {
+        let cancel = CancellationToken::new();
+        let backend = RemoteBackend::new(
+            vec![SipFlowClusterNode {
+                udp: "127.0.0.1:1".to_string(),
+                http: "http://127.0.0.1:1".to_string(),
+            }],
+            1,
+            1, // minimal channel capacity (clamped to >= 1)
+            0,
+            0,
+            0,
+            cancel.clone(),
+        )
+        .await
+        .expect("remote backend");
+
+        // Stop the dispatcher: it owns the ingress receiver, so the channel
+        // disconnects — flush takes the same drop-the-barrier branch as a
+        // full channel would.
+        cancel.cancel();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match backend.sender.try_send(Command::RecordItem {
+                call_id: "disconnect-probe".to_string(),
+                item: barrier_test_rtp_item(0),
+            }) {
+                Err(_) => break,
+                Ok(()) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "dispatcher did not exit in time"
+                    );
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }
+        }
+
+        let t0 = std::time::Instant::now();
+        backend.flush().await.expect("degraded flush still Ok");
+        assert!(
+            t0.elapsed() < Duration::from_secs(2),
+            "flush with unavailable ingress must degrade, not block (took {:?})",
+            t0.elapsed()
+        );
     }
 }

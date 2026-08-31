@@ -44,8 +44,6 @@ pub const PERM_CACHE_CAP: usize = 1024;
 pub enum ReloadTarget {
     Routes,
     Trunks,
-    SbcRoutes,
-    SbcTrunks,
     Queues,
     App,
     Acl,

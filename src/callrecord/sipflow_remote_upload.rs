@@ -8,7 +8,7 @@ use crate::{
     callrecord::sipflow_upload::{SipFlowUploadRequest, SipFlowUploadResponse},
     callrecord::{
         CallRecord, CallRecordHook, format_sipflow_media_key, format_sipflow_signaling_file_name,
-        format_sipflow_signaling_key,
+        format_sipflow_signaling_key, sipflow::SipFlowSlot,
     },
     config::{SipFlowClusterNode, SipFlowUploadConfig},
     sipflow::backend::remote::jump_consistent_hash,
@@ -22,6 +22,11 @@ pub struct SipFlowRemoteUploadHook {
     upload_config: SipFlowUploadConfig,
     db: Option<DatabaseConnection>,
     client: reqwest::Client,
+    /// Late-bound handle to the SipFlow wrapper. Flushed before delegating so
+    /// the tail messages (BYE / 200 OK) leave the client-side pipeline (async
+    /// writer batch → UDP sender) and are on the collector before it flushes
+    /// + queries on /upload.
+    sipflow: SipFlowSlot,
 }
 
 impl SipFlowRemoteUploadHook {
@@ -29,6 +34,7 @@ impl SipFlowRemoteUploadHook {
         nodes: Vec<SipFlowClusterNode>,
         upload_config: SipFlowUploadConfig,
         db: Option<DatabaseConnection>,
+        sipflow: SipFlowSlot,
     ) -> Result<Self> {
         Ok(Self {
             nodes,
@@ -38,6 +44,7 @@ impl SipFlowRemoteUploadHook {
                 Some(std::time::Duration::from_secs(120)),
                 Some(std::time::Duration::from_secs(10)),
             )?,
+            sipflow,
         })
     }
 }
@@ -45,6 +52,15 @@ impl SipFlowRemoteUploadHook {
 #[async_trait]
 impl CallRecordHook for SipFlowRemoteUploadHook {
     async fn on_record_completed(&self, records: &mut [CallRecord]) -> Result<()> {
+        // Flush the client-side pipeline (writer thread → UDP sender batch)
+        // once for the whole batch, so the collector has everything before it
+        // flushes + queries on /upload. Bounded: proceed on timeout.
+        if let Some(sipflow) = self.sipflow.get() {
+            crate::callrecord::sipflow::flush_with_deadline(sipflow).await;
+        } else {
+            warn!("SipFlowRemoteUploadHook: no SipFlow handle, skipping pre-upload flush");
+        }
+
         for record in records {
             let call_id = record.call_id.as_str();
             let start = Local.from_utc_datetime(&record.start_time.naive_utc());
@@ -194,6 +210,7 @@ mod tests {
                 pcm_sample_rate: None,
             },
             None,
+            Arc::new(std::sync::OnceLock::new()),
         )
         .expect("remote upload hook");
         let now = chrono::Utc::now();

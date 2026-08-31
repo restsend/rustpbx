@@ -1,7 +1,7 @@
 [project]
 name = "rustpbx-e2e"
 version = "0.1.0"
-description = "Unified Python + sipbot E2E suite for RustPBX (P2P/queue/IVR/voicemail/wholesale/CDR/sipflow/http-router/SBC)"
+description = "Unified Python + sipbot E2E suite for RustPBX (P2P/queue/IVR/voicemail/wholesale/CDR/sipflow/http-router)"
 requires-python = ">=3.10"
 
 [tool.pytest.ini_options]
@@ -17,7 +17,6 @@ markers = [
     "voicemail: voicemail record/retrieve/MWI tests",
     "wholesale: wholesale billing CDR tests",
     "http_router: proxy HTTP router tests",
-    "sbc: SBC JSON-RPC rewrite/reject/inject tests",
     "record: RWI record_start/stop tests",
     "bridge: IVR bridge action WS PCM16 audio tests",
     "outbound: outbound dial SSE interface tests",

@@ -23,6 +23,3 @@ mod media_task_leak;
 mod ringback_mode;
 #[path = "call/step_provider_retry_config.rs"]
 mod step_provider_retry_config;
-#[cfg(feature = "addon-sbc")]
-#[path = "call/trunk_health_e2e.rs"]
-mod trunk_health_e2e;

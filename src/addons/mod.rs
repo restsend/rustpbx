@@ -377,14 +377,6 @@ pub mod wholesale;
 #[cfg(feature = "addon-cc")]
 pub mod cc;
 pub mod queue;
-#[cfg(feature = "addon-sbc")]
-pub mod sbc;
-
-#[cfg(feature = "addon-endpoint-manager")]
-pub mod endpoint_manager;
-
-#[cfg(feature = "addon-enterprise-auth")]
-pub mod enterprise_auth;
 
 #[cfg(feature = "addon-voicemail")]
 pub mod voicemail;

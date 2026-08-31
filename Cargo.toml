@@ -25,14 +25,8 @@ categories = ["network-programming", "multimedia"]
 exclude = [
     "src/addons/cc",
     "src/addons/cc/**",
-    "src/addons/sbc",
-    "src/addons/sbc/**",
     "src/addons/wholesale",
     "src/addons/wholesale/**",
-    "src/addons/endpoint_manager",
-    "src/addons/endpoint_manager/**",
-    "src/addons/enterprise_auth",
-    "src/addons/enterprise_auth/**",
     "src/addons/ivr_editor",
     "src/addons/ivr_editor/**",
     "src/addons/telemetry",
@@ -67,14 +61,11 @@ addon-wholesale = [
     "dep:iso_currency",
 ]
 addon-archive = ["dep:async-compression", "dep:csv-async"]
-addon-endpoint-manager = []
-addon-enterprise-auth = ["dep:ldap3", "dep:ring"]
 addon-transcript = []
 addon-voicemail = ["dep:url"]
 addon-ivr-editor = ["dep:hex"]
 addon-cc = []
 
-addon-sbc = ["dep:minijinja", "dep:evalexpr"]
 addon-observability = ["metrics-exporter-prometheus"]
 addon-telemetry = [
     "addon-observability",
@@ -84,18 +75,13 @@ addon-telemetry = [
     "tracing-opentelemetry",
 ]
 commerce = [
-    "addon-endpoint-manager",
-    "addon-enterprise-auth",
     "addon-voicemail",
     "addon-ivr-editor",
     "addon-telemetry",
-    "addon-sbc",
 ]
 wholesale = ["addon-wholesale"]
 contact-center = [
     "addon-cc",
-    "addon-endpoint-manager",
-    "addon-enterprise-auth",
     "addon-ivr-editor",
     "addon-voicemail",
     "addon-telemetry",
@@ -132,7 +118,6 @@ minijinja = { version = "2.21.0", features = [
     "loader",
     "json",
 ], optional = true }
-evalexpr = { version = "11.3.1", features = ["regex_support"], optional = true }
 serde = { version = "1", features = ["derive"] }
 glob = "0.3.3"
 serde_json = "1"
@@ -221,7 +206,6 @@ async-compression = { version = "0.4", default-features = false, features = [
     "tokio",
     "gzip",
 ], optional = true }
-flate2 = "1"
 console-subscriber = "0.5.0"
 lru = "0.18"
 metrics = "0.24"
@@ -260,10 +244,6 @@ csv-async = { version = "1.3.1", features = [
 ], optional = true }
 quick-xml = { version = "0.41.0", features = ["serialize"] }
 totp-rs = { version = "5.7.1", features = ["qr", "gen_secret"] }
-ldap3 = { version = "0.12.1", optional = true, default-features = false, features = [
-    "tls-rustls-ring",
-] }
-ring = { version = "0.17", optional = true }
 tempfile = "3.27.0"
 country-emoji = { version = "0.3.5", optional = true }
 arc-swap = "1.9.2"

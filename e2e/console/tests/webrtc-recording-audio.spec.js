@@ -5,7 +5,7 @@
  *     bidirectional audio (recording forces MediaBridge anchoring).
  *
  * Run:
- *   cargo build --features "default,contact-center,addon-sbc,addon-wholesale"
+ *   cargo build --features "default,contact-center,addon-wholesale"
  *   cd e2e/console && PBX_BIN=../../target/debug/rustpbx npx playwright test tests/webrtc-recording-audio.spec.js
  */
 

@@ -137,7 +137,6 @@ Map commercial addons to named license keys.
 [licenses]
 [licenses.addons]
 wholesale         = "enterprise"
-endpoint-manager  = "enterprise"
 voicemail         = "basic"
 ivr_editor        = "enterprise"
 
