@@ -353,9 +353,14 @@ impl LegInner {
 
         let was_relay = Arc::new(AtomicBool::new(false));
         // Keep paced-sender RTCP SR / next-seq coherent while rewrite owns the
-        // shared WebRTC outbound SSRC.
+        // shared WebRTC outbound SSRC. Hold the audio sender as a WEAK ref so
+        // this observer cannot keep the PeerConnection or RtpTransport alive in
+        // a cycle: the observer is attached to the transport, and a strong
+        // sender would hold that same transport (transport -> observer ->
+        // sender -> transport), which reference counting never frees.
+        let audio_sender = audio_rtp_sender(&pc).map(|s| Arc::downgrade(&s));
         pc.add_observer(Arc::new(OutboundClockSync {
-            pc: pc.clone(),
+            sender: audio_sender,
             relay_active: was_relay.clone(),
         }));
 
@@ -985,7 +990,7 @@ fn seed_rewrite_options_from_destination(
 /// While rewrite owns the shared playback SSRC, feed each outbound packet into
 /// the paced sender so RTCP SR and the next IVR sequence stay coherent.
 struct OutboundClockSync {
-    pc: PeerConnection,
+    sender: Option<std::sync::Weak<rustrtc::peer_connection::RtpSender>>,
     relay_active: Arc<AtomicBool>,
 }
 
@@ -994,7 +999,7 @@ impl rustrtc::peer_connection::RtpObserver for OutboundClockSync {
         if !self.relay_active.load(Ordering::SeqCst) {
             return;
         }
-        let Some(sender) = audio_rtp_sender(&self.pc) else {
+        let Some(sender) = self.sender.as_ref().and_then(|w| w.upgrade()) else {
             return;
         };
         if packet.header.ssrc != sender.ssrc() {
