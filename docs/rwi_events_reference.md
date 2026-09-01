@@ -43,6 +43,12 @@ Authorization: Bearer <token>
 url = "https://myapp.example.com/rwi-events"
 timeout_ms = 5000
 headers = { Authorization = "Bearer your-token" }
+# 推送失败(传输错误、5xx、429)后的重试次数。其他 4xx 为永久失败,立即返回。
+# 退避时间从 200 ms 起指数递增。上限 5 次。
+retries = 2
+# 可选:在 rwi_event_queue_latency_seconds 直方图中统计事件排队延迟
+# (入队 -> 处理器出队)。默认关闭,需显式开启。
+track_queue_latency = true
 # 空 = 全部事件(推荐)。如需白名单过滤,请使用有效的事件类型。
 # 注意:坐席状态是 "agent_state_changed"(旧的 "dn_state_changed" 已废弃移除);
 # 录音数据(下载 URL、文件大小)通过 "recording_metadata_available" 和
@@ -51,6 +57,36 @@ headers = { Authorization = "Bearer your-token" }
 # events = ["call_hangup", "record_stopped", "recording_metadata_available", "record_end", "agent_state_changed"]
 events = []
 ```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `url` | String | (必填) | 接收 POST 请求的 HTTP 端点 |
+| `timeout_ms` | u64 | 5000 | HTTP 请求超时(毫秒,每次尝试) |
+| `headers` | HashMap | (可选) | 每个请求携带的自定义 HTTP 头 |
+| `events` | Vec\<String\> | [](全部) | 事件类型白名单;为空转发全部事件 |
+| `retries` | u32 | 0 | 推送失败后的重试次数(传输错误、5xx、429);硬上限 5;退避从 200 ms 起指数递增 |
+| `track_queue_latency` | bool | false | 记录排队等待直方图 `rwi_event_queue_latency_seconds` |
+
+Webhook 处理器运行在专用的 tokio 运行时上,其 HTTP 推送不会与 SIP 运行时
+争抢资源。worker 数量与事件队列长度在 `[proxy]` 下配置:
+
+| 键 | 默认值 | 说明 |
+|----|--------|------|
+| `[proxy] rwi_webhook_worker_threads` | 2 | webhook 推送消费者的专用 tokio worker 数 |
+| `[proxy] rwi_webhook_channel_size` | 512 | 事件队列长度(广播通道容量) |
+
+### Webhook 指标
+
+| 指标 | 类型 | 标签 | 说明 |
+|------|------|------|------|
+| `rwi_event_enqueued_total` | Counter | `event_type` | 网关分发推入队列的事件数 |
+| `rwi_events_pushed_total` | Counter | `event_type` | 收到 2xx 响应成功投递的事件数 |
+| `rwi_events_push_failed_total` | Counter | `event_type` | 推送出错或返回非 2xx 的事件数 |
+| `rwi_events_push_retries_total` | Counter | `event_type` | 推送失败后的重试次数 |
+| `rwi_events_dropped_total` | Counter | - | 因队列积压被跳过的事件数 |
+| `rwi_event_queue_size` | Gauge | - | 配置的队列容量 |
+| `rwi_event_queue_current` | Gauge | - | 当前排队中的事件数(每 5 秒采样) |
+| `rwi_event_queue_latency_seconds` | Histogram | `event_type` | 排队等待时长(入队 -> 处理器出队);通过 `track_queue_latency` 开启 |
 
 ---
 

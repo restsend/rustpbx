@@ -158,6 +158,19 @@ All metrics emitted by RustPBX, organized by category:
 | `rustpbx_transcription_latency_seconds` | Histogram | `language` | Transcription processing time |
 | `rustpbx_transcription_audio_seconds` | Histogram | `language` | Audio duration transcribed |
 
+#### RWI Events
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `rwi_event_enqueued_total` | Counter | `event_type` | Events pushed into the webhook queue by gateway dispatch |
+| `rwi_events_pushed_total` | Counter | `event_type` | Events delivered with a 2xx response |
+| `rwi_events_push_failed_total` | Counter | `event_type` | Pushes that errored or returned non-2xx |
+| `rwi_events_push_retries_total` | Counter | `event_type` | Retry attempts after a failed push |
+| `rwi_events_dropped_total` | Counter | - | Events lost to broadcast lag (consumer fell behind) |
+| `rwi_event_queue_size` | Gauge | - | Webhook queue capacity (`[proxy] rwi_webhook_channel_size`) |
+| `rwi_event_queue_current` | Gauge | - | Events currently queued (sampled every 5 s) |
+| `rwi_event_queue_latency_seconds` | Histogram | `event_type` | Queueing wait (enqueued -> handler dequeued); opt-in via `[rwi_webhook] track_queue_latency` |
+
 #### Routing
 
 | Metric | Type | Labels | Description |
