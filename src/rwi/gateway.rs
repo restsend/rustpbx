@@ -331,6 +331,7 @@ impl RwiGateway {
     fn fanout_webhook_tap(&self, entry: &EventCacheEntry) {
         if let Some(tx) = &self.webhook_tx {
             let _ = tx.send(entry.clone());
+            metrics::counter!("rwi_events_sent_total").increment(1);
         }
         let _ = self.event_tap.send(entry.clone());
     }

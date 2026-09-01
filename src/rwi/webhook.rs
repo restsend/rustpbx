@@ -108,8 +108,26 @@ pub fn start_rwi_webhook_handler(
     config: LocatorWebhookConfig,
 ) -> broadcast::Sender<EventCacheEntry> {
     let (tx, rx) = broadcast::channel(WEBHOOK_CHANNEL_SIZE);
+    spawn_queue_metrics(tx.clone());
     crate::utils::rwi_webhook_spawn(run_rwi_webhook_handler(config, rx));
     tx
+}
+
+/// Periodically export RWI webhook queue depth gauges: the channel's
+/// capacity and the number of events currently queued (produced but not
+/// yet seen by the handler). Slow-router backpressure shows up here as
+/// `current` climbing toward `size`.
+fn spawn_queue_metrics(tx: broadcast::Sender<EventCacheEntry>) {
+    crate::utils::rwi_webhook_spawn(async move {
+        metrics::gauge!("rwi_event_queue_size").set(WEBHOOK_CHANNEL_SIZE as f64);
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        interval.tick().await; // skip the immediate first tick
+        loop {
+            metrics::gauge!("rwi_event_queue_current").set(tx.len() as f64);
+            interval.tick().await;
+        }
+    });
 }
 
 async fn run_rwi_webhook_handler(
@@ -133,6 +151,7 @@ async fn run_rwi_webhook_handler(
             Ok(entry) => entry,
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 warn!("RWI webhook lagged, missed {} events", n);
+                metrics::counter!("rwi_events_dropped_total").increment(n as u64);
                 continue;
             }
             Err(broadcast::error::RecvError::Closed) => {
@@ -198,6 +217,7 @@ async fn run_rwi_webhook_handler(
                     entry.call_id.as_str()
                 };
                 if success {
+                    metrics::counter!("rwi_events_pushed_total").increment(1);
                     info!(
                         url = %record.url,
                         event_type,
@@ -207,6 +227,7 @@ async fn run_rwi_webhook_handler(
                         "RWI webhook delivered"
                     );
                 } else {
+                    metrics::counter!("rwi_events_push_failed_total").increment(1);
                     warn!(
                         url = %record.url,
                         event_type,
@@ -220,6 +241,7 @@ async fn run_rwi_webhook_handler(
             }
             Err(e) => {
                 consecutive_send_failures += 1;
+                metrics::counter!("rwi_events_push_failed_total").increment(1);
                 // INFO with the full request body: when the receiver is
                 // down this log is the only place to see which events (and
                 // payloads) were generated, so the body must be visible at
