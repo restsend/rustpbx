@@ -317,3 +317,10 @@ opt-level = 2
 # and improving runtime; flate2/audio-codec see measurable wins here.
 lto = "thin"
 codegen-units = 16
+
+# Local dev patch: client-role dialog flow affinity (RFC 7118 §6.2) — without
+# it, in-dialog requests to a WS callee (BYE on caller hangup / re-INVITE)
+# destination-route off the Contact and fall back to UDP (black hole).
+# Upstream candidate for rsipstack; remove once a release carries it.
+[patch.crates-io]
+rsipstack = { path = "../rsipstack" }
