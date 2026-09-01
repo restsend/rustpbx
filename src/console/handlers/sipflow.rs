@@ -87,14 +87,9 @@ async fn get_settings(
                     flush_count,
                     flush_interval_secs,
                     id_cache_size,
-                    engine,
                     compress,
                     compress_level,
-                    ttl_secs,
-                    memtable_size_mb,
-                    block_cache_capacity_mb,
                     shards,
-                    flowdb_sync_mode,
                     ..
                 } => (
                     "local",
@@ -104,14 +99,9 @@ async fn get_settings(
                         "flush_count": flush_count,
                         "flush_interval_secs": flush_interval_secs,
                         "id_cache_size": id_cache_size,
-                        "engine": engine,
                         "compress": compress,
                         "compress_level": compress_level,
-                        "ttl_secs": ttl_secs,
-                        "memtable_size_mb": memtable_size_mb,
-                        "block_cache_capacity_mb": block_cache_capacity_mb,
-                        "shards": shards,
-                        "flowdb_sync_mode": flowdb_sync_mode
+                        "shards": shards
                     }),
                 ),
                 SipFlowConfig::Remote {
@@ -205,6 +195,11 @@ async fn update_settings(
             table.remove("udp_addr");
             table.remove("http_addr");
             table.remove("timeout_secs");
+            table.remove("engine");
+            table.remove("ttl_secs");
+            table.remove("memtable_size_mb");
+            table.remove("block_cache_capacity_mb");
+            table.remove("flowdb_sync_mode");
         }
         "remote" => {
             table["type"] = value("remote");
@@ -248,6 +243,11 @@ async fn update_settings(
             table.remove("subdirs");
             table.remove("flush_count");
             table.remove("flush_interval_secs");
+            table.remove("engine");
+            table.remove("ttl_secs");
+            table.remove("memtable_size_mb");
+            table.remove("block_cache_capacity_mb");
+            table.remove("flowdb_sync_mode");
         }
         _ => {
             return (

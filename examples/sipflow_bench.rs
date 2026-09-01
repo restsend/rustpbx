@@ -1,7 +1,7 @@
-//! SipFlow backend performance benchmark: FlowDB vs SQLite.
+//! SipFlow SQLite backend performance benchmark.
 //!
 //! Measures write throughput, disk-space usage, and query latency
-//! for both storage engines under a realistic mixed SIP+RTP workload.
+//! under a realistic mixed SIP+RTP workload.
 //!
 //! ```sh
 //! cargo run --release --example sipflow_bench -- [options]
@@ -17,7 +17,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Local, TimeZone};
 use clap::Parser;
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
-use rustpbx::config::{SipFlowConfig, SipFlowEngine, SipFlowSubdirs};
+use rustpbx::config::{SipFlowConfig, SipFlowSubdirs};
 use rustpbx::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMsgType};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -196,9 +196,6 @@ struct BenchResult {
     disk_bytes: u64,
     query_flow_ms: f64,
     query_media_ms: f64,
-    flow_count: usize,
-    stats_packets: usize,
-    isolation_ok: bool,
 }
 
 impl BenchResult {
@@ -260,14 +257,10 @@ fn write_call(backend: &dyn SipFlowBackend, args: &Args, call_idx: usize, base_t
     }
 }
 
-async fn run_bench(engine: SipFlowEngine, args: &Args) -> BenchResult {
+async fn run_bench(args: &Args) -> BenchResult {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
-    let engine_name = if engine == SipFlowEngine::FlowDb {
-        "FlowDB"
-    } else {
-        "SQLite"
-    };
+    let engine_name = "SQLite";
 
     let config = SipFlowConfig::Local {
         root: root.to_string_lossy().to_string(),
@@ -275,14 +268,9 @@ async fn run_bench(engine: SipFlowEngine, args: &Args) -> BenchResult {
         flush_count: 1000,
         flush_interval_secs: 5,
         id_cache_size: 8192,
-        engine,
         compress: true,
         compress_level: 6,
-        ttl_secs: None,
-        memtable_size_mb: 64,
-        block_cache_capacity_mb: 128,
         shards: args.shards,
-        flowdb_sync_mode: flowdb::SyncMode::IntervalMs(10),
         upload: None,
         blocking_backpressure: false,
     };
@@ -472,9 +460,6 @@ async fn run_bench(engine: SipFlowEngine, args: &Args) -> BenchResult {
         disk_bytes,
         query_flow_ms,
         query_media_ms,
-        flow_count,
-        stats_packets,
-        isolation_ok,
     }
 }
 
@@ -486,7 +471,7 @@ fn main() {
         let total_records = args.calls * (args.sip_per_call + args.rtp_per_call);
 
         println!("╔═══════════════════════════════════════════════════════════════════════╗");
-        println!("║           SipFlow Backend Benchmark: FlowDB vs SQLite                  ║");
+        println!("║                    SipFlow SQLite Benchmark                            ║");
         println!("╚═══════════════════════════════════════════════════════════════════════╝");
         println!();
         println!("Configuration:");
@@ -498,77 +483,9 @@ fn main() {
         println!("  Exporters:     {}", args.exporters);
         println!("  Total records: {}", total_records);
 
-        let mut results = Vec::new();
-
-        results.push(run_bench(SipFlowEngine::Sqlite, &args).await);
+        let results = vec![run_bench(&args).await];
         dump_flush_metrics(&metrics, "SQLite");
-        results.push(run_bench(SipFlowEngine::FlowDb, &args).await);
-        dump_flush_metrics(&metrics, "FlowDB");
 
         BenchResult::print_table(&results);
-
-        let sqlite = &results[0];
-        let flowdb = &results[1];
-
-        // Correctness cross-check
-        println!();
-        println!("Correctness:");
-        let flow_match = sqlite.flow_count == flowdb.flow_count;
-        let rtp_match = sqlite.stats_packets == flowdb.stats_packets;
-        println!(
-            "  SIP flow count:  SQLite={} FlowDB={}  [{}]",
-            sqlite.flow_count,
-            flowdb.flow_count,
-            if flow_match { "MATCH" } else { "DIFF" }
-        );
-        println!(
-            "  RTP packet sum:  SQLite={} FlowDB={}  [{}]",
-            sqlite.stats_packets,
-            flowdb.stats_packets,
-            if rtp_match { "MATCH" } else { "DIFF" }
-        );
-        println!(
-            "  Isolation:       SQLite={} FlowDB={}",
-            sqlite.isolation_ok, flowdb.isolation_ok
-        );
-
-        println!();
-        println!("Summary:");
-        let speedup = flowdb.write_throughput / sqlite.write_throughput;
-        println!(
-            "  Write throughput: FlowDB {:.0} rec/s vs SQLite {:.0} rec/s ({:.2}x {})",
-            flowdb.write_throughput,
-            sqlite.write_throughput,
-            speedup,
-            if speedup >= 1.0 { "faster" } else { "slower" }
-        );
-        let space_ratio = flowdb.disk_bytes as f64 / sqlite.disk_bytes.max(1) as f64;
-        println!(
-            "  Disk space:       FlowDB {:.1} KB vs SQLite {:.1} KB ({:.2}x {})",
-            flowdb.disk_bytes as f64 / 1024.0,
-            sqlite.disk_bytes as f64 / 1024.0,
-            if space_ratio >= 1.0 {
-                space_ratio
-            } else {
-                1.0 / space_ratio
-            },
-            if space_ratio < 1.0 {
-                "smaller"
-            } else {
-                "larger"
-            }
-        );
-        let query_ratio = sqlite.query_flow_ms / flowdb.query_flow_ms.max(0.001);
-        println!(
-            "  Flow query:       FlowDB {:.1} ms vs SQLite {:.1} ms ({:.2}x {})",
-            flowdb.query_flow_ms,
-            sqlite.query_flow_ms,
-            query_ratio,
-            if query_ratio >= 1.0 {
-                "faster"
-            } else {
-                "slower"
-            }
-        );
     });
 }

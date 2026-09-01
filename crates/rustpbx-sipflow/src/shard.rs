@@ -14,8 +14,7 @@ pub const MODE_MULTI: u8 = 2;
 /// threads / bucket rotation update it when they rotate into a new bucket.
 ///
 /// This is the single source of truth for "which bucket are we in, is it
-/// sharded, and which shard does a call go to" — shared by both the SQLite and
-/// FlowDB backends so routing behaves identically.
+/// sharded, and which shard does a call go to".
 pub struct RouterState {
     mode: AtomicU8,
     pub shards: usize,

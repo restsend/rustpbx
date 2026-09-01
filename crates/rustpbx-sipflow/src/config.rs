@@ -50,23 +50,8 @@ fn default_sipflow_compress_level() -> u32 {
     6
 }
 
-fn default_flowdb_memtable_mb() -> usize {
-    64
-}
-
-fn default_flowdb_block_cache_mb() -> usize {
-    128
-}
-
 fn default_sipflow_shards() -> usize {
     4
-}
-
-fn default_flowdb_sync_mode() -> flowdb::SyncMode {
-    // Coalesce WAL fsyncs (every 10ms) instead of per-batch `Always`; trade a
-    // ~10ms crash-loss window for ~15% higher write throughput. Deployments
-    // that must never drop a packet can set `flowdb_sync_mode = "always"`.
-    flowdb::SyncMode::IntervalMs(10)
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize, PartialEq, Eq, Default)]
@@ -76,15 +61,6 @@ pub enum SipFlowSubdirs {
     #[default]
     Daily,
     Hourly,
-}
-
-#[derive(Debug, Deserialize, Clone, Copy, Serialize, PartialEq, Eq, Default)]
-pub enum SipFlowEngine {
-    #[serde(rename = "flowdb")]
-    FlowDb,
-    #[default]
-    #[serde(rename = "sqlite")]
-    Sqlite,
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
@@ -142,24 +118,12 @@ pub enum SipFlowConfig {
         flush_interval_secs: u64,
         #[serde(default = "default_sipflow_id_cache_size")]
         id_cache_size: usize,
-        #[serde(default)]
-        engine: SipFlowEngine,
         #[serde(default = "default_sipflow_compress")]
         compress: bool,
         #[serde(default = "default_sipflow_compress_level")]
         compress_level: u32,
-        #[serde(default)]
-        ttl_secs: Option<u64>,
-        #[serde(default = "default_flowdb_memtable_mb")]
-        memtable_size_mb: usize,
-        #[serde(default = "default_flowdb_block_cache_mb")]
-        block_cache_capacity_mb: usize,
         #[serde(default = "default_sipflow_shards")]
         shards: usize,
-        /// FlowDB WAL sync mode: `"always"` (fsync per batch, max durability)
-        /// or `{ interval_ms = N }` (coalesced fsync, ~N ms crash-loss window).
-        #[serde(default = "default_flowdb_sync_mode")]
-        flowdb_sync_mode: flowdb::SyncMode,
         #[serde(default)]
         upload: Option<SipFlowUploadConfig>,
         /// When true, `record()` blocks (up to 1s) on a full worker channel
@@ -197,6 +161,33 @@ pub enum SipFlowConfig {
 #[cfg(test)]
 mod tests {
     use super::SipFlowConfig;
+
+    #[test]
+    fn local_config_accepts_retired_flowdb_options_as_sqlite_config() {
+        let config: SipFlowConfig = serde_json::from_value(serde_json::json!({
+            "type": "local",
+            "root": "./sipflow",
+            "engine": "flowdb",
+            "ttl_secs": 86400,
+            "memtable_size_mb": 32,
+            "block_cache_capacity_mb": 64,
+            "flowdb_sync_mode": "always"
+        }))
+        .expect("legacy local SipFlow config should deserialize");
+
+        let SipFlowConfig::Local {
+            root,
+            flush_count,
+            flush_interval_secs,
+            ..
+        } = config
+        else {
+            panic!("expected local SipFlow config");
+        };
+        assert_eq!(root, "./sipflow");
+        assert_eq!(flush_count, 0);
+        assert_eq!(flush_interval_secs, 0);
+    }
 
     #[test]
     fn remote_config_defaults_mtu_to_standard_ethernet() {

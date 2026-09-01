@@ -250,8 +250,6 @@ arc-swap = "1.9.2"
 iso_currency = { version = "0.5.3", default-features = false, features = [
     "iterator",
 ], optional = true }
-flowdb = { version = "0.8.3", default-features = false }
-
 # Workspace crates
 rustpbx-models = { path = "crates/rustpbx-models" }
 rustpbx-storage = { path = "crates/rustpbx-storage" }

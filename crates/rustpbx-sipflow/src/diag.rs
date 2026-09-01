@@ -4,14 +4,12 @@ use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use crate::config::SipFlowSubdirs;
-use crate::flowdb_backend::FlowDbBackend;
 use crate::rtp_stats::parse_rtp_stats_header;
 use crate::sdp_utils::extract_sdp;
 use crate::storage::{StorageManager, discover_data_dirs};
-use crate::{SipFlowBackend, SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
+use crate::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 
 // ── SDP / Payload Map ─────────────────────────────────────
 
@@ -569,55 +567,6 @@ pub async fn run_diag(
             for p in pkts {
                 all_rtp_packets.push((p.leg, p.timestamp, p.payload));
             }
-        }
-    }
-
-    // FlowDB pass
-    if let Ok(flowdb) = FlowDbBackend::new(
-        &base,
-        subdirs,
-        None,
-        64,
-        128,
-        1000,
-        3600,
-        false,
-        16000,
-        1,
-        flowdb::SyncMode::Always,
-    ) {
-        let flowdb = Arc::new(flowdb);
-
-        if let Ok(items) = flowdb.query_flow(call_id, start, end).await {
-            let n = items.len();
-            all_sip.extend(items);
-            if n > 0 {
-                bucket_infos.push(BucketInfo {
-                    path: root_dir.to_string(),
-                    engine: "flowdb".into(),
-                    sip_msgs: n,
-                    rtp_packets: 0,
-                });
-            }
-        }
-
-        if let Ok(stats) = flowdb.query_media_stats(call_id, start, end).await {
-            let n: usize = stats.iter().map(|s| s.packet_count).sum();
-            all_rtp_stats.extend(stats);
-            if n > 0 {
-                if let Some(b) = bucket_infos.iter_mut().find(|b| b.engine == "flowdb") {
-                    b.rtp_packets += n;
-                }
-            }
-        }
-
-        if let Ok(pkts) = flowdb.scan_rtp_packets(
-            call_id,
-            start.timestamp_micros(),
-            end.timestamp_micros(),
-            None,
-        ) {
-            all_rtp_packets.extend(pkts);
         }
     }
 

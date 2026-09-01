@@ -1038,7 +1038,7 @@ mod tests {
         // ---- Phase 1: record the SIP+RTP item stream ----
         let items = capture_digit_press(5, 1600); // digit '5', 200 ms @ 8 kHz
 
-        // ---- Phase 2: export, mirroring FlowDbBackend::generate_wav ----
+        // ---- Phase 2: export through the stored SIP+RTP item stream ----
         // 2a. payload map derived from the recorded SDP (not hard-coded).
         let sip_items: Vec<SipFlowItem> = items
             .iter()

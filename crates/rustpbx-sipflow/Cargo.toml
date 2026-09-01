@@ -12,7 +12,6 @@ bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
 flate2 = "1"
-flowdb = { version = "0.8.3", default-features = false }
 futures = "0.3.31"
 libc = "0.2"
 lru = "0.18"

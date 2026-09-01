@@ -16,7 +16,7 @@ use rustpbx::callrecord::sipflow_upload::{
 use rustpbx::callrecord::{
     sipflow_media_key_for, sipflow_signaling_file_name_for, sipflow_signaling_key_for,
 };
-use rustpbx::config::{SipFlowConfig, SipFlowEngine, SipFlowSubdirs, SipFlowUploadConfig};
+use rustpbx::config::{SipFlowConfig, SipFlowSubdirs, SipFlowUploadConfig};
 use rustpbx::sipflow::{
     SipFlowBackend, create_backend,
     perf::{PerfCounters, PerfDumper},
@@ -52,13 +52,8 @@ struct Args {
     #[arg(short, long, default_value = "./config/sipflow")]
     root: String,
 
-    /// Storage engine: "flowdb" or "sqlite" (default)
-    #[arg(long, default_value = "sqlite")]
-    engine: String,
-
-    /// Disable gzip compression of stored payloads (sqlite engine only —
-    /// flowdb has built-in compression). Uncompressed and compressed data
-    /// are both always readable.
+    /// Disable gzip compression of stored payloads. Uncompressed and
+    /// compressed data are both always readable.
     #[arg(long, default_value_t = false)]
     no_compress: bool,
 
@@ -87,16 +82,16 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     recv_tasks: usize,
 
-    // ── SQLite options ──
-    /// Number of packets to batch before flushing (SQLite)
+    // ── Storage options ──
+    /// Number of packets to batch before flushing
     #[arg(long, default_value_t = 1000)]
     flush_count: usize,
 
-    /// Flush interval in seconds (SQLite)
+    /// Flush interval in seconds
     #[arg(long, default_value_t = 5)]
     flush_interval: u64,
 
-    /// Call-ID cache size (SQLite)
+    /// Call-ID cache size
     #[arg(long, default_value_t = 8192)]
     id_cache_size: usize,
 
@@ -120,19 +115,6 @@ struct Args {
     /// default is what keeps the collector from head-of-line blocking.
     #[arg(long, default_value_t = false)]
     blocking_backpressure: bool,
-
-    // ── FlowDB options ──
-    /// TTL in seconds for FlowDB records (optional, 0 = no ttl)
-    #[arg(long)]
-    ttl_secs: Option<u64>,
-
-    /// FlowDB memtable size in MB (default 64)
-    #[arg(long, default_value_t = 64)]
-    memtable_size_mb: usize,
-
-    /// FlowDB block cache capacity in MB (default 128)
-    #[arg(long, default_value_t = 128)]
-    block_cache_capacity_mb: usize,
 
     /// Number of parallel shard pipelines (1 = legacy single-file layout)
     #[arg(long, default_value_t = 4)]
@@ -247,17 +229,11 @@ async fn main() -> Result<()> {
     // Ensure data directory exists
     std::fs::create_dir_all(&args.root)?;
 
-    let engine = match args.engine.as_str() {
-        "flowdb" => SipFlowEngine::FlowDb,
-        _ => SipFlowEngine::Sqlite,
-    };
     let subdirs = match args.subdirs.as_str() {
         "none" => SipFlowSubdirs::None,
         "hourly" => SipFlowSubdirs::Hourly,
         _ => SipFlowSubdirs::Daily,
     };
-    let ttl_secs = args.ttl_secs.filter(|&s| s > 0);
-
     println!("Sipflow Start at {}", Utc::now());
     println!("{}", rustpbx::version::get_version_info());
     println!("root: {}", args.root);
@@ -269,14 +245,9 @@ async fn main() -> Result<()> {
         flush_count: args.flush_count,
         flush_interval_secs: args.flush_interval,
         id_cache_size: args.id_cache_size,
-        engine,
         compress: !args.no_compress,
         compress_level: args.compress_level,
-        ttl_secs,
-        memtable_size_mb: args.memtable_size_mb,
-        block_cache_capacity_mb: args.block_cache_capacity_mb,
         shards: args.shards,
-        flowdb_sync_mode: flowdb::SyncMode::IntervalMs(10),
         upload: None,
         blocking_backpressure: args.blocking_backpressure,
     };
@@ -356,11 +327,9 @@ async fn main() -> Result<()> {
     // SO_REUSEPORT socket so the kernel load-balances datagrams across them.
     // Pre-compress payloads on the receiver threads so gzip work is spread
     // across all receiver cores instead of serializing on the single
-    // storage worker. Only the SQLite engine stores gzip-compressed
-    // payloads (`maybe_compress_payload` is idempotent, so the storage
-    // layer will not re-compress). FlowDB stores raw payloads.
-    let compress_early: Option<u32> =
-        (engine == SipFlowEngine::Sqlite && !args.no_compress).then_some(args.compress_level);
+    // storage worker. `maybe_compress_payload` is idempotent, so the storage
+    // layer will not re-compress payloads.
+    let compress_early: Option<u32> = (!args.no_compress).then_some(args.compress_level);
 
     for i in 0..recv_tasks {
         let socket = bind_udp_socket(udp_addr, args.recv_buffer_size, recv_tasks > 1)?;

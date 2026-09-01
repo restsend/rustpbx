@@ -1,4 +1,3 @@
-pub mod hybrid;
 pub mod local;
 pub mod remote;
 
@@ -16,7 +15,7 @@ use crate::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 
 #[async_trait]
 pub trait SipFlowBackend: Send + Sync {
-    /// Short, stable identifier for the backend implementation (e.g. `"hybrid"`,
+    /// Short, stable identifier for the backend implementation (e.g. `"local"`,
     /// `"remote"`). Used for diagnostics/UI so operators can see which backend
     /// answered a sip-flow query. Defaults to `"unknown"`.
     fn kind(&self) -> &'static str {
@@ -141,14 +140,9 @@ pub async fn create_backend(
             flush_count,
             flush_interval_secs,
             id_cache_size,
-            engine,
             compress,
             compress_level,
-            ttl_secs,
-            memtable_size_mb,
-            block_cache_capacity_mb,
             shards,
-            flowdb_sync_mode,
             upload,
             blocking_backpressure,
             ..
@@ -170,25 +164,17 @@ pub async fn create_backend(
                 })
                 .unwrap_or((false, 16000));
 
-            // Hybrid backend: writes go to the configured engine, while
-            // queries can open both SQLite and FlowDB buckets, using each
-            // subdirectory's contents as an engine hint.
             let compress = compress.then_some(*compress_level);
-            hybrid::HybridLocalBackend::new(
+            local::LocalBackend::new(
                 root.clone(),
                 subdirs.clone(),
-                *engine,
                 *flush_count,
                 *flush_interval_secs,
                 *id_cache_size,
                 compress,
-                *ttl_secs,
-                *memtable_size_mb,
-                *block_cache_capacity_mb,
                 *shards,
                 force_pcm,
                 pcm_sample_rate,
-                *flowdb_sync_mode,
                 *blocking_backpressure,
             )
             .map(|b| Box::new(b) as Box<dyn SipFlowBackend>)
