@@ -898,7 +898,7 @@ pub struct LocatorWebhookConfig {
     /// Excludes the HTTP push itself. Disabled by default — opt in
     /// explicitly.
     #[serde(default)]
-    pub track_latency: Option<bool>,
+    pub track_queue_latency: Option<bool>,
 }
 
 /// Global recovery for Step IVR when the external provider cannot continue.

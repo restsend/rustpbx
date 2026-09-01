@@ -31,7 +31,7 @@ struct RwiWebhookSender {
     allowed_events: Vec<String>,
     client: reqwest::Client,
     retries: u32,
-    track_latency: bool,
+    track_queue_latency: bool,
 }
 
 impl RwiWebhookSender {
@@ -44,7 +44,7 @@ impl RwiWebhookSender {
             client: crate::http_util::build_keepalive_client(Some(timeout), None)
                 .unwrap_or_else(|_| reqwest::Client::new()),
             retries: config.retries.unwrap_or(0),
-            track_latency: config.track_latency.unwrap_or(false),
+            track_queue_latency: config.track_queue_latency.unwrap_or(false),
         }
     }
 
@@ -213,7 +213,7 @@ async fn run_rwi_webhook_handler(
                 // Opt-in queueing latency: enqueued (gateway dispatch) ->
                 // dequeued here. Excludes the HTTP push itself; a slow router
                 // does NOT inflate this — queue wait does.
-                if sender.track_latency {
+                if sender.track_queue_latency {
                     let queued = (chrono::Utc::now() - entry.cached_at)
                         .num_milliseconds() as f64
                         / 1000.0;
@@ -355,7 +355,7 @@ pub async fn send_test_event(
         headers: headers.cloned(),
         timeout_ms: Some(5000),
             retries: Some(2),
-            track_latency: None,
+            track_queue_latency: None,
     });
     let test_payload = json!({
         "rwi": "1.0",
@@ -428,7 +428,7 @@ mod tests {
             headers: None,
             timeout_ms: Some(5000),
             retries: Some(2),
-            track_latency: None,
+            track_queue_latency: None,
         };
         let tx = start_rwi_webhook_handler(config, WEBHOOK_CHANNEL_SIZE);
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -462,7 +462,7 @@ mod tests {
             headers: None,
             timeout_ms: Some(5000),
             retries: Some(2),
-            track_latency: None,
+            track_queue_latency: None,
         };
         let tx = start_rwi_webhook_handler(config, WEBHOOK_CHANNEL_SIZE);
         tokio::time::sleep(Duration::from_millis(50)).await;
