@@ -312,6 +312,8 @@ pub async fn upload_signaling_flow(
     client: &reqwest::Client,
     s3_storage: Option<&Storage>,
 ) -> bool {
+    let query_start = start - chrono::Duration::seconds(1);
+    let query_end = end + chrono::Duration::seconds(1);
     let mut query_call_ids = signaling_call_ids.to_vec();
     if !query_call_ids.iter().any(|id| id == call_id) {
         query_call_ids.push(call_id.to_string());
@@ -319,7 +321,10 @@ pub async fn upload_signaling_flow(
 
     let mut flow_items = Vec::new();
     for leg_call_id in &query_call_ids {
-        match backend.query_flow(leg_call_id, start, end).await {
+        match backend
+            .query_flow(leg_call_id, query_start, query_end)
+            .await
+        {
             Ok(mut items) => flow_items.append(&mut items),
             Err(e) => {
                 warn!(call_id, leg_call_id, "SipFlowUploadHook: query_flow failed: {e}");
@@ -551,6 +556,7 @@ mod tests {
         media: Vec<u8>,
         flush_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         queried_call_ids: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        queried_ranges: std::sync::Arc<std::sync::Mutex<Vec<(i64, i64)>>>,
     }
 
     #[async_trait::async_trait]
@@ -566,13 +572,17 @@ mod tests {
         async fn query_flow(
             &self,
             call_id: &str,
-            _start: DateTime<Local>,
-            _end: DateTime<Local>,
+            start: DateTime<Local>,
+            end: DateTime<Local>,
         ) -> anyhow::Result<Vec<SipFlowItem>> {
             self.queried_call_ids
                 .lock()
                 .unwrap()
                 .push(call_id.to_string());
+            self.queried_ranges
+                .lock()
+                .unwrap()
+                .push((start.timestamp_micros(), end.timestamp_micros()));
             Ok(vec![])
         }
         async fn query_media_stats(
@@ -653,6 +663,7 @@ mod tests {
                 media: vec![],
                 flush_count: flush_count.clone(),
                 queried_call_ids: Arc::new(std::sync::Mutex::new(Vec::new())),
+                queried_ranges: Arc::new(std::sync::Mutex::new(Vec::new())),
             }),
             Arc::new(std::sync::OnceLock::new()),
             SipFlowUploadConfig::Http {
@@ -682,6 +693,7 @@ mod tests {
                 media: vec![],
                 flush_count: flush_count.clone(),
                 queried_call_ids: Arc::new(std::sync::Mutex::new(Vec::new())),
+                queried_ranges: Arc::new(std::sync::Mutex::new(Vec::new())),
             }),
             Arc::new(std::sync::OnceLock::new()),
             SipFlowUploadConfig::Http {
@@ -708,10 +720,12 @@ mod tests {
     #[tokio::test]
     async fn signaling_query_uses_roles_and_adds_root_only_when_missing() {
         let queried_call_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let queried_ranges = Arc::new(std::sync::Mutex::new(Vec::new()));
         let backend = MockBackend {
             media: vec![],
             flush_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             queried_call_ids: queried_call_ids.clone(),
+            queried_ranges: queried_ranges.clone(),
         };
         let upload_config = SipFlowUploadConfig::Http {
             url: "http://localhost:9999/upload".to_string(),
@@ -723,14 +737,16 @@ mod tests {
         };
         let client = crate::http_util::build_keepalive_client(None, None).unwrap();
         let now = Local::now();
+        let start = now - chrono::Duration::seconds(1);
+        let end = now + chrono::Duration::seconds(1);
 
         upload_signaling_flow(
             &upload_config,
             &backend,
             "caller-call-id",
             &["caller-call-id".to_string(), "callee-call-id".to_string()],
-            now - chrono::Duration::seconds(1),
-            now + chrono::Duration::seconds(1),
+            start,
+            end,
             "flow.jsonl",
             "flow.jsonl",
             &client,
@@ -741,8 +757,19 @@ mod tests {
             *queried_call_ids.lock().unwrap(),
             ["caller-call-id", "callee-call-id"]
         );
+        assert_eq!(
+            *queried_ranges.lock().unwrap(),
+            vec![
+                (
+                    (start - chrono::Duration::seconds(1)).timestamp_micros(),
+                    (end + chrono::Duration::seconds(1)).timestamp_micros(),
+                );
+                2
+            ]
+        );
 
         queried_call_ids.lock().unwrap().clear();
+        queried_ranges.lock().unwrap().clear();
         upload_signaling_flow(
             &upload_config,
             &backend,
