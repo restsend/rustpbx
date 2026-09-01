@@ -2803,8 +2803,12 @@ max_retries = 3
         sip_headers: std::collections::HashMap::new(),
         route_name: None,
     };
-    let app_ctx =
-        crate::call::app::ApplicationContext::new(db, call_info, std::sync::Arc::new(config));
+    let app_ctx = crate::call::app::ApplicationContext::new(
+        db,
+        call_info,
+        std::sync::Arc::new(config),
+        reqwest::Client::new(),
+    );
 
     let factory = BuiltinAppFactory::new(None, None);
 

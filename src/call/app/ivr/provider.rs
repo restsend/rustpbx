@@ -285,12 +285,11 @@ pub struct StepProvider {
 }
 
 impl StepProvider {
-    pub fn new(url: impl Into<String>) -> Self {
+    pub fn new(url: impl Into<String>, http_client: reqwest::Client) -> Self {
         Self {
             url: url.into(),
             headers: HashMap::new(),
-            http_client: crate::http_util::build_keepalive_client(None, None)
-                .unwrap_or_else(|_| reqwest::Client::new()),
+            http_client,
             retry: RetryConfig::default(),
             prefer_ivr_fallback: false,
         }
@@ -308,11 +307,6 @@ impl StepProvider {
 
     pub fn with_prefer_ivr_fallback(mut self, prefer: bool) -> Self {
         self.prefer_ivr_fallback = prefer;
-        self
-    }
-
-    pub fn with_client(mut self, client: reqwest::Client) -> Self {
-        self.http_client = client;
         self
     }
 
@@ -542,7 +536,10 @@ mod tests {
 
     #[test]
     fn test_step_provider_endpoint_url_trims_whitespace_and_slash() {
-        let provider = StepProvider::new(" http://127.0.0.1:28080/ivr/step/ ");
+        let provider = StepProvider::new(
+            " http://127.0.0.1:28080/ivr/step/ ",
+            reqwest::Client::new(),
+        );
 
         assert_eq!(
             provider.endpoint_url(None),

@@ -118,8 +118,8 @@ struct PendingMenu {
 }
 
 impl StepIvrApp {
-    pub fn new(url: impl Into<String>) -> Self {
-        let provider = Box::new(super::provider::StepProvider::new(url));
+    pub fn new(url: impl Into<String>, http_client: reqwest::Client) -> Self {
+        let provider = Box::new(super::provider::StepProvider::new(url, http_client));
         Self {
             provider,
             provider_session: None,
@@ -2167,6 +2167,7 @@ mod tests {
                 route_name: None,
             },
             Arc::new(Config::default()),
+            reqwest::Client::new(),
         )
     }
 
@@ -4061,7 +4062,7 @@ mod tests {
         )
         .await;
 
-        let provider = StepProvider::new(&url).with_retry(RetryConfig {
+        let provider = StepProvider::new(&url, reqwest::Client::new()).with_retry(RetryConfig {
             max_retries: 1,
             timeout_ms: 2000,
             retry_delay_ms: 10,
@@ -4110,7 +4111,7 @@ mod tests {
                 target: "builtin_vip".into(),
             }],
         });
-        let provider = StepProvider::new(&url)
+        let provider = StepProvider::new(&url, reqwest::Client::new())
             .with_retry(RetryConfig {
                 max_retries: 1,
                 timeout_ms: 500,
@@ -4176,7 +4177,7 @@ mod tests {
             default: Some("default_ivr".into()),
             rules: vec![],
         });
-        let provider = StepProvider::new(&url)
+        let provider = StepProvider::new(&url, reqwest::Client::new())
             .with_retry(RetryConfig {
                 max_retries: 1,
                 timeout_ms: 200,
@@ -4234,7 +4235,7 @@ mod tests {
         let resp = serde_json::to_value(&entry).unwrap();
 
         let url = spawn_mock_provider(vec![resp]).await;
-        let app = StepIvrApp::new(&url);
+        let app = StepIvrApp::new(&url, reqwest::Client::new());
 
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
         stack
@@ -4292,7 +4293,7 @@ mod tests {
 
         let url = spawn_mock_provider(vec![serde_json::to_value(&menu_resp).unwrap()]).await;
 
-        let app = StepIvrApp::new(&url);
+        let app = StepIvrApp::new(&url, reqwest::Client::new());
 
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
         stack
@@ -4359,7 +4360,7 @@ mod tests {
         ])
         .await;
 
-        let app = StepIvrApp::new(&url);
+        let app = StepIvrApp::new(&url, reqwest::Client::new());
 
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
         stack
@@ -5817,12 +5818,13 @@ mod tests {
         });
 
         let provider =
-            StepProvider::new(format!("http://{addr}/ivr/step")).with_retry(RetryConfig {
-                max_retries: 1,
-                timeout_ms: 15_000,
-                retry_delay_ms: 100,
-                fallback_action: None,
-            });
+            StepProvider::new(format!("http://{addr}/ivr/step"), reqwest::Client::new())
+                .with_retry(RetryConfig {
+                    max_retries: 1,
+                    timeout_ms: 15_000,
+                    retry_delay_ms: 100,
+                    fallback_action: None,
+                });
         let ctx = make_test_context();
         let mut stack = MockCallStack::run_with_context(
             Box::new(StepIvrApp::with_provider(Box::new(provider)).with_name("http-ivr")),
@@ -6268,7 +6270,7 @@ mod tests {
         use crate::call::app::ivr::provider::StepProvider;
 
         let provider = start_mock_step_provider();
-        let step_provider = StepProvider::new(&provider.url);
+        let step_provider = StepProvider::new(&provider.url, reqwest::Client::new());
 
         let session = SessionContext {
             session_id: "test-session".to_string(),

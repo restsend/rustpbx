@@ -489,6 +489,7 @@ async fn test_guest_call_allowed_extension() {
     ));
 
     let server_inner = Arc::new(SipServerInner {
+        http_client: reqwest::Client::new(),
         rtp_config: ArcSwap::new(Arc::new(RtpConfig::default())),
         sip_contact_config: ArcSwap::new(Arc::new(SipContactConfig::default())),
         network_profiles: ArcSwap::new(Arc::new(Vec::new())),

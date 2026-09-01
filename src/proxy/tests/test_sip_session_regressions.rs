@@ -2872,6 +2872,7 @@ async fn route_point_fallback_matches_current_invocation_context() {
             route_name: None,
         },
         Arc::new(crate::config::Config::default()),
+        reqwest::Client::new(),
     ));
     let mut runtime = RoutePointRuntime::new(&[]);
     runtime.context = Some(app_context);

@@ -65,6 +65,7 @@ use tracing::{debug, info, warn};
 
 pub struct SipServerInner {
     pub cancel_token: CancellationToken,
+    pub http_client: reqwest::Client,
     pub rtp_config: ArcSwap<RtpConfig>,
     pub sip_contact_config: ArcSwap<SipContactConfig>,
     pub network_profiles: ArcSwap<Vec<NetworkProfile>>,
@@ -169,6 +170,7 @@ pub struct SipServerBuilder {
     default_network_profile_id: Option<String>,
     config: Arc<ProxyConfig>,
     cancel_token: Option<CancellationToken>,
+    http_client: Option<reqwest::Client>,
     user_backend: Option<Box<dyn UserBackend>>,
     auth_backend: Vec<Box<dyn AuthBackend>>,
     call_router: Option<Box<dyn CallRouter>>,
@@ -220,6 +222,7 @@ impl SipServerBuilder {
             network_profiles: None,
             default_network_profile_id: None,
             cancel_token: None,
+            http_client: None,
             user_backend: None,
             auth_backend: Vec::new(),
             call_router: None,
@@ -365,6 +368,11 @@ impl SipServerBuilder {
         self
     }
 
+    pub fn with_http_client(mut self, http_client: reqwest::Client) -> Self {
+        self.http_client = Some(http_client);
+        self
+    }
+
     pub fn with_create_route_invite(mut self, f: FnCreateRouteInvite) -> Self {
         self.create_route_invites.push(f);
         self
@@ -483,6 +491,10 @@ impl SipServerBuilder {
     }
 
     pub async fn build(mut self) -> Result<SipServer> {
+        let http_client = match self.http_client.take() {
+            Some(client) => client,
+            None => crate::http_util::build_keepalive_client(None, None)?,
+        };
         let user_backend = if let Some(backend) = self.user_backend {
             backend
         } else {
@@ -1129,6 +1141,7 @@ impl SipServerBuilder {
         self.trunk_health = Some(trunk_health_states.clone());
 
         let inner = Arc::new(SipServerInner {
+            http_client,
             rtp_config: ArcSwap::new(Arc::new(rtp_config)),
             sip_contact_config: ArcSwap::new(Arc::new(sip_contact_config)),
             network_profiles: ArcSwap::new(Arc::new(network_profiles)),

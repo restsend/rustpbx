@@ -52,6 +52,7 @@ use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 pub struct CoreContext {
     pub config: Arc<Config>,
     pub db: DatabaseConnection,
+    pub http_client: reqwest::Client,
     pub token: CancellationToken,
     pub callrecord_sender: Option<CallRecordSender>,
     pub callrecord_stats: Option<Arc<crate::callrecord::CallRecordStats>>,
@@ -251,6 +252,7 @@ impl AppStateBuilder {
 
     pub async fn build(self) -> Result<AppState> {
         let config: Arc<Config> = Arc::new(self.config.unwrap_or_default());
+        let http_client = crate::http_util::build_keepalive_client(None, None)?;
         let storage_config = config.storage.clone().unwrap_or_default();
         let storage = crate::storage::Storage::new(&storage_config)?;
 
@@ -423,6 +425,7 @@ impl AppStateBuilder {
         let mut core = Arc::new(CoreContext {
             config: config.clone(),
             db: db_conn.clone(),
+            http_client: http_client.clone(),
             token: token.clone(),
             callrecord_sender: callrecord_sender.clone(),
             callrecord_stats: callrecord_stats.clone(),
@@ -433,7 +436,12 @@ impl AppStateBuilder {
         });
 
         let sip_server = match self.proxy_builder {
-            Some(builder) => builder.build().await,
+            Some(builder) => {
+                builder
+                    .with_http_client(http_client.clone())
+                    .build()
+                    .await
+            }
             None => {
                 let mut proxy_config = config.proxy.clone();
                 for backend in proxy_config.user_backends.iter_mut() {
@@ -474,6 +482,7 @@ impl AppStateBuilder {
                         config.default_network_profile_id(),
                     )
                     .with_database_connection(core.db.clone())
+                    .with_http_client(core.http_client.clone())
                     .with_call_record_hooks(call_record_hooks)
                     .with_storage(core.storage.clone())
                     .with_sipflow_config(config.sipflow.clone())
@@ -558,6 +567,7 @@ impl AppStateBuilder {
             core = Arc::new(CoreContext {
                 config: core.config.clone(),
                 db: core.db.clone(),
+                http_client: core.http_client.clone(),
                 token: core.token.clone(),
                 callrecord_sender: core.callrecord_sender.clone(),
                 callrecord_stats: core.callrecord_stats.clone(),
@@ -571,7 +581,7 @@ impl AppStateBuilder {
         let app_state = Arc::new(AppStateInner {
             core: core.clone(),
             sip_server,
-            http_client: crate::http_util::build_keepalive_client(None, None)?,
+            http_client,
             skip_migrate: self.skip_migrate,
             total_calls: AtomicU64::new(0),
             total_failed_calls: AtomicU64::new(0),

@@ -227,12 +227,16 @@ pub struct PendingQueuePlan {
 
 impl ApplicationContext {
     /// Create a new application context.
-    pub fn new(db: DatabaseConnection, call_info: CallInfo, config: Arc<Config>) -> Self {
+    pub fn new(
+        db: DatabaseConnection,
+        call_info: CallInfo,
+        config: Arc<Config>,
+        http_client: reqwest::Client,
+    ) -> Self {
         Self {
             session_vars: Arc::new(DashMap::new()),
             db,
-            http_client: crate::http_util::build_keepalive_client(None, None)
-                .unwrap_or_else(|_| reqwest::Client::new()),
+            http_client,
             call_info,
             invocation: None,
             config,
@@ -447,7 +451,12 @@ mod tests {
     #[tokio::test]
     async fn test_session_vars() {
         let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
-        let ctx = ApplicationContext::new(db, make_call_info(), Arc::new(Config::default()));
+        let ctx = ApplicationContext::new(
+            db,
+            make_call_info(),
+            Arc::new(Config::default()),
+            reqwest::Client::new(),
+        );
 
         // Initially empty
         assert!(ctx.get_var("lang").is_none());

@@ -236,6 +236,7 @@ mod tests {
                 route_name: None,
             },
             Arc::new(crate::config::Config::default()),
+            reqwest::Client::new(),
         )
     }
 

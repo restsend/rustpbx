@@ -868,6 +868,7 @@ impl SipSession {
                 proxy: (*server.proxy_config.load_full()).clone(),
                 ..Default::default()
             }),
+            server.http_client.clone(),
         );
         app_ctx.rwi_gateway = server.rwi_gateway.clone();
         app_ctx.ivr_trace = server.ivr_trace.clone();

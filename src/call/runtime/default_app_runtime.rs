@@ -643,6 +643,7 @@ mod tests {
             Default::default(),
             call_info,
             std::sync::Arc::new(crate::config::Config::default()),
+            reqwest::Client::new(),
         );
         let runtime = DefaultAppRuntime::new(AppRuntimeConfig {
             session_id: "runtime-test".into(),
@@ -735,6 +736,7 @@ mod tests {
                 route_name: None,
             },
             std::sync::Arc::new(crate::config::Config::default()),
+            reqwest::Client::new(),
         );
         let factory = Arc::new(CaptureFactory {
             contexts: std::sync::Mutex::new(Vec::new()),

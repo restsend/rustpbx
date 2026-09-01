@@ -90,6 +90,7 @@ pub async fn create_test_server_with_config_and_sipflow_backend(
     ));
 
     let server_inner = Arc::new(SipServerInner {
+        http_client: reqwest::Client::new(),
         rtp_config: ArcSwap::new(Arc::new(RtpConfig::default())),
         sip_contact_config: ArcSwap::new(Arc::new(SipContactConfig::default())),
         network_profiles: ArcSwap::new(Arc::new(Vec::new())),

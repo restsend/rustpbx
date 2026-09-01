@@ -77,6 +77,7 @@ impl MockCallStack {
                 route_name: None,
             },
             Arc::new(Config::default()),
+            reqwest::Client::new(),
         );
 
         Self::run_with_context(app, ctx)

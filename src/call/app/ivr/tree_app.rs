@@ -1688,6 +1688,7 @@ mod tests {
                 route_name: None,
             },
             Arc::new(Config::default()),
+            reqwest::Client::new(),
         )
     }
 

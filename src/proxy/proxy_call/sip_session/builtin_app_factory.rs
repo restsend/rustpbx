@@ -125,7 +125,10 @@ impl BuiltinAppFactory {
                         .as_ref()
                         .and_then(|p| p.get("url").and_then(|v| v.as_str()))?;
 
-                    let mut provider = crate::call::app::ivr::StepProvider::new(url);
+                    let mut provider = crate::call::app::ivr::StepProvider::new(
+                        url,
+                        context.http_client.clone(),
+                    );
 
                     if let Some(hdrs) = params.as_ref()?.get("headers") {
                         if let Some(h) = hdrs.as_object() {
@@ -270,8 +273,10 @@ impl BuiltinAppFactory {
                     if file_config.ivr.is_step_mode() {
                         // Step mode from TOML
                         let provider_cfg = file_config.ivr.provider.as_ref()?;
-                        let mut provider =
-                            crate::call::app::ivr::StepProvider::new(&provider_cfg.url);
+                        let mut provider = crate::call::app::ivr::StepProvider::new(
+                            &provider_cfg.url,
+                            context.http_client.clone(),
+                        );
                         for (k, v) in &provider_cfg.headers {
                             provider.add_header(k, v);
                         }
