@@ -196,7 +196,6 @@ where
 // instead of the SIP runtime, preventing RTP load from starving SIP timers.
 // ---------------------------------------------------------------------------
 static MEDIA_RUNTIME: OnceLock<Handle> = OnceLock::new();
-
 /// Atomically set the global media runtime handle.  Must be called exactly
 /// once at startup, before any media task is spawned.
 pub fn set_media_runtime(handle: Handle) {
@@ -251,6 +250,53 @@ pub fn media_enter() -> Option<tokio::runtime::EnterGuard<'static>> {
     // SAFETY: OnceLock::get() returns &Handle with the lifetime of the
     // OnceLock, which is 'static because MEDIA_RUNTIME is a static.
     MEDIA_RUNTIME.get().map(|h| h.enter())
+}
+
+// ---------------------------------------------------------------------------
+// RWI webhook runtime isolation: a dedicated tokio runtime for the RWI HTTP
+// push consumer.  The webhook handler performs sequential blocking-ish HTTP
+// POSTs to the router; running it on its own pool keeps its egress (and any
+// backpressure from a slow router) off the SIP runtime shared by signalling,
+// the HTTP route path, and the CDR saver.
+// ---------------------------------------------------------------------------
+static RWI_WEBHOOK_RUNTIME: OnceLock<Handle> = OnceLock::new();
+
+/// Atomically set the global RWI webhook runtime handle.  Must be called
+/// exactly once at startup, before the webhook handler is spawned.
+pub fn set_rwi_webhook_runtime(handle: Handle) {
+    RWI_WEBHOOK_RUNTIME
+        .set(handle)
+        .expect("set_rwi_webhook_runtime called more than once");
+}
+
+/// Spawn a future onto the dedicated RWI webhook runtime.  Falls back to the
+/// ambient tokio runtime if the runtime has not been initialised (e.g. during
+/// tests).
+#[track_caller]
+pub fn rwi_webhook_spawn<T>(future: T) -> tokio::task::JoinHandle<T::Output>
+where
+    T: std::future::Future + Send + 'static,
+    T::Output: Send + 'static,
+{
+    let location = std::panic::Location::caller();
+    let loc = format!("{}:{}", location.file(), location.line());
+    let _guard = TaskGuard::new(loc);
+    if let Some(handle) = RWI_WEBHOOK_RUNTIME.get() {
+        handle.spawn(async move {
+            let _guard = _guard;
+            future.await
+        })
+    } else {
+        tokio::spawn(async move {
+            let _guard = _guard;
+            future.await
+        })
+    }
+}
+
+/// Return the configured RWI webhook runtime handle, if any.
+pub fn rwi_webhook_runtime_handle() -> Option<Handle> {
+    RWI_WEBHOOK_RUNTIME.get().cloned()
 }
 
 /// Collect tokio runtime metrics from the current and media runtimes.

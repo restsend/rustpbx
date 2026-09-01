@@ -8,7 +8,7 @@ use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
 /// Buffer size for the broadcast channel between gateway and webhook handler.
-const WEBHOOK_CHANNEL_SIZE: usize = 512;
+const WEBHOOK_CHANNEL_SIZE: usize = 100000;
 /// Max number of recent (call_id, timestamp) pairs kept for dedup.
 const DEDUP_CACHE_SIZE: usize = 4096;
 
@@ -108,7 +108,7 @@ pub fn start_rwi_webhook_handler(
     config: LocatorWebhookConfig,
 ) -> broadcast::Sender<EventCacheEntry> {
     let (tx, rx) = broadcast::channel(WEBHOOK_CHANNEL_SIZE);
-    crate::utils::spawn(run_rwi_webhook_handler(config, rx));
+    crate::utils::rwi_webhook_spawn(run_rwi_webhook_handler(config, rx));
     tx
 }
 

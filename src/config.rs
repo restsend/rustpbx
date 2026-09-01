@@ -1097,6 +1097,12 @@ pub struct ProxyConfig {
     pub sip_worker_threads: usize,
     #[serde(default = "default_media_worker_threads")]
     pub media_worker_threads: usize,
+    /// Dedicated tokio worker threads for the RWI HTTP webhook push consumer.
+    /// Isolates the webhook's outbound HTTP (and any backpressure from a slow
+    /// router) from the SIP runtime shared by signalling, the HTTP route path
+    /// and the CDR saver.
+    #[serde(default = "default_rwi_webhook_worker_threads")]
+    pub rwi_webhook_worker_threads: usize,
     pub ws_handler: Option<String>,
     pub ami_path: Option<String>,
     pub rwi_path: Option<String>,
@@ -1287,6 +1293,10 @@ fn default_media_worker_threads() -> usize {
     let n = available_parallelism();
     let sip = default_sip_worker_threads();
     if n > sip { n - sip } else { 1 }
+}
+
+fn default_rwi_webhook_worker_threads() -> usize {
+    2
 }
 
 fn default_auth_cache_size() -> usize {
@@ -1754,6 +1764,7 @@ impl Default for ProxyConfig {
             hold_music: None,
             sip_worker_threads: default_sip_worker_threads(),
             media_worker_threads: default_media_worker_threads(),
+            rwi_webhook_worker_threads: default_rwi_webhook_worker_threads(),
         }
     }
 }

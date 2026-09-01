@@ -328,10 +328,11 @@ fn main() -> Result<()> {
     // heavy RTP forwarding does not starve SIP timer/transaction tasks.
     let sip_workers = config.proxy.sip_worker_threads.max(1);
     let media_workers = config.proxy.media_worker_threads.max(1);
+    let rwi_webhook_workers = config.proxy.rwi_webhook_worker_threads.max(1);
 
     println!(
-        "SIP workers={} Media workers={}",
-        sip_workers, media_workers
+        "SIP workers={} Media workers={} RWI webhook workers={}",
+        sip_workers, media_workers, rwi_webhook_workers
     );
 
     let media_runtime = tokio::runtime::Builder::new_multi_thread()
@@ -345,6 +346,15 @@ fn main() -> Result<()> {
     // Recorder tasks wake per captured RTP packet; keep them off the small
     // SIP runtime so high-concurrency recording cannot starve SIP timers.
     rustpbx::media::media_recorder::set_recorder_runtime(media_runtime.handle().clone());
+
+    let rwi_webhook_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(rwi_webhook_workers)
+        .thread_name("rwi-webhook")
+        .thread_stack_size(8 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to build RWI webhook runtime: {}", e))?;
+    rustpbx::utils::set_rwi_webhook_runtime(rwi_webhook_runtime.handle().clone());
 
     let sip_runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(sip_workers)
