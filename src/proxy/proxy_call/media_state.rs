@@ -13,6 +13,9 @@ pub struct MediaState {
     pub callee_offer_cached_webrtc: Option<bool>,
     pub answer: Option<String>,
     pub early_media_sent: bool,
+    /// RWI `call_ringing` fires once per call — on the FIRST provisional
+    /// (183 with SDP, or 180 without). Later provisionals do not re-fire.
+    pub ringing_event_sent: bool,
     pub callee_answer_sdp: Option<String>,
     pub bridge: Option<MediaBridge>,
 }
@@ -26,6 +29,7 @@ impl MediaState {
             callee_offer_cached_webrtc: None,
             answer: None,
             early_media_sent: false,
+            ringing_event_sent: false,
             callee_answer_sdp: None,
             bridge: None,
         }
