@@ -2765,6 +2765,88 @@ mod tests {
         let _ = stack.join().await;
     }
 
+    /// `queue_joined` must be emitted exactly once per queue entry:
+    /// `on_enter` emits it normally, and must NOT emit a duplicate when
+    /// `SipSession::start_queue_app` already broadcast it before agent
+    /// resolution (strict "joined first" ordering, flag
+    /// `with_joined_emitted_externally`).
+    #[tokio::test]
+    async fn test_queue_joined_emitted_once_per_entry() {
+        use crate::rwi::auth::RwiIdentity;
+        use std::sync::Arc;
+
+        for expect_joined in [true, false] {
+            let mut gw = crate::rwi::gateway::RwiGateway::new();
+            let sid = gw
+                .create_session(RwiIdentity {
+                    token: "t".into(),
+                    scopes: vec![],
+                })
+                .read()
+                .id
+                .clone();
+            let (gws_tx, mut gws_rx) = tokio::sync::mpsc::unbounded_channel();
+            gw.set_session_event_sender(&sid, gws_tx);
+            let gw = Arc::new(parking_lot::RwLock::new(gw));
+
+            let config = build_simple_queue_config();
+            let plan = config.to_plan();
+            let mut queue = QueueApp::new(plan, config);
+            queue = queue.with_call_id("call-joined".to_string());
+            if !expect_joined {
+                queue = queue.with_joined_emitted_externally();
+            }
+
+            let mut ctx = crate::call::app::ApplicationContext::new(
+                sea_orm::DatabaseConnection::default(),
+                crate::call::app::CallInfo {
+                    session_id: "test-session".into(),
+                    caller: "1001".into(),
+                    callee: "1002".into(),
+                    direction: "inbound".into(),
+                    started_at: chrono::Utc::now(),
+                    sip_headers: Default::default(),
+                    route_name: None,
+                },
+                Arc::new(crate::config::Config::default()),
+            );
+            ctx.rwi_gateway = Some(gw);
+
+            let mut stack = MockCallStack::run_with_context(Box::new(queue), ctx);
+            stack.enter().await;
+
+            // The broadcast is synchronous; give the channel a moment.
+            for _ in 0..20 {
+                if !gws_rx.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+
+            let mut joined = 0usize;
+            while let Ok(v) = gws_rx.try_recv() {
+                if v.get("event_type").and_then(|e| e.as_str()) == Some("queue_joined") {
+                    joined += 1;
+                }
+            }
+
+            stack.cancel();
+            let _ = stack.join().await;
+
+            if expect_joined {
+                assert_eq!(
+                    joined, 1,
+                    "on_enter must emit queue_joined exactly once"
+                );
+            } else {
+                assert_eq!(
+                    joined, 0,
+                    "start_queue_app already broadcast queue_joined — on_enter must not duplicate it"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn test_queue_online_agent_plays_transfer_prompt_that_is_playable() {
         if !packaged_sounds_available() {

@@ -9,9 +9,12 @@
 //!
 //! 1. `call_created` — session lifecycle
 //! 2. `ivr_node_entered` / `ivr_node_exited` — tree IVR menu flow
-//! 3. `queue_joined` — QueueApp wait retention entered
-//! 4. `skill_group_call_queued` (reason `all_busy`) — ACD adapter
-//! 5. `skill_group_agent_assigned` — after the agent goes Idle
+//! 3. `queue_joined` — broadcast by `start_queue_app` BEFORE agent resolution
+//!    (strict ordering: it must precede every ACD event)
+//! 4. `skill_group_candidates_found` + `skill_group_call_queued` (reason
+//!    `all_busy`) — ACD adapter, during target resolution
+//! 5. `skill_group_agent_assigned` — after the agent goes Idle (wait
+//!    retention poll re-resolves)
 //! 6. `call_ringing` — agent leg 180 (dynamic-leg path)
 //! 7. `queue_agent_offered` — agent leg ringing
 //! 8. `queue_agent_connected` — agent answered
@@ -555,9 +558,19 @@ async fn test_full_chain_ivr_queue_agent_rwi_webhook_events() -> Result<()> {
             node_exited < joined,
             "IVR exit before queue join: {types:?}"
         );
-        // The adapter emits `queued` during target resolution, QueueApp
-        // confirms with `joined` right after — either order is acceptable,
-        // but both must precede the assignment.
+        // Strict ordering: `queue_joined` is broadcast by `start_queue_app`
+        // BEFORE agent resolution, so it must precede every skill-group/ACD
+        // event of this queue entry.
+        let candidates_pos = pos("skill_group_candidates_found")
+            .expect("skill_group_candidates_found must be present");
+        assert!(
+            joined < candidates_pos,
+            "queue_joined before candidates_found: {types:?}"
+        );
+        assert!(
+            joined < sg_queued,
+            "queue_joined before skill_group_call_queued: {types:?}"
+        );
         assert!(
             sg_queued < assigned_pos,
             "queued before assigned: {types:?}"

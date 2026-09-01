@@ -500,6 +500,16 @@ impl QueuePlan {
         self.dial_strategy.as_ref()
     }
 
+    /// Display id for queue lifecycle events (`queue_joined`, `queue_left`,
+    /// ...) — the label when present, otherwise the queue name. MUST stay in
+    /// sync with the `QueueConfig::name` the queue app factory builds from
+    /// this plan, so every event of one queue entry reports the same id.
+    pub fn display_queue_id(&self) -> String {
+        self.label
+            .clone()
+            .unwrap_or_else(|| self.queue_name.clone())
+    }
+
     pub fn passthrough_ringback(&self) -> bool {
         self.passthrough_ringback
     }

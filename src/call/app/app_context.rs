@@ -218,6 +218,11 @@ pub struct PendingQueuePlan {
     /// Per-call overflow overrides from the transfer URI query string.
     /// Applied by the queue app factory on top of the registry plan.
     pub overflow_overrides: Option<QueueOverflowOverrides>,
+    /// `queue_joined` was already broadcast by `SipSession::start_queue_app`
+    /// before agent resolution — strict ordering requires it to be the FIRST
+    /// queue event. The queue app factory forwards this to `QueueApp` so
+    /// `on_enter` does not emit a duplicate.
+    pub joined_emitted: bool,
 }
 
 impl ApplicationContext {

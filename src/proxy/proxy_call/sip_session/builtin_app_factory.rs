@@ -348,19 +348,14 @@ impl BuiltinAppFactory {
                 let pending = context.pending_queue.lock().take()?;
                 let mut plan = pending.plan;
                 let mut config = crate::call::app::queue::QueueConfig::default();
-                config.name = plan.queue_name.clone();
+                // Same display id the session broadcast in the early
+                // `queue_joined` (label first, else queue name).
+                config.name = plan.display_queue_id();
                 config.accept_immediately = plan.accept_immediately;
                 config.hold = plan.hold.clone();
                 config.fallback = plan.fallback.clone();
                 config.voice_prompts = plan.voice_prompts.clone();
                 config.ring_timeout = plan.ring_timeout;
-                if let Some(ref label) = plan.label {
-                    if !config.name.is_empty() {
-                        config.name = label.clone();
-                    } else {
-                        config.name = label.clone();
-                    }
-                }
                 // Build agent locations from resolved URIs
                 let agents: Vec<crate::call::Location> = pending
                     .agent_uris
@@ -440,6 +435,11 @@ impl BuiltinAppFactory {
 
                 let mut app = crate::call::app::queue::QueueApp::new(plan, config)
                     .with_call_id(context.call_info.session_id.clone());
+                // `queue_joined` was already broadcast before agent resolution
+                // (strict ordering) — suppress the duplicate in `on_enter`.
+                if pending.joined_emitted {
+                    app = app.with_joined_emitted_externally();
+                }
                 // The primary skill-group id must be visible to post-call
                 // hooks (CSAT/wrapup/hold-music) even when no agent registry
                 // is attached — QueueApp writes it to CallMeta via SipSession.

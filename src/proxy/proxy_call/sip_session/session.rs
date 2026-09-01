@@ -3816,6 +3816,21 @@ impl SipSession {
             None => Vec::new(),
         };
 
+        // Broadcast `queue_joined` BEFORE agent resolution so it is strictly
+        // the FIRST queue event of this entry — skill-group candidate /
+        // assignment events emitted during `resolve_custom_targets` below must
+        // never precede it. Uses the same display id the queue app factory
+        // will put into `QueueConfig::name`, so every later queue event
+        // (`queue_agent_offered`, `queue_left`, ...) matches.
+        let joined_emitted = self.server.rwi_gateway.is_some();
+        if joined_emitted {
+            let gw = self.server.rwi_gateway.as_ref().unwrap().read();
+            gw.broadcast(&crate::rwi::QueueJoined {
+                call_id: self.context.session_id.clone(),
+                queue_id: plan.display_queue_id(),
+            });
+        }
+
         // Resolve custom targets (skill-groups → specific agents). Capture the
         // primary skill-group id BEFORE resolution rewrites the dial strategy —
         // the queue app factory needs it to resolve the escalation plan.
@@ -3946,6 +3961,7 @@ impl SipSession {
                 parallel: is_parallel,
                 skill_group_id: primary_skill_group,
                 overflow_overrides,
+                joined_emitted,
             });
         }
 
@@ -3957,7 +3973,19 @@ impl SipSession {
             None,
         )
         .await
-        .map_err(|e| anyhow!("Failed to start queue app: {:?}", e))?;
+        .map_err(|e| {
+            // Avoid an orphan `queue_joined`: with the queue app never
+            // started, no `queue_left` would ever close the lifecycle.
+            if joined_emitted {
+                let gw = self.server.rwi_gateway.as_ref().unwrap().read();
+                gw.broadcast(&crate::rwi::QueueLeft {
+                    call_id: self.context.session_id.clone(),
+                    queue_id: plan.display_queue_id(),
+                    reason: Some("start_failed".to_string()),
+                });
+            }
+            anyhow!("Failed to start queue app: {:?}", e)
+        })?;
 
         // The queue app now drives the session. Attribute the terminal phase to
         // the queue and record the queue entry so the call trace shows the full

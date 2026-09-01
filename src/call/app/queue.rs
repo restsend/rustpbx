@@ -352,6 +352,10 @@ pub struct QueueApp {
     /// re-arm it — `set_timeout` replaces timers, which would extend the
     /// caller's promised max wait on every failed cycle.
     max_wait_armed: bool,
+    /// `queue_joined` was already broadcast by `SipSession::start_queue_app`
+    /// (before agent resolution) so it stays the FIRST queue event. When set,
+    /// `on_enter` must not emit a duplicate.
+    joined_emitted_externally: bool,
 }
 
 impl QueueApp {
@@ -384,6 +388,7 @@ impl QueueApp {
             abandoned_recorded: false,
             attempted_agents: Vec::new(),
             max_wait_armed: false,
+            joined_emitted_externally: false,
         }
     }
 
@@ -396,6 +401,14 @@ impl QueueApp {
     /// Set the call ID for tracking.
     pub fn with_call_id(mut self, call_id: String) -> Self {
         self.call_id = call_id;
+        self
+    }
+
+    /// Mark that `queue_joined` was already broadcast upstream
+    /// (`SipSession::start_queue_app`, before agent resolution) — `on_enter`
+    /// must not emit it again.
+    pub fn with_joined_emitted_externally(mut self) -> Self {
+        self.joined_emitted_externally = true;
         self
     }
 
@@ -1502,11 +1515,16 @@ impl CallApp for QueueApp {
             }
         }
 
-        // Notify external systems that the call entered the queue.
-        self.emit_rwi(&crate::rwi::event::QueueJoined {
-            call_id: self.call_id.clone(),
-            queue_id: queue_id.clone(),
-        });
+        // Notify external systems that the call entered the queue. Skipped
+        // when `SipSession::start_queue_app` already broadcast `queue_joined`
+        // before agent resolution (strict "joined first" ordering); the app
+        // only emits it here when it was started without that preparation.
+        if !self.joined_emitted_externally {
+            self.emit_rwi(&crate::rwi::event::QueueJoined {
+                call_id: self.call_id.clone(),
+                queue_id: queue_id.clone(),
+            });
+        }
 
         // Resolve agents dynamically if skill routing is enabled
         if self.config.skill_routing_enabled {
