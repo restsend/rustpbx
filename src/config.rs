@@ -1108,6 +1108,12 @@ pub struct ProxyConfig {
     /// and the CDR saver.
     #[serde(default = "default_rwi_webhook_worker_threads")]
     pub rwi_webhook_worker_threads: usize,
+    /// RWI webhook event queue length: capacity of the broadcast channel
+    /// between the gateway and the webhook handler. When more than this many
+    /// events are queued, slow consumers skip ahead (Lagged) and the missed
+    /// events are counted as dropped.
+    #[serde(default = "default_rwi_webhook_channel_size")]
+    pub rwi_webhook_channel_size: usize,
     pub ws_handler: Option<String>,
     pub ami_path: Option<String>,
     pub rwi_path: Option<String>,
@@ -1302,6 +1308,10 @@ fn default_media_worker_threads() -> usize {
 
 fn default_rwi_webhook_worker_threads() -> usize {
     2
+}
+
+fn default_rwi_webhook_channel_size() -> usize {
+    100000
 }
 
 fn default_auth_cache_size() -> usize {
@@ -1770,6 +1780,7 @@ impl Default for ProxyConfig {
             sip_worker_threads: default_sip_worker_threads(),
             media_worker_threads: default_media_worker_threads(),
             rwi_webhook_worker_threads: default_rwi_webhook_worker_threads(),
+            rwi_webhook_channel_size: default_rwi_webhook_channel_size(),
         }
     }
 }

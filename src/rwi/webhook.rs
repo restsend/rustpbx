@@ -7,8 +7,9 @@ use std::collections::{HashSet, VecDeque};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
-/// Buffer size for the broadcast channel between gateway and webhook handler.
-const WEBHOOK_CHANNEL_SIZE: usize = 100000;
+/// Default buffer size for the broadcast channel between gateway and webhook
+/// handler. Overridable via [proxy] rwi_webhook_channel_size.
+pub const WEBHOOK_CHANNEL_SIZE: usize = 100000;
 /// Max number of recent (call_id, timestamp) pairs kept for dedup.
 const DEDUP_CACHE_SIZE: usize = 4096;
 
@@ -158,9 +159,10 @@ fn truncate_payload(payload: &serde_json::Value) -> String {
 /// Returns a `broadcast::Sender` that the gateway can use to send events.
 pub fn start_rwi_webhook_handler(
     config: LocatorWebhookConfig,
+    channel_size: usize,
 ) -> broadcast::Sender<EventCacheEntry> {
-    let (tx, rx) = broadcast::channel(WEBHOOK_CHANNEL_SIZE);
-    spawn_queue_metrics(tx.clone());
+    let (tx, rx) = broadcast::channel(channel_size.max(1));
+    spawn_queue_metrics(tx.clone(), channel_size.max(1));
     crate::utils::rwi_webhook_spawn(run_rwi_webhook_handler(config, rx));
     tx
 }
@@ -169,9 +171,9 @@ pub fn start_rwi_webhook_handler(
 /// capacity and the number of events currently queued (produced but not
 /// yet seen by the handler). Slow-router backpressure shows up here as
 /// `current` climbing toward `size`.
-fn spawn_queue_metrics(tx: broadcast::Sender<EventCacheEntry>) {
+fn spawn_queue_metrics(tx: broadcast::Sender<EventCacheEntry>, size: usize) {
     crate::utils::rwi_webhook_spawn(async move {
-        metrics::gauge!("rwi_event_queue_size").set(WEBHOOK_CHANNEL_SIZE as f64);
+        metrics::gauge!("rwi_event_queue_size").set(size as f64);
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         interval.tick().await; // skip the immediate first tick
@@ -395,7 +397,7 @@ mod tests {
             timeout_ms: Some(5000),
             retries: Some(2),
         };
-        let tx = start_rwi_webhook_handler(config);
+        let tx = start_rwi_webhook_handler(config, WEBHOOK_CHANNEL_SIZE);
         tokio::time::sleep(Duration::from_millis(50)).await;
         let entry = EventCacheEntry {
             cached_at: chrono::Utc::now(),
@@ -428,7 +430,7 @@ mod tests {
             timeout_ms: Some(5000),
             retries: Some(2),
         };
-        let tx = start_rwi_webhook_handler(config);
+        let tx = start_rwi_webhook_handler(config, WEBHOOK_CHANNEL_SIZE);
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let now = chrono::Utc::now();
