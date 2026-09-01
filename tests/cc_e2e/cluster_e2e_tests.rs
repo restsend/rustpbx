@@ -693,3 +693,92 @@ fn cluster_console_transfer_uses_callee_leg() {
         other => panic!("expected Transfer, got {other:?}"),
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Test 10: Cross-node logout must be visible in node B's list view
+// ═══════════════════════════════════════════════════════════════════
+//
+// BUG REPRODUCTION: an agent logged out on node A (unregistration event),
+// but node B's in-memory copy still says `idle` (the peer status broadcast
+// was lost). When node B serves the CC panel list it merges its memory
+// with the shared `cc_agent_presence` rows; a fresh `offline` row owned by
+// node A must win over node B's stale `idle`.
+
+#[tokio::test]
+async fn cluster_remote_logout_overrides_stale_local_idle_in_list_view() {
+    let _guard = instance_env_guard().await;
+    let db = shared_db().await;
+
+    // ── Earlier: the agent was registered on node A; node B synced the
+    //    idle snapshot into its memory (cluster agent_status broadcast).
+    let registry = rustpbx::addons::cc::agent::AgentRegistry::new();
+    let synced = registry.sync_routing_state(
+        "agent-logout-1",
+        rustpbx::addons::cc::agent::AgentStatus::Idle,
+        vec![],
+        std::collections::HashMap::new(),
+        1,
+        0,
+        0,
+        1_000,
+        "node-a",
+    );
+    assert!(synced, "node B should adopt node A's idle snapshot");
+
+    // Node B's list-view memory map, built the same way `list_agents` does.
+    let memory: std::collections::HashMap<String, (String, i32)> = registry
+        .list_agents()
+        .await
+        .into_iter()
+        .map(|a| (a.agent_id.clone(), (a.status.to_string(), a.current_calls as i32)))
+        .collect();
+    assert_eq!(
+        memory.get("agent-logout-1").map(|(s, _)| s.as_str()),
+        Some("idle"),
+        "precondition: node B memory holds a stale idle copy"
+    );
+
+    // ── Now: the agent logs out on node A. Node A's stats writer records
+    //    a fresh `offline` row in the shared table.
+    rustpbx::addons::cc::stats_writer::upsert_agent_presence(
+        &db,
+        "agent-logout-1",
+        "offline",
+        &[],
+        &std::collections::HashMap::new(),
+        1,
+        0,
+        0,
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .await;
+    // Retag the row as owned by node A (in production the writing node
+    // stamps its own instance id; this process would stamp node B's).
+    use sea_orm::{ActiveModelTrait, EntityTrait};
+    let shared = rustpbx::addons::cc::models::cc_agent_presence::Entity::find_by_id(
+        "agent-logout-1",
+    )
+    .one(&db)
+    .await
+    .unwrap()
+    .unwrap();
+    let mut node_a_row: rustpbx::addons::cc::models::cc_agent_presence::ActiveModel =
+        shared.into();
+    node_a_row.instance_id = sea_orm::Set(Some("node-a".to_string()));
+    node_a_row.update(&db).await.unwrap();
+
+    // ── Node B serves the panel list: merge memory with shared rows.
+    let rows = rustpbx::addons::cc::stats_writer::read_all_agent_presence(&db).await;
+    let merged = rustpbx::addons::cc::console_handlers::merge_agent_presence_states(
+        memory,
+        rows,
+        chrono::Utc::now() - chrono::Duration::seconds(90),
+        "node-b",
+    );
+    assert_eq!(
+        merged.get("agent-logout-1").map(|(s, _)| s.as_str()),
+        Some("offline"),
+        "fresh offline row written by node A must override node B's stale idle"
+    );
+}
+
