@@ -11,11 +11,11 @@ fn default_pcm_rate() -> Option<u32> {
 }
 
 fn default_sipflow_flush_count() -> usize {
-    0
+    1000
 }
 
 fn default_sipflow_flush_interval() -> u64 {
-    0
+    5
 }
 
 fn default_remote_channel_capacity() -> usize {
@@ -185,8 +185,8 @@ mod tests {
             panic!("expected local SipFlow config");
         };
         assert_eq!(root, "./sipflow");
-        assert_eq!(flush_count, 0);
-        assert_eq!(flush_interval_secs, 0);
+        assert_eq!(flush_count, 1000);
+        assert_eq!(flush_interval_secs, 5);
     }
 
     #[test]

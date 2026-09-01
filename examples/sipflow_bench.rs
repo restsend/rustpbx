@@ -275,11 +275,10 @@ async fn run_bench(args: &Args) -> BenchResult {
         blocking_backpressure: false,
     };
 
-    let backend: std::sync::Arc<dyn SipFlowBackend> = std::sync::Arc::from(
+    let backend: std::sync::Arc<dyn SipFlowBackend> =
         rustpbx::sipflow::create_backend(&config, CancellationToken::new())
             .await
-            .unwrap(),
-    );
+            .unwrap();
 
     let base_ts = chrono::Utc::now().timestamp_micros() as u64;
     let total_records = args.calls * (args.sip_per_call + args.rtp_per_call);

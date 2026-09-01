@@ -281,7 +281,6 @@ impl AppStateBuilder {
             if let Some(cfg) = config.sipflow.as_ref() {
                 crate::sipflow::backend::create_backend(cfg, token.clone())
                     .await
-                    .map(|b| Arc::from(b) as Arc<dyn crate::sipflow::SipFlowBackend>)
                     .map_err(|e| warn!("Failed to create sipflow backend: {e}"))
                     .ok()
             } else {

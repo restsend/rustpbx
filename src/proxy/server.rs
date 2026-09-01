@@ -876,7 +876,6 @@ impl SipServerBuilder {
             create_backend(cfg, cancel_token.clone())
                 .await
                 .ok()
-                .map(|b| Arc::from(b) as Arc<dyn SipFlowBackend>)
         } else {
             None
         };
@@ -2033,8 +2032,6 @@ impl SipServerInner {
                 crate::sipflow::backend::create_backend(new_cfg, self.cancel_token.clone())
                     .await
                     .map_err(|e| anyhow!("Failed to create SipFlow backend: {e}"))?;
-            let new_backend: Arc<dyn crate::sipflow::SipFlowBackend> = Arc::from(new_backend);
-
             let new_mode = match new_cfg {
                 crate::config::SipFlowConfig::Local { .. } => "local",
                 crate::config::SipFlowConfig::Remote { .. } => "remote",

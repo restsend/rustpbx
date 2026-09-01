@@ -116,9 +116,8 @@ pub async fn create_test_server_with_config_and_sipflow_backend(
         ignore_out_of_dialog_request: true,
         locator_events: Some(locator_events_tx),
         sipflow_config: ArcSwap::new(Arc::new(None)),
-        sip_flow: sipflow_backend.map(|backend| {
-            crate::callrecord::sipflow::SipFlow::new(Some(backend), Vec::new(), false)
-        }),
+        sip_flow: sipflow_backend
+            .map(|backend| crate::callrecord::sipflow::SipFlow::new(Some(backend), Vec::new())),
         active_call_registry: Arc::new(ActiveProxyCallRegistry::new()),
         frequency_limiter: None,
         call_record_hooks: Arc::new(Vec::new()),

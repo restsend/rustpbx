@@ -253,7 +253,7 @@ async fn main() -> Result<()> {
     };
 
     let backend: Arc<dyn SipFlowBackend> =
-        Arc::from(create_backend(&config, CancellationToken::new()).await?);
+        create_backend(&config, CancellationToken::new()).await?;
     let perf_counters = PerfCounters::new_arc();
 
     // Export the ingest-side counters (packets parsed on the receiver threads,

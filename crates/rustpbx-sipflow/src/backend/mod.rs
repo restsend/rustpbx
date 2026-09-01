@@ -5,6 +5,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
@@ -132,7 +133,7 @@ pub trait SipFlowBackend: Send + Sync {
 pub async fn create_backend(
     config: &SipFlowConfig,
     cancel_token: CancellationToken,
-) -> Result<Box<dyn SipFlowBackend>> {
+) -> Result<Arc<dyn SipFlowBackend>> {
     match config {
         SipFlowConfig::Local {
             root,
@@ -177,7 +178,7 @@ pub async fn create_backend(
                 pcm_sample_rate,
                 *blocking_backpressure,
             )
-            .map(|b| Box::new(b) as Box<dyn SipFlowBackend>)
+            .map(|b| Arc::new(b) as Arc<dyn SipFlowBackend>)
         }
         SipFlowConfig::Remote {
             nodes,
@@ -212,7 +213,7 @@ pub async fn create_backend(
                 cancel_token,
             )
             .await
-            .map(|b| Box::new(b) as Box<dyn SipFlowBackend>)
+            .map(|b| Arc::new(b) as Arc<dyn SipFlowBackend>)
         }
     }
 }
