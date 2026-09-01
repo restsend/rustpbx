@@ -2317,18 +2317,68 @@ impl SipSession {
             DialogSide::Callee => DialogSide::Caller,
         };
         let headers = Self::sdp_headers();
+
+        // Bypass relay assumes both legs negotiated the same transport style.
+        // That does not hold when the legs were negotiated differently (e.g.
+        // the initial INVITE was regenerated as WebRTC for a WS callee while
+        // the caller's session is RTP): forwarding the offer verbatim sends
+        // the peer a style it must reject with 488. Regenerate the offer in
+        // the target leg's own style, translating the requested direction.
+        let target_leg = match target_side {
+            DialogSide::Callee => LegId::from("callee"),
+            DialogSide::Caller => LegId::from("caller"),
+        };
+        let offer_body = if method == rsipstack::sip::Method::Invite
+            && Self::offer_is_webrtc(offer_sdp) != self
+                .sdp_for_side_with_direction(&target_leg, "sendrecv")
+                .map(|ref sdp| Self::offer_is_webrtc(sdp))
+                .unwrap_or(Self::offer_is_webrtc(offer_sdp))
+        {
+            let direction = Self::cross_leg_direction(offer_sdp);
+            info!(
+                session_id = %self.id,
+                offer_webrtc = Self::offer_is_webrtc(offer_sdp),
+                %direction,
+                "re-INVITE offer style mismatch across legs; regenerating in target leg style"
+            );
+            self.sdp_for_side_with_direction(&target_leg, direction)?
+        } else {
+            offer_sdp.to_string()
+        };
+
         let response = self
             .send_mid_dialog_request_to_side(
                 target_side,
                 method,
                 headers,
-                Some(offer_sdp.as_bytes().to_vec()),
+                Some(offer_body.as_bytes().to_vec()),
             )
             .await?
             .ok_or_else(|| anyhow!("{} timed out", method))?;
 
         let status = response.status_code.clone();
         let answer_sdp = Self::extract_sdp(response.body());
+
+        // Persist the relayed negotiation on success, mirroring what the
+        // initial INVITE flow stores. Without this, session-timer refreshes
+        // re-INVITE each leg with the ORIGINAL offer/answer — silently
+        // un-holding a leg whose direction was rewritten by a relayed hold.
+        if status.kind() == rsipstack::sip::status_code::StatusCodeKind::Successful {
+            match target_side {
+                DialogSide::Callee => {
+                    self.media.callee_offer = Some(offer_body);
+                    if let Some(ref answer) = answer_sdp {
+                        self.media.callee_answer_sdp = Some(answer.clone());
+                    }
+                }
+                DialogSide::Caller => {
+                    self.media.caller_offer = Some(offer_body);
+                    if let Some(ref answer) = answer_sdp {
+                        self.media.answer = Some(answer.clone());
+                    }
+                }
+            }
+        }
 
         Ok((status, answer_sdp))
     }
@@ -7165,6 +7215,15 @@ impl SipSession {
     /// Generate hold (sendonly) / unhold (sendrecv) SDP for a side, reusing
     /// that side's last negotiated SDP (answer, else offer).
     fn generate_sdp_for_side(&self, side: &LegId, sendonly: bool) -> Result<String> {
+        let direction = if sendonly { "sendonly" } else { "sendrecv" };
+        self.sdp_for_side_with_direction(side, direction)
+    }
+
+    /// The side's last negotiated SDP (answer, else offer) rewritten to
+    /// `direction`. Used when a relayed re-INVITE offer's transport style
+    /// (RTP vs WebRTC) doesn't match what the target leg originally
+    /// negotiated — the leg's own SDP is the only style it can process.
+    fn sdp_for_side_with_direction(&self, side: &LegId, direction: &str) -> Result<String> {
         let base_sdp = if side.0 == "callee" {
             self.media
                 .callee_answer_sdp
@@ -7178,8 +7237,37 @@ impl SipSession {
                 .map(|s| s.as_str())
         }
         .ok_or_else(|| anyhow!("No SDP available for {} hold/unhold", side.0))?;
-        let direction = if sendonly { "sendonly" } else { "sendrecv" };
         Ok(rustrtc::modify_sdp_direction(base_sdp, direction))
+    }
+
+    /// RFC 3264 direction translation across the media anchor:
+    /// the relaying leg's offer expresses its send/receive intent; the target
+    /// leg's offer must express the complementary intent.
+    fn cross_leg_direction(offer_sdp: &str) -> &'static str {
+        let parsed = rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, offer_sdp).ok();
+        let dir = parsed
+            .as_ref()
+            .and_then(|d| {
+                d.media_sections
+                    .iter()
+                    .find(|s| s.kind == rustrtc::MediaKind::Audio)
+            })
+            .map(|s| s.direction);
+        match dir {
+            Some(rustrtc::Direction::SendOnly) => "recvonly",
+            Some(rustrtc::Direction::RecvOnly) => "sendonly",
+            Some(rustrtc::Direction::Inactive) => "inactive",
+            _ => "sendrecv",
+        }
+    }
+
+    /// WebRTC-style SDP (DTLS fingerprint / TLS-SRTP profile / setup attr).
+    /// Bypass-mode relay assumes both legs speak the same style; a mismatch
+    /// means the peer cannot process the offer verbatim.
+    fn offer_is_webrtc(sdp: &str) -> bool {
+        sdp.contains("a=fingerprint")
+            || sdp.contains("UDP/TLS/RTP/SAVP")
+            || sdp.contains("a=setup:")
     }
     async fn send_reinvite_to_callee_dialogs(&mut self, sdp: &str) -> Result<Option<String>> {
         let dialog_layer = self.server.dialog_layer.clone();
@@ -7267,6 +7355,11 @@ impl SipSession {
                     && !response.body().is_empty()
                 {
                     let answer_sdp = String::from_utf8_lossy(response.body()).to_string();
+                    // Keep the per-leg snapshots in sync with the forwarded
+                    // re-INVITE so session refreshes reuse the latest
+                    // negotiated SDP (same rationale as the bypass relay).
+                    self.media.callee_offer = Some(offer_sdp.clone());
+                    self.media.callee_answer_sdp = Some(answer_sdp.clone());
                     if self.media_profile.path == MediaPathMode::Anchored
                         || self.media.bridge.is_some()
                     {
