@@ -888,6 +888,11 @@ pub struct LocatorWebhookConfig {
     pub events: Vec<String>,
     pub headers: Option<HashMap<String, String>>,
     pub timeout_ms: Option<u64>,
+    /// Retries for the webhook HTTP push after a failed attempt (transport
+    /// error, 5xx or 429). 0 = single attempt (default). Exponential backoff
+    /// between attempts (200 ms base, doubling).
+    #[serde(default)]
+    pub retries: Option<u32>,
 }
 
 /// Global recovery for Step IVR when the external provider cannot continue.

@@ -29,6 +29,7 @@ struct RwiWebhookSender {
     headers: std::collections::HashMap<String, String>,
     allowed_events: Vec<String>,
     client: reqwest::Client,
+    retries: u32,
 }
 
 impl RwiWebhookSender {
@@ -40,6 +41,7 @@ impl RwiWebhookSender {
             allowed_events: config.events,
             client: crate::http_util::build_keepalive_client(Some(timeout), None)
                 .unwrap_or_else(|_| reqwest::Client::new()),
+            retries: config.retries.unwrap_or(0),
         }
     }
 
@@ -57,13 +59,57 @@ impl RwiWebhookSender {
         &self,
         payload: &serde_json::Value,
     ) -> Result<WebhookCallRecord, anyhow::Error> {
+        // Attempts = 1 + retries. A retryable outcome is a transport error,
+        // a 5xx, or a 429; other 4xx are permanent and return immediately.
+        // Backoff doubles from 200 ms. Each attempt is bounded by the
+        // client's request timeout (`timeout_ms`, default 5 s).
+        let attempts = self.retries.min(MAX_PUSH_RETRIES) as usize + 1;
+        let mut attempt: usize = 0;
+        loop {
+            attempt += 1;
+            match self.send_once(payload).await {
+                Ok(record) => {
+                    let status = record.status_code.unwrap_or(0);
+                    let retryable = status == 429 || status >= 500;
+                    if attempt >= attempts || !retryable {
+                        return Ok(record);
+                    }
+                    warn!(
+                        url = %self.url,
+                        attempt,
+                        attempts,
+                        status_code = status,
+                        "RWI webhook push failed, retrying"
+                    );
+                }
+                Err(e) => {
+                    if attempt >= attempts {
+                        return Err(e);
+                    }
+                    warn!(
+                        url = %self.url,
+                        attempt,
+                        attempts,
+                        error = %e,
+                        "RWI webhook push errored, retrying"
+                    );
+                }
+            }
+            metrics::counter!("rwi_events_push_retries_total").increment(1);
+            let backoff = PUSH_RETRY_BACKOFF_MS.saturating_mul(1 << (attempt - 1).min(5));
+            tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+        }
+    }
+
+    async fn send_once(
+        &self,
+        payload: &serde_json::Value,
+    ) -> Result<WebhookCallRecord, anyhow::Error> {
         let start = std::time::Instant::now();
         let mut req = self.client.post(&self.url).json(payload);
         for (key, value) in &self.headers {
             req = req.header(key, value);
         }
-        // The client is built with a connect/read timeout, so we don't wrap
-        // an additional timeout here.
         let resp = req
             .send()
             .await
@@ -79,6 +125,12 @@ impl RwiWebhookSender {
         })
     }
 }
+
+/// Hard cap on configured webhook push retries (protects the dedicated
+/// runtime's queue from unbounded redelivery backlogs).
+const MAX_PUSH_RETRIES: u32 = 5;
+/// Base backoff between webhook push retries (doubles per attempt).
+const PUSH_RETRY_BACKOFF_MS: u64 = 200;
 
 /// Captured metadata for a single webhook delivery attempt, used for
 /// structured observability logging.
@@ -269,6 +321,7 @@ pub async fn send_test_event(
         events: Vec::new(),
         headers: headers.cloned(),
         timeout_ms: Some(5000),
+            retries: Some(2),
     });
     let test_payload = json!({
         "rwi": "1.0",
@@ -340,6 +393,7 @@ mod tests {
             events: vec![],
             headers: None,
             timeout_ms: Some(5000),
+            retries: Some(2),
         };
         let tx = start_rwi_webhook_handler(config);
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -372,6 +426,7 @@ mod tests {
             events: vec![],
             headers: None,
             timeout_ms: Some(5000),
+            retries: Some(2),
         };
         let tx = start_rwi_webhook_handler(config);
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -460,6 +515,7 @@ mod tests {
             events: vec![],
             headers: None,
             timeout_ms: Some(5000),
+            retries: Some(2),
         });
 
         let payload = json!({"event_type": "test", "call_id": "c1"});
@@ -495,6 +551,7 @@ mod tests {
             events: vec![],
             headers: None,
             timeout_ms: Some(5000),
+            retries: Some(2),
         });
 
         let payload = json!({"event_type": "test"});
