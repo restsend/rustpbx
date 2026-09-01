@@ -306,22 +306,39 @@ fn session_leg_artifacts(record: &CallRecordModel) -> Value {
     })
 }
 
-/// Render a local signaling-sidecar JSONL file in the same structured JSON
-/// shape the sipflow backend path returns, so the console UI always receives
-/// parsed flow data instead of a raw JSONL download.
-async fn serve_local_jsonl_flow(
+/// Render an uploaded or local signaling-sidecar JSONL file in the same
+/// structured shape as the live backend path.
+async fn serve_archived_jsonl_flow(
     record: &CallRecordModel,
-    path: &str,
+    location: &str,
     detail_requested: bool,
+    client: &reqwest::Client,
 ) -> Response {
-    let bytes = match tokio::fs::read(path).await {
+    let bytes_result: anyhow::Result<Vec<u8>> = if location.starts_with("http://")
+        || location.starts_with("https://")
+    {
+        match client.get(location).send().await {
+            Ok(response) => match response.error_for_status() {
+                Ok(response) => response
+                    .bytes()
+                    .await
+                    .map(|bytes| bytes.to_vec())
+                    .map_err(anyhow::Error::from),
+                Err(err) => Err(anyhow::Error::from(err)),
+            },
+            Err(err) => Err(anyhow::Error::from(err)),
+        }
+    } else {
+        tokio::fs::read(location).await.map_err(anyhow::Error::from)
+    };
+    let bytes = match bytes_result {
         Ok(bytes) => bytes,
         Err(err) => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({
-                    "message": format!("Local sipflow JSONL not found: {err}"),
-                    "path": path,
+                    "message": format!("Archived sipflow JSONL not found: {err}"),
+                    "path": location,
                 })),
             )
                 .into_response();
@@ -337,16 +354,29 @@ async fn serve_local_jsonl_flow(
             continue;
         }
         match serde_json::from_str::<Value>(line) {
-            Ok(obj) => flow.push(json!({
-                "timestamp": obj.get("timestamp").cloned().unwrap_or(Value::Null),
-                "seq": obj.get("seq").cloned().unwrap_or(Value::Null),
-                "msg_type": obj.get("msg_type").cloned().unwrap_or(Value::Null),
-                "src_addr": obj.get("src_addr").cloned().unwrap_or(Value::Null),
-                "dst_addr": obj.get("dst_addr").cloned().unwrap_or(Value::Null),
-                "raw_message": obj.get("payload").cloned().unwrap_or(Value::Null),
-                "role": "primary",
-                "call_id": record.call_id,
-            })),
+            Ok(obj) => {
+                let raw_message = obj
+                    .get("payload")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let item_call_id = crate::sipflow::storage::extract_callid(raw_message.as_bytes())
+                    .unwrap_or_else(|| record.call_id.clone());
+                let role = if item_call_id == record.call_id {
+                    "caller"
+                } else {
+                    "callee"
+                };
+                flow.push(json!({
+                    "timestamp": obj.get("timestamp").cloned().unwrap_or(Value::Null),
+                    "seq": obj.get("seq").cloned().unwrap_or(Value::Null),
+                    "msg_type": obj.get("msg_type").cloned().unwrap_or(Value::Null),
+                    "src_addr": obj.get("src_addr").cloned().unwrap_or(Value::Null),
+                    "dst_addr": obj.get("dst_addr").cloned().unwrap_or(Value::Null),
+                    "raw_message": obj.get("payload").cloned().unwrap_or(Value::Null),
+                    "role": role,
+                    "call_id": item_call_id,
+                }));
+            }
             Err(_) => malformed_lines += 1,
         }
     }
@@ -375,7 +405,7 @@ async fn serve_local_jsonl_flow(
                 "end": end_time,
                 "base": "jsonl_file",
             },
-            "sip_leg_roles_source": "local_jsonl",
+            "sip_leg_roles_source": "jsonl_payload",
             "cdr_loaded": false,
             "sip_dropped_count": 0,
             "malformed_lines": malformed_lines,
@@ -399,6 +429,25 @@ async fn download_call_record_sip_flow(
         Err(resp) => return resp,
     };
 
+    // New records persist the exact uploaded JSONL URL. Prefer that archived
+    // artifact; older records without it continue through the live-backend
+    // query path below.
+    if let Some(location) = record
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("sipflow_jsonl"))
+        .and_then(|v| v.as_str())
+    {
+        let resolved = resolve_archived_artifact_path(location, record.started_at);
+        return serve_archived_jsonl_flow(
+            &record,
+            &resolved,
+            query.detail,
+            state.http_client(),
+        )
+        .await;
+    }
+
     let Some(server) = state.sip_server() else {
         return (
             StatusCode::NOT_FOUND,
@@ -408,16 +457,6 @@ async fn download_call_record_sip_flow(
     };
 
     let Some(sipflow) = &server.sip_flow else {
-        // Fall back to the recording sidecar JSONL path stored on the CDR.
-        if let Some(path) = record
-            .metadata
-            .as_ref()
-            .and_then(|m| m.get("sipflow_jsonl"))
-            .and_then(|v| v.as_str())
-        {
-            let resolved = resolve_archived_artifact_path(path, record.started_at);
-            return serve_local_jsonl_flow(&record, &resolved, query.detail).await;
-        }
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "message": "SIP flow not configured" })),
@@ -426,15 +465,6 @@ async fn download_call_record_sip_flow(
     };
 
     let Some(backend) = sipflow.backend() else {
-        if let Some(path) = record
-            .metadata
-            .as_ref()
-            .and_then(|m| m.get("sipflow_jsonl"))
-            .and_then(|v| v.as_str())
-        {
-            let resolved = resolve_archived_artifact_path(path, record.started_at);
-            return serve_local_jsonl_flow(&record, &resolved, query.detail).await;
-        }
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "message": "SIP flow backend not available" })),
@@ -2240,7 +2270,7 @@ mod tests {
         console::{ConsoleState, middleware::AuthRequired},
         models::{call_record, migration::Migrator},
     };
-    use axum::{extract::State, http::StatusCode};
+    use axum::{Router, extract::State, http::StatusCode, routing::get};
     use chrono::Utc;
     use sea_orm::{ActiveModelTrait, ActiveValue::Set, Database, DatabaseConnection};
     use sea_orm_migration::MigratorTrait;
@@ -2392,14 +2422,16 @@ mod tests {
         std::fs::write(
             &jsonl,
             format!(
-                "{{\"timestamp\":{later_ts},\"seq\":1,\"msg_type\":\"Sip\",\"src_addr\":\"\",\"dst_addr\":\"10.0.0.1:5060\",\"payload\":\"SIP/2.0 200 OK\\r\\n\"}}\n\
-                 {{\"timestamp\":{earlier_ts},\"seq\":0,\"msg_type\":\"Sip\",\"src_addr\":\"10.0.0.1:5060\",\"dst_addr\":\"\",\"payload\":\"INVITE sip:b@x SIP/2.0\\r\\n\"}}\n\
+                "{{\"timestamp\":{later_ts},\"seq\":1,\"msg_type\":\"Sip\",\"src_addr\":\"\",\"dst_addr\":\"10.0.0.1:5060\",\"payload\":\"SIP/2.0 200 OK\\r\\nCall-ID: jsonl-call\\r\\n\"}}\n\
+                 {{\"timestamp\":{earlier_ts},\"seq\":0,\"msg_type\":\"Sip\",\"src_addr\":\"10.0.0.1:5060\",\"dst_addr\":\"\",\"payload\":\"INVITE sip:b@x SIP/2.0\\r\\nCall-ID: callee-jsonl-call\\r\\n\"}}\n\
                  not-json\n"
             ),
         )
         .expect("write jsonl");
 
-        let response = serve_local_jsonl_flow(&model, jsonl.to_str().unwrap(), true).await;
+        let client = crate::http_util::build_keepalive_client(None, None).unwrap();
+        let response =
+            serve_archived_jsonl_flow(&model, jsonl.to_str().unwrap(), true, &client).await;
         let (parts, body) = response.into_parts();
         assert_eq!(parts.status, StatusCode::OK);
         assert!(
@@ -2420,9 +2452,10 @@ mod tests {
         assert_eq!(flow.len(), 2);
         // Sorted by timestamp ascending regardless of file line order.
         assert_eq!(flow[0]["seq"], 0);
-        assert_eq!(flow[0]["raw_message"], "INVITE sip:b@x SIP/2.0\r\n");
-        assert_eq!(flow[0]["role"], "primary");
-        assert_eq!(flow[0]["call_id"], "jsonl-call");
+        assert_eq!(flow[0]["role"], "callee");
+        assert_eq!(flow[0]["call_id"], "callee-jsonl-call");
+        assert_eq!(flow[1]["role"], "caller");
+        assert_eq!(flow[1]["call_id"], "jsonl-call");
         assert_eq!(flow[1]["dst_addr"], "10.0.0.1:5060");
         let diag = &value["diagnostics"];
         assert_eq!(diag["backend_type"], "local-jsonl");
@@ -2430,13 +2463,63 @@ mod tests {
         assert_eq!(diag["total_sip_msgs"], 2);
         assert_eq!(diag["total_rtp_streams"], 0);
         assert_eq!(diag["malformed_lines"], 1);
+        assert_eq!(diag["sip_leg_roles_source"], "jsonl_payload");
         assert!(value["rtp_streams"].as_array().unwrap().is_empty());
 
         // Missing file yields 404, still JSON.
         let missing = dir.path().join("nope.jsonl");
-        let response = serve_local_jsonl_flow(&model, missing.to_str().unwrap(), true).await;
+        let response =
+            serve_archived_jsonl_flow(&model, missing.to_str().unwrap(), true, &client).await;
         let (parts, _) = response.into_parts();
         assert_eq!(parts.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn serve_archived_jsonl_flow_reads_http_url() {
+        let db = setup_db().await;
+        let model = call_record::ActiveModel {
+            call_id: Set("remote-jsonl-call".into()),
+            direction: Set("inbound".into()),
+            status: Set("completed".into()),
+            started_at: Set(Utc::now()),
+            duration_secs: Set(10),
+            has_transcript: Set(false),
+            transcript_status: Set("pending".into()),
+            created_at: Set(Utc::now()),
+            updated_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert");
+
+        let app = Router::new().route(
+            "/flow.jsonl",
+            get(|| async {
+                "{\"timestamp\":1,\"seq\":0,\"msg_type\":\"Sip\",\"src_addr\":\"a\",\"dst_addr\":\"b\",\"payload\":\"INVITE sip:b SIP/2.0\\r\\n\"}\n"
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind JSONL server");
+        let address = listener.local_addr().expect("JSONL server address");
+        crate::utils::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        let client = crate::http_util::build_keepalive_client(None, None).unwrap();
+        let response = serve_archived_jsonl_flow(
+            &model,
+            &format!("http://{address}/flow.jsonl"),
+            true,
+            &client,
+        )
+        .await;
+        let (parts, body) = response.into_parts();
+        assert_eq!(parts.status, StatusCode::OK);
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["flow"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]

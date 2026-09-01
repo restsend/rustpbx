@@ -5,7 +5,7 @@ use chrono::{DateTime, Local, TimeZone};
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     callrecord::{
@@ -54,6 +54,14 @@ impl SipFlowUploadHook {
 
 #[async_trait]
 impl CallRecordHook for SipFlowUploadHook {
+    async fn on_record_enrich(&self, records: &mut [CallRecord]) -> anyhow::Result<()> {
+        for record in records {
+            let skip_media = record.recorder.iter().any(|m| m.track_id != "signaling");
+            preconstruct_signaling_url(record, &self.upload_config, skip_media);
+        }
+        Ok(())
+    }
+
     async fn on_record_completed(&self, records: &mut [CallRecord]) -> anyhow::Result<()> {
         for record in records {
             let call_id = record.call_id.as_str();
@@ -310,8 +318,8 @@ pub async fn upload_signaling_flow(
     }
 
     let mut flow_items = Vec::new();
-    for leg_call_id in query_call_ids {
-        match backend.query_flow(&leg_call_id, start, end).await {
+    for leg_call_id in &query_call_ids {
+        match backend.query_flow(leg_call_id, start, end).await {
             Ok(mut items) => flow_items.append(&mut items),
             Err(e) => {
                 warn!(call_id, leg_call_id, "SipFlowUploadHook: query_flow failed: {e}");
@@ -322,6 +330,11 @@ pub async fn upload_signaling_flow(
     flow_items.sort_by_key(|item| (item.timestamp, item.seq));
 
     if flow_items.is_empty() {
+        error!(
+            call_id,
+            queried_call_ids = ?query_call_ids,
+            "SipFlowUploadHook: signaling query returned no flow items; upload skipped"
+        );
         return false;
     }
 
@@ -420,6 +433,34 @@ pub(crate) fn sipflow_s3_url(endpoint: &str, bucket: &str, key: &str) -> String 
         bucket.trim_matches('/'),
         key.trim_start_matches('/')
     )
+}
+
+pub(crate) fn preconstruct_signaling_url(
+    record: &mut CallRecord,
+    upload_config: &SipFlowUploadConfig,
+    signaling_default: bool,
+) {
+    let SipFlowUploadConfig::S3 {
+        bucket,
+        endpoint,
+        root,
+        signaling,
+        ..
+    } = upload_config
+    else {
+        return;
+    };
+    if !signaling.unwrap_or(signaling_default) {
+        return;
+    }
+
+    let key = join_root(root, &format_sipflow_signaling_key(record));
+    let url = sipflow_s3_url(endpoint, bucket, &key);
+    record
+        .details
+        .metadata
+        .get_or_insert_with(Default::default)
+        .insert("sipflow_jsonl".to_string(), serde_json::Value::String(url));
 }
 
 async fn upload_s3(storage: &Storage, key: &str, data: Vec<u8>) -> Result<()> {
@@ -568,6 +609,40 @@ mod tests {
             ..Default::default()
         };
         record
+    }
+
+    #[test]
+    fn preconstructs_signaling_s3_url_in_metadata() {
+        let mut record = make_record();
+        let upload_config = SipFlowUploadConfig::S3 {
+            vendor: crate::config::S3Vendor::Minio,
+            bucket: "recordings".to_string(),
+            region: "us-east-1".to_string(),
+            access_key: "access".to_string(),
+            secret_key: "secret".to_string(),
+            endpoint: "http://127.0.0.1:9000".to_string(),
+            root: "sipflow-root".to_string(),
+            signaling: Some(true),
+            media: Some(true),
+            force_pcm: None,
+            pcm_sample_rate: None,
+        };
+
+        preconstruct_signaling_url(&mut record, &upload_config, false);
+
+        let expected = format!(
+            "http://127.0.0.1:9000/recordings/sipflow-root/{}/test-call-id.jsonl",
+            record.start_time.format("%Y%m%d")
+        );
+        assert_eq!(
+            record
+                .details
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("sipflow_jsonl"))
+                .and_then(serde_json::Value::as_str),
+            Some(expected.as_str())
+        );
     }
 
     #[tokio::test]

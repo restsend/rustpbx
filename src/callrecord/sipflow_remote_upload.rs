@@ -51,6 +51,17 @@ impl SipFlowRemoteUploadHook {
 
 #[async_trait]
 impl CallRecordHook for SipFlowRemoteUploadHook {
+    async fn on_record_enrich(&self, records: &mut [CallRecord]) -> Result<()> {
+        for record in records {
+            crate::callrecord::sipflow_upload::preconstruct_signaling_url(
+                record,
+                &self.upload_config,
+                false,
+            );
+        }
+        Ok(())
+    }
+
     async fn on_record_completed(&self, records: &mut [CallRecord]) -> Result<()> {
         // Flush the client-side pipeline (writer thread → UDP sender batch)
         // once for the whole batch, so the collector has everything before it
