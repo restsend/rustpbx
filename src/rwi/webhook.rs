@@ -9,7 +9,7 @@ use tracing::{debug, info, warn};
 
 /// Default buffer size for the broadcast channel between gateway and webhook
 /// handler. Overridable via [proxy] rwi_webhook_channel_size.
-pub const WEBHOOK_CHANNEL_SIZE: usize = 100000;
+pub const WEBHOOK_CHANNEL_SIZE: usize = 512;
 /// Max number of recent (call_id, timestamp) pairs kept for dedup.
 const DEDUP_CACHE_SIZE: usize = 4096;
 
@@ -31,6 +31,7 @@ struct RwiWebhookSender {
     allowed_events: Vec<String>,
     client: reqwest::Client,
     retries: u32,
+    track_latency: bool,
 }
 
 impl RwiWebhookSender {
@@ -43,6 +44,7 @@ impl RwiWebhookSender {
             client: crate::http_util::build_keepalive_client(Some(timeout), None)
                 .unwrap_or_else(|_| reqwest::Client::new()),
             retries: config.retries.unwrap_or(0),
+            track_latency: config.track_latency.unwrap_or(false),
         }
     }
 
@@ -59,6 +61,7 @@ impl RwiWebhookSender {
     async fn send_payload(
         &self,
         payload: &serde_json::Value,
+        event_type: &'static str,
     ) -> Result<WebhookCallRecord, anyhow::Error> {
         // Attempts = 1 + retries. A retryable outcome is a transport error,
         // a 5xx, or a 429; other 4xx are permanent and return immediately.
@@ -96,7 +99,11 @@ impl RwiWebhookSender {
                     );
                 }
             }
-            metrics::counter!("rwi_events_push_retries_total").increment(1);
+            metrics::counter!(
+                "rwi_events_push_retries_total",
+                "event_type" => event_type
+            )
+            .increment(1);
             let backoff = PUSH_RETRY_BACKOFF_MS.saturating_mul(1 << (attempt - 1).min(5));
             tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
         }
@@ -202,7 +209,22 @@ async fn run_rwi_webhook_handler(
 
     loop {
         let entry = match rx.recv().await {
-            Ok(entry) => entry,
+            Ok(entry) => {
+                // Opt-in queueing latency: enqueued (gateway dispatch) ->
+                // dequeued here. Excludes the HTTP push itself; a slow router
+                // does NOT inflate this — queue wait does.
+                if sender.track_latency {
+                    let queued = (chrono::Utc::now() - entry.cached_at)
+                        .num_milliseconds() as f64
+                        / 1000.0;
+                    metrics::histogram!(
+                        "rwi_event_queue_latency_seconds",
+                        "event_type" => entry.event.event_type
+                    )
+                    .record(queued);
+                }
+                entry
+            }
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 warn!("RWI webhook lagged, missed {} events", n);
                 metrics::counter!("rwi_events_dropped_total").increment(n as u64);
@@ -251,7 +273,7 @@ async fn run_rwi_webhook_handler(
             "event": event_value,
         });
 
-        match sender.send_payload(&payload).await {
+        match sender.send_payload(&payload, event_type).await {
             Ok(record) => {
                 if consecutive_send_failures > 0 {
                     info!(
@@ -271,7 +293,8 @@ async fn run_rwi_webhook_handler(
                     entry.call_id.as_str()
                 };
                 if success {
-                    metrics::counter!("rwi_events_pushed_total").increment(1);
+                    metrics::counter!("rwi_events_pushed_total", "event_type" => event_type)
+                        .increment(1);
                     info!(
                         url = %record.url,
                         event_type,
@@ -281,7 +304,11 @@ async fn run_rwi_webhook_handler(
                         "RWI webhook delivered"
                     );
                 } else {
-                    metrics::counter!("rwi_events_push_failed_total").increment(1);
+                    metrics::counter!(
+                        "rwi_events_push_failed_total",
+                        "event_type" => event_type
+                    )
+                    .increment(1);
                     warn!(
                         url = %record.url,
                         event_type,
@@ -295,7 +322,11 @@ async fn run_rwi_webhook_handler(
             }
             Err(e) => {
                 consecutive_send_failures += 1;
-                metrics::counter!("rwi_events_push_failed_total").increment(1);
+                metrics::counter!(
+                    "rwi_events_push_failed_total",
+                    "event_type" => event_type
+                )
+                .increment(1);
                 // INFO with the full request body: when the receiver is
                 // down this log is the only place to see which events (and
                 // payloads) were generated, so the body must be visible at
@@ -324,6 +355,7 @@ pub async fn send_test_event(
         headers: headers.cloned(),
         timeout_ms: Some(5000),
             retries: Some(2),
+            track_latency: None,
     });
     let test_payload = json!({
         "rwi": "1.0",
@@ -337,7 +369,7 @@ pub async fn send_test_event(
         }
     });
 
-    sender.send_payload(&test_payload).await.map(|_| ())
+    sender.send_payload(&test_payload, "test").await.map(|_| ())
 }
 
 #[cfg(test)]
@@ -396,6 +428,7 @@ mod tests {
             headers: None,
             timeout_ms: Some(5000),
             retries: Some(2),
+            track_latency: None,
         };
         let tx = start_rwi_webhook_handler(config, WEBHOOK_CHANNEL_SIZE);
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -429,6 +462,7 @@ mod tests {
             headers: None,
             timeout_ms: Some(5000),
             retries: Some(2),
+            track_latency: None,
         };
         let tx = start_rwi_webhook_handler(config, WEBHOOK_CHANNEL_SIZE);
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -521,7 +555,7 @@ mod tests {
         });
 
         let payload = json!({"event_type": "test", "call_id": "c1"});
-        let record = sender.send_payload(&payload).await.expect("send ok");
+        let record = sender.send_payload(&payload, "test").await.expect("send ok");
 
         assert_eq!(record.url, server.url());
         assert_eq!(record.status_code, Some(200));
@@ -559,7 +593,7 @@ mod tests {
         let payload = json!({"event_type": "test"});
         // send_payload treats any HTTP response as Ok (it only errors on
         // transport failure); the status code is captured in the record.
-        let record = sender.send_payload(&payload).await.expect("http ok");
+        let record = sender.send_payload(&payload, "test").await.expect("http ok");
         assert_eq!(record.status_code, Some(500));
     }
 

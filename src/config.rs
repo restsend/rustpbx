@@ -893,6 +893,12 @@ pub struct LocatorWebhookConfig {
     /// between attempts (200 ms base, doubling).
     #[serde(default)]
     pub retries: Option<u32>,
+    /// Track event queueing latency (gateway enqueued -> webhook handler
+    /// dequeued) in the `rwi_event_queue_latency_seconds` histogram.
+    /// Excludes the HTTP push itself. Disabled by default — opt in
+    /// explicitly.
+    #[serde(default)]
+    pub track_latency: Option<bool>,
 }
 
 /// Global recovery for Step IVR when the external provider cannot continue.
@@ -1311,7 +1317,7 @@ fn default_rwi_webhook_worker_threads() -> usize {
 }
 
 fn default_rwi_webhook_channel_size() -> usize {
-    100000
+    crate::rwi::webhook::WEBHOOK_CHANNEL_SIZE
 }
 
 fn default_auth_cache_size() -> usize {
