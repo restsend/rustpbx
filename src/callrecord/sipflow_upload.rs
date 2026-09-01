@@ -57,6 +57,11 @@ impl CallRecordHook for SipFlowUploadHook {
     async fn on_record_completed(&self, records: &mut [CallRecord]) -> anyhow::Result<()> {
         for record in records {
             let call_id = record.call_id.as_str();
+            let signaling_call_ids = record
+                .sip_leg_roles
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
             let start = Local.from_utc_datetime(&record.start_time.naive_utc());
             let end = Local.from_utc_datetime(&record.end_time.naive_utc());
             let duration_secs = (record.end_time - record.start_time).num_seconds() as i32;
@@ -83,6 +88,7 @@ impl CallRecordHook for SipFlowUploadHook {
                 &self.client,
                 self.s3_storage.as_ref(),
                 call_id,
+                &signaling_call_ids,
                 start,
                 end,
                 duration_secs,
@@ -115,6 +121,7 @@ async fn do_upload(
     client: &reqwest::Client,
     s3_storage: Option<&Storage>,
     call_id: &str,
+    signaling_call_ids: &[String],
     start: DateTime<Local>,
     end: DateTime<Local>,
     duration_secs: i32,
@@ -178,6 +185,7 @@ async fn do_upload(
             upload_config,
             backend,
             call_id,
+            signaling_call_ids,
             start,
             end,
             &full_signaling_key,
@@ -288,6 +296,7 @@ pub async fn upload_signaling_flow(
     upload_config: &SipFlowUploadConfig,
     backend: &dyn SipFlowBackend,
     call_id: &str,
+    signaling_call_ids: &[String],
     start: DateTime<Local>,
     end: DateTime<Local>,
     full_signaling_key: &str,
@@ -295,13 +304,22 @@ pub async fn upload_signaling_flow(
     client: &reqwest::Client,
     s3_storage: Option<&Storage>,
 ) -> bool {
-    let flow_items = match backend.query_flow(call_id, start, end).await {
-        Ok(items) => items,
-        Err(e) => {
-            warn!(call_id, "SipFlowUploadHook: query_flow failed: {e}");
-            return false;
+    let mut query_call_ids = signaling_call_ids.to_vec();
+    if !query_call_ids.iter().any(|id| id == call_id) {
+        query_call_ids.push(call_id.to_string());
+    }
+
+    let mut flow_items = Vec::new();
+    for leg_call_id in query_call_ids {
+        match backend.query_flow(&leg_call_id, start, end).await {
+            Ok(mut items) => flow_items.append(&mut items),
+            Err(e) => {
+                warn!(call_id, leg_call_id, "SipFlowUploadHook: query_flow failed: {e}");
+                return false;
+            }
         }
-    };
+    }
+    flow_items.sort_by_key(|item| (item.timestamp, item.seq));
 
     if flow_items.is_empty() {
         return false;
@@ -373,6 +391,8 @@ pub fn join_root(root: &str, key: &str) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SipFlowUploadRequest {
     pub call_id: String,
+    #[serde(default)]
+    pub signaling_call_ids: Vec<String>,
     pub start: i64,
     pub end: i64,
     pub upload: SipFlowUploadConfig,
@@ -489,6 +509,7 @@ mod tests {
     struct MockBackend {
         media: Vec<u8>,
         flush_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        queried_call_ids: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     #[async_trait::async_trait]
@@ -503,10 +524,14 @@ mod tests {
         }
         async fn query_flow(
             &self,
-            _call_id: &str,
+            call_id: &str,
             _start: DateTime<Local>,
             _end: DateTime<Local>,
         ) -> anyhow::Result<Vec<SipFlowItem>> {
+            self.queried_call_ids
+                .lock()
+                .unwrap()
+                .push(call_id.to_string());
             Ok(vec![])
         }
         async fn query_media_stats(
@@ -552,6 +577,7 @@ mod tests {
             Arc::new(MockBackend {
                 media: vec![],
                 flush_count: flush_count.clone(),
+                queried_call_ids: Arc::new(std::sync::Mutex::new(Vec::new())),
             }),
             Arc::new(std::sync::OnceLock::new()),
             SipFlowUploadConfig::Http {
@@ -580,6 +606,7 @@ mod tests {
             Arc::new(MockBackend {
                 media: vec![],
                 flush_count: flush_count.clone(),
+                queried_call_ids: Arc::new(std::sync::Mutex::new(Vec::new())),
             }),
             Arc::new(std::sync::OnceLock::new()),
             SipFlowUploadConfig::Http {
@@ -601,6 +628,63 @@ mod tests {
             .unwrap();
 
         assert_eq!(flush_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn signaling_query_uses_roles_and_adds_root_only_when_missing() {
+        let queried_call_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let backend = MockBackend {
+            media: vec![],
+            flush_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            queried_call_ids: queried_call_ids.clone(),
+        };
+        let upload_config = SipFlowUploadConfig::Http {
+            url: "http://localhost:9999/upload".to_string(),
+            headers: None,
+            signaling: Some(true),
+            media: Some(false),
+            force_pcm: None,
+            pcm_sample_rate: None,
+        };
+        let client = crate::http_util::build_keepalive_client(None, None).unwrap();
+        let now = Local::now();
+
+        upload_signaling_flow(
+            &upload_config,
+            &backend,
+            "caller-call-id",
+            &["caller-call-id".to_string(), "callee-call-id".to_string()],
+            now - chrono::Duration::seconds(1),
+            now + chrono::Duration::seconds(1),
+            "flow.jsonl",
+            "flow.jsonl",
+            &client,
+            None,
+        )
+        .await;
+        assert_eq!(
+            *queried_call_ids.lock().unwrap(),
+            ["caller-call-id", "callee-call-id"]
+        );
+
+        queried_call_ids.lock().unwrap().clear();
+        upload_signaling_flow(
+            &upload_config,
+            &backend,
+            "caller-call-id",
+            &["callee-call-id".to_string()],
+            now - chrono::Duration::seconds(1),
+            now + chrono::Duration::seconds(1),
+            "flow.jsonl",
+            "flow.jsonl",
+            &client,
+            None,
+        )
+        .await;
+        assert_eq!(
+            *queried_call_ids.lock().unwrap(),
+            ["callee-call-id", "caller-call-id"]
+        );
     }
 
     #[test]

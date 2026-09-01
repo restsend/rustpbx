@@ -1042,6 +1042,7 @@ async fn upload_handler(
             &req.upload,
             state.backend.as_ref(),
             call_id,
+            &req.signaling_call_ids,
             start,
             end,
             &full_signaling_key,

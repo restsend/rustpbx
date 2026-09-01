@@ -91,6 +91,7 @@ impl CallRecordHook for SipFlowRemoteUploadHook {
 
             let req = SipFlowUploadRequest {
                 call_id: call_id.to_string(),
+                signaling_call_ids: record.sip_leg_roles.keys().cloned().collect(),
                 start: start.timestamp(),
                 end: end.timestamp(),
                 upload: upload_config,
