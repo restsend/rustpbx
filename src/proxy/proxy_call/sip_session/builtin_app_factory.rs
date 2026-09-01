@@ -398,6 +398,13 @@ impl BuiltinAppFactory {
                             config.retry_interval_secs = retry;
                         }
                     }
+                    // URI `overflow_wait=` overrides the skill-group's
+                    // `max_wait_secs` (queue-level fallback timeout).
+                    if let Some(ovr) = pending.overflow_overrides.as_ref() {
+                        if let Some(wait) = ovr.max_wait_secs {
+                            config.max_wait_secs = wait;
+                        }
+                    }
                     // Ensure hold + comfort (wait retention) have audio.
                     if plan.hold.is_none() {
                         plan.hold = Some(
@@ -445,9 +452,14 @@ impl BuiltinAppFactory {
                     // groups + thresholds + fair ordering) from the addon so
                     // the queue app can escalate after the configured wait.
                     if let Some(sg) = pending.skill_group_id.clone() {
-                        let escalation = registry
+                        let mut escalation = registry
                             .escalation_plan_for(&format!("skill-group:{}", sg))
                             .await;
+                        // URI overflow params win over ACD policy and the
+                        // skill-group's `overflow_groups` (partial override).
+                        if let Some(ovr) = pending.overflow_overrides.as_ref() {
+                            ovr.apply_to_plan(&mut escalation);
+                        }
                         app = app.with_escalation_plan(escalation, sg);
                     }
                 }

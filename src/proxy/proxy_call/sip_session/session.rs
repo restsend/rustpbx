@@ -3803,7 +3803,11 @@ impl SipSession {
     /// queue-transfer path (`handle_queue_transfer`).  Resolves custom targets
     /// (skill-groups), applies the optional `queue_location_enricher`, stores
     /// the resolved plan in `pending_queue`, then starts the "queue" app.
-    pub(crate) async fn start_queue_app(&mut self, mut plan: crate::call::QueuePlan) -> Result<()> {
+    pub(crate) async fn start_queue_app(
+        &mut self,
+        mut plan: crate::call::QueuePlan,
+        overflow_overrides: Option<crate::call::app::QueueOverflowOverrides>,
+    ) -> Result<()> {
         use crate::call::DialStrategy;
 
         let agents = match &plan.dial_strategy {
@@ -3941,6 +3945,7 @@ impl SipSession {
                 agent_uris,
                 parallel: is_parallel,
                 skill_group_id: primary_skill_group,
+                overflow_overrides,
             });
         }
 
@@ -4018,7 +4023,7 @@ impl SipSession {
                         return self.execute_flow(next, callee_state_rx).await;
                     }
 
-                    match self.start_queue_app(plan.clone()).await {
+                    match self.start_queue_app(plan.clone(), None).await {
                         Ok(()) => Ok(()),
                         Err(e) => {
                             warn!(session_id = %self.id, error = %e, "Queue: failed to start queue app, trying next flow");

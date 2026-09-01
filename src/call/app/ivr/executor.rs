@@ -2547,6 +2547,7 @@ mod tests {
             "2".into(),
             ActionNode::new(EntryAction::Queue {
                 target: "support".into(),
+                params: HashMap::new(),
                 return_app: None,
                 return_target: None,
             }),

@@ -506,6 +506,7 @@ impl IvrApp {
             }
             EntryAction::Queue {
                 target,
+                params,
                 return_app,
                 return_target,
             } => {
@@ -520,6 +521,12 @@ impl IvrApp {
                 self.state = IvrState::Done;
                 let mut queue_uri = format!("queue:{}", target);
                 let mut query = String::new();
+                for (i, (k, v)) in params.iter().enumerate() {
+                    if i > 0 {
+                        query.push('&');
+                    }
+                    query.push_str(&format!("{}={}", k, urlencoding::encode(v)));
+                }
                 super::exec::append_return_app_query(
                     &mut query,
                     return_app,

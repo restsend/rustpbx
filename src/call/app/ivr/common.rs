@@ -268,10 +268,23 @@ pub async fn execute_action(
         }
         EntryAction::Queue {
             target,
+            params,
             return_app,
             return_target,
         } => {
             let mut t = substitute_vars(target, &sess.variables);
+            let mut query = String::new();
+            for (i, (k, v)) in params.iter().enumerate() {
+                if i > 0 {
+                    query.push('&');
+                }
+                let v = substitute_vars(v, &sess.variables);
+                query.push_str(&format!("{}={}", k, urlencoding::encode(&v)));
+            }
+            if !query.is_empty() {
+                t.push('?');
+                t.push_str(&query);
+            }
             super::exec::append_return_app_to_uri(&mut t, return_app, return_target);
             Ok(ActionResult::Terminal(TerminalAction::Transfer(format!(
                 "queue:{}",

@@ -1140,7 +1140,7 @@ async fn test_queue_transfer_without_return_to_ivr_starts_queue_app() {
     session.app_runtime = runtime.clone();
 
     session
-        .handle_queue_transfer("support", None, Vec::new())
+        .handle_queue_transfer("support", None, Vec::new(), None)
         .await
         .expect("queue app should start");
     assert_eq!(runtime.start_calls.load(Ordering::SeqCst), 1);
@@ -1168,6 +1168,7 @@ async fn test_queue_transfer_return_to_ivr_starts_queue_app_and_sets_meta() {
                 params: HashMap::new(),
             }),
             Vec::new(),
+            None,
         )
         .await
         .expect("queue app should start with return_app");
@@ -1628,7 +1629,7 @@ async fn test_start_queue_app_records_queue_entry_trace_and_app_name() {
     session.app_runtime = runtime.clone();
 
     session
-        .handle_queue_transfer("support", None, Vec::new())
+        .handle_queue_transfer("support", None, Vec::new(), None)
         .await
         .expect("queue app should start");
 
@@ -1687,7 +1688,7 @@ async fn test_queue_start_populates_meta_for_webhook_hooks() {
     session.app_runtime = runtime.clone();
 
     session
-        .handle_queue_transfer("support", None, Vec::new())
+        .handle_queue_transfer("support", None, Vec::new(), None)
         .await
         .expect("queue app should start");
 
@@ -2109,7 +2110,7 @@ async fn queue_no_agents_play_then_hangup_starts_queue_app() {
     session.app_runtime = runtime.clone();
 
     session
-        .handle_queue_transfer("support", None, Vec::new())
+        .handle_queue_transfer("support", None, Vec::new(), None)
         .await
         .expect("queue app should start");
     assert_eq!(runtime.start_calls.load(Ordering::SeqCst), 1);
@@ -2147,6 +2148,7 @@ async fn queue_not_found_with_return_to_ivr_starts_ivr_app() {
                 params: HashMap::new(),
             }),
             Vec::new(),
+            None,
         )
         .await
         .expect("missing-queue fallback with return_app should start the IVR app");
@@ -2184,7 +2186,7 @@ async fn queue_not_found_without_return_to_ivr_starts_queue_app() {
     session.app_runtime = runtime.clone();
 
     session
-        .handle_queue_transfer("missing-queue", None, Vec::new())
+        .handle_queue_transfer("missing-queue", None, Vec::new(), None)
         .await
         .expect("missing-queue fallback should start the queue app (announcement + hangup)");
 
@@ -2292,7 +2294,7 @@ async fn queue_no_agents_hangup_fallback_starts_queue_app() {
     session.app_runtime = runtime.clone();
 
     session
-        .handle_queue_transfer("support", None, Vec::new())
+        .handle_queue_transfer("support", None, Vec::new(), None)
         .await
         .expect("queue app should start");
     assert_eq!(runtime.start_calls.load(Ordering::SeqCst), 1);
@@ -2336,7 +2338,7 @@ async fn queue_transfer_recovers_from_already_running() {
     session.app_runtime = runtime.clone();
 
     session
-        .handle_queue_transfer("db-1", None, Vec::new())
+        .handle_queue_transfer("db-1", None, Vec::new(), None)
         .await
         .expect("queue transfer should recover from AlreadyRunning");
 
@@ -2441,6 +2443,7 @@ async fn queue_transfer_start_failure_with_return_app_returns_to_ivr() {
                 params: HashMap::new(),
             }),
             Vec::new(),
+            None,
         )
         .await
         .expect("queue start failure with return_app should start the IVR app");

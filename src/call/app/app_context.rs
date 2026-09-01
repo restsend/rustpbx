@@ -141,6 +141,70 @@ pub struct ApplicationContext {
     pub app_factory: Option<Arc<dyn crate::call::runtime::AppFactory>>,
 }
 
+/// Per-call overflow overrides carried via queue transfer URI query params
+/// (`overflow_group` / `overflow_after` / `overflow_wait` / `overflow_mode`).
+///
+/// Priority: URI params > ACD policy > skill-group `overflow_groups`.
+/// Partial-override semantics: only fields present on the URI are applied,
+/// the rest fall back to the registry-synthesized escalation plan.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct QueueOverflowOverrides {
+    /// `overflow_group=` — overflow target skill groups (replaces steps).
+    pub groups: Vec<String>,
+    /// `overflow_after=` — escalation trigger threshold (seconds).
+    pub threshold_secs: Option<u64>,
+    /// `overflow_wait=` — queue max wait before fallback (seconds).
+    pub max_wait_secs: Option<u64>,
+    /// `overflow_mode=` — `replace` or `cumulative`.
+    pub mode: Option<crate::call::app::queue::EscalationMode>,
+}
+
+impl QueueOverflowOverrides {
+    pub fn is_empty(&self) -> bool {
+        self.groups.is_empty()
+            && self.threshold_secs.is_none()
+            && self.max_wait_secs.is_none()
+            && self.mode.is_none()
+    }
+
+    /// Parse an `overflow_mode=` value (`replace` / `cumulative`).
+    pub fn parse_escalation_mode(s: &str) -> Option<crate::call::app::queue::EscalationMode> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "replace" => Some(crate::call::app::queue::EscalationMode::Replace),
+            "cumulative" => Some(crate::call::app::queue::EscalationMode::Cumulative),
+            _ => None,
+        }
+    }
+
+    /// Apply overrides onto a registry-synthesized escalation plan
+    /// (partial-override semantics; empty overrides leave the plan untouched).
+    pub fn apply_to_plan(&self, plan: &mut crate::call::app::queue::EscalationPlan) {
+        use crate::call::app::queue::EscalationStep;
+        if !self.groups.is_empty() {
+            let threshold = self
+                .threshold_secs
+                .or_else(|| plan.steps.first().map(|s| s.threshold_secs))
+                .unwrap_or(30);
+            plan.steps = self
+                .groups
+                .iter()
+                .map(|g| EscalationStep {
+                    threshold_secs: threshold,
+                    add_skill_group: g.clone(),
+                    fair: true,
+                })
+                .collect();
+        } else if let Some(t) = self.threshold_secs {
+            for step in plan.steps.iter_mut() {
+                step.threshold_secs = t;
+            }
+        }
+        if let Some(m) = self.mode.clone() {
+            plan.mode = m;
+        }
+    }
+}
+
 /// A resolved queue plan ready to be handed to QueueApp.
 #[derive(Clone)]
 pub struct PendingQueuePlan {
@@ -151,6 +215,9 @@ pub struct PendingQueuePlan {
     /// `skill-group:{id}`. The queue app factory uses it to pull the
     /// escalation plan from the agent registry.
     pub skill_group_id: Option<String>,
+    /// Per-call overflow overrides from the transfer URI query string.
+    /// Applied by the queue app factory on top of the registry plan.
+    pub overflow_overrides: Option<QueueOverflowOverrides>,
 }
 
 impl ApplicationContext {
@@ -254,6 +321,107 @@ mod tests {
             sip_headers: HashMap::new(),
             route_name: None,
         }
+    }
+
+    #[test]
+    fn test_overflow_overrides_apply_to_plan() {
+        use crate::call::app::queue::{EscalationMode, EscalationPlan, EscalationStep};
+
+        // Full override: groups replace steps, threshold + mode applied.
+        let mut plan = EscalationPlan {
+            mode: EscalationMode::Replace,
+            steps: vec![EscalationStep {
+                threshold_secs: 90,
+                add_skill_group: "old".into(),
+                fair: false,
+            }],
+        };
+        QueueOverflowOverrides {
+            groups: vec!["l2".into(), "l3".into()],
+            threshold_secs: Some(30),
+            max_wait_secs: None,
+            mode: Some(EscalationMode::Cumulative),
+        }
+        .apply_to_plan(&mut plan);
+        assert_eq!(plan.mode, EscalationMode::Cumulative);
+        assert_eq!(plan.steps.len(), 2);
+        assert!(plan.steps.iter().all(|s| s.threshold_secs == 30 && s.fair));
+        assert_eq!(plan.steps[0].add_skill_group, "l2");
+        assert_eq!(plan.steps[1].add_skill_group, "l3");
+
+        // Partial override: only the threshold is rewritten.
+        let mut plan2 = EscalationPlan {
+            mode: EscalationMode::Cumulative,
+            steps: vec![EscalationStep {
+                threshold_secs: 90,
+                add_skill_group: "a".into(),
+                fair: true,
+            }],
+        };
+        QueueOverflowOverrides {
+            threshold_secs: Some(15),
+            ..Default::default()
+        }
+        .apply_to_plan(&mut plan2);
+        assert_eq!(plan2.steps[0].threshold_secs, 15);
+        assert_eq!(plan2.steps[0].add_skill_group, "a");
+        assert_eq!(plan2.mode, EscalationMode::Cumulative);
+
+        // Groups without threshold: falls back to the first step's threshold.
+        let mut plan4 = EscalationPlan {
+            mode: EscalationMode::Replace,
+            steps: vec![EscalationStep {
+                threshold_secs: 60,
+                add_skill_group: "old".into(),
+                fair: false,
+            }],
+        };
+        QueueOverflowOverrides {
+            groups: vec!["l2".into()],
+            ..Default::default()
+        }
+        .apply_to_plan(&mut plan4);
+        assert_eq!(plan4.steps.len(), 1);
+        assert_eq!(plan4.steps[0].threshold_secs, 60);
+        assert_eq!(plan4.steps[0].add_skill_group, "l2");
+
+        // Empty overrides leave the plan untouched.
+        let mut plan3 = plan2.clone();
+        let untouched = plan2.clone();
+        QueueOverflowOverrides::default().apply_to_plan(&mut plan3);
+        assert_eq!(plan3, untouched);
+    }
+
+    #[test]
+    fn test_overflow_overrides_parse_escalation_mode() {
+        assert_eq!(
+            QueueOverflowOverrides::parse_escalation_mode("cumulative"),
+            Some(crate::call::app::queue::EscalationMode::Cumulative)
+        );
+        assert_eq!(
+            QueueOverflowOverrides::parse_escalation_mode(" Replace "),
+            Some(crate::call::app::queue::EscalationMode::Replace)
+        );
+        assert_eq!(QueueOverflowOverrides::parse_escalation_mode("bogus"), None);
+    }
+
+    #[test]
+    fn test_overflow_overrides_is_empty() {
+        assert!(QueueOverflowOverrides::default().is_empty());
+        assert!(
+            !QueueOverflowOverrides {
+                groups: vec!["g".into()],
+                ..Default::default()
+            }
+            .is_empty()
+        );
+        assert!(
+            !QueueOverflowOverrides {
+                threshold_secs: Some(1),
+                ..Default::default()
+            }
+            .is_empty()
+        );
     }
 
     #[test]

@@ -180,9 +180,9 @@ label = "Bob"
 
 # Fallback (if no agents answer)
 [proxy.queues.support_main.fallback]
-action = "redirect" # or "hangup", "queue"
-redirect = "sip:voicemail@local"
-# queue_ref = "overflow_queue"
+redirect = "sip:voicemail@local" # or a queue URI, e.g. "queue:overflow?overflow_group=..." (embedded query params are honored)
+# failure_code = 486
+# failure_reason = "No agents available"
 
 # Voice prompts (played to caller while waiting)
 # [proxy.queues.support_main.voice_prompts]
@@ -209,10 +209,10 @@ redirect = "sip:voicemail@local"
 
 When transferring a call to a queue via `queue:<name>`, you can append query parameters to override queue configuration at runtime.
 
-**`?return_ivr=<name>`** — Override the fallback action to transfer to an IVR instead of the configured fallback when no agents are available:
+**`?return_app=<app>&return_target=<target>`** — Override the fallback action to transfer to an app (e.g. `ivr`, `voicemail`, `queue`, `conference`) instead of the configured fallback when no agents are available. Note: the older `return_ivr=` spelling is **not** parsed:
 
 ```
-queue:support?return_ivr=main_menu
+queue:support?return_app=ivr&return_target=main_menu
 ```
 
 **`?target=<value>`** — Override the queue's configured agent targets with the given value. Supports `skillgroup:<id>` (resolved via AgentRegistry) or a SIP URI. Multiple `&target=` params are supported and dialed sequentially:
@@ -223,10 +223,26 @@ queue:support?target=sip:agent@pbx.com                           # Single SIP ag
 queue:support?target=skillgroup:sales&target=skillgroup:support  # Multiple targets (sequential)
 ```
 
+**`?overflow_group=<id>`** — 【Overflow override】Per-call overflow target skill groups. May be repeated, and comma-separated values are also accepted. When present, it **replaces** the whole escalation timeline for this call (no merging with the group's configured `overflow_groups`):
+
+```
+queue:support?overflow_group=support_l2                          # Single overflow group
+queue:support?overflow_group=support_l2,support_l3               # Comma-separated list
+queue:support?overflow_group=support_l2&overflow_group=support_l3
+```
+
+**`?overflow_after=<secs>`** — Overflow trigger threshold in seconds (overrides the escalation step thresholds). Without `overflow_group`, it rewrites the thresholds of the registry-synthesized plan.
+
+**`?overflow_wait=<secs>`** — Queue max wait (`max_wait_secs`) in seconds; after this the caller is routed to the fallback / return app. This is separate from `overflow_after`: the former bounds the total queue wait, the latter schedules the overflow escalation.
+
+**`?overflow_mode=<replace|cumulative>`** — Overflow mode: `replace` (re-dial into the new group) or `cumulative` (add the new group's agents alongside the current ones, fair round-robin). Defaults to `cumulative` when omitted.
+
+**Priority:** URI params > ACD policy (`overflow.escalation_timeline`) > skill-group `overflow_groups` + `max_wait_secs`. Only fields present on the URI are overridden; the rest fall back to the registry-synthesized plan. Overflow params only take effect when the queue dials a skill-group target (`?target=skillgroup:...` or the queue's own skill-group strategy).
+
 **Combined usage:**
 
 ```
-queue:support?target=skillgroup:sales&return_ivr=main_menu
+queue:support?target=skillgroup:vip&overflow_group=support_l2&overflow_group=support_l3&overflow_after=30&overflow_mode=cumulative&overflow_wait=120&return_app=ivr&return_target=main_menu
 ```
 
 ### Queue Overflow Escalation (skill-group queues)

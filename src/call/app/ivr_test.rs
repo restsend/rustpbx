@@ -737,6 +737,7 @@ action = { type = "transfer", target = "100" }
                         label: Some("Queue".to_string()),
                         action: EntryAction::Queue {
                             target: "sales".to_string(),
+                            params: HashMap::new(),
                             return_app: None,
                             return_target: None,
                         },
@@ -1012,6 +1013,7 @@ action = { type = "transfer", target = "100" }
                         label: Some("Queue no return".to_string()),
                         action: EntryAction::Queue {
                             target: "normal_queue".to_string(),
+                            params: HashMap::new(),
                             return_app: None,
                             return_target: None,
                         },
@@ -1021,6 +1023,7 @@ action = { type = "transfer", target = "100" }
                         label: Some("Queue with return".to_string()),
                         action: EntryAction::Queue {
                             target: "support".to_string(),
+                            params: HashMap::new(),
                             return_app: Some("ivr".into()),
                             return_target: Some("test-queue-return".into()),
                         },
@@ -1030,6 +1033,7 @@ action = { type = "transfer", target = "100" }
                         label: Some("Queue no return".to_string()),
                         action: EntryAction::Queue {
                             target: "overflow".to_string(),
+                            params: HashMap::new(),
                             return_app: None,
                             return_target: None,
                         },

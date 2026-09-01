@@ -154,6 +154,7 @@ pub(crate) enum TransferTarget {
         name: String,
         return_app: Option<ReturnTargetSpec>,
         target_overrides: Vec<String>,
+        overflow_overrides: Option<crate::call::app::QueueOverflowOverrides>,
     },
     Ivr {
         name: String,
@@ -305,6 +306,7 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                 } else {
                     let mut return_query: Vec<(&str, String)> = Vec::new();
                     let mut target_overrides = Vec::new();
+                    let mut overflow = crate::call::app::QueueOverflowOverrides::default();
                     if let Some(ref query) = query_str {
                         for pair in query.split('&') {
                             if pair.is_empty() {
@@ -316,6 +318,29 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                             let decoded = super::pct_decode_query(value);
                             match key {
                                 "target" => target_overrides.push(decoded),
+                                "overflow_group" => {
+                                    for g in decoded
+                                        .split(',')
+                                        .map(|s| s.trim())
+                                        .filter(|s| !s.is_empty())
+                                    {
+                                        overflow.groups.push(g.to_string());
+                                    }
+                                }
+                                "overflow_after" => {
+                                    if let Ok(v) = decoded.trim().parse::<u64>() {
+                                        overflow.threshold_secs = Some(v);
+                                    }
+                                }
+                                "overflow_wait" => {
+                                    if let Ok(v) = decoded.trim().parse::<u64>() {
+                                        overflow.max_wait_secs = Some(v);
+                                    }
+                                }
+                                "overflow_mode" => {
+                                    overflow.mode = crate::call::app
+                                        ::QueueOverflowOverrides::parse_escalation_mode(&decoded);
+                                }
                                 "return_app" | "return_target" => {
                                     return_query.push((key, decoded));
                                 }
@@ -330,6 +355,7 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                         name: queue_name,
                         return_app: ReturnTargetSpec::from_query_pairs(return_query.into_iter()),
                         target_overrides,
+                        overflow_overrides: (!overflow.is_empty()).then_some(overflow),
                     }
                 }
             }
@@ -539,9 +565,10 @@ impl SipSession {
                 name,
                 return_app,
                 target_overrides,
+                overflow_overrides,
             } => {
-                info!(session_id = %self.id, %leg_id, queue = %name, ?return_app, overrides = %target_overrides.len(), "Handling queue transfer");
-                self.handle_queue_transfer(&name, return_app, target_overrides)
+                info!(session_id = %self.id, %leg_id, queue = %name, ?return_app, overrides = %target_overrides.len(), overflow = ?overflow_overrides, "Handling queue transfer");
+                self.handle_queue_transfer(&name, return_app, target_overrides, overflow_overrides)
                     .await
             }
             TransferTarget::Ivr { name, params } => {
@@ -813,6 +840,7 @@ impl SipSession {
         queue_name: &str,
         return_app: Option<ReturnTargetSpec>,
         target_overrides: Vec<String>,
+        overflow_overrides: Option<crate::call::app::QueueOverflowOverrides>,
     ) -> Result<()> {
         let queue_config = self
             .server
@@ -933,7 +961,7 @@ impl SipSession {
             ));
         }
 
-        if let Err(e) = self.start_queue_app(queue_plan).await {
+        if let Err(e) = self.start_queue_app(queue_plan, overflow_overrides).await {
             warn!(session_id = %self.id, queue = %queue_name, error = %e, "Queue app failed to start; applying graceful fallback");
             return self
                 .handle_queue_failure_fallback(
@@ -1007,7 +1035,7 @@ impl SipSession {
             }),
             ..crate::call::QueuePlan::default()
         };
-        self.start_queue_app(fallback_plan).await
+        self.start_queue_app(fallback_plan, None).await
     }
 
     async fn start_route_point_app(
@@ -2164,6 +2192,7 @@ mod tests {
                     params: HashMap::new(),
                 }),
                 target_overrides: vec![],
+                overflow_overrides: None,
             }
         );
     }
@@ -2177,6 +2206,7 @@ mod tests {
                 name: "support".to_string(),
                 return_app: None,
                 target_overrides: vec![],
+                overflow_overrides: None,
             }
         );
     }
@@ -2190,6 +2220,7 @@ mod tests {
                 name: "sales".to_string(),
                 return_app: None,
                 target_overrides: vec![],
+                overflow_overrides: None,
             }
         );
     }
@@ -2203,6 +2234,7 @@ mod tests {
                 name: "support".to_string(),
                 return_app: None,
                 target_overrides: vec!["skillgroup:sales".to_string()],
+                overflow_overrides: None,
             }
         );
     }
@@ -2216,6 +2248,7 @@ mod tests {
                 name: "support".to_string(),
                 return_app: None,
                 target_overrides: vec!["sip:agent@pbx.com".to_string()],
+                overflow_overrides: None,
             }
         );
     }
@@ -2234,6 +2267,7 @@ mod tests {
                     "skillgroup:sales".to_string(),
                     "skillgroup:support".to_string(),
                 ],
+                overflow_overrides: None,
             }
         );
     }
@@ -2253,6 +2287,7 @@ mod tests {
                     params: HashMap::new(),
                 }),
                 target_overrides: vec!["skillgroup:sales".to_string()],
+                overflow_overrides: None,
             }
         );
     }
@@ -2272,8 +2307,85 @@ mod tests {
                     params: HashMap::new(),
                 }),
                 target_overrides: vec!["sip:a@pbx".to_string(), "sip:b@pbx".to_string()],
+                overflow_overrides: None,
             }
         );
+    }
+
+    #[test]
+    fn test_parse_transfer_target_queue_overflow_overrides() {
+        let t = parse_transfer_target(
+            "queue:support?target=skillgroup:vip&overflow_group=support_l2&overflow_group=support_l3&overflow_after=30&overflow_mode=cumulative&overflow_wait=120",
+        );
+        match t {
+            TransferTarget::Queue {
+                name,
+                target_overrides,
+                overflow_overrides,
+                ..
+            } => {
+                assert_eq!(name, "support");
+                assert_eq!(target_overrides, vec!["skillgroup:vip".to_string()]);
+                let o = overflow_overrides.expect("overflow overrides expected");
+                assert_eq!(
+                    o.groups,
+                    vec!["support_l2".to_string(), "support_l3".to_string()]
+                );
+                assert_eq!(o.threshold_secs, Some(30));
+                assert_eq!(o.max_wait_secs, Some(120));
+                assert_eq!(
+                    o.mode,
+                    Some(crate::call::app::queue::EscalationMode::Cumulative)
+                );
+            }
+            other => panic!("expected queue target, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_transfer_target_queue_overflow_comma_groups() {
+        let t = parse_transfer_target("queue:support?overflow_group=a%20b,c&overflow_after=45");
+        match t {
+            TransferTarget::Queue {
+                overflow_overrides, ..
+            } => {
+                let o = overflow_overrides.expect("expected overrides");
+                assert_eq!(o.groups, vec!["a b".to_string(), "c".to_string()]);
+                assert_eq!(o.threshold_secs, Some(45));
+                assert_eq!(o.mode, None);
+                assert_eq!(o.max_wait_secs, None);
+            }
+            other => panic!("expected queue target, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_transfer_target_queue_overflow_invalid_values_ignored() {
+        let t = parse_transfer_target(
+            "queue:support?overflow_after=abc&overflow_wait=-5&overflow_mode=bogus",
+        );
+        match t {
+            TransferTarget::Queue {
+                overflow_overrides, ..
+            } => {
+                // All values invalid → no overrides at all
+                assert!(overflow_overrides.is_none());
+            }
+            other => panic!("expected queue target, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_transfer_target_queue_without_overflow() {
+        let t = parse_transfer_target("queue:support?return_app=ivr&return_target=main");
+        match t {
+            TransferTarget::Queue {
+                overflow_overrides, ..
+            } => {
+                assert!(overflow_overrides.is_none());
+            }
+            other => panic!("expected queue target, got {:?}", other),
+        }
     }
 
     #[test]

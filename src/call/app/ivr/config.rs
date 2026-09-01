@@ -173,6 +173,11 @@ pub enum EntryAction {
     },
     Queue {
         target: String,
+        /// Extra query params encoded into the queue transfer URI
+        /// (e.g. `overflow_group` / `overflow_after` / `overflow_wait` /
+        /// `overflow_mode`).
+        #[serde(default)]
+        params: HashMap<String, String>,
         #[serde(default)]
         return_app: Option<String>,
         #[serde(default, alias = "return_to_ivr")]
@@ -572,6 +577,7 @@ impl WebhookResponse {
                 return_target,
             } => EntryAction::Queue {
                 target,
+                params: HashMap::new(),
                 return_app,
                 return_target,
             },
@@ -966,6 +972,7 @@ action = { type = "menu", menu = "root" }
                     "2".into(),
                     ActionNode::new(EntryAction::Queue {
                         target: "support".into(),
+                        params: HashMap::new(),
                         return_app: None,
                         return_target: None,
                     }),
