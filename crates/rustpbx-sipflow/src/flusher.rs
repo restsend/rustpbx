@@ -1,4 +1,5 @@
 use crate::protocol::MsgType;
+use crate::sqlite_metrics;
 use anyhow::Result;
 use lru::LruCache;
 use sqlx::sqlite::SqliteConnectOptions;
@@ -333,13 +334,16 @@ async fn handle_flush_command(
             // WAL and shrink its page cache so the previous bucket's WAL
             // doesn't linger on disk and its pages are released from RSS.
             if let Some(conn) = db_conn.as_mut() {
+                let ckpt_start = Instant::now();
                 let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
                     .execute(&mut *conn)
                     .await;
+                sqlite_metrics::record_checkpoint("truncate", ckpt_start.elapsed(), 0);
                 let _ = sqlx::query("PRAGMA shrink_memory")
                     .execute(&mut *conn)
                     .await;
             }
+            sqlite_metrics::ConnectionGuard::release("write");
             drop(db_conn.take());
             *db_conn = Some(open_db_with_pragmas(&new_db_path).await);
             *db_path = Some(new_db_path);
@@ -359,12 +363,15 @@ async fn handle_flush_command(
 }
 
 async fn open_db_with_pragmas(db_path: &PathBuf) -> SqliteConnection {
+    let open_start = Instant::now();
     let mut conn = SqliteConnectOptions::new()
         .filename(db_path)
         .create_if_missing(true)
         .connect()
         .await
+        .inspect_err(|e| sqlite_metrics::record_error("connect", e))
         .expect("failed to open sipflow sqlite db");
+    sqlite_metrics::record_write_open(open_start.elapsed());
 
     for pragma in [
         "PRAGMA journal_mode=WAL",
@@ -374,27 +381,44 @@ async fn open_db_with_pragmas(db_path: &PathBuf) -> SqliteConnection {
         "PRAGMA busy_timeout=5000",
         "PRAGMA page_size=4096",
     ] {
-        if let Err(e) = sqlx::query(pragma).execute(&mut conn).await {
-            tracing::warn!("sipflow flusher: PRAGMA failed: {e}");
+        let start = Instant::now();
+        match sqlx::query(pragma).execute(&mut conn).await {
+            Ok(r) => sqlite_metrics::record_statement("pragma", 0, r.rows_affected(), start.elapsed()),
+            Err(e) => {
+                sqlite_metrics::record_error("pragma", &e);
+                tracing::warn!("sipflow flusher: PRAGMA failed: {e}");
+            }
         }
     }
 
-    sqlx::query(
+    // Schema bootstrap (bucket creation). Each DDL runs once per bucket;
+    // failures stay non-fatal as before but are now visible in metrics.
+    async fn exec_ddl(conn: &mut SqliteConnection, sql: &'static str) {
+        let start = Instant::now();
+        match sqlx::query(sql).execute(conn).await {
+            Ok(r) => sqlite_metrics::record_statement("ddl", 0, r.rows_affected(), start.elapsed()),
+            Err(e) => {
+                sqlite_metrics::record_error("ddl", &e);
+                tracing::warn!("sipflow flusher: DDL failed: {e}");
+            }
+        }
+    }
+
+    exec_ddl(
+        &mut conn,
         "CREATE TABLE IF NOT EXISTS call_meta (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             callid TEXT UNIQUE NOT NULL
         )",
     )
-    .execute(&mut conn)
-    .await
-    .ok();
-
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_callid ON call_meta(callid)")
-        .execute(&mut conn)
-        .await
-        .ok();
-
-    sqlx::query(
+    .await;
+    exec_ddl(
+        &mut conn,
+        "CREATE INDEX IF NOT EXISTS idx_callid ON call_meta(callid)",
+    )
+    .await;
+    exec_ddl(
+        &mut conn,
         "CREATE TABLE IF NOT EXISTS sip_msgs (
             id INTEGER PRIMARY KEY,
             call_id INTEGER NOT NULL,
@@ -405,16 +429,14 @@ async fn open_db_with_pragmas(db_path: &PathBuf) -> SqliteConnection {
             size INTEGER NOT NULL
         )",
     )
-    .execute(&mut conn)
-    .await
-    .ok();
-
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_sip_call ON sip_msgs(call_id)")
-        .execute(&mut conn)
-        .await
-        .ok();
-
-    sqlx::query(
+    .await;
+    exec_ddl(
+        &mut conn,
+        "CREATE INDEX IF NOT EXISTS idx_sip_call ON sip_msgs(call_id)",
+    )
+    .await;
+    exec_ddl(
+        &mut conn,
         "CREATE TABLE IF NOT EXISTS media_msgs (
             id INTEGER PRIMARY KEY,
             call_id INTEGER NOT NULL,
@@ -425,26 +447,20 @@ async fn open_db_with_pragmas(db_path: &PathBuf) -> SqliteConnection {
             size INTEGER NOT NULL
         )",
     )
-    .execute(&mut conn)
-    .await
-    .ok();
+    .await;
 
     // `idx_media_call_timestamp` (call_id, timestamp) already covers all
     // call_id-prefix lookups, so the standalone `idx_media_call` index is
     // redundant. Every media row insert updated two B-trees; dropping the
     // redundant one measurably raises sustained write throughput on large
     // DBs. Existing databases are migrated (one-time) by the DROP below.
-    sqlx::query("DROP INDEX IF EXISTS idx_media_call")
-        .execute(&mut conn)
-        .await
-        .ok();
+    exec_ddl(&mut conn, "DROP INDEX IF EXISTS idx_media_call").await;
 
-    sqlx::query(
+    exec_ddl(
+        &mut conn,
         "CREATE INDEX IF NOT EXISTS idx_media_call_timestamp ON media_msgs(call_id, timestamp)",
     )
-    .execute(&mut conn)
-    .await
-    .ok();
+    .await;
 
     conn
 }
@@ -488,6 +504,10 @@ async fn flush_to_db(
             {
                 metrics::gauge!("sipflow_db_file_bytes", "component" => "sipflow")
                     .set(md.len() as f64);
+                sqlite_metrics::set_gauge("db", md.len());
+                if let Ok(wmd) = std::fs::metadata(format!("{}-wal", path.display())) {
+                    sqlite_metrics::set_gauge("wal", wmd.len());
+                }
             }
             tracing::trace!(
                 batch_size,
@@ -526,6 +546,25 @@ async fn flush_to_db(
                             "component" => "sipflow"
                         )
                         .increment(1);
+                    }
+                    sqlite_metrics::record_checkpoint(
+                        "passive",
+                        ckpt_start.elapsed(),
+                        row.busy as u64,
+                    );
+                    // Piggyback the page gauges on the throttled checkpoint
+                    // cadence — two cheap PRAGMAs against the write conn.
+                    if let (Some(pc), Some(fl)) = (
+                        sqlx::query_scalar::<_, i64>("PRAGMA page_count")
+                            .fetch_one(&mut *conn)
+                            .await
+                            .ok(),
+                        sqlx::query_scalar::<_, i64>("PRAGMA freelist_count")
+                            .fetch_one(&mut *conn)
+                            .await
+                            .ok(),
+                    ) {
+                        sqlite_metrics::set_page_gauges(pc.max(0) as u64, fl.max(0) as u64);
                     }
                 }
                 *last_checkpoint = Instant::now();
@@ -597,7 +636,18 @@ async fn insert_callids(
             b.push_bind(c);
         });
         qb.push(" ON CONFLICT(callid) DO UPDATE SET callid=callid RETURNING id");
-        let rows = qb.build().fetch_all(&mut **tx).await?;
+        let start = Instant::now();
+        let rows = qb
+            .build()
+            .fetch_all(&mut **tx)
+            .await
+            .inspect(|rows| {
+                sqlite_metrics::record_statement("insert", 0, rows.len() as u64, start.elapsed())
+            })
+            .map_err(|e| {
+                sqlite_metrics::record_error("insert", &e);
+                e
+            })?;
         for (row, callid) in rows.iter().zip(chunk.iter()) {
             let id: i32 = row.try_get("id")?;
             out.insert(callid.clone(), id);
@@ -647,6 +697,28 @@ async fn try_flush(
 }
 
 async fn flush_slice(
+    conn: &mut SqliteConnection,
+    metas: Vec<FlushMeta>,
+    call_id_cache: &mut LruCache<String, i32>,
+) -> Result<(usize, usize, usize)> {
+    let tx_timer = sqlite_metrics::TxTimer::begin();
+    let res = flush_slice_inner(conn, metas, call_id_cache).await;
+    match &res {
+        Ok(_) => tx_timer.finish(true),
+        Err(e) => {
+            tx_timer.finish(false);
+            if let Some(sqlx_err) = e.downcast_ref::<sqlx::Error>() {
+                sqlite_metrics::record_error("transaction", sqlx_err);
+            } else {
+                metrics::counter!("sqlite_errors_total", "database" => sqlite_metrics::DATABASE, "kind" => "transaction", "error" => "other")
+                    .increment(1);
+            }
+        }
+    }
+    res
+}
+
+async fn flush_slice_inner(
     conn: &mut SqliteConnection,
     metas: Vec<FlushMeta>,
     call_id_cache: &mut LruCache<String, i32>,
@@ -705,7 +777,13 @@ async fn flush_slice(
                 .push_bind(r.offset)
                 .push_bind(r.size);
         });
-        qb.build().execute(&mut *tx).await?;
+        let start = Instant::now();
+        if let Err(e) = qb.build().execute(&mut *tx).await.inspect(|r| {
+            sqlite_metrics::record_statement("insert", 0, r.rows_affected(), start.elapsed())
+        }) {
+            sqlite_metrics::record_error("insert", &e);
+            return Err(e.into());
+        }
     }
 
     for chunk in rtp_rows.chunks(INSERT_CHUNK_ROWS) {
@@ -720,7 +798,13 @@ async fn flush_slice(
                 .push_bind(r.offset)
                 .push_bind(r.size);
         });
-        qb.build().execute(&mut *tx).await?;
+        let start = Instant::now();
+        if let Err(e) = qb.build().execute(&mut *tx).await.inspect(|r| {
+            sqlite_metrics::record_statement("insert", 0, r.rows_affected(), start.elapsed())
+        }) {
+            sqlite_metrics::record_error("insert", &e);
+            return Err(e.into());
+        }
     }
 
     tx.commit().await?;

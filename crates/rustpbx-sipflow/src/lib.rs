@@ -7,6 +7,7 @@ pub mod protocol;
 pub mod rtp_stats;
 pub mod sdp_utils;
 pub mod shard;
+pub mod sqlite_metrics;
 pub mod storage;
 pub mod wav_utils;
 
