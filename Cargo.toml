@@ -251,11 +251,11 @@ iso_currency = { version = "0.5.3", default-features = false, features = [
     "iterator",
 ], optional = true }
 # Workspace crates
-rustpbx-models = { path = "crates/rustpbx-models" }
-rustpbx-storage = { path = "crates/rustpbx-storage" }
-rustpbx-http-util = { path = "crates/rustpbx-http-util" }
-rustpbx-sipflow = { path = "crates/rustpbx-sipflow" }
-rustpbx-media = { path = "crates/rustpbx-media" }
+rustpbx-models = { path = "crates/rustpbx-models", version = "0.5.0" }
+rustpbx-storage = { path = "crates/rustpbx-storage", version = "0.5.0" }
+rustpbx-http-util = { path = "crates/rustpbx-http-util", version = "0.5.0" }
+rustpbx-sipflow = { path = "crates/rustpbx-sipflow", version = "0.5.0" }
+rustpbx-media = { path = "crates/rustpbx-media", version = "0.5.0" }
 
 
 [dev-dependencies]
