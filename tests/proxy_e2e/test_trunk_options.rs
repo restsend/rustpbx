@@ -157,10 +157,30 @@ async fn test_options_from_trunk_ip_gets_200_ok() -> Result<()> {
 }
 
 #[tokio::test]
+async fn test_options_from_trusted_proxy_gets_200_ok() -> Result<()> {
+    for trusted_proxy in ["127.0.0.1", "127.0.0.0/8"] {
+        let config = ProxyConfig {
+            trusted_proxies: vec![trusted_proxy.to_string()],
+            acl_rules: Some(vec!["deny all".to_string()]),
+            ..Default::default()
+        };
+        let server = E2eTestServer::start_with_config(config).await?;
+        let client_port = portpicker::pick_unused_port().unwrap();
+        let server_addr = format!("127.0.0.1:{}", server.port);
+        let status = send_options(&server_addr, client_port).await?;
+        server.stop();
+
+        assert_eq!(status, Some(200), "OPTIONS from {trusted_proxy} should get 200 OK without a trunk");
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_options_from_unknown_ip_gets_no_response() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
 
     let mut config = trunk_options_proxy_config();
+    config.trusted_proxies = vec!["203.0.113.10".to_string()];
     config.trunks.insert(
         "carrier_only".to_string(),
         TrunkConfig {
