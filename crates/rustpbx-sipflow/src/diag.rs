@@ -535,7 +535,8 @@ pub async fn run_diag(
 
     // SQLite pass
     {
-        let mut sqlite = StorageManager::new(&base, subdirs.clone(), None, None, 0, 1, None);
+        let mut sqlite = StorageManager::new(&base, subdirs.clone(), None, None, 0, 1, None)
+            .with_scan_out_of_range(true);
 
         if let Ok(items) = sqlite.query_flow(call_id, start, end).await {
             let n = items.len();
