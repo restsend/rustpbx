@@ -343,8 +343,9 @@ async fn handle_flush_command(
                     .execute(&mut *conn)
                     .await;
             }
-            sqlite_metrics::ConnectionGuard::release("write");
-            drop(db_conn.take());
+            if db_conn.take().is_some() {
+                sqlite_metrics::ConnectionGuard::release("write");
+            }
             *db_conn = Some(open_db_with_pragmas(&new_db_path).await);
             *db_path = Some(new_db_path);
             call_id_cache.clear();
