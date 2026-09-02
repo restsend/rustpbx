@@ -42,6 +42,12 @@ pub struct StorageManager {
     /// Buffered raw records awaiting a bulk file write.
     write_buf: Vec<u8>,
     subdirs: SipFlowSubdirs,
+    /// When false (default), queries only scan buckets overlapping the
+    /// requested window (± one bucket). When true, the query path walks the
+    /// entire tree like diagnostics do — needed to find replayed or
+    /// mis-bucketed data (e.g. a bucket dir written by a `subdirs = none`
+    /// writer rooted elsewhere).
+    scan_out_of_range: bool,
     flusher_tx: Option<mpsc::Sender<FlushCommand>>,
     dropped: Arc<AtomicU64>,
     /// Shard this writer belongs to (0..shard_count). Used to pick the
@@ -268,6 +274,7 @@ impl StorageManager {
             pos_known: true,
             write_buf: Vec::with_capacity(RAW_WRITE_BUF_SIZE),
             subdirs,
+            scan_out_of_range: false,
             flusher_tx,
             dropped: dropped.unwrap_or_default(),
             shard_index,
@@ -809,8 +816,18 @@ impl StorageManager {
             .collect())
     }
 
+    /// Opt in to the legacy whole-tree scan on the query path.
+    pub fn with_scan_out_of_range(mut self, enabled: bool) -> Self {
+        self.scan_out_of_range = enabled;
+        self
+    }
+
     fn get_folders_in_range(&self, start: DateTime<Local>, end: DateTime<Local>) -> Vec<PathBuf> {
-        discover_data_dirs(&self.base_path, &self.subdirs, start, end)
+        if self.scan_out_of_range {
+            discover_data_dirs(&self.base_path, &self.subdirs, start, end)
+        } else {
+            discover_data_dirs_in_range(&self.base_path, &self.subdirs, start, end)
+        }
     }
 }
 
@@ -842,6 +859,58 @@ fn parse_hour_dir_name(name: &str) -> Option<u32> {
 /// discovered regardless of the configured `subdirs`, and the base directory
 /// itself is included last so data written with `subdirs = none` (or before a
 /// layout change) remains queryable.
+/// Buckets that can physically contain packets for `[start, end]`.
+///
+/// Ingest buckets by wall-clock capture time (the writer rotates hourly or
+/// daily on its own clock, and flush lag is bounded by the flush interval),
+/// so only buckets overlapping the query window — widened by one bucket on
+/// each side to absorb clock skew between writer and querier — need to be
+/// scanned. Per-query read IO stays constant instead of growing linearly
+/// with retention; `discover_data_dirs` (which additionally walks
+/// out-of-range buckets so replayed or mis-bucketed traffic stays findable)
+/// remains available for diagnostics.
+///
+/// Only the configured layout is enumerated, and the legacy base directory
+/// itself is included last so data written with `subdirs = none` remains
+/// queryable.
+pub(crate) fn discover_data_dirs_in_range(
+    base: &Path,
+    subdirs: &SipFlowSubdirs,
+    start: DateTime<Local>,
+    end: DateTime<Local>,
+) -> Vec<PathBuf> {
+    if matches!(subdirs, SipFlowSubdirs::None) {
+        return vec![base.to_path_buf()];
+    }
+
+    let start = start - chrono::Duration::hours(1);
+    let end = end + chrono::Duration::hours(1);
+    let start_day = start.date_naive();
+    let end_day = end.date_naive();
+
+    let mut out = Vec::new();
+    let mut day = start_day;
+    while day <= end_day {
+        let day_path = base.join(day.format("%Y%m%d").to_string());
+        if matches!(subdirs, SipFlowSubdirs::Hourly) {
+            let h0 = if day == start_day { start.hour() } else { 0 };
+            let h1 = if day == end_day { end.hour() } else { 23 };
+            for hour in h0..=h1 {
+                let hour_path = day_path.join(format!("{hour:02}"));
+                if hour_path.is_dir() {
+                    out.push(hour_path);
+                }
+            }
+        } else if day_path.is_dir() {
+            out.push(day_path);
+        }
+        day += chrono::Duration::days(1);
+    }
+
+    out.push(base.to_path_buf());
+    out
+}
+
 pub(crate) fn discover_data_dirs(
     base: &Path,
     subdirs: &SipFlowSubdirs,
@@ -1227,8 +1296,10 @@ mod tests {
         writer.force_flush().await.expect("flush");
 
         // Query with Daily subdirs for today's range — the 20200101 bucket
-        // is outside the computed range but must still be scanned.
-        let mut reader = StorageManager::new(base, SipFlowSubdirs::Daily, None, None, 0, 1, None);
+        // is outside the computed range and only found with the opt-in
+        // whole-tree scan (queries default to the scoped enumeration).
+        let mut reader = StorageManager::new(base, SipFlowSubdirs::Daily, None, None, 0, 1, None)
+            .with_scan_out_of_range(true);
         let items = reader
             .query_flow(
                 call_id,
@@ -1291,6 +1362,63 @@ mod tests {
         assert!(dirs.contains(&base.join("20200103")));
         assert_eq!(dirs.last().unwrap(), &base.to_path_buf());
         assert!(!dirs.contains(&base.join("not-a-date")));
+    }
+
+    #[test]
+    fn test_discover_data_dirs_in_range_scopes_to_window() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path();
+        for p in [
+            "20200101/22",
+            "20200101/23",
+            "20200102/00",
+            "20200102/01",
+            "20200102/05",
+            "20200115/12", // far history — must never be scanned
+        ] {
+            std::fs::create_dir_all(base.join(p)).unwrap();
+        }
+
+        let start = Local.with_ymd_and_hms(2020, 1, 2, 0, 30, 0).unwrap();
+        let end = Local.with_ymd_and_hms(2020, 1, 2, 0, 45, 0).unwrap();
+
+        let dirs = discover_data_dirs_in_range(base, &SipFlowSubdirs::Hourly, start, end);
+
+        // Window ± one hour of margin: 0101/23 (margin), 0102/00 (in range),
+        // 0102/01 (margin), then the legacy base dir.
+        assert_eq!(
+            dirs,
+            vec![
+                base.join("20200101/23"),
+                base.join("20200102/00"),
+                base.join("20200102/01"),
+                base.to_path_buf(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_discover_data_dirs_in_range_daily() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path();
+        for p in ["20200101", "20200102", "20200103"] {
+            std::fs::create_dir_all(base.join(p)).unwrap();
+        }
+
+        let start = Local.with_ymd_and_hms(2020, 1, 2, 0, 0, 0).unwrap();
+        let end = Local.with_ymd_and_hms(2020, 1, 2, 23, 59, 59).unwrap();
+
+        let dirs = discover_data_dirs_in_range(base, &SipFlowSubdirs::Daily, start, end);
+
+        assert_eq!(
+            dirs,
+            vec![
+                base.join("20200101"),
+                base.join("20200102"),
+                base.join("20200103"),
+                base.to_path_buf(),
+            ]
+        );
     }
 
     #[test]
