@@ -377,6 +377,7 @@ async fn test_database_saver_without_url_needs_main_db() {
         .with_config(CallRecordConfig {
             channel_capacity: 2048,
             batch_size: 64,
+            track_queue_latency: false,
             storage: CallRecordStorageConfig::Database {
                 database_url: None,
                 table_name: "custom_table".to_string(),
@@ -424,6 +425,7 @@ async fn test_local_config_without_main_db_ok() {
         .with_config(CallRecordConfig {
             channel_capacity: 2048,
             batch_size: 4,
+            track_queue_latency: false,
             storage: CallRecordStorageConfig::Local { root: root.clone() },
         })
         .build()
@@ -450,6 +452,7 @@ async fn test_builder_uses_configured_channel_and_batch_settings() {
         .with_config(CallRecordConfig {
             channel_capacity: 17,
             batch_size: 3,
+            track_queue_latency: false,
             storage: CallRecordStorageConfig::Local {
                 root: tmp.path().to_string_lossy().into_owned(),
             },
@@ -470,6 +473,7 @@ async fn test_http_config_without_main_db_ok() {
         .with_config(CallRecordConfig {
             channel_capacity: 2048,
             batch_size: 4,
+            track_queue_latency: false,
             storage: CallRecordStorageConfig::Http {
                 url: "http://127.0.0.1:1/cdr".to_string(),
                 headers: None,
@@ -494,6 +498,7 @@ async fn test_s3_config_without_main_db_ok() {
         .with_config(CallRecordConfig {
             channel_capacity: 2048,
             batch_size: 4,
+            track_queue_latency: false,
             storage: CallRecordStorageConfig::S3 {
                 vendor: crate::config::S3Vendor::Minio,
                 bucket: "test-bucket".to_string(),
@@ -523,6 +528,7 @@ async fn test_database_with_url_without_main_db_ok() {
         .with_config(CallRecordConfig {
             channel_capacity: 2048,
             batch_size: 4,
+            track_queue_latency: false,
             storage: CallRecordStorageConfig::Database {
                 database_url: Some("sqlite::memory:".to_string()),
                 table_name: "custom_cdr".to_string(),
@@ -556,6 +562,7 @@ async fn test_local_saver_does_not_write_to_db() {
         .with_config(CallRecordConfig {
             channel_capacity: 2048,
             batch_size: 4,
+            track_queue_latency: false,
             storage: CallRecordStorageConfig::Local { root: root.clone() },
         })
         .build()

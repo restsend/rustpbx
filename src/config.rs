@@ -641,6 +641,11 @@ pub struct CallRecordConfig {
     /// Maximum number of records passed to hooks and the saver at once.
     #[serde(default = "default_call_record_batch_size")]
     pub batch_size: usize,
+    /// Record the queueing-wait histogram `cdr_queue_latency_seconds`
+    /// (record enqueued → manager dequeued). The save/push time itself is
+    /// excluded; disabled by default.
+    #[serde(default)]
+    pub track_queue_latency: bool,
     #[serde(flatten)]
     pub storage: CallRecordStorageConfig,
 }
@@ -1769,6 +1774,7 @@ impl Default for CallRecordConfig {
         Self {
             channel_capacity: default_call_record_channel_capacity(),
             batch_size: default_call_record_batch_size(),
+            track_queue_latency: false,
             storage: CallRecordStorageConfig::Local {
                 #[cfg(target_os = "windows")]
                 root: "./config/cdr".to_string(),
