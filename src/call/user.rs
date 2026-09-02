@@ -284,10 +284,12 @@ impl TryFrom<&Transaction> for SipUser {
         let (via_transport, destination_addr) = SipConnection::parse_target_from_via(via_header)
             .map_err(|e| anyhow::anyhow!("failed to parse via header: {:?}", e))?;
 
-        let destination = SipAddr {
+        let mut destination = SipAddr {
             r#type: Some(via_transport),
             addr: destination_addr,
         };
+
+        apply_flow_destination(&mut destination, tx.connection.as_ref());
 
         let is_support_webrtc = matches!(via_transport, Transport::Wss | Transport::Ws);
 
@@ -316,6 +318,29 @@ impl TryFrom<&Transaction> for SipUser {
         u.build_contact(tx);
         Ok(u)
     }
+}
+
+/// RFC 5626 / RFC 7118: for reliable transports the connection that actually
+/// delivered the request is the authoritative source address. Browser clients
+/// advertise `.invalid` flow tokens (or NAT-stale hosts) in their Via
+/// sent-by, and received/rport stamping is not guaranteed on every transport
+/// path (e.g. binary WebSocket frames). Prefer the concrete peer address of
+/// the flow while keeping the Via-derived transport tag (Channel connections
+/// report UDP regardless of the underlying WebSocket).
+fn apply_flow_destination(destination: &mut SipAddr, connection: Option<&SipConnection>) {
+    let Some(connection) = connection else {
+        return;
+    };
+    if !connection.is_reliable() {
+        return;
+    }
+    let Some(remote) = connection.get_remote_addr() else {
+        return;
+    };
+    if matches!(&remote.addr.host, rsipstack::sip::Host::IpAddr(ip) if ip.is_unspecified()) {
+        return;
+    }
+    destination.addr = remote.addr.clone();
 }
 
 pub fn check_authorization_headers(
@@ -413,5 +438,124 @@ mod tests {
         };
         primary.merge_with(&secondary);
         assert!(!primary.voicemail_disabled);
+    }
+
+    fn via_derived_destination(via: &str) -> SipAddr {
+        let raw = format!(
+            "REGISTER sip:pbx.example.com SIP/2.0\r\nVia: {via}\r\nFrom: <sip:u@pbx.example.com>;tag=t1\r\nTo: <sip:u@pbx.example.com>\r\nCall-ID: c1\r\nCSeq: 1 REGISTER\r\nContent-Length: 0\r\n\r\n"
+        );
+        let request: rsipstack::sip::Request = rsipstack::sip::Request::try_from(raw.as_str())
+            .map_err(|e| format!("{e:?}"))
+            .unwrap();
+        let (transport, target) = rsipstack::transport::SipConnection::parse_target_from_via(
+            request.via_header().expect("via"),
+        )
+        .expect("parse via");
+        SipAddr {
+            r#type: Some(transport),
+            addr: target,
+        }
+    }
+
+    /// Production fault: a JsSIP WebSocket client's registration must record
+    /// the REAL flow address (`112.64.233.138:7318`), never the `.invalid`
+    /// flow token from its Via sent-by nor a wildcard listener default —
+    /// otherwise in-dialog requests (BYE) dial back to garbage and call-flow
+    /// recordings show `dst_addr: 0.0.0.0:5060`.
+    #[tokio::test]
+    async fn ws_registration_destination_prefers_connection_flow_address() {
+        use rsipstack::transport::channel::ChannelConnection;
+        use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+        use tokio_util::sync::CancellationToken;
+
+        let (_in_tx, in_rx): (_, UnboundedReceiver<rsipstack::transport::TransportEvent>) =
+            unbounded_channel();
+        let (out_tx, _out_rx) = unbounded_channel();
+        let cancel = CancellationToken::new();
+        let conn = ChannelConnection::create_connection(
+            in_rx,
+            out_tx,
+            SipAddr {
+                r#type: Some(rsipstack::sip::Transport::Udp),
+                addr: rsipstack::sip::HostWithPort {
+                    host: rsipstack::sip::Host::IpAddr("112.64.233.138".parse().unwrap()),
+                    port: Some(7318.into()),
+                },
+            },
+            Some(cancel.child_token()),
+        )
+        .await
+        .expect("channel connection");
+        let connection = rsipstack::transport::SipConnection::Channel(conn);
+        assert!(connection.is_reliable(), "channel flows are reliable");
+
+        // Via WITHOUT received/rport: sent-by is the raw `.invalid` flow
+        // token a browser stack emits (RFC 7118 B.1).
+        let mut destination =
+            via_derived_destination("SIP/2.0/WSS 7i94k9e6mr86.invalid;branch=z9hG4bK2011401");
+        assert!(
+            destination.addr.host.to_string().contains(".invalid"),
+            "precondition: via-derived target is the flow token"
+        );
+
+        apply_flow_destination(&mut destination, Some(&connection));
+        assert_eq!(destination.addr.host.to_string(), "112.64.233.138");
+        assert_eq!(
+            destination.addr.port.map(|p| p.0),
+            Some(7318),
+            "the concrete flow ip:port must replace the `.invalid` token"
+        );
+        assert_eq!(
+            destination.r#type,
+            Some(rsipstack::sip::Transport::Wss),
+            "the Via transport tag must be preserved"
+        );
+    }
+
+    #[test]
+    fn udp_registration_destination_keeps_via_derived_target() {
+        // UDP has no per-registration flow to reuse: the classic
+        // Via received/rport target stays authoritative.
+        let mut destination =
+            via_derived_destination("SIP/2.0/UDP 58.246.19.74:6988;branch=z9hG4bKx;rport=6988");
+        apply_flow_destination(&mut destination, None);
+        assert_eq!(destination.addr.host.to_string(), "58.246.19.74");
+        assert_eq!(destination.addr.port.map(|p| p.0), Some(6988));
+    }
+
+    #[tokio::test]
+    async fn wildcard_flow_address_is_ignored() {
+        use rsipstack::transport::channel::ChannelConnection;
+        use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+        use tokio_util::sync::CancellationToken;
+
+        let (out_tx, _out_rx) = unbounded_channel();
+        let (_in_tx, in_rx): (_, UnboundedReceiver<rsipstack::transport::TransportEvent>) =
+            unbounded_channel();
+        let conn = ChannelConnection::create_connection(
+            in_rx,
+            out_tx,
+            SipAddr {
+                r#type: Some(rsipstack::sip::Transport::Udp),
+                addr: rsipstack::sip::HostWithPort {
+                    host: rsipstack::sip::Host::IpAddr("0.0.0.0".parse().unwrap()),
+                    port: Some(5060.into()),
+                },
+            },
+            Some(CancellationToken::new()),
+        )
+        .await
+        .expect("channel connection");
+        let connection = rsipstack::transport::SipConnection::Channel(conn);
+
+        let mut destination = via_derived_destination(
+            "SIP/2.0/WSS 7i94k9e6mr86.invalid;branch=z9hG4bK2011401;received=112.64.233.138;rport=7318",
+        );
+        apply_flow_destination(&mut destination, Some(&connection));
+        assert_eq!(
+            destination.addr.host.to_string(),
+            "112.64.233.138",
+            "a wildcard flow address must not override a usable via-derived target"
+        );
     }
 }

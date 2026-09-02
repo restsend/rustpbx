@@ -4,8 +4,8 @@ use bytes::Bytes;
 use rsipstack::sip::{SipMessage, ToTypedHeader, prelude::HeadersExt};
 use rsipstack::{transaction::endpoint::MessageInspector, transport::SipAddr};
 use std::borrow::Cow;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 struct Backend(Option<Arc<dyn SipFlowBackend>>);
@@ -56,6 +56,16 @@ struct SipFlowInner {
     local_addrs: Vec<String>,
     /// Number of SIP messages rejected by backend dispatch.
     dropped_count: AtomicU64,
+}
+
+/// True when the host part is the unspecified address (`0.0.0.0` / `::`),
+/// i.e. a placeholder that carries no routing information.
+#[inline]
+fn is_unspecified_host(host_with_port: &rsipstack::sip::HostWithPort) -> bool {
+    matches!(
+        &host_with_port.host,
+        rsipstack::sip::Host::IpAddr(ip) if ip.is_unspecified()
+    )
 }
 
 #[derive(Clone)]
@@ -162,6 +172,18 @@ impl SipFlow {
         let mut src = String::with_capacity(64);
         let mut dst = String::with_capacity(64);
 
+        // A wildcard address means the endpoint address could not actually be
+        // determined (e.g. RFC 7118 `.invalid` WebSocket flow tokens in the
+        // Request-URI, or a wildcard-bound listener). Recording
+        // `0.0.0.0:<port>` poisons the call-flow diagnostics downstream, so
+        // for outgoing messages such addresses are ignored and the recorder
+        // falls back to the message-derived target (or leaves dst empty).
+        let addr = if is_outgoing {
+            addr.filter(|a| !is_unspecified_host(&a.addr))
+        } else {
+            addr
+        };
+
         if let Some(addr) = addr {
             let addr_str = addr.addr.to_string();
             if is_outgoing {
@@ -171,6 +193,7 @@ impl SipFlow {
             }
         } else if is_outgoing
             && let Ok(dest) = rsipstack::transport::SipConnection::get_destination(msg)
+            && !dest.ip().is_unspecified()
         {
             dst.push_str(&dest.to_string());
         }
@@ -219,7 +242,6 @@ impl SipFlow {
             let _ = backend.flush().await;
         }
     }
-
 }
 
 impl MessageInspector for SipFlow {
@@ -394,5 +416,65 @@ mod tests {
             3,
             "records after a hot reload must use the new backend"
         );
+    }
+
+    /// Production fault (callee-initiated BYE toward a JsSIP WebSocket
+    /// caller): the outgoing BYE's Request-URI is an unresolvable
+    /// `*.invalid` flow token. Without a transport-provided address the
+    /// recorder used to fall back to a wildcard destination (`0.0.0.0:5060`)
+    /// which corrupted the call flow view. The fallback must yield an empty
+    /// dst instead, and a real transport address must always win.
+    #[test]
+    fn outgoing_request_dst_never_wildcard_and_addr_param_wins() {
+        let invalid_bye = rsipstack::sip::SipMessage::try_from(
+            "BYE sip:i2bkchck@7i94k9e6mr86.invalid;transport=WS;ob SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 116.62.250.247:15060;branch=z9hG4bKJRWrkRJNwtk7;rport\r\n\
+             From: <sip:+17746371298@58.246.19.74:6988>;tag=y2Ty717d\r\n\
+             To: <sip:xwork_5g_test@pbx.test.weixuntech-inc.com>;tag=tbjrt9l1te\r\n\
+             Call-ID: q6cb2m7hj1j6gpsb6oif\r\n\
+             CSeq: 2631 BYE\r\n\
+             Content-Length: 0\r\n\r\n",
+        )
+        .expect("valid BYE");
+
+        // No transport address (legacy affinity path): dst stays empty
+        // instead of degenerating into a wildcard default.
+        let (src, dst) = SipFlow::extract_addrs_fast(true, None, &invalid_bye, &[]);
+        assert_eq!(
+            dst, "",
+            "unresolvable `.invalid` target must not become a wildcard dst"
+        );
+        assert_eq!(
+            src, "116.62.250.247:15060",
+            "src still comes from the Via sent-by"
+        );
+
+        // Simulated legacy garbage (wildcard listener as destination) — the
+        // recorder must reject it as well.
+        let wildcard = rsipstack::transport::SipAddr {
+            r#type: Some(rsipstack::sip::transport::Transport::Udp),
+            addr: rsipstack::sip::HostWithPort {
+                host: rsipstack::sip::Host::IpAddr(std::net::IpAddr::V4(
+                    std::net::Ipv4Addr::UNSPECIFIED,
+                )),
+                port: Some(5060.into()),
+            },
+        };
+        let (_, dst) = SipFlow::extract_addrs_fast(true, Some(&wildcard), &invalid_bye, &[]);
+        assert_eq!(
+            dst, "",
+            "wildcard transport address must not be recorded as dst"
+        );
+
+        // The real flow address (WebSocket remote peer) is recorded verbatim.
+        let flow_addr = rsipstack::transport::SipAddr {
+            r#type: Some(rsipstack::sip::transport::Transport::Wss),
+            addr: rsipstack::sip::HostWithPort {
+                host: rsipstack::sip::Host::IpAddr("112.64.233.138".parse().unwrap()),
+                port: Some(7318.into()),
+            },
+        };
+        let (_, dst) = SipFlow::extract_addrs_fast(true, Some(&flow_addr), &invalid_bye, &[]);
+        assert_eq!(dst, "112.64.233.138:7318");
     }
 }
