@@ -341,6 +341,7 @@ impl StorageManager {
             .current_offset
             .saturating_sub(self.write_buf.len() as u64);
         let write_start = Instant::now();
+        let batch_bytes = self.write_buf.len();
         if !self.pos_known {
             file.seek(SeekFrom::Start(offset)).await?;
         }
@@ -350,6 +351,9 @@ impl StorageManager {
         }
         self.pos_known = true;
         self.write_buf.clear();
+        metrics::counter!("sipflow_raw_flush_total", "component" => "sipflow").increment(1);
+        metrics::histogram!("sipflow_raw_flush_bytes", "component" => "sipflow")
+            .record(batch_bytes as f64);
         metrics::histogram!("sipflow_raw_write_seconds", "component" => "sipflow")
             .record(write_start.elapsed().as_secs_f64());
         Ok(())
