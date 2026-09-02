@@ -12,7 +12,7 @@ members = [
 
 [package]
 name = "rustpbx"
-version = "0.5.0-rc.1"
+version = "0.5.0"
 edition = "2024"
 default-run = "rustpbx"
 authors = ["jinti<shenjind@fourz.cn>"]
