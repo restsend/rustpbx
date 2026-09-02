@@ -955,6 +955,123 @@ async fn rwi_originate_uses_prepared_caller_leg_for_invite_answer() {
 }
 
 #[tokio::test]
+async fn rwi_bridge_setup_results_reach_listener_before_call_ends() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::media::leg::{LegConfig, LegInner};
+    use crate::media::media_bridge::LegSide;
+    use crate::proxy::active_call_registry::{ActiveProxyCallEntry, ActiveProxyCallStatus};
+    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+    use crate::proxy::tests::common::{create_test_request, create_test_server};
+    use crate::rwi::gateway::RwiGateway;
+    use crate::rwi::processor::RwiCommandProcessor;
+    use crate::rwi::session::RwiCommandPayload;
+
+    let (server, _) = create_test_server().await;
+    let call_id = "rwi-bridge-setup";
+    let request = create_test_request(rsipstack::sip::Method::Invite, "rwi", None, "rustpbx.com", None);
+    let context = CallContext {
+        session_id: call_id.into(),
+        dialplan: Arc::new(Dialplan::new(call_id.into(), request, DialDirection::Outbound)),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:rwi@rustpbx.com".into(),
+        original_callee: "sip:target@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let (mut session, handle, mut commands) = SipSession::new_uac(
+        server.clone(), CancellationToken::new(), None, context, true,
+        Arc::new(MockMediaPeer::new()), Arc::new(MockMediaPeer::new()),
+    );
+    let offer = session.prepare_originate_caller_leg(vec![
+        MediaNegotiator::codec_info_for_type(CodecType::PCMU),
+    ]).await.unwrap();
+    let remote = LegInner::new("bridge-remote", &LegConfig::rtp_pcmu(), None).unwrap();
+    let answer = remote.answer(&offer).await.unwrap();
+    let caller = session.bridge().unwrap().leg(LegSide::A).unwrap();
+    caller.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
+    session.bridge_mut().unwrap().accept(LegSide::A).await;
+    session.update_leg_state(&LegId::from("caller"), LegState::Connected);
+    server.active_call_registry.upsert(ActiveProxyCallEntry {
+        session_id: call_id.into(),
+        caller: None,
+        callee: None,
+        direction: "outbound".into(),
+        started_at: chrono::Utc::now(),
+        answered_at: Some(chrono::Utc::now()),
+        status: ActiveProxyCallStatus::Talking,
+    }, handle);
+
+    let gateway = RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let processor = RwiCommandProcessor::new(
+        server.active_call_registry.clone(),
+        Arc::new(parking_lot::RwLock::new(gateway)),
+        server.conference_manager.clone(),
+    ).with_sip_server(server.clone());
+    let listener = processor.register_transfer_notify_listener().await.unwrap();
+
+    let ws_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = ws_listener.local_addr().unwrap();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let ws_task = tokio::spawn(async move {
+        let (stream, _) = ws_listener.accept().await.unwrap();
+        let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let _ = stop_rx.await;
+        drop(ws);
+    });
+    let (_callee_tx, mut callee_rx) = mpsc::unbounded_channel();
+    for (target, succeeds, expected_event) in [
+        (format!("bridge:ws://{address}?timeout_ms=1000"), true, "call_transferred"),
+        ("bridge:invalid-websocket-url".into(), false, "call_transfer_failed"),
+    ] {
+        tokio::time::timeout(Duration::from_secs(2), processor.process_command(
+            RwiCommandPayload::Transfer { call_id: call_id.into(), target: target.clone() },
+        )).await.expect("RWI must return before the session executes setup").unwrap();
+        let command = commands.recv().await.unwrap();
+        assert!(matches!(command, CallCommand::Transfer { .. }));
+        let result = session.execute_command(command, Some(&mut callee_rx)).await;
+        assert_eq!(result.success, succeeds, "{:?}", result.message);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let entry = events.recv().await.unwrap();
+                if entry.event.event_type == expected_event {
+                    assert_eq!(entry.call_id, call_id);
+                    assert_eq!(entry.event.payload["transfer_target"], target);
+                    break;
+                }
+            }
+        }).await.expect("bridge setup result must reach the RWI controller");
+        assert!(!session.cancel_token.is_cancelled());
+        assert!(session.conference_bridge.bridge_handle.is_some());
+        assert!(server.active_call_registry.get(call_id).is_some());
+    }
+
+    // Setup reports directly, even without execute_command and while an
+    // additional subscriber has not started reading its events.
+    let (observer_tx, mut observer_rx) = mpsc::unbounded_channel();
+    server.transfer_notify_subscribers.lock().await.push(observer_tx);
+    let target = "bridge:invalid-websocket-url";
+    let result = tokio::time::timeout(Duration::from_secs(2), session.handle_blind_transfer(
+        LegId::from("caller"), target.into(), transfer::TransferDisposition::Detach, &mut callee_rx,
+    )).await.expect("setup must not wait for subscribers to process the result");
+    assert!(result.is_err());
+    let event = observer_rx.try_recv().expect("bridge setup must emit its own result");
+    assert_eq!(event.sip_status, 500);
+    assert!(matches!(event.event_type,
+        crate::call::domain::ReferNotifyEventType::Notify));
+
+    drop(observer_rx);
+
+    session.cleanup().await;
+    let _ = stop_tx.send(());
+    ws_task.await.unwrap();
+    remote.stop();
+    drop(listener);
+}
+
+#[tokio::test]
 async fn test_reject_command() {
     use crate::call::runtime::SessionId;
 

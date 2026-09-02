@@ -165,7 +165,7 @@ impl RwiCommandProcessor {
         self.conference_manager.clone()
     }
 
-    /// Register this processor as a subscriber for REFER NOTIFY events from
+    /// Register this processor as a subscriber for transfer result events from
     /// `SipSession` and spawn a background task to feed them into the
     /// `TransferController`.
     ///

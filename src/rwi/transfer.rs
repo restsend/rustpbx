@@ -214,6 +214,11 @@ impl TransferController {
 
         self.verify_call_state_for_transfer(&call_id).await?;
 
+        let _handle = self
+            .get_handle(&call_id)
+            .await
+            .ok_or(TransferFailureReason::InvalidState)?;
+
         let mut transaction = TransferTransaction::new(call_id.clone(), target.clone(), mode);
         transaction.update_status(TransferStatus::Accepted);
 
@@ -225,11 +230,6 @@ impl TransferController {
             .insert(transaction.transfer_id.clone(), transaction.clone());
 
         crate::metrics::transfer::set_active_transfers(self.transactions.len());
-
-        let _handle = self
-            .get_handle(&call_id)
-            .await
-            .ok_or(TransferFailureReason::InvalidState)?;
 
         let gw = self.gateway.read();
         gw.send_to_owner(&crate::rwi::CallTransferAccepted {
@@ -301,10 +301,9 @@ impl TransferController {
     /// Send a `CallCommand::Transfer` to the SipSession for this transaction.
     ///
     /// **Design**: `SipSessionHandle::send_command` is an mpsc fire-and-forget channel.
-    /// The SipSession processes the command asynchronously and emits `emit_transfer_event`
-    /// which surfaces the outcome via the RWI gateway.  There is no back-channel from
-    /// SipSession to TransferController, so this method returns `Ok(())` as soon as the
-    /// command is enqueued, or `Err(InternalError)` if the channel is closed.
+    /// Returns once the command is enqueued, or an error if the channel is closed.
+    /// WebSocket bridge setup results arrive through the transfer notification
+    /// listener, which releases the transaction and publishes the outcome.
     async fn try_refer_transfer(
         &self,
         tx: &TransferTransaction,
@@ -351,6 +350,7 @@ impl TransferController {
             }
         };
         if let Some(failed_tx) = failed_tx_opt {
+            self.transactions.remove(transfer_id);
             let gw = self.gateway.read();
             gw.send_to_owner(&crate::rwi::CallTransferFailed {
                 call_id: failed_tx.call_id.clone(),
@@ -612,6 +612,7 @@ impl TransferController {
                     crate::metrics::transfer::success_total("refer");
                     let completed_tx = tx.clone();
                     drop(tx);
+                    self.transactions.remove(&transfer_id);
                     let active_count = self
                         .transactions
                         .iter()
@@ -648,6 +649,7 @@ impl TransferController {
         match post_action {
             PostAction::TransferFailed(failed_tx, reason) => {
                 let failed_tx = *failed_tx;
+                self.transactions.remove(&transfer_id);
                 let gw = self.gateway.read();
                 gw.send_to_owner(&crate::rwi::CallTransferFailed {
                     call_id: failed_tx.call_id.clone(),
@@ -675,7 +677,8 @@ impl TransferController {
         self.handle_refer_response(transfer_id, sip_status).await
     }
 
-    /// Handle a REFER NOTIFY matched by `call_id`.
+    /// Handle a transfer result matched by `call_id`.
+    /// Assumes one pending transfer per call.
     pub async fn handle_notify_by_call_id(
         &self,
         call_id: &str,
@@ -754,6 +757,97 @@ mod tests {
     // ────────────────────────────────────────────────────────────────────────────
     // execute_blind_transfer tests
     // ────────────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn bridge_setup_reclaims_capacity_after_more_than_1000_transfers() {
+        let (ctrl, registry) = make_controller_with_registry();
+        let call_id = "bridge-capacity";
+        let target = "voip_bridge:ws://localhost/media?samplerate=8000";
+        let mut commands = register_talking_call(&registry, call_id);
+        let mut events = ctrl.gateway.read().subscribe_events();
+        for index in 0..1001 {
+            let tx = ctrl.execute_blind_transfer(call_id.into(), target.into()).await.unwrap();
+            assert!(matches!(commands.try_recv().unwrap(), CallCommand::Transfer { .. }));
+            assert!(ctrl.transactions.contains_key(&tx.transfer_id), "dispatch is not completion");
+            assert_eq!(events.try_recv().unwrap().event.event_type, "call_transfer_accepted");
+            let status = if index % 2 == 0 { 200 } else { 500 };
+            let finished = ctrl.handle_notify_by_call_id(call_id, status).await.unwrap();
+            assert_eq!(finished.transfer_id, tx.transfer_id);
+            assert!(ctrl.transactions.is_empty());
+            assert_eq!(events.try_recv().unwrap().event.event_type,
+                if status == 200 { "call_transferred" } else { "call_transfer_failed" });
+            assert!(ctrl.handle_notify_by_call_id(call_id, status).await.is_none());
+            assert!(events.try_recv().is_err(), "no duplicate result after removal");
+        }
+        assert!(registry.get(call_id).is_some(), "cleanup must preserve the active call");
+    }
+
+    #[tokio::test]
+    async fn notify_matches_call_and_preserves_progress() {
+        let (ctrl, registry) = make_controller_with_registry();
+        let _commands = register_talking_call(&registry, "call");
+        let _other_commands = register_talking_call(&registry, "other-call");
+        let _sip_commands = register_talking_call(&registry, "sip-call");
+        let bridge = ctrl.initiate_blind_transfer("call".into(), "bridge:ws://peer".into()).await.unwrap();
+        let other = ctrl.initiate_blind_transfer("other-call".into(), "bridge:ws://other".into()).await.unwrap();
+        let sip = ctrl.initiate_blind_transfer("sip-call".into(), "sip:target@local".into()).await.unwrap();
+
+        for status in [100, 180, 183] {
+            ctrl.handle_notify_by_call_id("call", status).await.unwrap();
+            assert!(ctrl.transactions.contains_key(&bridge.transfer_id));
+        }
+        let completed = ctrl.handle_notify_by_call_id("call", 200).await.unwrap();
+        assert_eq!(completed.transfer_id, bridge.transfer_id);
+        assert_eq!(completed.status, TransferStatus::Completed);
+        assert!(!ctrl.transactions.contains_key(&bridge.transfer_id));
+        assert!(ctrl.transactions.contains_key(&other.transfer_id));
+        assert!(ctrl.transactions.contains_key(&sip.transfer_id));
+
+        let failed = ctrl.handle_notify_by_call_id("other-call", 500).await.unwrap();
+        assert_eq!(failed.transfer_id, other.transfer_id);
+        assert_eq!(failed.status, TransferStatus::Failed(TransferFailureReason::ReferRejected));
+        assert!(!ctrl.transactions.contains_key(&other.transfer_id));
+        assert!(ctrl.transactions.contains_key(&sip.transfer_id));
+        assert_eq!(ctrl.transactions.len(), 1);
+
+        ctrl.handle_refer_response_by_call_id("sip-call", 202).await.unwrap();
+        assert!(ctrl.transactions.contains_key(&sip.transfer_id));
+        ctrl.handle_notify_by_call_id("sip-call", 180).await.unwrap();
+        assert!(ctrl.transactions.contains_key(&sip.transfer_id));
+        let completed = ctrl.handle_notify_by_call_id("sip-call", 200).await.unwrap();
+        assert_eq!(completed.status, TransferStatus::Completed);
+        assert!(ctrl.transactions.is_empty());
+
+        let rejected = ctrl.initiate_blind_transfer("sip-call".into(), "sip:target@local".into()).await.unwrap();
+        let failed = ctrl.handle_notify_by_call_id("sip-call", 486).await.unwrap();
+        assert_eq!(failed.transfer_id, rejected.transfer_id);
+        assert_eq!(failed.status, TransferStatus::Failed(TransferFailureReason::ReferRejected));
+        assert!(ctrl.transactions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn transfer_dispatch_failure_reclaims_capacity() {
+        let (ctrl, registry) = make_controller_with_registry();
+        drop(register_talking_call(&registry, "closed"));
+        let cases = [
+            ("bridge:ws://localhost", false),
+            ("sip:target@local", false),
+            ("ivr:menu", false),
+            ("queue:support", false),
+            ("conference:room", false),
+            ("sip:target@local", true),
+        ];
+        for index in 0..1001 {
+            let (target, replaces) = cases[index % cases.len()];
+            let result = if replaces {
+                ctrl.execute_replace_transfer("closed".into(), target.into()).await
+            } else {
+                ctrl.execute_blind_transfer("closed".into(), target.into()).await
+            };
+            assert!(matches!(result, Err(TransferFailureReason::InternalError)));
+            assert!(ctrl.transactions.is_empty());
+        }
+    }
 
     /// execute_blind_transfer dispatches a CallCommand::Transfer when the call
     /// is in Talking state and returns Ok(transaction).

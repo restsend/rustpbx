@@ -11,17 +11,16 @@ pub type ReferNotifyTx = mpsc::UnboundedSender<ReferNotifyEvent>;
 /// Type alias for ReferNotify event receiver.
 pub type ReferNotifyRx = mpsc::UnboundedReceiver<ReferNotifyEvent>;
 
-/// Whether this event represents a synchronous REFER response or an
-/// asynchronous REFER subscription NOTIFY.
+/// REFER progress and WebSocket media bridge setup results.
 #[derive(Debug, Clone)]
 pub enum ReferNotifyEventType {
     /// Synchronous response to the REFER request (e.g. 202 Accepted).
     ReferResponse,
-    /// Asynchronous NOTIFY carrying the result of the referred action.
+    /// Asynchronous transfer progress/result, from SIP NOTIFY or local bridge setup.
     Notify,
 }
 
-/// Emitted by `SipSession` when it receives a result for a REFER request.
+/// Internal transfer notification emitted by `SipSession`.
 #[derive(Debug, Clone)]
 pub struct ReferNotifyEvent {
     pub call_id: String,

@@ -631,7 +631,7 @@ impl SipSession {
             } => {
                 info!(session_id = %self.id, %leg_id, endpoint = %endpoint, sample_rate, codec = %codec, ?return_app, ?trace_context, "Handling Bridge transfer");
                 self.meta.transferred = true;
-                self.connect_bridge(
+                let result = self.connect_bridge(
                     leg_id,
                     endpoint.clone(),
                     headers.clone(),
@@ -641,7 +641,16 @@ impl SipSession {
                     return_app.clone(),
                     trace_context.clone(),
                 )
-                .await
+                .await;
+                // Setup is finished here; media forwarding keeps running on
+                // the session. Use the existing asynchronous result channel.
+                self.emit_refer_event(
+                    if result.is_ok() { 200 } else { 500 },
+                    result.as_ref().err().map(ToString::to_string),
+                    crate::call::domain::ReferNotifyEventType::Notify,
+                )
+                .await;
+                result
             }
             TransferTarget::Sip {
                 uri,
