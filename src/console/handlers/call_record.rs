@@ -314,23 +314,22 @@ async fn serve_archived_jsonl_flow(
     detail_requested: bool,
     client: &reqwest::Client,
 ) -> Response {
-    let bytes_result: anyhow::Result<Vec<u8>> = if location.starts_with("http://")
-        || location.starts_with("https://")
-    {
-        match client.get(location).send().await {
-            Ok(response) => match response.error_for_status() {
-                Ok(response) => response
-                    .bytes()
-                    .await
-                    .map(|bytes| bytes.to_vec())
-                    .map_err(anyhow::Error::from),
+    let bytes_result: anyhow::Result<Vec<u8>> =
+        if location.starts_with("http://") || location.starts_with("https://") {
+            match client.get(location).send().await {
+                Ok(response) => match response.error_for_status() {
+                    Ok(response) => response
+                        .bytes()
+                        .await
+                        .map(|bytes| bytes.to_vec())
+                        .map_err(anyhow::Error::from),
+                    Err(err) => Err(anyhow::Error::from(err)),
+                },
                 Err(err) => Err(anyhow::Error::from(err)),
-            },
-            Err(err) => Err(anyhow::Error::from(err)),
-        }
-    } else {
-        tokio::fs::read(location).await.map_err(anyhow::Error::from)
-    };
+            }
+        } else {
+            tokio::fs::read(location).await.map_err(anyhow::Error::from)
+        };
     let bytes = match bytes_result {
         Ok(bytes) => bytes,
         Err(err) => {
@@ -439,13 +438,8 @@ async fn download_call_record_sip_flow(
         .and_then(|v| v.as_str())
     {
         let resolved = resolve_archived_artifact_path(location, record.started_at);
-        return serve_archived_jsonl_flow(
-            &record,
-            &resolved,
-            query.detail,
-            state.http_client(),
-        )
-        .await;
+        return serve_archived_jsonl_flow(&record, &resolved, query.detail, state.http_client())
+            .await;
     }
 
     let Some(server) = state.sip_server() else {

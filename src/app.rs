@@ -436,12 +436,7 @@ impl AppStateBuilder {
         });
 
         let sip_server = match self.proxy_builder {
-            Some(builder) => {
-                builder
-                    .with_http_client(http_client.clone())
-                    .build()
-                    .await
-            }
+            Some(builder) => builder.with_http_client(http_client.clone()).build().await,
             None => {
                 let mut proxy_config = config.proxy.clone();
                 for backend in proxy_config.user_backends.iter_mut() {

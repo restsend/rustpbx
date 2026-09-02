@@ -1302,25 +1302,49 @@ impl SipSession {
         }
     }
 
-    fn is_local_home_proxy(local_addrs: &[SipAddr], home_proxy: &SipAddr) -> bool {
-        local_addrs
-            .iter()
-            .any(|addr| addr.addr.to_string() == home_proxy.addr.to_string())
+    /// This node's identity for home-proxy self detection: the
+    /// cluster-internal address resolved from `[cluster].peers` when
+    /// available, otherwise the default contact URI — the same address the
+    /// registrar stamps as `home_proxy` when cluster self resolution fails,
+    /// so fallback-stamped registrations compare exactly.
+    fn self_ident_addr(&self) -> Option<SipAddr> {
+        self.server.cluster_self_addr.clone().or_else(|| {
+            self.server
+                .default_contact_uri()
+                .and_then(|uri| SipAddr::try_from(uri).ok())
+        })
     }
 
+    /// Decide whether the callee leg must be routed to the registration's home
+    /// node (`true`) or delivered locally (`false`).
+    ///
+    /// The self check compares the registration's home address against this
+    /// node's deterministic identity: the cluster-internal address resolved
+    /// from `[cluster].peers` when available, otherwise the default contact
+    /// URI — the very address the registrar stamps as `home_proxy` when
+    /// cluster self resolution fails. Live endpoint addresses must NOT be
+    /// consulted here: `endpoint.get_addrs()` mixes in the remote addresses
+    /// of active connections, so a peer node's home address — which this node
+    /// may have connected to before — can wrongly look "local" and the
+    /// INVITE gets pushed into a connection owned by another node and
+    /// silently black-holed.
     fn route_via_home_proxy(
         target: &Location,
-        local_addrs: &[SipAddr],
         cluster_enabled: bool,
+        self_ident: Option<&SipAddr>,
     ) -> bool {
         if !cluster_enabled {
             return false;
         }
-        if let Some(home_proxy) = target.home_proxy.as_ref() {
-            return !Self::is_local_home_proxy(local_addrs, home_proxy);
+        let Some(home_proxy) = target.home_proxy.as_ref() else {
+            return false;
+        };
+        match self_ident {
+            Some(self_addr) => self_addr.addr.to_string() != home_proxy.addr.to_string(),
+            // Unknown self identity: deliver through the home node, which is
+            // authoritative for its own registrations.
+            None => true,
         }
-
-        false
     }
 
     fn resolve_outbound_callee_uri(
@@ -2329,10 +2353,11 @@ impl SipSession {
             DialogSide::Caller => LegId::from("caller"),
         };
         let offer_body = if method == rsipstack::sip::Method::Invite
-            && Self::offer_is_webrtc(offer_sdp) != self
-                .sdp_for_side_with_direction(&target_leg, "sendrecv")
-                .map(|ref sdp| Self::offer_is_webrtc(sdp))
-                .unwrap_or(Self::offer_is_webrtc(offer_sdp))
+            && Self::offer_is_webrtc(offer_sdp)
+                != self
+                    .sdp_for_side_with_direction(&target_leg, "sendrecv")
+                    .map(|ref sdp| Self::offer_is_webrtc(sdp))
+                    .unwrap_or(Self::offer_is_webrtc(offer_sdp))
         {
             let direction = Self::cross_leg_direction(offer_sdp);
             info!(
@@ -2601,10 +2626,10 @@ impl SipSession {
             )
         })?;
 
-        let local_addrs = self.server.endpoint.get_addrs();
         let cluster_enabled = !self.server.cluster_peer_ips.is_empty();
+        let self_ident = self.self_ident_addr();
         let route_via_home_proxy =
-            Self::route_via_home_proxy(target, &local_addrs, cluster_enabled);
+            Self::route_via_home_proxy(target, cluster_enabled, self_ident.as_ref());
         let callee_uri = Self::resolve_outbound_callee_uri(target, route_via_home_proxy);
 
         let mut headers: Vec<rsipstack::sip::Header> =
@@ -10210,11 +10235,11 @@ impl SipSession {
         };
         self.legs.set_transport(leg_id.clone(), transport_mode);
 
-        let local_addrs = self.server.endpoint.get_addrs();
+        let self_ident = self.self_ident_addr();
         let route_via_home_proxy = Self::route_via_home_proxy(
             &location,
-            &local_addrs,
             !self.server.cluster_peer_ips.is_empty(),
+            self_ident.as_ref(),
         );
         let callee_uri = Self::resolve_outbound_callee_uri(&location, route_via_home_proxy);
 
@@ -11439,3 +11464,103 @@ impl Drop for SipSession {
 #[cfg(test)]
 #[path = "tests/mod.rs"]
 mod tests;
+
+#[cfg(test)]
+mod route_via_home_proxy_tests {
+    use super::*;
+    use rsipstack::sip::HostWithPort;
+
+    fn sip_addr(addr: &str) -> SipAddr {
+        SipAddr {
+            r#type: None,
+            addr: HostWithPort::try_from(addr).unwrap(),
+        }
+    }
+
+    fn target_with_home(home: &str) -> Location {
+        Location {
+            home_proxy: Some(sip_addr(home)),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn peer_home_routes_via_home_node_even_when_connections_know_the_address() {
+        // Regression: the self check used live `endpoint.get_addrs()`, which
+        // mixes in remote addresses of active connections — a peer node's
+        // home address this node once connected to looked "local" and the
+        // INVITE was pushed into another node's WebSocket (black-holed).
+        // Self detection now relies on the deterministic cluster_self_addr.
+        let target = target_with_home("172.25.224.232:15060");
+        let cluster_self = sip_addr("172.25.225.2:15060");
+
+        assert!(SipSession::route_via_home_proxy(
+            &target,
+            true,
+            Some(&cluster_self)
+        ));
+    }
+
+    #[test]
+    fn own_cluster_address_delivers_locally() {
+        let target = target_with_home("172.25.225.2:15060");
+        let cluster_self = sip_addr("172.25.225.2:15060");
+
+        assert!(!SipSession::route_via_home_proxy(
+            &target,
+            true,
+            Some(&cluster_self)
+        ));
+    }
+
+    #[test]
+    fn fallback_identity_mirrors_registrar_stamping() {
+        // When cluster self resolution fails the registrar stamps
+        // default_contact_uri (the NAT/external address) as home_proxy, so
+        // the fallback identity must be that same address: a home equal to
+        // it is OUR registration (deliver locally), a peer's external home
+        // is remote — regardless of any address this node happens to hold
+        // connections to.
+        let own_contact = sip_addr("116.62.75.161:15060");
+        assert!(!SipSession::route_via_home_proxy(
+            &target_with_home("116.62.75.161:15060"),
+            true,
+            Some(&own_contact)
+        ));
+        assert!(SipSession::route_via_home_proxy(
+            &target_with_home("116.62.250.247:15060"),
+            true,
+            Some(&own_contact)
+        ));
+    }
+
+    #[test]
+    fn unknown_identity_routes_to_home_node() {
+        // Without any identity the home node is authoritative for its own
+        // registrations — forward there instead of guessing.
+        assert!(SipSession::route_via_home_proxy(
+            &target_with_home("172.25.224.232:15060"),
+            true,
+            None
+        ));
+    }
+
+    #[test]
+    fn no_cluster_or_no_home_proxy_never_routes_away() {
+        let target = target_with_home("172.25.224.232:15060");
+        let cluster_self = sip_addr("172.25.225.2:15060");
+
+        assert!(!SipSession::route_via_home_proxy(
+            &target,
+            false,
+            Some(&cluster_self)
+        ));
+
+        let no_home = Location::default();
+        assert!(!SipSession::route_via_home_proxy(
+            &no_home,
+            true,
+            Some(&cluster_self)
+        ));
+    }
+}

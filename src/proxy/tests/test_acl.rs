@@ -68,17 +68,19 @@ async fn trusted_proxy_uses_second_separate_via_for_inbound_trunk() {
         "rustpbx.com",
         None,
     );
-    request.headers.retain(|header| !matches!(header, Header::Via(_)));
-    request.headers.push_front(Header::Via(
-        rsipstack::sip::headers::Via::new(
+    request
+        .headers
+        .retain(|header| !matches!(header, Header::Via(_)));
+    request
+        .headers
+        .push_front(Header::Via(rsipstack::sip::headers::Via::new(
             "SIP/2.0/UDP 10.0.0.10:5060;branch=z9hG4bK-origin;received=198.51.100.25",
-        ),
-    ));
-    request.headers.push_front(Header::Via(
-        rsipstack::sip::headers::Via::new(
+        )));
+    request
+        .headers
+        .push_front(Header::Via(rsipstack::sip::headers::Via::new(
             "SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-proxy",
-        ),
-    ));
+        )));
     let (mut tx, _) = create_transaction(request).await;
     let cookie = TransactionCookie::default();
 
@@ -125,17 +127,19 @@ async fn untrusted_socket_ignores_forwarded_via_for_inbound_trunk() {
         "rustpbx.com",
         None,
     );
-    request.headers.retain(|header| !matches!(header, Header::Via(_)));
-    request.headers.push_front(Header::Via(
-        rsipstack::sip::headers::Via::new(
+    request
+        .headers
+        .retain(|header| !matches!(header, Header::Via(_)));
+    request
+        .headers
+        .push_front(Header::Via(rsipstack::sip::headers::Via::new(
             "SIP/2.0/UDP 10.0.0.10:5060;branch=z9hG4bK-forged;received=198.51.100.25",
-        ),
-    ));
-    request.headers.push_front(Header::Via(
-        rsipstack::sip::headers::Via::new(
+        )));
+    request
+        .headers
+        .push_front(Header::Via(rsipstack::sip::headers::Via::new(
             "SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-direct",
-        ),
-    ));
+        )));
     let (mut tx, _) = create_transaction(request).await;
     let cookie = TransactionCookie::default();
 

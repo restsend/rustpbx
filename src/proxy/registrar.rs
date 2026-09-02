@@ -657,10 +657,7 @@ impl ProxyModule for RegistrarModule {
                             match self
                                 .server
                                 .locator
-                                .has_active_bindings(
-                                    user.username.as_str(),
-                                    user.realm.as_deref(),
-                                )
+                                .has_active_bindings(user.username.as_str(), user.realm.as_deref())
                                 .await
                             {
                                 Ok(true) => debug!(

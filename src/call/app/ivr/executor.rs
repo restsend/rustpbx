@@ -5811,14 +5811,13 @@ mod tests {
             axum::serve(listener, app).await.ok();
         });
 
-        let provider =
-            StepProvider::new(format!("http://{addr}/ivr/step"), reqwest::Client::new())
-                .with_retry(RetryConfig {
-                    max_retries: 1,
-                    timeout_ms: 15_000,
-                    retry_delay_ms: 100,
-                    fallback_action: None,
-                });
+        let provider = StepProvider::new(format!("http://{addr}/ivr/step"), reqwest::Client::new())
+            .with_retry(RetryConfig {
+                max_retries: 1,
+                timeout_ms: 15_000,
+                retry_delay_ms: 100,
+                fallback_action: None,
+            });
         let ctx = make_test_context();
         let mut stack = MockCallStack::run_with_context(
             Box::new(StepIvrApp::with_provider(Box::new(provider)).with_name("http-ivr")),
@@ -5949,7 +5948,10 @@ mod tests {
             .try_recv()
             .expect("input phone trace must be enqueued");
         assert_eq!(finalized.event.payload["step_id"], "input-phone-step");
-        assert_eq!(finalized.event.payload["trigger"]["type"], "phone_collected");
+        assert_eq!(
+            finalized.event.payload["trigger"]["type"],
+            "phone_collected"
+        );
         assert_eq!(
             finalized.event.payload["trigger"]["detail"]["number"],
             "12345678901"

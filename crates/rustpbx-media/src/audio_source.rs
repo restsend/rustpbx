@@ -412,12 +412,9 @@ impl ToneAudioSource {
             return Err(anyhow!("Tone sample rate must be greater than zero"));
         }
 
-        let total_samples = duration
-            .as_nanos()
-            .saturating_mul(sample_rate as u128)
-            / 1_000_000_000;
-        let total_samples = u64::try_from(total_samples)
-            .map_err(|_| anyhow!("Tone duration is too large"))?;
+        let total_samples = duration.as_nanos().saturating_mul(sample_rate as u128) / 1_000_000_000;
+        let total_samples =
+            u64::try_from(total_samples).map_err(|_| anyhow!("Tone duration is too large"))?;
 
         Ok(Self {
             sample_rate,
@@ -859,8 +856,8 @@ mod tests {
 
     #[test]
     fn test_tone_audio_source_streams_exact_duration() {
-        let mut source = ToneAudioSource::new(1000, Duration::from_millis(25), 8000)
-            .expect("valid tone source");
+        let mut source =
+            ToneAudioSource::new(1000, Duration::from_millis(25), 8000).expect("valid tone source");
         let mut buffer = vec![0i16; 160];
 
         assert_eq!(source.sample_rate(), 8000);
@@ -877,8 +874,8 @@ mod tests {
 
     #[test]
     fn test_tone_audio_source_reset_restarts_waveform() {
-        let mut source = ToneAudioSource::new(440, Duration::from_millis(20), 8000)
-            .expect("valid tone source");
+        let mut source =
+            ToneAudioSource::new(440, Duration::from_millis(20), 8000).expect("valid tone source");
         let mut first = [0i16; 16];
         let mut replay = [0i16; 16];
 

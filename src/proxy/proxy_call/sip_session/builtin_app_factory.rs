@@ -125,10 +125,8 @@ impl BuiltinAppFactory {
                         .as_ref()
                         .and_then(|p| p.get("url").and_then(|v| v.as_str()))?;
 
-                    let mut provider = crate::call::app::ivr::StepProvider::new(
-                        url,
-                        context.http_client.clone(),
-                    );
+                    let mut provider =
+                        crate::call::app::ivr::StepProvider::new(url, context.http_client.clone());
 
                     if let Some(hdrs) = params.as_ref()?.get("headers") {
                         if let Some(h) = hdrs.as_object() {

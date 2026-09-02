@@ -536,10 +536,8 @@ mod tests {
 
     #[test]
     fn test_step_provider_endpoint_url_trims_whitespace_and_slash() {
-        let provider = StepProvider::new(
-            " http://127.0.0.1:28080/ivr/step/ ",
-            reqwest::Client::new(),
-        );
+        let provider =
+            StepProvider::new(" http://127.0.0.1:28080/ivr/step/ ", reqwest::Client::new());
 
         assert_eq!(
             provider.endpoint_url(None),

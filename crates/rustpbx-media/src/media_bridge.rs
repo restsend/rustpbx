@@ -2303,12 +2303,7 @@ mod tests {
         // Play a 440 Hz tone on leg A (egress → RTP → B ingress).
         mb.unbridge().await.expect("unbridge before tone");
         let handle = mb
-            .play_tone_side_only(
-                LegSide::A,
-                "440,200",
-                Duration::ZERO,
-                false,
-            )
+            .play_tone_side_only(LegSide::A, "440,200", Duration::ZERO, false)
             .await
             .expect("play tone on A");
 

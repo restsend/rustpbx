@@ -2810,6 +2810,7 @@ mod tests {
                     route_name: None,
                 },
                 Arc::new(crate::config::Config::default()),
+                reqwest::Client::new(),
             );
             ctx.rwi_gateway = Some(gw);
 
@@ -2835,10 +2836,7 @@ mod tests {
             let _ = stack.join().await;
 
             if expect_joined {
-                assert_eq!(
-                    joined, 1,
-                    "on_enter must emit queue_joined exactly once"
-                );
+                assert_eq!(joined, 1, "on_enter must emit queue_joined exactly once");
             } else {
                 assert_eq!(
                     joined, 0,

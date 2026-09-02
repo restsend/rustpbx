@@ -730,7 +730,12 @@ async fn cluster_remote_logout_overrides_stale_local_idle_in_list_view() {
         .list_agents()
         .await
         .into_iter()
-        .map(|a| (a.agent_id.clone(), (a.status.to_string(), a.current_calls as i32)))
+        .map(|a| {
+            (
+                a.agent_id.clone(),
+                (a.status.to_string(), a.current_calls as i32),
+            )
+        })
         .collect();
     assert_eq!(
         memory.get("agent-logout-1").map(|(s, _)| s.as_str()),
@@ -755,15 +760,13 @@ async fn cluster_remote_logout_overrides_stale_local_idle_in_list_view() {
     // Retag the row as owned by node A (in production the writing node
     // stamps its own instance id; this process would stamp node B's).
     use sea_orm::{ActiveModelTrait, EntityTrait};
-    let shared = rustpbx::addons::cc::models::cc_agent_presence::Entity::find_by_id(
-        "agent-logout-1",
-    )
-    .one(&db)
-    .await
-    .unwrap()
-    .unwrap();
-    let mut node_a_row: rustpbx::addons::cc::models::cc_agent_presence::ActiveModel =
-        shared.into();
+    let shared =
+        rustpbx::addons::cc::models::cc_agent_presence::Entity::find_by_id("agent-logout-1")
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+    let mut node_a_row: rustpbx::addons::cc::models::cc_agent_presence::ActiveModel = shared.into();
     node_a_row.instance_id = sea_orm::Set(Some("node-a".to_string()));
     node_a_row.update(&db).await.unwrap();
 
@@ -781,4 +784,3 @@ async fn cluster_remote_logout_overrides_stale_local_idle_in_list_view() {
         "fresh offline row written by node A must override node B's stale idle"
     );
 }
-

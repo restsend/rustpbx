@@ -65,11 +65,7 @@ impl CallRecordHook for SipFlowUploadHook {
     async fn on_record_completed(&self, records: &mut [CallRecord]) -> anyhow::Result<()> {
         for record in records {
             let call_id = record.call_id.as_str();
-            let signaling_call_ids = record
-                .sip_leg_roles
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>();
+            let signaling_call_ids = record.sip_leg_roles.keys().cloned().collect::<Vec<_>>();
             let start = Local.from_utc_datetime(&record.start_time.naive_utc());
             let end = Local.from_utc_datetime(&record.end_time.naive_utc());
             let duration_secs = (record.end_time - record.start_time).num_seconds() as i32;
@@ -327,7 +323,10 @@ pub async fn upload_signaling_flow(
         {
             Ok(mut items) => flow_items.append(&mut items),
             Err(e) => {
-                warn!(call_id, leg_call_id, "SipFlowUploadHook: query_flow failed: {e}");
+                warn!(
+                    call_id,
+                    leg_call_id, "SipFlowUploadHook: query_flow failed: {e}"
+                );
                 return false;
             }
         }

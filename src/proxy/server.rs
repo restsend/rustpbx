@@ -885,9 +885,7 @@ impl SipServerBuilder {
         let sipflow_backend = if let Some(backend) = self.sipflow_backend.take() {
             Some(backend)
         } else if let Some(cfg) = self.sipflow_config.as_ref() {
-            create_backend(cfg, cancel_token.clone())
-                .await
-                .ok()
+            create_backend(cfg, cancel_token.clone()).await.ok()
         } else {
             None
         };
@@ -2161,11 +2159,38 @@ impl SipServerInner {
 /// addresses (`addr:port` strings). The matching peer entry IS this node, so its
 /// address is what other peers use to reach us. Returns `None` when no peer entry
 /// matches (e.g. NAT where the peer address is not on a local interface).
+///
+/// Wildcard binds (`0.0.0.0`/`::`) report no concrete local address, so peers
+/// entries for this node are additionally matched against the host's network
+/// interface addresses — otherwise `cluster_self_addr` never resolves and
+/// registrations get stamped with the NAT/external contact instead of the
+/// cluster-internal address.
 fn resolve_cluster_self_addr(peers: &[ClusterPeer], local_addr_strs: &[String]) -> Option<SipAddr> {
+    resolve_cluster_self_addr_with_interfaces(peers, local_addr_strs, &crate::utils::local_ips())
+}
+
+fn resolve_cluster_self_addr_with_interfaces(
+    peers: &[ClusterPeer],
+    local_addr_strs: &[String],
+    interface_ips: &std::collections::HashSet<String>,
+) -> Option<SipAddr> {
     let matched = peers.iter().find(|p| {
         let peer_sip_addr = format!("{}:{}", p.addr, p.sip_port);
         local_addr_strs.iter().any(|la| la == &peer_sip_addr)
-    })?;
+    });
+    let matched = match matched {
+        Some(peer) => peer,
+        None => {
+            let wildcard = local_addr_strs.iter().any(|la| {
+                let host = la.rsplit_once(':').map(|(h, _)| h).unwrap_or(la.as_str());
+                host == "0.0.0.0" || host == "::" || host.is_empty()
+            });
+            if !wildcard {
+                return None;
+            }
+            peers.iter().find(|p| interface_ips.contains(&p.addr))?
+        }
+    };
     let peer_sip_addr = format!("{}:{}", matched.addr, matched.sip_port);
     HostWithPort::try_from(peer_sip_addr.as_str())
         .ok()
@@ -2360,6 +2385,68 @@ mod contact_uri_tests {
         let local_addrs = vec!["127.0.0.1:15060".to_string()];
 
         assert!(resolve_cluster_self_addr(&[], &local_addrs).is_none());
+    }
+
+    #[test]
+    fn resolve_cluster_self_addr_matches_interface_ip_when_listener_is_wildcard() {
+        let peers = vec![
+            ClusterPeer {
+                addr: "172.25.224.232".to_string(),
+                sip_port: 15060,
+                ami_port: 13080,
+            },
+            ClusterPeer {
+                addr: "172.25.225.2".to_string(),
+                sip_port: 15060,
+                ami_port: 13080,
+            },
+        ];
+        // Wildcard bind: the endpoint only reports 0.0.0.0, so the listener
+        // alone can never match a peers entry. The host interface IP breaks
+        // the tie.
+        let local_addrs = vec!["0.0.0.0:15060".to_string()];
+        let interfaces: std::collections::HashSet<String> =
+            ["172.25.225.2".to_string()].into_iter().collect();
+
+        let result =
+            resolve_cluster_self_addr_with_interfaces(&peers, &local_addrs, &interfaces).unwrap();
+
+        assert_eq!(result.addr.to_string(), "172.25.225.2:15060");
+    }
+
+    #[test]
+    fn resolve_cluster_self_addr_wildcard_still_none_when_peer_not_on_any_interface() {
+        let peers = vec![ClusterPeer {
+            addr: "10.9.9.9".to_string(),
+            sip_port: 15060,
+            ami_port: 13080,
+        }];
+        let local_addrs = vec!["0.0.0.0:15060".to_string()];
+        let interfaces: std::collections::HashSet<String> =
+            ["172.25.225.2".to_string()].into_iter().collect();
+
+        assert!(
+            resolve_cluster_self_addr_with_interfaces(&peers, &local_addrs, &interfaces).is_none()
+        );
+    }
+
+    #[test]
+    fn resolve_cluster_self_addr_concrete_bind_does_not_consult_interfaces() {
+        // A concrete listener that matches no peer must stay None even when
+        // the interface list would have matched — non-wildcard deployments
+        // keep the strict listener semantics.
+        let peers = vec![ClusterPeer {
+            addr: "172.25.224.232".to_string(),
+            sip_port: 15060,
+            ami_port: 13080,
+        }];
+        let local_addrs = vec!["192.168.1.10:15060".to_string()];
+        let interfaces: std::collections::HashSet<String> =
+            ["172.25.224.232".to_string()].into_iter().collect();
+
+        assert!(
+            resolve_cluster_self_addr_with_interfaces(&peers, &local_addrs, &interfaces).is_none()
+        );
     }
 
     #[tokio::test]
