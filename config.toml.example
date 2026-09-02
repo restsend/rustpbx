@@ -84,6 +84,17 @@ database_url = "sqlite://rustpbx.sqlite3"
 # username = "user"
 # credential = "pass"
 
+# For temporary TURN credentials, use secrete instead of credential.
+# Credentials use Base64(HMAC-SHA1(secrete, "<expiry>:<username>")).
+# Use the same secret as miuturn's [auth].secret, with use_auth_secret = true.
+# Each entry may have its own secret/lifetime.
+# Shared-secret entries are browser-only; static entries also apply to PBX RTP.
+# [[ice_servers]]
+# urls = ["turn:turn.example.com:3478", "turn:turn.example.com:3478?transport=tcp"]
+# secrete = "replace-with-the-same-private-secret-as-miuturn"
+# username = "rustpbx" # user-id suffix, must not contain ':'; default: rustpbx
+# lifetime = 3600 # seconds; clients must fetch fresh credentials before expiry
+
 # Shared SIP and HTTP AMI cluster peers.
 # [cluster]
 # peers = [{ addr = "10.0.0.2", sip_port = 5060, ami_port = 8080 }]

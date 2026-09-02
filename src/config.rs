@@ -25,6 +25,28 @@ pub const DEFAULT_IVR_MODE: &str = "tree";
 /// Product brand name.
 pub const BRAND_NAME: &str = "RustPBX";
 
+/// An ICE server with optional settings for issuing temporary browser credentials.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct IceServerConfig {
+    #[serde(flatten)]
+    pub server: IceServer,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrete: Option<String>,
+    /// Temporary credential lifetime in seconds; defaults to one hour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifetime: Option<u64>,
+}
+
+impl std::fmt::Debug for IceServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IceServerConfig")
+            .field("server", &self.server)
+            .field("secrete", &self.secrete.as_ref().map(|_| "[redacted]"))
+            .field("lifetime", &self.lifetime)
+            .finish()
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(version)]
 pub(crate) struct Cli {
@@ -332,7 +354,7 @@ pub struct Config {
     pub webrtc_port_end: Option<u16>,
 
     pub callrecord: Option<CallRecordConfig>,
-    pub ice_servers: Option<Vec<IceServer>>,
+    pub ice_servers: Option<Vec<IceServerConfig>>,
     /// Media server settings (comfort noise etc.).
     #[serde(default)]
     pub media: Option<MediaSection>,
@@ -1891,7 +1913,12 @@ impl Config {
             end_port: self.rtp_end_port,
             webrtc_start_port: self.webrtc_port_start,
             webrtc_end_port: self.webrtc_port_end,
-            ice_servers: self.ice_servers.clone(),
+            // Shared-secret entries are issued on demand for browsers. Avoid
+            // caching expiring credentials in the PBX's long-lived RTP config.
+            ice_servers: self.ice_servers.as_ref().map(|servers| {
+                servers.iter().filter(|entry| entry.secrete.is_none())
+                    .map(|entry| entry.server.clone()).collect()
+            }),
             comfort_noise: media
                 .map(|m| m.comfort_noise)
                 .unwrap_or_else(default_comfort_noise),
@@ -1899,6 +1926,54 @@ impl Config {
                 .map(|m| m.comfort_noise_level_db)
                 .unwrap_or_else(default_comfort_noise_level_db),
         }
+    }
+
+    /// Resolve browser ICE configuration at the current Unix time (seconds).
+    /// Static entries are preserved; shared-secret TURN credentials are minted
+    /// per request and are not cached in the server-side RTP configuration.
+    pub fn browser_ice_servers(&self, now: u64) -> Result<Vec<IceServer>> {
+        let mut servers = Vec::new();
+        for entry in self.ice_servers.iter().flatten() {
+            let Some(secret) = &entry.secrete else {
+                servers.push(entry.server.clone());
+                continue;
+            };
+            use base64::{Engine as _, engine::general_purpose::STANDARD};
+            use hmac::{Hmac, KeyInit, Mac};
+
+            let turn = &entry.server;
+            let user = turn.username.as_deref().unwrap_or("rustpbx");
+            let lifetime = entry.lifetime.unwrap_or(3600);
+            anyhow::ensure!(!secret.is_empty(), "ice_servers.secrete must not be empty");
+            anyhow::ensure!(turn.credential.is_none(), "ice_servers cannot combine secrete and credential");
+            anyhow::ensure!(
+                turn.credential_type == rustrtc::IceCredentialType::Password,
+                "ice_servers.secrete requires password credentials"
+            );
+            anyhow::ensure!(
+                !turn.urls.is_empty()
+                    && turn.urls.iter().all(|url| {
+                        url.strip_prefix("turn:")
+                            .or_else(|| url.strip_prefix("turns:"))
+                            .is_some_and(|host| !host.is_empty())
+                    }),
+                "ice_servers with secrete must contain TURN URLs"
+            );
+            anyhow::ensure!(
+                !user.is_empty() && !user.contains(':'),
+                "ice_servers with secrete require a nonempty username suffix without a colon"
+            );
+            anyhow::ensure!(lifetime > 0, "ice_servers.lifetime must be positive");
+            let expires = now.checked_add(lifetime)
+                .ok_or_else(|| anyhow::anyhow!("ice_servers.lifetime overflows expiry"))?;
+            let username = format!("{}:{}", expires, user);
+            let mut mac = Hmac::<sha1::Sha1>::new_from_slice(secret.as_bytes())?;
+            mac.update(username.as_bytes());
+            // TURN REST passwords use standard padded Base64, as in coturn.
+            let credential = STANDARD.encode(mac.finalize().into_bytes());
+            servers.push(turn.clone().with_credential(username, credential));
+        }
+        Ok(servers)
     }
 
     pub fn sip_contact_config(&self) -> SipContactConfig {
@@ -2028,6 +2103,109 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_turn_rest_ice_servers_match_miuturn() {
+        let config: Config = toml::from_str(r#"
+            [[ice_servers]]
+            urls = ["stun:stun.example.com:3478"]
+            [[ice_servers]]
+            urls = ["turn:turn.example.com:3478", "turns:turn.example.com:5349"]
+            secrete = "interop-secret"
+            [[ice_servers]]
+            urls = ["turn:static.example.com:3478"]
+            username = "static-user"
+            credential = "static-password"
+            [[ice_servers]]
+            urls = ["turn:second.example.com:3478"]
+            secrete = "second-secret"
+            username = "agent"
+            lifetime = 120
+            [proxy]
+            addr = "127.0.0.1"
+        "#).unwrap();
+        let servers = config.browser_ice_servers(4_102_441_200).unwrap();
+        assert_eq!(servers.len(), 4);
+        assert_eq!(servers[0], IceServer::new(vec!["stun:stun.example.com:3478".to_string()]));
+        assert_eq!(servers[2], IceServer::new(vec!["turn:static.example.com:3478".to_string()])
+            .with_credential("static-user", "static-password"));
+        assert_eq!(servers[1].urls, vec!["turn:turn.example.com:3478", "turns:turn.example.com:5349"]);
+        assert_eq!(servers[1].username.as_deref(), Some("4102444800:rustpbx"));
+        // Independent HMAC-SHA1 test vector, also checked by miuturn's auth test.
+        assert_eq!(servers[1].credential.as_deref(), Some("+dOIp7n9DHzIT8uNfVz8tNFZoLs="));
+        assert_eq!(servers[3].urls, vec!["turn:second.example.com:3478"]);
+        assert_eq!(servers[3].username.as_deref(), Some("4102441320:agent"));
+        assert_eq!(servers[3].credential.as_deref(), Some("N0aMpuJsuGx1vnor9b2IygKfbeE="));
+        assert_eq!(config.rtp_config().ice_servers, Some(vec![servers[0].clone(), servers[2].clone()]));
+        let refreshed = config.browser_ice_servers(4_102_441_201).unwrap();
+        assert_eq!(refreshed[1].username.as_deref(), Some("4102444801:rustpbx"));
+        assert_ne!(refreshed[1].credential, servers[1].credential);
+        assert!(!format!("{:?}", config.ice_servers).contains("interop-secret"));
+        assert!(!format!("{:?}", config.ice_servers).contains("second-secret"));
+
+        let saved = toml::to_string(&config).unwrap();
+        assert!(!saved.contains("turn_rest"));
+        let restored: Config = toml::from_str(&saved).unwrap();
+        assert_eq!(restored.browser_ice_servers(4_102_441_200).unwrap(), servers);
+    }
+
+    #[test]
+    fn test_turn_rest_static_ice_servers_unchanged() {
+        let config = Config::default();
+        assert!(config.browser_ice_servers(0).unwrap().is_empty());
+        assert!(config.rtp_config().ice_servers.is_none());
+        let config: Config = toml::from_str(r#"
+            [[ice_servers]]
+            urls = ["stun:stun.example.com:3478"]
+            [[ice_servers]]
+            urls = ["turn:static.example.com:3478"]
+            username = "user"
+            credential = "password"
+            credential_type = "oauth"
+            [proxy]
+            addr = "127.0.0.1"
+        "#).unwrap();
+        let expected = vec![
+            IceServer::new(vec!["stun:stun.example.com:3478".to_string()]),
+            IceServer::new(vec!["turn:static.example.com:3478".to_string()])
+                .with_credential("user", "password")
+                .credential_type(rustrtc::IceCredentialType::Oauth),
+        ];
+        assert_eq!(config.browser_ice_servers(0).unwrap(), expected);
+        assert_eq!(config.rtp_config().ice_servers, Some(expected));
+    }
+
+    #[test]
+    fn test_turn_rest_custom_lifetime_and_invalid_config() {
+        let settings = r#"
+            urls = ["turn:turn.example.com:3478"]
+            secrete = "private-secret"
+            username = "agent"
+            lifetime = 120
+        "#;
+        let turn: IceServerConfig = toml::from_str(settings).unwrap();
+        let mut config = Config { ice_servers: Some(vec![turn]), ..Config::default() };
+        assert_eq!(config.browser_ice_servers(1000).unwrap()[0].username.as_deref(), Some("1120:agent"));
+        assert_eq!(config.rtp_config().ice_servers, Some(vec![]));
+        assert!(config.browser_ice_servers(u64::MAX).is_err());
+        for invalid_setting in [
+            "secrete = ''",
+            "urls = []",
+            "urls = ['stun:example.com']",
+            "urls = ['turn:']",
+            "username = ''",
+            "username = 'agent:extra'",
+            "lifetime = 0",
+            "credential = 'static-password'",
+            "credential_type = 'oauth'",
+        ] {
+            let mut fields: toml::Table = toml::from_str(settings).unwrap();
+            fields.extend(toml::from_str::<toml::Table>(invalid_setting).unwrap());
+            config.ice_servers = Some(vec![fields.try_into().unwrap()]);
+            let error = config.browser_ice_servers(1000).unwrap_err().to_string();
+            assert!(!error.contains("private-secret"));
+        }
+    }
 
     #[test]
     fn test_video_codecs_default_and_override() {
