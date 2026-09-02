@@ -480,6 +480,38 @@ impl SipSession {
         result
     }
 
+    /// CTI transfer ops address the agent side as `callee`. On queue-routed
+    /// (dynamic-leg) calls the answered agent leg is registered under its
+    /// dialog UUID while the literal `callee` entry is a placeholder that
+    /// never leaves `Initializing` — resolve `callee` to the single
+    /// connected non-caller leg so the transfer reaches the real agent leg.
+    fn resolve_transfer_leg(&self, leg_id: LegId) -> LegId {
+        if leg_id.as_str() != "callee" {
+            return leg_id;
+        }
+        if self
+            .legs
+            .get(&leg_id)
+            .is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::Hold))
+        {
+            return leg_id;
+        }
+        let connected: Vec<LegId> = self
+            .legs
+            .iter()
+            .filter(|(id, leg)| {
+                id.as_str() != "caller"
+                    && matches!(leg.state, LegState::Connected | LegState::Hold)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        if connected.len() == 1 {
+            connected.into_iter().next().unwrap_or(leg_id)
+        } else {
+            leg_id
+        }
+    }
+
     async fn handle_transfer_inner(
         &mut self,
         leg_id: LegId,
@@ -488,6 +520,7 @@ impl SipSession {
         disposition: TransferDisposition,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<()> {
+        let leg_id = self.resolve_transfer_leg(leg_id);
         let leg = self.require_leg(&leg_id)?;
         if !matches!(leg.state, LegState::Connected | LegState::Hold) {
             return Err(anyhow!(

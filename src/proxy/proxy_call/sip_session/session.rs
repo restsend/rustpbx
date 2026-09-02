@@ -9392,6 +9392,20 @@ impl SipSession {
                     }
                 }
 
+                // Owner-anchored consult leg ("C answered" signal): fire the
+                // session hooks even when the queue media bridge is gone by
+                // this point (the queue app exits at agent connect, and the
+                // consult leg carries its own media peer) — the CC layer
+                // blocks transfer merge/complete until this fires.
+                if leg_id == LegId::from("consult")
+                    && !self.server.session_hooks.is_empty()
+                {
+                    let ctx = self.session_hook_ctx();
+                    for hook in self.server.session_hooks.iter() {
+                        hook.on_call_connected(&ctx).await;
+                    }
+                }
+
                 self.update_leg_state(&leg_id, LegState::Connected);
                 self.update_media_path().await;
                 CommandResult::success()
@@ -10047,7 +10061,15 @@ impl SipSession {
             "Adding new SIP leg to session"
         );
 
-        let uri = parse_dial_target(&target)
+        // Normalize bare-user targets ("1002") with the selected realm —
+        // same normalization the blind-transfer B-leg dial uses — so the
+        // locator can match the registered AOR (user@realm). A hostless
+        // URI silently misses the locator and the INVITE would go to the
+        // default port where nobody listens.
+        let realm = self.server.proxy_config.load().select_realm("");
+        let normalized_target = crate::call::build_sip_uri(&target, &realm);
+        let uri = parse_dial_target(&normalized_target)
+            .or_else(|_| parse_dial_target(&target))
             .map_err(|e| anyhow!("Invalid SIP URI '{}': {}", target, e))?;
         let mut location = crate::call::Location {
             aor: uri.clone(),
