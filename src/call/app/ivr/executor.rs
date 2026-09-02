@@ -276,7 +276,12 @@ impl StepIvrApp {
         self.pending_trace.take()
     }
 
-    fn record_pending_session_end(&mut self, preserve_trigger_detail: bool) {
+    /// Finalize the pending WaitFor trace: fill in `step_end_time` and
+    /// `duration_ms`, then emit ONE `ivr_step_trace` keeping the step's
+    /// original trigger (e.g. `phone_collected`, `dtmf`) with its detail.
+    /// Completion is observable via `step_end_time`; `session_end` stays
+    /// reserved for on_exit, the only entry carrying end_reason.
+    fn record_pending_session_end(&mut self) {
         let Some(pending) = self.pending_take() else {
             return;
         };
@@ -284,27 +289,10 @@ impl StepIvrApp {
             .pending_start_instant
             .map(|start| start.elapsed().as_millis() as u64)
             .unwrap_or(0);
-        let completed = IvrTraceEntry {
+        self.record_trace(IvrTraceEntry {
             step_end_time: Some(chrono::Utc::now().to_rfc3339()),
             duration_ms,
             ..pending
-        };
-        let completion_trigger = crate::rwi::TriggerInfo {
-            // NOT `session_end`: this fires mid-flow (InputPhone completion,
-            // TransferResult) while the session continues. Consumers treat a
-            // real `session_end` as final — reserve it for on_exit, which is
-            // the only entry carrying end_reason.
-            r#type: "wait_finalized".into(),
-            detail: if preserve_trigger_detail {
-                completed.trigger.detail.clone()
-            } else {
-                None
-            },
-        };
-        self.record_trace(completed.clone());
-        self.record_trace(IvrTraceEntry {
-            trigger: completion_trigger,
-            ..completed
         });
     }
 
@@ -656,7 +644,7 @@ impl StepIvrApp {
                                 end_reason: None,
                                 end_detail: None,
                             });
-                            self.record_pending_session_end(true);
+                            self.record_pending_session_end();
                             self.current_node =
                                 Some(self.request_next(Some(provider_event)).await?);
                             return Box::pin(self.__exec_node(ctrl, ctx)).await;
@@ -1745,7 +1733,7 @@ impl CallApp for StepIvrApp {
                 }
             }
             AppEvent::TransferResult { outcome } => {
-                self.record_pending_session_end(false);
+                self.record_pending_session_end();
                 self.current_node = Some(
                     self.request_next(Some(ProviderEvent::TransferResult { outcome }))
                         .await?,
@@ -2282,7 +2270,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transfer_result_emits_wait_finalized_before_next_node() {
+    async fn transfer_result_finalizes_pending_trace_with_original_trigger() {
         use crate::call::app::ControllerEvent;
         use crate::call::domain::TransferOutcome;
         use crate::rwi::gateway::RwiGateway;
@@ -2325,18 +2313,20 @@ mod tests {
             .assert_cmd(200, "hangup", |c| matches!(c, CallCommand::Hangup { .. }))
             .await;
 
-        let ordinary = events.try_recv().expect("transfer trace must be enqueued");
-        let completed = events
-            .try_recv()
-            .expect("transfer completion trace must be enqueued");
-        assert_eq!(ordinary.event.payload["step_id"], "transfer-step");
-        assert_eq!(ordinary.event.payload["trigger"]["type"], "session_start");
-        assert_eq!(completed.event.payload["step_id"], "transfer-step");
-        assert_eq!(
-            completed.event.payload["trigger"]["type"], "wait_finalized",
-            "mid-flow wait completion must be wait_finalized, NOT session_end"
-        );
-        assert!(completed.event.payload["trigger"]["detail"].is_null());
+        // Single finalized trace: original trigger, end time filled, no
+        // wait_finalized duplicate.
+        let finalized = events.try_recv().expect("transfer trace must be enqueued");
+        assert_eq!(finalized.event.payload["step_id"], "transfer-step");
+        assert_eq!(finalized.event.payload["trigger"]["type"], "session_start");
+        assert!(finalized.event.payload["step_end_time"].is_string());
+        // Subsequent events are legitimate (hangup step trace, session_end) —
+        // none may be a wait_finalized duplicate.
+        while let Ok(ev) = events.try_recv() {
+            assert_ne!(
+                ev.event.payload["trigger"]["type"], "wait_finalized",
+                "wait completion must not emit a wait_finalized duplicate"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3295,10 +3285,10 @@ mod tests {
         );
     }
 
-    // ── B: InputPhone completion finalizes the wait with `wait_finalized` ──
+    // ── B: InputPhone completion finalizes the wait with its original trigger ──
 
     #[tokio::test]
-    async fn test_input_phone_wait_finalized_trigger() {
+    async fn test_input_phone_completion_keeps_original_trigger() {
         use crate::call::app::ivr::trace::IvrTraceCollector;
 
         let trace = IvrTraceCollector::new();
@@ -3346,11 +3336,15 @@ mod tests {
         let entries = trace.query_by_session(&sess.session_id).await;
         let finalized = entries
             .iter()
-            .find(|e| e.trigger.r#type == "wait_finalized")
-            .expect("InputPhone completion must emit a wait_finalized entry");
+            .find(|e| e.trigger.r#type == "phone_collected")
+            .expect("InputPhone completion must emit a phone_collected entry");
         assert_eq!(
             finalized.action_type, "InputPhone",
-            "wait_finalized entry must describe the step that finished"
+            "the finalized entry must describe the step that finished"
+        );
+        assert!(
+            finalized.step_end_time.is_some(),
+            "the finalized entry must carry step_end_time (completion marker)"
         );
         assert!(
             !entries.iter().any(|e| e.trigger.r#type == "session_end"
@@ -5949,23 +5943,26 @@ mod tests {
             )
             .await;
 
-        let ordinary = events
+        // Single finalized trace: original phone_collected trigger, end time
+        // filled, no wait_finalized duplicate.
+        let finalized = events
             .try_recv()
             .expect("input phone trace must be enqueued");
-        let completed = events
-            .try_recv()
-            .expect("input phone completion trace must be enqueued");
-        assert_eq!(ordinary.event.payload["step_id"], "input-phone-step");
-        assert_eq!(ordinary.event.payload["trigger"]["type"], "phone_collected");
-        assert_eq!(completed.event.payload["step_id"], "input-phone-step");
+        assert_eq!(finalized.event.payload["step_id"], "input-phone-step");
+        assert_eq!(finalized.event.payload["trigger"]["type"], "phone_collected");
         assert_eq!(
-            completed.event.payload["trigger"]["type"], "wait_finalized",
-            "mid-flow wait completion must be wait_finalized, NOT session_end"
-        );
-        assert_eq!(
-            completed.event.payload["trigger"]["detail"]["number"],
+            finalized.event.payload["trigger"]["detail"]["number"],
             "12345678901"
         );
+        assert!(finalized.event.payload["step_end_time"].is_string());
+        // Subsequent events are legitimate (transfer step trace, session_end) —
+        // none may be a wait_finalized duplicate.
+        while let Ok(ev) = events.try_recv() {
+            assert_ne!(
+                ev.event.payload["trigger"]["type"], "wait_finalized",
+                "input phone completion must not emit a wait_finalized duplicate"
+            );
+        }
     }
 
     #[tokio::test]

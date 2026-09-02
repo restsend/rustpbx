@@ -664,6 +664,8 @@ IVR 流程完成（执行了终止动作：转接、排队、留言、挂机）�
 Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时产生。
 
 > **会话终止条目（`session_end`）**：当 IVR 会话结束（含主叫挂机 `RemoteHangup`、系统取消 `Cancelled`）时，会额外 emit 一条 `trigger.type="session_end"` 的跟踪事件，`action_type`/`step_id`/`step_name` 记录最后执行的节点，并填充 `end_reason`/`end_detail` 表示整个会话的结束原因。外部 provider 的 `/end` webhook 在 `RemoteHangup`/`Cancelled` 时不会被调用（本地跟踪事件照常发出）。
+>
+> **单条完成事件**：每个步骤（含等待类：播放、收号、转接等待结果）只在完成时发出**一条**跟踪事件。`trigger` 保留触发该步骤的原始来源（如 `phone_collected`、`dtmf`）及 detail，以 `step_end_time` 有值作为完成标记；不发送任何中间态或重复事件。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -675,14 +677,14 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 | `trigger` | Object | 触发该步骤的结构化信息，见下方说明 |
 | `action_type` | String | 动作类型（如 `Transfer`、`Prompt`、`DtmfMenu`） |
 | `action_json` | Option\<String\> | 动作详情 JSON |
-| `result_kind` | String | 结果类型（`terminal`、`continue`、`error`） |
 | `duration_ms` | u64 | 步骤执行耗时（毫秒），始终有值 |
 | `error` | Option\<String\> | 错误信息 |
 | `step_id` | Option\<String\> | 当前节点 ID，由 Provider 通过 ActionNode.step_id 返回 |
 | `step_name` | Option\<String\> | 当前节点名称，由 Provider 通过 ActionNode.step_name 返回 |
-| `step_start_time` | Option\<String\> | 当前步骤开始时间（ISO UTC） |
-| `step_end_time` | Option\<String\> | 当前步骤结束时间（ISO UTC）。仅步骤执行完成（terminal/error）时有值；等待用户输入（WaitFor）时为 null |
+| `step_start_time` | Option\<String\> | 当前步骤开始时间（ISO UTC）。常规步骤有值；`session_end`、fallback、bridge 按键等派生条目为 null |
+| `step_end_time` | Option\<String\> | 当前步骤结束时间（ISO UTC），始终有值 —— 它是该步骤完成（事件已发出）的标记 |
 | `extra` | Option\<JSON Object\> | Provider 透传的额外数据。Provider 在每次响应的 ActionNode.extra 中返回完整对象，RustPBX 透传存储并原样输出 |
+| `sip_headers` | Option\<Map\<String, String\>\> | 呼叫的白名单 SIP 头 |
 | `end_reason` | Option\<String\> | 仅会话终止（`session_end`）条目有值，标识整个 IVR 会话如何结束（`normal`、`transfer`、`transfer_to_queue`、`hangup`、`user_hangup`、`timeout`、`error` 等） |
 | `end_detail` | Option\<String\> | 与 `end_reason` 配套的详情（如转接目标、错误信息） |
 
@@ -701,7 +703,7 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 >
 > **时间字段说明**：
 > - `step_start_time` — 当前步骤的开始时间（上一步结束或 session 开始）
-> - `step_end_time` — 步骤结束时间（仅完成时）
+> - `step_end_time` — 步骤结束时间，每条事件都有（完成标记）
 >
 > **耗时字段说明**：
 > - `duration_ms` — 步骤执行耗时（毫秒），始终有值，包含 provider 往返和动作执行时间

@@ -699,6 +699,8 @@ Dispatch: fan_out_to_context
 Step-mode IVR trace event. Emitted on each provider round-trip or action execution completion.
 
 > **Session-end entry (`session_end`)**: when the IVR session ends (including caller hangup `RemoteHangup` and system cancel `Cancelled`), an extra trace entry with `trigger.type="session_end"` is emitted. `action_type`/`step_id`/`step_name` record the last executed node, and `end_reason`/`end_detail` describe how the whole session ended. The external provider `/end` webhook is **not** called on `RemoteHangup`/`Cancelled` (the local trace event is still emitted).
+>
+> **Single completion event**: each step — including waiting steps (playback, digit collection, transfer awaiting result) — emits exactly **one** trace entry upon completion. The `trigger` keeps the step's original trigger source (e.g. `phone_collected`, `dtmf`) with its detail; a non-null `step_end_time` marks completion. No intermediate or duplicate events are emitted.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -710,14 +712,14 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 | `trigger` | Object | Structured trigger info for this step, see below |
 | `action_type` | String | Action type (e.g., `Transfer`, `Prompt`, `DtmfMenu`) |
 | `action_json` | Option\<String\> | Action details JSON |
-| `result_kind` | String | Result type (`terminal`, `continue`, `error`) |
 | `duration_ms` | u64 | Step execution duration (ms), always present |
 | `error` | Option\<String\> | Error message |
 | `step_id` | Option\<String\> | Current node ID, returned by provider via ActionNode.step_id |
 | `step_name` | Option\<String\> | Current node name, returned by provider via ActionNode.step_name |
-| `step_start_time` | Option\<String\> | Current step start time (ISO UTC) |
-| `step_end_time` | Option\<String\> | Current step end time (ISO UTC). Only present when step execution completes (terminal/error); null during WaitFor (waiting for user input) |
+| `step_start_time` | Option\<String\> | Current step start time (ISO UTC). Present on regular steps; null on derived entries (`session_end`, fallback, bridge DTMF) |
+| `step_end_time` | Option\<String\> | Current step end time (ISO UTC), always present — it marks step completion (i.e. the event has been emitted) |
 | `extra` | Option\<JSON Object\> | Transparent passthrough data from provider. Provider returns the complete object in ActionNode.extra each time; RustPBX stores and outputs it as-is |
+| `sip_headers` | Option\<Map\<String, String\>\> | Whitelisted SIP headers of the call |
 | `end_reason` | Option\<String\> | Present only on the session-end (`session_end`) entry; identifies how the whole IVR session ended (`normal`, `transfer`, `transfer_to_queue`, `hangup`, `user_hangup`, `timeout`, `error`, etc.) |
 | `end_detail` | Option\<String\> | Companion detail for `end_reason` (e.g. transfer target, error message) |
 
@@ -736,7 +738,7 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 >
 > **Timing fields**:
 > - `step_start_time` — when the current step started (previous step end or session start)
-> - `step_end_time` — when the step ended (only on completion)
+> - `step_end_time` — when the step ended; present on every entry (completion marker)
 >
 > **Duration fields**:
 > - `duration_ms` — step execution duration (ms), always present, includes provider round-trip and action execution time
