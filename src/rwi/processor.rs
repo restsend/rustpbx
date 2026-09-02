@@ -106,7 +106,7 @@ impl Drop for TransferNotifyListener {
         let tx = self.tx.clone();
         crate::utils::spawn(async move {
             let mut subscribers = server.transfer_notify_subscribers.lock().await;
-            subscribers.retain(|s| !s.is_closed() || s.same_channel(&tx));
+            subscribers.retain(|s| !s.is_closed() && !s.same_channel(&tx));
         });
     }
 }
@@ -3183,6 +3183,63 @@ impl RwiCommandProcessor {
                 "Transfer cancel failed: {}",
                 e.as_str()
             ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::call::domain::{ReferNotifyEvent, ReferNotifyEventType};
+    use crate::proxy::tests::common::create_test_server;
+
+    #[tokio::test]
+    async fn transfer_listener_drop_removes_own_sender_and_preserves_other_listeners() {
+        let (server, _) = create_test_server().await;
+        // Keep both receivers alive to exercise cleanup before the cancelled
+        // consumer tasks have had a chance to exit.
+        let (first_tx, _first_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (second_tx, mut second_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (closed_tx, closed_rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(closed_rx);
+        server.transfer_notify_subscribers.lock().await.extend([
+            first_tx.clone(), second_tx.clone(), closed_tx,
+        ]);
+        let first = TransferNotifyListener {
+            server: server.clone(),
+            tx: first_tx,
+            cancel: tokio_util::sync::CancellationToken::new(),
+        };
+        let second = TransferNotifyListener {
+            server: server.clone(),
+            tx: second_tx.clone(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+        };
+
+        for (listener, remaining) in [(first, 1), (second, 0)] {
+            let cancel = listener.cancel.clone();
+            drop(listener);
+            assert!(cancel.is_cancelled());
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let subscribers = server.transfer_notify_subscribers.lock().await;
+                    if subscribers.len() == remaining {
+                        if remaining == 1 {
+                            assert!(subscribers[0].same_channel(&second_tx));
+                            subscribers[0].send(ReferNotifyEvent {
+                                call_id: "remaining-call".into(),
+                                sip_status: 200,
+                                reason: None,
+                                event_type: ReferNotifyEventType::Notify,
+                            }).unwrap();
+                            assert_eq!(second_rx.try_recv().unwrap().call_id, "remaining-call");
+                        }
+                        break;
+                    }
+                    drop(subscribers);
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("drop must remove its sender without another registration");
         }
     }
 }
