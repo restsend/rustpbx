@@ -2676,12 +2676,15 @@ async fn hangup_command_queues_bye_dialogs_immediately() {
     use crate::call::domain::HangupCommand;
 
     let mut session = build_session(build_dialplan_with_mode(MediaProxyMode::Bypass)).await;
+    session.bridge.active = true;
     let caller_dialog_id = session.caller_dialog_id();
 
     let result = session
         .execute_command(CallCommand::Hangup(HangupCommand::all(None, None)), None)
         .await;
     assert!(result.success, "hangup command must succeed");
+    assert!(!session.bridge.active);
+    assert!(session.cancel_token.is_cancelled());
 
     // The caller leg is ended AND its dialog is queued for an immediate BYE.
     assert_eq!(
@@ -2701,6 +2704,8 @@ async fn hangup_command_cascade_none_queues_nothing() {
     use crate::call::domain::{HangupCascade, HangupCommand};
 
     let mut session = build_session(build_dialplan_with_mode(MediaProxyMode::Bypass)).await;
+    session.bridge.active = true;
+    assert!(session.update_leg_state(&LegId::from("caller"), LegState::Connected));
 
     let result = session
         .execute_command(
@@ -2709,6 +2714,8 @@ async fn hangup_command_cascade_none_queues_nothing() {
         )
         .await;
     assert!(result.success);
+    assert!(session.bridge.active);
+    assert!(!session.cancel_token.is_cancelled());
     assert!(
         session.pending_hangup.is_empty(),
         "cascade=None must not queue any BYE dialog"

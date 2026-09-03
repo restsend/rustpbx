@@ -9921,6 +9921,13 @@ impl SipSession {
         }
 
         self.sync_state();
+        // Apply the cascade first: All marks the caller Ended, while a
+        // hangup that leaves the caller alive must preserve the session.
+        if self.legs.get(&LegId::from("caller"))
+            .is_some_and(|leg| leg.state != LegState::Ended)
+        {
+            return CommandResult::success();
+        }
         self.bridge.clear();
 
         if self.app_runtime.is_running() {
