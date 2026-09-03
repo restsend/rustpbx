@@ -1192,4 +1192,57 @@ mod tests {
             "with_original_headers=false must map to no passthrough"
         );
     }
+
+    #[tokio::test]
+    async fn test_http_router_forward_caller_rewrite_full_uri() {
+        let dialplan = resolve_with_response(json!({
+            "action": "forward",
+            "targets": ["sip:1001@127.0.0.1"],
+            "caller": "sip:88888888@pbx.example.com"
+        }))
+        .await
+        .unwrap();
+
+        let caller = dialplan.caller.expect("dialplan caller must be set");
+        assert_eq!(caller.to_string(), "sip:88888888@pbx.example.com");
+    }
+
+    #[tokio::test]
+    async fn test_http_router_forward_caller_rewrite_bare_user() {
+        let dialplan = resolve_with_response(json!({
+            "action": "forward",
+            "targets": ["sip:1001@127.0.0.1"],
+            "caller": "88888888"
+        }))
+        .await
+        .unwrap();
+
+        let caller = dialplan.caller.expect("dialplan caller must be set");
+        assert_eq!(
+            caller.to_string(),
+            "sip:88888888@example.com",
+            "bare user must be qualified with the caller's realm"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_router_forward_caller_rewrite_invalid_fails_call() {
+        let result = resolve_with_response(json!({
+            "action": "forward",
+            "targets": ["sip:1001@127.0.0.1"],
+            "caller": "sip:88888888@pbx.example.com:99999"
+        }))
+        .await;
+
+        let err = result.expect_err("an invalid caller override must fail the call");
+        assert!(
+            err.error.to_string().contains("88888888"),
+            "error should mention the invalid caller override: {}",
+            err.error
+        );
+        assert!(
+            err.status.is_some(),
+            "an invalid caller override must carry a SIP error status"
+        );
+    }
 }

@@ -1,7 +1,7 @@
 use crate::call::cookie::SpamResult;
 use crate::call::{
     DialDirection, DialStrategy, Dialplan, Location, RouteInvite, SipUser, TransactionCookie,
-    TrunkContext,
+    TrunkContext, build_sip_uri,
 };
 use crate::config::{
     HttpRouterConfig, MediaProxyMode, RecordingAutoStartAt, RecordingPolicy, RtpConfig,
@@ -117,6 +117,12 @@ struct HttpResponsePayload {
     /// Allowed audio codecs. If set, restricts the audio codecs used for this call.
     /// Values are codec names like "pcma", "pcmu", "g722", "opus", "g729".
     pub allow_codecs: Option<Vec<String>>,
+    /// Caller override for the callee leg (From header). Accepts a full SIP
+    /// URI ("sip:88888888@pbx.example.com"), a "user@host" shorthand, or a
+    /// bare user which is qualified with the caller's realm. When omitted the
+    /// authenticated caller is kept. An unparseable value fails the call
+    /// immediately with 500 Server Internal Error.
+    pub caller: Option<String>,
 }
 
 #[async_trait]
@@ -304,6 +310,35 @@ impl CallRouter for HttpCallRouter {
 
                 if let Some(from) = caller.from.as_ref() {
                     dialplan = dialplan.with_caller(from.clone());
+                }
+
+                if let Some(caller_override) = result
+                    .caller
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    let realm = caller.realm.clone().unwrap_or_else(|| {
+                        caller
+                            .from
+                            .as_ref()
+                            .map(|from| from.host().to_string())
+                            .unwrap_or_default()
+                    });
+                    match rsipstack::sip::Uri::try_from(build_sip_uri(caller_override, &realm)) {
+                        Ok(uri) => dialplan = dialplan.with_caller(uri),
+                        Err(e) => {
+                            return Err(RouteError {
+                                error: anyhow!(
+                                    "HTTP router returned invalid caller override {:?}: {}",
+                                    caller_override,
+                                    e
+                                ),
+                                status: Some(rsipstack::sip::StatusCode::ServerInternalError),
+                                extensions: None,
+                            });
+                        }
+                    }
                 }
 
                 dialplan = dialplan.with_targets(strategy);
