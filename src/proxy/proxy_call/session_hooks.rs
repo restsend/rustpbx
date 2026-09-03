@@ -156,8 +156,13 @@ use crate::call::domain::LegId;
 /// `Arc` and called from async tasks.
 #[async_trait]
 pub trait CallSessionHook: Send + Sync {
-    /// Called when the callee starts ringing (180 Ringing sent to caller).
-    async fn on_call_ringing(&self, _ctx: &CallSessionContext) {}
+    /// Called when the callee starts ringing — any ringing-ish provisional
+    /// response: 180 Ringing, or 183/180-with-SDP early media.
+    ///
+    /// `early_media` is `true` when the provisional response carried SDP
+    /// (e.g. 183 Session Progress with early media) and `false` for a plain
+    /// 180 Ringing without SDP.
+    async fn on_call_ringing(&self, _ctx: &CallSessionContext, _early_media: bool) {}
 
     /// Called once both legs are connected (200 OK acknowledged by caller).
     async fn on_call_connected(&self, _ctx: &CallSessionContext) {}

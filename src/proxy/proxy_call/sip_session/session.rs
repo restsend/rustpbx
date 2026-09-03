@@ -2200,6 +2200,60 @@ impl SipSession {
         }
     }
 
+    /// Fire the `on_call_ringing` session hooks for this session.
+    ///
+    /// Used by paths that dial a leg outside the regular `dial_sequential`
+    /// flow (notably the RWI originate setup loop in `rwi/processor.rs`),
+    /// so a ringing provisional (180, or 183/180-with-SDP early media when
+    /// `early_media` is set) reaches addons — the CC addon emits `cc_ringing`
+    /// and transitions the agent Idle → Ringing.
+    pub(crate) async fn fire_on_call_ringing_hooks(&self, early_media: bool) {
+        if self.server.session_hooks.is_empty() {
+            return;
+        }
+        let ctx = self.session_hook_ctx();
+        for hook in self.server.session_hooks.iter() {
+            hook.on_call_ringing(&ctx, early_media).await;
+        }
+    }
+
+    /// Fire the `on_call_connected` session hooks for this session.
+    ///
+    /// Used by the RWI originate setup loop after the first outbound INVITE
+    /// is confirmed (200 OK) and attached as the caller dialog, so addons
+    /// learn the call connected — the CC addon emits `cc_answered` and
+    /// transitions the agent Ringing/Idle → Busy.
+    pub(crate) async fn fire_on_call_connected_hooks(&self) {
+        if self.server.session_hooks.is_empty() {
+            return;
+        }
+        let ctx = self.session_hook_ctx();
+        for hook in self.server.session_hooks.iter() {
+            hook.on_call_connected(&ctx).await;
+        }
+    }
+
+    /// Fire the `on_call_ended` session hooks for this session.
+    ///
+    /// Used by the RWI originate setup loop when the first outbound INVITE
+    /// FAILS (rejected / no-answer / timeout / media setup failure) — the
+    /// UAC session loop never starts on those paths, so without this the
+    /// CC addon would never learn the call ended (agent stuck in Ringing,
+    /// no `cc_hangup` webhook).
+    pub(crate) async fn fire_on_call_ended_hooks(
+        &self,
+        reason: Option<&crate::callrecord::CallRecordHangupReason>,
+        duration_secs: u64,
+    ) {
+        if self.server.session_hooks.is_empty() {
+            return;
+        }
+        let ctx = self.session_hook_ctx();
+        for hook in self.server.session_hooks.iter() {
+            hook.on_call_ended(&ctx, reason, duration_secs).await;
+        }
+    }
+
     fn ok_or_failure<T>(result: anyhow::Result<T>) -> CommandResult {
         match result {
             Ok(_) => CommandResult::success(),
@@ -4459,11 +4513,12 @@ impl SipSession {
         // Race the forked INVITEs – first 200 OK wins
         // Fire on_call_ringing hooks now that callees are ringing.
         // Use the first target's AOR for agent identity.
+        // (No provisional response yet — early_media is always false here.)
         if !self.server.session_hooks.is_empty() && !targets.is_empty() {
             self.meta.routed_callee = Some(targets[0].aor.to_string());
             let ctx = self.session_hook_ctx();
             for hook in self.server.session_hooks.iter() {
-                hook.on_call_ringing(&ctx).await;
+                hook.on_call_ringing(&ctx, false).await;
             }
         }
 
@@ -5377,6 +5432,20 @@ impl SipSession {
                                 self.media.early_media_sent = true;
                                 self.update_leg_state(&LegId::from("callee"), LegState::EarlyMedia);
 
+                                // Provisional response carried SDP — emit the
+                                // core early-media event and fire the ringing
+                                // session hooks with early_media = true (e.g.
+                                // the CC addon turns this into `cc_ringing`).
+                                self.emit_typed_rwi_event(&crate::rwi::CallEarlyMedia {
+                                    call_id: self.context.session_id.clone(),
+                                });
+                                if !self.server.session_hooks.is_empty() {
+                                    let ctx = self.session_hook_ctx();
+                                    for hook in self.server.session_hooks.iter() {
+                                        hook.on_call_ringing(&ctx, true).await;
+                                    }
+                                }
+
                                 if self.media_profile.path == MediaPathMode::Anchored {
                                     let caller_sdp = match self
                                         .prepare_caller_answer_from_callee_sdp(
@@ -5442,11 +5511,11 @@ impl SipSession {
                                 call_id: self.context.session_id.clone(),
                             });
 
-                            // Fire on_call_ringing hooks
+                            // Fire on_call_ringing hooks (plain 180, no SDP)
                             if !self.server.session_hooks.is_empty() {
                                 let ctx = self.session_hook_ctx();
                                 for hook in self.server.session_hooks.iter() {
-                                    hook.on_call_ringing(&ctx).await;
+                                    hook.on_call_ringing(&ctx, false).await;
                                 }
                             }
                         }
@@ -9202,7 +9271,7 @@ impl SipSession {
                 if !self.server.session_hooks.is_empty() {
                     let ctx = self.session_hook_ctx();
                     for hook in self.server.session_hooks.iter() {
-                        hook.on_call_ringing(&ctx).await;
+                        hook.on_call_ringing(&ctx, false).await;
                     }
                 }
                 // Notify the running queue app that the agent is ringing so

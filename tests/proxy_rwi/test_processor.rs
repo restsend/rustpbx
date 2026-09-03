@@ -843,6 +843,292 @@ async fn test_originate_explicit_trunk_skips_route() {
     );
 }
 
+/// Agent click-to-call (CTI originate): the RWI originate path must fire the
+/// full cc_* webhook chain — `cc_ringing` when the dialed customer leg rings
+/// (180), `cc_answered` when it connects — attributed to the originating
+/// agent via `resolved_agent_id`, plus `cc_hangup` on teardown.
+///
+/// Before the fix the originate setup loop dialed its first leg outside the
+/// session-hook lifecycle, so agent originates only ever emitted `cc_hangup`.
+#[tokio::test]
+async fn test_originate_agent_click_to_call_emits_cc_events() {
+    use crate::common::e2e_test_server::{E2eTestServer, E2eTestServerInject};
+    use crate::common::rtp_utils::RtpReceiver;
+    use crate::common::test_ua::TestUaEvent;
+    use rustpbx::addons::cc::acd::{AcdConfig, AcdEngine};
+    use rustpbx::addons::cc::agent::{AgentRegistry as CcAgentRegistry, AgentStatus};
+    use rustpbx::addons::cc::agent_registry_adapter::CcAgentRegistryAdapter;
+    use rustpbx::config::ProxyConfig;
+
+    // ── CC wiring: agent registry + event tap + session hook ──────────────
+    let cc_registry = Arc::new(CcAgentRegistry::new());
+    cc_registry
+        .register("1001".to_string(), vec![], 1)
+        .await
+        .expect("register agent");
+    cc_registry
+        .update_status("1001", AgentStatus::Idle)
+        .await
+        .expect("agent idle");
+
+    let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel();
+    cc_registry.set_event_tx(ev_tx);
+
+    let hook = Arc::new(
+        rustpbx::addons::cc::cc_call_session_hook::CcCallSessionHook::new(
+            cc_registry.clone(),
+            Arc::new(rustpbx::addons::cc::metrics::MetricsCollector::new()),
+        ),
+    );
+    let adapter = Arc::new(CcAgentRegistryAdapter::new(
+        cc_registry.clone(),
+        Arc::new(AcdEngine::new(AcdConfig::default())),
+        "127.0.0.1",
+    ));
+
+    let inject = E2eTestServerInject {
+        session_hook: Some(hook),
+        agent_registry: Some(adapter),
+        ..Default::default()
+    };
+    let server = E2eTestServer::start_with_inject(ProxyConfig::default(), inject)
+        .await
+        .expect("start e2e server");
+
+    // ── Originate: agent 1001 → customer "bob" ─────────────────────────────
+    let bob = server.create_ua("bob").await.expect("create bob UA");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let processor = RwiCommandProcessor::new(
+        Arc::new(ActiveProxyCallRegistry::new()),
+        Arc::new(RwLock::new(RwiGateway::new())),
+        Arc::new(ConferenceManager::new()),
+    )
+    .with_sip_server(server.server_ref.clone());
+
+    let call_id = "cti-originate-e2e-1".to_string();
+    // Direct-to-callee dial: point at bob's UA socket (the originate loop's
+    // raw client dialog does not consult the proxy locator).
+    let destination = format!("sip:bob@127.0.0.1:{}", bob.local_port());
+    processor
+        .process_command(RwiCommandPayload::Originate(
+            rustpbx::rwi::session::OriginateRequest {
+                call_id: call_id.clone(),
+                destination,
+                caller_id: Some("sip:1001@127.0.0.1".into()),
+                timeout_secs: Some(15),
+                extra_headers: std::collections::HashMap::new(),
+                trunk: None,
+                route_originated_calls: None,
+                record: None,
+            },
+        ))
+        .await
+        .expect("originate accepted");
+
+    // ── Customer leg: ring (180) then answer (200 OK) ──────────────────────
+    let bob_rx = RtpReceiver::bind(0).await.expect("bind bob rtp");
+    let bob_sdp = crate::common::test_helpers::pcmu_sdp("127.0.0.1", bob_rx.port().unwrap());
+
+    let mut bob_dialog = None;
+    for _ in 0..100 {
+        let events = bob.process_dialog_events().await.expect("bob events");
+        for event in events {
+            if let TestUaEvent::IncomingCall(id, _offer) = event {
+                // 180 Ringing first — this must produce cc_ringing.
+                bob.ring_call(&id).await.expect("bob rings 180");
+                bob_dialog = Some(id.clone());
+                break;
+            }
+        }
+        if bob_dialog.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let bob_id = bob_dialog.expect("bob never received the originate INVITE");
+
+    // cc_ringing must arrive after the 180, attributed to agent 1001.
+    let ringing = wait_for_cc_event(&mut ev_rx, "cc_ringing", std::time::Duration::from_secs(5))
+        .await
+        .expect("cc_ringing expected after 180 Ringing");
+    assert_eq!(ringing.payload["agent_id"].as_str(), Some("1001"));
+    assert_eq!(ringing.call_id.as_deref(), Some(call_id.as_str()));
+    assert_eq!(
+        ringing.payload["early_media"].as_bool(),
+        Some(false),
+        "plain 180 must carry early_media=false"
+    );
+    {
+        let agent = cc_registry.get_agent("1001").await.expect("agent");
+        assert!(
+            matches!(agent.status, AgentStatus::Ringing { .. }),
+            "agent must be Ringing after customer 180, got {}",
+            agent.status
+        );
+    }
+
+    bob.answer_call(&bob_id, Some(bob_sdp))
+        .await
+        .expect("bob answers");
+
+    // cc_answered must arrive after the 200 OK.
+    let answered = wait_for_cc_event(&mut ev_rx, "cc_answered", std::time::Duration::from_secs(5))
+        .await
+        .expect("cc_answered expected after 200 OK");
+    assert_eq!(answered.payload["agent_id"].as_str(), Some("1001"));
+    assert_eq!(answered.call_id.as_deref(), Some(call_id.as_str()));
+    {
+        let agent = cc_registry.get_agent("1001").await.expect("agent");
+        assert!(
+            matches!(agent.status, AgentStatus::Busy { .. }),
+            "agent must be Busy after customer answers, got {}",
+            agent.status
+        );
+    }
+
+    // ── Teardown: customer hangs up → cc_hangup ───────────────────────────
+    bob.hangup(&bob_id).await.expect("bob hangs up");
+    let hangup = wait_for_cc_event(&mut ev_rx, "cc_hangup", std::time::Duration::from_secs(10))
+        .await
+        .expect("cc_hangup expected after hangup");
+    assert_eq!(hangup.payload["agent_id"].as_str(), Some("1001"));
+
+    server.stop();
+}
+
+/// Failure release: when an agent originate rings (180 → cc_ringing, agent
+/// Idle → Ringing) and the customer then REJECTS (486), the originate setup
+/// loop must fire `on_call_ended` — the agent returns to Idle and a
+/// `cc_hangup` webhook is emitted. Without this the agent stays stuck in
+/// Ringing forever (the UAC session loop never starts on failed setup).
+#[tokio::test]
+async fn test_originate_rejected_releases_agent_and_emits_cc_hangup() {
+    use crate::common::e2e_test_server::{E2eTestServer, E2eTestServerInject};
+    use crate::common::test_ua::TestUaEvent;
+    use rustpbx::addons::cc::agent::{AgentRegistry as CcAgentRegistry, AgentStatus};
+    use rustpbx::config::ProxyConfig;
+
+    let cc_registry = Arc::new(CcAgentRegistry::new());
+    cc_registry
+        .register("1001".to_string(), vec![], 1)
+        .await
+        .expect("register agent");
+    cc_registry
+        .update_status("1001", AgentStatus::Idle)
+        .await
+        .expect("agent idle");
+
+    let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel();
+    cc_registry.set_event_tx(ev_tx);
+
+    let hook = Arc::new(
+        rustpbx::addons::cc::cc_call_session_hook::CcCallSessionHook::new(
+            cc_registry.clone(),
+            Arc::new(rustpbx::addons::cc::metrics::MetricsCollector::new()),
+        ),
+    );
+
+    let inject = E2eTestServerInject {
+        session_hook: Some(hook),
+        ..Default::default()
+    };
+    let server = E2eTestServer::start_with_inject(ProxyConfig::default(), inject)
+        .await
+        .expect("start e2e server");
+
+    let bob = server.create_ua("bob").await.expect("create bob UA");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let processor = RwiCommandProcessor::new(
+        Arc::new(ActiveProxyCallRegistry::new()),
+        Arc::new(RwLock::new(RwiGateway::new())),
+        Arc::new(ConferenceManager::new()),
+    )
+    .with_sip_server(server.server_ref.clone());
+
+    let call_id = "cti-originate-reject-1".to_string();
+    processor
+        .process_command(RwiCommandPayload::Originate(
+            rustpbx::rwi::session::OriginateRequest {
+                call_id: call_id.clone(),
+                destination: format!("sip:bob@127.0.0.1:{}", bob.local_port()),
+                caller_id: Some("sip:1001@127.0.0.1".into()),
+                timeout_secs: Some(15),
+                extra_headers: std::collections::HashMap::new(),
+                trunk: None,
+                route_originated_calls: None,
+                record: None,
+            },
+        ))
+        .await
+        .expect("originate accepted");
+
+    // Wait for the INVITE at bob, ring 180, then reject with 486.
+    let mut bob_dialog = None;
+    for _ in 0..100 {
+        let events = bob.process_dialog_events().await.expect("bob events");
+        for event in events {
+            if let TestUaEvent::IncomingCall(id, _offer) = event {
+                bob.ring_call(&id).await.expect("bob rings 180");
+                bob_dialog = Some(id.clone());
+                break;
+            }
+        }
+        if bob_dialog.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let bob_id = bob_dialog.expect("bob never received the originate INVITE");
+
+    // 180 → cc_ringing, agent Idle → Ringing.
+    let ringing = wait_for_cc_event(&mut ev_rx, "cc_ringing", std::time::Duration::from_secs(5))
+        .await
+        .expect("cc_ringing expected");
+    assert_eq!(ringing.payload["agent_id"].as_str(), Some("1001"));
+    {
+        let agent = cc_registry.get_agent("1001").await.expect("agent");
+        assert!(matches!(agent.status, AgentStatus::Ringing { .. }));
+    }
+
+    bob.reject_call(&bob_id).await.expect("bob rejects 486");
+
+    // cc_hangup must arrive and the agent must be released back to Idle.
+    let hangup = wait_for_cc_event(&mut ev_rx, "cc_hangup", std::time::Duration::from_secs(10))
+        .await
+        .expect("cc_hangup expected after 486 reject");
+    assert_eq!(hangup.payload["agent_id"].as_str(), Some("1001"));
+    assert_eq!(hangup.call_id.as_deref(), Some(call_id.as_str()));
+    {
+        let agent = cc_registry.get_agent("1001").await.expect("agent");
+        assert!(
+            matches!(agent.status, AgentStatus::Idle),
+            "rejected originate must release the agent to Idle, got {}",
+            agent.status
+        );
+    }
+
+    server.stop();
+}
+
+/// Wait for the next cc_* event of the given type on the registry event
+/// channel, skipping unrelated events (e.g. agent_state_changed).
+async fn wait_for_cc_event(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<rustpbx::rwi::proto::RwiEvent>,
+    event_type: &str,
+    timeout: std::time::Duration,
+) -> Option<rustpbx::rwi::proto::RwiEvent> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while let Ok(event) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        let event = event?;
+        if event.event_type == event_type {
+            return Some(event);
+        }
+    }
+    None
+}
+
 #[tokio::test]
 async fn test_answer_existing_call() {
     let registry = Arc::new(ActiveProxyCallRegistry::new());

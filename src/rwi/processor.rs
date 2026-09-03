@@ -985,6 +985,7 @@ impl RwiCommandProcessor {
         crate::utils::spawn(async move {
             use crate::call::cookie::TransactionCookie;
             use crate::call::{DialDirection, Dialplan};
+            use crate::callrecord::CallRecordHangupReason;
             use crate::proxy::active_call_registry::{ActiveProxyCallEntry, ActiveProxyCallStatus};
             use crate::proxy::proxy_call::sip_session::SipSession;
             use crate::proxy::proxy_call::state::CallContext;
@@ -1245,6 +1246,15 @@ impl RwiCommandProcessor {
             let mut originate_recording_started = false;
             let mut pending_commands = VecDeque::new();
             let mut setup_hangup: Option<(Option<String>, Option<u16>)> = None;
+            // `cc_ringing` session hooks fire once, on the FIRST provisional
+            // response — whichever of 180/183 arrives first.
+            let mut ringing_hooks_fired = false;
+            // Normalized hangup reason for failed setup paths — fed to the
+            // `on_call_ended` session hooks after the setup block so the CC
+            // addon releases the agent (Ringing → Idle) and emits `cc_hangup`.
+            // (Paths that never assign read the initial `None`.)
+            #[allow(unused_assignments)]
+            let mut setup_end_reason: Option<CallRecordHangupReason> = None;
 
             // Wait for the outbound INVITE to complete while servicing the
             // commands that are meaningful before the first dialog is
@@ -1294,6 +1304,24 @@ impl RwiCommandProcessor {
                                                     call_id: call_id.clone(),
                                                 });
                                             }
+                                        }
+
+                                        // Fire the ringing session hooks once, on the
+                                        // first provisional response — the CC addon
+                                        // emits `cc_ringing` (agent Idle → Ringing)
+                                        // for agent originates. `early_media` marks a
+                                        // 183/180-with-SDP provisional so consumers
+                                        // can distinguish ringback from early media.
+                                        if !ringing_hooks_fired {
+                                            ringing_hooks_fired = true;
+                                            let has_sdp = {
+                                                let body = response.body();
+                                                !body.is_empty()
+                                                    && String::from_utf8_lossy(body).contains("v=0")
+                                            };
+                                            session
+                                                .fire_on_call_ringing_hooks(code != 180 || has_sdp)
+                                                .await;
                                         }
 
                                         let body = response.body();
@@ -1488,8 +1516,15 @@ impl RwiCommandProcessor {
                                     sip_status: Some(resp.status_code().code()),
                                 });
                             }
+                            setup_end_reason = Some(CallRecordHangupReason::Failed);
                             break 'setup;
                         }
+
+                        // Fire the connected session hooks now that the first
+                        // outbound leg is confirmed and its media attached —
+                        // the CC addon emits `cc_answered` (agent
+                        // Ringing/Idle → Busy) for agent originates.
+                        session.fire_on_call_connected_hooks().await;
 
                         if !originate_recording_started
                             && let Some((path, config)) = originate_recording.as_ref()
@@ -1585,6 +1620,13 @@ impl RwiCommandProcessor {
                     }
                     Ok(Some(Ok((_dialog, resp_opt)))) => {
                         let sip_status = resp_opt.as_ref().map(|r| r.status_code.code());
+                        setup_end_reason = Some(match sip_status {
+                            // Busy / busy-everywhere → rejected.
+                            Some(486) | Some(600) => CallRecordHangupReason::Rejected,
+                            // No-answer family.
+                            Some(408) | Some(480) | Some(487) => CallRecordHangupReason::NoAnswer,
+                            _ => CallRecordHangupReason::Failed,
+                        });
                         {
                             let gw = gateway.read();
                             if sip_status == Some(486) || sip_status == Some(600) {
@@ -1606,6 +1648,7 @@ impl RwiCommandProcessor {
                         }
                     }
                     Ok(Some(Err(e))) => {
+                        setup_end_reason = Some(CallRecordHangupReason::Failed);
                         let gw = gateway.read();
                         gw.send_to_owner(&crate::rwi::CallHangup {
                             call_id: call_id.clone(),
@@ -1616,6 +1659,8 @@ impl RwiCommandProcessor {
                     }
                     Ok(None) => {
                         let (reason, sip_status) = setup_hangup.take().unwrap_or_default();
+                        // Pre-answer hangup command (CTI cancelled the call).
+                        setup_end_reason = Some(CallRecordHangupReason::Canceled);
                         let gw = gateway.read();
                         gw.send_to_owner(&crate::rwi::CallHangup {
                             call_id: call_id.clone(),
@@ -1625,6 +1670,8 @@ impl RwiCommandProcessor {
                         });
                     }
                     Err(_) => {
+                        // Ring timeout — the customer leg never answered.
+                        setup_end_reason = Some(CallRecordHangupReason::NoAnswer);
                         let gw = gateway.read();
                         gw.send_to_owner(&crate::rwi::CallNoAnswer {
                             call_id: call_id.clone(),
@@ -1632,6 +1679,15 @@ impl RwiCommandProcessor {
                     }
                 }
             }
+
+            // Failed setup (rejected / no-answer / timeout / media failure):
+            // the UAC session loop never started, so the `on_call_ended`
+            // session hooks must fire here — otherwise an agent already moved
+            // to Ringing by the first provisional stays stuck and no
+            // `cc_hangup` webhook is emitted.
+            session
+                .fire_on_call_ended_hooks(setup_end_reason.as_ref(), 0)
+                .await;
 
             if originate_recording_started {
                 let _ = session

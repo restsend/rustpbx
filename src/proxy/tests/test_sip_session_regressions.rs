@@ -2468,27 +2468,43 @@ async fn queue_transfer_start_failure_with_return_app_returns_to_ivr() {
 
 // ── cc_ringing for queue-dialed agents (dynamic leg 180 Ringing) ─────────────
 
-/// Recording hook that captures whether `on_call_ringing` fired.
+/// Recording hook that captures whether `on_call_ringing` fired (and with
+/// which `early_media` flag) plus `on_call_connected` firings.
 struct RingingRecordingHook {
     ringing: Arc<AtomicUsize>,
+    early_media: Arc<AtomicUsize>,
+    connected: Arc<AtomicUsize>,
 }
 
 impl RingingRecordingHook {
-    fn new() -> (Self, Arc<AtomicUsize>) {
+    fn new() -> (Self, Arc<AtomicUsize>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
         let ringing = Arc::new(AtomicUsize::new(0));
+        let early_media = Arc::new(AtomicUsize::new(0));
+        let connected = Arc::new(AtomicUsize::new(0));
         (
             Self {
                 ringing: ringing.clone(),
+                early_media: early_media.clone(),
+                connected: connected.clone(),
             },
             ringing,
+            early_media,
+            connected,
         )
     }
 }
 
 #[async_trait]
 impl crate::proxy::proxy_call::session_hooks::CallSessionHook for RingingRecordingHook {
-    async fn on_call_ringing(&self, _ctx: &CallSessionContext) {
+    async fn on_call_ringing(&self, _ctx: &CallSessionContext, early_media: bool) {
         self.ringing.fetch_add(1, Ordering::SeqCst);
+        if early_media {
+            self.early_media.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    async fn on_call_connected(&self, _ctx: &CallSessionContext) {
+        self.connected.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -2504,7 +2520,7 @@ async fn test_leg_ringing_fires_on_call_ringing_hook() {
         ..Default::default()
     });
     let (mut server, _config) = create_test_server().await;
-    let (hook, ringing) = RingingRecordingHook::new();
+    let (hook, ringing, _early_media, _connected) = RingingRecordingHook::new();
     Arc::get_mut(&mut server)
         .expect("server must be uniquely owned for hook registration")
         .session_hooks = Arc::new(vec![Arc::new(hook)]);
@@ -2533,6 +2549,47 @@ async fn test_leg_ringing_fires_on_call_ringing_hook() {
         session.legs.get(&agent_leg).map(|l| l.state),
         Some(LegState::Ringing),
         "ringing leg should be marked LegState::Ringing"
+    );
+}
+
+/// The RWI originate path dials its first leg outside the regular
+/// `dial_sequential` flow, so it drives the session lifecycle hooks through
+/// `fire_on_call_ringing_hooks` / `fire_on_call_connected_hooks`. These
+/// helpers must fan out to every registered hook with the early_media flag
+/// preserved (the CC addon turns them into `cc_ringing`/`cc_answered` for
+/// agent click-to-call originates).
+#[tokio::test]
+async fn test_originate_fire_helpers_reach_session_hooks() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let (mut server, _config) = create_test_server().await;
+    let (hook, ringing, early_media, connected) = RingingRecordingHook::new();
+    Arc::get_mut(&mut server)
+        .expect("server must be uniquely owned for hook registration")
+        .session_hooks = Arc::new(vec![Arc::new(hook)]);
+    let session = build_session_on_server(server, dialplan).await;
+
+    session.fire_on_call_ringing_hooks(false).await;
+    assert_eq!(ringing.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        early_media.load(Ordering::SeqCst),
+        0,
+        "plain 180 provisional must not set early_media"
+    );
+
+    session.fire_on_call_ringing_hooks(true).await;
+    assert_eq!(ringing.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        early_media.load(Ordering::SeqCst),
+        1,
+        "183/SDP provisional must set early_media"
+    );
+
+    assert_eq!(connected.load(Ordering::SeqCst), 0);
+    session.fire_on_call_connected_hooks().await;
+    assert_eq!(
+        connected.load(Ordering::SeqCst),
+        1,
+        "fire_on_call_connected_hooks must fire on_call_connected"
     );
 }
 
