@@ -191,31 +191,24 @@ impl MessageInspector for TokenInjector {
             return msg;
         }
 
-        let is_register = match msg.cseq_header() {
-            Ok(cseq) => {
-                let cseq_str = format!("{:?}", cseq);
-                cseq_str.to_uppercase().contains("REGISTER")
-            }
-            Err(_) => false,
-        };
+        let is_register = msg
+            .cseq_header()
+            .ok()
+            .and_then(|cseq| cseq.method().ok())
+            == Some(rsipstack::sip::Method::Register);
 
         if !is_register {
             return msg;
         }
 
+        // REGISTER's To URI identifies the account being registered. Contact
+        // identifies a device binding; SIP.js deliberately uses a random user.
         let agent_id = msg
-            .contact_header()
+            .to_header()
             .ok()
-            .and_then(|c| {
-                let uri_str = format!("{:?}", c);
-                extract_user_from_uri(&uri_str)
-            })
-            .or_else(|| {
-                msg.to_header().ok().and_then(|t| {
-                    let uri_str = format!("{:?}", t);
-                    extract_user_from_uri(&uri_str)
-                })
-            });
+            .and_then(|to| to.uri().ok())
+            .and_then(|uri| uri.auth.map(|auth| auth.user))
+            .filter(|user| !user.is_empty());
 
         if let Some(agent_id) = agent_id {
             // Gate to CC agents only when a validator is configured.
@@ -241,6 +234,40 @@ impl MessageInspector for TokenInjector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_injector_rejects_invalid_registration_identity() {
+        use rsipstack::sip::{HasHeaders, Response, StatusCode};
+
+        let auth = PhoneAuth::with_secret("test-secret".to_string());
+        let injector = TokenInjector::with_agent_validator(auth, Arc::new(|id| id == "2001"));
+        for (status, cseq, to) in [
+            (StatusCode::OK, "2 REGISTER", Some("<sip:alice@example.com>")),
+            (StatusCode::OK, "2 REGISTER", Some("<sip:example.com>")),
+            (StatusCode::OK, "2 REGISTER", Some("invalid To header")),
+            (StatusCode::OK, "2 REGISTER", None),
+            (StatusCode::Unauthorized, "2 REGISTER", Some("<sip:2001@example.com>")),
+            (StatusCode::OK, "2 INVITE", Some("<sip:2001@example.com>")),
+            (StatusCode::OK, "invalid CSeq", Some("<sip:2001@example.com>")),
+        ] {
+            let mut response = Response {
+                status_code: status.clone(),
+                headers: vec![
+                    Header::CSeq(cseq.into()),
+                    // A known agent in Contact must never substitute for To.
+                    Header::Contact("<sip:2001@device.invalid>".into()),
+                ].into(),
+                ..Default::default()
+            };
+            if let Some(to) = to {
+                response.headers.push(Header::To(to.into()));
+            }
+            let output = injector.before_send(SipMessage::Response(response), None);
+            assert!(!output.headers().iter().any(|header| {
+                matches!(header, Header::Other(name, _) if name == "X-Agent-Token")
+            }), "unexpected token for status={status}, CSeq={cseq}, To={to:?}");
+        }
+    }
 
     #[tokio::test]
     async fn generate_token_evicts_expired_entries_for_other_agents() {
@@ -280,12 +307,4 @@ mod tests {
             "exactly one entry per agent"
         );
     }
-}
-
-fn extract_user_from_uri(uri_str: &str) -> Option<String> {
-    let s = uri_str.trim();
-    let s = s.trim_start_matches('<').trim_end_matches('>');
-    let user_part = s.split(':').nth(1)?;
-    let user = user_part.split('@').next()?;
-    Some(user.to_string())
 }
