@@ -2818,6 +2818,13 @@ impl SipSession {
         });
         self.meta.callee_call_ids.insert(callee_call_id.clone());
 
+        // CTI uses the agent leg's SIP Call-ID, including while it is ringing.
+        // Register it before either sequential or parallel dialing sends INVITE.
+        let registry = &self.server.active_call_registry;
+        if let Some(handle) = registry.get_handle(&self.context.session_id) {
+            registry.register_dialog(callee_call_id.clone(), handle);
+        }
+
         let option = rsipstack::dialog::invitation::InviteOption {
             caller_display_name: self.context.dialplan.caller_display_name.clone(),
             callee: callee_uri.clone(),

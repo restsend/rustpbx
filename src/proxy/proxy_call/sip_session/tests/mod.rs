@@ -580,6 +580,89 @@ fn test_resolve_outbound_callee_uri_uses_contact_when_not_via_home_proxy() {
 }
 
 #[tokio::test]
+async fn test_target_invite_call_ids_resolve_before_dialing() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server, create_transaction,
+    };
+
+    let (server, _) = create_test_server().await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "charlie",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let original_request = request.clone();
+    let (tx, _) = create_transaction(request).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let server_dialog = server
+        .dialog_layer
+        .get_or_create_server_invite(&tx, state_tx, None, None)
+        .unwrap();
+    let session_id = server_dialog.id().call_id.clone();
+    let context = CallContext {
+        session_id: session_id.clone(),
+        dialplan: Arc::new(
+            Dialplan::new(session_id.clone(), original_request, DialDirection::Inbound)
+                .with_caller("sip:charlie@rustpbx.com".try_into().unwrap()),
+        ),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:charlie@rustpbx.com".to_string(),
+        original_callee: "sip:2001@rustpbx.com".to_string(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let (mut session, handle, _cmd_rx) = SipSession::new(
+        server.clone(),
+        CancellationToken::new(),
+        None,
+        context,
+        server_dialog,
+        false,
+        Arc::new(MockMediaPeer::new()),
+        Arc::new(MockMediaPeer::new()),
+    );
+    let registry = &server.active_call_registry;
+    registry.register_handle(session_id.clone(), handle);
+    let target = Location {
+        aor: "sip:2001@rustpbx.com".try_into().unwrap(),
+        ..Default::default()
+    };
+    let mut call_ids = Vec::new();
+
+    // Exercise the builder used by both sequential dialing and parallel forks.
+    // No INVITE has been sent and no LegConnected notification has occurred.
+    for leg_id in [None, Some("fork-1")] {
+        let (invite, _, call_id) = session
+            .build_target_invite_option(&target, leg_id)
+            .await
+            .unwrap();
+        assert_eq!(invite.call_id.as_deref(), Some(call_id.as_str()));
+        assert_ne!(call_id, session_id);
+        let resolved = registry
+            .get_handle_by_dialog(&call_id)
+            .expect("the desk's SIP Call-ID must resolve before it receives INVITE");
+        assert_eq!(resolved.session_id(), session_id);
+        call_ids.push(call_id);
+    }
+    assert_ne!(call_ids[0], call_ids[1]);
+    assert!(registry.get_handle(&session_id).is_some());
+    for call_id in &call_ids {
+        assert!(registry.get_handle_by_dialog(call_id).is_some());
+    }
+
+    registry.remove(&session_id);
+    for call_id in &call_ids {
+        assert!(registry.get_handle_by_dialog(call_id).is_none());
+    }
+}
+
+#[tokio::test]
 async fn test_init_callee_timer_disabled_without_session_expires() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
