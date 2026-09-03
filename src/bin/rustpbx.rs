@@ -12,7 +12,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::Path;
-#[cfg(unix)]
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;

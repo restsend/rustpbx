@@ -36,6 +36,14 @@ cd rustpbx
 cargo run --release -- --conf config.toml.example
 ```
 
+Cross-compile for Windows 64-bit (from Linux/macOS):
+
+```bash
+rustup target add x86_64-pc-windows-gnu
+cargo build --release --target x86_64-pc-windows-gnu
+# output: target/x86_64-pc-windows-gnu/release/rustpbx.exe
+```
+
 That's it — the example config boots a full PBX out of the box:
 
 | Access | Value |
