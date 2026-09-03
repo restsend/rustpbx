@@ -49,7 +49,15 @@ async fn drain_and_stop(state: &rustpbx::app::AppState) {
         info!("already draining; joining the drain wait");
     }
     let outcome = rustpbx::shutdown::wait_until_drained(
-        || sip.inner.active_call_registry.count() == 0 && sip.inner.dialog_layer.is_empty(),
+        || {
+            sip.inner.active_call_registry.count() == 0
+                && !sip.inner.dialog_layer.all_dialog_ids().iter().any(|id| {
+                    matches!(
+                        sip.inner.dialog_layer.get_dialog_with(id),
+                        Some(rsipstack::dialog::dialog::Dialog::Invite(_))
+                    )
+                })
+        },
         timeout,
     )
     .await;
