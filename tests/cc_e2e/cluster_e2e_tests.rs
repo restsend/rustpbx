@@ -370,7 +370,7 @@ async fn cluster_affinity_peer_does_not_steal_live_call() {
         1,
         0,
         0,
-        1,
+        chrono::Utc::now().timestamp_millis(),
     )
     .await;
 
@@ -386,7 +386,7 @@ async fn cluster_affinity_peer_does_not_steal_live_call() {
         1,
         0,
         0,
-        1,
+        chrono::Utc::now().timestamp_millis(),
     )
     .await;
 
@@ -575,7 +575,7 @@ async fn cluster_merged_presence_feeds_longest_idle() {
         1,
         0,
         0,
-        1,
+        chrono::Utc::now().timestamp_millis(),
     )
     .await;
 
@@ -590,7 +590,7 @@ async fn cluster_merged_presence_feeds_longest_idle() {
         1,
         0,
         0,
-        1,
+        chrono::Utc::now().timestamp_millis(),
     )
     .await;
 

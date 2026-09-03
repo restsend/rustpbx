@@ -70,7 +70,8 @@ async fn step_provider_waits_for_configured_retry_delay() {
         .with_state(Arc::clone(&request_times));
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-    let provider = StepProvider::new(format!("http://{addr}/ivr/step")).with_retry(RetryConfig {
+    let provider = StepProvider::new(format!("http://{addr}/ivr/step"), reqwest::Client::new())
+        .with_retry(RetryConfig {
         max_retries: 2,
         timeout_ms: 1_000,
         retry_delay_ms: 250,
