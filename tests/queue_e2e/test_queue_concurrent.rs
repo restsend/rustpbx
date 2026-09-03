@@ -379,6 +379,22 @@ async fn settle(
         .map_err(|e| anyhow!("caller task failed: {e}"))?
 }
 
+/// Poll `pred` until it holds or `timeout` elapses.
+///
+/// Skill-group queues answer the caller as soon as hold/wait audio starts
+/// (wait retention), so a confirmed caller dialog no longer implies the call
+/// was bridged to an agent — tests must observe the agent side instead.
+async fn wait_for(pred: impl Fn() -> bool, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if pred() {
+            return true;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    pred()
+}
+
 async fn shutdown(harness: TestHarness, uas: Vec<TestUa>) {
     for ua in uas {
         let _ = ua.stop();
@@ -482,20 +498,25 @@ async fn test_concurrent_fallback_skips_busy_agent() -> Result<()> {
 
     // Both calls race in: one reserves bob, the other alice — which caller
     // gets which agent is not deterministic, so assert order-agnostically.
+    // The queue early-answers both callers (hold/wait audio needs a confirmed
+    // dialog), so `settle` only proves dialog confirmation — the bridge
+    // signal is bob answering his reserving call.
     let call1 = spawn_caller(caller1.clone(), harness.proxy_addr, 30110);
     let call2 = spawn_caller(caller2.clone(), harness.proxy_addr, 30111);
 
     let r1 = settle(call1).await;
     let r2 = settle(call2).await;
-    let (winner_dialog, winner_caller) = match (&r1, &r2) {
-        (Ok(d), Err(_)) => (d.clone(), caller1.clone()),
-        (Err(_), Ok(d)) => (d.clone(), caller2.clone()),
-        _ => panic!(
-            "exactly one call should connect via bob, got: {:?} / {:?}",
-            r1.is_ok(),
-            r2.is_ok()
-        ),
-    };
+
+    assert!(
+        wait_for(
+            || bob_stats.established.load(Ordering::Relaxed) >= 1,
+            Duration::from_secs(12),
+        )
+        .await,
+        "exactly one call should connect via bob, got: {:?} / {:?}",
+        r1.is_ok(),
+        r2.is_ok()
+    );
 
     // Let any (buggy) extra INVITE window elapse.
     sleep(Duration::from_secs(RING_TIMEOUT_SECS + 1)).await;
@@ -515,10 +536,14 @@ async fn test_concurrent_fallback_skips_busy_agent() -> Result<()> {
         1,
         "bob's connected call must be untouched"
     );
-    let _ = r1.is_err(); // silence unused warnings on Result drops
-    let _ = r2.is_err();
 
-    let _ = winner_caller.hangup(&winner_dialog).await;
+    // Teardown: hang up both confirmed caller dialogs (best-effort).
+    if let Ok(d) = &r1 {
+        let _ = caller1.hangup(d).await;
+    }
+    if let Ok(d) = &r2 {
+        let _ = caller2.hangup(d).await;
+    }
     sleep(Duration::from_millis(300)).await;
     bob_pump.abort();
     alice_pump.abort();
@@ -558,10 +583,21 @@ async fn test_fallback_answerer_overrides_resolved_agent_id() -> Result<()> {
     caller.start().await?;
     let call = spawn_caller(caller.clone(), harness.proxy_addr, 30120);
 
-    // bob times out (2s) → fallback dials alice → alice answers.
+    // bob times out (2s) → fallback dials alice → alice answers. The queue
+    // early-answers the caller while bob is still ringing, so `settle` cannot
+    // signal the bridge — poll for alice's answered call instead.
     let dialog = settle(call)
         .await
-        .expect("call should connect via alice fallback");
+        .expect("caller dialog should confirm (queue early-answer)");
+
+    assert!(
+        wait_for(
+            || alice_stats.established.load(Ordering::Relaxed) >= 1,
+            Duration::from_secs(12),
+        )
+        .await,
+        "call should connect via alice fallback"
+    );
 
     sleep(Duration::from_millis(300)).await;
 
@@ -631,21 +667,24 @@ async fn test_three_calls_two_agents_no_double_dial() -> Result<()> {
 
     let ra = settle(call_a).await;
     let rb = settle(call_b).await;
-    let (winner_dialog, winner_caller) = match (&ra, &rb) {
-        (Ok(d), Err(_)) => (d.clone(), caller_a.clone()),
-        (Err(_), Ok(d)) => (d.clone(), caller_b.clone()),
-        _ => panic!(
-            "exactly one of A/B should connect via bob, got: {:?} / {:?}",
-            ra.is_ok(),
-            rb.is_ok()
-        ),
-    };
+    // The queue early-answers all callers (hold/wait audio needs a confirmed
+    // dialog), so settle only proves dialog confirmation — the bridge signal
+    // is bob's answered call.
+    assert!(
+        wait_for(
+            || bob_stats.established.load(Ordering::Relaxed) >= 1,
+            Duration::from_secs(12),
+        )
+        .await,
+        "exactly one of A/B should connect via bob, got: {:?} / {:?}",
+        ra.is_ok(),
+        rb.is_ok()
+    );
 
-    // C fails: no available agent at resolve time.
+    // C finds both agents reserved at resolve time; with wait retention the
+    // call stays queued (early-answered for hold audio) instead of failing
+    // with the fallback 486.
     let result_c = settle(call_c).await;
-    assert!(result_c.is_err(), "call C must fail: no agent available");
-    let _ = ra.is_err();
-    let _ = rb.is_err();
 
     // Let any (buggy) extra INVITE window elapse.
     sleep(Duration::from_secs(RING_TIMEOUT_SECS + 1)).await;
@@ -666,7 +705,16 @@ async fn test_three_calls_two_agents_no_double_dial() -> Result<()> {
         "the bridged call must remain intact"
     );
 
-    let _ = winner_caller.hangup(&winner_dialog).await;
+    // Teardown: hang up all confirmed caller dialogs (best-effort).
+    if let Ok(d) = &ra {
+        let _ = caller_a.hangup(d).await;
+    }
+    if let Ok(d) = &rb {
+        let _ = caller_b.hangup(d).await;
+    }
+    if let Ok(d) = &result_c {
+        let _ = caller_c.hangup(d).await;
+    }
     sleep(Duration::from_millis(300)).await;
     bob_pump.abort();
     alice_pump.abort();

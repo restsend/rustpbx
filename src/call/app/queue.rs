@@ -1526,8 +1526,13 @@ impl CallApp for QueueApp {
             });
         }
 
-        // Resolve agents dynamically if skill routing is enabled
-        if self.config.skill_routing_enabled {
+        // Resolve agents dynamically if skill routing is enabled and the plan
+        // carries no resolved list yet. A skill-group target is resolved (and
+        // its primary agent reserved) *before* the queue app starts, and the
+        // ordered result is written into `plan.dial_strategy`. Re-resolving
+        // here via `find_available_agents` would drop the reserved agent (it
+        // is no longer `Idle`) and break the deterministic dial order.
+        if self.config.skill_routing_enabled && self.get_agents().is_empty() {
             self.resolve_agents().await;
         }
 
