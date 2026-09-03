@@ -123,9 +123,7 @@ realms = ["your-public-ip:5060"]
 
 ## Contributors
 
-Led by [@shenjinti](https://github.com/shenjinti), with contributions from:
-
-yeoleobun · elliottjiang · liu zhen · autopeasant · Gonzalo Ruiz · zhouhailin · fluffy1781 · v0l (Kieran) · davidcforbes · deweydb · [@umran](https://github.com/umran) · Tyson George
+[@shenjinti](https://github.com/shenjinti) · [@yeoleobun](https://github.com/yeoleobun) · [@dengxiayehu](https://github.com/dengxiayehu) · [@zen2do](https://github.com/zen2do) · [@autopeasant](https://github.com/autopeasant) · [@rgon](https://github.com/rgon) · [@themooer1](https://github.com/themooer1) · [@v0l](https://github.com/v0l) · [@tgeorge06](https://github.com/tgeorge06) · [@umran](https://github.com/umran) · [@davidcforbes](https://github.com/davidcforbes) · [@deweydb](https://github.com/deweydb) · [@zhouhailin](https://github.com/zhouhailin)
 
 ## License
 
