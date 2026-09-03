@@ -881,7 +881,7 @@ impl StepIvrApp {
             error: Some(reason.to_string()),
             step_id: self.current_step_id.clone(),
             step_name: self.current_step_name.clone(),
-            step_start_time: None,
+            step_start_time: self.current_step_start_time.clone(),
             step_end_time: Some(now),
             extra: self.extra.clone(),
             end_reason: None,
@@ -1630,7 +1630,7 @@ impl CallApp for StepIvrApp {
                 error: None,
                 step_id: self.current_step_id.clone(),
                 step_name: self.current_step_name.clone(),
-                step_start_time: None,
+                step_start_time: self.current_step_start_time.clone(),
                 step_end_time: Some(chrono::Utc::now().to_rfc3339()),
                 duration_ms: 0,
                 extra: self.extra.clone(),
@@ -1951,7 +1951,7 @@ impl CallApp for StepIvrApp {
             error: None,
             step_id: last_step_id,
             step_name: last_step_name,
-            step_start_time: None,
+            step_start_time: self.current_step_start_time.clone(),
             step_end_time: Some(chrono::Utc::now().to_rfc3339()),
             duration_ms: 0,
             extra: last_extra,
@@ -5415,6 +5415,7 @@ mod tests {
         app.current_node = Some(current_node);
         app.extra = Some(serde_json::json!({"nodetype": "previous-node"}));
         app.current_step_id = Some("step-7".to_string());
+        app.current_step_start_time = Some("2026-01-01T00:00:00+00:00".to_string());
         app.sess
             .variables
             .insert("session_id".into(), "test-session".into());
@@ -5430,6 +5431,11 @@ mod tests {
             .iter()
             .find(|e| e.trigger.r#type == "session_end")
             .expect("remote hangup must record a session_end trace entry");
+        assert_eq!(
+            session_end.step_start_time.as_deref(),
+            Some("2026-01-01T00:00:00+00:00"),
+            "session_end trace must carry the in-flight step's start time (duration_ms contract)"
+        );
         assert_eq!(
             session_end.step_id.as_deref(),
             Some("step-7"),
@@ -5502,6 +5508,178 @@ mod tests {
             .expect("session end trace must be enqueued");
         assert_eq!(first.event.payload["step_id"], "step-normal");
         assert_eq!(second.event.payload["step_id"], "step-end");
+    }
+
+    // ── Invariant: step_end_time implies step_start_time ──
+    //
+    // Consumers derive duration_ms as `event timestamp - step_start_time`.
+    // An entry that carries step_end_time without step_start_time yields an
+    // empty duration. Every finalized entry (ordinary step, pending finalize,
+    // dtmf_menu_invalid, ivr_fallback, session_end) must carry both stamps.
+
+    #[tokio::test]
+    async fn test_all_step_traces_with_end_time_carry_start_time() {
+        use crate::call::app::ivr::trace::IvrTraceCollector;
+
+        let trace = IvrTraceCollector::new();
+
+        let mut entries = HashMap::new();
+        entries.insert(
+            "1".into(),
+            ActionNode::new(EntryAction::Transfer {
+                target: "2001".into(),
+                params: HashMap::new(),
+                return_app: None,
+                return_target: None,
+            }),
+        );
+        let menu = ActionNode::new(EntryAction::DtmfMenu {
+            greeting: Some("menu.wav".into()),
+            greeting_text: None,
+            greeting_record_list: None,
+            greeting_voice: None,
+            timeout_ms: 5000,
+            max_retries: 3,
+            entries,
+            timeout_action: None,
+            invalid_action: None,
+            greeting_api_url: None,
+        });
+
+        let mut app: StepIvrApp = mock_app(vec![menu]);
+        app.trace = Some(trace.clone());
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "play", |c| {
+                matches!(c, CallCommand::Play { source: crate::call::domain::MediaSource::File { path }, .. } if path == "menu.wav")
+            })
+            .await;
+        stack.audio_complete("ivr_menu_greeting");
+        let _ = stack.drain_cmds();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Rejected key → dtmf_menu_invalid trace; matching key → pending
+        // finalize + terminal transfer step trace; the transfer ends the
+        // session and on_exit appends the session_end entry.
+        stack.dtmf("9");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        stack.dtmf("1");
+        stack
+            .assert_cmd(200, "stop", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let sessions = trace.sessions().await;
+        let sess = &sessions[0];
+        let entries = trace.query_by_session(&sess.session_id).await;
+        assert!(
+            entries.iter().any(|e| e.trigger.r#type == "dtmf_menu_invalid"),
+            "expected a dtmf_menu_invalid entry in the trace"
+        );
+        assert!(
+            entries.iter().any(|e| e.trigger.r#type == "session_end"),
+            "expected a session_end entry in the trace"
+        );
+        for e in &entries {
+            assert!(
+                !(e.step_end_time.is_some() && e.step_start_time.is_none()),
+                "trace entry with trigger '{}' carries step_end_time ({:?}) but no step_start_time — duration_ms would be empty for consumers",
+                e.trigger.r#type,
+                e.step_end_time
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rwi_step_trace_events_carry_start_time_when_ended() {
+        use crate::rwi::gateway::RwiGateway;
+
+        let provider = EventCapturingProvider::new();
+        let mut app: StepIvrApp =
+            StepIvrApp::with_provider(Box::new(provider)).with_name("start-time-ivr");
+        let gateway = RwiGateway::new();
+        let mut events = gateway.subscribe_events();
+        app.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gateway)));
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+
+        stack
+            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(200, "play", |c| {
+                matches!(c, CallCommand::Play { source: crate::call::domain::MediaSource::File { path }, .. } if path == "menu.wav")
+            })
+            .await;
+        stack.audio_complete("ivr_menu_greeting");
+        let _ = stack.drain_cmds();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Caller hangs up while the menu step is still waiting: on_exit
+        // finalizes the pending step trace, then records session_end.
+        stack.remote_hangup();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let mut ended = 0;
+        while let Ok(ev) = events.try_recv() {
+            if ev.event.payload["step_end_time"].is_string() {
+                ended += 1;
+                assert!(
+                    ev.event.payload["step_start_time"].is_string(),
+                    "ivr_step_trace event with trigger {:?} carries step_end_time but no step_start_time — duration_ms would be empty for consumers",
+                    ev.event.payload["trigger"]
+                );
+            }
+        }
+        assert!(
+            ended >= 2,
+            "expected the finalized menu step and the session_end traces, got {ended}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fallback_trace_carries_step_start_time() {
+        use crate::call::app::ivr::trace::IvrTraceCollector;
+
+        let trace = IvrTraceCollector::new();
+        let mut app: StepIvrApp = StepIvrApp::with_provider(Box::new(FailThenEscalateProvider));
+        app.trace = Some(trace.clone());
+        app.sess
+            .variables
+            .insert("session_id".into(), "test-session".into());
+        app.current_step_start_time = Some("2026-01-01T00:00:00+00:00".to_string());
+
+        // No ivr_fallback configured → `not_configured` trace emitted via
+        // record_fallback_trace.
+        app.enter_ivr_fallback_node("step:test");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let entries = trace.query_by_session("test-session").await;
+        let fallback = entries
+            .iter()
+            .find(|e| e.action_type == "ivr_fallback")
+            .expect("fallback decision must be traced");
+        assert_eq!(
+            fallback.step_start_time.as_deref(),
+            Some("2026-01-01T00:00:00+00:00"),
+            "ivr_fallback trace must carry step_start_time — duration_ms would be empty for consumers"
+        );
+        assert!(
+            fallback.step_end_time.is_some(),
+            "ivr_fallback trace must carry step_end_time"
+        );
     }
 
     // ── Hangup while a step waits: the step's trigger records WHY it ended ──
