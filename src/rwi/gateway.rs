@@ -643,6 +643,7 @@ mod tests {
         gw.set_session_event_sender(&sid, tx);
         gw.broadcast(&crate::rwi::CallRinging {
             call_id: "c1".into(),
+            early_media: false,
         });
         let v = rx.recv().await.unwrap();
         assert!(v.to_string().contains("call_ringing"));
@@ -1006,6 +1007,7 @@ mod tests {
 
         gw.send_to_owner(&crate::rwi::CallRinging {
             call_id: "c1".into(),
+            early_media: false,
         });
 
         let v = rx.recv().await.unwrap();

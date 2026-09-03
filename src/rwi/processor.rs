@@ -1291,36 +1291,33 @@ impl RwiCommandProcessor {
                                         if cdr_ring_time.is_none() {
                                             cdr_ring_time = Some(chrono::Utc::now());
                                         }
+                                        let has_sdp = {
+                                            let body = response.body();
+                                            !body.is_empty()
+                                                && String::from_utf8_lossy(body).contains("v=0")
+                                        };
+                                        // One `call_ringing` per provisional response.
+                                        // `early_media` marks a 183/180-with-SDP
+                                        // provisional so consumers can distinguish
+                                        // ringback from early media.
+                                        let early_media = code != 180 || has_sdp;
                                         {
                                             let gw = gateway.read();
-                                            if code == 180 {
-                                                // 180 Ringing — remote side is alerting.
-                                                gw.send_to_owner(&crate::rwi::CallRinging {
-                                                    call_id: call_id.clone(),
-                                                });
-                                            } else {
-                                                // 183 or other provisional — treat as early media.
-                                                gw.send_to_owner(&crate::rwi::CallEarlyMedia {
-                                                    call_id: call_id.clone(),
-                                                });
-                                            }
+                                            gw.send_to_owner(&crate::rwi::CallRinging {
+                                                call_id: call_id.clone(),
+                                                early_media,
+                                            });
                                         }
 
                                         // Fire the ringing session hooks once, on the
                                         // first provisional response — the CC addon
                                         // emits `cc_ringing` (agent Idle → Ringing)
-                                        // for agent originates. `early_media` marks a
-                                        // 183/180-with-SDP provisional so consumers
-                                        // can distinguish ringback from early media.
+                                        // for agent originates, carrying the same
+                                        // `early_media` flag as the core event.
                                         if !ringing_hooks_fired {
                                             ringing_hooks_fired = true;
-                                            let has_sdp = {
-                                                let body = response.body();
-                                                !body.is_empty()
-                                                    && String::from_utf8_lossy(body).contains("v=0")
-                                            };
                                             session
-                                                .fire_on_call_ringing_hooks(code != 180 || has_sdp)
+                                                .fire_on_call_ringing_hooks(early_media)
                                                 .await;
                                         }
 

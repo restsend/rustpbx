@@ -327,6 +327,7 @@ mod tests {
             event: crate::rwi::event::to_legacy_event(
                 &crate::rwi::CallRinging {
                     call_id: "c1".into(),
+                    early_media: true,
                 },
                 None,
             ),
@@ -335,6 +336,11 @@ mod tests {
         wait_for_events(&server.received, 1, 2000).await;
         let body = &server.received.lock().unwrap()[0];
         assert_eq!(body["event_type"], "call_ringing");
+        assert_eq!(
+            body["event"]["early_media"].as_bool(),
+            Some(true),
+            "call_ringing must carry the early_media flag through the webhook"
+        );
     }
 
     /// Regression: agent status, recording metadata, and recording finalization

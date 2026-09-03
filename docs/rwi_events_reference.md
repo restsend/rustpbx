@@ -235,13 +235,14 @@ Webhook 使用 `(call_id, timestamp)` 元组去重，环形缓冲区容量 4096 
 }
 ```
 
-#### call_ringing / call_early_media / call_answered / call_unbridged / call_no_answer / call_busy
+#### call_ringing
 
-分发：call_owner
+分发：call_owner（**每收到一个 provisional 响应发送一条**）
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `call_id` | String | 呼叫标识 |
+| `early_media` | bool | `true` = 暂态响应携带 SDP（183 Session Progress 或 180 带 SDP，即早期媒体）；`false` = 普通 180 Ringing。原独立的 `call_early_media` 事件已并入本事件，消费方改用此字段区分回铃音与早期媒体 |
 | *+ctx* | | 扁平化上下文 |
 
 ```json
@@ -249,6 +250,7 @@ Webhook 使用 `(call_id, timestamp)` 元组去重，环形缓冲区容量 4096 
   "rwi": "1.0",
   "call_ringing": {
     "call_id": "call-abc",
+    "early_media": false,
     "caller": "sip:13800138000@pbx.local",
     "callee": "sip:4000@pbx.local",
     "caller_name": "13800138000",
@@ -257,6 +259,17 @@ Webhook 使用 `(call_id, timestamp)` 元组去重，环形缓冲区容量 4096 
   }
 }
 ```
+
+> 被叫先回 183（带 SDP）再回 180 的呼叫会先后收到两条 `call_ringing`：`early_media` 先 `true` 后 `false`。
+
+#### call_answered / call_unbridged / call_no_answer / call_busy
+
+分发：call_owner
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫标识 |
+| *+ctx* | | 扁平化上下文 |
 
 #### call_bridged
 
@@ -1071,8 +1084,7 @@ CC 呼叫挂机。载荷含 `call_id`、`agent_id`、`hangup_by`
 | 事件类型 | 分发 | call_id | 上下文 |
 |----------|------|---------|--------|
 | `call_created` | owner | ✅ | 自有字段（入呼 INVITE 与外呼 originate） |
-| `call_ringing` | owner | ✅ | +ctx |
-| `call_early_media` | owner | ✅ | +ctx |
+| `call_ringing` | owner | ✅ | +ctx +`early_media`（每条 provisional 一条事件） |
 | `call_answered` | owner | ✅ | +ctx |
 | `call_bridged` | owner | leg_a | — |
 | `call_unbridged` | owner | ✅ | +ctx |

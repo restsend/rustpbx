@@ -221,6 +221,7 @@ async fn test_comprehensive_core_event_structs() {
             "default",
             &rustpbx::rwi::CallRinging {
                 call_id: call_id.into(),
+                early_media: false,
             },
         );
         gw.fan_out(
@@ -484,6 +485,7 @@ async fn test_new_api_event_structs() {
         let gw = ctx.gw();
         gw.broadcast(&rustpbx::rwi::CallRinging {
             call_id: call_id.into(),
+            early_media: false,
         });
     }
 
@@ -530,6 +532,15 @@ async fn test_new_api_event_structs() {
         println!("  [{i}] event_type={et} | {detail}");
     }
 
+    let ringing = events
+        .iter()
+        .find(|v| v.get("event_type").and_then(|s| s.as_str()) == Some("call_ringing"))
+        .expect("call_ringing from new struct + new gateway method");
+    assert_eq!(
+        ringing["early_media"].as_bool(),
+        Some(false),
+        "call_ringing payload must carry the early_media flag"
+    );
     let ringing_count = events
         .iter()
         .filter(|v| v.get("event_type").and_then(|s| s.as_str()) == Some("call_ringing"))

@@ -997,6 +997,116 @@ async fn test_originate_agent_click_to_call_emits_cc_events() {
     server.stop();
 }
 
+/// Originate provisional responses must surface as the CORE `call_ringing`
+/// event carrying an `early_media` flag — the separate `call_early_media`
+/// event type was folded into `call_ringing`. Emission is per provisional
+/// response: a 183 Session Progress (SDP) yields `call_ringing` with
+/// `early_media=true`, and a subsequent plain 180 Ringing yields another
+/// `call_ringing` with `early_media=false`.
+#[tokio::test]
+async fn test_originate_provisionals_emit_call_ringing_with_early_media_flag() {
+    use crate::common::e2e_test_server::{E2eTestServer, E2eTestServerInject};
+    use crate::common::rtp_utils::RtpReceiver;
+    use crate::common::test_ua::TestUaEvent;
+    use rustpbx::config::ProxyConfig;
+
+    let server =
+        E2eTestServer::start_with_inject(ProxyConfig::default(), E2eTestServerInject::default())
+            .await
+            .expect("start e2e server");
+
+    let bob = server.create_ua("bob").await.expect("create bob UA");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Fresh gateway so the test can tap every core event the originate loop
+    // emits (the event tap always receives, no ownership claim needed).
+    let gateway = Arc::new(RwLock::new(RwiGateway::new()));
+    let mut tap = gateway.read().subscribe_events();
+    let processor = RwiCommandProcessor::new(
+        Arc::new(ActiveProxyCallRegistry::new()),
+        gateway,
+        Arc::new(ConferenceManager::new()),
+    )
+    .with_sip_server(server.server_ref.clone());
+
+    let call_id = "originate-early-media-1".to_string();
+    let destination = format!("sip:bob@127.0.0.1:{}", bob.local_port());
+    processor
+        .process_command(RwiCommandPayload::Originate(
+            rustpbx::rwi::session::OriginateRequest {
+                call_id: call_id.clone(),
+                destination,
+                caller_id: Some("sip:1001@127.0.0.1".into()),
+                timeout_secs: Some(15),
+                extra_headers: std::collections::HashMap::new(),
+                trunk: None,
+                route_originated_calls: None,
+                record: None,
+            },
+        ))
+        .await
+        .expect("originate accepted");
+
+    // Customer leg: 183 Session Progress with SDP (early media) first, then a
+    // plain 180 Ringing.
+    let bob_rx = RtpReceiver::bind(0).await.expect("bind bob rtp");
+    let bob_sdp = crate::common::test_helpers::pcmu_sdp("127.0.0.1", bob_rx.port().unwrap());
+
+    let mut bob_dialog = None;
+    for _ in 0..100 {
+        let events = bob.process_dialog_events().await.expect("bob events");
+        for event in events {
+            if let TestUaEvent::IncomingCall(id, _offer) = event {
+                bob.send_ringing(&id, Some(bob_sdp.clone()))
+                    .await
+                    .expect("bob sends 183 with SDP");
+                bob_dialog = Some(id);
+                break;
+            }
+        }
+        if bob_dialog.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let bob_id = bob_dialog.expect("bob never received the originate INVITE");
+    bob.ring_call(&bob_id).await.expect("bob rings plain 180");
+
+    // Drain the tap: first `call_ringing` must carry early_media=true (the
+    // 183), the second early_media=false (the 180). No `call_early_media`
+    // event may appear.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut ringing_flags: Vec<bool> = Vec::new();
+    while ringing_flags.len() < 2 {
+        let entry = match tokio::time::timeout_at(deadline, tap.recv()).await {
+            Ok(Ok(entry)) => entry,
+            _ => break,
+        };
+        assert_ne!(
+            entry.event.event_type, "call_early_media",
+            "the separate call_early_media event type must be gone"
+        );
+        if entry.event.event_type == "call_ringing" {
+            let flag = entry.event.payload["early_media"].as_bool();
+            assert!(
+                flag.is_some(),
+                "call_ringing must carry a boolean early_media flag: {}",
+                entry.event.payload
+            );
+            ringing_flags.push(flag.unwrap());
+        }
+    }
+    assert_eq!(
+        ringing_flags,
+        vec![true, false],
+        "expected call_ringing(early_media=true) for the 183 then \
+         call_ringing(early_media=false) for the 180"
+    );
+
+    bob.hangup(&bob_id).await.expect("bob hangs up");
+    server.stop();
+}
+
 /// Failure release: when an agent originate rings (180 → cc_ringing, agent
 /// Idle → Ringing) and the customer then REJECTS (486), the originate setup
 /// loop must fire `on_call_ended` — the agent returns to Idle and a

@@ -5433,11 +5433,13 @@ impl SipSession {
                                 self.update_leg_state(&LegId::from("callee"), LegState::EarlyMedia);
 
                                 // Provisional response carried SDP — emit the
-                                // core early-media event and fire the ringing
-                                // session hooks with early_media = true (e.g.
-                                // the CC addon turns this into `cc_ringing`).
-                                self.emit_typed_rwi_event(&crate::rwi::CallEarlyMedia {
+                                // core ringing event with early_media = true and
+                                // fire the ringing session hooks with the same
+                                // flag (e.g. the CC addon turns this into
+                                // `cc_ringing`).
+                                self.emit_typed_rwi_event(&crate::rwi::CallRinging {
                                     call_id: self.context.session_id.clone(),
+                                    early_media: true,
                                 });
                                 if !self.server.session_hooks.is_empty() {
                                     let ctx = self.session_hook_ctx();
@@ -5509,6 +5511,7 @@ impl SipSession {
 
                             self.emit_typed_rwi_event(&crate::rwi::CallRinging {
                                 call_id: self.context.session_id.clone(),
+                                early_media: false,
                             });
 
                             // Fire on_call_ringing hooks (plain 180, no SDP)
@@ -9296,6 +9299,7 @@ impl SipSession {
                 }
                 self.emit_typed_rwi_event(&crate::rwi::CallRinging {
                     call_id: self.context.session_id.clone(),
+                    early_media: false,
                 });
                 CommandResult::success()
             }

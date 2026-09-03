@@ -118,6 +118,12 @@ rwi_event!(CallCreated, "call_created");
 #[derive(Debug, Clone, Serialize)]
 pub struct CallRinging {
     pub call_id: String,
+    /// `true` when the ringing provisional response carried SDP (183 Session
+    /// Progress or 180 with SDP — early media), `false` for a plain 180
+    /// Ringing. Emitted once per provisional response; consumers tell
+    /// ringback from early media by this flag instead of a separate event.
+    #[serde(default)]
+    pub early_media: bool,
 }
 rwi_event!(CallRinging, "call_ringing");
 
@@ -137,12 +143,6 @@ pub struct CallHangup {
     pub sip_status: Option<u16>,
 }
 rwi_event!(CallHangup, "call_hangup");
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CallEarlyMedia {
-    pub call_id: String,
-}
-rwi_event!(CallEarlyMedia, "call_early_media");
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CallNoAnswer {

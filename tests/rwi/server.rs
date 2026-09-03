@@ -667,6 +667,7 @@ async fn test_session_resume_returns_events() {
         let event1 = rustpbx::rwi::event::to_legacy_event(
             &rustpbx::rwi::CallRinging {
                 call_id: "test-call-1".to_string(),
+                early_media: false,
             },
             None,
         );
@@ -714,12 +715,14 @@ async fn test_call_resume_returns_call_specific_events() {
         let event1 = rustpbx::rwi::event::to_legacy_event(
             &rustpbx::rwi::CallRinging {
                 call_id: "call-a".to_string(),
+                early_media: false,
             },
             None,
         );
         let event2 = rustpbx::rwi::event::to_legacy_event(
             &rustpbx::rwi::CallRinging {
                 call_id: "call-b".to_string(),
+                early_media: false,
             },
             None,
         );

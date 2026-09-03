@@ -55,6 +55,7 @@ async fn test_full_session_resume_flow() {
                 "resume-test",
                 &rustpbx::rwi::CallRinging {
                     call_id: "resume-call-1".to_string(),
+                    early_media: false,
                 },
             );
             gw.fan_out(
@@ -137,6 +138,7 @@ async fn test_call_resume_filters_by_call_id() {
             &rustpbx::rwi::event::to_legacy_event(
                 &rustpbx::rwi::CallRinging {
                     call_id: "call-a".to_string(),
+                    early_media: false,
                 },
                 None,
             ),
@@ -157,6 +159,7 @@ async fn test_call_resume_filters_by_call_id() {
             &rustpbx::rwi::event::to_legacy_event(
                 &rustpbx::rwi::CallRinging {
                     call_id: "call-b".to_string(),
+                    early_media: false,
                 },
                 None,
             ),
