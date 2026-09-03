@@ -121,6 +121,12 @@ SIP 401 behind NAT/Docker — set the realm explicitly:
 realms = ["your-public-ip:5060"]
 ```
 
+## Contributors
+
+Led by [@shenjinti](https://github.com/shenjinti), with contributions from:
+
+yeoleobun · elliottjiang · liu zhen · autopeasant · Gonzalo Ruiz · zhouhailin · fluffy1781 · v0l (Kieran) · davidcforbes · deweydb · [@umran](https://github.com/umran) · Tyson George
+
 ## License
 
 Community: MIT · Commercial: [hi@miuda.ai](mailto:hi@miuda.ai) · **https://miuda.ai**
