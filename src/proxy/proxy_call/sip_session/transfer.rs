@@ -500,8 +500,7 @@ impl SipSession {
             .legs
             .iter()
             .filter(|(id, leg)| {
-                id.as_str() != "caller"
-                    && matches!(leg.state, LegState::Connected | LegState::Hold)
+                id.as_str() != "caller" && matches!(leg.state, LegState::Connected | LegState::Hold)
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -631,17 +630,18 @@ impl SipSession {
             } => {
                 info!(session_id = %self.id, %leg_id, endpoint = %endpoint, sample_rate, codec = %codec, ?return_app, ?trace_context, "Handling Bridge transfer");
                 self.meta.transferred = true;
-                let result = self.connect_bridge(
-                    leg_id,
-                    endpoint.clone(),
-                    headers.clone(),
-                    sample_rate,
-                    codec.clone(),
-                    timeout_ms,
-                    return_app.clone(),
-                    trace_context.clone(),
-                )
-                .await;
+                let result = self
+                    .connect_bridge(
+                        leg_id,
+                        endpoint.clone(),
+                        headers.clone(),
+                        sample_rate,
+                        codec.clone(),
+                        timeout_ms,
+                        return_app.clone(),
+                        trace_context.clone(),
+                    )
+                    .await;
                 // Setup is finished here; media forwarding keeps running on
                 // the session. Use the existing asynchronous result channel.
                 self.emit_refer_event(

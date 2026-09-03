@@ -939,7 +939,11 @@ async fn iceservers_handler(State(config): State<Arc<Config>>) -> Response {
         Ok(servers) => Json(servers).into_response(),
         Err(error) => {
             warn!(%error, "Invalid TURN REST configuration");
-            (StatusCode::INTERNAL_SERVER_ERROR, "Invalid TURN REST configuration").into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Invalid TURN REST configuration",
+            )
+                .into_response()
         }
     };
     // These responses can contain expiring credentials, including on failure.
@@ -1128,7 +1132,8 @@ mod ice_servers_tests {
 
     #[tokio::test]
     async fn test_turn_rest_ice_servers_http_response() {
-        let config: Config = toml::from_str(r#"
+        let config: Config = toml::from_str(
+            r#"
             [[ice_servers]]
             urls = ["stun:example.com:3478"]
             [[ice_servers]]
@@ -1138,12 +1143,31 @@ mod ice_servers_tests {
             lifetime = 120
             [proxy]
             addr = "127.0.0.1"
-        "#).unwrap();
-        let before = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-        let app = Router::new().route("/iceservers", get(iceservers_handler).with_state(Arc::new(config)));
-        let response = app.oneshot(Request::builder().uri("/iceservers").body(Body::empty()).unwrap()).await.unwrap();
+        "#,
+        )
+        .unwrap();
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let app = Router::new().route(
+            "/iceservers",
+            get(iceservers_handler).with_state(Arc::new(config)),
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/iceservers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[axum::http::header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            response.headers()[axum::http::header::CACHE_CONTROL],
+            "no-store"
+        );
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         let text = std::str::from_utf8(&body).unwrap();
         assert!(!text.contains("server-only-secret"));
@@ -1152,8 +1176,16 @@ mod ice_servers_tests {
         let servers: Vec<rustrtc::IceServer> = serde_json::from_slice(&body).unwrap();
         assert_eq!(servers.len(), 2);
         assert_eq!(servers[0].urls, vec!["stun:example.com:3478"]);
-        let (expires, user) = servers[1].username.as_ref().unwrap().split_once(':').unwrap();
-        let after = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let (expires, user) = servers[1]
+            .username
+            .as_ref()
+            .unwrap()
+            .split_once(':')
+            .unwrap();
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         assert!((before + 120..=after + 120).contains(&expires.parse::<u64>().unwrap()));
         assert_eq!(user, "agent");
         let credential = servers[1].credential.as_ref().unwrap();
@@ -1163,16 +1195,22 @@ mod ice_servers_tests {
 
     #[tokio::test]
     async fn test_turn_rest_ice_servers_http_invalid_config() {
-        let config: Config = toml::from_str(r#"
+        let config: Config = toml::from_str(
+            r#"
             [[ice_servers]]
             urls = []
             secrete = "server-only-secret"
             [proxy]
             addr = "127.0.0.1"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let response = iceservers_handler(State(Arc::new(config))).await;
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(response.headers()[axum::http::header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            response.headers()[axum::http::header::CACHE_CONTROL],
+            "no-store"
+        );
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         assert_eq!(&body[..], b"Invalid TURN REST configuration");
     }

@@ -1501,8 +1501,14 @@ impl SipServer {
                             .and_then(|conn| conn.get_remote_addr())
                             .and_then(crate::proxy::routing::source_addr_ip);
                         let from_trusted_proxy = source_ip.is_some_and(|ip| {
-                            self.inner.proxy_config.load().trusted_proxies.iter()
-                                .filter_map(|proxy| crate::proxy::routing::parse_trusted_proxy(proxy))
+                            self.inner
+                                .proxy_config
+                                .load()
+                                .trusted_proxies
+                                .iter()
+                                .filter_map(|proxy| {
+                                    crate::proxy::routing::parse_trusted_proxy(proxy)
+                                })
                                 .any(|network| network.contains(&ip))
                         });
                         let is_trunk = if let Some(ref ip) = via_ip {

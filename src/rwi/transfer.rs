@@ -766,20 +766,51 @@ mod tests {
         let mut commands = register_talking_call(&registry, call_id);
         let mut events = ctrl.gateway.read().subscribe_events();
         for index in 0..1001 {
-            let tx = ctrl.execute_blind_transfer(call_id.into(), target.into()).await.unwrap();
-            assert!(matches!(commands.try_recv().unwrap(), CallCommand::Transfer { .. }));
-            assert!(ctrl.transactions.contains_key(&tx.transfer_id), "dispatch is not completion");
-            assert_eq!(events.try_recv().unwrap().event.event_type, "call_transfer_accepted");
+            let tx = ctrl
+                .execute_blind_transfer(call_id.into(), target.into())
+                .await
+                .unwrap();
+            assert!(matches!(
+                commands.try_recv().unwrap(),
+                CallCommand::Transfer { .. }
+            ));
+            assert!(
+                ctrl.transactions.contains_key(&tx.transfer_id),
+                "dispatch is not completion"
+            );
+            assert_eq!(
+                events.try_recv().unwrap().event.event_type,
+                "call_transfer_accepted"
+            );
             let status = if index % 2 == 0 { 200 } else { 500 };
-            let finished = ctrl.handle_notify_by_call_id(call_id, status).await.unwrap();
+            let finished = ctrl
+                .handle_notify_by_call_id(call_id, status)
+                .await
+                .unwrap();
             assert_eq!(finished.transfer_id, tx.transfer_id);
             assert!(ctrl.transactions.is_empty());
-            assert_eq!(events.try_recv().unwrap().event.event_type,
-                if status == 200 { "call_transferred" } else { "call_transfer_failed" });
-            assert!(ctrl.handle_notify_by_call_id(call_id, status).await.is_none());
-            assert!(events.try_recv().is_err(), "no duplicate result after removal");
+            assert_eq!(
+                events.try_recv().unwrap().event.event_type,
+                if status == 200 {
+                    "call_transferred"
+                } else {
+                    "call_transfer_failed"
+                }
+            );
+            assert!(
+                ctrl.handle_notify_by_call_id(call_id, status)
+                    .await
+                    .is_none()
+            );
+            assert!(
+                events.try_recv().is_err(),
+                "no duplicate result after removal"
+            );
         }
-        assert!(registry.get(call_id).is_some(), "cleanup must preserve the active call");
+        assert!(
+            registry.get(call_id).is_some(),
+            "cleanup must preserve the active call"
+        );
     }
 
     #[tokio::test]
@@ -788,9 +819,18 @@ mod tests {
         let _commands = register_talking_call(&registry, "call");
         let _other_commands = register_talking_call(&registry, "other-call");
         let _sip_commands = register_talking_call(&registry, "sip-call");
-        let bridge = ctrl.initiate_blind_transfer("call".into(), "bridge:ws://peer".into()).await.unwrap();
-        let other = ctrl.initiate_blind_transfer("other-call".into(), "bridge:ws://other".into()).await.unwrap();
-        let sip = ctrl.initiate_blind_transfer("sip-call".into(), "sip:target@local".into()).await.unwrap();
+        let bridge = ctrl
+            .initiate_blind_transfer("call".into(), "bridge:ws://peer".into())
+            .await
+            .unwrap();
+        let other = ctrl
+            .initiate_blind_transfer("other-call".into(), "bridge:ws://other".into())
+            .await
+            .unwrap();
+        let sip = ctrl
+            .initiate_blind_transfer("sip-call".into(), "sip:target@local".into())
+            .await
+            .unwrap();
 
         for status in [100, 180, 183] {
             ctrl.handle_notify_by_call_id("call", status).await.unwrap();
@@ -803,25 +843,47 @@ mod tests {
         assert!(ctrl.transactions.contains_key(&other.transfer_id));
         assert!(ctrl.transactions.contains_key(&sip.transfer_id));
 
-        let failed = ctrl.handle_notify_by_call_id("other-call", 500).await.unwrap();
+        let failed = ctrl
+            .handle_notify_by_call_id("other-call", 500)
+            .await
+            .unwrap();
         assert_eq!(failed.transfer_id, other.transfer_id);
-        assert_eq!(failed.status, TransferStatus::Failed(TransferFailureReason::ReferRejected));
+        assert_eq!(
+            failed.status,
+            TransferStatus::Failed(TransferFailureReason::ReferRejected)
+        );
         assert!(!ctrl.transactions.contains_key(&other.transfer_id));
         assert!(ctrl.transactions.contains_key(&sip.transfer_id));
         assert_eq!(ctrl.transactions.len(), 1);
 
-        ctrl.handle_refer_response_by_call_id("sip-call", 202).await.unwrap();
+        ctrl.handle_refer_response_by_call_id("sip-call", 202)
+            .await
+            .unwrap();
         assert!(ctrl.transactions.contains_key(&sip.transfer_id));
-        ctrl.handle_notify_by_call_id("sip-call", 180).await.unwrap();
+        ctrl.handle_notify_by_call_id("sip-call", 180)
+            .await
+            .unwrap();
         assert!(ctrl.transactions.contains_key(&sip.transfer_id));
-        let completed = ctrl.handle_notify_by_call_id("sip-call", 200).await.unwrap();
+        let completed = ctrl
+            .handle_notify_by_call_id("sip-call", 200)
+            .await
+            .unwrap();
         assert_eq!(completed.status, TransferStatus::Completed);
         assert!(ctrl.transactions.is_empty());
 
-        let rejected = ctrl.initiate_blind_transfer("sip-call".into(), "sip:target@local".into()).await.unwrap();
-        let failed = ctrl.handle_notify_by_call_id("sip-call", 486).await.unwrap();
+        let rejected = ctrl
+            .initiate_blind_transfer("sip-call".into(), "sip:target@local".into())
+            .await
+            .unwrap();
+        let failed = ctrl
+            .handle_notify_by_call_id("sip-call", 486)
+            .await
+            .unwrap();
         assert_eq!(failed.transfer_id, rejected.transfer_id);
-        assert_eq!(failed.status, TransferStatus::Failed(TransferFailureReason::ReferRejected));
+        assert_eq!(
+            failed.status,
+            TransferStatus::Failed(TransferFailureReason::ReferRejected)
+        );
         assert!(ctrl.transactions.is_empty());
     }
 
@@ -840,9 +902,11 @@ mod tests {
         for index in 0..1001 {
             let (target, replaces) = cases[index % cases.len()];
             let result = if replaces {
-                ctrl.execute_replace_transfer("closed".into(), target.into()).await
+                ctrl.execute_replace_transfer("closed".into(), target.into())
+                    .await
             } else {
-                ctrl.execute_blind_transfer("closed".into(), target.into()).await
+                ctrl.execute_blind_transfer("closed".into(), target.into())
+                    .await
             };
             assert!(matches!(result, Err(TransferFailureReason::InternalError)));
             assert!(ctrl.transactions.is_empty());

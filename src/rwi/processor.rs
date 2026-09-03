@@ -3259,7 +3259,9 @@ mod tests {
         let (closed_tx, closed_rx) = tokio::sync::mpsc::unbounded_channel();
         drop(closed_rx);
         server.transfer_notify_subscribers.lock().await.extend([
-            first_tx.clone(), second_tx.clone(), closed_tx,
+            first_tx.clone(),
+            second_tx.clone(),
+            closed_tx,
         ]);
         let first = TransferNotifyListener {
             server: server.clone(),
@@ -3282,12 +3284,14 @@ mod tests {
                     if subscribers.len() == remaining {
                         if remaining == 1 {
                             assert!(subscribers[0].same_channel(&second_tx));
-                            subscribers[0].send(ReferNotifyEvent {
-                                call_id: "remaining-call".into(),
-                                sip_status: 200,
-                                reason: None,
-                                event_type: ReferNotifyEventType::Notify,
-                            }).unwrap();
+                            subscribers[0]
+                                .send(ReferNotifyEvent {
+                                    call_id: "remaining-call".into(),
+                                    sip_status: 200,
+                                    reason: None,
+                                    event_type: ReferNotifyEventType::Notify,
+                                })
+                                .unwrap();
                             assert_eq!(second_rx.try_recv().unwrap().call_id, "remaining-call");
                         }
                         break;
@@ -3295,7 +3299,9 @@ mod tests {
                     drop(subscribers);
                     tokio::task::yield_now().await;
                 }
-            }).await.expect("drop must remove its sender without another registration");
+            })
+            .await
+            .expect("drop must remove its sender without another registration");
         }
     }
 }

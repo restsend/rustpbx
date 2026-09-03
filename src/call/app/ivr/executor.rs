@@ -5586,7 +5586,9 @@ mod tests {
         let sess = &sessions[0];
         let entries = trace.query_by_session(&sess.session_id).await;
         assert!(
-            entries.iter().any(|e| e.trigger.r#type == "dtmf_menu_invalid"),
+            entries
+                .iter()
+                .any(|e| e.trigger.r#type == "dtmf_menu_invalid"),
             "expected a dtmf_menu_invalid entry in the trace"
         );
         assert!(

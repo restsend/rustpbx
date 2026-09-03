@@ -1916,8 +1916,11 @@ impl Config {
             // Shared-secret entries are issued on demand for browsers. Avoid
             // caching expiring credentials in the PBX's long-lived RTP config.
             ice_servers: self.ice_servers.as_ref().map(|servers| {
-                servers.iter().filter(|entry| entry.secrete.is_none())
-                    .map(|entry| entry.server.clone()).collect()
+                servers
+                    .iter()
+                    .filter(|entry| entry.secrete.is_none())
+                    .map(|entry| entry.server.clone())
+                    .collect()
             }),
             comfort_noise: media
                 .map(|m| m.comfort_noise)
@@ -1945,7 +1948,10 @@ impl Config {
             let user = turn.username.as_deref().unwrap_or("rustpbx");
             let lifetime = entry.lifetime.unwrap_or(3600);
             anyhow::ensure!(!secret.is_empty(), "ice_servers.secrete must not be empty");
-            anyhow::ensure!(turn.credential.is_none(), "ice_servers cannot combine secrete and credential");
+            anyhow::ensure!(
+                turn.credential.is_none(),
+                "ice_servers cannot combine secrete and credential"
+            );
             anyhow::ensure!(
                 turn.credential_type == rustrtc::IceCredentialType::Password,
                 "ice_servers.secrete requires password credentials"
@@ -1964,7 +1970,8 @@ impl Config {
                 "ice_servers with secrete require a nonempty username suffix without a colon"
             );
             anyhow::ensure!(lifetime > 0, "ice_servers.lifetime must be positive");
-            let expires = now.checked_add(lifetime)
+            let expires = now
+                .checked_add(lifetime)
                 .ok_or_else(|| anyhow::anyhow!("ice_servers.lifetime overflows expiry"))?;
             let username = format!("{}:{}", expires, user);
             let mut mac = Hmac::<sha1::Sha1>::new_from_slice(secret.as_bytes())?;
@@ -2106,7 +2113,8 @@ mod tests {
 
     #[test]
     fn test_turn_rest_ice_servers_match_miuturn() {
-        let config: Config = toml::from_str(r#"
+        let config: Config = toml::from_str(
+            r#"
             [[ice_servers]]
             urls = ["stun:stun.example.com:3478"]
             [[ice_servers]]
@@ -2123,20 +2131,40 @@ mod tests {
             lifetime = 120
             [proxy]
             addr = "127.0.0.1"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let servers = config.browser_ice_servers(4_102_441_200).unwrap();
         assert_eq!(servers.len(), 4);
-        assert_eq!(servers[0], IceServer::new(vec!["stun:stun.example.com:3478".to_string()]));
-        assert_eq!(servers[2], IceServer::new(vec!["turn:static.example.com:3478".to_string()])
-            .with_credential("static-user", "static-password"));
-        assert_eq!(servers[1].urls, vec!["turn:turn.example.com:3478", "turns:turn.example.com:5349"]);
+        assert_eq!(
+            servers[0],
+            IceServer::new(vec!["stun:stun.example.com:3478".to_string()])
+        );
+        assert_eq!(
+            servers[2],
+            IceServer::new(vec!["turn:static.example.com:3478".to_string()])
+                .with_credential("static-user", "static-password")
+        );
+        assert_eq!(
+            servers[1].urls,
+            vec!["turn:turn.example.com:3478", "turns:turn.example.com:5349"]
+        );
         assert_eq!(servers[1].username.as_deref(), Some("4102444800:rustpbx"));
         // Independent HMAC-SHA1 test vector, also checked by miuturn's auth test.
-        assert_eq!(servers[1].credential.as_deref(), Some("+dOIp7n9DHzIT8uNfVz8tNFZoLs="));
+        assert_eq!(
+            servers[1].credential.as_deref(),
+            Some("+dOIp7n9DHzIT8uNfVz8tNFZoLs=")
+        );
         assert_eq!(servers[3].urls, vec!["turn:second.example.com:3478"]);
         assert_eq!(servers[3].username.as_deref(), Some("4102441320:agent"));
-        assert_eq!(servers[3].credential.as_deref(), Some("N0aMpuJsuGx1vnor9b2IygKfbeE="));
-        assert_eq!(config.rtp_config().ice_servers, Some(vec![servers[0].clone(), servers[2].clone()]));
+        assert_eq!(
+            servers[3].credential.as_deref(),
+            Some("N0aMpuJsuGx1vnor9b2IygKfbeE=")
+        );
+        assert_eq!(
+            config.rtp_config().ice_servers,
+            Some(vec![servers[0].clone(), servers[2].clone()])
+        );
         let refreshed = config.browser_ice_servers(4_102_441_201).unwrap();
         assert_eq!(refreshed[1].username.as_deref(), Some("4102444801:rustpbx"));
         assert_ne!(refreshed[1].credential, servers[1].credential);
@@ -2146,7 +2174,10 @@ mod tests {
         let saved = toml::to_string(&config).unwrap();
         assert!(!saved.contains("turn_rest"));
         let restored: Config = toml::from_str(&saved).unwrap();
-        assert_eq!(restored.browser_ice_servers(4_102_441_200).unwrap(), servers);
+        assert_eq!(
+            restored.browser_ice_servers(4_102_441_200).unwrap(),
+            servers
+        );
     }
 
     #[test]
@@ -2154,7 +2185,8 @@ mod tests {
         let config = Config::default();
         assert!(config.browser_ice_servers(0).unwrap().is_empty());
         assert!(config.rtp_config().ice_servers.is_none());
-        let config: Config = toml::from_str(r#"
+        let config: Config = toml::from_str(
+            r#"
             [[ice_servers]]
             urls = ["stun:stun.example.com:3478"]
             [[ice_servers]]
@@ -2164,7 +2196,9 @@ mod tests {
             credential_type = "oauth"
             [proxy]
             addr = "127.0.0.1"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let expected = vec![
             IceServer::new(vec!["stun:stun.example.com:3478".to_string()]),
             IceServer::new(vec!["turn:static.example.com:3478".to_string()])
@@ -2184,8 +2218,16 @@ mod tests {
             lifetime = 120
         "#;
         let turn: IceServerConfig = toml::from_str(settings).unwrap();
-        let mut config = Config { ice_servers: Some(vec![turn]), ..Config::default() };
-        assert_eq!(config.browser_ice_servers(1000).unwrap()[0].username.as_deref(), Some("1120:agent"));
+        let mut config = Config {
+            ice_servers: Some(vec![turn]),
+            ..Config::default()
+        };
+        assert_eq!(
+            config.browser_ice_servers(1000).unwrap()[0]
+                .username
+                .as_deref(),
+            Some("1120:agent")
+        );
         assert_eq!(config.rtp_config().ice_servers, Some(vec![]));
         assert!(config.browser_ice_servers(u64::MAX).is_err());
         for invalid_setting in [

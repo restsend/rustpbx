@@ -9466,9 +9466,7 @@ impl SipSession {
                 // this point (the queue app exits at agent connect, and the
                 // consult leg carries its own media peer) — the CC layer
                 // blocks transfer merge/complete until this fires.
-                if leg_id == LegId::from("consult")
-                    && !self.server.session_hooks.is_empty()
-                {
+                if leg_id == LegId::from("consult") && !self.server.session_hooks.is_empty() {
                     let ctx = self.session_hook_ctx();
                     for hook in self.server.session_hooks.iter() {
                         hook.on_call_connected(&ctx).await;

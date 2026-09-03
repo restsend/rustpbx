@@ -170,7 +170,11 @@ async fn test_options_from_trusted_proxy_gets_200_ok() -> Result<()> {
         let status = send_options(&server_addr, client_port).await?;
         server.stop();
 
-        assert_eq!(status, Some(200), "OPTIONS from {trusted_proxy} should get 200 OK without a trunk");
+        assert_eq!(
+            status,
+            Some(200),
+            "OPTIONS from {trusted_proxy} should get 200 OK without a trunk"
+        );
     }
     Ok(())
 }

@@ -72,11 +72,11 @@ async fn step_provider_waits_for_configured_retry_delay() {
 
     let provider = StepProvider::new(format!("http://{addr}/ivr/step"), reqwest::Client::new())
         .with_retry(RetryConfig {
-        max_retries: 2,
-        timeout_ms: 1_000,
-        retry_delay_ms: 250,
-        fallback_action: None,
-    });
+            max_retries: 2,
+            timeout_ms: 1_000,
+            retry_delay_ms: 250,
+            fallback_action: None,
+        });
     let context = ProviderContext {
         session_id: "retry-delay-test".into(),
         app_execution_id: 1,
