@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RustPBX - Secure Software-Defined PBX</title>
+    <title>RustPBX - AI-Native Software-Defined PBX</title>
     <style>
         :root {
             --primary: #f06529;
@@ -179,6 +179,41 @@
             color: #75715e;
         }
 
+        code.inline {
+            display: inline;
+            padding: 2px 6px;
+            margin: 0;
+            background: rgba(240, 101, 41, 0.12);
+            color: var(--primary-dark);
+            border-radius: 4px;
+            white-space: nowrap;
+            word-break: normal;
+        }
+
+        .programmable {
+            padding: 60px 0;
+            background-color: var(--white);
+        }
+
+        .interface-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 30px;
+            margin-top: 40px;
+        }
+
+        .interface-card {
+            background: var(--bg);
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+        }
+
+        .interface-card h3 {
+            color: var(--primary);
+            margin-top: 0;
+        }
+
         footer {
             background-color: var(--secondary);
             color: var(--white);
@@ -257,6 +292,7 @@
             </a>
             <nav>
                 <a href="#features">Features</a>
+                <a href="#programmable">API</a>
                 <a href="#screenshots">Screenshots</a>
                 <a href="https://github.com/restsend/rustpbx">GitHub</a>
                 <a href="https://miuda.ai/?from=rustpbx.com">By Miuda.ai</a>
@@ -267,9 +303,9 @@
 
     <section class="hero">
         <div class="container">
-            <h1>Secure Software-Defined PBX</h1>
-            <p>A high-performance SIP PBX implemented in Rust, designed for modern communication pipelines and
-                AI-powered voice applications.</p>
+            <h1>The AI-Native, Software-Defined PBX</h1>
+            <p>A high-performance SIP PBX built in Rust. All call control is externalized via HTTP/WebSocket/Webhook —
+                routing, media control, and events are programmable in any language. No C modules, no recompilation.</p>
             <a href="https://github.com/restsend/rustpbx" class="btn">Get Started on GitHub</a>
         </div>
     </section>
@@ -302,6 +338,11 @@
                     <p>SIP Message Flow Analysis</p>
                 </div>
                 <div class="screenshot-item">
+                    <img src="https://raw.githubusercontent.com/restsend/rustpbx/main/docs/screenshots/call-detail-transcript.png"
+                        alt="Call Transcription">
+                    <p>Live Call Transcription</p>
+                </div>
+                <div class="screenshot-item">
                     <img src="https://raw.githubusercontent.com/restsend/rustpbx/main/docs/screenshots/web-dailer.png"
                         alt="Web Dialer">
                     <p>Integrated Web Dialer</p>
@@ -311,6 +352,51 @@
                         alt="Settings">
                     <p>System Configuration</p>
                 </div>
+                <div class="screenshot-item">
+                    <img src="https://raw.githubusercontent.com/restsend/rustpbx/main/docs/screenshots/metrics.png"
+                        alt="Metrics">
+                    <p>Prometheus Metrics Dashboard</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section id="programmable" class="programmable">
+        <div class="container">
+            <div class="section-title">
+                <h2>Programmable by Design</h2>
+                <p>Call control is externalized — build your telephony logic in any language.</p>
+            </div>
+            <div class="interface-grid">
+                <div class="interface-card">
+                    <h3>HTTP Router</h3>
+                    <p>Every incoming INVITE calls your webhook. Return JSON to decide routing:</p>
+                    <code><span class="code-comment">// RustPBX POSTs to your webhook</span>
+{ "call_id": "abc-123",
+  "from": "sip:+861390000@trunk",
+  "to": "sip:400800" }
+
+<span class="code-comment">// Your response decides what happens</span>
+{ "action": "forward",
+  "targets": ["sip:1001@internal"],
+  "record": true }</code>
+                    <p>Actions: <code class="inline">forward</code> · <code class="inline">reject</code> · <code
+                            class="inline">abort</code> · <code class="inline">spam</code></p>
+                </div>
+                <div class="interface-card">
+                    <h3>RWI — Real-time WebSocket Interface</h3>
+                    <p>JSON-over-WebSocket for live call control:</p>
+                    <code><span class="code-comment">// In-call commands</span>
+originate · answer · hangup · bridge
+transfer · play · record.start
+
+<span class="code-comment">// Contact center &amp; supervision</span>
+queue / ACD commands
+supervisor: listen · whisper · barge
+conference commands · and more</code>
+                    <p>Read the <a href="https://github.com/restsend/rustpbx/blob/main/docs/rwi.md">RWI protocol
+                            docs</a>.</p>
+                </div>
             </div>
         </div>
     </section>
@@ -319,7 +405,7 @@
         <div class="container">
             <div class="section-title">
                 <h2>Why Choose RustPBX?</h2>
-                <p>Modern telephony, simplified. Built for reliability, speed, and ease of use.</p>
+                <p>Everything you need to run modern telephony — from SIP trunking to AI-powered calls.</p>
             </div>
             <div class="feature-grid">
                 <div class="feature-card highlighted">
@@ -332,19 +418,47 @@
                     <p>Apply configuration changes instantly with one click. Supports seamless hot-reloading to keep
                         your business running.</p>
                 </div>
+                <div class="feature-card highlighted">
+                    <h3>AI-Native Calls</h3>
+                    <p>AI agents join calls as native participants — listen, speak with barge-in, and transfer, all
+                        driven over WebSocket.</p>
+                </div>
                 <div class="feature-card">
                     <h3>High Performance</h3>
-                    <p>Leveraging Rust's concurrency and memory safety for a rock-solid SIP core that scales
-                        horizontally.</p>
+                    <p>Rust's concurrency and memory safety for a rock-solid SIP core: 5,000 concurrent calls with RTP
+                        relay on ~3.8 cores, with linear scaling.</p>
                 </div>
                 <div class="feature-card">
                     <h3>Full SIP Stack</h3>
-                    <p>Complete proxy server with registration, authentication, and routing. Supports UDP, TCP, and
-                        WebSocket.</p>
+                    <p>Complete proxy server with registration, authentication, and routing. Supports UDP, TCP,
+                        WebSocket, and TLS with SRTP encryption.</p>
                 </div>
                 <div class="feature-card">
                     <h3>Media Proxying</h3>
-                    <p>Advanced RTP/RTCP proxying with NAT traversal and built-in call recording capabilities.</p>
+                    <p>Advanced RTP relay &amp; transcoding, NAT traversal, and built-in call recording capabilities.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Call Center &amp; ACD</h3>
+                    <p>Built-in contact center: agent state machine, skill-based routing with 5 distribution strategies,
+                        queues with overflow policies, and supervisor listen/whisper/barge.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Transcription</h3>
+                    <p>Offline transcription with SenseVoice and live transcripts via SSE — search and analyze every
+                        conversation.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>SipFlow Capture</h3>
+                    <p>Unified SIP + RTP capture with visual message flow analysis for fast troubleshooting.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Auto TLS (ACME)</h3>
+                    <p>Automatic certificate provisioning via ACME. Secure TLS/SIP and WSS out of the box.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Observability</h3>
+                    <p>Prometheus metrics, OpenTelemetry tracing, RBAC, and CDR webhooks for your billing and analytics
+                        pipelines.</p>
                 </div>
                 <div class="feature-card">
                     <h3>WebRTC Ready</h3>
@@ -370,16 +484,23 @@
         <div class="container">
             <div class="section-title">
                 <h2>Quick Start with Docker</h2>
-                <p>Get up and running in seconds.</p>
+                <p>Get up and running in minutes.</p>
             </div>
-            <code><span class="code-comment"># Just run the latest community image</span>
-docker run -d \
-  --name rustpbx \
-  --net host \
-  -v $(pwd)/db:/app/db \
-  ghcr.io/restsend/rustpbx:latest</code>
-            <p style="text-align: center;">Visit <a
-                    href="http://localhost:8080/console">http://localhost:8080/console</a> after launching.</p>
+            <code><span class="code-comment"># 1. Download the example config</span>
+curl -O https://raw.githubusercontent.com/restsend/rustpbx/main/config.toml.example
+
+<span class="code-comment"># 2. Start RustPBX with the config mounted</span>
+docker run -d --name rustpbx --net host \
+  -v $(pwd)/config.toml.example:/app/config.toml \
+  ghcr.io/restsend/rustpbx:latest --conf /app/config.toml
+
+<span class="code-comment"># 3. Create the admin account (first time only)</span>
+docker exec rustpbx /app/rustpbx --conf /app/config.toml \
+  --super-username admin --super-password changeme</code>
+            <p style="text-align: center;">Then visit <a
+                    href="http://localhost:8080/console/">http://localhost:8080/console/</a> and sign in. Default test
+                extensions: <code class="inline">bob</code> / <code class="inline">alice</code> (password <code
+                    class="inline">123456</code>).</p>
         </div>
     </section>
 
@@ -389,7 +510,9 @@ docker run -d \
             <div class="footer-links">
                 <a href="https://github.com/restsend/rustpbx">GitHub</a>
                 <a href="https://github.com/restsend/rustpbx/blob/main/LICENSE">License</a>
-                <a href="https://github.com/restsend/rustpbx/tree/main/docs">Documentation</a>
+                <a href="https://github.com/restsend/rustpbx/blob/main/docs/configuration.md">Configuration</a>
+                <a href="https://github.com/restsend/rustpbx/blob/main/docs/api_integration_guide.md">API Guide</a>
+                <a href="https://github.com/restsend/rustpbx/blob/main/docs/rwi.md">RWI Protocol</a>
             </div>
         </div>
     </footer>

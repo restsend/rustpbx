@@ -77,6 +77,14 @@ pub trait Locator: Send + Sync {
         is_local_realm(realm)
     }
     fn set_realm_checker(&self, _checker: RealmChecker) {}
+    /// Attach an optional event sender so the backend can report bindings it
+    /// removes on its own (e.g. expired rows pruned during `lookup`).
+    ///
+    /// Backends must NOT emit events for register / unregister /
+    /// `unregister_with_address` / `sweep_expired` — those are already emitted
+    /// by the registrar, [`TransportInspectorLocator`] and the sweep task in
+    /// `server.rs`; emitting there as well would produce duplicates.
+    fn set_event_sender(&self, _sender: Option<LocatorEventSender>) {}
     async fn register(&self, username: &str, realm: Option<&str>, location: Location)
     -> Result<()>;
     async fn has_active_bindings(&self, username: &str, realm: Option<&str>) -> Result<bool>;

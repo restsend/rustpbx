@@ -912,6 +912,9 @@ impl SipServerBuilder {
             let (tx, _) = tokio::sync::broadcast::channel(12);
             tx
         });
+        // Let the backend report bindings it removes on its own (e.g. expired
+        // rows pruned during `lookup`) as LocatorEvent::Offline.
+        locator.set_event_sender(Some(locator_events.clone()));
 
         let locator_local_addrs = endpoint_local_addrs;
         let cluster_enabled = !self.cluster_peers.is_empty();

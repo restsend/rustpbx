@@ -520,6 +520,23 @@ impl LegInner {
         // Attach immediately when the transport object becomes available.
         self.ensure_observer();
 
+        // RTP-mode transports bind to the SDP-declared media address, which a
+        // NAT'd peer cannot receive on (its SDP carries a private/reflexive
+        // address). Honor the leg's latching config so egress follows the
+        // observed packet source instead (symmetric RTP); WebRTC legs resolve
+        // their address via ICE and are excluded.
+        if self.pc.config().transport_mode == rustrtc::TransportMode::Rtp
+            && self.pc.config().enable_latching
+        {
+            for transceiver in self.pc.get_transceivers() {
+                if let Some(sender) = transceiver.sender()
+                    && let Some(transport) = sender.transport()
+                {
+                    transport.ice_conn().enable_latch_on_rtp();
+                }
+            }
+        }
+
         let local_sdp = if sdp_type == SdpType::Offer {
             // rustrtc gathering pattern: the first create_answer primes ICE
             // gathering; wait for candidates, then the second includes them.
@@ -1014,6 +1031,34 @@ impl rustrtc::peer_connection::RtpObserver for OutboundClockSync {
 }
 
 const WEBRTC_RELAY_READY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Transports attach asynchronously relative to relay arming (a WebRTC
+/// destination's SRTP transport appears right after `wait_for_connected`);
+/// retry this long before degrading the relay to transcoding. Mirrors the
+/// RTCP forwarder's bounded wait.
+const RTP_TRANSPORT_READY_ATTEMPTS: usize = 50;
+const RTP_TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Resolve one leg transport, retrying while it is still being attached.
+async fn wait_rtp_transport(
+    pc: &PeerConnection,
+    kind: rustrtc::MediaKind,
+    role: &str,
+) -> Result<Arc<rustrtc::transports::rtp::RtpTransport>> {
+    let mut last: Option<Arc<rustrtc::transports::rtp::RtpTransport>> = None;
+    for _ in 0..=RTP_TRANSPORT_READY_ATTEMPTS {
+        last = rtp_transport_for_kind(pc, kind);
+        if last.is_some() {
+            return Ok(last.expect("checked above"));
+        }
+        tokio::time::sleep(RTP_TRANSPORT_RETRY_INTERVAL).await;
+    }
+    Err(anyhow!(
+        "{} {:?} RTP transport missing after {}ms",
+        role,
+        kind,
+        (RTP_TRANSPORT_READY_ATTEMPTS as u64) * RTP_TRANSPORT_RETRY_INTERVAL.as_millis() as u64
+    ))
+}
 
 async fn wait_and_arm_rewrite_relay(
     source_pc: &PeerConnection,
@@ -1038,10 +1083,9 @@ async fn wait_and_arm_rewrite_relay(
 
     let options = seed_rewrite_options_from_destination(destination_pc, rules, options);
 
-    let audio_source = rtp_transport_for_kind(source_pc, rustrtc::MediaKind::Audio)
-        .ok_or_else(|| anyhow!("source audio RTP transport missing"))?;
-    let audio_target = rtp_transport_for_kind(destination_pc, rustrtc::MediaKind::Audio)
-        .ok_or_else(|| anyhow!("destination audio RTP transport missing"))?;
+    let audio_source = wait_rtp_transport(source_pc, rustrtc::MediaKind::Audio, "source").await?;
+    let audio_target =
+        wait_rtp_transport(destination_pc, rustrtc::MediaKind::Audio, "destination").await?;
 
     if video_payload_types.is_empty() {
         // Audio-only relay: remove any stale routes from an earlier
@@ -1054,10 +1098,9 @@ async fn wait_and_arm_rewrite_relay(
 
     // Resolve both video transports before clearing the old routes. A missing
     // late WebRTC video transport must not tear down working audio.
-    let video_source = rtp_transport_for_kind(source_pc, rustrtc::MediaKind::Video)
-        .ok_or_else(|| anyhow!("source video RTP transport missing"))?;
-    let video_target = rtp_transport_for_kind(destination_pc, rustrtc::MediaKind::Video)
-        .ok_or_else(|| anyhow!("destination video RTP transport missing"))?;
+    let video_source = wait_rtp_transport(source_pc, rustrtc::MediaKind::Video, "source").await?;
+    let video_target =
+        wait_rtp_transport(destination_pc, rustrtc::MediaKind::Video, "destination").await?;
 
     source_pc.clear_rtp_rewrite_bridge();
 

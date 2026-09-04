@@ -1,8 +1,9 @@
 use super::locator::{
-    Locator, RealmChecker, UNREGISTER_GRACE_SECS, choose_registered_aor, invalid_host_fallback,
-    is_local_realm, is_location_expired, now_epoch_secs, sort_locations_by_recency,
+    Locator, LocatorEvent, LocatorEventSender, RealmChecker, UNREGISTER_GRACE_SECS,
+    choose_registered_aor, invalid_host_fallback, is_local_realm, is_location_expired,
+    now_epoch_secs, sort_locations_by_recency,
 };
-use crate::call::Location;
+use crate::call::{LOCATOR_EXPIRE_GRACE_SECS, Location};
 use anyhow::Result;
 use async_trait::async_trait;
 use rsipstack::transport::SipAddr;
@@ -45,6 +46,7 @@ impl Entity {}
 pub struct DbLocator {
     db: DatabaseConnection,
     realm_checker: Mutex<Option<RealmChecker>>,
+    event_sender: Mutex<Option<LocatorEventSender>>,
 }
 
 #[derive(DeriveMigrationName)]
@@ -198,6 +200,7 @@ impl DbLocator {
         let db_locator = Self {
             db,
             realm_checker: Mutex::new(None),
+            event_sender: Mutex::new(None),
         };
         if migrate {
             info!("Creating DbLocator with migration");
@@ -355,6 +358,66 @@ fn decode_location_metadata(
     (user_agent, home_proxy, registered_aor)
 }
 
+/// Convert a stored row into a [`Location`].
+///
+/// `now_epoch` / `now_instant` are the caller's clock view; they are used to
+/// translate the epoch-based `last_modified` column into an `Instant` that is
+/// consistent with the rest of the returned locations.
+fn model_to_location(model: &Model, now_epoch: i64, now_instant: Instant) -> Result<Location> {
+    let aor = rsipstack::sip::Uri::try_from(model.aor.as_str())
+        .map_err(|e| anyhow::anyhow!("Error parsing aor: {}", e))?;
+
+    let transport = match model.transport.to_uppercase().as_str() {
+        "UDP" => rsipstack::sip::transport::Transport::Udp,
+        "TCP" => rsipstack::sip::transport::Transport::Tcp,
+        "TLS" => rsipstack::sip::transport::Transport::Tls,
+        "WS" => rsipstack::sip::transport::Transport::Ws,
+        "WSS" => rsipstack::sip::transport::Transport::Wss,
+        _ => rsipstack::sip::transport::Transport::Udp, // Default to UDP
+    };
+
+    // Parse destination host to HostWithPort
+    let addr: rsipstack::sip::HostWithPort = model.destination.as_str().try_into()?;
+
+    // Create SipAddr
+    let destination = SipAddr {
+        r#type: Some(transport),
+        addr,
+    };
+
+    let (user_agent, home_proxy, decoded_registered_aor) =
+        decode_location_metadata(model.user_agent.as_deref());
+    let registered_aor = choose_registered_aor(
+        model.username.as_str(),
+        model.realm.as_str(),
+        &aor,
+        decoded_registered_aor,
+    );
+
+    let age_secs = if model.last_modified >= now_epoch {
+        0
+    } else {
+        (now_epoch - model.last_modified) as u64
+    };
+    let last_modified_instant = now_instant
+        .checked_sub(Duration::from_secs(age_secs))
+        .unwrap_or(now_instant);
+
+    Ok(Location {
+        aor,
+        expires: model.expires as u32,
+        destination: Some(destination),
+        last_modified: Some(last_modified_instant),
+        supports_webrtc: model.supports_webrtc,
+        transport: Some(transport),
+        registered_aor: Some(registered_aor),
+        user_agent,
+        home_proxy,
+        instance_id: model.instance_id.clone(),
+        ..Default::default()
+    })
+}
+
 #[async_trait]
 impl Locator for DbLocator {
     async fn is_local_realm(&self, realm: &str) -> bool {
@@ -372,6 +435,67 @@ impl Locator for DbLocator {
             .try_lock()
             .expect("failed to lock realm_checker");
         *lock = Some(checker);
+    }
+
+    fn set_event_sender(&self, sender: Option<LocatorEventSender>) {
+        let mut lock = self
+            .event_sender
+            .try_lock()
+            .expect("failed to lock event_sender");
+        *lock = sender;
+    }
+
+    /// Periodically sweep expired registrations that would otherwise linger —
+    /// e.g. browsers that vanish without a REGISTER expires=0. Returns the
+    /// removed bindings; the caller (the sweep task in `server.rs`) is
+    /// responsible for broadcasting `LocatorEvent::Offline` for them.
+    async fn sweep_expired(&self) -> Result<Vec<Location>> {
+        let now_epoch = now_epoch_secs();
+        let now_instant = Instant::now();
+
+        // Coarse SQL prefilter: a row can only be expired once
+        // `last_modified + expires + grace <= now`. With `expires > 0` that
+        // implies `last_modified < now - grace`, so anything at or after the
+        // cutoff is still fresh. `expires == 0` means "never expire".
+        let cutoff = now_epoch - LOCATOR_EXPIRE_GRACE_SECS;
+        let candidates = Entity::find()
+            .filter(Column::Expires.gt(0))
+            .filter(Column::LastModified.lt(cutoff))
+            .all(&self.db)
+            .await
+            .map_err(|e| anyhow::anyhow!("Database error on sweep_expired lookup: {}", e))?;
+
+        let mut expired_ids = Vec::new();
+        let mut expired_locations = Vec::new();
+        for model in candidates {
+            if is_location_expired(model.expires, model.last_modified, now_epoch) {
+                match model_to_location(&model, now_epoch, now_instant) {
+                    Ok(location) => {
+                        info!(
+                            identifier = %format!("{}/{}", model.username, model.realm),
+                            binding = %model.aor,
+                            "swept expired registration"
+                        );
+                        expired_ids.push(model.id);
+                        expired_locations.push(location);
+                    }
+                    Err(e) => {
+                        warn!(error = %e, aor = %model.aor, "skipping unparsable expired location row");
+                    }
+                }
+            }
+        }
+        if expired_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        Entity::delete_many()
+            .filter(Column::Id.is_in(expired_ids))
+            .exec(&self.db)
+            .await
+            .map_err(|e| anyhow::anyhow!("Database error on sweep_expired delete: {}", e))?;
+
+        Ok(expired_locations)
     }
 
     async fn register(
@@ -551,48 +675,12 @@ impl Locator for DbLocator {
 
         let mut locations = Vec::new();
         for loc in removed_locations {
-            let aor = rsipstack::sip::Uri::try_from(loc.aor.as_str())
-                .map_err(|e| anyhow::anyhow!("Error parsing aor: {}", e))?;
-            // Parse transport from string
-            let transport = match loc.transport.to_uppercase().as_str() {
-                "UDP" => rsipstack::sip::transport::Transport::Udp,
-                "TCP" => rsipstack::sip::transport::Transport::Tcp,
-                "TLS" => rsipstack::sip::transport::Transport::Tls,
-                "WS" => rsipstack::sip::transport::Transport::Ws,
-                "WSS" => rsipstack::sip::transport::Transport::Wss,
-                _ => rsipstack::sip::transport::Transport::Udp, // Default to UDP
-            };
-
-            // Parse destination host to HostWithPort
-            let addr = loc.destination.try_into()?;
-
-            // Create SipAddr
-            let destination = SipAddr {
-                r#type: Some(transport),
-                addr,
-            };
-
-            let (user_agent, home_proxy, decoded_registered_aor) =
-                decode_location_metadata(loc.user_agent.as_deref());
-            let registered_aor = choose_registered_aor(
-                loc.username.as_str(),
-                loc.realm.as_str(),
-                &aor,
-                decoded_registered_aor,
-            );
-
-            locations.push(Location {
-                aor,
-                expires: loc.expires as u32,
-                destination: Some(destination),
-                supports_webrtc: loc.supports_webrtc,
-                transport: Some(transport),
-                registered_aor: Some(registered_aor),
-                user_agent,
-                home_proxy,
-                instance_id: loc.instance_id.clone(),
-                ..Default::default()
-            });
+            match model_to_location(&loc, now_epoch, Instant::now()) {
+                Ok(location) => locations.push(location),
+                Err(e) => {
+                    warn!(error = %e, aor = %loc.aor, "skipping unparsable unregistered location row");
+                }
+            }
         }
         Ok(Some(sort_locations_by_recency(locations)))
     }
@@ -725,77 +813,41 @@ impl Locator for DbLocator {
 
         let mut locations = Vec::new();
         let mut expired_ids = Vec::new();
+        let mut expired_locations = Vec::new();
         let now_instant = Instant::now();
         for model in models {
             if is_location_expired(model.expires, model.last_modified, now_epoch) {
                 expired_ids.push(model.id);
+                match model_to_location(&model, now_epoch, now_instant) {
+                    Ok(location) => expired_locations.push(location),
+                    Err(e) => {
+                        warn!(error = %e, aor = %model.aor, "skipping unparsable expired location row");
+                    }
+                }
                 continue;
             }
-            let aor = rsipstack::sip::Uri::try_from(model.aor.as_str())
-                .map_err(|e| anyhow::anyhow!("Error parsing aor: {}", e))?;
-
-            let (user_agent, home_proxy, decoded_registered_aor) =
-                decode_location_metadata(model.user_agent.as_deref());
-            let registered_aor = choose_registered_aor(
-                model.username.as_str(),
-                model.realm.as_str(),
-                &aor,
-                decoded_registered_aor,
-            );
-
-            // Parse transport from string
-            let transport = match model.transport.to_uppercase().as_str() {
-                "UDP" => rsipstack::sip::transport::Transport::Udp,
-                "TCP" => rsipstack::sip::transport::Transport::Tcp,
-                "TLS" => rsipstack::sip::transport::Transport::Tls,
-                "WS" => rsipstack::sip::transport::Transport::Ws,
-                "WSS" => rsipstack::sip::transport::Transport::Wss,
-                _ => rsipstack::sip::transport::Transport::Udp, // Default to UDP
-            };
-
-            // Parse destination host to HostWithPort
-            let addr = model.destination.try_into()?;
-
-            // Create SipAddr
-            let destination = SipAddr {
-                r#type: Some(transport),
-                addr,
-            };
-
-            let age_secs = if model.last_modified >= now_epoch {
-                0
-            } else {
-                (now_epoch - model.last_modified) as u64
-            };
-            let age_duration = Duration::from_secs(age_secs);
-            let last_modified_instant =
-                now_instant.checked_sub(age_duration).unwrap_or(now_instant);
-
-            locations.push(Location {
-                aor,
-                expires: model.expires as u32,
-                destination: Some(destination),
-                last_modified: Some(last_modified_instant),
-                supports_webrtc: model.supports_webrtc,
-                transport: Some(transport),
-                registered_aor: Some(registered_aor),
-                user_agent,
-                home_proxy,
-                instance_id: model.instance_id.clone(),
-                ..Default::default()
-            });
+            locations.push(model_to_location(&model, now_epoch, now_instant)?);
         }
 
         // Best-effort cleanup of expired bindings so they don't shadow live
         // registrations in subsequent .invalid username lookups (which order by
         // recency). Expired rows were previously only skipped, never deleted.
-        if !expired_ids.is_empty()
-            && let Err(e) = Entity::delete_many()
+        if !expired_ids.is_empty() {
+            if let Err(e) = Entity::delete_many()
                 .filter(Column::Id.is_in(expired_ids))
                 .exec(&self.db)
                 .await
-        {
-            warn!(error = %e, "Failed to delete expired location rows during lookup");
+            {
+                warn!(error = %e, "Failed to delete expired location rows during lookup");
+            } else if !expired_locations.is_empty()
+                && let Some(sender) = self.event_sender.lock().await.clone().as_ref()
+            {
+                // The backend removed these bindings on its own (no explicit
+                // unregister arrived). Broadcast Offline so downstream
+                // consumers (presence, CC agent state, cluster peers,
+                // locator_webhook) observe the transition.
+                let _ = sender.send(LocatorEvent::Offline(expired_locations));
+            }
         }
 
         Ok(sort_locations_by_recency(locations))
@@ -821,6 +873,7 @@ mod tests {
         let locator = DbLocator {
             db,
             realm_checker: Mutex::new(None),
+            event_sender: Mutex::new(None),
         };
         let location = Location {
             aor: rsipstack::sip::Uri {
@@ -1125,8 +1178,7 @@ mod tests {
     /// must NOT overwrite line 103's destination, because the instance-id
     /// destination refresh is scoped to the same username/realm.
     #[tokio::test]
-    async fn db_locator_instance_id_does_not_cross_clobber_other_extension() {
-        let locator = DbLocator::new_with_migrate("sqlite::memory:".to_string(), true)
+    async fn db_locator_instance_id_does_not_cross_clobber_other_extension() {        let locator = DbLocator::new_with_migrate("sqlite::memory:".to_string(), true)
             .await
             .expect("create db locator");
 
@@ -1198,5 +1250,199 @@ mod tests {
             Some("192.168.10.50:6062".to_string()),
             "104 destination must be its own port"
         );
+    }
+
+    /// Backdate every row of `username` by `age_secs` so it looks registered
+    /// in the past (simulating a client that vanished without unregistering).
+    async fn backdate_rows(locator: &DbLocator, username: &str, age_secs: i64) {
+        let backdated = now_epoch_secs() - age_secs;
+        Entity::update_many()
+            .col_expr(Column::LastModified, Expr::value(backdated))
+            .filter(Column::Username.eq(username))
+            .exec(&locator.db)
+            .await
+            .expect("backdate rows");
+    }
+
+    /// The client never sent unregister and the WS connection dropped without
+    /// a Close frame. The sweep must remove the expired binding and return it
+    /// so the caller (sweep task in server.rs) can broadcast Offline. Rows
+    /// with expires == 0 ("never expire") must be kept. The backend itself
+    /// must NOT emit an Offline event for swept rows — that is the sweep
+    /// task's job; emitting here as well would duplicate the event.
+    #[tokio::test]
+    async fn sweep_expired_removes_and_returns_expired_rows() {
+        let locator = DbLocator::new_with_migrate("sqlite::memory:".to_string(), true)
+            .await
+            .expect("create db locator");
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        locator.set_event_sender(Some(tx));
+
+        let aor: rsipstack::sip::Uri = "sip:alice@pbx.example.com".try_into().expect("aor");
+        locator
+            .register(
+                "alice",
+                Some("pbx.example.com"),
+                Location {
+                    aor: aor.clone(),
+                    expires: 60,
+                    destination: Some(SipAddr {
+                        r#type: Some(Transport::Udp),
+                        addr: "192.0.2.10:5060".try_into().expect("destination"),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("register alice");
+
+        // A never-expire binding (expires == 0) inserted directly, older than
+        // any grace period — must survive the sweep.
+        let now = now_epoch_secs();
+        Entity::insert(ActiveModel {
+            aor: Set("sip:carol@pbx.example.com".to_string()),
+            expires: Set(0),
+            username: Set("carol".to_string()),
+            realm: Set("pbx.example.com".to_string()),
+            destination: Set("192.0.2.30:5060".to_string()),
+            transport: Set("UDP".to_string()),
+            last_modified: Set(now - 7200),
+            created_at: Set(chrono::Utc::now()),
+            updated_at: Set(chrono::Utc::now()),
+            supports_webrtc: Set(false),
+            user_agent: Set(None),
+            instance_id: Set(None),
+            id: sea_orm::ActiveValue::NotSet,
+        })
+        .exec(&locator.db)
+        .await
+        .expect("insert never-expire row");
+
+        // Alice registered an hour ago with expires=60 — long expired.
+        backdate_rows(&locator, "alice", 3600).await;
+
+        let swept = locator.sweep_expired().await.expect("sweep expired");
+        assert_eq!(swept.len(), 1, "only alice's expired binding is swept");
+        assert_eq!(swept[0].aor, aor);
+        assert_eq!(
+            swept[0].transport,
+            Some(Transport::Udp),
+            "swept location keeps its transport"
+        );
+
+        // Sweep must not emit Offline itself (server.rs sweep task does).
+        assert!(
+            rx.try_recv().is_err(),
+            "sweep_expired must not emit Offline events"
+        );
+
+        // Alice's row is gone; carol's never-expire row survives.
+        let alice_lookup = locator.lookup(&aor).await.expect("lookup alice");
+        assert!(alice_lookup.is_empty(), "expired binding must be removed");
+        assert!(
+            locator
+                .has_active_bindings("carol", Some("pbx.example.com"))
+                .await
+                .expect("carol active bindings"),
+            "expires == 0 means never expire — carol must stay active after the sweep"
+        );
+        let carol_rows = Entity::find()
+            .filter(Column::Username.eq("carol"))
+            .all(&locator.db)
+            .await
+            .expect("query carol rows");
+        assert_eq!(carol_rows.len(), 1, "never-expire row must not be swept");
+    }
+
+    /// When `lookup` opportunistically deletes expired rows, the backend must
+    /// broadcast LocatorEvent::Offline for them — the client vanished without
+    /// unregistering, so this is the only offline signal downstream consumers
+    /// (presence, CC agent state, cluster peers, locator_webhook) get.
+    #[tokio::test]
+    async fn lookup_emits_offline_event_for_expired_rows() {
+        let locator = DbLocator::new_with_migrate("sqlite::memory:".to_string(), true)
+            .await
+            .expect("create db locator");
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        locator.set_event_sender(Some(tx));
+
+        let aor: rsipstack::sip::Uri = "sip:bob@pbx.example.com".try_into().expect("aor");
+        locator
+            .register(
+                "bob",
+                Some("pbx.example.com"),
+                Location {
+                    aor: aor.clone(),
+                    expires: 60,
+                    destination: Some(SipAddr {
+                        r#type: Some(Transport::Ws),
+                        addr: "192.0.2.20:8080".try_into().expect("destination"),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("register bob");
+
+        backdate_rows(&locator, "bob", 3600).await;
+
+        // The lookup finds the (now expired) row, deletes it and reports it.
+        let locations = locator.lookup(&aor).await.expect("lookup bob");
+        assert!(locations.is_empty(), "expired binding must not resolve");
+
+        let event = rx
+            .try_recv()
+            .expect("lookup must emit Offline for expired rows");
+        match event {
+            LocatorEvent::Offline(removed) => {
+                assert_eq!(removed.len(), 1);
+                assert_eq!(removed[0].aor, aor);
+            }
+            other => panic!("expected LocatorEvent::Offline, got {other:?}"),
+        }
+
+        // Row is gone — a second lookup neither resolves nor emits again.
+        let locations = locator.lookup(&aor).await.expect("second lookup");
+        assert!(locations.is_empty());
+        assert!(rx.try_recv().is_err(), "no duplicate Offline event");
+    }
+
+    /// Without an attached sender (e.g. standalone use in tests) lookup must
+    /// still delete expired rows silently and keep working.
+    #[tokio::test]
+    async fn lookup_without_event_sender_still_cleans_expired_rows() {
+        let locator = DbLocator::new_with_migrate("sqlite::memory:".to_string(), true)
+            .await
+            .expect("create db locator");
+
+        let aor: rsipstack::sip::Uri = "sip:dave@pbx.example.com".try_into().expect("aor");
+        locator
+            .register(
+                "dave",
+                Some("pbx.example.com"),
+                Location {
+                    aor: aor.clone(),
+                    expires: 60,
+                    destination: Some(SipAddr {
+                        r#type: Some(Transport::Udp),
+                        addr: "192.0.2.40:5060".try_into().expect("destination"),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("register dave");
+
+        backdate_rows(&locator, "dave", 3600).await;
+
+        let locations = locator.lookup(&aor).await.expect("lookup dave");
+        assert!(locations.is_empty(), "expired binding must not resolve");
+
+        let remaining = Entity::find()
+            .filter(Column::Username.eq("dave"))
+            .all(&locator.db)
+            .await
+            .expect("query dave rows");
+        assert!(remaining.is_empty(), "expired row must be deleted");
     }
 }

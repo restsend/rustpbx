@@ -291,7 +291,19 @@ impl TryFrom<&Transaction> for SipUser {
 
         apply_flow_destination(&mut destination, tx.connection.as_ref());
 
-        let is_support_webrtc = matches!(via_transport, Transport::Wss | Transport::Ws);
+        // RFC 5768: a Contact carrying `;+sip.ice` declares ICE/WebRTC media
+        // capability. UDP-registered UAs that advertise it (e.g. restsend
+        // mobile SDKs behind NAT) must still get an ICE-capable callee offer —
+        // a plain-RTP offer would carry the UA's private SDP address, which
+        // the proxy cannot reach (one-way media / black video).
+        let contact_declares_ice = origin_contact.as_ref().is_some_and(|contact| {
+            contact
+                .params
+                .iter()
+                .any(|p| p.to_string().eq_ignore_ascii_case(";+sip.ice"))
+        });
+        let is_support_webrtc =
+            matches!(via_transport, Transport::Wss | Transport::Ws) || contact_declares_ice;
 
         let mut u = SipUser {
             id: 0,
