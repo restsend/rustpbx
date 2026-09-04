@@ -153,6 +153,19 @@ pub fn q850_reason_value(code: &rsipstack::sip::StatusCode, detail: Option<&str>
     )
 }
 
+pub fn route_error_reason(route_err: &RouteError) -> String {
+    let code = route_err
+        .status
+        .clone()
+        .unwrap_or(rsipstack::sip::StatusCode::ServerInternalError);
+    let reason_text = route_err.error.to_string();
+    if reason_text.contains(";cause=") {
+        reason_text
+    } else {
+        q850_reason_value(&code, Some(reason_text.as_str()))
+    }
+}
+
 /// Verdict returned by a [`DialplanInspector`].
 ///
 /// Allows an inspector to continue the chain, finalize the dialplan
@@ -1505,15 +1518,11 @@ impl CallModule {
         if cookie.is_spam() {
             return Ok(());
         }
+        let reason_value = route_error_reason(&route_err);
         let code = route_err
             .status
             .unwrap_or(rsipstack::sip::StatusCode::ServerInternalError);
         let reason_text = route_err.error.to_string();
-        let reason_value = if reason_text.contains(";cause=") {
-            reason_text.clone()
-        } else {
-            q850_reason_value(&code, Some(reason_text.as_str()))
-        };
         self.report_failure(
             tx,
             cookie,
@@ -1993,7 +2002,7 @@ impl CallModule {
         let dialplan = match dialplan {
             Ok(d) => d,
             Err(route_err) => {
-                warn!(key = %tx.key, error = %route_err.error, status = ?route_err.status, "failed to build dialplan");
+                warn!(key = %tx.key, error = %route_err.error, status = ?route_err.status, reason = %route_error_reason(&route_err), "failed to build dialplan");
                 return self.reply_route_error(tx, &cookie, route_err).await;
             }
         };

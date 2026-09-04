@@ -368,6 +368,15 @@ async fn match_invite_impl(
             hints.max_ring_time =
                 (max_ring_time > 0).then(|| std::time::Duration::from_secs(max_ring_time as u64));
         }
+        // Remember which route matched so the CDR reporter can attribute the
+        // call to it (route id/name ride the dialplan extensions).
+        {
+            let hints = hints.get_or_insert_with(DialplanHints::default);
+            hints.extensions.insert(crate::call::MatchedRoute {
+                id: rule.id,
+                name: rule.name.clone(),
+            });
+        }
 
         // Handle based on action type
         match rule.action.get_action_type() {

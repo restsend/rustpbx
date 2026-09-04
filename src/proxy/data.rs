@@ -1556,6 +1556,7 @@ async fn convert_route(
     }
 
     let route = RouteRule {
+        id: Some(model.id),
         name: model.name,
         description: model.description,
         priority: model.priority,
@@ -1986,6 +1987,42 @@ mod tests {
             route_names,
             vec!["high-first", "high-second", "middle", "low"]
         );
+    }
+
+    #[tokio::test]
+    async fn convert_route_keeps_database_id() {
+        // DB routes must preserve `rustpbx_routes.id` on the runtime rule so
+        // the CDR can reference the matched route.
+        let model = routing::Model {
+            id: 42,
+            name: "us-outbound".to_string(),
+            description: None,
+            direction: routing::RoutingDirection::Outbound,
+            priority: 100,
+            is_active: true,
+            selection_strategy: routing::RoutingSelectionStrategy::RoundRobin,
+            hash_key: None,
+            source_trunk_id: None,
+            default_trunk_id: None,
+            source_pattern: None,
+            destination_pattern: Some("1001".to_string()),
+            header_filters: None,
+            rewrite_rules: None,
+            target_trunks: None,
+            owner: None,
+            notes: None,
+            metadata: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            last_deployed_at: None,
+        };
+        let trunk_lookup = HashMap::new();
+        let route = convert_route(model, &trunk_lookup, None, None)
+            .await
+            .expect("convert route")
+            .expect("route produced");
+        assert_eq!(route.id, Some(42));
+        assert_eq!(route.name, "us-outbound");
     }
 
     #[tokio::test]

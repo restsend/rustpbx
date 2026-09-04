@@ -194,6 +194,8 @@ async fn test_wholesale_billing_flow() {
     record.extensions.insert(WholesaleBillingContext {
         tenant_id,
         carrier_id: Some(trunk_id),
+        route_table_id: None,
+        route_item_id: None,
         sell_rate: tenant_rate_record.rate,
         buy_rate: vendor_rate_record.rate,
         tenant_min_duration: tenant_rate_record.min_duration,

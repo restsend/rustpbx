@@ -134,6 +134,16 @@ pub struct OutboundTrunkContext {
     pub tenant_id: Option<i64>,
 }
 
+/// The routing rule (`RouteRule`) that matched and produced this call's
+/// dialplan. Attached to dialplan hints by the route matcher so the CDR
+/// reporter can attribute the call to the matched route. `id` is `None` for
+/// rules that only exist in config files (no database row).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchedRoute {
+    pub id: Option<i64>,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrunkContext {
     pub id: Option<i64>,

@@ -608,6 +608,11 @@ pub enum DestConfig {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RouteRule {
     pub name: String,
+    /// Database id (`rustpbx_routes.id`) when the rule was loaded from the
+    /// routing table; `None` for config-file/embedded rules. Propagated into
+    /// CDRs so calls can be attributed to the matched route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
@@ -651,6 +656,7 @@ impl Default for RouteRule {
     fn default() -> Self {
         Self {
             name: String::new(),
+            id: None,
             description: None,
             priority: 0,
             source_trunks: Vec::new(),

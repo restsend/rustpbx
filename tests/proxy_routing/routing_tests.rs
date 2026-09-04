@@ -175,6 +175,124 @@ async fn test_selected_trunk_codecs_override_source_trunk_codecs() {
 }
 
 #[tokio::test]
+async fn test_matched_route_context_attached_on_forward() {
+    // The matched route (id/name) must ride the dialplan hints so the CDR
+    // reporter can attribute the call to the route. A database-backed rule
+    // carries its id; a config-file rule only carries its name.
+    let routing_state = Arc::new(RoutingState::new());
+    let mut trunks = HashMap::new();
+    trunks.insert(
+        "outbound-trunk".to_string(),
+        TrunkConfig {
+            dest: "sip:192.168.3.7:5060".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let routes = vec![RouteRule {
+        name: "carrier-us".to_string(),
+        id: Some(42),
+        priority: 100,
+        match_conditions: MatchConditions {
+            to_user: Some("1001".to_string()),
+            ..Default::default()
+        },
+        action: RouteAction {
+            dest: Some(DestConfig::Single("outbound-trunk".to_string())),
+            select: "rr".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }];
+
+    let result = match_invite(
+        Some(&trunks),
+        Some(&routes),
+        None,
+        create_test_invite_option(),
+        &create_test_request(),
+        None,
+        routing_state,
+        &DialDirection::Outbound,
+    )
+    .await
+    .expect("invite should match outbound route");
+
+    match result {
+        RouteResult::Forward(_, hints) => {
+            let matched = hints
+                .and_then(|hints| {
+                    hints
+                        .extensions
+                        .get::<rustpbx::call::MatchedRoute>()
+                        .cloned()
+                })
+                .expect("matched route context attached to hints");
+            assert_eq!(matched.id, Some(42));
+            assert_eq!(matched.name, "carrier-us");
+        }
+        _ => panic!("expected forward with matched route context"),
+    }
+}
+
+#[tokio::test]
+async fn test_matched_route_context_config_file_rule_has_no_id() {
+    let routing_state = Arc::new(RoutingState::new());
+    let mut trunks = HashMap::new();
+    trunks.insert(
+        "outbound-trunk".to_string(),
+        TrunkConfig {
+            dest: "sip:192.168.3.7:5060".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let routes = vec![RouteRule {
+        name: "toml-only-route".to_string(),
+        priority: 100,
+        match_conditions: MatchConditions {
+            to_user: Some("1001".to_string()),
+            ..Default::default()
+        },
+        action: RouteAction {
+            dest: Some(DestConfig::Single("outbound-trunk".to_string())),
+            select: "rr".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }];
+
+    let result = match_invite(
+        Some(&trunks),
+        Some(&routes),
+        None,
+        create_test_invite_option(),
+        &create_test_request(),
+        None,
+        routing_state,
+        &DialDirection::Outbound,
+    )
+    .await
+    .expect("invite should match outbound route");
+
+    match result {
+        RouteResult::Forward(_, hints) => {
+            let matched = hints
+                .and_then(|hints| {
+                    hints
+                        .extensions
+                        .get::<rustpbx::call::MatchedRoute>()
+                        .cloned()
+                })
+                .expect("matched route context attached to hints");
+            assert_eq!(matched.id, None);
+            assert_eq!(matched.name, "toml-only-route");
+        }
+        _ => panic!("expected forward with matched route context"),
+    }
+}
+
+#[tokio::test]
 async fn test_trunk_matches_inbound_ip_with_cidr() {
     let trunk = TrunkConfig {
         dest: "sip:10.0.0.1:5060".to_string(),

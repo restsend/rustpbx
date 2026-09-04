@@ -167,6 +167,22 @@ impl CallReporter {
             });
         let outbound_sip_trunk_id = outbound_trunk_context.as_ref().and_then(|ctx| ctx.id);
 
+        // The route rule that matched during routing (see the route matcher).
+        // The cookie wins so per-leg reporters can override, mirroring the
+        // outbound trunk lookup above.
+        let matched_route = self
+            .context
+            .cookie
+            .get_extension::<crate::call::MatchedRoute>()
+            .or_else(|| {
+                self.context
+                    .dialplan
+                    .extensions
+                    .get::<crate::call::MatchedRoute>()
+                    .cloned()
+            });
+        let route_id = matched_route.as_ref().and_then(|route| route.id);
+
         // The session flushes the file recorder before reporting. Prefer
         // completed mid-call / full-call segments; fall back to dialplan path.
         let root_session = snapshot
@@ -205,6 +221,15 @@ impl CallReporter {
             }
         }
 
+        // Route name is kept in metadata (not a dedicated column) so config
+        // file rules without a database id are also attributed.
+        if let Some(route) = &matched_route {
+            metadata_map.insert(
+                "route_name".to_string(),
+                serde_json::Value::String(route.name.clone()),
+            );
+        }
+
         // Harvest routing/in-call error context into metadata so the generic
         // DB saver (which drops status_code/last_error/hangup_reason) still
         // preserves a structured, queryable error code.  This also fixes the
@@ -239,6 +264,7 @@ impl CallReporter {
             extension_id,
             sip_trunk_id,
             outbound_sip_trunk_id,
+            route_id,
             sip_gateway,
             recording_url: recording_path_for_db,
             rewrite,

@@ -1531,6 +1531,11 @@ fn build_record_payload(
 
     let outbound_trunk_dest = metadata_string(record.metadata.as_ref(), OUTBOUND_TRUNK_DEST_KEY);
 
+    // The route rule matched during routing. `route_id` references
+    // rustpbx_routes (None for config-file rules); the name comes from the
+    // CDR metadata written by the reporter.
+    let route_name = metadata_string(record.metadata.as_ref(), "route_name");
+
     let caller_uri = record.caller_uri.clone();
     let callee_uri = record.callee_uri.clone();
 
@@ -1569,6 +1574,8 @@ fn build_record_payload(
         "outbound_trunk": outbound_trunk_name,
         "outbound_trunk_id": record.outbound_sip_trunk_id,
         "outbound_trunk_dest": outbound_trunk_dest,
+        "route_id": record.route_id,
+        "route_name": route_name,
         "tags": tags,
         "has_transcript": record.has_transcript,
         "transcript_status": record.transcript_status,
@@ -2262,7 +2269,7 @@ mod tests {
     use crate::{
         config::ConsoleConfig,
         console::{ConsoleState, middleware::AuthRequired},
-        models::{call_record, migration::Migrator},
+        models::{call_record, migration::Migrator, routing},
     };
     use axum::{Router, extract::State, http::StatusCode, routing::get};
     use chrono::Utc;
@@ -2737,6 +2744,56 @@ mod tests {
         assert!(payload["error"].is_null());
         assert!(payload["ring_time"].is_null());
         assert!(payload["answer_time"].is_null());
+    }
+
+    #[tokio::test]
+    async fn build_record_payload_exposes_matched_route() {
+        // The matched route surfaces for the UI: route_id from the FK column,
+        // route_name from the reporter-written metadata (also covering
+        // config-file rules without a database id).
+        let db = setup_db().await;
+        let state = create_console_state(db.clone()).await;
+
+        let route = routing::ActiveModel {
+            name: Set("us-outbound".into()),
+            direction: Set(routing::RoutingDirection::Outbound),
+            priority: Set(100),
+            is_active: Set(true),
+            selection_strategy: Set(routing::RoutingSelectionStrategy::default()),
+            created_at: Set(Utc::now()),
+            updated_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert route");
+
+        let record = call_record::ActiveModel {
+            call_id: Set("call-route-1".into()),
+            direction: Set("outbound".into()),
+            status: Set("completed".into()),
+            started_at: Set(Utc::now()),
+            duration_secs: Set(10),
+            route_id: Set(Some(route.id)),
+            metadata: Set(Some(json!({
+                "route_name": "us-outbound"
+            }))),
+            has_transcript: Set(false),
+            transcript_status: Set("pending".into()),
+            created_at: Set(Utc::now()),
+            updated_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert call record");
+
+        let related = load_related_context(&db, &[record.clone()])
+            .await
+            .expect("related context");
+        let payload = build_record_payload(&record, &related, &state, None);
+        assert_eq!(payload["route_id"], route.id);
+        assert_eq!(payload["route_name"], "us-outbound");
     }
 
     #[tokio::test]

@@ -36,7 +36,8 @@ pub mod transcription;
 pub mod user;
 pub mod uui;
 pub use cookie::{
-    CalleeDisplayName, CalleeOfflineMarker, OutboundTrunkContext, TransactionCookie, TrunkContext,
+    CalleeDisplayName, CalleeOfflineMarker, MatchedRoute, OutboundTrunkContext, TransactionCookie,
+    TrunkContext,
 };
 pub use user::SipUser;
 
