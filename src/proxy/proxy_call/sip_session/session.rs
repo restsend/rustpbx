@@ -5434,6 +5434,23 @@ impl SipSession {
                         }
 
                         let callee_sdp = String::from_utf8_lossy(response.body()).to_string();
+                        debug!(
+                            session_id = %self.id,
+                            session_id = %self.context.session_id,
+                            status = %response.status_code,
+                            sdp_len = callee_sdp.len(),
+                            "callee provisional response received"
+                        );
+                        // Ringing is signalled by EITHER provisional: a 183
+                        // with SDP (early media started) or a 180 without.
+                        // Fires once per call — later provisionals do not
+                        // re-fire the event.
+                        if !self.media.ringing_event_sent {
+                            self.media.ringing_event_sent = true;
+                            self.emit_typed_rwi_event(&crate::rwi::CallRinging {
+                                call_id: self.context.session_id.clone(),
+                            });
+                        }
                         if !callee_sdp.is_empty() && callee_sdp.contains("v=0") {
                             if !self.media.early_media_sent {
                                 self.media.early_media_sent = true;

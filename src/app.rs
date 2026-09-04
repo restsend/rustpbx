@@ -621,7 +621,10 @@ impl AppStateBuilder {
         if let Some(webhook_config) = config.rwi_webhook.clone()
             && let Some(gateway_ref) = core.rwi_gateway.clone()
         {
-            let webhook_tx = crate::rwi::webhook::start_rwi_webhook_handler(webhook_config);
+            let webhook_tx = crate::rwi::webhook::start_rwi_webhook_handler(
+                webhook_config,
+                config.proxy.rwi_webhook_channel_size,
+            );
             let mut gw = gateway_ref.write();
             gw.set_webhook_tx(webhook_tx);
         }
