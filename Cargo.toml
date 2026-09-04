@@ -318,4 +318,8 @@ opt-level = 2
 # and improving runtime; flate2/audio-codec see measurable wins here.
 lto = "thin"
 codegen-units = 16
+# line-tables-only debuginfo keeps release panic backtraces actionable
+# (file + line per frame via tracing_panic::panic_hook) at a small binary
+# size cost; full debuginfo is not embedded, so symbol/variable data stays out.
+debug = "line-tables-only"
 

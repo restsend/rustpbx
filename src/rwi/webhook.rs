@@ -4,6 +4,7 @@ use anyhow::anyhow;
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use std::collections::{HashSet, VecDeque};
+use std::time::Duration;
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
@@ -11,18 +12,12 @@ use tracing::{debug, info, warn};
 const WEBHOOK_CHANNEL_SIZE: usize = 512;
 /// Max number of recent (call_id, timestamp) pairs kept for dedup.
 const DEDUP_CACHE_SIZE: usize = 4096;
-
-/// Truncate a string to `max` bytes on a UTF-8 char boundary for logging.
-fn truncate_for_log(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        return s;
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
+/// Idempotent retry policy: a failed delivery (transport error or non-2xx
+/// status) is retried up to [`WEBHOOK_RETRY_COUNT`] times with
+/// [`WEBHOOK_RETRY_INTERVAL_MS`] between attempts. Every attempt re-sends the
+/// byte-identical payload (same `event_id`), so receivers can safely dedupe.
+const WEBHOOK_RETRY_COUNT: u32 = 3;
+const WEBHOOK_RETRY_INTERVAL_MS: u64 = 500;
 
 struct RwiWebhookSender {
     url: String,
@@ -48,14 +43,18 @@ impl RwiWebhookSender {
     }
 
     /// Deliver the payload to the configured webhook URL, returning a record
-    /// describing the call (url, status code, latency, body preview) for
-    /// structured logging. The request is sent directly (rather than via
+    /// describing the call (url, status code, latency) for structured logging.
+    /// The request is sent directly (rather than via
     /// `http_util::execute_request`) so that the HTTP status code is captured
     /// for *every* response — including non-2xx — which is essential for
-    /// observability. The body is truncated to keep logs bounded.
+    /// observability. `body` is the pre-serialized payload; it is echoed into
+    /// the record verbatim (never truncated) so log lines carry the complete
+    /// event as a compensation record, and reused across retries so every
+    /// attempt is byte-identical.
     async fn send_payload(
         &self,
         payload: &serde_json::Value,
+        body: &str,
     ) -> Result<WebhookCallRecord, anyhow::Error> {
         let start = std::time::Instant::now();
         let mut req = self.client.post(&self.url).json(payload);
@@ -75,30 +74,21 @@ impl RwiWebhookSender {
             url: self.url.clone(),
             status_code: Some(status_code),
             latency_ms: start.elapsed().as_millis() as u64,
-            body_preview: truncate_payload(payload),
+            body: body.to_string(),
         })
     }
 }
 
 /// Captured metadata for a single webhook delivery attempt, used for
-/// structured observability logging.
+/// structured observability logging. `body` carries the *complete* request
+/// payload — never truncated — so the sender-side log can serve as a
+/// compensation record when the receiver misses an event.
 #[derive(Debug, Clone)]
 pub struct WebhookCallRecord {
     pub url: String,
     pub status_code: Option<u16>,
     pub latency_ms: u64,
-    pub body_preview: String,
-}
-
-/// Truncate a JSON payload to a bounded preview for logging.
-fn truncate_payload(payload: &serde_json::Value) -> String {
-    const MAX_BODY_PREVIEW: usize = 1024;
-    let s = payload.to_string();
-    if s.len() <= MAX_BODY_PREVIEW {
-        s
-    } else {
-        format!("{}…(truncated {} bytes)", &s[..MAX_BODY_PREVIEW], s.len())
-    }
+    pub body: String,
 }
 
 /// Start the RWI webhook handler background task.
@@ -172,66 +162,109 @@ async fn run_rwi_webhook_handler(
 
         let payload = json!({
             "rwi": "1.0",
+            // Idempotency key: re-sent unchanged on every retry attempt so
+            // receivers can dedupe redeliveries.
+            "event_id": uuid::Uuid::new_v4().to_string(),
             "timestamp": entry.cached_at.to_rfc3339(),
             "call_id": entry.call_id,
             "event_type": event_type,
             "event": event_value,
         });
+        // Serialize once and reuse the exact bytes for every attempt and log
+        // line. The body is never truncated: the full payload in the log
+        // serves as a compensation record when the receiver misses an event.
+        let body = payload.to_string();
 
-        match sender.send_payload(&payload).await {
-            Ok(record) => {
-                if consecutive_send_failures > 0 {
-                    info!(
-                        url = %record.url,
-                        consecutive_failures = consecutive_send_failures,
-                        "RWI webhook delivery recovered"
-                    );
-                }
-                consecutive_send_failures = 0;
-                let success = record
-                    .status_code
-                    .map(|c| (200..300).contains(&c))
-                    .unwrap_or(false);
-                let call_id = if entry.call_id.is_empty() {
-                    "-"
-                } else {
-                    entry.call_id.as_str()
-                };
-                if success {
-                    info!(
-                        url = %record.url,
-                        event_type,
-                        call_id,
-                        status_code = record.status_code.unwrap_or(0),
-                        latency_ms = record.latency_ms,
-                        "RWI webhook delivered"
-                    );
-                } else {
+        let total_attempts = 1 + WEBHOOK_RETRY_COUNT;
+        for attempt in 1..=total_attempts {
+            if attempt > 1 {
+                tokio::time::sleep(Duration::from_millis(WEBHOOK_RETRY_INTERVAL_MS)).await;
+            }
+            match sender.send_payload(&payload, &body).await {
+                Ok(record) => {
+                    let success = record
+                        .status_code
+                        .map(|c| (200..300).contains(&c))
+                        .unwrap_or(false);
+                    let call_id = if entry.call_id.is_empty() {
+                        "-"
+                    } else {
+                        entry.call_id.as_str()
+                    };
+                    if success {
+                        if consecutive_send_failures > 0 {
+                            info!(
+                                url = %record.url,
+                                consecutive_failures = consecutive_send_failures,
+                                "RWI webhook delivery recovered"
+                            );
+                        }
+                        consecutive_send_failures = 0;
+                        info!(
+                            url = %record.url,
+                            event_type,
+                            call_id,
+                            attempt,
+                            status_code = record.status_code.unwrap_or(0),
+                            latency_ms = record.latency_ms,
+                            body = %record.body,
+                            "RWI webhook delivered"
+                        );
+                        break;
+                    }
+                    if attempt < total_attempts {
+                        warn!(
+                            url = %record.url,
+                            event_type,
+                            call_id,
+                            attempt,
+                            max_attempts = total_attempts,
+                            status_code = record.status_code.unwrap_or(0),
+                            latency_ms = record.latency_ms,
+                            "RWI webhook returned non-success status, retrying"
+                        );
+                        continue;
+                    }
+                    consecutive_send_failures += 1;
                     warn!(
                         url = %record.url,
                         event_type,
                         call_id,
+                        attempts = total_attempts,
                         status_code = record.status_code.unwrap_or(0),
                         latency_ms = record.latency_ms,
-                        body_preview = %record.body_preview,
-                        "RWI webhook returned non-success status"
+                        body = %record.body,
+                        "RWI webhook returned non-success status, giving up"
                     );
                 }
-            }
-            Err(e) => {
-                consecutive_send_failures += 1;
-                // INFO with the full request body: when the receiver is
-                // down this log is the only place to see which events (and
-                // payloads) were generated, so the body must be visible at
-                // the default log level.
-                info!(
-                    url = %sender.url,
-                    event_type,
-                    call_id = %entry.call_id,
-                    body = %truncate_for_log(&payload.to_string(), 1024),
-                    error = %e,
-                    "RWI webhook send failed"
-                );
+                Err(e) => {
+                    if attempt < total_attempts {
+                        warn!(
+                            url = %sender.url,
+                            event_type,
+                            call_id = %entry.call_id,
+                            attempt,
+                            max_attempts = total_attempts,
+                            error = %e,
+                            "RWI webhook send failed, retrying"
+                        );
+                        continue;
+                    }
+                    consecutive_send_failures += 1;
+                    // INFO with the full request body: when the receiver is
+                    // down this log is the only place to see which events
+                    // (and payloads) were generated. The body is never
+                    // truncated, so the log doubles as a compensation record.
+                    info!(
+                        url = %sender.url,
+                        event_type,
+                        call_id = %entry.call_id,
+                        attempts = total_attempts,
+                        body = %body,
+                        error = %e,
+                        "RWI webhook send failed"
+                    );
+                }
             }
         }
     }
@@ -260,7 +293,10 @@ pub async fn send_test_event(
         }
     });
 
-    sender.send_payload(&test_payload).await.map(|_| ())
+    sender
+        .send_payload(&test_payload, &test_payload.to_string())
+        .await
+        .map(|_| ())
 }
 
 #[cfg(test)]
@@ -447,15 +483,39 @@ mod tests {
         });
 
         let payload = json!({"event_type": "test", "call_id": "c1"});
-        let record = sender.send_payload(&payload).await.expect("send ok");
+        let body = payload.to_string();
+        let record = sender.send_payload(&payload, &body).await.expect("send ok");
 
         assert_eq!(record.url, server.url());
         assert_eq!(record.status_code, Some(200));
         assert!(record.latency_ms < 5000, "latency should be bounded");
-        assert!(
-            record.body_preview.contains("test"),
-            "body preview should reflect payload"
-        );
+        assert!(record.body.contains("test"), "body should reflect payload");
+        assert_eq!(record.body, body, "body must be the full payload");
+    }
+
+    /// Regression (panic fix): payloads whose serialized form exceeds 1024
+    /// bytes and contains multi-byte UTF-8 characters (e.g. Chinese) straddling
+    /// the old truncation boundary must be handled without panicking. Bodies
+    /// are never truncated — the full payload is echoed for log compensation.
+    #[tokio::test]
+    async fn test_send_payload_handles_large_multibyte_body() {
+        let server = TestHttpServer::start().await;
+        let sender = RwiWebhookSender::new(LocatorWebhookConfig {
+            url: server.url(),
+            events: vec![],
+            headers: None,
+            timeout_ms: Some(5000),
+        });
+
+        // 1800 bytes of '请' (3 bytes each): byte 1024 falls inside a char,
+        // which panicked the old `&s[..1024]` slice.
+        let payload = json!({"event_type": "test", "note": "请".repeat(600)});
+        let body = payload.to_string();
+        assert!(body.len() > 1024);
+
+        let record = sender.send_payload(&payload, &body).await.expect("send ok");
+        assert_eq!(record.status_code, Some(200));
+        assert_eq!(record.body, body, "body must not be truncated");
     }
 
     /// Non-success responses are still captured (status code recorded) so the
@@ -484,20 +544,177 @@ mod tests {
         let payload = json!({"event_type": "test"});
         // send_payload treats any HTTP response as Ok (it only errors on
         // transport failure); the status code is captured in the record.
-        let record = sender.send_payload(&payload).await.expect("http ok");
+        let body = payload.to_string();
+        let record = sender.send_payload(&payload, &body).await.expect("http ok");
         assert_eq!(record.status_code, Some(500));
     }
 
-    /// Body preview is truncated for very large payloads to keep logs bounded.
-    #[test]
-    fn test_truncate_payload_bounds_size() {
-        let huge = serde_json::Value::String("x".repeat(5000));
-        let preview = truncate_payload(&huge);
-        assert!(
-            preview.len() < 5000,
-            "preview must be truncated, len={}",
-            preview.len()
+    /// HTTP server that answers `fail_status` for the first `fail_first`
+    /// requests, then 200. Records every request body for retry assertions.
+    struct RetryTestServer {
+        port: u16,
+        received: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    impl RetryTestServer {
+        async fn start(fail_first: u32, fail_status: axum::http::StatusCode) -> Self {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            let received: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+            let rc = received.clone();
+            let counter = Arc::new(AtomicU32::new(0));
+            let app = axum::Router::new().route(
+                "/hook",
+                axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    let rc = rc.clone();
+                    let counter = counter.clone();
+                    async move {
+                        let n = counter.fetch_add(1, Ordering::SeqCst);
+                        rc.lock().unwrap().push(body);
+                        if n < fail_first {
+                            (
+                                fail_status,
+                                axum::Json(serde_json::json!({"status": "error"})),
+                            )
+                        } else {
+                            (
+                                axum::http::StatusCode::OK,
+                                axum::Json(serde_json::json!({"status": "ok"})),
+                            )
+                        }
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            crate::utils::spawn(async move {
+                axum::serve(listener, app).await.ok();
+            });
+            Self { port, received }
+        }
+
+        fn url(&self) -> String {
+            format!("http://127.0.0.1:{}/hook", self.port)
+        }
+    }
+
+    fn retry_test_entry(call_id: &str) -> EventCacheEntry {
+        EventCacheEntry {
+            cached_at: chrono::Utc::now(),
+            call_id: call_id.into(),
+            event: crate::rwi::event::to_legacy_event(
+                &crate::rwi::CallAnswered {
+                    call_id: call_id.into(),
+                },
+                None,
+            ),
+        }
+    }
+
+    /// Failed deliveries (non-2xx) are retried up to `WEBHOOK_RETRY_COUNT`
+    /// times with `WEBHOOK_RETRY_INTERVAL_MS` between attempts, and every
+    /// attempt re-sends a byte-identical payload (stable `event_id`) so
+    /// receivers can dedupe.
+    #[tokio::test]
+    async fn test_webhook_retries_until_success_with_identical_payload() {
+        let server = RetryTestServer::start(2, axum::http::StatusCode::SERVICE_UNAVAILABLE).await;
+        let config = LocatorWebhookConfig {
+            url: server.url(),
+            events: vec![],
+            headers: None,
+            timeout_ms: Some(5000),
+        };
+        let tx = start_rwi_webhook_handler(config);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        tx.send(retry_test_entry("retry-1")).ok();
+
+        // 2 initial failures + 1 successful retry = 3 requests.
+        wait_for_events(&server.received, 3, 5000).await;
+        let received = server.received.lock().unwrap();
+        assert_eq!(received.len(), 3, "expected exactly 3 delivery attempts");
+        assert_eq!(
+            received[0], received[1],
+            "retry attempts must carry identical payloads"
         );
-        assert!(preview.contains("truncated"));
+        assert_eq!(
+            received[1], received[2],
+            "retry attempts must carry identical payloads"
+        );
+        assert!(
+            received[0].get("event_id").is_some(),
+            "payload must carry an event_id idempotency key"
+        );
+    }
+
+    /// After the initial attempt plus all retries fail, the handler gives up
+    /// (exactly `1 + WEBHOOK_RETRY_COUNT` requests) and stays alive so
+    /// subsequent events are still delivered.
+    #[tokio::test]
+    async fn test_webhook_gives_up_after_max_retries_and_stays_alive() {
+        let server = RetryTestServer::start(u32::MAX, axum::http::StatusCode::BAD_GATEWAY).await;
+        let config = LocatorWebhookConfig {
+            url: server.url(),
+            events: vec![],
+            headers: None,
+            timeout_ms: Some(5000),
+        };
+        let tx = start_rwi_webhook_handler(config);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        tx.send(retry_test_entry("retry-2")).ok();
+
+        // 1 initial attempt + 3 retries = 4 requests.
+        wait_for_events(&server.received, 4, 8000).await;
+        // No 5th attempt may follow (wait longer than the retry interval).
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert_eq!(
+            server.received.lock().unwrap().len(),
+            4,
+            "delivery must stop after 1 attempt + 3 retries"
+        );
+
+        // The handler loop must still be alive for the next event.
+        tx.send(retry_test_entry("retry-3")).ok();
+        wait_for_events(&server.received, 5, 8000).await;
+        assert!(server.received.lock().unwrap().len() >= 5);
+    }
+
+    /// Large multi-byte payloads flow through the whole handler untouched —
+    /// end-to-end regression for the UTF-8 char-boundary panic: the receiver
+    /// must get the complete, untruncated payload.
+    #[tokio::test]
+    async fn test_webhook_delivers_large_multibyte_payload_end_to_end() {
+        let server = TestHttpServer::start().await;
+        let config = LocatorWebhookConfig {
+            url: server.url(),
+            events: vec![],
+            headers: None,
+            timeout_ms: Some(5000),
+        };
+        let tx = start_rwi_webhook_handler(config);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let transcript = "请检查录音质量与通话摘要。".repeat(100);
+        let entry = EventCacheEntry {
+            cached_at: chrono::Utc::now(),
+            call_id: "call-cn".into(),
+            event: crate::rwi::event::RwiEvent {
+                event_type: "recording_metadata_available",
+                call_id: Some("call-cn".into()),
+                payload: serde_json::json!({
+                    "event_type": "recording_metadata_available",
+                    "call_id": "call-cn",
+                    "metadata": { "transcript": transcript },
+                }),
+            },
+        };
+        tx.send(entry).ok();
+
+        wait_for_events(&server.received, 1, 2000).await;
+        let body = &server.received.lock().unwrap()[0];
+        assert_eq!(
+            body["event"]["metadata"]["transcript"], transcript,
+            "payload must be delivered in full, without truncation"
+        );
     }
 }
