@@ -146,8 +146,7 @@ mod tests {
                 description: None,
                 r#type: "sell".to_string(),
                 rates: vec![RateConfig {
-                    id: 0,
-                    prefix: "1".to_string(),
+                                        prefix: "1".to_string(),
                     match_caller_prefix: None,
                     rate: 0.01,
                     min_duration: 60,

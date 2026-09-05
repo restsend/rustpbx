@@ -127,8 +127,7 @@ async fn test_caller_pool_selects_from_route_pool() {
             description: None,
             r#type: "sell".to_string(),
             rates: vec![rustpbx::addons::wholesale::data::RateConfig {
-                id: 0,
-                prefix: "86".to_string(),
+                                prefix: "86".to_string(),
                 match_caller_prefix: None,
                 rate: 0.1,
                 min_duration: 60,

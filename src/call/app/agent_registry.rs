@@ -354,6 +354,10 @@ pub trait AgentRegistry: Send + Sync {
         for group in add_group_ids {
             uris.extend(self.resolve_target(&format!("skill-group:{group}")).await);
         }
+        // Dedup preserving order — overlapping groups (an agent belonging to
+        // both the primary and an escalation group) must be dialled once.
+        let mut seen = std::collections::HashSet::new();
+        uris.retain(|uri| seen.insert(uri.clone()));
         uris
     }
 

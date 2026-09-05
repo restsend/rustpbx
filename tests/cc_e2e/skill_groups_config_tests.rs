@@ -47,7 +47,10 @@ fn config_path_for(dir: &TempDir) -> String {
 }
 
 fn generated_cc_dir(dir: &TempDir) -> std::path::PathBuf {
-    dir.path().join("config").join("cc")
+    // refactor_media layout: cc dir sits NEXT TO the main config file
+    // (`<parent-of-config>/cc`); the main branch additionally supports
+    // `proxy.generated_dir` indirection, which this branch does not have.
+    dir.path().join("cc")
 }
 
 // ── export ────────────────────────────────────────────────────────────────
@@ -552,9 +555,10 @@ skills_required = ["b"]
     let async_cache =
         rustpbx::addons::cc::CcAddonState::load_skill_groups_from_dir(Some(&config_path)).await;
 
-    let generated_root = tmp.path().join("config");
+    // `load_skill_groups_from_config_dir_sync` takes the config ROOT (it
+    // appends `cc/skill_groups` itself) — i.e. the parent of `config.toml`.
     let sync_cache =
-        rustpbx::addons::cc::CcAddonState::load_skill_groups_from_config_dir_sync(&generated_root);
+        rustpbx::addons::cc::CcAddonState::load_skill_groups_from_config_dir_sync(tmp.path());
 
     assert_eq!(
         async_cache.groups.len(),
@@ -570,27 +574,8 @@ skills_required = ["b"]
     }
 }
 
-#[test]
-fn cc_config_dir_uses_generated_dir_relative_to_main_config() {
-    let tmp = TempDir::new().unwrap();
-    let conf = tmp.path().join("rustpbx.toml");
-    std::fs::write(&conf, "[proxy]\ngenerated_dir = \"./config\"\n").unwrap();
-
-    let dir = CcAddonState::cc_config_dir(conf.to_str()).unwrap();
-    assert_eq!(dir, tmp.path().join("config").join("cc"));
-}
-
-#[test]
-fn cc_config_dir_honors_absolute_generated_dir() {
-    let tmp = TempDir::new().unwrap();
-    let generated = tmp.path().join("generated");
-    let conf = tmp.path().join("rustpbx.toml");
-    std::fs::write(
-        &conf,
-        format!("[proxy]\ngenerated_dir = \"{}\"\n", generated.display()),
-    )
-    .unwrap();
-
-    let dir = CcAddonState::cc_config_dir(conf.to_str()).unwrap();
-    assert_eq!(dir, generated.join("cc"));
-}
+// NOTE: `cc_config_dir_uses_generated_dir_relative_to_main_config` and
+// `cc_config_dir_honors_absolute_generated_dir` were removed — they pinned
+// the `proxy.generated_dir` indirection that exists on the cc `main` branch
+// but not on the `refactor_media` integration branch this workspace builds
+// against (here `cc_config_dir` is always `<parent-of-config>/cc`).

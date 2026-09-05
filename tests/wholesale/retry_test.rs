@@ -170,8 +170,7 @@ async fn test_wholesale_route_ignores_retry_configuration() {
             description: None,
             r#type: "Standard".to_string(),
             rates: vec![RateConfig {
-                id: 0,
-                prefix: "1".to_string(),
+                                prefix: "1".to_string(),
                 match_caller_prefix: None,
                 rate: 0.1,
                 min_duration: 1,

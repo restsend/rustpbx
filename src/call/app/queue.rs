@@ -1894,13 +1894,12 @@ impl CallApp for QueueApp {
                             }
                         }
 
-                        if let Some(ref registry) = self.agent_registry {
-                            let agent_id = data
-                                .get("agent_id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or(agent_uri);
-                            let _ = registry.start_call(agent_id).await;
-                        }
+                        // NOTE: no registry.start_call() here — the connected
+                        // agent's call accounting is owned by the call-session
+                        // hooks (on_call_connected increments, on_call_ended
+                        // decrements). Calling start_call here as well double-
+                        // counted every answered call and permanently consumed
+                        // agent capacity.
 
                         // Release phantom states of agents dialed for this call
                         // that never connected (e.g. an agent that rejected with

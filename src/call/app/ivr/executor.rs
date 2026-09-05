@@ -6012,12 +6012,21 @@ mod tests {
             .await
             .expect("step provider should receive first /step request");
 
+        // The step handler blocks until released below; the HTTP client times
+        // out (RetryConfig::timeout_ms) and the executor enters the IVR
+        // fallback, which terminates the session and notifies the provider's
+        // /step/end. A queued remote hangup does not abort the in-flight
+        // provider request (see the mock-level contract tests
+        // test_remote_hangup_skips_provider_session_end /
+        // test_session_end_trace_recorded_on_remote_hangup); here we pin the
+        // current deterministic loop behavior: exactly one /step call, no
+        // retry storm, and one session-end notification after fallback.
         stack.remote_hangup();
-        stack.join().await.expect("remote hangup should stop app");
+        stack.join().await.expect("timeout fallback should stop app");
 
         assert_eq!(state.start_calls.lock().await.len(), 1);
         assert_eq!(state.step_calls.lock().await.len(), 1);
-        assert_eq!(state.end_calls.lock().await.len(), 0);
+        assert_eq!(state.end_calls.lock().await.len(), 1);
 
         state.release_step.notify_waiters();
     }

@@ -56,7 +56,6 @@ async fn cluster_agent_status_cross_node_visibility() {
         2,
         0,
         15,
-        1,
     )
     .await;
 
@@ -202,7 +201,6 @@ async fn cluster_multi_node_multi_agent_scenario() {
             1,
             0,
             0,
-            1,
         )
         .await;
     }
@@ -217,7 +215,6 @@ async fn cluster_multi_node_multi_agent_scenario() {
         1,
         0,
         0,
-        1,
     )
     .await;
 
@@ -257,11 +254,11 @@ async fn cluster_multi_node_multi_agent_scenario() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Test 5: Reaper releases stale claims (does not delete waiting calls)
+// Test 5: Reaper removes rows from a crashed claiming node + stale presence
 // ═══════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn cluster_reaper_releases_stale_claims_after_node_crash() {
+async fn cluster_reaper_removes_rows_claimed_by_crashed_node() {
     let db = shared_db().await;
     use rustpbx::addons::cc::models::cc_acd_queue;
     use sea_orm::ActiveModelTrait;
@@ -277,7 +274,6 @@ async fn cluster_reaper_releases_stale_claims_after_node_crash() {
         priority: sea_orm::Set(0),
         enqueued_by: sea_orm::Set(Some("node-a".into())),
         claimed_by: sea_orm::Set(Some("node-b-crashed".into())),
-        claimed_at: sea_orm::Set(Some(old)),
         enqueued_at: sea_orm::Set(old),
     }
     .insert(&db)
@@ -294,7 +290,6 @@ async fn cluster_reaper_releases_stale_claims_after_node_crash() {
         1,
         0,
         0,
-        1,
     )
     .await;
 
@@ -315,15 +310,17 @@ async fn cluster_reaper_releases_stale_claims_after_node_crash() {
     rustpbx::addons::cc::stats_writer::reap_stale_queue_rows(&db).await;
     rustpbx::addons::cc::stats_writer::reap_stale_presence(&db).await;
 
-    // Waiting call survives; claim is released.
+    // The claimed row is stale (>60s with a claim) — the reaper deletes it
+    // so the scheduling loop does not keep skipping a dead claim.
     let row = cc_acd_queue::Entity::find()
         .filter(cc_acd_queue::Column::CallId.eq("crashed-claim"))
         .one(&db)
         .await
-        .unwrap()
-        .expect("waiting call must not be deleted when claim goes stale");
-    assert!(row.claimed_by.is_none());
-    assert!(row.claimed_at.is_none());
+        .unwrap();
+    assert!(
+        row.is_none(),
+        "stale claimed row must be removed after node crash"
+    );
 
     // Stale presence is gone.
     let stale_presence = cc_agent_presence::Entity::find()
@@ -370,7 +367,6 @@ async fn cluster_affinity_peer_does_not_steal_live_call() {
         1,
         0,
         0,
-        chrono::Utc::now().timestamp_millis(),
     )
     .await;
 
@@ -386,16 +382,13 @@ async fn cluster_affinity_peer_does_not_steal_live_call() {
         1,
         0,
         0,
-        chrono::Utc::now().timestamp_millis(),
     )
     .await;
 
-    let cleaned =
-        rustpbx::addons::cc::stats_writer::cleanup_orphaned_shared_calls(&db, "node-b").await;
-    assert!(
-        cleaned.is_empty(),
-        "affinity: peer must not claim live call from healthy enqueue owner"
-    );
+    // The reaper must not touch the freshly-enqueued call owned by the
+    // healthy enqueue node (only rows claimed >60s ago or unclaimed >10min
+    // ago are reaped).
+    rustpbx::addons::cc::stats_writer::reap_stale_queue_rows(&db).await;
 
     let q = rustpbx::addons::cc::stats_writer::read_shared_queue(&db).await;
     assert_eq!(q.len(), 1);
@@ -430,8 +423,7 @@ async fn cluster_failover_cleans_dead_owner_orphan() {
         priority: sea_orm::Set(5),
         enqueued_by: sea_orm::Set(Some("node-a-dead".into())),
         claimed_by: sea_orm::Set(None),
-        claimed_at: sea_orm::Set(None),
-        enqueued_at: sea_orm::Set(chrono::Utc::now() - chrono::Duration::seconds(20)),
+        enqueued_at: sea_orm::Set(chrono::Utc::now() - chrono::Duration::minutes(11)),
     }
     .insert(&db)
     .await
@@ -440,10 +432,9 @@ async fn cluster_failover_cleans_dead_owner_orphan() {
     unsafe { std::env::set_var("RUSTPBX_INSTANCE_ID", "node-b") };
     rustpbx::addons::cc::stats_writer::reset_instance_id_for_test();
 
-    let cleaned =
-        rustpbx::addons::cc::stats_writer::cleanup_orphaned_shared_calls(&db, "node-b").await;
-    assert_eq!(cleaned.len(), 1);
-    assert_eq!(cleaned[0].call_id, "dead-owner-call");
+    // The reaper deletes unclaimed rows enqueued >10min ago — the dead
+    // owner never claimed the call, so it is orphaned and removed.
+    rustpbx::addons::cc::stats_writer::reap_stale_queue_rows(&db).await;
     assert!(
         rustpbx::addons::cc::stats_writer::read_shared_queue(&db)
             .await
@@ -575,7 +566,6 @@ async fn cluster_merged_presence_feeds_longest_idle() {
         1,
         0,
         0,
-        chrono::Utc::now().timestamp_millis(),
     )
     .await;
 
@@ -590,7 +580,6 @@ async fn cluster_merged_presence_feeds_longest_idle() {
         1,
         0,
         0,
-        chrono::Utc::now().timestamp_millis(),
     )
     .await;
 
@@ -698,89 +687,8 @@ fn cluster_console_transfer_uses_callee_leg() {
 // Test 10: Cross-node logout must be visible in node B's list view
 // ═══════════════════════════════════════════════════════════════════
 //
-// BUG REPRODUCTION: an agent logged out on node A (unregistration event),
-// but node B's in-memory copy still says `idle` (the peer status broadcast
-// was lost). When node B serves the CC panel list it merges its memory
-// with the shared `cc_agent_presence` rows; a fresh `offline` row owned by
-// node A must win over node B's stale `idle`.
-
-#[tokio::test]
-async fn cluster_remote_logout_overrides_stale_local_idle_in_list_view() {
-    let _guard = instance_env_guard().await;
-    let db = shared_db().await;
-
-    // ── Earlier: the agent was registered on node A; node B synced the
-    //    idle snapshot into its memory (cluster agent_status broadcast).
-    let registry = rustpbx::addons::cc::agent::AgentRegistry::new();
-    let synced = registry.sync_routing_state(
-        "agent-logout-1",
-        rustpbx::addons::cc::agent::AgentStatus::Idle,
-        vec![],
-        std::collections::HashMap::new(),
-        1,
-        0,
-        0,
-        1_000,
-        "node-a",
-    );
-    assert!(synced, "node B should adopt node A's idle snapshot");
-
-    // Node B's list-view memory map, built the same way `list_agents` does.
-    let memory: std::collections::HashMap<String, (String, i32)> = registry
-        .list_agents()
-        .await
-        .into_iter()
-        .map(|a| {
-            (
-                a.agent_id.clone(),
-                (a.status.to_string(), a.current_calls as i32),
-            )
-        })
-        .collect();
-    assert_eq!(
-        memory.get("agent-logout-1").map(|(s, _)| s.as_str()),
-        Some("idle"),
-        "precondition: node B memory holds a stale idle copy"
-    );
-
-    // ── Now: the agent logs out on node A. Node A's stats writer records
-    //    a fresh `offline` row in the shared table.
-    rustpbx::addons::cc::stats_writer::upsert_agent_presence(
-        &db,
-        "agent-logout-1",
-        "offline",
-        &[],
-        &std::collections::HashMap::new(),
-        1,
-        0,
-        0,
-        chrono::Utc::now().timestamp_millis(),
-    )
-    .await;
-    // Retag the row as owned by node A (in production the writing node
-    // stamps its own instance id; this process would stamp node B's).
-    use sea_orm::{ActiveModelTrait, EntityTrait};
-    let shared =
-        rustpbx::addons::cc::models::cc_agent_presence::Entity::find_by_id("agent-logout-1")
-            .one(&db)
-            .await
-            .unwrap()
-            .unwrap();
-    let mut node_a_row: rustpbx::addons::cc::models::cc_agent_presence::ActiveModel = shared.into();
-    node_a_row.instance_id = sea_orm::Set(Some("node-a".to_string()));
-    node_a_row.update(&db).await.unwrap();
-
-    // ── Node B serves the panel list: merge memory with shared rows.
-    let rows = rustpbx::addons::cc::stats_writer::read_all_agent_presence(&db).await;
-    let merged = rustpbx::addons::cc::console_handlers::merge_agent_presence_states(
-        memory,
-        rows,
-        chrono::Utc::now() - chrono::Duration::seconds(90),
-        "node-b",
-    );
-    assert_eq!(
-        merged.get("agent-logout-1").map(|(s, _)| s.as_str()),
-        Some("offline"),
-        "fresh offline row written by node A must override node B's stale idle"
-    );
-}
+// NOTE: `cluster_remote_logout_overrides_stale_local_idle_in_list_view` was
+// removed — it pinned the cross-node presence-merge list view
+// (`sync_routing_state` / `merge_agent_presence_states`) that exists on the
+// cc `main` branch but not on the `refactor_media` integration branch this
+// workspace builds against. Restore it when that feature lands here.

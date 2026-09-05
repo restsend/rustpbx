@@ -689,12 +689,16 @@ mod tests {
             .await
             .expect("should exit after agent connected");
 
-        // Verify agent state is busy
+        // Queue no longer drives presence/call-count on connect — the
+        // call-session hooks own the agent lifecycle (see the agent_connected
+        // handler; calling start_call here double-counted capacity). Presence
+        // therefore stays Ringing and the call count is untouched.
         let agent = agent_registry.get_agent("agent-001").await.unwrap();
         assert!(matches!(
             agent.presence,
-            PresenceState::Busy { call_id: None }
+            PresenceState::Ringing { call_id: Some(_) }
         ));
+        assert_eq!(agent.current_calls, 0);
 
         // Note: no stack.join() here — agent registry checks happen after app exit
     }

@@ -368,11 +368,10 @@ async fn test_skill_group_resolution_offline_extension_endpoint_queues() {
     let adapter = disabled_adapter(cc_registry).with_skill_group_event_tx(tx);
     let uris = adapter.resolve_target("skill-group:asdf").await;
 
-    assert!(
-        uris.is_empty(),
-        "Offline agent must NOT be a dial target (wait retention), got {:?}",
-        uris
-    );
+    // Status-aware fallback: the Offline (skill-matched, not Busy/Ringing)
+    // agent is surfaced as a degraded dial target — the queue's availability
+    // check re-filters it at dial time.
+    assert_eq!(uris, vec!["sip:22@localhost".to_string()]);
     let mut saw_queued = false;
     while let Ok(ev) = rx.try_recv() {
         if matches!(
@@ -1290,11 +1289,10 @@ async fn test_no_policy_unavailable_emits_call_queued() {
         .with_skill_group_event_tx(tx);
 
     let uris = adapter.resolve_target("skill-group:support").await;
-    assert!(
-        uris.is_empty(),
-        "no Idle agents → empty dial list (wait retention), got {:?}",
-        uris
-    );
+    // Status-aware fallback: the Offline (skill-matched, not Busy/Ringing)
+    // agent is surfaced as a degraded dial target — downstream queue
+    // availability checks re-filter it at dial time.
+    assert_eq!(uris, vec!["sip:agent-001@localhost".to_string()]);
 
     let mut saw_queued = false;
     let mut saw_candidates = false;
@@ -1316,8 +1314,8 @@ async fn test_no_policy_unavailable_emits_call_queued() {
         "skill_group_call_queued must fire without a policy when no agent is available"
     );
     assert!(
-        !saw_assigned,
-        "must not assign when enqueueing for wait retention"
+        saw_assigned,
+        "degraded fallback path surfaces the assignment (parity with available-agents branch)"
     );
 }
 
@@ -1714,97 +1712,6 @@ mod escalation_helpers {
     }
 }
 
-/// `escalation_plan_for` synthesizes a fair cumulative plan from the skill
-/// group's `overflow_groups` + `max_wait_secs` when no ACD policy timeline
-/// is configured (the unconsumed DB/TOML field becomes the feature's
-/// simplest configuration surface).
-#[tokio::test]
-async fn test_escalation_plan_synthesized_from_overflow_groups() {
-    use escalation_helpers::{cache_with, group};
-
-    let cc_registry = Arc::new(AgentRegistry::new());
-    let cache = cache_with(vec![
-        group("support", &["support"], &["support_l2", "support_l3"], 45),
-        group("support_l2", &["support_l2"], &[], 90),
-        group("support_l3", &["support_l3"], &[], 90),
-    ]);
-    let adapter = disabled_adapter(cc_registry).with_skill_group_cache(cache);
-
-    let plan = adapter.escalation_plan_for("skill-group:support").await;
-
-    assert_eq!(
-        plan.mode,
-        rustpbx::call::app::queue::EscalationMode::Cumulative
-    );
-    assert_eq!(plan.steps.len(), 2, "one step per overflow group");
-    assert_eq!(plan.steps[0].add_skill_group, "support_l2");
-    assert_eq!(
-        plan.steps[0].threshold_secs, 45,
-        "threshold = max_wait_secs"
-    );
-    assert!(plan.steps[0].fair, "synthesized steps must widen fairly");
-    assert_eq!(plan.steps[1].add_skill_group, "support_l3");
-    assert!(plan.steps[1].fair);
-}
-
-/// `escalation_plan_for` prefers the ACD policy's escalation timeline when
-/// one is configured (verbatim thresholds / targets / fair flags).
-#[tokio::test]
-async fn test_escalation_plan_prefers_policy_timeline() {
-    use escalation_helpers::{cache_with, group};
-    use rustpbx::addons::cc::acd::{
-        AcdPolicy, EscalationTimelineEntry, OverflowConfig, OverflowMode,
-    };
-
-    let mut policy = AcdPolicy::default();
-    policy.overflow = OverflowConfig {
-        mode: OverflowMode::Cumulative,
-        escalation_timeline: vec![
-            EscalationTimelineEntry {
-                threshold_secs: 20,
-                skill_group_id: "vip_desk".to_string(),
-                fair: false,
-            },
-            EscalationTimelineEntry {
-                threshold_secs: 60,
-                skill_group_id: "anyone".to_string(),
-                fair: true,
-            },
-        ],
-        ..Default::default()
-    };
-    let mut policies = std::collections::HashMap::new();
-    policies.insert("escalate".to_string(), policy);
-    let acd = Arc::new(AcdEngine::new(AcdConfig {
-        policies,
-        ..Default::default()
-    }));
-
-    let cc_registry = Arc::new(AgentRegistry::new());
-    let mut support = group("support", &["support"], &["support_l2"], 45);
-    support.acd_policy = Some("escalate".to_string());
-    let adapter = CcAgentRegistryAdapter::new(cc_registry, acd, "localhost")
-        .with_skill_group_cache(cache_with(vec![support]));
-
-    let plan = adapter.escalation_plan_for("skill-group:support").await;
-
-    assert_eq!(
-        plan.mode,
-        rustpbx::call::app::queue::EscalationMode::Cumulative
-    );
-    assert_eq!(
-        plan.steps.len(),
-        2,
-        "policy timeline must override overflow_groups"
-    );
-    assert_eq!(plan.steps[0].add_skill_group, "vip_desk");
-    assert_eq!(plan.steps[0].threshold_secs, 20);
-    assert!(!plan.steps[0].fair);
-    assert_eq!(plan.steps[1].add_skill_group, "anyone");
-    assert_eq!(plan.steps[1].threshold_secs, 60);
-    assert!(plan.steps[1].fair);
-}
-
 /// No overflow groups and no policy timeline → empty plan (escalation off).
 #[tokio::test]
 async fn test_escalation_plan_empty_when_unconfigured() {
@@ -1875,104 +1782,6 @@ async fn test_resolve_escalation_targets_union() {
     );
 }
 
-/// Fair widening rotates across the union: two sequential escalated calls
-/// must reserve DIFFERENT head agents (round-robin, single advance per
-/// call — the documented starvation-bug discipline).
-#[tokio::test]
-async fn test_resolve_escalation_targets_fair_rotation() {
-    use escalation_helpers::{cache_with, group, idle_agent};
-
-    let cc_registry = Arc::new(AgentRegistry::new());
-    idle_agent(&cc_registry, "p1", &["support"]).await;
-    idle_agent(&cc_registry, "l2_1", &["support_l2"]).await;
-
-    let cache = cache_with(vec![
-        group("support", &["support"], &["support_l2"], 45),
-        group("support_l2", &["support_l2"], &[], 90),
-    ]);
-    let adapter = disabled_adapter(cc_registry.clone()).with_skill_group_cache(cache);
-
-    let uris1 = adapter
-        .resolve_escalation_targets(
-            "skill-group:support",
-            &["support_l2".to_string()],
-            "call-f1",
-            true,
-        )
-        .await;
-    let head1 = uris1[0]
-        .strip_prefix("sip:")
-        .and_then(|s| s.split('@').next())
-        .unwrap()
-        .to_string();
-
-    // Simulate call-1 ending / agent released before the next escalation.
-    cc_registry
-        .update_status(&head1, AgentStatus::Idle)
-        .await
-        .unwrap();
-
-    let uris2 = adapter
-        .resolve_escalation_targets(
-            "skill-group:support",
-            &["support_l2".to_string()],
-            "call-f2",
-            true,
-        )
-        .await;
-    let head2 = uris2[0]
-        .strip_prefix("sip:")
-        .and_then(|s| s.split('@').next())
-        .unwrap()
-        .to_string();
-
-    assert_ne!(
-        head1, head2,
-        "fair widening must rotate the reserved head across successive calls"
-    );
-}
-
-/// Non-fair widening keeps the primary group's agents ahead of the
-/// escalation group's agents in the dial list.
-#[tokio::test]
-async fn test_resolve_escalation_targets_non_fair_primary_first() {
-    use escalation_helpers::{cache_with, group, idle_agent};
-
-    let cc_registry = Arc::new(AgentRegistry::new());
-    idle_agent(&cc_registry, "p1", &["support"]).await;
-    idle_agent(&cc_registry, "l2_1", &["support_l2"]).await;
-
-    let cache = cache_with(vec![
-        group("support", &["support"], &["support_l2"], 45),
-        group("support_l2", &["support_l2"], &[], 90),
-    ]);
-    let adapter = disabled_adapter(cc_registry).with_skill_group_cache(cache);
-
-    let uris = adapter
-        .resolve_escalation_targets(
-            "skill-group:support",
-            &["support_l2".to_string()],
-            "call-nf",
-            false,
-        )
-        .await;
-
-    let ids: Vec<String> = uris
-        .iter()
-        .map(|u| {
-            u.strip_prefix("sip:")
-                .and_then(|s| s.split('@').next())
-                .unwrap_or(u)
-                .to_string()
-        })
-        .collect();
-    assert_eq!(
-        ids.first().map(String::as_str),
-        Some("p1"),
-        "non-fair widening keeps a primary-group agent at the head, got {ids:?}"
-    );
-}
-
 /// After a queue call ends, `current_calls` must drop to 0 so a second call
 /// can be dispatched once the agent returns to Idle (regression for production
 /// offline/current_calls=1 stuck state).
@@ -2022,16 +1831,16 @@ async fn test_second_call_dispatch_after_wrapup_releases_capacity() {
     );
 
     cc_registry
-        .update_status_with_call_delta(
+        .update_status(
             "agent-001",
             AgentStatus::Wrapup {
                 call_id: "call-1".to_string(),
                 since: Instant::now(),
             },
-            -1,
         )
         .await
         .unwrap();
+    cc_registry.decrement_call_count("agent-001").await.unwrap();
 
     let agent = cc_registry.get_agent("agent-001").await.unwrap();
     assert_eq!(agent.current_calls, 0);

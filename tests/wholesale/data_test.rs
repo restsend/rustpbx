@@ -476,8 +476,7 @@ async fn test_reload_runtime_keeps_unpriced_carrier_without_rate_deck() {
 fn test_find_best_rate_prefers_matching_caller_prefix() {
     let matcher = RateMatcher::from(vec![
         RateConfig {
-            id: 0,
-            prefix: "1".to_string(),
+                        prefix: "1".to_string(),
             match_caller_prefix: None,
             rate: 0.01,
             min_duration: 60,
@@ -485,8 +484,7 @@ fn test_find_best_rate_prefers_matching_caller_prefix() {
             remark: None,
         },
         RateConfig {
-            id: 0,
-            prefix: "1".to_string(),
+                        prefix: "1".to_string(),
             match_caller_prefix: Some("86".to_string()),
             rate: 0.02,
             min_duration: 60,
@@ -494,8 +492,7 @@ fn test_find_best_rate_prefers_matching_caller_prefix() {
             remark: None,
         },
         RateConfig {
-            id: 0,
-            prefix: "1".to_string(),
+                        prefix: "1".to_string(),
             match_caller_prefix: Some("8613".to_string()),
             rate: 0.03,
             min_duration: 60,
@@ -503,8 +500,7 @@ fn test_find_best_rate_prefers_matching_caller_prefix() {
             remark: None,
         },
         RateConfig {
-            id: 0,
-            prefix: "12".to_string(),
+                        prefix: "12".to_string(),
             match_caller_prefix: None,
             rate: 0.05,
             min_duration: 60,
@@ -512,8 +508,7 @@ fn test_find_best_rate_prefers_matching_caller_prefix() {
             remark: None,
         },
         RateConfig {
-            id: 0,
-            prefix: "12".to_string(),
+                        prefix: "12".to_string(),
             match_caller_prefix: Some("852".to_string()),
             rate: 0.04,
             min_duration: 60,

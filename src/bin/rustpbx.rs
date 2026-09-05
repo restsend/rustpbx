@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::time::{Duration, sleep};
-use tracing::info;
+use tracing::{debug, info, warn};
 use tracing_subscriber::{
     EnvFilter, fmt::time::LocalTime, layer::SubscriberExt, util::SubscriberInitExt,
 };
@@ -732,12 +732,52 @@ fn main() -> Result<()> {
         };
 
         if app_reload_requested {
+            // Resolve the SIP ports from the config on disk (the in-memory
+            // cache is only populated on build failures). These are the
+            // listeners the OLD app still holds while it drains.
+            let ports = match &next_config_path {
+                Some(path) => match Config::load_async(path).await {
+                    Ok(cfg) => cfg.proxy.all_udp_ports(),
+                    Err(_) => Vec::new(),
+                },
+                None => Vec::new(),
+            };
             info!("Reload requested; restarting with updated configuration");
             next_config_path = app_config_path;
             cached_config = None;
             retry_count = 0;
 
-            sleep(Duration::from_secs(3)).await; // give some time for sockets to be released
+            // Wait for the OLD app's SIP listeners to actually release their
+            // ports before rebuilding. A fixed grace sleep raced with the
+            // graceful drain (which waits for active calls), making the new
+            // bind fail with "Address already in use" for up to the whole
+            // retry budget.
+            let wait_start = std::time::Instant::now();
+            loop {
+                let free = ports.is_empty()
+                    || ports.iter().all(|p| {
+                        match std::net::UdpSocket::bind(("0.0.0.0", *p)) {
+                            Ok(_) => true,
+                            Err(_) => false,
+                        }
+                    });
+                if free {
+                    break;
+                }
+                if wait_start.elapsed() > std::time::Duration::from_secs(120) {
+                    warn!(
+                        "reload: SIP ports {:?} still bound after 120s; rebuilding anyway",
+                        ports
+                    );
+                    break;
+                }
+                debug!(
+                    "reload: waiting for SIP ports {:?} to be released ({:?} elapsed)",
+                    ports,
+                    wait_start.elapsed()
+                );
+                sleep(Duration::from_millis(500)).await;
+            }
             continue;
         }
 

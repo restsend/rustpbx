@@ -111,9 +111,9 @@ async fn run_rwi_webhook_handler(
 
     // Dedup cache: ring buffer of (call_id, cached_at) to skip duplicates
     // when the same event is forwarded from multiple call owners.
-    let mut dedup: VecDeque<(String, DateTime<Utc>)> =
+    let mut dedup: VecDeque<(String, DateTime<Utc>, String)> =
         VecDeque::with_capacity(DEDUP_CACHE_SIZE + 1);
-    let mut seen: HashSet<(String, DateTime<Utc>)> = HashSet::new();
+    let mut seen: HashSet<(String, DateTime<Utc>, String)> = HashSet::new();
     // Consecutive transport-failure counter — used only to log a single
     // "recovered" line when delivery succeeds again after an outage.
     let mut consecutive_send_failures: u32 = 0;
@@ -130,11 +130,19 @@ async fn run_rwi_webhook_handler(
             }
         };
 
-        // Dedup: skip event if the same (call_id, timestamp) was already sent.
-        // Events with empty call_id (broadcast events like agent state changes)
-        // are not deduped since they have no call context.
+        // Dedup: skip event if the same (call_id, timestamp, event_type) was
+        // already sent. The timestamp has microsecond resolution, so distinct
+        // events for the same call CAN share one — the event type keeps the
+        // key from collapsing them (e.g. call_created vs queue_joined emitted
+        // back-to-back at session start). Events with empty call_id
+        // (broadcast events like agent state changes) are not deduped since
+        // they have no call context.
         if !entry.call_id.is_empty() {
-            let dedup_key = (entry.call_id.clone(), entry.cached_at);
+            let dedup_key = (
+                entry.call_id.clone(),
+                entry.cached_at,
+                entry.event.event_type.to_string(),
+            );
             if seen.contains(&dedup_key) {
                 debug!(
                     "RWI webhook: skipping duplicate event at {}",

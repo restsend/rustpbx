@@ -11132,6 +11132,19 @@ impl SipSession {
             "callee" => Some(crate::media::media_bridge::LegSide::B),
             _ => None,
         };
+        // A service-initiated DTMF (CTI / WS API) represents a keypress on
+        // this call, so a running app (IVR menu, CSAT collect, …) must see it
+        // exactly like an inbound RTP/SIP-INFO digit would be injected.
+        let mut app_notified = false;
+        for d in &valid_digits {
+            app_notified |= super::util::inject_dtmf_into_app(
+                *d,
+                leg_id.as_str(),
+                &self.id.to_string(),
+                &self.app_runtime,
+                &self.server.rwi_gateway,
+            );
+        }
         if let Some(side) = side {
             let rtp_sent = match self.media.bridge.as_ref() {
                 Some(mb) if mb.leg(side).is_some() => match mb.send_dtmf(side, &digit_str).await {
@@ -11180,6 +11193,8 @@ impl SipSession {
                 },
                 None => return Err(anyhow!("No connected callee dialog")),
             }
+        } else if app_notified {
+            return Ok(());
         } else {
             return Err(anyhow!("No dialog for leg: {}", leg_id));
         };
@@ -11190,6 +11205,12 @@ impl SipSession {
                 info!(session_id = %self.id, %leg_id, digits = %digit_str, "DTMF sent via SIP INFO");
             }
             Err(e) => {
+                if app_notified {
+                    // The running app already consumed the digits; the far
+                    // end simply does not support SIP INFO delivery.
+                    info!(session_id = %self.id, error = %e, "SIP INFO DTMF failed; app already received digits");
+                    return Ok(());
+                }
                 return Err(anyhow!("Failed to send DTMF: {}", e));
             }
         }

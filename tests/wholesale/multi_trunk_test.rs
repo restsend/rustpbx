@@ -227,8 +227,7 @@ async fn test_acl_trunk_context_selects_source_trunk() {
                 description: None,
                 r#type: "sell".to_string(),
                 rates: vec![RateConfig {
-                    id: 0,
-                    prefix: "234".to_string(),
+                                        prefix: "234".to_string(),
                     match_caller_prefix: None,
                     rate: 0.01,
                     min_duration: 60,
@@ -246,8 +245,7 @@ async fn test_acl_trunk_context_selects_source_trunk() {
                 description: None,
                 r#type: "sell".to_string(),
                 rates: vec![RateConfig {
-                    id: 0,
-                    prefix: "1234".to_string(),
+                                        prefix: "1234".to_string(),
                     match_caller_prefix: None,
                     rate: 0.01,
                     min_duration: 60,
@@ -436,8 +434,7 @@ async fn test_multi_trunk_context_and_stripping() {
                 description: None,
                 r#type: "sell".to_string(),
                 rates: vec![RateConfig {
-                    id: 0,
-                    prefix: "0000".to_string(),
+                                        prefix: "0000".to_string(),
                     match_caller_prefix: None,
                     rate: 0.01,
                     min_duration: 60,
@@ -569,8 +566,7 @@ async fn test_multi_trunk_context_and_stripping() {
                 description: None,
                 r#type: "sell".to_string(),
                 rates: vec![RateConfig {
-                    id: 0,
-                    prefix: "1111".to_string(),
+                                        prefix: "1111".to_string(),
                     match_caller_prefix: None,
                     rate: 0.01,
                     min_duration: 60,
@@ -705,8 +701,7 @@ async fn test_single_trunk_returns_forward() {
                 description: None,
                 r#type: "sell".to_string(),
                 rates: vec![RateConfig {
-                    id: 0,
-                    prefix: "1".to_string(),
+                                        prefix: "1".to_string(),
                     match_caller_prefix: None,
                     rate: 0.01,
                     min_duration: 60,
@@ -929,8 +924,7 @@ async fn test_multiple_trunks_selects_one_carrier() {
                 description: None,
                 r#type: "sell".to_string(),
                 rates: vec![RateConfig {
-                    id: 0,
-                    prefix: "1".to_string(),
+                                        prefix: "1".to_string(),
                     match_caller_prefix: None,
                     rate: 0.01,
                     min_duration: 60,
@@ -1139,8 +1133,7 @@ async fn test_abort_when_no_trunks_have_valid_rates() {
                 description: None,
                 r#type: "sell".to_string(),
                 rates: vec![RateConfig {
-                    id: 0,
-                    prefix: "999".to_string(), // This will match 999xxx but NOT 99xxx
+                                        prefix: "999".to_string(), // This will match 999xxx but NOT 99xxx
                     match_caller_prefix: None,
                     rate: 0.01,
                     min_duration: 60,
