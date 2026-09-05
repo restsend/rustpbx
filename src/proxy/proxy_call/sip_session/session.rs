@@ -8827,6 +8827,36 @@ impl SipSession {
                 CommandResult::success()
             }
 
+            CallCommand::HangupAgentLeg => {
+                // BYE every connected leg that is neither the caller nor the
+                // consult leg — i.e. the agent the queue dispatched (whose
+                // leg id is a generated UUID, not the literal `callee`).
+                let agent_legs: Vec<LegId> = self
+                    .legs
+                    .iter()
+                    .filter(|(id, leg)| leg.is_active() && id.0 != "caller" && id.0 != "consult")
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                if agent_legs.is_empty() {
+                    warn!(session_id = %self.id, "HangupAgentLeg: no connected agent leg found");
+                    return CommandResult::success();
+                }
+                for leg_id in &agent_legs {
+                    info!(session_id = %self.id, %leg_id, "HangupAgentLeg: hanging up agent leg");
+                    // Mark Ended + queue the BYE so the agent UA leaves
+                    // immediately, then detach the leg (which re-runs
+                    // update_media_path and re-bridges caller↔consult).
+                    if let Some(leg) = self.legs.get_mut(leg_id) {
+                        leg.state = LegState::Ended;
+                    }
+                    if let Some(dialog) = self.legs.get_dialog(leg_id) {
+                        self.pending_hangup.insert(dialog.id());
+                    }
+                    let _ = self.handle_remove_leg(leg_id.clone()).await;
+                }
+                CommandResult::success()
+            }
+
             CallCommand::ResumeMedia => {
                 if let Some(mb) = self.bridge_mut() {
                     if let Err(e) = mb.resume().await {
@@ -9923,7 +9953,9 @@ impl SipSession {
         self.sync_state();
         // Apply the cascade first: All marks the caller Ended, while a
         // hangup that leaves the caller alive must preserve the session.
-        if self.legs.get(&LegId::from("caller"))
+        if self
+            .legs
+            .get(&LegId::from("caller"))
             .is_some_and(|leg| leg.state != LegState::Ended)
         {
             return CommandResult::success();

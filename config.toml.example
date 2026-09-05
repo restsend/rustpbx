@@ -340,6 +340,12 @@ auto_start_at = "media" # default; use "answer" to wait for 200
 # type = "local" archival layout under path:
 # subdir = "daily"   # default — {path}/YYYYMMDD/{file}
 # # subdir = "hourly"  # {path}/YYYYMMDD/HH/{file}
+#
+# S3 mode: recording URLs stored in call records point to the object, and the
+# console generates a presigned download URL on demand (works with private
+# buckets). signed_url_expiry_secs controls how long each presigned URL stays
+# valid; default 86400 (24h), capped at 7 days (604800) by the S3 SigV4 spec.
+# # signed_url_expiry_secs = 86400
 
 # ── Live transcription (streaming ASR) ───────────────────────────────────────
 # Real-time call transcription over a streaming ASR WebSocket. When configured,
@@ -448,6 +454,7 @@ subdirs = "daily"  # "none" | "daily" | "hourly"
 # root = "recordings"
 # media = true          # upload RTP as WAV when type=sipflow (default: true)
 # signaling = true      # upload SIP signalling JSONL (recommended with [sipflow])
+# signed_url_expiry_secs = 86400  # presigned download URL lifetime (24h default, max 7 days)
 
 # Remote backend (single node):
 # [sipflow]

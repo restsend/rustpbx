@@ -1702,6 +1702,10 @@ pub(crate) struct RecordingPolicyPayload {
     /// Media destination: `local` | `http` | `s3` | `sipflow`.
     #[serde(default, rename = "type")]
     recording_type: Option<crate::config::RecordingType>,
+    /// Lifetime in seconds of presigned recording download URLs (S3 mode
+    /// only, capped at 7 days by SigV4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    signed_url_expiry_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

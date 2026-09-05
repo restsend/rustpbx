@@ -635,6 +635,7 @@ mod tests {
             media: Some(true),
             force_pcm: None,
             pcm_sample_rate: None,
+            signed_url_expiry_secs: None,
         };
 
         preconstruct_signaling_url(&mut record, &upload_config, false);

@@ -1178,7 +1178,8 @@ mod tests {
     /// must NOT overwrite line 103's destination, because the instance-id
     /// destination refresh is scoped to the same username/realm.
     #[tokio::test]
-    async fn db_locator_instance_id_does_not_cross_clobber_other_extension() {        let locator = DbLocator::new_with_migrate("sqlite::memory:".to_string(), true)
+    async fn db_locator_instance_id_does_not_cross_clobber_other_extension() {
+        let locator = DbLocator::new_with_migrate("sqlite::memory:".to_string(), true)
             .await
             .expect("create db locator");
 

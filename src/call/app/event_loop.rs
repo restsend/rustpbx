@@ -76,6 +76,13 @@ impl AppEventLoop {
                     action = self.handle_next_event().await?;
                 }
                 AppAction::Exit => {
+                    // The app asked for a plain exit (no transfer/hangup).
+                    // on_exit MUST still run: it is where apps flush their
+                    // final state — e.g. a tree IVR started via ivr.exec
+                    // writes the IvrExecResult (collected digits) there.
+                    // Skipping it left those results unwritten and the
+                    // ivr.exec hook fell back to an empty default payload.
+                    self.app.on_exit(ExitReason::Normal).await?;
                     break;
                 }
                 AppAction::Hangup { reason, code } => {

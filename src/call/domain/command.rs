@@ -135,6 +135,13 @@ pub enum CallCommand {
     /// survey) suppress surveys on transferred legs.
     MarkTransferred,
 
+    /// Hang up the connected agent leg(s) — every `Connected` leg except
+    /// `caller` / `consult`. Consult-transfer completion must BYE the agent
+    /// that way because queue-dispatched agent legs carry a generated UUID,
+    /// not the literal `callee` id (removing `callee` detaches a placeholder
+    /// and leaves the real agent leg bridged to the wrong media path).
+    HangupAgentLeg,
+
     /// Place a leg on hold
     Hold {
         /// The leg to hold

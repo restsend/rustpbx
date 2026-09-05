@@ -10,6 +10,7 @@ repository = "https://github.com/restsend/rustpbx"
 anyhow = "1"
 bytes = "1"
 futures = "0.3.31"
+http = "1"
 object_store = { version = "0.14.0", default-features = false, features = [
     "fs",
     "aws-base",

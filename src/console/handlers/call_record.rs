@@ -34,10 +34,11 @@ use std::{
     collections::{HashMap, HashSet},
     path::Path,
     sync::Arc,
+    time::Duration,
 };
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::media::wav_reader::{WavReader, WavSpec, WavWriter};
 
@@ -1002,12 +1003,10 @@ async fn query_call_records(
         inline_recordings.push(inline_url);
     }
 
-    let items: Vec<Value> = pagination
-        .items
-        .iter()
-        .zip(inline_recordings.iter())
-        .map(|(record, inline)| build_record_payload(record, &related, &state, inline.as_deref()))
-        .collect();
+    let mut items: Vec<Value> = Vec::with_capacity(pagination.items.len());
+    for (record, inline) in pagination.items.iter().zip(inline_recordings.iter()) {
+        items.push(build_record_payload(record, &related, &state, inline.as_deref()).await);
+    }
 
     let summary = match build_summary(&cdb, condition).await {
         Ok(summary) => summary,
@@ -1083,7 +1082,7 @@ async fn page_call_record_detail(
     };
 
     let cdr_data = load_cdr_data(&state, &model).await;
-    let payload = build_detail_payload(&model, &related, &state, cdr_data.as_ref());
+    let payload = build_detail_payload(&model, &related, &state, cdr_data.as_ref()).await;
     let current_user = state.build_current_user_ctx(&user).await;
 
     state.render_with_headers(
@@ -1495,7 +1494,7 @@ pub struct CdrData {
     pub storage: Option<CdrStorage>,
 }
 
-fn build_record_payload(
+async fn build_record_payload(
     record: &CallRecordModel,
     related: &RelatedContext,
     state: &ConsoleState,
@@ -1539,7 +1538,7 @@ fn build_record_payload(
     let caller_uri = record.caller_uri.clone();
     let callee_uri = record.callee_uri.clone();
 
-    let recording = build_recording_payload(state, record, inline_recording_url);
+    let recording = build_recording_payload(state, record, inline_recording_url).await;
     let error = build_error_payload(record.metadata.as_ref());
 
     let rewrite_caller_original = record.rewrite_original_from.clone();
@@ -1654,7 +1653,72 @@ fn build_trace_payload(metadata: Option<&Value>) -> Value {
         .unwrap_or(Value::Null)
 }
 
-fn build_recording_payload(
+/// Lifetime applied to presigned URLs when the owning config section is
+/// absent (should not happen in practice; kept as a safe fallback).
+const FALLBACK_SIGNED_URL_EXPIRY_SECS: u64 = 86_400;
+
+/// Rewrite a stored OSS/S3 object URL (`{endpoint}/{bucket}/{key}` or
+/// `s3://{bucket}/{key}`) into a presigned download URL, so recordings
+/// remain accessible when the bucket is private. The signature is generated
+/// on demand from the upload storage credentials and stays valid for the
+/// configured `signed_url_expiry_secs` window (capped at 7 days by SigV4).
+///
+/// Returns the original URL unchanged when no configured storage owns the
+/// URL (e.g. HTTP-upload mode) or when signing fails.
+async fn presign_recording_url(state: &ConsoleState, raw_url: &str) -> Option<String> {
+    let app = state.app_state()?;
+    let core = &app.core;
+
+    let recording_expiry = core
+        .config
+        .recording
+        .as_ref()
+        .map(|policy| policy.effective_signed_url_expiry_secs());
+    let sipflow_expiry = core.config.sipflow.as_ref().and_then(|s| match s {
+        crate::config::SipFlowConfig::Local { upload, .. } => {
+            upload.as_ref().and_then(|u| u.signed_url_expiry_secs())
+        }
+        crate::config::SipFlowConfig::Remote { upload, .. } => {
+            upload.as_ref().and_then(|u| u.signed_url_expiry_secs())
+        }
+    });
+
+    let candidates = [
+        (
+            core.recording_storage.as_ref(),
+            recording_expiry.unwrap_or(FALLBACK_SIGNED_URL_EXPIRY_SECS),
+        ),
+        (
+            core.sipflow_storage.as_ref(),
+            sipflow_expiry.unwrap_or(FALLBACK_SIGNED_URL_EXPIRY_SECS),
+        ),
+    ];
+
+    for (storage, expiry_secs) in candidates {
+        let Some(storage) = storage else {
+            continue;
+        };
+        if !storage.supports_presign() {
+            continue;
+        }
+        let Some(key) = storage.object_key_from_url(raw_url) else {
+            continue;
+        };
+        return match storage
+            .presign_read_url(&key, Duration::from_secs(expiry_secs))
+            .await
+        {
+            Ok(signed) => Some(signed),
+            Err(err) => {
+                debug!(url = raw_url, %err, "failed to presign recording url");
+                None
+            }
+        };
+    }
+    None
+}
+
+async fn build_recording_payload(
     state: &ConsoleState,
     record: &CallRecordModel,
     inline_recording_url: Option<&str>,
@@ -1667,8 +1731,13 @@ fn build_recording_payload(
 
     let (url, supports_streams) = if let Some(raw_value) = raw {
         if raw_value.starts_with("http://") || raw_value.starts_with("https://") {
-            // External URL – cannot extract per-leg streams
-            (raw_value.to_string(), false)
+            // External URL – presign OSS/S3 objects when possible
+            (
+                presign_recording_url(state, raw_value)
+                    .await
+                    .unwrap_or_else(|| raw_value.to_string()),
+                false,
+            )
         } else {
             // Local file path – serve through /recording endpoint with stream selection
             (
@@ -1700,7 +1769,10 @@ fn build_recording_payload(
     }))
 }
 
-fn derive_recording_download_url(state: &ConsoleState, record: &CallRecordModel) -> Option<String> {
+async fn derive_recording_download_url(
+    state: &ConsoleState,
+    record: &CallRecordModel,
+) -> Option<String> {
     if let Some(raw) = record
         .recording_url
         .as_ref()
@@ -1708,7 +1780,11 @@ fn derive_recording_download_url(state: &ConsoleState, record: &CallRecordModel)
         .filter(|value| !value.is_empty())
     {
         if raw.starts_with("http://") || raw.starts_with("https://") {
-            return Some(raw.to_string());
+            return Some(
+                presign_recording_url(state, raw)
+                    .await
+                    .unwrap_or_else(|| raw.to_string()),
+            );
         } else {
             return Some(state.url_for(&format!("/call-records/{}/recording", record.id)));
         }
@@ -1935,7 +2011,7 @@ fn extract_channel_from_wav(path: &str, stream_leg: i32) -> anyhow::Result<Vec<u
     Ok(buf)
 }
 
-fn build_detail_payload(
+async fn build_detail_payload(
     record: &CallRecordModel,
     related: &RelatedContext,
     state: &ConsoleState,
@@ -1944,7 +2020,7 @@ fn build_detail_payload(
     let inline_recording_url = select_recording_path(record, cdr)
         .map(|_| state.url_for(&format!("/call-records/{}/recording", record.id)));
     let record_payload =
-        build_record_payload(record, related, state, inline_recording_url.as_deref());
+        build_record_payload(record, related, state, inline_recording_url.as_deref()).await;
     let participants = build_participants(record, related);
 
     // Per-leg media quality captured by the MediaBridge at call end (RTCP
@@ -1986,7 +2062,7 @@ fn build_detail_payload(
     let sip_flow_download =
         state.url_for(&format!("/call-records/{}/sip-flow?detail=true", record.id));
 
-    let mut download_recording = derive_recording_download_url(state, record);
+    let mut download_recording = derive_recording_download_url(state, record).await;
     if download_recording.is_none() {
         download_recording = inline_recording_url.clone();
     }
@@ -2627,7 +2703,7 @@ mod tests {
         let related = load_related_context(&db, &[record.clone()])
             .await
             .expect("related context");
-        let payload = build_record_payload(&record, &related, &state, None);
+        let payload = build_record_payload(&record, &related, &state, None).await;
         assert_eq!(payload["id"], 1);
         assert_eq!(payload["ring_time"], ring_time.to_rfc3339());
         assert_eq!(payload["answer_time"], answer_time.to_rfc3339());
@@ -2661,7 +2737,7 @@ mod tests {
         let related = load_related_context(&db, &[record.clone()])
             .await
             .expect("related context");
-        let payload = build_record_payload(&record, &related, &state, None);
+        let payload = build_record_payload(&record, &related, &state, None).await;
         assert_eq!(payload["outbound_trunk"], "carrier-a");
         assert_eq!(
             payload["outbound_trunk_dest"],
@@ -2705,7 +2781,7 @@ mod tests {
         let related = load_related_context(&db, &[record.clone()])
             .await
             .expect("related context");
-        let payload = build_record_payload(&record, &related, &state, None);
+        let payload = build_record_payload(&record, &related, &state, None).await;
         assert_eq!(payload["error"]["code"], "wholesale.insufficient_funds");
         assert_eq!(payload["error"]["app"], "wholesale");
         assert_eq!(payload["error"]["severity"], "error");
@@ -2740,7 +2816,7 @@ mod tests {
         let related = load_related_context(&db, &[record.clone()])
             .await
             .expect("related context");
-        let payload = build_record_payload(&record, &related, &state, None);
+        let payload = build_record_payload(&record, &related, &state, None).await;
         assert!(payload["error"].is_null());
         assert!(payload["ring_time"].is_null());
         assert!(payload["answer_time"].is_null());
@@ -2791,7 +2867,7 @@ mod tests {
         let related = load_related_context(&db, &[record.clone()])
             .await
             .expect("related context");
-        let payload = build_record_payload(&record, &related, &state, None);
+        let payload = build_record_payload(&record, &related, &state, None).await;
         assert_eq!(payload["route_id"], route.id);
         assert_eq!(payload["route_name"], "us-outbound");
     }
@@ -3034,7 +3110,7 @@ mod tests {
         .await
         .expect("insert call record");
 
-        let payload = build_recording_payload(&state, &record, None);
+        let payload = build_recording_payload(&state, &record, None).await;
         let payload = payload.expect("should return a recording payload");
         assert_eq!(
             payload["supports_streams"], true,
@@ -3069,7 +3145,7 @@ mod tests {
         .await
         .expect("insert call record");
 
-        let payload = build_recording_payload(&state, &record, None);
+        let payload = build_recording_payload(&state, &record, None).await;
         let payload = payload.expect("should return a recording payload");
         assert_eq!(
             payload["supports_streams"], false,
@@ -3104,7 +3180,7 @@ mod tests {
         .expect("insert call record");
 
         let inline_url = state.url_for(&format!("/call-records/{}/recording", record.id));
-        let payload = build_recording_payload(&state, &record, Some(inline_url.as_str()));
+        let payload = build_recording_payload(&state, &record, Some(inline_url.as_str())).await;
         let payload = payload.expect("should return a recording payload");
         assert_eq!(
             payload["supports_streams"], true,
@@ -3134,7 +3210,7 @@ mod tests {
         .await
         .expect("insert call record");
 
-        let payload = build_recording_payload(&state, &record, None);
+        let payload = build_recording_payload(&state, &record, None).await;
         assert!(
             payload.is_none(),
             "should return None when no recording and no sipflow"

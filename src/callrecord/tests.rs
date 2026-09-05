@@ -1238,7 +1238,7 @@ async fn test_recording_upload_uses_sipflow_stashed_url() {
         recording_type: Some(RecordingType::Local),
         ..Default::default()
     };
-    let (hook, _upload_manager) =
+    let (hook, _upload_manager, _) =
         RecordingUploadHook::new(policy).expect("failed to create RecordingUploadHook");
     let hook = hook.with_rwi_gateway(gateway.clone());
 
@@ -1369,7 +1369,7 @@ async fn test_recording_metadata_filename_falls_back_to_call_id_wav() {
         recording_type: Some(RecordingType::Local),
         ..Default::default()
     };
-    let (hook, _upload_manager) = RecordingUploadHook::new(policy).unwrap();
+    let (hook, _upload_manager, _) = RecordingUploadHook::new(policy).unwrap();
     let hook = hook.with_rwi_gateway(gateway.clone());
 
     let now = Utc::now();
@@ -1438,7 +1438,7 @@ async fn test_recording_metadata_file_size_uses_stashed_sipflow_size() {
         recording_type: Some(RecordingType::Local),
         ..Default::default()
     };
-    let (hook, _upload_manager) = RecordingUploadHook::new(policy).unwrap();
+    let (hook, _upload_manager, _) = RecordingUploadHook::new(policy).unwrap();
     let hook = hook.with_rwi_gateway(gateway.clone());
 
     let now = Utc::now();

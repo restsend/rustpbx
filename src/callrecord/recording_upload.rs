@@ -37,9 +37,15 @@ pub struct RecordingUploadManager {
 const RECORDING_UPLOAD_CHANNEL_CAPACITY: usize = 65_536;
 
 impl RecordingUploadHook {
-    pub fn new(policy: RecordingPolicy) -> Result<(Self, Option<RecordingUploadManager>)> {
+    /// Builds the hook plus (in S3 mode) the background upload manager and the
+    /// shared S3 storage handle. The storage clone is returned so callers can
+    /// expose it for on-demand presigned URL generation.
+    pub fn new(
+        policy: RecordingPolicy,
+    ) -> Result<(Self, Option<RecordingUploadManager>, Option<Storage>)> {
         let recording_type = policy.effective_recording_type();
-        let (s3_upload_sender, upload_manager) = if recording_type == RecordingType::S3 {
+        let (s3_upload_sender, upload_manager, s3_storage) = if recording_type == RecordingType::S3
+        {
             let bucket = Self::required(&policy.bucket, "bucket")?;
             let region = Self::required(&policy.region, "region")?;
             let access_key = Self::required(&policy.access_key, "access_key")?;
@@ -65,12 +71,13 @@ impl RecordingUploadHook {
                 Some(sender),
                 Some(RecordingUploadManager {
                     policy: policy.clone(),
-                    storage,
+                    storage: storage.clone(),
                     receiver,
                 }),
+                Some(storage),
             )
         } else {
-            (None, None)
+            (None, None, None)
         };
 
         Ok((
@@ -84,6 +91,7 @@ impl RecordingUploadHook {
                 s3_upload_sender,
             },
             upload_manager,
+            s3_storage,
         ))
     }
 
@@ -770,7 +778,7 @@ mod tests {
             root: Some("recordings".into()),
             ..Default::default()
         };
-        let (hook, _upload_manager) = RecordingUploadHook::new(policy).expect("recording hook");
+        let (hook, _upload_manager, _) = RecordingUploadHook::new(policy).expect("recording hook");
         let now = chrono::Utc::now();
         let mut record = CallRecord {
             call_id: "preconstructed-url".into(),
@@ -892,7 +900,7 @@ mod tests {
             url: Some(format!("http://{address}/recording")),
             ..Default::default()
         };
-        let (hook, _upload_manager) = RecordingUploadHook::new(policy).expect("recording hook");
+        let (hook, _upload_manager, _) = RecordingUploadHook::new(policy).expect("recording hook");
         let now = chrono::Utc::now();
         let mut record = CallRecord {
             call_id: "early-media-call".to_string(),
@@ -952,7 +960,7 @@ mod tests {
             url: Some("http://127.0.0.1:1/recording".to_string()),
             ..Default::default()
         };
-        let (hook, _upload_manager) = RecordingUploadHook::new(policy).expect("recording hook");
+        let (hook, _upload_manager, _) = RecordingUploadHook::new(policy).expect("recording hook");
         let now = chrono::Utc::now();
         let mut record = CallRecord {
             call_id: "upload-fail-call".to_string(),
@@ -999,7 +1007,7 @@ mod tests {
             subdir: Some("daily".into()),
             ..Default::default()
         };
-        let (hook, _upload_manager) = RecordingUploadHook::new(policy).expect("hook");
+        let (hook, _upload_manager, _) = RecordingUploadHook::new(policy).expect("hook");
         let now = chrono::Utc::now();
         let mut record = CallRecord {
             call_id: "local-archive".into(),
@@ -1041,7 +1049,7 @@ mod tests {
             subdir: Some("hourly".into()),
             ..Default::default()
         };
-        let (hook, _upload_manager) = RecordingUploadHook::new(policy).expect("hook");
+        let (hook, _upload_manager, _) = RecordingUploadHook::new(policy).expect("hook");
         let now = chrono::Utc::now();
         let mut record = CallRecord {
             call_id: "local-hourly".into(),
@@ -1102,7 +1110,7 @@ mod tests {
             url: Some(format!("http://{address}/recording")),
             ..Default::default()
         };
-        let (hook, _upload_manager) = RecordingUploadHook::new(policy).unwrap();
+        let (hook, _upload_manager, _) = RecordingUploadHook::new(policy).unwrap();
         let now = chrono::Utc::now();
         let mut record = CallRecord {
             call_id: "multi-artifact".into(),
@@ -1167,7 +1175,7 @@ mod tests {
             subdir: Some("daily".into()),
             ..Default::default()
         };
-        let (hook, _upload_manager) = RecordingUploadHook::new(policy).expect("hook");
+        let (hook, _upload_manager, _) = RecordingUploadHook::new(policy).expect("hook");
         let now = chrono::Utc::now();
         let mut record = CallRecord {
             call_id: "enrich-archive".into(),
@@ -1269,7 +1277,7 @@ mod tests {
             subdir: Some("daily".into()),
             ..Default::default()
         };
-        let (hook, _upload_manager) = RecordingUploadHook::new(policy).expect("hook");
+        let (hook, _upload_manager, _) = RecordingUploadHook::new(policy).expect("hook");
         let now = chrono::Utc::now();
         let mut record = CallRecord {
             call_id: "custom-path".into(),

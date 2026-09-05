@@ -83,6 +83,11 @@ pub enum SipFlowUploadConfig {
         force_pcm: Option<bool>,
         #[serde(default = "default_pcm_rate")]
         pcm_sample_rate: Option<u32>,
+        /// Lifetime in seconds of presigned download URLs generated on demand
+        /// for S3-uploaded flows. Defaults to 86400 (24h), clamped to the
+        /// SigV4 7-day maximum.
+        #[serde(default)]
+        signed_url_expiry_secs: Option<u64>,
     },
     Http {
         url: String,
@@ -96,6 +101,27 @@ pub enum SipFlowUploadConfig {
         #[serde(default = "default_pcm_rate")]
         pcm_sample_rate: Option<u32>,
     },
+}
+
+impl SipFlowUploadConfig {
+    /// Lifetime of on-demand presigned download URLs for S3-uploaded flows,
+    /// clamped to the SigV4 7-day maximum
+    /// ([`rustpbx_storage::MAX_PRESIGN_EXPIRY_SECS`]). Returns `None` for
+    /// non-S3 backends.
+    pub fn signed_url_expiry_secs(&self) -> Option<u64> {
+        const DEFAULT_SIGNED_URL_EXPIRY_SECS: u64 = 86_400;
+        match self {
+            SipFlowUploadConfig::S3 {
+                signed_url_expiry_secs,
+                ..
+            } => Some(
+                signed_url_expiry_secs
+                    .unwrap_or(DEFAULT_SIGNED_URL_EXPIRY_SECS)
+                    .clamp(1, rustpbx_storage::MAX_PRESIGN_EXPIRY_SECS),
+            ),
+            SipFlowUploadConfig::Http { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]

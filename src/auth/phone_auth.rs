@@ -191,10 +191,7 @@ impl MessageInspector for TokenInjector {
             return msg;
         }
 
-        let is_register = msg
-            .cseq_header()
-            .ok()
-            .and_then(|cseq| cseq.method().ok())
+        let is_register = msg.cseq_header().ok().and_then(|cseq| cseq.method().ok())
             == Some(rsipstack::sip::Method::Register);
 
         if !is_register {
@@ -242,13 +239,25 @@ mod tests {
         let auth = PhoneAuth::with_secret("test-secret".to_string());
         let injector = TokenInjector::with_agent_validator(auth, Arc::new(|id| id == "2001"));
         for (status, cseq, to) in [
-            (StatusCode::OK, "2 REGISTER", Some("<sip:alice@example.com>")),
+            (
+                StatusCode::OK,
+                "2 REGISTER",
+                Some("<sip:alice@example.com>"),
+            ),
             (StatusCode::OK, "2 REGISTER", Some("<sip:example.com>")),
             (StatusCode::OK, "2 REGISTER", Some("invalid To header")),
             (StatusCode::OK, "2 REGISTER", None),
-            (StatusCode::Unauthorized, "2 REGISTER", Some("<sip:2001@example.com>")),
+            (
+                StatusCode::Unauthorized,
+                "2 REGISTER",
+                Some("<sip:2001@example.com>"),
+            ),
             (StatusCode::OK, "2 INVITE", Some("<sip:2001@example.com>")),
-            (StatusCode::OK, "invalid CSeq", Some("<sip:2001@example.com>")),
+            (
+                StatusCode::OK,
+                "invalid CSeq",
+                Some("<sip:2001@example.com>"),
+            ),
         ] {
             let mut response = Response {
                 status_code: status.clone(),
@@ -256,16 +265,20 @@ mod tests {
                     Header::CSeq(cseq.into()),
                     // A known agent in Contact must never substitute for To.
                     Header::Contact("<sip:2001@device.invalid>".into()),
-                ].into(),
+                ]
+                .into(),
                 ..Default::default()
             };
             if let Some(to) = to {
                 response.headers.push(Header::To(to.into()));
             }
             let output = injector.before_send(SipMessage::Response(response), None);
-            assert!(!output.headers().iter().any(|header| {
-                matches!(header, Header::Other(name, _) if name == "X-Agent-Token")
-            }), "unexpected token for status={status}, CSeq={cseq}, To={to:?}");
+            assert!(
+                !output.headers().iter().any(|header| {
+                    matches!(header, Header::Other(name, _) if name == "X-Agent-Token")
+                }),
+                "unexpected token for status={status}, CSeq={cseq}, To={to:?}"
+            );
         }
     }
 

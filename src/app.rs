@@ -57,6 +57,12 @@ pub struct CoreContext {
     pub callrecord_sender: Option<CallRecordSender>,
     pub callrecord_stats: Option<Arc<crate::callrecord::CallRecordStats>>,
     pub storage: crate::storage::Storage,
+    /// S3 storage used by `[recording]` uploads, shared with the console for
+    /// on-demand presigned download URLs. `None` outside S3 mode.
+    pub recording_storage: Option<crate::storage::Storage>,
+    /// S3 storage used by `[sipflow.upload]`, shared with the console for
+    /// on-demand presigned download URLs. `None` outside S3 mode.
+    pub sipflow_storage: Option<crate::storage::Storage>,
     pub rwi_auth: Option<crate::rwi::RwiAuthRef>,
     pub rwi_gateway: Option<crate::rwi::RwiGatewayRef>,
     pub rwi_call_registry: Option<Arc<ActiveProxyCallRegistry>>,
@@ -316,6 +322,8 @@ impl AppStateBuilder {
         let mut callrecord_stats = None;
         let mut callrecord_manager = None;
         let mut recording_upload_manager: Option<RecordingUploadManager> = None;
+        let mut recording_upload_storage: Option<crate::storage::Storage> = None;
+        let mut sipflow_upload_storage: Option<crate::storage::Storage> = None;
         // Late-bound handle to the SipFlow wrapper, shared with the call-record
         // upload hooks. Filled in as soon as the SIP server (owning SipFlow)
         // has been built below.
@@ -357,6 +365,10 @@ impl AppStateBuilder {
             // the server (which owns SipFlow) is built after this point, and
             // the handle is filled in as soon as it exists.
             if let Some(upload_cfg) = sipflow_upload_config.as_ref() {
+                sipflow_upload_storage =
+                    crate::callrecord::sipflow_upload::build_s3_storage(upload_cfg)
+                        .ok()
+                        .flatten();
                 match config.sipflow.as_ref() {
                     // Remote + delegate_upload: POST upload params to the bin
                     // instead of downloading WAV and re-uploading locally.
@@ -390,8 +402,9 @@ impl AppStateBuilder {
             }
 
             if let Some(policy) = recording_upload_policy.as_ref() {
-                let (mut hook, upload_manager) = RecordingUploadHook::new(policy.clone())?;
+                let (mut hook, upload_manager, storage) = RecordingUploadHook::new(policy.clone())?;
                 recording_upload_manager = upload_manager;
+                recording_upload_storage = storage;
                 if let Some(ref gw) = rwi_gateway {
                     hook = hook.with_rwi_gateway(gw.clone());
                 }
@@ -430,6 +443,8 @@ impl AppStateBuilder {
             callrecord_sender: callrecord_sender.clone(),
             callrecord_stats: callrecord_stats.clone(),
             storage: storage.clone(),
+            recording_storage: recording_upload_storage.clone(),
+            sipflow_storage: sipflow_upload_storage.clone(),
             rwi_auth: crate::rwi::create_rwi_auth(&config),
             rwi_gateway: rwi_gateway.clone(),
             rwi_call_registry: None,
@@ -567,6 +582,8 @@ impl AppStateBuilder {
                 callrecord_sender: core.callrecord_sender.clone(),
                 callrecord_stats: core.callrecord_stats.clone(),
                 storage: core.storage.clone(),
+                recording_storage: core.recording_storage.clone(),
+                sipflow_storage: core.sipflow_storage.clone(),
                 rwi_auth: core.rwi_auth.clone(),
                 rwi_gateway: core.rwi_gateway.clone(),
                 rwi_call_registry: Some(registry),

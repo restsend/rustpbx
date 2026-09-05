@@ -240,6 +240,12 @@ pub struct RecordingPolicy {
     /// `hourly`. Files are moved under `{path}/YYYYMMDD[/HH]/` after the call.
     #[serde(default)]
     pub subdir: Option<String>,
+    /// Lifetime in seconds of presigned download URLs generated on demand for
+    /// S3-uploaded recordings. Defaults to 86400 (24h); the SigV4 signature
+    /// used by S3/S3-compatible services (AWS, Aliyun OSS, Tencent COS…)
+    /// caps validity at 7 days (604800), so larger values are clamped.
+    #[serde(default)]
+    pub signed_url_expiry_secs: Option<u64>,
 }
 
 impl RecordingPolicy {
@@ -275,6 +281,15 @@ impl RecordingPolicy {
     /// True when the `[recording]` upload path should handle WAV artifacts.
     pub fn uploads_recording(&self) -> bool {
         self.enabled.unwrap_or(false) && self.effective_recording_type().is_file_media()
+    }
+
+    /// Lifetime of on-demand presigned recording URLs, clamped to the SigV4
+    /// 7-day maximum (see [`crate::storage::MAX_PRESIGN_EXPIRY_SECS`]).
+    pub fn effective_signed_url_expiry_secs(&self) -> u64 {
+        const DEFAULT_SIGNED_URL_EXPIRY_SECS: u64 = 86_400;
+        self.signed_url_expiry_secs
+            .unwrap_or(DEFAULT_SIGNED_URL_EXPIRY_SECS)
+            .clamp(1, crate::storage::MAX_PRESIGN_EXPIRY_SECS)
     }
 
     pub fn ensure_defaults(&mut self) -> bool {
@@ -2428,6 +2443,48 @@ mod tests {
         assert!(
             config.callrecord.is_none(),
             "callrecord should be None when [callrecord] section is absent"
+        );
+    }
+
+    #[test]
+    fn test_recording_signed_url_expiry_parsing() {
+        // Explicit value parses and survives round-trip.
+        let toml_str = r#"
+            [proxy]
+            addr = "0.0.0.0"
+
+            [recording]
+            enabled = true
+            type = "s3"
+            bucket = "my-bucket"
+            region = "oss-cn-hangzhou"
+            access_key = "ak"
+            secret_key = "sk"
+            endpoint = "https://oss-cn-hangzhou.aliyuncs.com"
+            signed_url_expiry_secs = 3600
+        "#;
+        let config: Config = toml::from_str(toml_str).expect("Config should parse");
+        let policy = config.recording.expect("recording policy should parse");
+        assert_eq!(policy.signed_url_expiry_secs, Some(3600));
+        assert_eq!(policy.effective_signed_url_expiry_secs(), 3600);
+
+        // Absent value falls back to the 24h default.
+        let config: Config =
+            toml::from_str("[proxy]\naddr = \"0.0.0.0\"\n[recording]\nenabled = true\n")
+                .expect("Config should parse");
+        let policy = config.recording.expect("recording policy should parse");
+        assert_eq!(policy.signed_url_expiry_secs, None);
+        assert_eq!(policy.effective_signed_url_expiry_secs(), 86_400);
+
+        // Values beyond the SigV4 7-day limit are clamped (90 days -> 7 days).
+        let config: Config = toml::from_str(
+            "[proxy]\naddr = \"0.0.0.0\"\n[recording]\nsigned_url_expiry_secs = 7776000\n", // 90 days
+        )
+        .expect("Config should parse");
+        let policy = config.recording.expect("recording policy should parse");
+        assert_eq!(
+            policy.effective_signed_url_expiry_secs(),
+            crate::storage::MAX_PRESIGN_EXPIRY_SECS
         );
     }
 
