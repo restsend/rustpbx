@@ -3,17 +3,18 @@ use crate::flusher::{FlushCommand, FlushMeta};
 use crate::protocol::{MsgType, Packet};
 use crate::rtp_stats::{MediaStatsAccumulator, parse_rtp_stats_header};
 use crate::shard::{RouterState, bucket_query_dirs, detect_bucket_layout};
+use crate::sqlite_metrics;
 use crate::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 use anyhow::Result;
 use bytes::{BufMut, Bytes};
 use chrono::{DateTime, Datelike, Local, Timelike};
 use futures::TryStreamExt;
-use sqlx::{Connection, SqliteConnection};
+use sqlx::SqliteConnection;
 use std::io::{Read, SeekFrom, Write};
+use std::time::Instant;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -348,6 +349,7 @@ impl StorageManager {
             .current_offset
             .saturating_sub(self.write_buf.len() as u64);
         let write_start = Instant::now();
+        let batch_bytes = self.write_buf.len();
         if !self.pos_known {
             file.seek(SeekFrom::Start(offset)).await?;
         }
@@ -357,6 +359,9 @@ impl StorageManager {
         }
         self.pos_known = true;
         self.write_buf.clear();
+        metrics::counter!("sipflow_raw_flush_total", "component" => "sipflow").increment(1);
+        metrics::histogram!("sipflow_raw_flush_bytes", "component" => "sipflow")
+            .record(batch_bytes as f64);
         metrics::histogram!("sipflow_raw_write_seconds", "component" => "sipflow")
             .record(write_start.elapsed().as_secs_f64());
         Ok(())
@@ -485,7 +490,14 @@ impl StorageManager {
             "PRAGMA busy_timeout=5000",
             "PRAGMA query_only=1",
         ] {
-            let _ = sqlx::query(pragma).execute(&mut *conn).await;
+            let start = Instant::now();
+            match sqlx::query(pragma).execute(&mut *conn).await {
+                Ok(_) => sqlite_metrics::record_statement("pragma", 0, 0, start.elapsed()),
+                Err(e) => {
+                    sqlite_metrics::record_error("pragma", &e);
+                    tracing::debug!("read-conn pragma failed: {pragma}: {e}");
+                }
+            }
         }
     }
 
@@ -511,14 +523,13 @@ impl StorageManager {
                     continue;
                 }
 
-                let mut conn =
-                    SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy()))
-                        .await?;
+                let (mut conn, _conn_guard) = sqlite_metrics::connect_read(&db_path).await?;
                 Self::configure_read_conn(&mut conn).await;
                 let mut raw_file = File::open(raw_path).await?;
                 let mut current_pos = None;
 
                 // Query using JOIN with call_meta
+                let q_start = Instant::now();
                 let rows = sqlx::query_as::<_, SipPacketRow>(
                     "SELECT s.src AS src,
                             s.dst AS dst,
@@ -536,7 +547,12 @@ impl StorageManager {
                 .bind(start_ts)
                 .bind(end_ts)
                 .fetch_all(&mut conn)
-                .await?;
+                .await
+                .inspect(|rows| sqlite_metrics::record_select(rows.len(), q_start.elapsed()))
+                .map_err(|e| {
+                    sqlite_metrics::record_error("select", &e);
+                    e
+                })?;
 
                 for row in rows {
                     let offset = u64::try_from(row.offset)?;
@@ -581,13 +597,12 @@ impl StorageManager {
                     continue;
                 }
 
-                let mut conn =
-                    SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy()))
-                        .await?;
+                let (mut conn, _conn_guard) = sqlite_metrics::connect_read(&db_path).await?;
                 Self::configure_read_conn(&mut conn).await;
                 let mut raw_file = File::open(raw_path).await?;
                 let mut current_pos = None;
 
+                let q_start = Instant::now();
                 let rows = sqlx::query_as::<_, SipPacketRow>(
                     "SELECT s.src AS src,
                             s.dst AS dst,
@@ -602,7 +617,12 @@ impl StorageManager {
                 .bind(start_ts)
                 .bind(end_ts)
                 .fetch_all(&mut conn)
-                .await?;
+                .await
+                .inspect(|rows| sqlite_metrics::record_select(rows.len(), q_start.elapsed()))
+                .map_err(|e| {
+                    sqlite_metrics::record_error("select", &e);
+                    e
+                })?;
 
                 for row in rows {
                     let offset = u64::try_from(row.offset)?;
@@ -671,11 +691,10 @@ impl StorageManager {
                     continue;
                 }
 
-                let mut conn =
-                    SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy()))
-                        .await?;
+                let (mut conn, _conn_guard) = sqlite_metrics::connect_read(&db_path).await?;
                 Self::configure_read_conn(&mut conn).await;
 
+                let q_start = Instant::now();
                 let mut rows = sqlx::query_as::<_, MediaSourceRow>(
                     "SELECT m.leg AS leg,
                             m.src AS src
@@ -691,11 +710,18 @@ impl StorageManager {
                 .bind(end_ts)
                 .fetch(&mut conn);
 
-                while let Some(row) = rows.try_next().await? {
+                let mut n_rows = 0usize;
+                while let Some(row) = rows
+                    .try_next()
+                    .await
+                    .inspect_err(|e| sqlite_metrics::record_error("select", e))?
+                {
+                    n_rows += 1;
                     if seen.insert((row.leg, row.src.clone())) {
                         results.push(row);
                     }
                 }
+                sqlite_metrics::record_select(n_rows, q_start.elapsed());
             }
         }
 
@@ -724,13 +750,12 @@ impl StorageManager {
                     continue;
                 }
 
-                let mut conn =
-                    SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy()))
-                        .await?;
+                let (mut conn, _conn_guard) = sqlite_metrics::connect_read(&db_path).await?;
                 Self::configure_read_conn(&mut conn).await;
                 let mut raw_file = File::open(&raw_path).await?;
                 let mut current_pos = None;
 
+                let q_start = Instant::now();
                 let rows = sqlx::query_as::<_, MediaPacketRow>(
                     "SELECT s.leg AS leg,
                             s.src AS src,
@@ -748,7 +773,12 @@ impl StorageManager {
                 .bind(start_ts)
                 .bind(end_ts)
                 .fetch_all(&mut conn)
-                .await?;
+                .await
+                .inspect(|rows| sqlite_metrics::record_select(rows.len(), q_start.elapsed()))
+                .map_err(|e| {
+                    sqlite_metrics::record_error("select", &e);
+                    e
+                })?;
 
                 if !rows.is_empty() {
                     tracing::info!(
@@ -1739,9 +1769,11 @@ mod tests {
 
         let db_path = dir.path().join("sipflow.db");
         let raw_path = dir.path().join("data.raw");
-        let mut conn = SqliteConnection::connect(&format!("sqlite:{}", db_path.display()))
-            .await
-            .expect("open sipflow.db");
+        let mut conn = <SqliteConnection as sqlx::Connection>::connect(
+            &format!("sqlite:{}", db_path.display()),
+        )
+        .await
+        .expect("open sipflow.db");
         let rows = sqlx::query_as::<_, (i32, i64, i64, i64)>(
             "SELECT m.leg, m.timestamp, m.offset, m.size
              FROM media_msgs m
