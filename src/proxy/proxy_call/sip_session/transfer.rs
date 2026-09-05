@@ -802,6 +802,15 @@ impl SipSession {
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<()> {
         info!(session_id = %self.id, %leg_id, target = %uri, return_app = ?self.meta.transfer_return_app, "Blind transfer via B-leg INVITE (B2BUA)");
+        // `callee` is a reusable slot: finalizing the target replaces its
+        // dialog. Save the current B-leg identity before dialing so cleanup
+        // cannot accidentally hang up the transfer target (or the caller).
+        let replaced_leg = self.resolve_transfer_leg(LegId::from("callee"));
+        let replaced_dialog_id = self
+            .legs
+            .get_dialog(&replaced_leg)
+            .map(|dialog| dialog.id())
+            .or_else(|| self.meta.connected_callee_dialog_id.clone());
         // The transfer target is a NEW peer — invalidate the cached
         // callee offer so `prepare_callee_media_offer` creates a
         // fresh B leg (with its own local offer) instead of reusing
@@ -857,6 +866,17 @@ impl SipSession {
             .try_single_target(&location, callee_state_rx, None, None, caller)
             .await;
         if result.is_ok() {
+            if let Some(dialog_id) = replaced_dialog_id {
+                if self.meta.connected_callee_dialog_id.as_ref() != Some(&dialog_id) {
+                    info!(session_id = %self.id, %dialog_id, "Hanging up replaced B-leg after blind transfer");
+                    self.pending_hangup.insert(dialog_id);
+                    // Queue agents can have dynamic leg IDs. Retire that
+                    // state too, without marking the new `callee` Ended.
+                    if replaced_leg != LegId::from("callee") {
+                        self.update_leg_state(&replaced_leg, LegState::Ended);
+                    }
+                }
+            }
             // The B2BUA blind-transfer path swaps the B leg
             // in-session (no REFER), so the REFER-based emitters
             // never fire. Emit the transfer notification here,

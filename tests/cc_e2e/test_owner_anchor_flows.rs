@@ -1,14 +1,13 @@
 //! Owner-anchored cluster CTI flows (blind transfer / consult / takeover).
 //!
-//! These exercise the Call-Owner media-anchor contract without requiring a
-//! multi-node mesh: a fake `ActiveProxyCallRegistry` + command channel proves
+//! Blind transfer exercises real SIP dialogs on an in-process PBX. The other
+//! flows exercise the Call-Owner contract without a multi-node mesh: a fake `ActiveProxyCallRegistry` + command channel proves
 //! the state machines dispatch the right `CallCommand`s that production SIP
 //! sessions will execute on the owning node.
 
-use rustpbx::addons::cc::config::TransferConfig;
 use rustpbx::addons::cc::supervisor::{MonitorType, SupervisorManager};
 use rustpbx::addons::cc::transfer::{ConsultTransferManager, TransferState};
-use rustpbx::call::domain::{CallCommand, HangupCascade, LegId};
+use rustpbx::call::domain::{CallCommand, LegId};
 use rustpbx::call::runtime::{ConferenceManager, SessionId};
 use rustpbx::proxy::active_call_registry::{
     ActiveProxyCallEntry, ActiveProxyCallRegistry, ActiveProxyCallStatus,
@@ -66,56 +65,132 @@ fn drain_cmds(rx: &mut mpsc::Receiver<CallCommand>, timeout_ms: u64) -> Vec<Call
 // ═══════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn e2e_blind_transfer_dispatches_transfer_and_agent_hangup() {
-    let registry = Arc::new(ActiveProxyCallRegistry::new());
-    let (handle, mut rx) = make_session("sess-blind-1");
-    upsert_session(&registry, "sess-blind-1", handle.clone());
+async fn e2e_blind_transfer_retires_agent_dialog_and_preserves_customer() {
+    use crate::common::e2e_test_server::E2eTestServer;
+    use crate::common::test_ua::{TestUaEvent, create_test_sdp};
+    use tokio::time::{sleep, timeout};
 
-    // Config gate: disabled → CTI must refuse (mirrors REST FORBIDDEN).
-    let mut disabled = TransferConfig::default();
-    disabled.blind_transfer_enabled = false;
-    assert!(!disabled.blind_transfer_enabled);
+    let server = E2eTestServer::start().await.unwrap();
+    let customer = server.create_ua("charlie").await.unwrap();
+    let agent = server.create_ua("bob").await.unwrap();
+    let target = server.create_ua("alice").await.unwrap();
+    let sdp = create_test_sdp("127.0.0.1", 12345, false);
+    let call = tokio::spawn({
+        let customer = customer.clone();
+        let sdp = sdp.clone();
+        async move { customer.make_call("bob", Some(sdp)).await }
+    });
+    let agent_dialog = timeout(Duration::from_secs(5), async {
+        loop {
+            for event in agent.process_dialog_events().await.unwrap() {
+                if let TestUaEvent::IncomingCall(id, _) = event {
+                    agent.answer_call(&id, Some(sdp.clone())).await.unwrap();
+                    return id;
+                }
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("agent receives the original call");
+    let customer_dialog = timeout(Duration::from_secs(5), call)
+        .await.unwrap().unwrap().unwrap();
+    let handle = server.registry.get_handle_by_dialog(&agent_dialog.call_id)
+        .expect("CC resolves the agent's SIP Call-ID to its owner session");
 
-    // Owner path: Transfer(callee) then Hangup(agent/callee leg).
-    handle
-        .send_command(CallCommand::Transfer {
+    // First reject a transfer, then answer a retry. Neither rejection nor
+    // ringing may release the original agent; only a connected replacement
+    // should receive the callee slot and trigger the old dialog's BYE.
+    let mut target_dialog = None;
+    for accept in [false, true] {
+        handle.send_command(CallCommand::Transfer {
             leg_id: LegId::new("callee"),
-            target: "sip:1002@example.com".into(),
+            target: "sip:alice".into(),
             attended: false,
+        }).unwrap();
+        let incoming = timeout(Duration::from_secs(5), async {
+            loop {
+                for event in target.process_dialog_events().await.unwrap() {
+                    if let TestUaEvent::IncomingCall(id, _) = event {
+                        return id;
+                    }
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
         })
-        .unwrap();
-    handle
-        .send_command(CallCommand::Hangup(rustpbx::call::domain::HangupCommand {
-            leg_id: Some(LegId::new("callee")),
-            cascade: HangupCascade::None,
-            initiator: rustpbx::call::domain::HangupInitiator::Local {
-                source: "blind_transfer".into(),
-            },
-            reason: Some(rustpbx::callrecord::CallRecordHangupReason::BySystem),
-            code: Some(200),
-            rtp_timeout_side: None,
-        }))
-        .unwrap();
+        .await
+        .expect("transfer INVITE reaches Alice");
+        assert_ne!(incoming.call_id, agent_dialog.call_id);
+        if !accept {
+            target.reject_call_with_reason(&incoming, Some(486), None)
+                .await.unwrap();
+            // Allow the failed INVITE to finish before inspecting the agent
+            // and dispatching the next transfer through the same owner.
+            sleep(Duration::from_millis(100)).await;
+        } else {
+            target.ring_call(&incoming).await.unwrap();
+            sleep(Duration::from_millis(100)).await;
+        }
+        let agent_events = agent.process_dialog_events().await.unwrap();
+        assert!(
+            !agent_events.iter().any(|event| matches!(event,
+                TestUaEvent::CallTerminated(id) if id.call_id == agent_dialog.call_id)),
+            "agent must stay connected until replacement answers: {agent_events:?}"
+        );
+        if accept {
+            target.answer_call(&incoming, Some(sdp.clone())).await.unwrap();
+            target_dialog = Some(incoming);
+        }
+    }
+    let target_dialog = target_dialog.unwrap();
 
-    let cmds = drain_cmds(&mut rx, 200);
-    assert!(
-        cmds.iter().any(|c| matches!(
-            c,
-            CallCommand::Transfer {
-                leg_id,
-                attended: false,
-                ..
-            } if leg_id.as_str() == "callee"
-        )),
-        "expected Transfer(callee), got {cmds:?}"
-    );
-    assert!(
-        cmds.iter().any(|c| matches!(
-            c,
-            CallCommand::Hangup(h) if h.leg_id.as_ref().map(|l| l.as_str()) == Some("callee")
-        )),
-        "expected Hangup(callee) after blind transfer, got {cmds:?}"
-    );
+    timeout(Duration::from_secs(3), async {
+        loop {
+            for event in agent.process_dialog_events().await.unwrap() {
+                if let TestUaEvent::CallTerminated(id) = event {
+                    assert_eq!(id.call_id, agent_dialog.call_id);
+                    return;
+                }
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("PBX must send BYE to the original agent without a manual hangup");
+
+    // Exercise both surviving dialogs after the old agent's termination has
+    // reached the PBX, including the existing stale-callee BYE guard.
+    sleep(Duration::from_millis(100)).await;
+    for ua in [&customer, &target] {
+        let events = ua.process_dialog_events().await.unwrap();
+        assert!(
+            !events.iter().any(|event| matches!(event, TestUaEvent::CallTerminated(_))),
+            "agent teardown must not terminate the customer or Alice: {events:?}"
+        );
+    }
+    let entry = server.registry.get(handle.session_id()).expect("call remains active");
+    assert_eq!(entry.status, ActiveProxyCallStatus::Talking);
+    let target_handle = server.registry.get_handle_by_dialog(&target_dialog.call_id)
+        .expect("Alice's new dialog belongs to the surviving session");
+    assert_eq!(target_handle.session_id(), handle.session_id());
+    target.hangup(&target_dialog).await.unwrap();
+    timeout(Duration::from_secs(3), async {
+        loop {
+            for event in customer.process_dialog_events().await.unwrap() {
+                if let TestUaEvent::CallTerminated(id) = event {
+                    assert_eq!(id.call_id, customer_dialog.call_id);
+                    return;
+                }
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Alice's BYE must still terminate the surviving customer dialog");
+    customer.stop();
+    agent.stop();
+    target.stop();
+    server.stop();
 }
 
 #[tokio::test]
