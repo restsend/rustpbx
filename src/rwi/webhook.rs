@@ -102,6 +102,22 @@ pub fn start_rwi_webhook_handler(
     tx
 }
 
+/// Dedup identity for webhook delivery retries/redeliveries.
+///
+/// Includes the event TYPE: `cached_at` has microsecond resolution, so two
+/// DISTINCT events for the same call can legitimately share one timestamp
+/// (observed in e2e: `call_created` vs `queue_joined` at session start) —
+/// a key without the type silently dropped one of them.
+fn webhook_dedup_key(
+    entry: &EventCacheEntry,
+) -> (String, DateTime<Utc>, String) {
+    (
+        entry.call_id.clone(),
+        entry.cached_at,
+        entry.event.event_type.to_string(),
+    )
+}
+
 async fn run_rwi_webhook_handler(
     config: LocatorWebhookConfig,
     mut rx: broadcast::Receiver<EventCacheEntry>,
@@ -138,11 +154,7 @@ async fn run_rwi_webhook_handler(
         // (broadcast events like agent state changes) are not deduped since
         // they have no call context.
         if !entry.call_id.is_empty() {
-            let dedup_key = (
-                entry.call_id.clone(),
-                entry.cached_at,
-                entry.event.event_type.to_string(),
-            );
+            let dedup_key = webhook_dedup_key(&entry);
             if seen.contains(&dedup_key) {
                 debug!(
                     "RWI webhook: skipping duplicate event at {}",
@@ -385,6 +397,103 @@ mod tests {
             Some(true),
             "call_ringing must carry the early_media flag through the webhook"
         );
+    }
+
+    /// Regression canary for the same-microsecond dedup collapse: two
+    /// DISTINCT event types for the same call sharing one `cached_at` must
+    /// BOTH be delivered. The pre-fix key `(call_id, cached_at)` dropped the
+    /// second one — e2e saw ~1/3 of `call_created` bindings lost this way.
+    #[tokio::test]
+    async fn test_webhook_dedup_same_timestamp_different_type_both_delivered() {
+        let server = TestHttpServer::start().await;
+        let config = LocatorWebhookConfig {
+            url: server.url(),
+            events: vec![],
+            headers: None,
+            timeout_ms: Some(5000),
+        };
+        let tx = start_rwi_webhook_handler(config);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let ts = chrono::Utc::now();
+        let mk = |event: crate::rwi::event::RwiEvent| EventCacheEntry {
+            cached_at: ts,
+            call_id: "dedup-call".into(),
+            event,
+        };
+        let ringing = mk(crate::rwi::event::to_legacy_event(
+            &crate::rwi::CallRinging {
+                call_id: "dedup-call".into(),
+                early_media: false,
+            },
+            None,
+        ));
+        let created = mk(crate::rwi::event::to_legacy_event(
+            &crate::rwi::CallCreated {
+                call_id: "dedup-call".into(),
+                context: "default".into(),
+                caller: "sip:1001@localhost".into(),
+                callee: "sip:8888@localhost".into(),
+                trunk: None,
+                sip_headers: Default::default(),
+                caller_name: None,
+                callee_name: None,
+                called_phone: None,
+                app_id: None,
+                routing_target: None,
+                uuid: None,
+                routing_path: None,
+            },
+            None,
+        ));
+        tx.send(ringing).ok();
+        tx.send(created).ok();
+
+        wait_for_events(&server.received, 2, 2000).await;
+        let received = server.received.lock().unwrap();
+        let types: Vec<&str> = received
+            .iter()
+            .map(|b| b["event_type"].as_str().unwrap_or(""))
+            .collect();
+        assert!(
+            types.contains(&"call_ringing") && types.contains(&"call_created"),
+            "same-timestamp distinct-type events must both be delivered, got {types:?}"
+        );
+    }
+
+    /// True redeliveries (identical identity incl. event type) are still
+    /// deduplicated exactly once.
+    #[tokio::test]
+    async fn test_webhook_dedup_identical_event_dropped_once() {
+        let server = TestHttpServer::start().await;
+        let config = LocatorWebhookConfig {
+            url: server.url(),
+            events: vec![],
+            headers: None,
+            timeout_ms: Some(5000),
+        };
+        let tx = start_rwi_webhook_handler(config);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let ts = chrono::Utc::now();
+        let mk = || EventCacheEntry {
+            cached_at: ts,
+            call_id: "dedup-once".into(),
+            event: crate::rwi::event::to_legacy_event(
+                &crate::rwi::CallRinging {
+                    call_id: "dedup-once".into(),
+                    early_media: false,
+                },
+                None,
+            ),
+        };
+        tx.send(mk()).ok();
+        tx.send(mk()).ok();
+
+        wait_for_events(&server.received, 1, 2000).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let count = server.received.lock().unwrap().len();
+        assert_eq!(count, 1, "identical redelivery must be deduped to one");
     }
 
     /// Regression: agent status, recording metadata, and recording finalization
