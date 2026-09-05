@@ -768,6 +768,43 @@ pub mod cc {
     }
 }
 
+pub mod cdr {
+    /// Record accepted into the bounded queue (producer → manager).
+    pub fn enqueued() {
+        metrics::counter!("cdr_records_enqueued_total").increment(1);
+    }
+
+    /// Record lost because the queue was full or the manager was gone.
+    pub fn dropped() {
+        metrics::counter!("cdr_records_dropped_total").increment(1);
+    }
+
+    /// Records handed to the saver and persisted successfully.
+    pub fn pushed(n: u64) {
+        metrics::counter!("cdr_records_pushed_total").increment(n);
+    }
+
+    /// Records in a batch the saver failed to persist.
+    pub fn push_failed(n: u64) {
+        metrics::counter!("cdr_records_push_failed_total").increment(n);
+    }
+
+    pub fn set_queue_size(capacity: usize) {
+        metrics::gauge!("cdr_queue_size").set(capacity as f64);
+    }
+
+    pub fn set_queue_current(n: usize) {
+        metrics::gauge!("cdr_queue_current").set(n as f64);
+    }
+
+    /// Queueing wait (record enqueued → manager dequeued). Excludes the
+    /// save/push time itself; a slow endpoint does NOT inflate this —
+    /// queue backlog does. Opt-in via `[callrecord] track_queue_latency`.
+    pub fn queue_latency_seconds(duration_secs: f64) {
+        metrics::histogram!("cdr_queue_latency_seconds").record(duration_secs);
+    }
+}
+
 pub fn init_static_gauges() {
     let version = crate::version::get_short_version();
     metrics::gauge!("rustpbx_info", "version" => version).set(1.0);

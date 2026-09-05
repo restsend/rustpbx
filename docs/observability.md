@@ -109,6 +109,31 @@ All metrics emitted by RustPBX, organized by category:
 | `rustpbx_call_duration_seconds` | Histogram | `direction` | Wall-clock time from INVITE to BYE |
 | `rustpbx_call_talk_time_seconds` | Histogram | `direction` | Talk time (only for answered calls) |
 
+#### Call Record (CDR) Pipeline
+
+Metrics for the call-record pipeline: producers enqueue finished CDRs into a
+bounded queue (`[callrecord] channel_capacity`), and a single manager task
+drains the queue in batches and hands them to the configured saver
+(`http`, `database`, `local`, `s3`).
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `cdr_records_enqueued_total` | Counter | - | CDRs accepted into the queue |
+| `cdr_records_pushed_total` | Counter | - | CDRs persisted by the saver (batch success) |
+| `cdr_records_push_failed_total` | Counter | - | CDRs in batches the saver failed to persist |
+| `cdr_records_dropped_total` | Counter | - | CDRs lost because the queue was full or the manager was gone |
+| `cdr_queue_size` | Gauge | - | Configured queue capacity |
+| `cdr_queue_current` | Gauge | - | CDRs currently queued (sampled every 5 s) |
+| `cdr_queue_latency_seconds` | Histogram | - | Queueing wait (record enqueued → manager dequeued); opt-in via `[callrecord] track_queue_latency` |
+
+A healthy pipeline keeps `cdr_records_enqueued_total == cdr_records_pushed_total`,
+`cdr_records_dropped_total == 0` and `cdr_queue_current` near 0. Rising
+`cdr_queue_current` or any `cdr_records_dropped_total` increments mean the
+saver endpoint is slower than the call completion rate — scale the endpoint or
+raise `channel_capacity` (memory-bounded). `cdr_queue_latency_seconds`
+measures how long a record waits in the queue only; a slow endpoint does not
+inflate it, backlog does.
+
 #### Trunk Metrics
 
 | Metric | Type | Labels | Description |

@@ -186,6 +186,13 @@ pub struct CallRecord {
     pub extensions: http::Extensions,
 }
 
+/// Extension key stashing the enqueue instant on a `CallRecord` so the
+/// manager can measure queueing wait (enqueued → dequeued) for the
+/// opt-in `cdr_queue_latency_seconds` histogram without changing the
+/// channel item type. Never serialized.
+#[derive(Debug, Clone, Copy)]
+pub struct RecordEnqueuedAt(pub Instant);
+
 impl Clone for CallRecord {
     fn clone(&self) -> Self {
         Self {
@@ -538,6 +545,8 @@ pub struct CallRecordManager {
     pub batch_size: usize,
     pub sender: CallRecordSender,
     pub stats: Arc<CallRecordStats>,
+    channel_capacity: usize,
+    track_queue_latency: bool,
     cancel_token: CancellationToken,
     receiver: CallRecordReceiver,
     saver: Box<dyn CallRecordSaver>,
@@ -628,6 +637,7 @@ impl CallRecordManagerBuilder {
             .unwrap_or(DEFAULT_CALL_RECORD_BATCH_SIZE)
             .max(1);
         let (sender, receiver) = tokio::sync::mpsc::channel(channel_capacity);
+        let track_queue_latency = config.as_ref().is_some_and(|c| c.track_queue_latency);
         let saver: Box<dyn CallRecordSaver> = match config.map(|c| c.storage) {
             // No [callrecord] section → default: database → rustpbx_call_records
             None => {
@@ -763,6 +773,8 @@ impl CallRecordManagerBuilder {
         Ok(CallRecordManager {
             batch_size,
             stats: Arc::new(CallRecordStats::new()),
+            channel_capacity,
+            track_queue_latency,
             cancel_token,
             sender,
             receiver,
@@ -1328,7 +1340,17 @@ impl CallRecordManager {
     pub async fn serve(&mut self) {
         let token = self.cancel_token.clone();
         let batch_size = self.batch_size.max(1);
-        info!(batch_size, "CallRecordManager serving");
+        let track_queue_latency = self.track_queue_latency;
+        info!(
+            batch_size,
+            channel_capacity = self.channel_capacity,
+            track_queue_latency,
+            "CallRecordManager serving"
+        );
+        crate::metrics::cdr::set_queue_size(self.channel_capacity);
+        crate::metrics::cdr::set_queue_current(0);
+        let mut gauge_interval = tokio::time::interval(Duration::from_secs(5));
+        gauge_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let receiver = &mut self.receiver;
         let saver = self.saver.as_ref();
         let hooks = &self.hooks;
@@ -1350,6 +1372,17 @@ impl CallRecordManager {
                         continue;
                     }
 
+                    if track_queue_latency {
+                        let now = Instant::now();
+                        for record in records.iter_mut() {
+                            if let Some(enqueued_at) = record.extensions.remove::<RecordEnqueuedAt>() {
+                                crate::metrics::cdr::queue_latency_seconds(
+                                    now.duration_since(enqueued_at.0).as_secs_f64(),
+                                );
+                            }
+                        }
+                    }
+
                     let started_at = Instant::now();
                     for hook in hooks {
                         if let Err(e) = hook.on_record_enrich(&mut records).await {
@@ -1359,6 +1392,7 @@ impl CallRecordManager {
 
                     match saver.save(&records).await {
                         Ok(file_names) => {
+                            crate::metrics::cdr::pushed(records.len() as u64);
                             if file_names.len() != records.len() {
                                 warn!(
                                     batch_size = records.len(),
@@ -1376,6 +1410,7 @@ impl CallRecordManager {
                             );
                         }
                         Err(err) => {
+                            crate::metrics::cdr::push_failed(records.len() as u64);
                             warn!(batch_size = records.len(), "Failed to save call record batch: {}", err);
                         }
                     }
@@ -1385,6 +1420,9 @@ impl CallRecordManager {
                             warn!(batch_size = records.len(), "CallRecordHook failed: {}", e);
                         }
                     }
+                }
+                _ = gauge_interval.tick(), if !shutting_down => {
+                    crate::metrics::cdr::set_queue_current(receiver.len());
                 }
                 _ = token.cancelled(), if !shutting_down => {
                     shutting_down = true;

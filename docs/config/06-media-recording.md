@@ -227,6 +227,19 @@ The `[callrecord]` section is **optional**. It adds a secondary raw-CDR sink on 
 
 `max_concurrent` controls how many post-call CDR save/upload/hook tasks may run at once. The default is `64`; values below `1` are clamped to `1`.
 
+Common pipeline options (independent of the storage type):
+
+| Key | Default | Description |
+|---|---|---|
+| `channel_capacity` | 2048 | Bounded queue length between call producers and the CDR manager. Producers drop (and count `cdr_records_dropped_total`) when full. |
+| `batch_size` | 64 | Max records per manager batch. |
+| `track_queue_latency` | false | Record the `cdr_queue_latency_seconds` histogram (queueing wait only — save/push time excluded). |
+
+The pipeline exports Prometheus metrics (`cdr_records_enqueued_total`,
+`cdr_records_pushed_total`, `cdr_records_push_failed_total`,
+`cdr_records_dropped_total`, `cdr_queue_size`, `cdr_queue_current`,
+`cdr_queue_latency_seconds`) — see [observability.md](../observability.md#call-record-cdr-pipeline).
+
 ### Database
 Writes CDR JSON to a separate database table (default: `call_records`).
 

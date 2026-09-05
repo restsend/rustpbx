@@ -349,9 +349,20 @@ impl CallReporter {
             // Bounded channel: drop new records (with a warn log) if the
             // saver has fallen behind, instead of buffering indefinitely.
             // `try_send` is sync, so the existing synchronous emit path is
-            // preserved.
-            if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = sender.try_send(record) {
-                tracing::warn!("call record channel full; dropping record to bound memory");
+            // preserved. The enqueue instant rides in `extensions` for the
+            // manager's opt-in queueing-latency histogram.
+            record
+                .extensions
+                .insert(crate::callrecord::RecordEnqueuedAt(std::time::Instant::now()));
+            match sender.try_send(record) {
+                Ok(()) => crate::metrics::cdr::enqueued(),
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    crate::metrics::cdr::dropped();
+                    tracing::warn!("call record channel full; dropping record to bound memory");
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    crate::metrics::cdr::dropped();
+                }
             }
         }
     }
