@@ -4203,6 +4203,14 @@ impl SipSession {
                 } => {
                     info!(app_name = %app_name, "Executing application flow");
                     self.meta.app_name = Some(app_name.clone());
+                    // Stamp the app-routed contract: the CALLER of an
+                    // application session (IVR / queue entry / conference…
+                    // ) is a self-service customer, NOT an agent on a call —
+                    // CcCallSessionHook must not mark a registered agent
+                    // caller Busy just because the caller identity resolves
+                    // to one (that used to lock the agent out of ACD
+                    // dispatch for the whole call).
+                    self.session_ext_set("cc_app_routed", app_name.clone());
                     if app_name == "ivr" {
                         let ivr_short = app_params
                             .as_ref()
