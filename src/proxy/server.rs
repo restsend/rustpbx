@@ -946,11 +946,12 @@ impl SipServerBuilder {
             if cc.peers.is_empty() {
                 return None;
             }
-            let local_addr_strs: Vec<String> = endpoint
+            let mut local_addr_strs: Vec<String> = endpoint
                 .get_addrs()
                 .iter()
                 .map(|a| a.addr.to_string())
                 .collect();
+            local_addr_strs.extend(local_addrs.iter().map(|a| a.to_string()));
             match resolve_cluster_self_addr(&cc.peers, &local_addr_strs) {
                 Some(addr) => {
                     info!(%addr, "resolved cluster self peer address for home_proxy stamping");
