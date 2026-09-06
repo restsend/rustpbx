@@ -12,6 +12,24 @@ pub fn build_keepalive_client(
     timeout: Option<Duration>,
     connect_timeout: Option<Duration>,
 ) -> Result<reqwest::Client> {
+    build_client(keepalive_client_builder(timeout, connect_timeout))
+}
+
+/// Builds a keepalive client that returns redirects to its caller unchanged.
+pub fn build_keepalive_client_without_redirect(
+    timeout: Option<Duration>,
+    connect_timeout: Option<Duration>,
+) -> Result<reqwest::Client> {
+    build_client(
+        keepalive_client_builder(timeout, connect_timeout)
+            .redirect(reqwest::redirect::Policy::none()),
+    )
+}
+
+fn keepalive_client_builder(
+    timeout: Option<Duration>,
+    connect_timeout: Option<Duration>,
+) -> reqwest::ClientBuilder {
     let mut builder = reqwest::Client::builder()
         .tcp_keepalive(DEFAULT_HTTP_TCP_KEEPALIVE)
         .pool_idle_timeout(DEFAULT_HTTP_POOL_IDLE_TIMEOUT)
@@ -25,6 +43,10 @@ pub fn build_keepalive_client(
         builder = builder.connect_timeout(connect_timeout);
     }
 
+    builder
+}
+
+fn build_client(builder: reqwest::ClientBuilder) -> Result<reqwest::Client> {
     builder
         .build()
         .map_err(|e| anyhow!("Failed to build HTTP client: {}", e))
