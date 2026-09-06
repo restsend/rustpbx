@@ -161,6 +161,8 @@ pub struct Location {
     pub supports_webrtc: bool,
     pub credential: Option<Credential>,
     pub headers: Option<Vec<rsipstack::sip::Header>>,
+    pub registered_username: Option<String>,
+    pub registered_realm: Option<String>,
     pub registered_aor: Option<rsipstack::sip::Uri>,
     pub contact_raw: Option<String>,
     pub contact_params: Option<HashMap<String, String>>,
@@ -201,6 +203,8 @@ impl std::fmt::Debug for Location {
             .field("last_modified", &self.last_modified)
             .field("supports_webrtc", &self.supports_webrtc)
             .field("headers", &self.headers)
+            .field("registered_username", &self.registered_username)
+            .field("registered_realm", &self.registered_realm)
             .field("registered_aor", &self.registered_aor)
             .field("contact_raw", &self.contact_raw)
             .field("contact_params", &self.contact_params)
