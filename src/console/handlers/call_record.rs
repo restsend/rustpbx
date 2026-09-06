@@ -323,10 +323,10 @@ async fn serve_archived_jsonl_flow(
                         .bytes()
                         .await
                         .map(|bytes| bytes.to_vec())
-                        .map_err(anyhow::Error::from),
-                    Err(err) => Err(anyhow::Error::from(err)),
+                        .map_err(|err| anyhow::Error::from(err.without_url())),
+                    Err(err) => Err(anyhow::Error::from(err.without_url())),
                 },
-                Err(err) => Err(anyhow::Error::from(err)),
+                Err(err) => Err(anyhow::Error::from(err.without_url())),
             }
         } else {
             tokio::fs::read(location).await.map_err(anyhow::Error::from)
@@ -438,7 +438,18 @@ async fn download_call_record_sip_flow(
         .and_then(|m| m.get("sipflow_jsonl"))
         .and_then(|v| v.as_str())
     {
-        let resolved = resolve_archived_artifact_path(location, record.started_at);
+        let resolved = if location.starts_with("http://")
+            || location.starts_with("https://")
+            || location.starts_with("s3://")
+        {
+            if let Some(signed_url) = presign_artifact_url(&state, location).await {
+                signed_url
+            } else {
+                location.to_string()
+            }
+        } else {
+            resolve_archived_artifact_path(location, record.started_at)
+        };
         return serve_archived_jsonl_flow(&record, &resolved, query.detail, state.http_client())
             .await;
     }
@@ -1658,14 +1669,13 @@ fn build_trace_payload(metadata: Option<&Value>) -> Value {
 const FALLBACK_SIGNED_URL_EXPIRY_SECS: u64 = 86_400;
 
 /// Rewrite a stored OSS/S3 object URL (`{endpoint}/{bucket}/{key}` or
-/// `s3://{bucket}/{key}`) into a presigned download URL, so recordings
+/// `s3://{bucket}/{key}`) into a presigned download URL, so recordings and SIP-flow
 /// remain accessible when the bucket is private. The signature is generated
 /// on demand from the upload storage credentials and stays valid for the
 /// configured `signed_url_expiry_secs` window (capped at 7 days by SigV4).
 ///
-/// Returns the original URL unchanged when no configured storage owns the
-/// URL (e.g. HTTP-upload mode) or when signing fails.
-async fn presign_recording_url(state: &ConsoleState, raw_url: &str) -> Option<String> {
+/// Returns `None` when no configured storage owns the URL or signing fails.
+async fn presign_artifact_url(state: &ConsoleState, raw_url: &str) -> Option<String> {
     let app = state.app_state()?;
     let core = &app.core;
 
@@ -1710,7 +1720,7 @@ async fn presign_recording_url(state: &ConsoleState, raw_url: &str) -> Option<St
         {
             Ok(signed) => Some(signed),
             Err(err) => {
-                debug!(url = raw_url, %err, "failed to presign recording url");
+                debug!(%err, "failed to presign artifact URL");
                 None
             }
         };
@@ -1733,7 +1743,7 @@ async fn build_recording_payload(
         if raw_value.starts_with("http://") || raw_value.starts_with("https://") {
             // External URL – presign OSS/S3 objects when possible
             (
-                presign_recording_url(state, raw_value)
+                presign_artifact_url(state, raw_value)
                     .await
                     .unwrap_or_else(|| raw_value.to_string()),
                 false,
@@ -1781,7 +1791,7 @@ async fn derive_recording_download_url(
     {
         if raw.starts_with("http://") || raw.starts_with("https://") {
             return Some(
-                presign_recording_url(state, raw)
+                presign_artifact_url(state, raw)
                     .await
                     .unwrap_or_else(|| raw.to_string()),
             );
@@ -2365,6 +2375,96 @@ mod tests {
         ConsoleState::initialize(db, ConsoleConfig::default(), None)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn private_artifacts_are_retrieved_using_signed_urls() {
+        let temp = tempfile::tempdir().unwrap();
+        let wav_path = temp.path().join("fixture.wav");
+        create_test_stereo_wav(wav_path.to_str().unwrap());
+        let wav = tokio::fs::read(&wav_path).await.unwrap();
+        let served_wav = wav.clone();
+        let mock = Router::new().route("/{*key}", get(move |headers: HeaderMap, uri: http::Uri| {
+            let wav = served_wav.clone();
+            async move {
+                if headers.contains_key(http::header::AUTHORIZATION)
+                    || !uri.query().unwrap_or_default().contains("X-Amz-Signature=")
+                    || uri.query().unwrap_or_default().contains("stream=") {
+                    return StatusCode::FORBIDDEN.into_response();
+                }
+                if uri.path().ends_with(".wav") {
+                    ([(http::header::CONTENT_TYPE, "audio/wav")], wav).into_response()
+                } else {
+                    "{\"timestamp\":1,\"seq\":0,\"msg_type\":\"Sip\",\"payload\":\"INVITE sip:b SIP/2.0\\r\\n\"}\n".into_response()
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let mock_task = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let config = crate::config::Config {
+            database_url: "sqlite::memory:".into(),
+            storage: Some(crate::storage::StorageConfig::Local {
+                path: temp.path().join("storage").to_string_lossy().into_owned(),
+            }),
+            recording: Some(crate::config::RecordingPolicy {
+                enabled: Some(true),
+                recording_type: Some(crate::config::RecordingType::S3),
+                vendor: Some(crate::storage::S3Vendor::Aliyun),
+                endpoint: Some(endpoint.clone()),
+                access_key: Some("test".into()),
+                secret_key: Some("test".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let app = crate::app::AppStateBuilder::new()
+            .with_config(config)
+            .with_skip_sip_bind()
+            .build()
+            .await
+            .unwrap();
+        let state = create_console_state(app.db().clone()).await;
+        state.set_app_state(Some(Arc::downgrade(&app)));
+        let record = call_record::ActiveModel {
+            call_id: Set("private-artifacts".into()),
+            direction: Set("inbound".into()),
+            status: Set("completed".into()),
+            started_at: Set(Utc::now()),
+            created_at: Set(Utc::now()),
+            updated_at: Set(Utc::now()),
+            duration_secs: Set(10),
+            has_transcript: Set(false),
+            transcript_status: Set("pending".into()),
+            recording_url: Set(Some(format!("{endpoint}/recordings/call.wav"))),
+            metadata: Set(Some(
+                json!({"sipflow_jsonl": format!("{endpoint}/sipflow/call.jsonl")}),
+            )),
+            ..Default::default()
+        }
+        .insert(app.db())
+        .await
+        .unwrap();
+        let payload = build_recording_payload(&state, &record, None)
+            .await
+            .unwrap();
+        let signed = payload["url"].as_str().unwrap();
+        assert!(signed.starts_with(&format!("{endpoint}/recordings/call.wav?")));
+        assert_eq!(payload["supports_streams"], false);
+        let response = state.http_client().get(signed).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.bytes().await.unwrap().as_ref(), wav.as_slice());
+        let location = format!("{endpoint}/sipflow/call.jsonl");
+        let signed = presign_artifact_url(&state, &location).await.unwrap();
+        let response = serve_archived_jsonl_flow(&record, &signed, true, state.http_client()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["flow"].as_array().unwrap().len(), 1);
+        app.token().cancel();
+        mock_task.abort();
     }
 
     #[tokio::test]

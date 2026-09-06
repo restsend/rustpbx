@@ -2087,6 +2087,9 @@
                     return '';
                 }
                 const base = this.record.recording.url;
+                if (!this.record.recording.supports_streams) {
+                    return base;
+                }
                 const selected = this.normalizePlaybackStream(this.playbackStream);
                 const stream = selected || 'A';
                 const separator = base.includes('?') ? '&' : '?';
