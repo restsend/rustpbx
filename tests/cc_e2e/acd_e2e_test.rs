@@ -153,7 +153,7 @@ mod acd_e2e_test {
         // the wait timeout the call MUST target Voicemail — not just "any
         // overflow/fallback".
         let mut cfg = cc_state.acd_engine.config_snapshot();
-        let mut support = cfg
+        let support = cfg
             .policies
             .get_mut("support")
             .expect("support policy exists");
