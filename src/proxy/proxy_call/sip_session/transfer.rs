@@ -81,6 +81,172 @@ enum BridgeForwardSink {
     Pcm(tokio::sync::mpsc::Sender<Vec<i16>>),
 }
 
+fn take_bridge_pcm_frame(
+    buffered: &mut Vec<i16>,
+    samples_per_frame: usize,
+    flush_tail: bool,
+) -> Option<Vec<i16>> {
+    if buffered.len() >= samples_per_frame {
+        return Some(buffered.drain(..samples_per_frame).collect());
+    }
+    if flush_tail && !buffered.is_empty() {
+        // A clean WS EOF is the only signal that this short chunk is final;
+        // pad it once so both bridge sinks preserve the received PCM tail.
+        let mut tail = std::mem::take(buffered);
+        tail.resize(samples_per_frame, 0);
+        return Some(tail);
+    }
+    None
+}
+
+/// Bridge forward loop: WS PCM16 messages → bridge sink.
+///
+/// Extracted from `SipSession::connect_bridge` so the close→flush wiring
+/// (a clean `Message::Close`/EOF must flush the partial PCM tail) is
+/// exercised at its real boundary by tests.
+async fn bridge_forward_loop<S>(
+    mut ws_read: S,
+    forward_sink: BridgeForwardSink,
+    forward_cancel: tokio_util::sync::CancellationToken,
+    cmd_tx_for_fwd: Option<mpsc::Sender<CallCommand>>,
+    leg_id: LegId,
+    session_id: String,
+    codec_type: audio_codec::CodecType,
+    payload_type: u8,
+    ws_sample_rate: u32,
+) where
+    S: futures::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + Unpin
+        + Send,
+{
+    use audio_codec::create_encoder;
+    use rustrtc::media::{AudioFrame as RtcAudioFrame, MediaSample};
+
+    let samples_per_frame = (ws_sample_rate * 20 / 1000) as usize;
+    let mut buffered = Vec::new();
+
+    // Track path: encoder + RTP state. Pcm path: none needed.
+    let mut encoder = if let BridgeForwardSink::Track(..) = &forward_sink {
+        Some(create_encoder(codec_type))
+    } else {
+        None
+    };
+    let enc_sample_rate = encoder
+        .as_ref()
+        .map(|e| e.sample_rate())
+        .unwrap_or(ws_sample_rate);
+    let clock_rate = codec_type.clock_rate() as u32;
+    let rtp_ticks_per_frame = clock_rate * 20 / 1000;
+    let mut rtp_ts: u32 = rand::random();
+    let mut seq: u16 = rand::random();
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = forward_cancel.cancelled() => {
+                info!(session_id = %session_id, %leg_id, "Bridge forward loop cancelled");
+                break;
+            }
+            msg = ws_read.next() => {
+                let stream_closed = match msg {
+                    Some(Ok(Message::Binary(data))) => {
+                        buffered.extend(
+                            data.chunks_exact(2)
+                                .map(|bytes| i16::from_ne_bytes([bytes[0], bytes[1]])),
+                        );
+                        false
+                    }
+                    Some(Ok(Message::Text(txt))) => {
+                        // Outbound DTMF: WS service sends {"type":"dtmf","digit":"..."}
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&txt) {
+                            if val.get("type").and_then(|v| v.as_str()) == Some("dtmf") {
+                                if let Some(digits) = val.get("digit").and_then(|v| v.as_str()) {
+                                    if let Some(ref tx) = cmd_tx_for_fwd {
+                                        let cmd = CallCommand::SendDtmf {
+                                            leg_id: leg_id.clone(),
+                                            digits: digits.to_string(),
+                                        };
+                                        tokio::select! {
+                                            biased;
+                                            _ = forward_cancel.cancelled() => return,
+                                            result = tx.send(cmd) => {
+                                                if result.is_err() {
+                                                    warn!(session_id = %session_id, %leg_id, "Bridge forward: cmd_tx closed");
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    Some(Ok(Message::Close(_))) | None => {
+                        info!(session_id = %session_id, %leg_id, "Bridge WS closed remotely");
+                        true
+                    }
+                    Some(Err(e)) => {
+                        warn!(session_id = %session_id, %leg_id, "Bridge WS read error: {}", e);
+                        break;
+                    }
+                    _ => continue,
+                };
+
+                while let Some(chunk) = take_bridge_pcm_frame(
+                    &mut buffered,
+                    samples_per_frame,
+                    stream_closed,
+                ) {
+                    if let BridgeForwardSink::Pcm(tx) = &forward_sink {
+                        tokio::select! {
+                            biased;
+                            _ = forward_cancel.cancelled() => return,
+                            result = tx.send(chunk) => {
+                                if result.is_err() {
+                                    info!(%session_id, %leg_id, "Bridge forward: PCM channel closed");
+                                    return;
+                                }
+                            }
+                        }
+                    } else if let BridgeForwardSink::Track(sender) = &forward_sink {
+                        let chunk = if ws_sample_rate != enc_sample_rate {
+                            crate::call::runtime::conference_media_bridge::resample_linear(
+                                &chunk, ws_sample_rate, enc_sample_rate,
+                            )
+                        } else {
+                            chunk
+                        };
+                        if let Some(ref mut enc) = encoder {
+                            let encoded = enc.encode(&chunk);
+                            let frame = RtcAudioFrame {
+                                rtp_timestamp: rtp_ts,
+                                clock_rate,
+                                data: encoded.into(),
+                                sequence_number: Some(seq),
+                                payload_type: Some(payload_type),
+                                marker: false,
+                                header_extension: None,
+                                raw_packet: None,
+                                source_addr: None,
+                            };
+                            if sender.send(MediaSample::Audio(frame)).is_err() {
+                                warn!(%session_id, %leg_id, "Bridge forward: track sender closed");
+                                return;
+                            }
+                            rtp_ts = rtp_ts.wrapping_add(rtp_ticks_per_frame);
+                            seq = seq.wrapping_add(1);
+                        }
+                    }
+                }
+                if stream_closed {
+                    break;
+                }
+            }
+        }
+    }
+}
+
 /// Raw return-app specification extracted from a transfer target's query
 /// string.  Resolved to a concrete [`ReturnAppSpec`] by the transfer handler
 /// (which has access to `data_context` for IVR file resolution).
@@ -1490,7 +1656,7 @@ impl SipSession {
                 .map_err(|e| anyhow!("Failed to connect Bridge WebSocket: {}", e))?
         };
         info!(session_id = %self.id, endpoint = %endpoint, "Bridge WebSocket connected");
-        let (mut ws_write, mut ws_read) = ws_stream.split();
+        let (mut ws_write, ws_read) = ws_stream.split();
 
         // ── 2. Obtain the leg's audio sender (forward) & PeerConnection (reverse).
         let mut forward_sink: Option<BridgeForwardSink> = None;
@@ -1663,127 +1829,18 @@ impl SipSession {
             let leg_id = leg_id.clone();
             let session_id = session_id.clone();
             crate::utils::spawn(async move {
-                use audio_codec::create_encoder;
-                use rustrtc::media::{AudioFrame as RtcAudioFrame, MediaSample};
-
-                let samples_per_frame = (ws_sample_rate * 20 / 1000) as usize;
-                let mut buf: Vec<i16> = Vec::new();
-
-                // Track path: encoder + RTP state. Pcm path: none needed.
-                let mut encoder = if let BridgeForwardSink::Track(..) = &forward_sink {
-                    Some(create_encoder(codec_type))
-                } else {
-                    None
-                };
-                let enc_sample_rate = encoder
-                    .as_ref()
-                    .map(|e| e.sample_rate())
-                    .unwrap_or(ws_sample_rate);
-                let clock_rate = codec_type.clock_rate() as u32;
-                let rtp_ticks_per_frame = clock_rate * 20 / 1000;
-                let mut rtp_ts: u32 = rand::random();
-                let mut seq: u16 = rand::random();
-
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = forward_cancel.cancelled() => {
-                            info!(session_id = %session_id, %leg_id, "Bridge forward loop cancelled");
-                            break;
-                        }
-                        msg = ws_read.next() => {
-                            match msg {
-                                Some(Ok(Message::Binary(data))) => {
-                                    if data.len() < 2 { continue; }
-                                    let samples: Vec<i16> = data.chunks_exact(2)
-                                        .map(|c| i16::from_ne_bytes([c[0], c[1]]))
-                                        .collect();
-                                    buf.extend(samples);
-
-                                    while buf.len() >= samples_per_frame {
-                                        let chunk: Vec<i16> = buf.drain(..samples_per_frame).collect();
-
-                                        if let BridgeForwardSink::Pcm(tx) = &forward_sink {
-                                            tokio::select! {
-                                                biased;
-                                                _ = forward_cancel.cancelled() => return,
-                                                result = tx.send(chunk) => {
-                                                    if result.is_err() {
-                                                        info!(%session_id, %leg_id, "Bridge forward: PCM channel closed");
-                                                        return;
-                                                    }
-                                                }
-                                            }
-                                        } else if let BridgeForwardSink::Track(sender) = &forward_sink {
-                                            let chunk = if ws_sample_rate != enc_sample_rate {
-                                                crate::call::runtime::conference_media_bridge::resample_linear(
-                                                    &chunk, ws_sample_rate, enc_sample_rate,
-                                                )
-                                            } else {
-                                                chunk
-                                            };
-                                            if let Some(ref mut enc) = encoder {
-                                                let encoded = enc.encode(&chunk);
-                                                let frame = RtcAudioFrame {
-                                                    rtp_timestamp: rtp_ts,
-                                                    clock_rate,
-                                                    data: encoded.into(),
-                                                    sequence_number: Some(seq),
-                                                    payload_type: Some(payload_type),
-                                                    marker: false,
-                                                    header_extension: None,
-                                                    raw_packet: None,
-                                                    source_addr: None,
-                                                };
-                                                if sender.send(MediaSample::Audio(frame)).is_err() {
-                                                    warn!(%session_id, %leg_id, "Bridge forward: track sender closed");
-                                                    return;
-                                                }
-                                                rtp_ts = rtp_ts.wrapping_add(rtp_ticks_per_frame);
-                                                seq = seq.wrapping_add(1);
-                                            }
-                                        }
-                                    }
-                                }
-                                Some(Ok(Message::Text(txt))) => {
-                                    // Outbound DTMF: WS service sends {"type":"dtmf","digit":"..."}
-                                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&txt) {
-                                        if val.get("type").and_then(|v| v.as_str()) == Some("dtmf") {
-                                            if let Some(digits) = val.get("digit").and_then(|v| v.as_str()) {
-                                                if let Some(ref tx) = cmd_tx_for_fwd {
-                                                    let cmd = CallCommand::SendDtmf {
-                                                        leg_id: leg_id.clone(),
-                                                        digits: digits.to_string(),
-                                                    };
-                                                    tokio::select! {
-                                                        biased;
-                                                        _ = forward_cancel.cancelled() => return,
-                                                        result = tx.send(cmd) => {
-                                                            if result.is_err() {
-                                                                warn!(session_id = %session_id, %leg_id, "Bridge forward: cmd_tx closed");
-                                                                break;
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            continue;
-                                        }
-                                    }
-                                }
-                                Some(Ok(Message::Close(_))) | None => {
-                                    info!(session_id = %session_id, %leg_id, "Bridge WS closed remotely");
-                                    break;
-                                }
-                                Some(Err(e)) => {
-                                    warn!(session_id = %session_id, %leg_id, "Bridge WS read error: {}", e);
-                                    break;
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
+                bridge_forward_loop(
+                    ws_read,
+                    forward_sink,
+                    forward_cancel,
+                    cmd_tx_for_fwd,
+                    leg_id,
+                    session_id,
+                    codec_type,
+                    payload_type,
+                    ws_sample_rate,
+                )
+                .await
             })
         };
 
@@ -2807,7 +2864,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_voip_bridge_echo_integration() {
+    async fn test_bridge_forward_flushes_pcm_tail_on_remote_close() {
+        // 40 samples (5 ms at 8 kHz) — short of one 20 ms frame, so the tail
+        // can only surface through the close→flush path of the forward loop.
+        let samples: Vec<i16> = (0..40).map(|i| (i * 100) as i16).collect();
+        let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_ne_bytes()).collect();
+
+        let messages: Vec<Result<Message, tokio_tungstenite::tungstenite::Error>> =
+            vec![
+                Ok(Message::Binary(bytes.into())),
+                Ok(Message::Close(None)),
+            ];
+
+        let (pcm_tx, mut pcm_rx) = mpsc::channel(4);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            bridge_forward_loop(
+                futures::stream::iter(messages),
+                BridgeForwardSink::Pcm(pcm_tx),
+                tokio_util::sync::CancellationToken::new(),
+                None,
+                LegId::new("caller"),
+                "test-session".to_string(),
+                audio_codec::CodecType::PCMU,
+                0,
+                8000,
+            ),
+        )
+        .await
+        .expect("forward loop must terminate after remote close");
+
+        let mut frames = Vec::new();
+        while let Some(frame) = pcm_rx.recv().await {
+            frames.push(frame);
+        }
+        assert_eq!(frames.len(), 1, "padded tail frame must be flushed once");
+        assert_eq!(frames[0].len(), 160);
+        assert_eq!(&frames[0][..40], &samples[..]);
+        assert!(frames[0][40..].iter().all(|sample| *sample == 0));
+    }
+
+    #[tokio::test]
+    async fn test_voip_bridge_flushes_partial_pcm_tail() {
         let addr = spawn_ws_echo_server().await;
         let ws_url = format!("ws://127.0.0.1:{}", addr.port());
 
@@ -2837,8 +2935,8 @@ mod tests {
             .expect("connect to echo server");
         let (mut ws_write, mut ws_read) = ws_stream.split();
 
-        // Send a PCM16 frame (160 samples at 8kHz = 10ms)
-        let tx_samples: Vec<i16> = (0..160).map(|i| (i * 100) as i16).collect();
+        // Send 25 ms so the bridge has one full frame and a 5 ms tail at EOF.
+        let tx_samples: Vec<i16> = (0..200).map(|i| (i * 100) as i16).collect();
         let mut tx_bytes = Vec::with_capacity(tx_samples.len() * 2);
         for s in &tx_samples {
             tx_bytes.extend_from_slice(&s.to_ne_bytes());
@@ -2863,23 +2961,37 @@ mod tests {
             other => panic!("expected Binary, got {other:?}"),
         };
 
-        // Verify echoed data matches
-        assert_eq!(
-            rx_bytes.len(),
-            tx_bytes.len(),
-            "echo should have same byte count"
-        );
-        let rx_samples: Vec<i16> = rx_bytes
-            .chunks_exact(2)
-            .map(|c| i16::from_ne_bytes([c[0], c[1]]))
-            .collect();
-        assert_eq!(rx_samples, tx_samples, "echoed PCM should match original");
-
-        // 3. Close cleanly
+        // 3. Close cleanly, then flush the bridge framer into the real PCM
+        // source used by the MediaBridge egress path.
         ws_write
             .close()
             .await
             .expect("close WS connection gracefully");
+
+        let mut buffered: Vec<i16> = rx_bytes
+            .chunks_exact(2)
+            .map(|bytes| i16::from_ne_bytes([bytes[0], bytes[1]]))
+            .collect();
+        let mut frames = Vec::new();
+        while let Some(frame) = take_bridge_pcm_frame(&mut buffered, 160, true) {
+            frames.push(frame);
+        }
+        let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel(4);
+        for frame in frames {
+            pcm_tx.send(frame).await.unwrap();
+        }
+        drop(pcm_tx);
+
+        use crate::media::audio_source::{AudioSource, ChannelAudioSource};
+        let mut source = ChannelAudioSource::new(pcm_rx, 8000);
+        let mut first = vec![0i16; 160];
+        let mut last = vec![0i16; 160];
+        assert_eq!(source.read_samples(&mut first), 160);
+        assert_eq!(source.read_samples(&mut last), 160);
+        assert_eq!(first, tx_samples[..160]);
+        assert_eq!(&last[..40], &tx_samples[160..]);
+        assert!(last[40..].iter().all(|sample| *sample == 0));
+        assert_eq!(source.read_samples(&mut last), 0);
     }
 
     #[tokio::test]
