@@ -56,6 +56,7 @@ async fn cluster_agent_status_cross_node_visibility() {
         2,
         0,
         15,
+        chrono::Utc::now().timestamp_millis(),
     )
     .await;
 
@@ -201,6 +202,7 @@ async fn cluster_multi_node_multi_agent_scenario() {
             1,
             0,
             0,
+            chrono::Utc::now().timestamp_millis(),
         )
         .await;
     }
@@ -215,6 +217,7 @@ async fn cluster_multi_node_multi_agent_scenario() {
         1,
         0,
         0,
+        chrono::Utc::now().timestamp_millis(),
     )
     .await;
 
@@ -274,6 +277,7 @@ async fn cluster_reaper_removes_rows_claimed_by_crashed_node() {
         priority: sea_orm::Set(0),
         enqueued_by: sea_orm::Set(Some("node-a".into())),
         claimed_by: sea_orm::Set(Some("node-b-crashed".into())),
+        claimed_at: sea_orm::Set(Some(old)),
         enqueued_at: sea_orm::Set(old),
     }
     .insert(&db)
@@ -290,6 +294,7 @@ async fn cluster_reaper_removes_rows_claimed_by_crashed_node() {
         1,
         0,
         0,
+        chrono::Utc::now().timestamp_millis(),
     )
     .await;
 
@@ -310,16 +315,19 @@ async fn cluster_reaper_removes_rows_claimed_by_crashed_node() {
     rustpbx::addons::cc::stats_writer::reap_stale_queue_rows(&db).await;
     rustpbx::addons::cc::stats_writer::reap_stale_presence(&db).await;
 
-    // The claimed row is stale (>60s with a claim) — the reaper deletes it
-    // so the scheduling loop does not keep skipping a dead claim.
+    // The claimed row is stale (>60s with a claim) — the reaper releases
+    // the claim (keeps the row) so the scheduling loop does not keep
+    // skipping a dead claim.
     let row = cc_acd_queue::Entity::find()
         .filter(cc_acd_queue::Column::CallId.eq("crashed-claim"))
         .one(&db)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("stale claimed row must survive (claim released, not deleted)");
+    assert!(row.claimed_by.is_none(), "stale claim should be released");
     assert!(
-        row.is_none(),
-        "stale claimed row must be removed after node crash"
+        row.claimed_at.is_none(),
+        "stale claimed_at should be cleared"
     );
 
     // Stale presence is gone.
@@ -367,6 +375,7 @@ async fn cluster_affinity_peer_does_not_steal_live_call() {
         1,
         0,
         0,
+        chrono::Utc::now().timestamp_millis(),
     )
     .await;
 
@@ -382,6 +391,7 @@ async fn cluster_affinity_peer_does_not_steal_live_call() {
         1,
         0,
         0,
+        chrono::Utc::now().timestamp_millis(),
     )
     .await;
 
@@ -423,6 +433,7 @@ async fn cluster_failover_cleans_dead_owner_orphan() {
         priority: sea_orm::Set(5),
         enqueued_by: sea_orm::Set(Some("node-a-dead".into())),
         claimed_by: sea_orm::Set(None),
+        claimed_at: sea_orm::Set(None),
         enqueued_at: sea_orm::Set(chrono::Utc::now() - chrono::Duration::minutes(11)),
     }
     .insert(&db)
@@ -566,6 +577,7 @@ async fn cluster_merged_presence_feeds_longest_idle() {
         1,
         0,
         0,
+        chrono::Utc::now().timestamp_millis(),
     )
     .await;
 
@@ -580,6 +592,7 @@ async fn cluster_merged_presence_feeds_longest_idle() {
         1,
         0,
         0,
+        chrono::Utc::now().timestamp_millis(),
     )
     .await;
 

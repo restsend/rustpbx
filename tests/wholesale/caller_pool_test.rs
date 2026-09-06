@@ -126,7 +126,7 @@ async fn test_caller_pool_selects_from_route_pool() {
             name: "Test Deck".to_string(),
             description: None,
             r#type: "sell".to_string(),
-            rates: vec![rustpbx::addons::wholesale::data::RateConfig {
+            rates: vec![rustpbx::addons::wholesale::data::RateConfig { id: 1,
                                 prefix: "86".to_string(),
                 match_caller_prefix: None,
                 rate: 0.1,

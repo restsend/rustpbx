@@ -194,6 +194,8 @@ async fn test_wholesale_billing_flow() {
     record.extensions.insert(WholesaleBillingContext {
         tenant_id,
         carrier_id: Some(trunk_id),
+        route_table_id: None,
+        route_item_id: None,
         sell_rate: tenant_rate_record.rate,
         buy_rate: vendor_rate_record.rate,
         tenant_min_duration: tenant_rate_record.min_duration,
@@ -598,7 +600,7 @@ async fn test_rebill_logic_with_prefixes() {
 
     assert_eq!(rated_callee_for_sell, "8613800000000");
 
-    let sell_rates = RateMatcher::from(vec![RateConfig {
+    let sell_rates = RateMatcher::from(vec![RateConfig { id: 7,
                 prefix: "86138".to_string(),
         match_caller_prefix: None,
         rate: 0.45,

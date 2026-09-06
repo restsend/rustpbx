@@ -169,7 +169,7 @@ async fn test_wholesale_route_ignores_retry_configuration() {
             name: "Test Deck".to_string(),
             description: None,
             r#type: "Standard".to_string(),
-            rates: vec![RateConfig {
+            rates: vec![RateConfig { id: 21,
                                 prefix: "1".to_string(),
                 match_caller_prefix: None,
                 rate: 0.1,

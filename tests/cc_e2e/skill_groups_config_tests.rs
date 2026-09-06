@@ -47,10 +47,9 @@ fn config_path_for(dir: &TempDir) -> String {
 }
 
 fn generated_cc_dir(dir: &TempDir) -> std::path::PathBuf {
-    // refactor_media layout: cc dir sits NEXT TO the main config file
-    // (`<parent-of-config>/cc`); the main branch additionally supports
-    // `proxy.generated_dir` indirection, which this branch does not have.
-    dir.path().join("cc")
+    // Default layout on main: config file's dir + default `generated_dir`
+    // ("./config"), i.e. `<parent-of-config>/config/cc`.
+    dir.path().join("config").join("cc")
 }
 
 // ── export ────────────────────────────────────────────────────────────────
@@ -555,10 +554,12 @@ skills_required = ["b"]
     let async_cache =
         rustpbx::addons::cc::CcAddonState::load_skill_groups_from_dir(Some(&config_path)).await;
 
-    // `load_skill_groups_from_config_dir_sync` takes the config ROOT (it
-    // appends `cc/skill_groups` itself) — i.e. the parent of `config.toml`.
-    let sync_cache =
-        rustpbx::addons::cc::CcAddonState::load_skill_groups_from_config_dir_sync(tmp.path());
+    // `load_skill_groups_from_config_dir_sync` takes the generated config
+    // ROOT (it appends `cc/skill_groups` itself) — with the default
+    // `generated_dir` that is `<parent-of-config>/config`.
+    let sync_cache = rustpbx::addons::cc::CcAddonState::load_skill_groups_from_config_dir_sync(
+        &tmp.path().join("config"),
+    );
 
     assert_eq!(
         async_cache.groups.len(),

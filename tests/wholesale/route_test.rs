@@ -56,20 +56,19 @@ fn test_route_table(profile: RoutingProfileConfig) -> RouteTable {
             item.caller_number_pool
                 .as_deref()
                 .and_then(CallerNumberPool::from_config)
+                .map(std::sync::Arc::new)
         } else {
             None
         };
-        let match_caller_prefix = item
+        let match_caller_prefixes = item
             .match_caller_prefix
             .as_deref()
-            .and_then(|value| {
-                value
-                    .split([',', '\n', '\r'])
-                    .map(str::trim)
-                    .filter(|prefix| !prefix.is_empty() && !prefix.eq_ignore_ascii_case("none"))
-                    .next()
-                    .map(str::to_string)
-            });
+            .into_iter()
+            .flat_map(|value| value.split([',', '\n', '\r']))
+            .map(str::trim)
+            .filter(|prefix| !prefix.is_empty() && !prefix.eq_ignore_ascii_case("none"))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
         trie.push(
             &prefix,
             Route {
@@ -78,7 +77,7 @@ fn test_route_table(profile: RoutingProfileConfig) -> RouteTable {
                 outbound_trunk: OutboundTrunkIndex(0),
                 priority: item.priority,
                 weight: item.weight,
-                match_caller_prefix,
+                match_caller_prefixes,
                 match_callee_country_id,
                 match_caller_country_id,
                 rewrite_callee,
@@ -267,7 +266,7 @@ async fn test_wholesale_route_invite_with_source_ip() {
                 name: "Test Deck".to_string(),
                 description: None,
                 r#type: "sell".to_string(),
-                rates: vec![RateConfig {
+                rates: vec![RateConfig { id: 22,
                                         prefix: "1".to_string(),
                     match_caller_prefix: None,
                     rate: 0.01,
@@ -459,7 +458,7 @@ async fn test_wholesale_route_country_match() {
                 name: "Country Match Deck".to_string(),
                 description: None,
                 r#type: "sell".to_string(),
-                rates: vec![RateConfig {
+                rates: vec![RateConfig { id: 23,
                                         prefix: "+86".to_string(),
                     match_caller_prefix: None,
                     rate: 0.01,
@@ -669,7 +668,7 @@ async fn test_wholesale_route_priority_wins_after_prefix_match() {
                 description: None,
                 r#type: "sell".to_string(),
                 rates: vec![
-                    RateConfig {
+                    RateConfig { id: 24,
                                                 prefix: "1".to_string(),
                         match_caller_prefix: None,
                         rate: 0.01,
@@ -677,7 +676,7 @@ async fn test_wholesale_route_priority_wins_after_prefix_match() {
                         increment: 60,
                         remark: None,
                     },
-                    RateConfig {
+                    RateConfig { id: 25,
                                                 prefix: "5".to_string(),
                         match_caller_prefix: None,
                         rate: 0.01,
@@ -1102,7 +1101,7 @@ async fn test_config_trie_selects_from_matching_callee_prefixes() {
                 name: "Config Trie Sell Deck".to_string(),
                 description: None,
                 r#type: "sell".to_string(),
-                rates: vec![RateConfig {
+                rates: vec![RateConfig { id: 26,
                                         prefix: "1".to_string(),
                     match_caller_prefix: None,
                     rate: 0.01,
@@ -1277,7 +1276,7 @@ async fn test_wholesale_route_prefix_stripping_and_cost() {
                 description: None,
                 r#type: "sell".to_string(),
                 rates: vec![
-                    RateConfig {
+                    RateConfig { id: 27,
                                                 prefix: "44".to_string(),
                         match_caller_prefix: None,
                         rate: 0.00076,
@@ -1285,7 +1284,7 @@ async fn test_wholesale_route_prefix_stripping_and_cost() {
                         increment: 1,
                         remark: None,
                     },
-                    RateConfig {
+                    RateConfig { id: 28,
                                                 prefix: "44".to_string(),
                         match_caller_prefix: Some("447".to_string()),
                         rate: 0.00099,
@@ -1304,7 +1303,7 @@ async fn test_wholesale_route_prefix_stripping_and_cost() {
                 name: "Buy Deck".to_string(),
                 description: None,
                 r#type: "buy".to_string(),
-                rates: vec![RateConfig {
+                rates: vec![RateConfig { id: 29,
                                         prefix: "44".to_string(),
                     match_caller_prefix: None,
                     rate: 0.0005,
@@ -1562,7 +1561,7 @@ async fn test_wholesale_route_full_prefix_chain() {
                 name: "Sell Deck".to_string(),
                 description: None,
                 r#type: "sell".to_string(),
-                rates: vec![RateConfig {
+                rates: vec![RateConfig { id: 30,
                                         prefix: "123".to_string(),
                     match_caller_prefix: None,
                     rate: 0.001,
@@ -1580,7 +1579,7 @@ async fn test_wholesale_route_full_prefix_chain() {
                 name: "Buy Deck".to_string(),
                 description: None,
                 r#type: "buy".to_string(),
-                rates: vec![RateConfig {
+                rates: vec![RateConfig { id: 31,
                                         prefix: "123".to_string(),
                     match_caller_prefix: None,
                     rate: 0.0005,
@@ -1902,7 +1901,7 @@ async fn test_lcr_sorts_by_buy_rate() {
                 name: "Sell".to_string(),
                 description: None,
                 r#type: "sell".to_string(),
-                rates: vec![RateConfig {
+                rates: vec![RateConfig { id: 32,
                                         prefix: "1".to_string(),
                     match_caller_prefix: None,
                     rate: 0.05,
@@ -1921,7 +1920,7 @@ async fn test_lcr_sorts_by_buy_rate() {
                 name: "Buy-Cheap".to_string(),
                 description: None,
                 r#type: "buy".to_string(),
-                rates: vec![RateConfig {
+                rates: vec![RateConfig { id: 33,
                                         prefix: "1".to_string(),
                     match_caller_prefix: None,
                     rate: 0.01,
@@ -1939,7 +1938,7 @@ async fn test_lcr_sorts_by_buy_rate() {
                 name: "Buy-Medium".to_string(),
                 description: None,
                 r#type: "buy".to_string(),
-                rates: vec![RateConfig {
+                rates: vec![RateConfig { id: 34,
                                         prefix: "1".to_string(),
                     match_caller_prefix: None,
                     rate: 0.02,
@@ -1957,7 +1956,7 @@ async fn test_lcr_sorts_by_buy_rate() {
                 name: "Buy-Expensive".to_string(),
                 description: None,
                 r#type: "buy".to_string(),
-                rates: vec![RateConfig {
+                rates: vec![RateConfig { id: 35,
                                         prefix: "1".to_string(),
                     match_caller_prefix: None,
                     rate: 0.03,
@@ -2178,7 +2177,7 @@ async fn test_same_priority_uses_weight_when_lcr_disabled() {
                 name: "Sell".to_string(),
                 description: None,
                 r#type: "sell".to_string(),
-                rates: vec![RateConfig {
+                rates: vec![RateConfig { id: 36,
                                         prefix: "1".to_string(),
                     match_caller_prefix: None,
                     rate: 0.10,
@@ -2196,7 +2195,7 @@ async fn test_same_priority_uses_weight_when_lcr_disabled() {
                 name: "Buy-Cheap".to_string(),
                 description: None,
                 r#type: "buy".to_string(),
-                rates: vec![RateConfig {
+                rates: vec![RateConfig { id: 37,
                                         prefix: "1".to_string(),
                     match_caller_prefix: None,
                     rate: 0.01,
@@ -2214,7 +2213,7 @@ async fn test_same_priority_uses_weight_when_lcr_disabled() {
                 name: "Buy-Expensive".to_string(),
                 description: None,
                 r#type: "buy".to_string(),
-                rates: vec![RateConfig {
+                rates: vec![RateConfig { id: 38,
                                         prefix: "1".to_string(),
                     match_caller_prefix: None,
                     rate: 0.05,
@@ -2433,7 +2432,7 @@ async fn test_priority_over_cost_with_lcr_enabled() {
                 name: "Sell-Priority-Test".to_string(),
                 description: None,
                 r#type: "sell".to_string(),
-                rates: vec![RateConfig {
+                rates: vec![RateConfig { id: 39,
                                         prefix: "1".to_string(),
                     match_caller_prefix: None,
                     rate: 0.10,
@@ -2451,7 +2450,7 @@ async fn test_priority_over_cost_with_lcr_enabled() {
                 name: "Buy-HighPrio-Expensive".to_string(),
                 description: None,
                 r#type: "buy".to_string(),
-                rates: vec![RateConfig {
+                rates: vec![RateConfig { id: 40,
                                         prefix: "1".to_string(),
                     match_caller_prefix: None,
                     rate: 0.05,
@@ -2469,7 +2468,7 @@ async fn test_priority_over_cost_with_lcr_enabled() {
                 name: "Buy-LowPrio-Cheap".to_string(),
                 description: None,
                 r#type: "buy".to_string(),
-                rates: vec![RateConfig {
+                rates: vec![RateConfig { id: 41,
                                         prefix: "1".to_string(),
                     match_caller_prefix: None,
                     rate: 0.01,
@@ -2691,7 +2690,7 @@ async fn test_lcr_same_priority_sorted_by_cost() {
                 name: "Sell-SamePrio-Test".to_string(),
                 description: None,
                 r#type: "sell".to_string(),
-                rates: vec![RateConfig {
+                rates: vec![RateConfig { id: 42,
                                         prefix: "1".to_string(),
                     match_caller_prefix: None,
                     rate: 0.10,
@@ -2714,7 +2713,7 @@ async fn test_lcr_same_priority_sorted_by_cost() {
                     name: name.to_string(),
                     description: None,
                     r#type: "buy".to_string(),
-                    rates: vec![RateConfig {
+                    rates: vec![RateConfig { id: 43,
                                                 prefix: "1".to_string(),
                         match_caller_prefix: None,
                         rate: rate_val,
@@ -2875,7 +2874,7 @@ async fn test_wholesale_route_rewrite_hostport_true() {
                 name: "Rewrite-Test-Deck".to_string(),
                 description: None,
                 r#type: "sell".to_string(),
-                rates: vec![RateConfig {
+                rates: vec![RateConfig { id: 44,
                                         prefix: "1".to_string(),
                     match_caller_prefix: None,
                     rate: 0.01,
@@ -3024,7 +3023,7 @@ async fn test_wholesale_route_ignores_rewrite_hostport_false() {
                 name: "NoRewrite-Test-Deck".to_string(),
                 description: None,
                 r#type: "sell".to_string(),
-                rates: vec![RateConfig {
+                rates: vec![RateConfig { id: 45,
                                         prefix: "1".to_string(),
                     match_caller_prefix: None,
                     rate: 0.01,

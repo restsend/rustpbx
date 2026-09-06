@@ -145,7 +145,7 @@ mod tests {
                 name: "RL Deck".to_string(),
                 description: None,
                 r#type: "sell".to_string(),
-                rates: vec![RateConfig {
+                rates: vec![RateConfig { id: 20,
                                         prefix: "1".to_string(),
                     match_caller_prefix: None,
                     rate: 0.01,
