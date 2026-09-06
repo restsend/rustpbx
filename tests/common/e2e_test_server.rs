@@ -126,28 +126,45 @@ impl E2eTestServer {
     /// Start an E2E test server with the presence module registered
     /// (in addition to auth, registrar, call).
     pub async fn start_with_presence(mode: MediaProxyMode) -> Result<Self> {
-        let port = portpicker::pick_unused_port().unwrap_or(15060);
-        let proxy_addr = format!("127.0.0.1:{}", port).parse()?;
+        // Same port-snipe retry as start_with_config_and_inject.
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let port = portpicker::pick_unused_port().unwrap_or(15060);
+            let proxy_addr = format!("127.0.0.1:{}", port).parse()?;
 
-        let mut proxy_config = test_helpers::test_proxy_config_with_presence(port);
-        proxy_config.media_proxy = mode;
-        proxy_config.ensure_user = Some(false);
-        proxy_config.enable_latching = false;
+            let mut proxy_config = test_helpers::test_proxy_config_with_presence(port);
+            proxy_config.media_proxy = mode;
+            proxy_config.ensure_user = Some(false);
+            proxy_config.enable_latching = false;
 
-        let mode = proxy_config.media_proxy;
-        let (builder, cdr_capture, cancel_token) =
-            Self::base_builder(proxy_config, &E2eTestServerInject::default()).await?;
-        let builder = test_helpers::register_modules_with_presence(builder);
-        Self::start_builder(
-            port,
-            proxy_addr,
-            mode,
-            builder,
-            cdr_capture,
-            cancel_token,
-            "E2E test server with presence started",
-        )
-        .await
+            let mode = proxy_config.media_proxy;
+            let (builder, cdr_capture, cancel_token) =
+                Self::base_builder(proxy_config, &E2eTestServerInject::default()).await?;
+            let builder = test_helpers::register_modules_with_presence(builder);
+            match Self::start_builder(
+                port,
+                proxy_addr,
+                mode,
+                builder,
+                cdr_capture,
+                cancel_token,
+                "E2E test server with presence started",
+            )
+            .await
+            {
+                Ok(server) => return Ok(server),
+                Err(e) if attempt < 5 && e.to_string().contains("Address already in use") => {
+                    warn!(
+                        port,
+                        attempt,
+                        "ephemeral port sniped by a concurrent server, retrying"
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Start with a custom ProxyConfig, allowing injection of trunks, routes, etc.
@@ -175,43 +192,64 @@ impl E2eTestServer {
     }
 
     async fn start_with_config_and_inject(
-        mut proxy_config: ProxyConfig,
+        proxy_config: ProxyConfig,
         inject: E2eTestServerInject,
         label: &str,
     ) -> Result<Self> {
-        let port = portpicker::pick_unused_port().unwrap_or(15060);
-        let proxy_addr = format!("127.0.0.1:{}", port).parse()?;
+        // portpicker probes a port and RELEASES it before returning, so a
+        // concurrently starting test server can snipe it in between — the
+        // bind then fails with "Address already in use" (observed as a flaky
+        // queue_e2e failure under full-suite parallel runs). Retry with a
+        // fresh port instead of failing the test.
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let port = portpicker::pick_unused_port().unwrap_or(15060);
+            let proxy_addr = format!("127.0.0.1:{}", port).parse()?;
 
-        let base = test_helpers::test_proxy_config(port);
-        proxy_config.addr = base.addr;
-        proxy_config.udp_port = base.udp_port;
-        proxy_config.tcp_port = base.tcp_port;
-        proxy_config.tls_port = base.tls_port;
-        proxy_config.ws_port = base.ws_port;
-        proxy_config.useragent = base.useragent;
-        proxy_config.modules = base.modules;
-        proxy_config.ensure_user = Some(false);
-        proxy_config.enable_latching = false;
+            let mut config = proxy_config.clone();
+            let base = test_helpers::test_proxy_config(port);
+            config.addr = base.addr;
+            config.udp_port = base.udp_port;
+            config.tcp_port = base.tcp_port;
+            config.tls_port = base.tls_port;
+            config.ws_port = base.ws_port;
+            config.useragent = base.useragent;
+            config.modules = base.modules;
+            config.ensure_user = Some(false);
+            config.enable_latching = false;
 
-        let mode = proxy_config.media_proxy;
-        let (builder, cdr_capture, cancel_token) =
-            Self::base_builder(proxy_config, &inject).await?;
-        let builder = test_helpers::register_standard_modules(builder);
-        let builder = match inject.agent_registry {
-            Some(registry) => builder.with_agent_registry(registry),
-            None => builder,
-        };
+            let mode = config.media_proxy;
+            let (builder, cdr_capture, cancel_token) = Self::base_builder(config, &inject).await?;
+            let builder = test_helpers::register_standard_modules(builder);
+            let builder = match &inject.agent_registry {
+                Some(registry) => builder.with_agent_registry(registry.clone()),
+                None => builder,
+            };
 
-        Self::start_builder(
-            port,
-            proxy_addr,
-            mode,
-            builder,
-            cdr_capture,
-            cancel_token,
-            label,
-        )
-        .await
+            match Self::start_builder(
+                port,
+                proxy_addr,
+                mode,
+                builder,
+                cdr_capture,
+                cancel_token,
+                label,
+            )
+            .await
+            {
+                Ok(server) => return Ok(server),
+                Err(e) if attempt < 5 && e.to_string().contains("Address already in use") => {
+                    warn!(
+                        port,
+                        attempt,
+                        "ephemeral port sniped by a concurrent server, retrying"
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Create the builder base: config arc, CDR capture, user backend,

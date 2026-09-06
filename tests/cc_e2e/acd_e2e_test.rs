@@ -40,6 +40,10 @@ mod acd_e2e_test {
         };
         let mut policy = AcdPolicy::default();
         policy.schedule = schedule;
+        // Real VIP weighting: without a gold bonus the "VIP" call is
+        // indistinguishable from a normal one and priority routing is
+        // untestable (the old assertions passed with VIP never winning).
+        policy.priority.vip_bonus.insert("gold".to_string(), 100);
         let mut policies = HashMap::new();
         policies.insert("default".to_string(), policy.clone());
         policies.insert("support".to_string(), policy);
@@ -145,9 +149,23 @@ mod acd_e2e_test {
     async fn test_acd_overflow_to_voicemail() {
         let cc_state = cc_state_always_open();
 
-        // Don't register any agents - simulate all busy
+        // Bind the support policy to a real voicemail overflow chain: after
+        // the wait timeout the call MUST target Voicemail — not just "any
+        // overflow/fallback".
+        let mut cfg = cc_state.acd_engine.config_snapshot();
+        let mut support = cfg
+            .policies
+            .get_mut("support")
+            .expect("support policy exists");
+        support.overflow.triggers = vec![rustpbx::addons::cc::acd::config::OverflowTrigger {
+            trigger_type: rustpbx::addons::cc::acd::config::TriggerType::Timeout,
+            value: Some(120),
+            action: rustpbx::addons::cc::acd::config::OverflowAction::Overflow,
+        }];
+        support.overflow.chain = vec![rustpbx::addons::cc::acd::config::OverflowTargetConfig::Voicemail];
+        cc_state.acd_engine.replace_config(cfg);
 
-        // Create call
+        // Create call already past the 120s overflow timeout
         let call = rustpbx::addons::cc::acd::CallContext {
             call_id: "test-call-002".to_string(),
             trace_id: "trace-002".to_string(),
@@ -156,7 +174,7 @@ mod acd_e2e_test {
             skill_group_id: "support".to_string(),
             priority: 0,
             required_skills: vec![],
-            queue_time: std::time::Instant::now() - Duration::from_secs(150), // Simulate waiting 150s
+            queue_time: std::time::Instant::now() - Duration::from_secs(150),
             custom_data: std::collections::HashMap::new(),
         };
 
@@ -167,18 +185,17 @@ mod acd_e2e_test {
         let agents: Vec<rustpbx::addons::cc::acd::AgentSnapshot> = vec![];
         let decisions = cc_state.acd_engine.tick(&agents, Some("support"));
 
-        // Should get overflow or fallback decision
-        let has_overflow = decisions.iter().any(|d| {
-            matches!(
-                d,
-                rustpbx::addons::cc::acd::AcdDecision::Overflow { .. }
-                    | rustpbx::addons::cc::acd::AcdDecision::Fallback { .. }
-            )
+        // The overflow decision must specifically target Voicemail.
+        let voicemail_overflow = decisions.iter().any(|d| match d {
+            rustpbx::addons::cc::acd::AcdDecision::Overflow { target, .. } => {
+                matches!(target, rustpbx::addons::cc::acd::OverflowTarget::Voicemail)
+            }
+            _ => false,
         });
 
         assert!(
-            has_overflow,
-            "Call should overflow when no agents available and timeout reached"
+            voicemail_overflow,
+            "timeout overflow must target Voicemail, got {decisions:?}"
         );
     }
 
@@ -257,14 +274,24 @@ mod acd_e2e_test {
         // Run tick
         let decisions = cc_state.acd_engine.tick(&snapshots, Some("support"));
 
-        // Find assignment decision
-        let assign_decision = decisions
+        // Exactly one agent (max_concurrency=1) → exactly one Assign, and it
+        // MUST be the VIP call: it enqueued with a higher effective priority
+        // (vip_level=gold bonus) despite the normal call waiting longer.
+        let assigned: Vec<&rustpbx::addons::cc::acd::AcdDecision> = decisions
             .iter()
-            .find(|d| matches!(d, rustpbx::addons::cc::acd::AcdDecision::Assign { .. }));
+            .filter(|d| matches!(d, rustpbx::addons::cc::acd::AcdDecision::Assign { .. }))
+            .collect();
 
-        assert!(assign_decision.is_some(), "Should assign one call");
+        assert_eq!(assigned.len(), 1, "single agent → exactly one assignment");
+        match assigned[0] {
+            rustpbx::addons::cc::acd::AcdDecision::Assign { call_id, .. } => assert_eq!(
+                call_id, "vip-call",
+                "VIP call must be assigned ahead of the earlier normal call"
+            ),
+            other => panic!("unexpected decision: {other:?}"),
+        }
 
-        // Queue should have one remaining call
+        // The normal call remains queued
         assert_eq!(cc_state.acd_engine.queue_len(), 1);
     }
 
@@ -301,17 +328,14 @@ mod acd_e2e_test {
             custom_data: std::collections::HashMap::new(),
         };
 
-        // Enqueue and verify
+        // Enqueue and verify: schedule is always-open, agents exist → must be
+        // Wait (queued), never Fallback. Pin the exact decision instead of
+        // accepting both branches.
         let decision = cc_state.acd_engine.enqueue(call, Some("support"));
-        // Decision could be Wait or Fallback depending on schedule
         assert!(
-            matches!(decision, rustpbx::addons::cc::acd::AcdDecision::Wait { .. })
-                || matches!(
-                    decision,
-                    rustpbx::addons::cc::acd::AcdDecision::Fallback { .. }
-                )
+            matches!(decision, rustpbx::addons::cc::acd::AcdDecision::Wait { .. }),
+            "always-open schedule with capacity must queue the call, got {decision:?}"
         );
-        // If Wait, queue should have 1 item; if Fallback, queue should be empty
-        assert!(cc_state.acd_engine.queue_len() <= 1);
+        assert_eq!(cc_state.acd_engine.queue_len(), 1);
     }
 }
