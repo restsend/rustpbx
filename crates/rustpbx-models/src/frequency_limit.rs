@@ -97,6 +97,7 @@ impl MigrationTrait for Migration {
                     .col(Column::Scope)
                     .col(Column::ScopeValue)
                     .col(Column::LimitType)
+                    .if_not_exists()
                     .to_owned(),
             )
             .await

@@ -89,6 +89,7 @@ impl MigrationTrait for Migration {
                             .on_delete(MigrationForeignKeyAction::Cascade)
                             .on_update(MigrationForeignKeyAction::Cascade),
                     )
+                    .if_not_exists()
                     .to_owned(),
             )
             .await?;
@@ -100,6 +101,7 @@ impl MigrationTrait for Migration {
                     .col(Column::ExtensionId)
                     .col(Column::DepartmentId)
                     .unique()
+                    .if_not_exists()
                     .to_owned(),
             )
             .await

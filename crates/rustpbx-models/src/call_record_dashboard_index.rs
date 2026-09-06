@@ -28,6 +28,7 @@ impl MigrationTrait for Migration {
                         .col(col_started_at)
                         .col(col_status)
                         .col(col_duration_secs)
+                        .if_not_exists()
                         .to_owned(),
                 )
                 .await?;

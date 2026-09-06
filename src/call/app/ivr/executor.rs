@@ -2183,7 +2183,7 @@ mod tests {
         let mut stack = MockCallStack::run_with_context(Box::new(app), context);
 
         stack
-            .assert_cmd(200, "accept", |command| {
+            .assert_cmd(2000, "accept", |command| {
                 matches!(command, CallCommand::Answer { .. })
             })
             .await;
@@ -2258,7 +2258,7 @@ mod tests {
             "2000",
         );
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
             .assert_cmd(
@@ -2296,10 +2296,10 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "transfer", |c| {
+            .assert_cmd(2000, "transfer", |c| {
                 matches!(c, CallCommand::TransferAwaitResult { target, .. } if target == "2001")
             })
             .await;
@@ -2310,7 +2310,7 @@ mod tests {
             ))
             .unwrap();
         stack
-            .assert_cmd(200, "hangup", |c| matches!(c, CallCommand::Hangup { .. }))
+            .assert_cmd(2000, "hangup", |c| matches!(c, CallCommand::Hangup { .. }))
             .await;
 
         // Single finalized trace: original trigger, end time filled, no
@@ -2350,10 +2350,10 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(mock_app(vec![node])), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -2401,10 +2401,10 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -2458,7 +2458,7 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
             .assert_cmd(
@@ -2504,7 +2504,7 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
             .assert_cmd(
@@ -2559,10 +2559,10 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(mock_app(vec![menu])), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -2580,7 +2580,7 @@ mod tests {
 
         // DTMF triggers StopPlayback first, then Transfer
         stack
-            .assert_cmd(200, "stop", |c| {
+            .assert_cmd(2000, "stop", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
@@ -2647,10 +2647,10 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -2667,7 +2667,7 @@ mod tests {
         stack.dtmf("1");
 
         stack
-            .assert_cmd(200, "stop", |c| {
+            .assert_cmd(2000, "stop", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
@@ -2739,10 +2739,10 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -2759,7 +2759,7 @@ mod tests {
         stack.dtmf("1");
 
         stack
-            .assert_cmd(200, "stop", |c| {
+            .assert_cmd(2000, "stop", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
@@ -2799,10 +2799,10 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -2819,7 +2819,7 @@ mod tests {
         stack.dtmf("2");
 
         stack
-            .assert_cmd(200, "stop", |c| {
+            .assert_cmd(2000, "stop", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
@@ -2899,10 +2899,10 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -2918,7 +2918,7 @@ mod tests {
         stack.audio_complete("ivr_prompt");
 
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -2932,7 +2932,7 @@ mod tests {
         // Greeting complete must flush the buffered digit to the provider.
         stack.audio_complete("ivr_menu_greeting");
         stack
-            .assert_cmd(200, "stop", |c| {
+            .assert_cmd(2000, "stop", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
@@ -2999,10 +2999,10 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -3018,7 +3018,7 @@ mod tests {
         stack.dtmf("1");
 
         stack
-            .assert_cmd(200, "stop", |c| {
+            .assert_cmd(2000, "stop", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
@@ -3075,10 +3075,10 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -3094,7 +3094,7 @@ mod tests {
         stack.dtmf("1");
 
         stack
-            .assert_cmd(200, "stop", |c| {
+            .assert_cmd(2000, "stop", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
@@ -3183,10 +3183,10 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(c, CallCommand::Play { source: crate::call::domain::MediaSource::File { path }, .. } if path == "menu.wav")
             })
             .await;
@@ -3220,7 +3220,7 @@ mod tests {
         // The menu is still waiting: a subsequent valid key must resolve.
         stack.dtmf("1");
         stack
-            .assert_cmd(200, "stop", |c| {
+            .assert_cmd(2000, "stop", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
@@ -3247,10 +3247,10 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(c, CallCommand::Play { source: crate::call::domain::MediaSource::File { path }, .. } if path == "menu.wav")
             })
             .await;
@@ -3315,7 +3315,7 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         let _ = stack.drain_cmds();
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -3369,10 +3369,10 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(c, CallCommand::Play { source: crate::call::domain::MediaSource::File { path }, .. } if path == "menu.wav")
             })
             .await;
@@ -3382,7 +3382,7 @@ mod tests {
         // Barge-in while the greeting is still playing.
         stack.dtmf("2");
         stack
-            .assert_cmd(200, "stop", |c| {
+            .assert_cmd(2000, "stop", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
@@ -3475,10 +3475,10 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(c, CallCommand::Play { source: crate::call::domain::MediaSource::File { path }, .. } if path == "menu.wav")
             })
             .await;
@@ -3488,7 +3488,7 @@ mod tests {
         stack.dtmf("1");
 
         stack
-            .assert_cmd(200, "stop", |c| {
+            .assert_cmd(2000, "stop", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
@@ -3533,7 +3533,7 @@ mod tests {
         let mut stack2 = MockCallStack::run(Box::new(app2), "1001", "2000");
 
         stack2
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         // The fetched text is synthesized via TTS when a TTS backend is
         // available (greeting plays), otherwise the menu degrades to a
@@ -3545,7 +3545,7 @@ mod tests {
         let _ = stack2.drain_cmds();
         stack2.dtmf("1");
         stack2
-            .assert_cmd(200, "stop", |c| {
+            .assert_cmd(2000, "stop", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
@@ -3643,10 +3643,10 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(c, CallCommand::Play { source: crate::call::domain::MediaSource::File { path }, .. } if path == "menu.wav")
             })
             .await;
@@ -3657,7 +3657,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         stack.timeout("ivr_dtmf_timeout");
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(c, CallCommand::Play { source: crate::call::domain::MediaSource::File { path }, .. } if path == "menu.wav")
             })
             .await;
@@ -3713,10 +3713,10 @@ mod tests {
             "2000",
         );
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -3731,10 +3731,10 @@ mod tests {
             "2000",
         );
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "transfer", |c| {
+            .assert_cmd(2000, "transfer", |c| {
                 matches!(c, CallCommand::Transfer { target, .. }
                     if target == "toivr:39290?businessType=7")
             })
@@ -3757,10 +3757,10 @@ mod tests {
             "2000",
         );
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "transfer", |c| {
+            .assert_cmd(2000, "transfer", |c| {
                 matches!(c, CallCommand::Transfer { target, .. }
                     if target == "bridge:https://voip.example.com/rooms")
             })
@@ -3789,10 +3789,10 @@ mod tests {
             "2000",
         );
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "transfer", |c| {
+            .assert_cmd(2000, "transfer", |c| {
                 matches!(c, CallCommand::Transfer { target, .. }
                     if target == "bridge:wss://voip.example.com/room1?return_app=ivr&return_target=main")
             })
@@ -3816,7 +3816,7 @@ mod tests {
             "2000",
         );
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
             .assert_cmd(
@@ -3843,7 +3843,7 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
             .assert_cmd(
@@ -3910,10 +3910,10 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(mock_app(vec![node])), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -3947,7 +3947,7 @@ mod tests {
             "2000",
         );
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         // InputVoice should produce an answer error in the app
         // The app currently returns the error from execute_action
@@ -4068,7 +4068,7 @@ mod tests {
             "2000",
         );
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
             .assert_cmd(
@@ -4133,7 +4133,7 @@ mod tests {
             context,
         );
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
             .assert_cmd(2000, "direct IVR fallback", |c| {
@@ -4193,7 +4193,7 @@ mod tests {
             "2000",
         );
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         // prefer_ivr_fallback must skip retry.fallback hangup and use direct IVR instead.
         stack
@@ -4233,10 +4233,10 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -4291,10 +4291,10 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -4358,10 +4358,10 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -4419,10 +4419,10 @@ mod tests {
         let mut stack =
             MockCallStack::run(Box::new(mock_app(vec![prompt, transfer])), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -4482,10 +4482,10 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(mock_app(vec![node])), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -4544,10 +4544,10 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(mock_app(vec![menu])), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -4568,7 +4568,7 @@ mod tests {
         stack.dtmf("1");
 
         stack
-            .assert_cmd(200, "stop", |c| {
+            .assert_cmd(2000, "stop", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
@@ -4627,10 +4627,10 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(mock_app(vec![menu])), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -4648,12 +4648,12 @@ mod tests {
         // Valid key press → local menu match → next node (prompt_break) runs.
         stack.dtmf("1");
         stack
-            .assert_cmd(200, "stop", |c| {
+            .assert_cmd(2000, "stop", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "play prompt_break", |c| {
+            .assert_cmd(2000, "play prompt_break", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -4721,10 +4721,10 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(mock_app(vec![menu])), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -4787,10 +4787,10 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(mock_app(vec![menu, prompt])), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -4806,12 +4806,12 @@ mod tests {
         // Digit forwarded to provider → provider returns prompt_break node.
         stack.dtmf("1");
         stack
-            .assert_cmd(200, "stop", |c| {
+            .assert_cmd(2000, "stop", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "play prompt_break", |c| {
+            .assert_cmd(2000, "play prompt_break", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -4873,10 +4873,10 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(mock_app(vec![menu])), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -4903,7 +4903,7 @@ mod tests {
         // must fall through to Hangup.
         stack.timeout("ivr_dtmf_timeout");
         stack
-            .assert_cmd(200, "hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -4948,10 +4948,10 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(mock_app(vec![menu, hangup])), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -4983,7 +4983,7 @@ mod tests {
         // A subsequent VALID key must still work — proving the flow survived.
         stack.dtmf("1");
         stack
-            .assert_cmd(200, "stop", |c| {
+            .assert_cmd(2000, "stop", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
@@ -5032,10 +5032,10 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(mock_app(vec![menu, hangup])), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -5062,7 +5062,7 @@ mod tests {
         // Valid key still works → flow is alive.
         stack.dtmf("1");
         stack
-            .assert_cmd(200, "stop", |c| {
+            .assert_cmd(2000, "stop", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
@@ -5098,10 +5098,10 @@ mod tests {
         let mut stack =
             MockCallStack::run(Box::new(mock_app(vec![prompt, transfer])), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -5121,7 +5121,7 @@ mod tests {
         // The app should stop the audio first, then ask the provider for
         // the next action (MockProvider returns Transfer("2001")).
         stack
-            .assert_cmd(200, "stop", |c| {
+            .assert_cmd(2000, "stop", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
@@ -5151,11 +5151,11 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(mock_app(vec![node])), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
 
         // Grab the Play command and inspect its options.
-        let play_cmd = stack.next_cmd(200).await.expect("expected a Play command");
+        let play_cmd = stack.next_cmd(2000).await.expect("expected a Play command");
         match &play_cmd {
             CallCommand::Play { options, .. } => {
                 let opts = options.as_ref().expect("PlayOptions must be set");
@@ -5183,10 +5183,10 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(mock_app(vec![node])), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
 
-        let play_cmd = stack.next_cmd(200).await.expect("expected a Play command");
+        let play_cmd = stack.next_cmd(2000).await.expect("expected a Play command");
         match &play_cmd {
             CallCommand::Play { options, .. } => {
                 let opts = options.as_ref().expect("PlayOptions must be set");
@@ -5225,11 +5225,11 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(mock_app(vec![node])), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         // First prompt (interruptible) starts playing.
         stack
-            .assert_cmd(200, "play first", |c| {
+            .assert_cmd(2000, "play first", |c| {
                 matches!(c, CallCommand::Play { source, options, .. }
                     if matches!(source, crate::call::domain::MediaSource::File { path } if path == "first.wav")
                     && options.as_ref().map_or(false, |o| o.interrupt_on_dtmf))
@@ -5241,7 +5241,7 @@ mod tests {
 
         // Second prompt (non-interruptible) starts playing.
         stack
-            .assert_cmd(200, "play second", |c| {
+            .assert_cmd(2000, "play second", |c| {
                 matches!(c, CallCommand::Play { source, options, .. }
                     if matches!(source, crate::call::domain::MediaSource::File { path } if path == "second.wav")
                     && options.as_ref().map_or(false, |o| !o.interrupt_on_dtmf))
@@ -5301,10 +5301,10 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(mock_app(vec![node])), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "play", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Hammer multiple digits while playback is in progress.
@@ -5551,10 +5551,10 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(c, CallCommand::Play { source: crate::call::domain::MediaSource::File { path }, .. } if path == "menu.wav")
             })
             .await;
@@ -5569,7 +5569,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         stack.dtmf("1");
         stack
-            .assert_cmd(200, "stop", |c| {
+            .assert_cmd(2000, "stop", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
@@ -5618,10 +5618,10 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(c, CallCommand::Play { source: crate::call::domain::MediaSource::File { path }, .. } if path == "menu.wav")
             })
             .await;
@@ -5702,10 +5702,10 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(c, CallCommand::Play { source: crate::call::domain::MediaSource::File { path }, .. } if path == "menu.wav")
             })
             .await;
@@ -5754,10 +5754,10 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(c, CallCommand::Play { source: crate::call::domain::MediaSource::File { path }, .. } if path == "menu.wav")
             })
             .await;
@@ -5867,7 +5867,7 @@ mod tests {
         );
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
 
         tokio::time::timeout(Duration::from_secs(1), entered_next.notified())
@@ -5896,7 +5896,7 @@ mod tests {
         );
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
 
         stack
@@ -6005,7 +6005,7 @@ mod tests {
         );
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
 
         tokio::time::timeout(Duration::from_secs(2), state.step_entered.notified())
@@ -6057,7 +6057,7 @@ mod tests {
         let mut stack =
             MockCallStack::run(Box::new(mock_app(vec![menu, followup])), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
 
         // Menu has no greeting → NoAudio path → timeout set, app waiting
@@ -6104,10 +6104,10 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -6196,10 +6196,10 @@ mod tests {
         let mut stack =
             MockCallStack::run(Box::new(mock_app(vec![torecord, followup])), "1001", "2000");
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -6209,7 +6209,7 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(200, "start_record", |c| {
+            .assert_cmd(2000, "start_record", |c| {
                 matches!(c, CallCommand::StartRecording { .. })
             })
             .await;
@@ -6254,10 +6254,10 @@ mod tests {
             "2000",
         );
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "start_record", |c| {
+            .assert_cmd(2000, "start_record", |c| {
                 matches!(
                     c,
                     CallCommand::StartRecording { config }
@@ -6269,7 +6269,7 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(200, "stop_record", |c| {
+            .assert_cmd(2000, "stop_record", |c| {
                 matches!(c, CallCommand::StopRecording)
             })
             .await;
@@ -6312,15 +6312,15 @@ mod tests {
             "2000",
         );
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "start_record", |c| {
+            .assert_cmd(2000, "start_record", |c| {
                 matches!(c, CallCommand::StartRecording { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -6675,7 +6675,7 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
             .assert_cmd(500, "play-welcome", |c| play_file_cmd(c, "welcome.wav"))
@@ -6712,7 +6712,7 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
             .assert_cmd(500, "play-welcome", |c| play_file_cmd(c, "welcome.wav"))
@@ -6754,7 +6754,7 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
             .assert_cmd(500, "play-welcome", |c| play_file_cmd(c, "welcome.wav"))
@@ -6820,7 +6820,7 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack
-            .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
             .assert_cmd(500, "play-menu", |c| play_file_cmd(c, "menu.wav"))

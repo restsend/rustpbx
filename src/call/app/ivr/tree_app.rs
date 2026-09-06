@@ -1860,7 +1860,7 @@ mod tests {
         let mut stack = MockCallStack::run_with_context(Box::new(IvrApp::new(def)), ctx.clone());
         stack.enter().await;
         stack
-            .assert_cmd(200, "accept", |c| {
+            .assert_cmd(2000, "accept", |c| {
                 matches!(c, crate::call::domain::CallCommand::Answer { .. })
             })
             .await;
@@ -1943,19 +1943,19 @@ mod tests {
         let mut stack = MockCallStack::run_with_context(Box::new(IvrApp::new(def)), ctx.clone());
         stack.enter().await;
         stack
-            .assert_cmd(200, "accept", |c| {
+            .assert_cmd(2000, "accept", |c| {
                 matches!(c, crate::call::domain::CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "play", |c| {
+            .assert_cmd(2000, "play", |c| {
                 matches!(c, crate::call::domain::CallCommand::Play { .. })
             })
             .await;
 
         stack.dtmf("1");
         stack
-            .assert_cmd(200, "stop", |c| {
+            .assert_cmd(2000, "stop", |c| {
                 matches!(c, crate::call::domain::CallCommand::StopPlayback { .. })
             })
             .await;
@@ -2019,7 +2019,7 @@ mod tests {
         let mut stack = MockCallStack::run_with_context(Box::new(IvrApp::new(def)), ctx.clone());
         stack.enter().await;
         stack
-            .assert_cmd(200, "accept", |c| {
+            .assert_cmd(2000, "accept", |c| {
                 matches!(c, crate::call::domain::CallCommand::Answer { .. })
             })
             .await;

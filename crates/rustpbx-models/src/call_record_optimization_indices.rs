@@ -28,6 +28,7 @@ impl MigrationTrait for Migration {
                         .col(col_started_at)
                         .col(col_id)
                         .col(col_status)
+                        .if_not_exists()
                         .to_owned(),
                 )
                 .await?;
@@ -44,6 +45,7 @@ impl MigrationTrait for Migration {
                         .name("idx_rustpbx_call_records_to_number")
                         .table(table)
                         .col(col_to_number)
+                        .if_not_exists()
                         .to_owned(),
                 )
                 .await?;

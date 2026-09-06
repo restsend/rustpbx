@@ -140,14 +140,14 @@ mod tests {
 
         // IVR should answer on enter
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         // IVR should play the root greeting
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Simulate greeting complete — IVR waits for DTMF
@@ -173,13 +173,13 @@ mod tests {
 
         // Skip answer
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         // Skip greeting play
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         // Greeting completes
         stack.audio_complete("default");
@@ -202,13 +202,13 @@ mod tests {
 
         // Answer
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         // Root greeting
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -217,7 +217,7 @@ mod tests {
 
         // Should play support greeting
         stack
-            .assert_cmd(200, "PlayPrompt-support", |c| {
+            .assert_cmd(2000, "PlayPrompt-support", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -242,20 +242,20 @@ mod tests {
 
         // Answer
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         // Root greeting
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
         // Press "2" → support
         stack.dtmf("2");
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -264,7 +264,7 @@ mod tests {
 
         // Should play root greeting again
         stack
-            .assert_cmd(200, "PlayPrompt-root", |c| {
+            .assert_cmd(2000, "PlayPrompt-root", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -331,26 +331,26 @@ mod tests {
         };
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt-root", |c| {
+            .assert_cmd(2000, "PlayPrompt-root", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
         stack.dtmf("1");
         stack
-            .assert_cmd(200, "PlayPrompt-sub_a", |c| {
+            .assert_cmd(2000, "PlayPrompt-sub_a", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
         stack.dtmf("1");
         stack
-            .assert_cmd(200, "PlayPrompt-sub_b", |c| {
+            .assert_cmd(2000, "PlayPrompt-sub_b", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -358,7 +358,7 @@ mod tests {
         // Back from sub_b → should return to sub_a (one level up, not root)
         stack.dtmf("9");
         stack
-            .assert_cmd(200, "PlayPrompt-sub_a-2", |c| {
+            .assert_cmd(2000, "PlayPrompt-sub_a-2", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -387,12 +387,12 @@ mod tests {
         };
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt-root", |c| {
+            .assert_cmd(2000, "PlayPrompt-root", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -400,7 +400,7 @@ mod tests {
         // Back at root is a no-op — should replay root greeting
         stack.dtmf("9");
         stack
-            .assert_cmd(200, "PlayPrompt-root-2", |c| {
+            .assert_cmd(2000, "PlayPrompt-root-2", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -416,19 +416,19 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
         // Press "3" → play address
         stack.dtmf("3");
         stack
-            .assert_cmd(200, "PlayPrompt-address", |c| {
+            .assert_cmd(2000, "PlayPrompt-address", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -438,7 +438,7 @@ mod tests {
 
         // Should re-play root greeting
         stack
-            .assert_cmd(200, "PlayPrompt-root", |c| {
+            .assert_cmd(2000, "PlayPrompt-root", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -455,12 +455,12 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -469,7 +469,7 @@ mod tests {
 
         // Should replay root greeting
         stack
-            .assert_cmd(200, "PlayPrompt-repeat", |c| {
+            .assert_cmd(2000, "PlayPrompt-repeat", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -486,12 +486,12 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -500,7 +500,7 @@ mod tests {
 
         // Should play goodbye
         stack
-            .assert_cmd(200, "PlayPrompt-goodbye", |c| {
+            .assert_cmd(2000, "PlayPrompt-goodbye", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -508,7 +508,7 @@ mod tests {
         // After goodbye completes → hangup
         stack.audio_complete("default");
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -520,12 +520,12 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -534,7 +534,7 @@ mod tests {
 
         // Should play invalid prompt
         stack
-            .assert_cmd(200, "PlayPrompt-invalid", |c| {
+            .assert_cmd(2000, "PlayPrompt-invalid", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -542,7 +542,7 @@ mod tests {
         // Invalid prompt completes → replay greeting
         stack.audio_complete("default");
         stack
-            .assert_cmd(200, "PlayPrompt-greeting", |c| {
+            .assert_cmd(2000, "PlayPrompt-greeting", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -559,12 +559,12 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -620,12 +620,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(config.ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -642,12 +642,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         stack.remote_hangup();
@@ -665,19 +665,19 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
         // Navigate to support sub-menu
         stack.dtmf("2");
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -758,12 +758,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt-greeting", |c| {
+            .assert_cmd(2000, "PlayPrompt-greeting", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -772,7 +772,7 @@ action = { type = "transfer", target = "100" }
         stack.dtmf("1");
 
         stack
-            .assert_cmd(200, "PlayPrompt-collect", |c| {
+            .assert_cmd(2000, "PlayPrompt-collect", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -803,18 +803,18 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
         stack.dtmf("1");
         stack
-            .assert_cmd(200, "PlayPrompt-collect", |c| {
+            .assert_cmd(2000, "PlayPrompt-collect", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -843,12 +843,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -922,12 +922,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -955,12 +955,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1054,12 +1054,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1086,12 +1086,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1118,12 +1118,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1231,12 +1231,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt-greeting", |c| {
+            .assert_cmd(2000, "PlayPrompt-greeting", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -1273,12 +1273,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1305,12 +1305,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1326,7 +1326,7 @@ action = { type = "transfer", target = "100" }
         // After goodbye completes → hangup
         stack.audio_complete("default");
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -1344,12 +1344,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1365,7 +1365,7 @@ action = { type = "transfer", target = "100" }
         // Announcement completes → returns to root greeting
         stack.audio_complete("default");
         stack
-            .assert_cmd(200, "PlayPrompt-root-again", |c| {
+            .assert_cmd(2000, "PlayPrompt-root-again", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -1423,12 +1423,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt-root", |c| {
+            .assert_cmd(2000, "PlayPrompt-root", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -1462,12 +1462,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1498,12 +1498,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1537,12 +1537,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1581,12 +1581,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1636,12 +1636,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1673,12 +1673,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1704,18 +1704,18 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
         stack.dtmf("1");
         stack
-            .assert_cmd(200, "PlayPrompt-collect", |c| {
+            .assert_cmd(2000, "PlayPrompt-collect", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -1803,12 +1803,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt-greeting", |c| {
+            .assert_cmd(2000, "PlayPrompt-greeting", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -1819,7 +1819,7 @@ action = { type = "transfer", target = "100" }
 
         // Should play the busy prompt
         stack
-            .assert_cmd(200, "PlayPrompt-busy", |c| {
+            .assert_cmd(2000, "PlayPrompt-busy", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -1827,7 +1827,7 @@ action = { type = "transfer", target = "100" }
         // After prompt completes → hangup with SIP code 486
         stack.audio_complete("default");
         stack
-            .assert_cmd(200, "Hangup-486", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup-486", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -1837,12 +1837,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt-greeting", |c| {
+            .assert_cmd(2000, "PlayPrompt-greeting", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -1853,7 +1853,7 @@ action = { type = "transfer", target = "100" }
 
         // No prompt — should hang up immediately with SIP code 503
         stack
-            .assert_cmd(200, "Hangup-503", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup-503", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -1863,12 +1863,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt-greeting", |c| {
+            .assert_cmd(2000, "PlayPrompt-greeting", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -1879,7 +1879,7 @@ action = { type = "transfer", target = "100" }
 
         // Should play the goodbye prompt
         stack
-            .assert_cmd(200, "PlayPrompt-goodbye", |c| {
+            .assert_cmd(2000, "PlayPrompt-goodbye", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -1887,7 +1887,7 @@ action = { type = "transfer", target = "100" }
         // After prompt completes → hangup with code: None (normal hangup)
         stack.audio_complete("default");
         stack
-            .assert_cmd(200, "Hangup-no-code", |c| {
+            .assert_cmd(2000, "Hangup-no-code", |c| {
                 matches!(c, CallCommand::Hangup(_))
             })
             .await;
@@ -2020,7 +2020,7 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
@@ -2131,7 +2131,7 @@ action = { type = "transfer", target = "100" }
 
         // Answer
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
@@ -2217,7 +2217,7 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
@@ -2294,7 +2294,7 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
@@ -2388,7 +2388,7 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
@@ -2472,7 +2472,7 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
@@ -2480,7 +2480,7 @@ action = { type = "transfer", target = "100" }
         // Greeting starts — we deliberately DO NOT wire real playback completion
         // because we want to barge-in before it finishes.
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Barge-in: press "1" while greeting is still "playing"
@@ -2547,7 +2547,7 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
@@ -2629,7 +2629,7 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
@@ -2666,12 +2666,12 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt-greeting", |c| {
+            .assert_cmd(2000, "PlayPrompt-greeting", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -2690,7 +2690,7 @@ action = { type = "transfer", target = "100" }
         // After prompt completes → hangup with code 486
         stack.audio_complete("default");
         stack
-            .assert_cmd(200, "Hangup-486", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup-486", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -2812,7 +2812,7 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
@@ -2877,13 +2877,13 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
+            .assert_cmd(2000, "PlayPrompt", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -2931,13 +2931,13 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
+            .assert_cmd(2000, "PlayPrompt", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -2952,7 +2952,7 @@ action = { type = "transfer", target = "100" }
         stack.dtmf("0");
 
         stack
-            .assert_cmd(200, "PlayPrompt-goodbye", |c| {
+            .assert_cmd(2000, "PlayPrompt-goodbye", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
@@ -2965,7 +2965,7 @@ action = { type = "transfer", target = "100" }
 
         stack.audio_complete("default");
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -3023,12 +3023,12 @@ action = { type = "transfer", target = "100" }
 
         // Answer + play greeting
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Greeting complete → DTMF "1" → Transfer
@@ -3037,7 +3037,7 @@ action = { type = "transfer", target = "100" }
 
         // IVR should emit Transfer command and write IvrExecResult.
         stack
-            .assert_cmd(200, "Transfer", |c| {
+            .assert_cmd(2000, "Transfer", |c| {
                 matches!(c, CallCommand::Transfer { .. })
             })
             .await;

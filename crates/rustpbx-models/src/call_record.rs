@@ -309,6 +309,7 @@ impl MigrationTrait for Migration {
                         .table(Entity)
                         .col(Column::CallId)
                         .unique()
+                        .if_not_exists()
                         .to_owned(),
                 )
                 .await?;
@@ -328,6 +329,7 @@ impl MigrationTrait for Migration {
                         .table(Entity)
                         .col(Column::StartedAt)
                         .col(Column::Direction)
+                        .if_not_exists()
                         .to_owned(),
                 )
                 .await?;
@@ -343,6 +345,7 @@ impl MigrationTrait for Migration {
                         .name("idx_rustpbx_call_records_status")
                         .table(Entity)
                         .col(Column::Status)
+                        .if_not_exists()
                         .to_owned(),
                 )
                 .await?;
@@ -358,6 +361,7 @@ impl MigrationTrait for Migration {
                         .name("idx_rustpbx_call_records_extension")
                         .table(Entity)
                         .col(Column::ExtensionId)
+                        .if_not_exists()
                         .to_owned(),
                 )
                 .await?;

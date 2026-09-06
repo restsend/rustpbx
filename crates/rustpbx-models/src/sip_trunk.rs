@@ -200,6 +200,7 @@ impl MigrationTrait for Migration {
                         .table(Entity)
                         .col(Column::Name)
                         .unique()
+                        .if_not_exists()
                         .to_owned(),
                 )
                 .await?;
@@ -216,6 +217,7 @@ impl MigrationTrait for Migration {
                         .table(Entity)
                         .col(Column::Status)
                         .col(Column::IsActive)
+                        .if_not_exists()
                         .to_owned(),
                 )
                 .await?;
@@ -231,6 +233,7 @@ impl MigrationTrait for Migration {
                         .name("idx_rustpbx_sip_trunks_direction")
                         .table(Entity)
                         .col(Column::Direction)
+                        .if_not_exists()
                         .to_owned(),
                 )
                 .await?;

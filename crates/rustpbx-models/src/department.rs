@@ -67,6 +67,7 @@ impl MigrationTrait for Migration {
                     .table(Entity)
                     .name("idx_rustpbx_departments_slug")
                     .col(Column::Slug)
+                    .if_not_exists()
                     .to_owned(),
             )
             .await?;

@@ -61,6 +61,7 @@ impl MigrationTrait for Migration {
                         .col(Column::Category)
                         .col(Column::EntryName)
                         .unique()
+                        .if_not_exists()
                         .to_owned(),
                 )
                 .await?;

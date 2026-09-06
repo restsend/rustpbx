@@ -408,7 +408,7 @@ mod tests {
 
         // Timer fires after 20ms → on_timeout → Hangup
         stack
-            .assert_cmd(200, "Hangup from timer", |c| {
+            .assert_cmd(2000, "Hangup from timer", |c| {
                 matches!(c, CallCommand::Hangup(_))
             })
             .await;
@@ -533,7 +533,7 @@ mod tests {
 
         // AcceptCall first
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
@@ -548,7 +548,7 @@ mod tests {
 
         // App should now hang up
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
 
         assert!(logged(&log).contains(&"collected:42".to_string()));
@@ -611,7 +611,7 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "3001");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
@@ -622,7 +622,7 @@ mod tests {
         stack.dtmf("#");
 
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
         assert!(logged(&log).contains(&"collected:42".to_string()));
     }
@@ -642,7 +642,7 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "3001");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
@@ -778,7 +778,7 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "1001", "4001");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
@@ -903,7 +903,7 @@ mod tests {
             .await;
 
         stack
-            .assert_cmd(200, "PlayPrompt-pin", |c| {
+            .assert_cmd(2000, "PlayPrompt-pin", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;

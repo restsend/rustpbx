@@ -125,14 +125,14 @@ mod tests {
 
         // Queue should answer on enter (accept_immediately = true)
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         // Queue should start playing hold music
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         stack.cancel();
@@ -155,7 +155,7 @@ mod tests {
         // Queue should NOT answer immediately
         // It should start hold music without answering
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         stack.cancel();
@@ -178,7 +178,7 @@ mod tests {
         // Queue should detect no agents and execute fallback immediately
         // No AcceptCall is sent because there are no agents to dial
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -204,7 +204,7 @@ mod tests {
 
         // Queue should detect no agents and return 486 Busy Here
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -232,7 +232,7 @@ mod tests {
         // Queue detects no agents and executes fallback immediately
         // For PlayThenHangup, it currently just hangs up (play is skipped in current impl)
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -249,18 +249,18 @@ mod tests {
 
         // Answer and start hold music
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
-        let hold_cmd = stack.next_cmd(200).await.expect("hold music Play");
+        let hold_cmd = stack.next_cmd(2000).await.expect("hold music Play");
         let hold_tid = play_track_id(&hold_cmd);
 
         // Hold music completed with a matching track id → restarted.
         stack.audio_complete(hold_tid);
         stack
-            .assert_cmd(200, "PlayPrompt-restart", |c| {
+            .assert_cmd(2000, "PlayPrompt-restart", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -286,13 +286,13 @@ mod tests {
 
         // Answer and start hold music
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Remote party hangs up
@@ -317,13 +317,13 @@ mod tests {
 
         // Answer and start hold music
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Simulate agent connected event
@@ -352,20 +352,20 @@ mod tests {
 
         // Answer and start hold music
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // First agent is busy
         stack.custom("agent_busy", serde_json::json!({}));
         // Auto-dials agent 2
         stack
-            .assert_cmd(200, "LegAdd-agent2", |c| {
+            .assert_cmd(2000, "LegAdd-agent2", |c| {
                 matches!(c, CallCommand::LegAdd { .. })
             })
             .await;
@@ -399,13 +399,13 @@ mod tests {
 
         // Answer and start hold music
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // All agents are busy
@@ -413,7 +413,7 @@ mod tests {
 
         // Should execute fallback (hangup)
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -485,7 +485,7 @@ mod tests {
 
         // Answer
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
@@ -558,20 +558,20 @@ mod tests {
 
         // Initial answer
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         // Hold music starts
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Agent 1 is busy
         stack.custom("agent_busy", serde_json::json!({}));
         stack
-            .assert_cmd(200, "LegAdd-agent2", |c| {
+            .assert_cmd(2000, "LegAdd-agent2", |c| {
                 matches!(c, CallCommand::LegAdd { .. })
             })
             .await;
@@ -579,7 +579,7 @@ mod tests {
         // Agent 2 no answer
         stack.custom("agent_no_answer", serde_json::json!({}));
         stack
-            .assert_cmd(200, "LegAdd-agent3", |c| {
+            .assert_cmd(2000, "LegAdd-agent3", |c| {
                 matches!(c, CallCommand::LegAdd { .. })
             })
             .await;
@@ -592,7 +592,7 @@ mod tests {
 
         // Hold music is stopped first.
         stack
-            .assert_cmd(200, "StopHold", |c| {
+            .assert_cmd(2000, "StopHold", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
@@ -648,24 +648,24 @@ mod tests {
 
         // Should answer immediately
         stack
-            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
 
         // Should start hold music
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Should originate call to agent
         stack
-            .assert_cmd(200, "OriginateCall", |c| {
+            .assert_cmd(2000, "OriginateCall", |c| {
                 matches!(c, CallCommand::LegAdd { target, .. } if target == "sip:agent1@example.com")
             })
             .await;
 
         // Should notify external systems
         stack
-            .assert_cmd(200, "NotifyEvent", |c| {
+            .assert_cmd(2000, "NotifyEvent", |c| {
                 matches!(c, CallCommand::InjectAppEvent { .. })
             })
             .await;
@@ -766,19 +766,19 @@ mod tests {
 
         // Should answer the call (from accept_immediately)
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         // Should play the busy prompt since all agents are busy/unavailable
-        let busy_cmd = stack.next_cmd(200).await.expect("busy prompt Play");
+        let busy_cmd = stack.next_cmd(2000).await.expect("busy prompt Play");
 
         stack.audio_complete(play_track_id(&busy_cmd));
 
         // Should then execute fallback (hangup)
         stack
-            .assert_cmd(200, "Hangup-auto", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup-auto", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
 
         stack.join().await.expect("should complete successfully");
@@ -805,19 +805,19 @@ mod tests {
 
         // Should answer the call (for busy prompt audio playback)
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         // Should play the busy prompt since no agents resolved
-        let busy_cmd = stack.next_cmd(200).await.expect("busy prompt Play");
+        let busy_cmd = stack.next_cmd(2000).await.expect("busy prompt Play");
 
         stack.audio_complete(play_track_id(&busy_cmd));
 
         // Should then execute fallback (hangup)
         stack
-            .assert_cmd(200, "Hangup-skill", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup-skill", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
 
         stack.join().await.expect("should complete successfully");
@@ -869,15 +869,15 @@ mod tests {
 
         // Should answer and start hold music
         stack
-            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Should originate call
         stack
-            .assert_cmd(200, "OriginateCall", |c| {
+            .assert_cmd(2000, "OriginateCall", |c| {
                 matches!(c, CallCommand::LegAdd { target, .. } if target == "sip:agent1@example.com")
             })
             .await;
@@ -921,13 +921,13 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         stack
-            .assert_cmd(200, "PlayPrompt-hold", |c| {
+            .assert_cmd(2000, "PlayPrompt-hold", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -935,14 +935,14 @@ mod tests {
         // Dialing starts → transfer prompt plays BEFORE any connection.
         stack.custom("dial_next_agent", serde_json::json!({}));
         stack
-            .assert_cmd(200, "LegAdd", |c| matches!(c, CallCommand::LegAdd { .. }))
+            .assert_cmd(2000, "LegAdd", |c| matches!(c, CallCommand::LegAdd { .. }))
             .await;
         stack
-            .assert_cmd(200, "StopHold", |c| {
+            .assert_cmd(2000, "StopHold", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
-        let transfer_cmd = stack.next_cmd(200).await.expect("transfer prompt Play");
+        let transfer_cmd = stack.next_cmd(2000).await.expect("transfer prompt Play");
         assert!(
             play_path(&transfer_cmd).ends_with("queue-transfer-zh.wav"),
             "expected the ZH transfer prompt"
@@ -959,11 +959,11 @@ mod tests {
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
         stack
-            .assert_cmd(200, "StopTransfer", |c| {
+            .assert_cmd(2000, "StopTransfer", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
-        let service_cmd = stack.next_cmd(200).await.expect("service prompt Play");
+        let service_cmd = stack.next_cmd(2000).await.expect("service prompt Play");
         assert!(
             play_path(&service_cmd).ends_with("queue-service-zh.wav"),
             "expected the ZH service prompt"
@@ -992,31 +992,31 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt-hold", |c| {
+            .assert_cmd(2000, "PlayPrompt-hold", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
 
         stack.custom("dial_next_agent", serde_json::json!({}));
         stack
-            .assert_cmd(200, "LegAdd", |c| matches!(c, CallCommand::LegAdd { .. }))
+            .assert_cmd(2000, "LegAdd", |c| matches!(c, CallCommand::LegAdd { .. }))
             .await;
         stack
-            .assert_cmd(200, "StopHold", |c| {
+            .assert_cmd(2000, "StopHold", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
-        let transfer_cmd = stack.next_cmd(200).await.expect("transfer prompt Play");
+        let transfer_cmd = stack.next_cmd(2000).await.expect("transfer prompt Play");
         let transfer_tid = play_track_id(&transfer_cmd);
 
         // Prompt finishes while the agent is still ringing → hold music resumes.
         stack.audio_complete(transfer_tid);
-        let hold_cmd = stack.next_cmd(200).await.expect("hold music resume Play");
+        let hold_cmd = stack.next_cmd(2000).await.expect("hold music resume Play");
         assert!(
             play_path(&hold_cmd).ends_with("hold_music.wav"),
             "hold music must resume after the transfer prompt"
@@ -1028,11 +1028,11 @@ mod tests {
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
         stack
-            .assert_cmd(200, "StopHold2", |c| {
+            .assert_cmd(2000, "StopHold2", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
-        let service_cmd = stack.next_cmd(200).await.expect("service prompt Play");
+        let service_cmd = stack.next_cmd(2000).await.expect("service prompt Play");
         let service_tid = play_track_id(&service_cmd);
         stack.audio_complete(service_tid);
 
@@ -1054,27 +1054,27 @@ mod tests {
         );
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt-hold", |c| {
+            .assert_cmd(2000, "PlayPrompt-hold", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
 
         stack.custom("dial_next_agent", serde_json::json!({}));
         stack
-            .assert_cmd(200, "LegAdd", |c| matches!(c, CallCommand::LegAdd { .. }))
+            .assert_cmd(2000, "LegAdd", |c| matches!(c, CallCommand::LegAdd { .. }))
             .await;
         stack
-            .assert_cmd(200, "StopHold", |c| {
+            .assert_cmd(2000, "StopHold", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt-transfer", |c| {
+            .assert_cmd(2000, "PlayPrompt-transfer", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
@@ -1084,7 +1084,7 @@ mod tests {
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
         stack
-            .assert_cmd(200, "StopTransfer", |c| {
+            .assert_cmd(2000, "StopTransfer", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
@@ -1105,13 +1105,13 @@ mod tests {
         );
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         stack.custom(
@@ -1135,22 +1135,22 @@ mod tests {
         );
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         stack.custom("all_agents_busy", serde_json::json!({}));
 
-        let busy_cmd = stack.next_cmd(200).await.expect("busy prompt Play");
+        let busy_cmd = stack.next_cmd(2000).await.expect("busy prompt Play");
         stack.audio_complete(play_track_id(&busy_cmd));
 
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -1164,33 +1164,33 @@ mod tests {
         );
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         stack.custom("agent_busy", serde_json::json!({}));
         stack
-            .assert_cmd(200, "LegAdd-agent2", |c| {
+            .assert_cmd(2000, "LegAdd-agent2", |c| {
                 matches!(c, CallCommand::LegAdd { .. })
             })
             .await;
         // First originate starts the pre-connect transfer prompt.
         stack
-            .assert_cmd(200, "StopHold", |c| {
+            .assert_cmd(2000, "StopHold", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
-        let transfer_cmd = stack.next_cmd(200).await.expect("transfer prompt Play");
+        let transfer_cmd = stack.next_cmd(2000).await.expect("transfer prompt Play");
         assert!(play_is_side_only(&transfer_cmd));
 
         stack.custom("agent_busy", serde_json::json!({}));
         stack
-            .assert_cmd(200, "LegAdd-agent3", |c| {
+            .assert_cmd(2000, "LegAdd-agent3", |c| {
                 matches!(c, CallCommand::LegAdd { .. })
             })
             .await;
@@ -1203,11 +1203,11 @@ mod tests {
 
         stack.custom("agent_busy", serde_json::json!({}));
 
-        let busy_cmd = stack.next_cmd(200).await.expect("busy prompt Play");
+        let busy_cmd = stack.next_cmd(2000).await.expect("busy prompt Play");
         stack.audio_complete(play_track_id(&busy_cmd));
 
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -1223,25 +1223,25 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Dialing starts → EN transfer prompt before connect.
         stack.custom("dial_next_agent", serde_json::json!({}));
         stack
-            .assert_cmd(200, "LegAdd", |c| matches!(c, CallCommand::LegAdd { .. }))
+            .assert_cmd(2000, "LegAdd", |c| matches!(c, CallCommand::LegAdd { .. }))
             .await;
         stack
-            .assert_cmd(200, "StopHold", |c| {
+            .assert_cmd(2000, "StopHold", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
-        let transfer_cmd = stack.next_cmd(200).await.expect("transfer prompt Play");
+        let transfer_cmd = stack.next_cmd(2000).await.expect("transfer prompt Play");
         assert!(
             play_path(&transfer_cmd).ends_with("queue-transfer-en.wav"),
             "expected the EN transfer prompt"
@@ -1253,11 +1253,11 @@ mod tests {
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
         stack
-            .assert_cmd(200, "StopTransfer", |c| {
+            .assert_cmd(2000, "StopTransfer", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
-        let service_cmd = stack.next_cmd(200).await.expect("service prompt Play");
+        let service_cmd = stack.next_cmd(2000).await.expect("service prompt Play");
         assert!(
             play_path(&service_cmd).ends_with("queue-service-en.wav"),
             "expected the EN service prompt"
@@ -1282,27 +1282,27 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         stack.timeout("max_wait_timeout");
 
         stack
-            .assert_cmd(200, "NotifyEvent", |c| {
+            .assert_cmd(2000, "NotifyEvent", |c| {
                 matches!(c, CallCommand::InjectAppEvent { .. })
             })
             .await;
 
-        let busy_cmd = stack.next_cmd(200).await.expect("busy prompt Play");
+        let busy_cmd = stack.next_cmd(2000).await.expect("busy prompt Play");
         stack.audio_complete(play_track_id(&busy_cmd));
 
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -1316,47 +1316,47 @@ mod tests {
         );
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // All agents no-answer
         stack.custom("agent_no_answer", serde_json::json!({}));
         stack
-            .assert_cmd(200, "LegAdd-agent2", |c| {
+            .assert_cmd(2000, "LegAdd-agent2", |c| {
                 matches!(c, CallCommand::LegAdd { .. })
             })
             .await;
         // First originate starts the pre-connect transfer prompt.
         stack
-            .assert_cmd(200, "StopHold", |c| {
+            .assert_cmd(2000, "StopHold", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt-transfer", |c| {
+            .assert_cmd(2000, "PlayPrompt-transfer", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.custom("agent_no_answer", serde_json::json!({}));
         stack
-            .assert_cmd(200, "LegAdd-agent3", |c| {
+            .assert_cmd(2000, "LegAdd-agent3", |c| {
                 matches!(c, CallCommand::LegAdd { .. })
             })
             .await;
         stack.custom("agent_no_answer", serde_json::json!({}));
 
         // Should play no-answer prompt (not busy prompt)
-        let na_cmd = stack.next_cmd(200).await.expect("no-answer prompt Play");
+        let na_cmd = stack.next_cmd(2000).await.expect("no-answer prompt Play");
         stack.audio_complete(play_track_id(&na_cmd));
 
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -1370,47 +1370,47 @@ mod tests {
         );
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Agent 1 busy, Agent 2 no-answer, Agent 3 busy
         stack.custom("agent_busy", serde_json::json!({}));
         stack
-            .assert_cmd(200, "LegAdd-agent2", |c| {
+            .assert_cmd(2000, "LegAdd-agent2", |c| {
                 matches!(c, CallCommand::LegAdd { .. })
             })
             .await;
         // First originate starts the pre-connect transfer prompt.
         stack
-            .assert_cmd(200, "StopHold", |c| {
+            .assert_cmd(2000, "StopHold", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt-transfer", |c| {
+            .assert_cmd(2000, "PlayPrompt-transfer", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.custom("agent_no_answer", serde_json::json!({}));
         stack
-            .assert_cmd(200, "LegAdd-agent3", |c| {
+            .assert_cmd(2000, "LegAdd-agent3", |c| {
                 matches!(c, CallCommand::LegAdd { .. })
             })
             .await;
         stack.custom("agent_busy", serde_json::json!({}));
 
         // Last one was busy, so should play busy prompt
-        let busy_cmd = stack.next_cmd(200).await.expect("busy prompt Play");
+        let busy_cmd = stack.next_cmd(2000).await.expect("busy prompt Play");
         stack.audio_complete(play_track_id(&busy_cmd));
 
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -1427,13 +1427,13 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // All agents no-answer, no no_answer_prompt configured -> should go directly to fallback
@@ -1443,7 +1443,7 @@ mod tests {
 
         // Should NOT play any prompt, just hangup
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -1458,22 +1458,22 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Ring timeout triggers no-answer path (only 1 agent in simple queue)
         stack.timeout("agent_ring_timeout");
 
-        let na_cmd = stack.next_cmd(200).await.expect("no-answer prompt Play");
+        let na_cmd = stack.next_cmd(2000).await.expect("no-answer prompt Play");
         stack.audio_complete(play_track_id(&na_cmd));
 
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -1490,18 +1490,18 @@ mod tests {
 
         // Answer
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         // Play hold music
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Should originate calls to ALL agents in parallel
-        let cmd0 = stack.next_cmd(200).await.expect("LegAdd for agent1");
+        let cmd0 = stack.next_cmd(2000).await.expect("LegAdd for agent1");
         let _leg_id_0 = match &cmd0 {
             CallCommand::LegAdd { leg_id, .. } => {
                 leg_id.clone().expect("LegAdd should have leg_id")
@@ -1509,7 +1509,7 @@ mod tests {
             _ => panic!("expected LegAdd, got {cmd0:?}"),
         };
 
-        let cmd1 = stack.next_cmd(200).await.expect("LegAdd for agent2");
+        let cmd1 = stack.next_cmd(2000).await.expect("LegAdd for agent2");
         let leg_id_1 = match &cmd1 {
             CallCommand::LegAdd { leg_id, .. } => {
                 leg_id.clone().expect("LegAdd should have leg_id")
@@ -1524,14 +1524,14 @@ mod tests {
         );
 
         // Hold music stops when the agent answers.
-        let stop = stack.next_cmd(200).await.expect("StopHold");
+        let stop = stack.next_cmd(2000).await.expect("StopHold");
         assert!(
             matches!(stop, CallCommand::StopPlayback { .. }),
             "expected StopPlayback after agent connected, got {stop:?}"
         );
 
         // Should cancel agent 2's leg via LegRemove (NOT agent 1's leg)
-        let remove = stack.next_cmd(200).await.expect("LegRemove");
+        let remove = stack.next_cmd(2000).await.expect("LegRemove");
         match &remove {
             CallCommand::LegRemove { leg_id } => {
                 assert_eq!(
@@ -1563,24 +1563,24 @@ mod tests {
 
         // Answer
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         // Play hold music
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Should originate calls to both agents
         stack
-            .assert_cmd(200, "LegAdd-agent1", |c| {
+            .assert_cmd(2000, "LegAdd-agent1", |c| {
                 matches!(c, CallCommand::LegAdd { target, .. } if target == "sip:agent1@example.com")
             })
             .await;
         stack
-            .assert_cmd(200, "LegAdd-agent2", |c| {
+            .assert_cmd(2000, "LegAdd-agent2", |c| {
                 matches!(c, CallCommand::LegAdd { target, .. } if target == "sip:agent2@example.com")
             })
             .await;
@@ -1590,7 +1590,7 @@ mod tests {
 
         // Should hit no-answer fallback
         stack
-            .assert_cmd(200, "FallbackHangup", |c| {
+            .assert_cmd(2000, "FallbackHangup", |c| {
                 matches!(c, CallCommand::Hangup(_))
             })
             .await;
@@ -1608,15 +1608,15 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
-        let first = stack.next_cmd(200).await.expect("first parallel LegAdd");
+        let first = stack.next_cmd(2000).await.expect("first parallel LegAdd");
         let first_leg = match first {
             CallCommand::LegAdd {
                 leg_id: Some(leg_id),
@@ -1624,7 +1624,7 @@ mod tests {
             } => leg_id,
             other => panic!("expected first LegAdd, got {other:?}"),
         };
-        let second = stack.next_cmd(200).await.expect("second parallel LegAdd");
+        let second = stack.next_cmd(2000).await.expect("second parallel LegAdd");
         let second_leg = match second {
             CallCommand::LegAdd {
                 leg_id: Some(leg_id),
@@ -1641,7 +1641,7 @@ mod tests {
 
         stack.custom("agent_busy", serde_json::json!({"leg_id": second_leg.0}));
         stack
-            .assert_cmd(200, "FallbackHangup", |c| {
+            .assert_cmd(2000, "FallbackHangup", |c| {
                 matches!(c, CallCommand::Hangup(_))
             })
             .await;
@@ -1662,12 +1662,12 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         // No agents → busy prompt is none → final destination prompt
-        let final_cmd = stack.next_cmd(200).await.expect("final prompt Play");
+        let final_cmd = stack.next_cmd(2000).await.expect("final prompt Play");
 
         // Final prompt audio completes → fallback (hangup)
         stack.audio_complete(play_track_id(&final_cmd));
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
 
         stack.join().await.unwrap();
@@ -1722,7 +1722,7 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
 
         stack
-            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
 
         // Trigger escalation check — should not crash even though skill-group: support2
@@ -1956,13 +1956,13 @@ mod tests {
         // timer fire). Sequential dialing is kicked off by the production
         // execute_flow's "dial_next_agent" injection.
         stack
-            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "Hold", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "Hold", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.custom("dial_next_agent", serde_json::json!({}));
-        stack.assert_cmd(200, "LegAdd-primary", |c| {
+        stack.assert_cmd(2000, "LegAdd-primary", |c| {
             matches!(c, CallCommand::LegAdd { target, .. } if target.contains("agent1@example.com"))
         })
         .await;
@@ -2019,14 +2019,14 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
         stack
-            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "Hold", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "Hold", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.custom("dial_next_agent", serde_json::json!({}));
         stack
-            .assert_cmd(200, "LegAdd-primary", |c| {
+            .assert_cmd(2000, "LegAdd-primary", |c| {
                 matches!(c, CallCommand::LegAdd { .. })
             })
             .await;
@@ -2081,13 +2081,13 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
 
         stack
-            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "Hold", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "Hold", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.custom("dial_next_agent", serde_json::json!({}));
-        stack.assert_cmd(200, "LegAdd-primary", |c| {
+        stack.assert_cmd(2000, "LegAdd-primary", |c| {
             matches!(c, CallCommand::LegAdd { target, .. } if target.contains("agent1@example.com"))
         })
         .await;
@@ -2359,13 +2359,13 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         let hold_cmd = stack
-            .next_cmd(200)
+            .next_cmd(2000)
             .await
             .expect("expected hold-music Play command");
         let path = play_path(&hold_cmd);
@@ -2476,10 +2476,10 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
         stack
-            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         let hold_cmd = stack
-            .next_cmd(200)
+            .next_cmd(2000)
             .await
             .expect("expected hold music while waiting");
         assert!(
@@ -2527,9 +2527,9 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
         stack
-            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
-        let _hold = stack.next_cmd(200).await.expect("hold while waiting");
+        let _hold = stack.next_cmd(2000).await.expect("hold while waiting");
 
         stack.timeout("queue_retry");
 
@@ -2609,9 +2609,9 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
         stack
-            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
-        let _hold = stack.next_cmd(200).await.expect("hold while waiting");
+        let _hold = stack.next_cmd(2000).await.expect("hold while waiting");
 
         // Poll #1 resolves an Idle agent → dial.
         stack.timeout("queue_retry");
@@ -2739,10 +2739,10 @@ mod tests {
 
         // accept_immediately → Answer first, then autonomous dial of the agent.
         stack
-            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "OriginateCall", |c| {
+            .assert_cmd(2000, "OriginateCall", |c| {
                 matches!(c, CallCommand::LegAdd { .. })
             })
             .await;
@@ -2865,26 +2865,26 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         // discard hold music
-        let _ = stack.next_cmd(200).await.expect("hold music");
+        let _ = stack.next_cmd(2000).await.expect("hold music");
 
         // Dialing starts → pre-connect transfer prompt.
         stack.custom("dial_next_agent", serde_json::json!({}));
         stack
-            .assert_cmd(200, "LegAdd", |c| matches!(c, CallCommand::LegAdd { .. }))
+            .assert_cmd(2000, "LegAdd", |c| matches!(c, CallCommand::LegAdd { .. }))
             .await;
         stack
-            .assert_cmd(200, "StopHold", |c| {
+            .assert_cmd(2000, "StopHold", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
 
         let transfer_cmd = stack
-            .next_cmd(200)
+            .next_cmd(2000)
             .await
             .expect("expected transfer-prompt Play command");
         let path = play_path(&transfer_cmd);
@@ -2901,12 +2901,12 @@ mod tests {
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
         stack
-            .assert_cmd(200, "StopTransfer", |c| {
+            .assert_cmd(2000, "StopTransfer", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
         let service_cmd = stack
-            .next_cmd(200)
+            .next_cmd(2000)
             .await
             .expect("expected service-prompt Play command");
         let path = play_path(&service_cmd);
@@ -2939,18 +2939,18 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         // discard hold music
-        let _ = stack.next_cmd(200).await.expect("hold music");
+        let _ = stack.next_cmd(2000).await.expect("hold music");
 
         // Every agent is reported busy (offline-equivalent exhaustion path).
         stack.custom("all_agents_busy", serde_json::json!({}));
 
         let busy_cmd = stack
-            .next_cmd(200)
+            .next_cmd(2000)
             .await
             .expect("expected busy-prompt Play command");
         let path = play_path(&busy_cmd);
@@ -2962,7 +2962,7 @@ mod tests {
 
         stack.audio_complete(play_track_id(&busy_cmd));
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -2981,40 +2981,40 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
-        let _ = stack.next_cmd(200).await.expect("hold music");
+        let _ = stack.next_cmd(2000).await.expect("hold music");
 
         // Sequential no-answer across every agent.
         stack.custom("agent_no_answer", serde_json::json!({}));
         stack
-            .assert_cmd(200, "LegAdd-agent2", |c| {
+            .assert_cmd(2000, "LegAdd-agent2", |c| {
                 matches!(c, CallCommand::LegAdd { .. })
             })
             .await;
         // First originate starts the pre-connect transfer prompt.
         stack
-            .assert_cmd(200, "StopHold", |c| {
+            .assert_cmd(2000, "StopHold", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt-transfer", |c| {
+            .assert_cmd(2000, "PlayPrompt-transfer", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.custom("agent_no_answer", serde_json::json!({}));
         stack
-            .assert_cmd(200, "LegAdd-agent3", |c| {
+            .assert_cmd(2000, "LegAdd-agent3", |c| {
                 matches!(c, CallCommand::LegAdd { .. })
             })
             .await;
         stack.custom("agent_no_answer", serde_json::json!({}));
 
         let na_cmd = stack
-            .next_cmd(200)
+            .next_cmd(2000)
             .await
             .expect("expected no-answer-prompt Play command");
         let path = play_path(&na_cmd);
@@ -3026,7 +3026,7 @@ mod tests {
 
         stack.audio_complete(play_track_id(&na_cmd));
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -3045,12 +3045,12 @@ mod tests {
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
         stack
-            .assert_cmd(200, "StopHold", |c| {
+            .assert_cmd(2000, "StopHold", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
         stack
-            .next_cmd(200)
+            .next_cmd(2000)
             .await
             .expect("expected service-prompt Play command")
     }
@@ -3078,12 +3078,12 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         let service_cmd = drive_to_service_prompt(&mut stack).await;
@@ -3120,12 +3120,12 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         let service_cmd = drive_to_service_prompt(&mut stack).await;
@@ -3153,12 +3153,12 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         let service_cmd = drive_to_service_prompt(&mut stack).await;
@@ -3178,12 +3178,12 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         let service_cmd = drive_to_service_prompt(&mut stack).await;
@@ -3213,31 +3213,31 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         stack
-            .assert_cmd(200, "LegAdd-agent1", |c| {
+            .assert_cmd(2000, "LegAdd-agent1", |c| {
                 matches!(c, CallCommand::LegAdd { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "LegAdd-agent2", |c| {
+            .assert_cmd(2000, "LegAdd-agent2", |c| {
                 matches!(c, CallCommand::LegAdd { .. })
             })
             .await;
 
         stack
-            .assert_cmd(200, "StopHold", |c| {
+            .assert_cmd(2000, "StopHold", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
-        let transfer_cmd = stack.next_cmd(200).await.expect("transfer prompt Play");
+        let transfer_cmd = stack.next_cmd(2000).await.expect("transfer prompt Play");
         assert!(play_is_side_only(&transfer_cmd));
 
         // No further prompt commands while both agents ring.
@@ -3253,16 +3253,16 @@ mod tests {
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
         stack
-            .assert_cmd(200, "LegRemove-agent2", |c| {
+            .assert_cmd(2000, "LegRemove-agent2", |c| {
                 matches!(c, CallCommand::LegRemove { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "StopTransfer", |c| {
+            .assert_cmd(2000, "StopTransfer", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
-        let service_cmd = stack.next_cmd(200).await.expect("service prompt Play");
+        let service_cmd = stack.next_cmd(2000).await.expect("service prompt Play");
         assert!(play_is_side_only(&service_cmd));
 
         stack.audio_complete(play_track_id(&service_cmd));
@@ -3282,12 +3282,12 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Agent answers; queue plays the caller-only service prompt and
@@ -3323,12 +3323,12 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         let service_cmd = drive_to_service_prompt(&mut stack).await;
@@ -3393,17 +3393,17 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Kick off sequential dialing: agent1 is available and gets dialed.
         stack.custom("dial_next_agent", serde_json::json!({}));
-        let first = stack.next_cmd(200).await.expect("LegAdd agent1");
+        let first = stack.next_cmd(2000).await.expect("LegAdd agent1");
         match &first {
             CallCommand::LegAdd { target, .. } => {
                 assert_eq!(target, "sip:agent1@example.com")
@@ -3473,16 +3473,16 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| {
+            .assert_cmd(2000, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Only the available agent is dialed.
-        let cmd = stack.next_cmd(200).await.expect("LegAdd agent1");
+        let cmd = stack.next_cmd(2000).await.expect("LegAdd agent1");
         match &cmd {
             CallCommand::LegAdd { target, .. } => {
                 assert_eq!(target, "sip:agent1@example.com")

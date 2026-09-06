@@ -154,6 +154,7 @@ impl MigrationTrait for Migration {
                     .table(Entity)
                     .col(Column::Extension)
                     .unique()
+                    .if_not_exists()
                     .to_owned(),
             )
             .await?;

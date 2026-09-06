@@ -41,6 +41,7 @@ impl MigrationTrait for Migration {
                         .name("idx_call_records_outbound_sip_trunk_id")
                         .table(CallRecordEntity)
                         .col(CallRecordColumn::OutboundSipTrunkId)
+                        .if_not_exists()
                         .to_owned(),
                 )
                 .await?;
