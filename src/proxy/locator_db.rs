@@ -1,21 +1,27 @@
 use super::locator::{
-    Locator, LocatorEvent, LocatorEventSender, RealmChecker, UNREGISTER_GRACE_SECS,
-    choose_registered_aor, invalid_host_fallback, is_local_realm, is_location_expired,
-    now_epoch_secs, sort_locations_by_recency,
+    Locator, LocatorEvent, LocatorEventLock, LocatorEventSender, RealmChecker,
+    UNREGISTER_GRACE_SECS, choose_registered_aor, invalid_host_fallback, is_local_realm,
+    is_location_expired, locations_without_active_bindings, now_epoch_secs,
+    sort_locations_by_recency,
 };
 use crate::call::{LOCATOR_EXPIRE_GRACE_SECS, Location};
 use anyhow::Result;
 use async_trait::async_trait;
 use rsipstack::transport::SipAddr;
-use sea_orm::{ActiveModelTrait, Database, QueryOrder, Set, entity::prelude::*};
+use sea_orm::{
+    ActiveModelTrait, Database, QueryOrder, QuerySelect, Set, TransactionTrait, entity::prelude::*,
+};
 pub use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{
     big_integer, boolean, string_len, string_len_null, timestamp_with_time_zone as timestamp,
 };
 use sea_orm_migration::sea_query::ColumnDef as MigrationColumnDef;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 // ... (rest of the model)
@@ -47,6 +53,7 @@ pub struct DbLocator {
     db: DatabaseConnection,
     realm_checker: Mutex<Option<RealmChecker>>,
     event_sender: Mutex<Option<LocatorEventSender>>,
+    event_lock: Mutex<Option<LocatorEventLock>>,
 }
 
 #[derive(DeriveMigrationName)]
@@ -201,6 +208,7 @@ impl DbLocator {
             db,
             realm_checker: Mutex::new(None),
             event_sender: Mutex::new(None),
+            event_lock: Mutex::new(None),
         };
         if migrate {
             info!("Creating DbLocator with migration");
@@ -410,12 +418,89 @@ fn model_to_location(model: &Model, now_epoch: i64, now_instant: Instant) -> Res
         last_modified: Some(last_modified_instant),
         supports_webrtc: model.supports_webrtc,
         transport: Some(transport),
+        registered_username: Some(model.username.clone()),
+        registered_realm: (!model.realm.is_empty()).then(|| model.realm.clone()),
         registered_aor: Some(registered_aor),
         user_agent,
         home_proxy,
         instance_id: model.instance_id.clone(),
         ..Default::default()
     })
+}
+
+impl DbLocator {
+    /// Delete only the exact expired snapshots observed by the caller.
+    /// A concurrent REGISTER may refresh the same row between selection and
+    /// cleanup, including from another process that cannot share our mutex.
+    async fn delete_expired_snapshots(
+        &self,
+        candidates: Vec<Model>,
+        now_epoch: i64,
+        now_instant: Instant,
+    ) -> Result<Vec<Location>> {
+        let candidates: Vec<_> = candidates
+            .into_iter()
+            .filter(|model| is_location_expired(model.expires, model.last_modified, now_epoch))
+            .collect();
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut snapshots = Condition::any();
+        let candidate_ids: Vec<_> = candidates.iter().map(|model| model.id).collect();
+        for model in &candidates {
+            snapshots = snapshots.add(
+                Condition::all()
+                    .add(Column::Id.eq(model.id))
+                    .add(Column::LastModified.eq(model.last_modified))
+                    .add(Column::Expires.eq(model.expires)),
+            );
+        }
+
+        let transaction = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| anyhow::anyhow!("Database error starting expired cleanup: {}", e))?;
+        Entity::delete_many()
+            .filter(snapshots)
+            .exec(&transaction)
+            .await
+            .map_err(|e| anyhow::anyhow!("Database error deleting expired locations: {}", e))?;
+        let survivors: HashSet<i64> = Entity::find()
+            .select_only()
+            .column(Column::Id)
+            .filter(Column::Id.is_in(candidate_ids))
+            .into_tuple::<i64>()
+            .all(&transaction)
+            .await
+            .map_err(|e| anyhow::anyhow!("Database error verifying expired cleanup: {}", e))?
+            .into_iter()
+            .collect();
+        transaction
+            .commit()
+            .await
+            .map_err(|e| anyhow::anyhow!("Database error committing expired cleanup: {}", e))?;
+
+        let mut removed = Vec::new();
+        for model in candidates {
+            if survivors.contains(&model.id) {
+                debug!(
+                    identifier = %format!("{}/{}", model.username, model.realm),
+                    binding = %model.aor,
+                    "expired registration was refreshed before cleanup"
+                );
+                continue;
+            }
+            match model_to_location(&model, now_epoch, now_instant) {
+                Ok(location) => removed.push(location),
+                Err(e) => {
+                    warn!(error = %e, aor = %model.aor, "deleted unparsable expired location row");
+                }
+            }
+        }
+        Ok(removed)
+    }
 }
 
 #[async_trait]
@@ -445,6 +530,14 @@ impl Locator for DbLocator {
         *lock = sender;
     }
 
+    fn set_event_lock(&self, event_lock: Option<LocatorEventLock>) {
+        let mut lock = self
+            .event_lock
+            .try_lock()
+            .expect("failed to lock event_lock");
+        *lock = event_lock;
+    }
+
     /// Periodically sweep expired registrations that would otherwise linger —
     /// e.g. browsers that vanish without a REGISTER expires=0. Returns the
     /// removed bindings; the caller (the sweep task in `server.rs`) is
@@ -465,37 +558,23 @@ impl Locator for DbLocator {
             .await
             .map_err(|e| anyhow::anyhow!("Database error on sweep_expired lookup: {}", e))?;
 
-        let mut expired_ids = Vec::new();
-        let mut expired_locations = Vec::new();
+        let mut expired = Vec::new();
         for model in candidates {
             if is_location_expired(model.expires, model.last_modified, now_epoch) {
-                match model_to_location(&model, now_epoch, now_instant) {
-                    Ok(location) => {
-                        info!(
-                            identifier = %format!("{}/{}", model.username, model.realm),
-                            binding = %model.aor,
-                            "swept expired registration"
-                        );
-                        expired_ids.push(model.id);
-                        expired_locations.push(location);
-                    }
-                    Err(e) => {
-                        warn!(error = %e, aor = %model.aor, "skipping unparsable expired location row");
-                    }
-                }
+                expired.push(model);
             }
         }
-        if expired_ids.is_empty() {
+        if expired.is_empty() {
             return Ok(vec![]);
         }
 
-        Entity::delete_many()
-            .filter(Column::Id.is_in(expired_ids))
-            .exec(&self.db)
-            .await
-            .map_err(|e| anyhow::anyhow!("Database error on sweep_expired delete: {}", e))?;
-
-        Ok(expired_locations)
+        let removed = self
+            .delete_expired_snapshots(expired, now_epoch, now_instant)
+            .await?;
+        for location in &removed {
+            info!(binding = %location.aor, "swept expired registration");
+        }
+        Ok(removed)
     }
 
     async fn register(
@@ -812,18 +891,11 @@ impl Locator for DbLocator {
         }
 
         let mut locations = Vec::new();
-        let mut expired_ids = Vec::new();
-        let mut expired_locations = Vec::new();
+        let mut expired = Vec::new();
         let now_instant = Instant::now();
         for model in models {
             if is_location_expired(model.expires, model.last_modified, now_epoch) {
-                expired_ids.push(model.id);
-                match model_to_location(&model, now_epoch, now_instant) {
-                    Ok(location) => expired_locations.push(location),
-                    Err(e) => {
-                        warn!(error = %e, aor = %model.aor, "skipping unparsable expired location row");
-                    }
-                }
+                expired.push(model);
                 continue;
             }
             locations.push(model_to_location(&model, now_epoch, now_instant)?);
@@ -832,21 +904,29 @@ impl Locator for DbLocator {
         // Best-effort cleanup of expired bindings so they don't shadow live
         // registrations in subsequent .invalid username lookups (which order by
         // recency). Expired rows were previously only skipped, never deleted.
-        if !expired_ids.is_empty() {
-            if let Err(e) = Entity::delete_many()
-                .filter(Column::Id.is_in(expired_ids))
-                .exec(&self.db)
+        if !expired.is_empty() {
+            let event_lock = self.event_lock.lock().await.clone();
+            let _event_guard = match event_lock {
+                Some(lock) => Some(lock.lock_owned().await),
+                None => None,
+            };
+            match self
+                .delete_expired_snapshots(expired, now_epoch, now_instant)
                 .await
             {
-                warn!(error = %e, "Failed to delete expired location rows during lookup");
-            } else if !expired_locations.is_empty()
-                && let Some(sender) = self.event_sender.lock().await.clone().as_ref()
-            {
-                // The backend removed these bindings on its own (no explicit
-                // unregister arrived). Broadcast Offline so downstream
-                // consumers (presence, CC agent state, cluster peers,
-                // locator_webhook) observe the transition.
-                let _ = sender.send(LocatorEvent::Offline(expired_locations));
+                Err(e) => warn!(error = %e, "Failed to delete expired location rows during lookup"),
+                Ok(expired_locations) if !expired_locations.is_empty() => {
+                    // The backend removed these bindings on its own (no explicit
+                    // unregister arrived). Broadcast Offline so downstream
+                    // consumers observe the transition.
+                    let offline = locations_without_active_bindings(self, expired_locations).await;
+                    if !offline.is_empty()
+                        && let Some(sender) = self.event_sender.lock().await.clone().as_ref()
+                    {
+                        let _ = sender.send(LocatorEvent::Offline(offline));
+                    }
+                }
+                Ok(_) => {}
             }
         }
 
@@ -857,6 +937,7 @@ impl Locator for DbLocator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::locator::sweep_offline_locations;
     use rsipstack::sip::{Auth, HostWithPort, Scheme, transport::Transport};
     use rsipstack::transport::SipAddr;
     use sea_orm::{DbBackend, MockDatabase, MockExecResult};
@@ -874,6 +955,7 @@ mod tests {
             db,
             realm_checker: Mutex::new(None),
             event_sender: Mutex::new(None),
+            event_lock: Mutex::new(None),
         };
         let location = Location {
             aor: rsipstack::sip::Uri {
@@ -1319,12 +1401,63 @@ mod tests {
         .await
         .expect("insert never-expire row");
 
-        // Alice registered an hour ago with expires=60 — long expired.
+        // Alice's old binding expired, but a newer binding for the same
+        // registered identity is still active. Removing the old binding must
+        // not report Alice offline.
         backdate_rows(&locator, "alice", 3600).await;
+        let fresh_alice_aor: rsipstack::sip::Uri =
+            format!("sip:{}@{}", "alice-new", "pbx.example.com")
+                .try_into()
+                .expect("fresh alice aor");
+        locator
+            .register(
+                "alice",
+                Some("pbx.example.com"),
+                Location {
+                    aor: fresh_alice_aor.clone(),
+                    expires: 60,
+                    destination: Some(SipAddr {
+                        r#type: Some(Transport::Udp),
+                        addr: "192.0.2.11:5060".try_into().expect("fresh destination"),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("register fresh alice binding");
 
-        let swept = locator.sweep_expired().await.expect("sweep expired");
-        assert_eq!(swept.len(), 1, "only alice's expired binding is swept");
-        assert_eq!(swept[0].aor, aor);
+        // Bob has no replacement binding and therefore really becomes
+        // offline when his expired binding is swept.
+        let bob_aor: rsipstack::sip::Uri = format!("sip:{}@{}", "bob", "pbx.example.com")
+            .try_into()
+            .expect("bob aor");
+        locator
+            .register(
+                "bob",
+                Some("pbx.example.com"),
+                Location {
+                    aor: bob_aor.clone(),
+                    expires: 60,
+                    destination: Some(SipAddr {
+                        r#type: Some(Transport::Udp),
+                        addr: "192.0.2.20:5060".try_into().expect("bob destination"),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("register bob");
+        backdate_rows(&locator, "bob", 3600).await;
+
+        let swept = sweep_offline_locations(&locator)
+            .await
+            .expect("sweep expired");
+        assert_eq!(
+            swept.len(),
+            1,
+            "only the fully offline identity is reported"
+        );
+        assert_eq!(swept[0].aor, bob_aor);
         assert_eq!(
             swept[0].transport,
             Some(Transport::Udp),
@@ -1337,9 +1470,19 @@ mod tests {
             "sweep_expired must not emit Offline events"
         );
 
-        // Alice's row is gone; carol's never-expire row survives.
-        let alice_lookup = locator.lookup(&aor).await.expect("lookup alice");
-        assert!(alice_lookup.is_empty(), "expired binding must be removed");
+        // Alice's stale row is gone while her fresh binding and Carol's
+        // never-expire row survive.
+        let stale_alice = Entity::find()
+            .filter(Column::Aor.eq(aor.to_string()))
+            .one(&locator.db)
+            .await
+            .expect("query stale alice");
+        assert!(stale_alice.is_none(), "expired binding must be removed");
+        let fresh_alice_lookup = locator
+            .lookup(&fresh_alice_aor)
+            .await
+            .expect("lookup fresh alice");
+        assert_eq!(fresh_alice_lookup.len(), 1, "fresh binding must survive");
         assert!(
             locator
                 .has_active_bindings("carol", Some("pbx.example.com"))
@@ -1445,5 +1588,55 @@ mod tests {
             .await
             .expect("query dave rows");
         assert!(remaining.is_empty(), "expired row must be deleted");
+    }
+
+    #[tokio::test]
+    async fn expired_snapshot_cleanup_preserves_a_refreshed_binding() {
+        let locator = DbLocator::new_with_migrate("sqlite::memory:".to_string(), true)
+            .await
+            .expect("create db locator");
+        let aor: rsipstack::sip::Uri = format!("sip:{}@{}", "alice", "pbx.example.com")
+            .try_into()
+            .expect("valid aor");
+        let location = Location {
+            aor: aor.clone(),
+            expires: 60,
+            destination: Some(SipAddr {
+                r#type: Some(Transport::Udp),
+                addr: "192.0.2.10:5060".try_into().expect("destination"),
+            }),
+            ..Default::default()
+        };
+        locator
+            .register("alice", Some("pbx.example.com"), location.clone())
+            .await
+            .expect("register stale snapshot");
+        backdate_rows(&locator, "alice", 3600).await;
+        let stale = Entity::find()
+            .filter(Column::Username.eq("alice"))
+            .one(&locator.db)
+            .await
+            .expect("read stale snapshot")
+            .expect("stale row");
+
+        locator
+            .register("alice", Some("pbx.example.com"), location)
+            .await
+            .expect("refresh binding");
+        let removed = locator
+            .delete_expired_snapshots(vec![stale], now_epoch_secs(), Instant::now())
+            .await
+            .expect("compare-and-delete stale snapshot");
+
+        assert!(removed.is_empty(), "the refreshed row was not removed");
+        assert_eq!(
+            locator
+                .lookup(&aor)
+                .await
+                .expect("lookup refreshed binding")
+                .len(),
+            1,
+            "the refreshed binding must remain routable"
+        );
     }
 }

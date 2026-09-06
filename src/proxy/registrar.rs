@@ -3,7 +3,7 @@ use crate::call::user::SipUser;
 use crate::call::{Location, TransactionCookie};
 use crate::config::ProxyConfig;
 use crate::metrics;
-use crate::proxy::locator::LocatorEvent;
+use crate::proxy::locator::{LocatorEvent, locations_without_active_bindings};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use rsipstack::sip::prelude::HeadersExt;
@@ -11,7 +11,7 @@ use rsipstack::sip::{Header, Param, Transport, Uri};
 use rsipstack::{transaction::transaction::Transaction, transport::SipAddr};
 use std::{collections::HashMap, sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 #[derive(Clone)]
 pub struct RegistrarModule {
@@ -515,6 +515,7 @@ impl ProxyModule for RegistrarModule {
                 return Ok(ProxyAction::Abort);
             }
 
+            let event_guard = self.server.locator_event_lock.lock().await;
             self.server
                 .locator
                 .unregister(user.username.as_str(), user.realm.as_deref())
@@ -525,14 +526,24 @@ impl ProxyModule for RegistrarModule {
             metrics::sip::unregistration(&realm);
 
             if let Some(locator_events) = &self.server.locator_events {
-                locator_events
-                    .send(LocatorEvent::Unregistered(Location {
+                let removed = locations_without_active_bindings(
+                    self.server.locator.as_ref().as_ref(),
+                    vec![Location {
                         aor: registered_aor.clone(),
+                        registered_username: Some(user.username.clone()),
+                        registered_realm: user.realm.clone(),
                         registered_aor: Some(registered_aor),
                         ..Default::default()
-                    }))
-                    .ok();
+                    }],
+                )
+                .await;
+                if let Some(location) = removed.into_iter().next() {
+                    locator_events
+                        .send(LocatorEvent::Unregistered(location))
+                        .ok();
+                }
             }
+            drop(event_guard);
 
             let headers = Vec::new();
             tx.reply_with(rsipstack::sip::StatusCode::OK, headers, None)
@@ -619,6 +630,8 @@ impl ProxyModule for RegistrarModule {
                 },
                 credential: None,
                 headers: Some(headers),
+                registered_username: Some(user.username.clone()),
+                registered_realm: user.realm.clone(),
                 registered_aor: Some(registered_aor.clone()),
                 contact_raw: Some(rendered_contact.clone()),
                 contact_params: Some(entry.param_map()),
@@ -640,6 +653,7 @@ impl ProxyModule for RegistrarModule {
                 location.transport = destination.r#type;
             }
 
+            let _event_guard = self.server.locator_event_lock.lock().await;
             match self
                 .server
                 .locator
@@ -654,26 +668,15 @@ impl ProxyModule for RegistrarModule {
                     metrics::sip::registration_succeeded(&realm);
                     if let Some(locator_events) = &self.server.locator_events {
                         if location.expires == 0 {
-                            match self
-                                .server
-                                .locator
-                                .has_active_bindings(user.username.as_str(), user.realm.as_deref())
-                                .await
-                            {
-                                Ok(true) => debug!(
-                                    username = %user.username,
-                                    "Binding removed while user remains registered"
-                                ),
-                                Ok(false) => {
-                                    locator_events
-                                        .send(LocatorEvent::Unregistered(location))
-                                        .ok();
-                                }
-                                Err(error) => warn!(
-                                    username = %user.username,
-                                    error = %error,
-                                    "Failed to verify remaining bindings after unregister"
-                                ),
+                            let removed = locations_without_active_bindings(
+                                self.server.locator.as_ref().as_ref(),
+                                vec![location],
+                            )
+                            .await;
+                            if let Some(location) = removed.into_iter().next() {
+                                locator_events
+                                    .send(LocatorEvent::Unregistered(location))
+                                    .ok();
                             }
                         } else {
                             locator_events.send(LocatorEvent::Registered(location)).ok();

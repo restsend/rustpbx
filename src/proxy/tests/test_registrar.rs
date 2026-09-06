@@ -1,12 +1,91 @@
 use super::common::{
     create_register_request, create_test_request, create_test_server,
-    create_test_server_with_config, create_transaction,
+    create_test_server_with_config, create_test_server_with_config_and_locator, create_transaction,
 };
 use crate::call::{Location, TransactionCookie};
 use crate::config::ProxyConfig;
+use crate::proxy::locator::{Locator, LocatorStats, MemoryLocator, RealmChecker};
 use crate::proxy::registrar::RegistrarModule;
 use crate::proxy::{ProxyAction, ProxyModule};
+use anyhow::Result;
+use async_trait::async_trait;
+use rsipstack::sip::Header;
+use rsipstack::transport::SipAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
+
+#[derive(Clone)]
+struct PausingLocator {
+    inner: Arc<MemoryLocator>,
+    pause_has_active: Arc<AtomicBool>,
+    pause_unregister: Arc<AtomicBool>,
+    checked: Arc<Notify>,
+    resume: Arc<Notify>,
+}
+
+impl PausingLocator {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(MemoryLocator::new()),
+            pause_has_active: Arc::new(AtomicBool::new(false)),
+            pause_unregister: Arc::new(AtomicBool::new(false)),
+            checked: Arc::new(Notify::new()),
+            resume: Arc::new(Notify::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl Locator for PausingLocator {
+    fn set_realm_checker(&self, checker: RealmChecker) {
+        self.inner.set_realm_checker(checker);
+    }
+
+    async fn register(
+        &self,
+        username: &str,
+        realm: Option<&str>,
+        location: Location,
+    ) -> Result<()> {
+        self.inner.register(username, realm, location).await
+    }
+
+    async fn has_active_bindings(&self, username: &str, realm: Option<&str>) -> Result<bool> {
+        let active = self.inner.has_active_bindings(username, realm).await?;
+        if !active && self.pause_has_active.swap(false, Ordering::SeqCst) {
+            self.checked.notify_one();
+            self.resume.notified().await;
+        }
+        Ok(active)
+    }
+
+    async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()> {
+        self.inner.unregister(username, realm).await?;
+        if self.pause_unregister.swap(false, Ordering::SeqCst) {
+            self.checked.notify_one();
+            self.resume.notified().await;
+        }
+        Ok(())
+    }
+
+    async fn unregister_with_address(&self, addr: &SipAddr) -> Result<Option<Vec<Location>>> {
+        self.inner.unregister_with_address(addr).await
+    }
+
+    async fn lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>> {
+        self.inner.lookup(uri).await
+    }
+
+    async fn sweep_expired(&self) -> Result<Vec<Location>> {
+        self.inner.sweep_expired().await
+    }
+
+    async fn online_stats(&self) -> Result<LocatorStats> {
+        self.inner.online_stats().await
+    }
+}
 
 #[tokio::test]
 async fn test_registrar_register_success() {
@@ -116,62 +195,108 @@ async fn test_registrar_unregister() {
 
 #[tokio::test]
 async fn test_registrar_unregister_keeps_user_online_with_another_binding() {
-    let config = ProxyConfig {
-        realms: Some(vec!["example.com".to_string()]),
-        ..Default::default()
-    };
-    let (server_inner, config) = create_test_server_with_config(config).await;
-    let module = RegistrarModule::new(server_inner.clone(), config);
+    let mut stale_event_scenarios = Vec::new();
+    for wildcard in [false, true] {
+        let locator = PausingLocator::new();
+        let locator_trait = Arc::new(Box::new(locator.clone()) as Box<dyn Locator>);
+        let config = ProxyConfig {
+            realms: Some(vec!["example.com".to_string()]),
+            ..Default::default()
+        };
+        let (server_inner, config) =
+            create_test_server_with_config_and_locator(config, locator_trait).await;
+        let module = RegistrarModule::new(server_inner.clone(), config);
 
-    let register_request = create_register_request("agent-a", "example.com", Some(60));
-    let registered_aor = register_request.uri.clone();
-    let registered_realm = registered_aor.host_with_port.to_string();
-    let (mut tx, _) = create_transaction(register_request).await;
-    module
-        .on_transaction_begin(
-            CancellationToken::new(),
-            &mut tx,
-            TransactionCookie::default(),
-        )
-        .await
-        .unwrap();
+        let register_request = create_register_request("agent-a", "example.com", Some(60));
+        let registered_aor = register_request.uri.clone();
+        let (mut tx, _) = create_transaction(register_request).await;
+        module
+            .on_transaction_begin(
+                CancellationToken::new(),
+                &mut tx,
+                TransactionCookie::default(),
+            )
+            .await
+            .unwrap();
 
-    let second_aor = create_register_request("new-device", "client.invalid", None).uri;
-    server_inner
-        .locator
-        .register(
-            "agent-a",
-            Some(&registered_realm),
-            Location {
-                aor: second_aor.clone(),
-                expires: 60,
-                registered_aor: Some(registered_aor.clone()),
-                instance_id: Some("new-binding".to_string()),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+        let mut events = server_inner.locator_events.as_ref().unwrap().subscribe();
+        if wildcard {
+            locator.pause_unregister.store(true, Ordering::SeqCst);
+        } else {
+            locator.pause_has_active.store(true, Ordering::SeqCst);
+        }
 
-    let mut events = server_inner.locator_events.as_ref().unwrap().subscribe();
-    let unregister_request = create_register_request("agent-a", "example.com", Some(0));
-    let (mut tx, _) = create_transaction(unregister_request).await;
-    module
-        .on_transaction_begin(
-            CancellationToken::new(),
-            &mut tx,
-            TransactionCookie::default(),
-        )
-        .await
-        .unwrap();
+        let mut unregister_request = create_register_request("agent-a", "example.com", Some(0));
+        if wildcard {
+            unregister_request
+                .headers
+                .retain(|header| !matches!(header, Header::Contact(_)));
+            unregister_request
+                .headers
+                .push(Header::Other("Contact".into(), "*".into()));
+        }
+        let (mut unregister_tx, _) = create_transaction(unregister_request).await;
+        let unregister_module = module.clone();
+        let unregister_task = tokio::spawn(async move {
+            unregister_module
+                .on_transaction_begin(
+                    CancellationToken::new(),
+                    &mut unregister_tx,
+                    TransactionCookie::default(),
+                )
+                .await
+                .unwrap();
+        });
 
-    let locations = server_inner.locator.lookup(&registered_aor).await.unwrap();
-    assert_eq!(locations.len(), 1);
-    assert_eq!(locations[0].aor, second_aor);
-    assert!(matches!(
-        events.try_recv(),
-        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
-    ));
+        locator.checked.notified().await;
+
+        let register_request = create_register_request("agent-a", "example.com", Some(60));
+        let (mut register_tx, _) = create_transaction(register_request).await;
+        let register_module = module.clone();
+        let register_task = tokio::spawn(async move {
+            register_module
+                .on_transaction_begin(
+                    CancellationToken::new(),
+                    &mut register_tx,
+                    TransactionCookie::default(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let first_event =
+            tokio::time::timeout(std::time::Duration::from_millis(100), events.recv())
+                .await
+                .ok()
+                .and_then(|result| result.ok());
+        locator.resume.notify_one();
+        unregister_task.await.unwrap();
+        register_task.await.unwrap();
+
+        let mut observed = first_event.into_iter().collect::<Vec<_>>();
+        while let Ok(event) = events.try_recv() {
+            observed.push(event);
+        }
+        if !matches!(
+            observed.last(),
+            Some(crate::proxy::locator::LocatorEvent::Registered(_))
+        ) {
+            stale_event_scenarios.push((wildcard, observed));
+        }
+        assert_eq!(
+            server_inner
+                .locator
+                .lookup(&registered_aor)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    assert!(
+        stale_event_scenarios.is_empty(),
+        "stale unregister events followed concurrent registrations: {stale_event_scenarios:?}"
+    );
 }
 
 #[tokio::test]

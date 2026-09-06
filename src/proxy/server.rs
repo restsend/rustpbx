@@ -23,7 +23,8 @@ use crate::{
         call::{CallRouter, DialplanInspector},
         cluster_event::ClusterEventHub,
         locator::{
-            DialogTargetLocator, LocatorEvent, LocatorEventSender, TransportInspectorLocator,
+            DialogTargetLocator, LocatorEvent, LocatorEventLock, LocatorEventSender,
+            TransportInspectorLocator, sweep_offline_locations,
         },
         presence::PresenceManager,
     },
@@ -94,6 +95,7 @@ pub struct SipServerInner {
     pub create_route_invites: Vec<FnCreateRouteInvite>,
     pub ignore_out_of_dialog_request: bool,
     pub locator_events: Option<LocatorEventSender>,
+    pub locator_event_lock: LocatorEventLock,
     pub sipflow_config: ArcSwap<Option<SipFlowConfig>>,
     pub recording_policy: ArcSwap<Option<RecordingPolicy>>,
     pub sip_flow: Option<SipFlow>,
@@ -912,9 +914,11 @@ impl SipServerBuilder {
             let (tx, _) = tokio::sync::broadcast::channel(12);
             tx
         });
+        let locator_event_lock = Arc::new(tokio::sync::Mutex::new(()));
         // Let the backend report bindings it removes on its own (e.g. expired
         // rows pruned during `lookup`) as LocatorEvent::Offline.
         locator.set_event_sender(Some(locator_events.clone()));
+        locator.set_event_lock(Some(locator_event_lock.clone()));
 
         let locator_local_addrs = endpoint_local_addrs;
         let cluster_enabled = !self.cluster_peers.is_empty();
@@ -928,6 +932,7 @@ impl SipServerBuilder {
             .with_transport_inspector(TransportInspectorLocator::new(
                 locator.clone(),
                 locator_events.clone(),
+                locator_event_lock.clone(),
             ));
 
         let endpoint = endpoint_builder.build();
@@ -1036,6 +1041,7 @@ impl SipServerBuilder {
         {
             let locator_for_sweep = locator.clone();
             let locator_events_for_sweep = locator_events.clone();
+            let locator_event_lock_for_sweep = locator_event_lock.clone();
             let sweep_token = cancel_token.child_token();
             tokio::spawn(async move {
                 // Run roughly every quarter of the shortest typical registrar
@@ -1055,7 +1061,8 @@ impl SipServerBuilder {
                         biased;
                         _ = sweep_token.cancelled() => break,
                         _ = ticker.tick() => {
-                            match locator_for_sweep.sweep_expired().await {
+                            let _event_guard = locator_event_lock_for_sweep.lock().await;
+                            match sweep_offline_locations(locator_for_sweep.as_ref().as_ref()).await {
                                 Ok(removed) if !removed.is_empty() => {
                                     info!(
                                         count = removed.len(),
@@ -1166,6 +1173,7 @@ impl SipServerBuilder {
             create_route_invites: self.create_route_invites,
             ignore_out_of_dialog_request: self.ignore_out_of_dialog_request,
             locator_events: Some(locator_events),
+            locator_event_lock,
             sipflow_config: ArcSwap::new(Arc::new(self.sipflow_config.clone())),
             recording_policy: ArcSwap::new(Arc::new(self.config.recording.clone())),
             sip_flow,

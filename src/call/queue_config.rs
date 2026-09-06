@@ -267,6 +267,8 @@ impl AgentConfig {
             supports_webrtc: false,
             credential: None,
             headers: None,
+            registered_username: None,
+            registered_realm: None,
             registered_aor: None,
             contact_raw: None,
             contact_params: None,

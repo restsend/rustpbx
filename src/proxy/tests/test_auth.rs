@@ -515,6 +515,7 @@ async fn test_guest_call_allowed_extension() {
         create_route_invites: Vec::new(),
         ignore_out_of_dialog_request: true,
         locator_events: None,
+        locator_event_lock: Arc::new(tokio::sync::Mutex::new(())),
         sipflow_config: ArcSwap::new(Arc::new(None)),
         sip_flow: None,
         active_call_registry: Arc::new(ActiveProxyCallRegistry::new()),

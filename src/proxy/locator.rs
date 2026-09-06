@@ -21,7 +21,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 #[derive(Clone, Debug)]
 pub enum LocatorEvent {
@@ -47,6 +47,7 @@ pub struct LocatorStats {
 
 pub type LocatorEventSender = tokio::sync::broadcast::Sender<LocatorEvent>;
 pub type LocatorEventReceiver = tokio::sync::broadcast::Receiver<LocatorEvent>;
+pub type LocatorEventLock = Arc<tokio::sync::Mutex<()>>;
 pub type LocatorCreationFuture = Pin<Box<dyn Future<Output = Result<Box<dyn Locator>>> + Send>>;
 pub type RealmChecker =
     Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
@@ -85,6 +86,10 @@ pub trait Locator: Send + Sync {
     /// by the registrar, [`TransportInspectorLocator`] and the sweep task in
     /// `server.rs`; emitting there as well would produce duplicates.
     fn set_event_sender(&self, _sender: Option<LocatorEventSender>) {}
+    /// Share the lock that serializes locator mutations with their local
+    /// registration events. Backends use it only when removing bindings on
+    /// their own, so all event producers observe the same ordering boundary.
+    fn set_event_lock(&self, _lock: Option<LocatorEventLock>) {}
     async fn register(&self, username: &str, realm: Option<&str>, location: Location)
     -> Result<()>;
     async fn has_active_bindings(&self, username: &str, realm: Option<&str>) -> Result<bool>;
@@ -99,6 +104,52 @@ pub trait Locator: Send + Sync {
     async fn online_stats(&self) -> Result<LocatorStats> {
         Ok(LocatorStats::default())
     }
+}
+
+/// Keep removed bindings only for identities that have no active binding left.
+///
+/// Binding cleanup and user presence are different facts: a reconnect can add
+/// a fresh Contact before an older Contact expires or its transport closes.
+/// Every removal path must cross this boundary before publishing an offline or
+/// unregistered event, otherwise the stale binding can overwrite the fresh
+/// registration state.
+pub async fn locations_without_active_bindings(
+    locator: &dyn Locator,
+    removed: Vec<Location>,
+) -> Vec<Location> {
+    let mut grouped = HashMap::<(String, Option<String>), Vec<Location>>::new();
+    for location in removed {
+        let Some(username) = location.registered_username.clone() else {
+            warn!(binding = %location.aor, "Removed binding has no registered username");
+            continue;
+        };
+        grouped
+            .entry((username, location.registered_realm.clone()))
+            .or_default()
+            .push(location);
+    }
+
+    let mut offline = Vec::new();
+    for ((username, realm), locations) in grouped {
+        match locator
+            .has_active_bindings(&username, realm.as_deref())
+            .await
+        {
+            Ok(true) => debug!(%username, "Binding removed while user remains registered"),
+            Ok(false) => offline.extend(locations),
+            Err(error) => warn!(
+                %username,
+                error = %error,
+                "Failed to verify remaining bindings after removal"
+            ),
+        }
+    }
+    offline
+}
+
+pub async fn sweep_offline_locations(locator: &dyn Locator) -> Result<Vec<Location>> {
+    let removed = locator.sweep_expired().await?;
+    Ok(locations_without_active_bindings(locator, removed).await)
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -480,6 +531,7 @@ impl TargetLocator for DialogTargetLocator {
 pub struct TransportInspectorLocator {
     locator_events: LocatorEventSender,
     locator: Arc<Box<dyn Locator>>,
+    locator_event_lock: LocatorEventLock,
 }
 
 impl TransportInspectorLocator {
@@ -487,10 +539,12 @@ impl TransportInspectorLocator {
     pub fn new(
         locator: Arc<Box<dyn Locator>>,
         locator_events: LocatorEventSender,
+        locator_event_lock: LocatorEventLock,
     ) -> Box<dyn TransportEventInspector> {
         Box::new(Self {
             locator,
             locator_events,
+            locator_event_lock,
         }) as Box<dyn TransportEventInspector>
     }
 }
@@ -500,11 +554,15 @@ impl TransportEventInspector for TransportInspectorLocator {
     async fn handle(&self, event: TransportEvent) -> Option<TransportEvent> {
         if let TransportEvent::Closed(conn) = &event {
             let addr = conn.get_remote_addr().unwrap_or_else(|| conn.get_addr());
+            let _event_guard = self.locator_event_lock.lock().await;
             match self.locator.unregister_with_address(addr).await {
                 Ok(Some(removed)) => {
-                    if !removed.is_empty() {
+                    let offline =
+                        locations_without_active_bindings(self.locator.as_ref().as_ref(), removed)
+                            .await;
+                    if !offline.is_empty() {
                         self.locator_events
-                            .send(LocatorEvent::Offline(removed))
+                            .send(LocatorEvent::Offline(offline))
                             .ok();
                     }
                 }
@@ -564,13 +622,15 @@ impl Locator for MemoryLocator {
         &self,
         username: &str,
         realm: Option<&str>,
-        location: Location,
+        mut location: Location,
     ) -> Result<()> {
         let identifier = self.get_identifier(username, realm).await;
         if identifier.is_empty() {
             debug!(%username, "skip registering location with empty identifier");
             return Ok(());
         }
+        location.registered_username = Some(username.to_string());
+        location.registered_realm = realm.map(str::to_string);
 
         let binding_key = location.binding_key();
         let now = Instant::now();
@@ -844,7 +904,7 @@ impl Locator for MemoryLocator {
     /// e.g. browsers that close without sending a REGISTER expires=0.                                                                                                                                                                              
     async fn sweep_expired(&self) -> Result<Vec<Location>> {
         let now = Instant::now();
-        let mut removed: Vec<Location> = Vec::new();
+        let mut removed = Vec::new();
 
         self.locations.retain(|_, map| {
             map.retain(|_, loc| {

@@ -37,8 +37,24 @@ pub async fn create_test_server_with_config(
 }
 
 pub async fn create_test_server_with_config_and_sipflow_backend(
+    config: ProxyConfig,
+    sipflow_backend: Option<Arc<dyn crate::sipflow::SipFlowBackend>>,
+) -> (Arc<SipServerInner>, Arc<ProxyConfig>) {
+    let locator = Arc::new(Box::new(MemoryLocator::new()) as Box<dyn Locator>);
+    create_test_server_with_dependencies(config, sipflow_backend, locator).await
+}
+
+pub async fn create_test_server_with_config_and_locator(
+    config: ProxyConfig,
+    locator: Arc<Box<dyn Locator>>,
+) -> (Arc<SipServerInner>, Arc<ProxyConfig>) {
+    create_test_server_with_dependencies(config, None, locator).await
+}
+
+async fn create_test_server_with_dependencies(
     mut config: ProxyConfig,
     sipflow_backend: Option<Arc<dyn crate::sipflow::SipFlowBackend>>,
+    locator: Arc<Box<dyn Locator>>,
 ) -> (Arc<SipServerInner>, Arc<ProxyConfig>) {
     // Add rustpbx.com to the allowed realms for testing
     if config.realms.is_none() {
@@ -51,7 +67,6 @@ pub async fn create_test_server_with_config_and_sipflow_backend(
         .push("rustpbx.com".to_string());
 
     let user_backend = Box::new(MemoryUserBackend::new(None));
-    let locator = Arc::new(Box::new(MemoryLocator::new()) as Box<dyn Locator>);
     let config = Arc::new(config);
 
     let endpoint = rsipstack::EndpointBuilder::new().build();
@@ -81,6 +96,8 @@ pub async fn create_test_server_with_config_and_sipflow_backend(
     );
 
     let (locator_events_tx, _) = tokio::sync::broadcast::channel(100);
+    let locator_event_lock = Arc::new(tokio::sync::Mutex::new(()));
+    locator.set_event_lock(Some(locator_event_lock.clone()));
 
     // Share ONE ConferenceManager between the conference_manager field and the
     // ConferenceServer so tests that cross between them observe the same state.
@@ -116,6 +133,7 @@ pub async fn create_test_server_with_config_and_sipflow_backend(
         create_route_invites: Vec::new(),
         ignore_out_of_dialog_request: true,
         locator_events: Some(locator_events_tx),
+        locator_event_lock,
         sipflow_config: ArcSwap::new(Arc::new(None)),
         sip_flow: sipflow_backend
             .map(|backend| crate::callrecord::sipflow::SipFlow::new(Some(backend), Vec::new())),
