@@ -46,10 +46,6 @@ impl RecordingUploadHook {
         let recording_type = policy.effective_recording_type();
         let (s3_upload_sender, upload_manager, s3_storage) = if recording_type == RecordingType::S3
         {
-            let bucket = Self::required(&policy.bucket, "bucket")?;
-            let region = Self::required(&policy.region, "region")?;
-            let access_key = Self::required(&policy.access_key, "access_key")?;
-            let secret_key = Self::required(&policy.secret_key, "secret_key")?;
             let endpoint = policy
                 .endpoint
                 .as_deref()
@@ -57,10 +53,12 @@ impl RecordingUploadHook {
                 .filter(|endpoint| !endpoint.is_empty())
                 .map(str::to_string);
             let vendor = policy.vendor.clone().unwrap_or_default();
+            let access_key = Self::required(&policy.access_key, "access_key")?;
+            let secret_key = Self::required(&policy.secret_key, "secret_key")?;
             let storage = Storage::new(&StorageConfig::S3 {
                 vendor,
-                bucket: bucket.clone(),
-                region,
+                bucket: policy.bucket.clone().unwrap_or_default(),
+                region: policy.region.clone().unwrap_or_default(),
                 access_key,
                 secret_key,
                 endpoint: endpoint.clone(),
@@ -232,19 +230,23 @@ impl RecordingUploadHook {
         }
     }
 
-    fn s3_url(endpoint: Option<&str>, bucket: &str, key: &str) -> String {
-        match endpoint
+    fn s3_url(&self, bucket: &str, key: &str) -> String {
+        let bucket = bucket.trim().trim_matches('/');
+        let key = key.trim_start_matches('/');
+        let Some(endpoint) = self
+            .policy
+            .endpoint
+            .as_deref()
             .map(str::trim)
-            .filter(|endpoint| !endpoint.is_empty())
-        {
-            Some(endpoint) => format!(
-                "{}/{}/{}",
-                endpoint.trim_end_matches('/'),
-                bucket.trim_matches('/'),
-                key.trim_start_matches('/')
-            ),
-            None => format!("s3://{}/{}", bucket.trim_matches('/'), key),
+            .filter(|s| !s.is_empty())
+        else {
+            return format!("s3://{bucket}/{key}");
+        };
+        let endpoint = endpoint.trim_end_matches('/');
+        if self.policy.vendor == Some(crate::storage::S3Vendor::Aliyun) {
+            return format!("{endpoint}/{key}");
         }
+        format!("{endpoint}/{bucket}/{key}")
     }
 }
 
@@ -310,12 +312,12 @@ impl RecordingUploadManager {
 
 impl RecordingUploadHook {
     fn preconstruct_s3_urls(&self, record: &mut CallRecord) -> Result<()> {
-        let bucket = Self::required(&self.policy.bucket, "bucket")?;
+        let bucket = self.policy.bucket.as_deref().unwrap_or_default().trim();
         let mut first_media_url = None;
 
         for media in &mut record.recorder {
             let key = Self::storage_key(&self.policy, Path::new(&media.path));
-            let url = Self::s3_url(self.policy.endpoint.as_deref(), &bucket, &key);
+            let url = self.s3_url(bucket, &key);
             let extra = media.extra.get_or_insert_with(HashMap::new);
             extra.insert("uploadUrl".to_string(), json!(url.clone()));
             if first_media_url.is_none() && media.track_id != "signaling" {
@@ -427,8 +429,8 @@ impl CallRecordHook for RecordingUploadHook {
 
                 if recording_type == RecordingType::S3 {
                     let key = Self::storage_key(&self.policy, Path::new(&path));
-                    let bucket = Self::required(&self.policy.bucket, "bucket")?;
-                    let url = Self::s3_url(self.policy.endpoint.as_deref(), &bucket, &key);
+                    let bucket = self.policy.bucket.as_deref().unwrap_or_default().trim();
+                    let url = self.s3_url(bucket, &key);
                     match self
                         .s3_upload_sender
                         .as_ref()
@@ -753,6 +755,37 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[tokio::test]
+    async fn aliyun_empty_bucket_and_region_initialize_recording_hook() {
+        let policy = RecordingPolicy {
+            recording_type: Some(RecordingType::S3),
+            vendor: Some(crate::storage::S3Vendor::Aliyun),
+            bucket: Some(String::new()),
+            region: Some(String::new()),
+            endpoint: Some("https://test-bucket.oss-cn-beijing.aliyuncs.com".into()),
+            access_key: Some("test".into()),
+            secret_key: Some("test".into()),
+            root: Some("recordings".into()),
+            ..Default::default()
+        };
+        let (hook, _, _) = RecordingUploadHook::new(policy).unwrap();
+        let mut record = CallRecord {
+            recorder: vec![CallRecordMedia {
+                track_id: "mixed".into(),
+                path: "call.wav".into(),
+                size: 44,
+                extra: None,
+            }],
+            ..Default::default()
+        };
+        hook.preconstruct_s3_urls(&mut record).unwrap();
+        let raw = record.details.recording_url.unwrap();
+        assert_eq!(
+            raw,
+            "https://test-bucket.oss-cn-beijing.aliyuncs.com/recordings/call.wav"
+        );
+    }
 
     #[tokio::test]
     async fn s3_enrich_preconstructs_recording_url() {

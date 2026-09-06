@@ -37,7 +37,9 @@ pub enum StorageConfig {
     },
     S3 {
         vendor: S3Vendor,
+        #[serde(default)]
         bucket: String,
+        #[serde(default)]
         region: String,
         access_key: String,
         secret_key: String,
@@ -114,6 +116,9 @@ impl Storage {
                             .with_access_key_id(access_key)
                             .with_secret_access_key(secret_key);
 
+                        if *vendor == S3Vendor::Aliyun {
+                            builder = builder.with_virtual_hosted_style_request(true);
+                        }
                         if let Some(ep) = endpoint.as_deref() {
                             builder = builder.with_endpoint(ep);
                             if ep.starts_with("http://") {
@@ -329,7 +334,7 @@ mod tests {
 
     fn s3_test_config(endpoint: Option<String>) -> StorageConfig {
         StorageConfig::S3 {
-            vendor: S3Vendor::Aliyun,
+            vendor: S3Vendor::AWS,
             bucket: "recordings-bucket".to_string(),
             region: "oss-cn-hangzhou".to_string(),
             access_key: "test-access-key".to_string(),
@@ -561,6 +566,64 @@ mod tests {
             ),
             None
         );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod aliyun_tests {
+    use super::*;
+    use crate::{Storage, StorageConfig};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn aliyun_empty_fields_keep_complete_endpoint() -> Result<()> {
+        let storage = Storage::new(&StorageConfig::S3 {
+            vendor: S3Vendor::Aliyun,
+            bucket: String::new(),
+            region: String::new(),
+            endpoint: Some("https://test-bucket.oss-cn-beijing.aliyuncs.com".into()),
+            access_key: "test".into(),
+            secret_key: "test".into(),
+            prefix: None,
+        })?;
+        for key in ["recordings/day/call.wav", "sipflow/day/call.jsonl"] {
+            let signed = storage
+                .presign_read_url(key, Duration::from_secs(60))
+                .await?;
+            assert!(signed.starts_with(&format!(
+                "https://test-bucket.oss-cn-beijing.aliyuncs.com/{key}?"
+            )));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn other_s3_vendors_preserve_path_style() -> Result<()> {
+        for vendor in [
+            S3Vendor::AWS,
+            S3Vendor::Minio,
+            S3Vendor::Tencent,
+            S3Vendor::DigitalOcean,
+        ] {
+            let ep = "https://objects.example.com";
+            let storage = Storage::new(&StorageConfig::S3 {
+                vendor: vendor.clone(),
+                bucket: "bucket".into(),
+                region: "us-east-1".into(),
+                endpoint: Some(ep.into()),
+                access_key: "test".into(),
+                secret_key: "test".into(),
+                prefix: None,
+            })?;
+            let raw = "https://objects.example.com/bucket/nested/file.wav";
+            assert!(
+                storage
+                    .presign_read_url("nested/file.wav", Duration::from_secs(60))
+                    .await?
+                    .starts_with(&format!("{raw}?"))
+            );
+        }
         Ok(())
     }
 }

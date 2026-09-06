@@ -241,7 +241,10 @@ pub async fn upload_media(
 
     let url_result = match upload_config {
         SipFlowUploadConfig::S3 {
-            bucket, endpoint, ..
+            vendor,
+            bucket,
+            endpoint,
+            ..
         } => {
             let wav_bytes = match tokio::fs::read(&temp_path).await {
                 Ok(b) => b,
@@ -255,7 +258,7 @@ pub async fn upload_media(
             };
             upload_s3(storage, full_media_key, wav_bytes)
                 .await
-                .map(|_| sipflow_s3_url(endpoint, bucket, full_media_key))
+                .map(|_| sipflow_s3_url(vendor, endpoint, bucket, full_media_key))
         }
         SipFlowUploadConfig::Http { url, headers, .. } => {
             upload_http_file(client, url, headers.as_ref(), call_id, &temp_path).await
@@ -430,13 +433,19 @@ pub struct SipFlowUploadResponse {
 
 // ── Internal upload helpers ───────────────────────────────────────────────────
 
-pub(crate) fn sipflow_s3_url(endpoint: &str, bucket: &str, key: &str) -> String {
-    format!(
-        "{}/{}/{}",
-        endpoint.trim_end_matches('/'),
-        bucket.trim_matches('/'),
-        key.trim_start_matches('/')
-    )
+pub(crate) fn sipflow_s3_url(
+    vendor: &crate::storage::S3Vendor,
+    endpoint: &str,
+    bucket: &str,
+    key: &str,
+) -> String {
+    let endpoint = endpoint.trim().trim_end_matches('/');
+    let bucket = bucket.trim().trim_matches('/');
+    let key = key.trim_start_matches('/');
+    if *vendor == crate::storage::S3Vendor::Aliyun {
+        return format!("{endpoint}/{key}");
+    }
+    format!("{endpoint}/{bucket}/{key}")
 }
 
 pub(crate) fn preconstruct_signaling_url(
@@ -445,6 +454,7 @@ pub(crate) fn preconstruct_signaling_url(
     signaling_default: bool,
 ) {
     let SipFlowUploadConfig::S3 {
+        vendor,
         bucket,
         endpoint,
         root,
@@ -459,7 +469,7 @@ pub(crate) fn preconstruct_signaling_url(
     }
 
     let key = join_root(root, &format_sipflow_signaling_key(record));
-    let url = sipflow_s3_url(endpoint, bucket, &key);
+    let url = sipflow_s3_url(vendor, endpoint, bucket, &key);
     record
         .details
         .metadata
@@ -618,6 +628,39 @@ mod tests {
             ..Default::default()
         };
         record
+    }
+
+    #[test]
+    fn aliyun_empty_bucket_and_region_generate_signaling_url() {
+        let config: SipFlowUploadConfig = toml::from_str(
+            r#"
+            type = "s3"
+            vendor = "aliyun"
+            bucket = ""
+            region = ""
+            endpoint = "https://test-bucket.oss-cn-beijing.aliyuncs.com"
+            access_key = "test"
+            secret_key = "test"
+            root = "sipflow"
+            signaling = true
+            media = false
+        "#,
+        )
+        .unwrap();
+        let mut record = make_record();
+        preconstruct_signaling_url(&mut record, &config, false);
+        let raw = record.details.metadata.as_ref().unwrap()["sipflow_jsonl"]
+            .as_str()
+            .unwrap();
+        let key = format!(
+            "sipflow/{}/test-call-id.jsonl",
+            record.start_time.format("%Y%m%d")
+        );
+        assert_eq!(
+            raw,
+            format!("https://test-bucket.oss-cn-beijing.aliyuncs.com/{key}")
+        );
+        assert!(build_s3_storage(&config).unwrap().is_some());
     }
 
     #[test]

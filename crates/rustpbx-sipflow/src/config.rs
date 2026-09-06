@@ -69,7 +69,9 @@ pub enum SipFlowSubdirs {
 pub enum SipFlowUploadConfig {
     S3 {
         vendor: S3Vendor,
+        #[serde(default)]
         bucket: String,
+        #[serde(default)]
         region: String,
         access_key: String,
         secret_key: String,

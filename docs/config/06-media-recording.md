@@ -187,6 +187,20 @@ endpoint = "http://minio:9000"
 root = "recordings"
 ```
 
+For Aliyun OSS, set `vendor = "aliyun"` and provide the complete virtual-hosted
+endpoint, including the bucket name. Leave `bucket` and `region` unset;
+the client uses the endpoint unchanged:
+
+```toml
+vendor = "aliyun"
+endpoint = "https://my-bucket.oss-cn-beijing.aliyuncs.com"
+```
+
+This applies to both `[recording]` and `[sipflow.upload]`. AccessKey credentials
+are still required. The `root` setting is an object-key prefix inside the
+bucket. No bucket or region is inferred, and regional endpoints are not
+rewritten. Other vendors retain their existing addressing behavior.
+
 When `[recording] type = "http"` or `type = "s3"` is used, the CDR may be written before the media upload finishes. The database `recording_url` is updated after the upload succeeds. The local CDR JSON keeps the local recorder path in `recordingUrl` and the recorder metadata in `recorder[]`.
 
 ### SIP Signaling JSONL Sidecar

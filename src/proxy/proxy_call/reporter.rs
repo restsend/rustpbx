@@ -284,6 +284,7 @@ impl CallReporter {
             && let Some(crate::config::SipFlowConfig::Local {
                 upload:
                     Some(crate::config::SipFlowUploadConfig::S3 {
+                        vendor,
                         bucket,
                         endpoint,
                         root,
@@ -304,7 +305,7 @@ impl CallReporter {
                 format!("{}/{}", root.trim_end_matches('/'), key)
             };
             details.recording_url = Some(crate::callrecord::sipflow_upload::sipflow_s3_url(
-                endpoint, bucket, &full_key,
+                vendor, endpoint, bucket, &full_key,
             ));
             details.recording_duration_secs = Some((now - start_time).num_seconds().max(0) as i32);
         }
@@ -353,7 +354,9 @@ impl CallReporter {
             // manager's opt-in queueing-latency histogram.
             record
                 .extensions
-                .insert(crate::callrecord::RecordEnqueuedAt(std::time::Instant::now()));
+                .insert(crate::callrecord::RecordEnqueuedAt(
+                    std::time::Instant::now(),
+                ));
             match sender.try_send(record) {
                 Ok(()) => crate::metrics::cdr::enqueued(),
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
