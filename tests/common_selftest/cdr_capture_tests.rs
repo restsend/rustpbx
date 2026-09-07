@@ -38,6 +38,8 @@ fn create_test_record() -> CallRecord {
             outbound_sip_trunk_id: None,
             route_id: None,
             sip_gateway: None,
+            caller_peer: None,
+            callee_peer: None,
             recording_url: None,
             recording_duration_secs: None,
             has_transcript: false,

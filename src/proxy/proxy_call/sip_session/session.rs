@@ -2863,6 +2863,18 @@ impl SipSession {
             ..Default::default()
         };
 
+        // B-leg SIP destination for the CDR `calleePeer` field. Stashed here
+        // at dial time because cleanup() clears the leg dialogs before
+        // reporting. Last dial wins. Bare `ip:port` (SipAddr's Display would
+        // add a transport prefix). When the target carries no explicit
+        // destination (URI-routed leg), the INVITE goes to the request-URI
+        // host — use it (exact for IP-literal hosts like trunks).
+        self.meta.callee_peer = option
+            .destination
+            .as_ref()
+            .map(|d| d.addr.to_string())
+            .or_else(|| Some(callee_uri.host_with_port.to_string()));
+
         Ok((option, callee_uri, callee_call_id))
     }
 
@@ -8744,6 +8756,7 @@ impl SipSession {
             connected_callee: self.meta.connected_callee.clone(),
             routed_contact: self.meta.routed_contact.clone(),
             routed_destination: self.meta.routed_destination.clone(),
+            callee_peer: self.meta.callee_peer.clone(),
             last_queue_name: self.meta.queue_name.clone(),
             callee_call_ids: self.meta.callee_call_ids.iter().cloned().collect(),
             server_dialog_id: self.caller_dialog_id(),
@@ -10555,6 +10568,15 @@ impl SipSession {
             call_id: Some(bleg_call_id.clone()),
             ..Default::default()
         };
+
+        // B-leg SIP destination for the CDR `calleePeer` field (see
+        // build_target_invite_option; last dial wins). Bare `ip:port`;
+        // URI-routed legs fall back to the request-URI host.
+        self.meta.callee_peer = invite_option
+            .destination
+            .as_ref()
+            .map(|d| d.addr.to_string())
+            .or_else(|| Some(callee_uri.host_with_port.to_string()));
 
         // Register the B-leg SIP Call-ID as soon as the INVITE is built so
         // ringing-time CTI (`GET /cc/calls/{call_id}/context`) resolves before

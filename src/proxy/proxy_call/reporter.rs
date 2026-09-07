@@ -277,6 +277,17 @@ impl CallReporter {
             ..Default::default()
         };
 
+        // Peer addresses for the CDR: A-leg rides the transaction cookie
+        // (`CallerPeerContext`, covers the early-failure path where no
+        // SipSession/snapshot exists); B-leg was stashed into the snapshot at
+        // dial time.
+        details.caller_peer = self
+            .context
+            .cookie
+            .get_extension::<crate::call::CallerPeerContext>()
+            .map(|p| p.0);
+        details.callee_peer = snapshot.callee_peer.clone();
+
         if call_was_accepted
             && details.recording_url.is_none()
             && self.server.recording_policy.load().is_none()
@@ -736,6 +747,7 @@ mod tests {
             connected_callee: None,
             routed_contact: None,
             routed_destination: None,
+            callee_peer: None,
             last_queue_name: None,
             callee_call_ids: vec!["callee-call-id".to_string()],
             server_dialog_id: rsipstack::dialog::DialogId {
@@ -850,6 +862,7 @@ mod tests {
             connected_callee: None,
             routed_contact: None,
             routed_destination: None,
+            callee_peer: None,
             last_queue_name: None,
             callee_call_ids: vec![],
             server_dialog_id: rsipstack::dialog::DialogId {

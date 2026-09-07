@@ -1783,6 +1783,25 @@ impl CallModule {
             .get_user()
             .ok_or_else(|| anyhow::anyhow!("Missing caller user in transaction cookie"))?;
 
+        // A-leg SIP peer (bare ip:port) for the CDR `callerPeer` field: prefer
+        // the inbound INVITE's transport connection, fall back to the top-Via
+        // address when the connection is unavailable (may be a NAT address).
+        // Rides the cookie so early-failure CDRs (no SipSession yet) keep it.
+        // NB: `SipAddr::to_string()` prefixes the transport ("UDP ip:port");
+        // the bare `addr` (HostWithPort) matches the signaling table's peer
+        // format and the plugin's anchored LIKE matching.
+        let caller_peer = tx
+            .connection
+            .as_ref()
+            .and_then(|conn| conn.get_remote_addr())
+            .map(|addr| addr.addr.to_string())
+            .or_else(|| {
+                crate::proxy::routing::extract_via_ip(&tx.original).map(|ip| ip.to_string())
+            });
+        if let Some(peer) = caller_peer {
+            cookie.insert_extension(crate::call::CallerPeerContext(peer));
+        }
+
         // Immediately acknowledge the INVITE with 100 Trying BEFORE any routing work.
         // Routing (esp. wholesale route_wholesale) may block on CPS locks, DB lookups or
         // semaphores; without an early 100 the upstream retransmits (Timer A: 500ms..16s)
