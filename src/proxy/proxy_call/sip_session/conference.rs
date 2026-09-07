@@ -31,14 +31,11 @@ impl SipSession {
             info!(session_id = %self.id, conf_id = %conf_id_str, "Conference created");
         }
 
-        let mut active_legs: Vec<(LegId, Option<Arc<dyn MediaPeer>>)> = self
+        let mut active_legs: Vec<LegId> = self
             .legs
             .iter()
             .filter(|(_, leg)| leg.is_active())
-            .map(|(id, _)| {
-                let peer = self.legs.get_peer(id).cloned();
-                (id.clone(), peer)
-            })
+            .map(|(id, _)| id.clone())
             .collect();
 
         // Room dial-in (app=conference): join_conference_mixer runs right
@@ -48,54 +45,16 @@ impl SipSession {
         // The caller leg IS the participant for dial-in: always include it.
         {
             let caller_leg = LegId::from("caller");
-            if self.legs.get(&caller_leg).is_some()
-                && !active_legs.iter().any(|(id, _)| *id == caller_leg)
-            {
-                let peer = self.legs.get_peer(&caller_leg).cloned();
-                active_legs.insert(0, (caller_leg, peer));
+            if self.legs.get(&caller_leg).is_some() && !active_legs.contains(&caller_leg) {
+                active_legs.insert(0, caller_leg);
             }
         }
 
-        for (leg_id, peer) in active_legs {
-            // NOTE: the participant is NOT explicitly registered here.
-            // `start_conference_media_bridge[_for_peer]` → `start_bridge_full_duplex`
-            // registers the participant internally (exactly once). Pre-registering
-            // with a different composite leg_id caused a duplicate participant
-            // entry (one bridged, one orphaned).
-            // The "caller"/"callee" anchor legs must take the dedicated
-            // start_conference_media_bridge path: it resolves the anchor peer
-            // itself AND prefers MediaBridge leg Inject for the output side
-            // (the consult-merge-proven path). The legs-registry peer for an
-            // anchor leg is a bare virtual MediaStreamBuilder with no PC /
-            // tracks, which the _for_peer variant cannot bridge.
-            let is_anchor_leg = leg_id.0 == "caller"
-                || leg_id.0 == "callee"
-                || leg_id.0.ends_with("-caller")
-                || leg_id.0.ends_with("-callee");
-            // Anchor legs register under the session-scoped composite id
-            // (consult-merge convention): every dial-in session's caller is
-            // literally "caller", so the bare id collides across
-            // participants ("Leg caller already in conference").
-            let join_leg = if is_anchor_leg {
-                self.participant_leg(&leg_id)
-            } else {
-                leg_id.clone()
-            };
-            let joined = if let (false, Some(peer)) = (is_anchor_leg, peer) {
-                self.start_conference_media_bridge_for_peer(
-                    conf_id_str,
-                    &join_leg,
-                    &peer,
-                    None,
-                    None,
-                )
-                .await
-                .map(|_| ())
-            } else {
-                self.start_conference_media_bridge(conf_id_str, &join_leg)
-                    .await
-                    .map(|_| ())
-            };
+        for leg_id in active_legs {
+            let join_leg = self.participant_leg(&leg_id);
+            let joined = self
+                .try_start_and_store_bridge(conf_id_str, &leg_id, "conference media bridge")
+                .await;
             match joined {
                 Ok(()) => {
                     info!(session_id = %self.id, %join_leg, conf_id = %conf_id_str, "Leg joined conference");
@@ -179,6 +138,23 @@ impl SipSession {
         use rustrtc::media::MediaSample;
         use rustrtc::media::track::sample_track;
 
+        let prefix = format!("{}-", self.id);
+        let local_leg = LegId::from(
+            leg_id
+                .as_str()
+                .strip_prefix(&prefix)
+                .unwrap_or(leg_id.as_str()),
+        );
+        if self.media_side_for_leg(&local_leg).is_none() {
+            let peer = self
+                .legs
+                .get_peer(&local_leg)
+                .cloned()
+                .ok_or_else(|| anyhow!("Missing media peer for {}", local_leg))?;
+            return self
+                .start_conference_media_bridge_for_peer(conf_id, leg_id, &peer, None, None)
+                .await;
+        }
         let is_callee = leg_id.0.ends_with("-callee") || leg_id.0 == "callee";
         let (peer, track_id) = if is_callee {
             (
@@ -307,46 +283,27 @@ impl SipSession {
         &mut self,
         leg_id: &LegId,
     ) -> Result<Box<dyn crate::call::runtime::conference_media_bridge::AudioReceiver>> {
-        // Prefer the MediaBridge leg that actually carries media. The requested
-        // leg (e.g. a virtual caller in UAC mode) may not have a negotiated
-        // profile; try both sides and use whichever has one.
-        let preferred = if leg_id.0.ends_with("-callee") || leg_id.0 == "callee" {
-            crate::media::media_bridge::LegSide::B
-        } else {
-            crate::media::media_bridge::LegSide::A
-        };
-        let mut candidates = vec![preferred, preferred.opposite()];
-        candidates.dedup();
-
-        if let Some(mb) = self.bridge() {
-            for side in candidates {
-                match mb.leg_pcm_stream(side) {
-                    Ok(stream) => {
-                        info!(session_id = %self.id,
-                            leg_id = %leg_id,
-                            side = ?side,
-                            "Conference audio receiver from MediaBridge leg (P2.4)"
-                        );
-                        return Ok(Box::new(MediaBridgeLegAudioReceiver::new(stream)));
-                    }
-                    Err(e) => {
-                        warn!(session_id = %self.id,
-                            leg_id = %leg_id,
-                            side = ?side,
-                            has_leg = mb.leg(side).is_some(),
-                            error = %e,
-                            "MediaBridge leg PCM stream unavailable; trying next side"
-                        );
-                    }
-                }
-            }
+        let prefix = format!("{}-", self.id);
+        let local_leg = LegId::from(
+            leg_id
+                .as_str()
+                .strip_prefix(&prefix)
+                .unwrap_or(leg_id.as_str()),
+        );
+        self.require_leg(&local_leg)?;
+        if let Some(side) = self.media_side_for_leg(&local_leg)
+            && let Some(mb) = self.bridge()
+            && mb.leg(side).is_some()
+        {
+            return Ok(Box::new(MediaBridgeLegAudioReceiver::new(
+                mb.leg_pcm_stream(side)?,
+            )));
         }
-        // Fallback: read from the independent peer PC (legacy path) when no
-        // MediaBridge leg has a negotiated profile.
-        let Some(peer) = self.caller_peer().cloned() else {
-            return Err(anyhow!("No caller peer for conference input"));
-        };
-        self.create_audio_receiver_from_peer(&peer, None).await
+        let peer = self
+            .legs
+            .get_peer(&local_leg)
+            .ok_or_else(|| anyhow!("No media peer for conference leg {}", local_leg))?;
+        self.create_audio_receiver_from_peer(peer, None).await
     }
 
     pub(super) async fn create_audio_receiver_from_peer(
@@ -364,6 +321,14 @@ impl SipSession {
     pub(super) fn leg_negotiated_codec(&self, leg_id: &LegId) -> audio_codec::CodecType {
         use crate::media::negotiate::MediaNegotiator;
 
+        let prefix = format!("{}-", self.id);
+        let local_leg = LegId::from(
+            leg_id
+                .as_str()
+                .strip_prefix(&prefix)
+                .unwrap_or(leg_id.as_str()),
+        );
+        let leg_id = &local_leg;
         let sdp = self.legs.get_answer(leg_id).or_else(|| {
             if leg_id.as_str() == "caller" {
                 self.media.answer.as_deref()
@@ -437,9 +402,7 @@ impl SipSession {
             &participant_leg,
             "supervisor conference media bridge",
         )
-        .await;
-
-        Ok(())
+        .await
     }
 
     /// Join a specific leg of this session into a conference mixer.
@@ -490,27 +453,19 @@ impl SipSession {
         info!(session_id = %self.id, "Leaving mixer/conference");
 
         if let Some(conf_id) = self.conference_bridge.conf_id.take() {
-            let conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id.as_str());
-            let participant_leg = LegId::new(format!("{}-callee", self.id.0));
-
-            let _ = self
-                .server
-                .conference_server
-                .remove_participant(&conf_id_obj, &participant_leg)
-                .await;
-
-            if let Some(ref handle) = self.conference_bridge.bridge_handle {
-                handle.stop();
+            let conf_id = crate::call::runtime::ConferenceId::from(conf_id.as_str());
+            for leg in self.legs.keys() {
+                let _ = self
+                    .server
+                    .conference_server
+                    .remove_participant(&conf_id, &self.participant_leg(leg))
+                    .await;
             }
-            self.conference_bridge.bridge_handle = None;
-
-            // Also stop any per-leg handles (e.g. the supervisor listen/whisper
-            // pair stored in the LegRegistry by start_supervisor_bridge_pair).
-            self.legs.stop_all_conference_bridge_handles();
-
-            info!(session_id = %self.id, conf_id = %conf_id, "Left conference");
         }
-
+        self.legs.stop_all_conference_bridge_handles();
+        // The session-level handle is still used by the separate direct
+        // cross-session bridge path; conference participants live on legs.
+        self.conference_bridge.stop_bridge();
         Ok(())
     }
 }

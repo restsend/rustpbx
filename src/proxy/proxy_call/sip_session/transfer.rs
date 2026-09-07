@@ -2144,30 +2144,15 @@ impl SipSession {
             "Found leg for cross-session migration"
         );
 
-        let conference_server = &self.server.conference_server;
-        let conf_id = crate::call::runtime::ConferenceId::from(into_conference.as_str());
-
-        // Use a consistent composite leg_id for both conference registration and
-        // media bridge start — previously the two used different IDs causing a mismatch.
-        let participant_leg = LegId::new(format!("{}-{}", from_session, leg_id));
-        conference_server
-            .add_participant(&conf_id, participant_leg.clone())
-            .await
-            .map_err(|e| anyhow!("Failed to add leg to conference: {}", e))?;
-
-        info!(session_id = %self.id,
-            session_id = %self.id,
-            leg_id = %leg_id,
-            conf_id = %into_conference,
-            "Successfully migrated leg into conference"
-        );
-
+        // The media bridge registers the participant; pre-registration
+        // would make the subsequent bridge creation fail as a duplicate.
+        let participant_leg = self.participant_leg(&leg_id);
         self.try_start_and_store_bridge(
             &into_conference,
             &participant_leg,
             "conference media bridge",
         )
-        .await;
+        .await?;
 
         self.update_leg_state(&leg_id, LegState::Hold);
 
@@ -2234,7 +2219,7 @@ impl SipSession {
 
         let participant_leg = LegId::new(format!("{}-{}", my_session, my_leg));
         self.try_start_and_store_bridge(&conf_id, &participant_leg, "P2P conference media bridge")
-            .await;
+            .await?;
 
         if current_session == session_a {
             let registry = &self.server.active_call_registry;

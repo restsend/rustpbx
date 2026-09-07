@@ -593,35 +593,53 @@ impl SipSession {
         Ok(())
     }
 
-    /// Store a conference bridge handle + conference id on the session,
-    /// stopping any previously active bridge first.
-    pub(super) fn set_active_bridge(
-        &mut self,
-        conf_id: String,
-        handle: crate::call::runtime::ConferenceBridgeHandle,
-    ) {
-        self.conference_bridge.stop_bridge();
-        self.conference_bridge.bridge_handle = Some(handle);
-        self.conference_bridge.conf_id = Some(conf_id);
-    }
-
-    /// Start a conference media bridge, store the handle on success, or log a
-    /// warning on failure (non-fatal — execution continues).
+    /// Attach one participant to a mixer and retain its bridge on the local
+    /// leg. Other participants in this session keep their own bridge handles.
     pub(super) async fn try_start_and_store_bridge(
         &mut self,
         conf_id: &str,
         leg: &LegId,
         label: &str,
-    ) {
-        match self.start_conference_media_bridge(conf_id, leg).await {
-            Ok(handle) => {
-                info!(session_id = %self.id, leg_id = %leg, "{} started", label);
-                self.set_active_bridge(conf_id.to_string(), handle);
-            }
-            Err(e) => {
-                warn!(session_id = %self.id, leg_id = %leg, error = %e, "Failed to start {}", label);
+    ) -> Result<()> {
+        let prefix = format!("{}-", self.id);
+        let local_leg = LegId::from(leg.as_str().strip_prefix(&prefix).unwrap_or(leg.as_str()));
+        self.require_leg(&local_leg)?;
+        let participant_leg = self.participant_leg(&local_leg);
+        let current_room = self
+            .server
+            .conference_server
+            .get_conference_id_for_leg(&participant_leg)
+            .await;
+        if let Some(room) = current_room.as_ref() {
+            if room.0 == conf_id
+                && self
+                    .legs
+                    .conference_bridge_handle(&local_leg)
+                    .is_some_and(|handle| !handle.cancel_token.is_cancelled())
+            {
+                return Ok(());
             }
         }
+        // Moving to another mixer must stop the old bridge and remove its
+        // membership before registering this participant in the new room.
+        drop(self.legs.remove_conference_bridge_handle(&local_leg));
+        if let Some(room) = current_room {
+            self.server
+                .conference_server
+                .remove_participant(&room, &participant_leg)
+                .await?;
+        }
+        let handle = self
+            .start_conference_media_bridge(conf_id, &participant_leg)
+            .await
+            .map_err(|error| {
+                warn!(session_id = %self.id, %participant_leg, %error, "Failed to start {}", label);
+                error
+            })?;
+        self.legs.set_conference_bridge_handle(local_leg, handle);
+        self.conference_bridge.conf_id = Some(conf_id.to_string());
+        info!(session_id = %self.id, leg_id = %participant_leg, "{} started", label);
+        Ok(())
     }
 
     /// Start (or restart if already running) an application.
@@ -729,7 +747,9 @@ impl SipSession {
                 }
             }
         });
-        self.legs.push_task(leg.clone(), handle);
+        let prefix = format!("{}-", self.id);
+        let local_leg = LegId::from(leg.as_str().strip_prefix(&prefix).unwrap_or(leg.as_str()));
+        self.legs.push_task(local_leg, handle);
     }
 
     /// Build an `AudioReceiver` from a `PeerConnection` using the session's
@@ -10610,6 +10630,16 @@ impl SipSession {
 
     /// Update media path based on number of active legs.
     async fn update_media_path(&mut self) {
+        // Explicit mixer joins own routing until leave/cancel. Automatic
+        // two-leg routing must not tear down a private consultation mixer.
+        if self
+            .conference_bridge
+            .conf_id
+            .as_ref()
+            .is_some_and(|id| id != &format!("conf-{}", self.id))
+        {
+            return;
+        }
         let active_legs: Vec<LegId> = self
             .legs
             .iter()
@@ -10696,27 +10726,25 @@ impl SipSession {
 #[async_trait::async_trait]
 impl crate::call::runtime::LegMediaBridger for SipSession {
     async fn bridge_into(&mut self, conf_id: &str, leg_id: &LegId) -> Result<()> {
-        let peer = self.legs.get_peer(leg_id).cloned();
-        let handle = if let Some(peer) = peer {
-            self.start_conference_media_bridge_for_peer(conf_id, leg_id, &peer, None, None)
-                .await?
-        } else {
-            self.start_conference_media_bridge(conf_id, leg_id).await?
-        };
-        self.legs
-            .set_conference_bridge_handle(leg_id.clone(), handle);
-        Ok(())
+        self.try_start_and_store_bridge(conf_id, leg_id, "automatic conference bridge")
+            .await
     }
 
     async fn unbridge(&mut self, conf_id: &str, leg_id: &LegId) -> Result<()> {
-        if let Some(handle) = self.legs.remove_conference_bridge_handle(leg_id) {
-            handle.stop();
-        }
+        let prefix = format!("{}-", self.id);
+        let local_leg = LegId::from(
+            leg_id
+                .as_str()
+                .strip_prefix(&prefix)
+                .unwrap_or(leg_id.as_str()),
+        );
+        drop(self.legs.remove_conference_bridge_handle(&local_leg));
         let _ = self
             .server
             .conference_server
-            .leave_conference(conf_id, leg_id)
+            .leave_conference(conf_id, &self.participant_leg(&local_leg))
             .await;
+
         Ok(())
     }
 }
@@ -11565,6 +11593,22 @@ impl Drop for SipSession {
         self.timer_queue.clear();
         self.timer_keys.clear();
 
+        if let Some(conf_id) = self.conference_bridge.conf_id.clone()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            let server = self.server.conference_server.clone();
+            let participants: Vec<_> = self
+                .legs
+                .keys()
+                .map(|id| self.participant_leg(id))
+                .collect();
+            runtime.spawn(async move {
+                let conf_id = crate::call::runtime::ConferenceId::from(conf_id.as_str());
+                for participant in participants {
+                    let _ = server.remove_participant(&conf_id, &participant).await;
+                }
+            });
+        }
         // Stop conference bridges (safety net — cancel only, since we can't
         // .await in Drop)
         self.conference_bridge.stop_bridge();

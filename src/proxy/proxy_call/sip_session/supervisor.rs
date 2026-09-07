@@ -88,19 +88,19 @@ impl SipSession {
         let conf_id = format!("supervisor-{}-{}", self.id.0, kind);
         self.ensure_conference(&conf_id, Some(3)).await?;
 
-        let target_handle = self
-            .start_conference_media_bridge(&conf_id, &self.participant_leg(target_leg))
-            .await?;
-        self.legs
-            .set_conference_bridge_handle(target_leg.clone(), target_handle);
+        self.try_start_and_store_bridge(
+            &conf_id,
+            target_leg,
+            "supervisor conference media bridge",
+        )
+        .await?;
+        self.try_start_and_store_bridge(
+            &conf_id,
+            supervisor_leg,
+            "supervisor conference media bridge",
+        )
+        .await?;
 
-        let sup_handle = self
-            .start_conference_media_bridge(&conf_id, &self.participant_leg(supervisor_leg))
-            .await?;
-        self.legs
-            .set_conference_bridge_handle(supervisor_leg.clone(), sup_handle);
-
-        self.conference_bridge.conf_id = Some(conf_id);
         self.update_leg_state(supervisor_leg, LegState::Connected);
         Ok(())
     }
@@ -130,18 +130,9 @@ impl SipSession {
         let leg_ids: Vec<LegId> = self.legs.keys().cloned().collect();
 
         for leg_id in &leg_ids {
-            let participant_leg = self.participant_leg(leg_id);
-            if let Err(e) = self
-                .start_conference_media_bridge(&conf_id, &participant_leg)
-                .await
-            {
-                warn!(session_id = %self.id, %leg_id, error = %e, "Failed to bridge leg into barge conference");
-            }
+            self.try_start_and_store_bridge(&conf_id, leg_id, "barge conference media bridge")
+                .await?;
         }
-
-        self.start_conference_media_bridge(&conf_id, &self.participant_leg(&supervisor_leg))
-            .await?;
-        self.conference_bridge.conf_id = Some(conf_id);
 
         self.update_leg_state(&supervisor_leg, LegState::Connected);
         info!(session_id = %self.id,
@@ -167,26 +158,12 @@ impl SipSession {
         let conf_id = format!("supervisor-{}-{}", self.id.0, supervisor_session_id);
         self.ensure_conference(&conf_id, Some(3)).await?;
 
-        let target_participant_leg = self.participant_leg(&resolved_target_leg);
-        match self
-            .start_conference_media_bridge(&conf_id, &target_participant_leg)
-            .await
-        {
-            Ok(handle) => {
-                info!(session_id = %self.id,
-                    leg_id = %resolved_target_leg,
-                    "Supervisor conference media bridge started for target"
-                );
-                self.set_active_bridge(conf_id.clone(), handle);
-            }
-            Err(e) => {
-                return Err(anyhow!(
-                    "Failed to start supervisor conference media bridge for target {}: {}",
-                    resolved_target_leg,
-                    e
-                ));
-            }
-        }
+        self.try_start_and_store_bridge(
+            &conf_id,
+            &resolved_target_leg,
+            "supervisor conference media bridge",
+        )
+        .await?;
 
         self.forward_command(
             supervisor_session_id,
@@ -226,12 +203,12 @@ impl SipSession {
 
             let conf_id = format!("supervisor-{}-takeover", self.id.0);
             self.ensure_conference(&conf_id, Some(3)).await?;
-            if let Err(e) = self
-                .start_conference_media_bridge(&conf_id, &self.participant_leg(&customer_leg))
-                .await
-            {
-                warn!(session_id = %self.id, error = %e, "takeover: failed to bridge customer");
-            }
+            self.try_start_and_store_bridge(
+                &conf_id,
+                &customer_leg,
+                "takeover conference media bridge",
+            )
+            .await?;
             // Cross-session: ask supervisor session to join the same mixer.
             if let Some(sup_handle) = self
                 .server
@@ -272,14 +249,9 @@ impl SipSession {
         let conf_id = format!("supervisor-{}-takeover", self.id.0);
         self.ensure_conference(&conf_id, Some(3)).await?;
         for leg_id in [&supervisor_leg, &other_leg] {
-            if let Err(e) = self
-                .start_conference_media_bridge(&conf_id, &self.participant_leg(leg_id))
-                .await
-            {
-                warn!(session_id = %self.id, %leg_id, error = %e, "takeover bridge failed");
-            }
+            self.try_start_and_store_bridge(&conf_id, leg_id, "takeover conference media bridge")
+                .await?;
         }
-        self.conference_bridge.conf_id = Some(conf_id);
         self.bridge = BridgeConfig::bridge(supervisor_leg.clone(), other_leg.clone());
 
         self.update_leg_state(&target_leg, LegState::Ended);

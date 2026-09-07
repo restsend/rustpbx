@@ -87,14 +87,18 @@ impl ConferenceMediaBridge {
         let output_rx = self
             .conference_manager
             .take_participant_output_rx(leg_id)
-            .await
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "No output_rx found for leg {} in conference {}",
-                    leg_id,
-                    conf_id
-                )
-            })?;
+            .await;
+        let Some(output_rx) = output_rx else {
+            let _ = self
+                .conference_manager
+                .remove_participant(&conf_id_obj, leg_id)
+                .await;
+            anyhow::bail!(
+                "No output_rx found for leg {} in conference {}",
+                leg_id,
+                conf_id
+            );
+        };
 
         info!(
             conf_id = %conf_id,

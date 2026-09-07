@@ -179,6 +179,12 @@ impl LegRegistry {
         }
     }
 
+    pub fn conference_bridge_handle(&self, id: &LegId) -> Option<&ConferenceBridgeHandle> {
+        self.legs
+            .get(id)
+            .and_then(|data| data.conference_bridge.as_ref())
+    }
+
     pub fn remove_conference_bridge_handle(
         &mut self,
         id: &LegId,
