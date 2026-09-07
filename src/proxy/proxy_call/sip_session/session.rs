@@ -9693,6 +9693,17 @@ impl SipSession {
                     }
                     CommandResult::failure(reason.clone())
                 };
+                let ctx = self.session_hook_ctx();
+                for hook in self.server.session_hooks.iter() {
+                    if let Some(spec) = hook.on_leg_failed(&ctx, leg_id.as_str(), &reason).await {
+                        if let Err(error) = self
+                            .handle_send_info(spec.leg_id, spec.content_type, spec.body)
+                            .await
+                        {
+                            warn!(session_id = %self.id, %error, "Failed to send leg failure notification");
+                        }
+                    }
+                }
                 result
             }
 

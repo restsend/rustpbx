@@ -167,6 +167,17 @@ pub trait CallSessionHook: Send + Sync {
     /// Called once both legs are connected (200 OK acknowledged by caller).
     async fn on_call_connected(&self, _ctx: &CallSessionContext) {}
 
+    /// A leg rejected, timed out, or disconnected. Implementations may
+    /// update their state and return a SIP INFO notification.
+    async fn on_leg_failed(
+        &self,
+        _ctx: &CallSessionContext,
+        _leg_id: &str,
+        _reason: &str,
+    ) -> Option<SendInfoSpec> {
+        None
+    }
+
     /// Called when a leg is put on hold (re-INVITE with `sendonly`/`inactive`).
     async fn on_call_held(&self, _ctx: &CallSessionContext, _leg_id: &str) {}
 
