@@ -301,6 +301,27 @@ mod acd_e2e_test {
         // This test doesn't require a running SIP server
         let cc_state = rustpbx::addons::cc::CcAddonState::new();
 
+        // Make the default policy deterministic: always-open (00:00-23:59
+        // UTC). CcAddonState::new() ships a 09:00-18:00 Asia/Shanghai default
+        // — without this the decision below depends on the wall clock and
+        // the test breaks outside business hours on CI.
+        let mut acd_config = rustpbx::addons::cc::acd::AcdConfig::default();
+        let mut policy = rustpbx::addons::cc::acd::AcdPolicy::default();
+        policy.schedule = rustpbx::addons::cc::acd::ScheduleConfig {
+            business_hours: Some(rustpbx::addons::cc::acd::BusinessHours {
+                start: "00:00".to_string(),
+                end: "23:59".to_string(),
+                timezone: "UTC".to_string(),
+            }),
+            holidays: Default::default(),
+            night_mode: None,
+        };
+        acd_config
+            .policies
+            .insert("default".to_string(), policy);
+        acd_config.default_policy = "default".to_string();
+        cc_state.acd_engine.replace_config(acd_config);
+
         // Register test agent
         cc_state
             .agent_registry

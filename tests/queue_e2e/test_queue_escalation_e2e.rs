@@ -175,7 +175,11 @@ mod escalation_e2e {
         let skill_group_cache = Arc::new(tokio::sync::RwLock::new(cache));
 
         let cc_registry = Arc::new(AgentRegistry::new());
-        for (id, skills) in [("agent1", vec!["support"]), ("agent2", vec!["support_l2"])] {
+        for (id, skills) in [
+            ("agent1", vec!["support"]),
+            ("agent2", vec!["support_l2"]),
+            ("agent3", vec!["support_l2"]),
+        ] {
             cc_registry
                 .register(
                     id.to_string(),
@@ -190,6 +194,7 @@ mod escalation_e2e {
                 .unwrap();
         }
 
+        let cc_registry_reset = cc_registry.clone();
         let adapter = Arc::new(
             CcAgentRegistryAdapter::new(
                 cc_registry,
@@ -207,7 +212,7 @@ mod escalation_e2e {
         let server = crate::common::e2e_test_server::E2eTestServer::start_with_inject(
             escalation_proxy_config(port),
             crate::common::e2e_test_server::E2eTestServerInject {
-                users: ["caller", "agent1", "agent2"]
+                users: ["caller", "agent1", "agent2", "agent3"]
                     .into_iter()
                     .enumerate()
                     .map(|(idx, username)| SipUser {
@@ -251,6 +256,12 @@ mod escalation_e2e {
         let mut agent2 = mk_ua("agent2", 26011);
         agent2.start().await.unwrap();
         agent2.register().await.unwrap();
+
+        // agent3: second overflow-group agent — only dialed when the fair
+        // round-robin head rotates to it on the SECOND escalated call.
+        let mut agent3 = mk_ua("agent3", 26013);
+        agent3.start().await.unwrap();
+        agent3.register().await.unwrap();
 
         let mut caller = mk_ua("caller", 26012);
         caller.start().await.unwrap();
@@ -343,13 +354,135 @@ mod escalation_e2e {
 
         // agent1's superseded leg is torn down (first-answer-wins removes
         // the remaining escalation legs).
-        let _ = wait_for_event(&mut agent1, t0, Duration::from_secs(5), |e| {
+        wait_for_event(&mut agent1, t0, Duration::from_secs(5), |e| {
             matches!(e, TestUaEvent::CallTerminated(_))
         })
-        .await;
+        .await
+        .expect(
+            "agent1's superseded escalation leg must be terminated after \
+             first-answer-wins",
+        );
 
         let _ = hangup_tx.send(());
         let _ = tokio::time::timeout(Duration::from_secs(10), call_task).await;
+        sleep(Duration::from_millis(300)).await;
+
+        // ── Second escalated call: the fair round-robin head must ROTATE ──
+        // The adapter-owned rr counter persists across calls (ec720bc), so
+        // the head of the second escalation union differs from the first:
+        // call 1 dialled agent1 (primary head) → agent2 (widen); call 2 must
+        // dial agent2 (rotated head) → agent3 (widen).
+        for id in ["agent1", "agent2"] {
+            // idle→idle is rejected by the state machine; only reset the
+            // agents actually left in Ringing/Busy by call 1.
+            let needs_reset = cc_registry_reset
+                .get_agent(id)
+                .await
+                .map(|a| !matches!(a.status, AgentStatus::Idle))
+                .unwrap_or(false);
+            if needs_reset {
+                cc_registry_reset
+                    .update_status(id, AgentStatus::Idle)
+                    .await
+                    .unwrap();
+            }
+        }
+        let connected_before = connected.lock().await.len();
+
+        // Drain stale UA events from call 1 (e.g. agent3's cancelled widen
+        // leg and agent1's superseded-leg teardown) so call-2 matchers only
+        // see fresh signalling.
+        sleep(Duration::from_millis(400)).await;
+        for ua in [&mut agent1, &mut agent2, &mut agent3] {
+            loop {
+                match wait_for_event(ua, Instant::now(), Duration::from_millis(200), |_| true)
+                    .await
+                {
+                    Some(_) => continue,
+                    None => break,
+                }
+            }
+        }
+
+        let mut caller2 = mk_ua("caller", 26014);
+        caller2.start().await.unwrap();
+
+        let sdp_offer2 = "v=0\r\n\
+            o=caller2 3 0 IN IP4 127.0.0.1\r\ns=caller2\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+            m=audio 30003 RTP/AVP 0 101\r\n\
+            a=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n"
+            .to_string();
+
+        let t1 = Instant::now();
+        let (hangup2_tx, hangup2_rx) = tokio::sync::oneshot::channel::<()>();
+        let call_task2 = tokio::spawn(async move {
+            let dialog_id = caller2.make_call("support", Some(sdp_offer2)).await?;
+            let _ = hangup2_rx.await;
+            caller2.hangup(&dialog_id).await?;
+            Ok::<_, anyhow::Error>(())
+        });
+
+        // Phase 1: the ROTATED head (agent2) is dialled first — call 1's
+        // head was agent1.
+        wait_for_event(&mut agent2, t1, Duration::from_secs(8), |e| {
+            matches!(e, TestUaEvent::IncomingCall(_, _))
+        })
+        .await
+        .expect(
+            "agent2 must be the head of call 2 (fair rotation across calls)",
+        );
+        // NOTE: the widened phase still adds the union tail (agent1) after
+        // the threshold — the rotation contract is about the HEAD, asserted
+        // above (call 1 head=agent1, call 2 head=agent2).
+
+        // Phase 2: after the 2s threshold the widen reaches agent3 (the next
+        // fair pick — NOT agent2's dialog again, NOT agent1).
+        let (agent3_invite_at, agent3_invite) =
+            wait_for_event(&mut agent3, t1, Duration::from_secs(10), |e| {
+                matches!(e, TestUaEvent::IncomingCall(_, _))
+            })
+            .await
+            .expect("agent3 must receive the widened INVITE of call 2");
+        assert!(
+            agent3_invite_at >= Duration::from_secs(2),
+            "widening must respect max_wait_secs, fired at {agent3_invite_at:?}"
+        );
+        let TestUaEvent::IncomingCall(agent3_dialog, _) = agent3_invite else {
+            unreachable!("matcher guarantees IncomingCall");
+        };
+        let sdp_answer3 = "v=0\r\n\
+            o=agent3 4 0 IN IP4 127.0.0.1\r\ns=agent3\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+            m=audio 30004 RTP/AVP 0 101\r\n\
+            a=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n"
+            .to_string();
+        agent3
+            .answer_call(&agent3_dialog, Some(sdp_answer3))
+            .await
+            .unwrap();
+        wait_for_event(
+            &mut agent3,
+            t1,
+            Duration::from_secs(5),
+            |e| matches!(e, TestUaEvent::CallEstablished(d) if *d == agent3_dialog),
+        )
+        .await
+        .expect("agent3 leg must be established after answering");
+
+        // The queue connected call 2 as well (hook fired again).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if connected.lock().await.len() > connected_before {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "on_call_connected must fire for call 2"
+            );
+            sleep(Duration::from_millis(50)).await;
+        }
+
+        let _ = hangup2_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(10), call_task2).await;
         sleep(Duration::from_millis(300)).await;
 
         server.stop();

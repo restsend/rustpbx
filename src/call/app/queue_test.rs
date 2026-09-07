@@ -1677,59 +1677,68 @@ mod tests {
 
     #[tokio::test]
     async fn test_cumulative_escalation_does_not_crash() {
-        use crate::call::app::agent_registry::db::DbRegistry;
-        use crate::call::app::queue::EscalationMode;
         use std::sync::Arc;
 
-        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
-        let registry = Arc::new(DbRegistry::new(db));
-        registry
-            .register(
-                "agent1".into(),
-                "Agent 1".into(),
-                "sip:agent1@pbx".into(),
-                vec!["support".into()],
-                1,
-            )
-            .await
-            .unwrap();
-        registry
-            .update_presence(
-                "agent1",
-                crate::call::app::agent_registry::PresenceState::Idle,
-            )
-            .await
-            .unwrap();
-
         let mut config = build_simple_queue_config();
-        config.autonomous_routing = true;
-        config.skill_routing_enabled = true;
-        config.required_skills = vec!["support".to_string()];
-        config.agents = vec![];
-        config.strategy = DialStrategy::Sequential(vec![]);
-        config.escalation_mode = EscalationMode::Cumulative;
+        config.escalation_mode = crate::call::app::queue::EscalationMode::Cumulative;
         config.escalation_timeline = vec![crate::call::app::queue::EscalationStep {
-            threshold_secs: 5,
+            threshold_secs: 1,
             add_skill_group: "support2".to_string(),
             fair: false,
         }];
+        config.skill_group = Some("support".to_string());
+
+        // The widened union resolves to one new agent for support2.
+        let registry = Arc::new(
+            HookRecordingRegistry::new()
+                .with_escalation_uris(vec![vec!["sip:l2agent@example.com".to_string()]]),
+        );
 
         let plan = config.to_plan();
-        let mut queue = QueueApp::new(plan, config);
-        queue = queue.with_agent_registry(registry.clone());
-        queue = queue.with_call_id("call-001".to_string());
+        let queue = QueueApp::new(plan, config)
+            .with_agent_registry(registry.clone())
+            .with_call_id("call-001".to_string());
 
         let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
 
         stack
             .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
+        // Caller is held (comfort media) while waiting for the primary leg.
+        stack
+            .assert_cmd(2000, "Hold", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        stack
+            .assert_cmd(2000, "LegAdd-primary", |c| {
+                matches!(c, CallCommand::LegAdd { target, .. } if target.contains("agent1@example.com"))
+            })
+            .await;
 
-        // Trigger escalation check — should not crash even though skill-group: support2
-        // doesn't resolve to any agents
-        stack.timeout("escalation_check");
+        // The auto-armed escalation timer must resolve the widened group and
+        // dial the new agent — NOT hang up, even though the widened group
+        // came back as a fresh union.
+        stack.assert_cmd(4000, "LegAdd-widened", |c| {
+            matches!(c, CallCommand::LegAdd { target, .. } if target.contains("l2agent@example.com"))
+        })
+        .await;
 
-        stack.join().await.unwrap();
+        // No Hangup and no spurious dial after the escalation.
+        assert!(
+            stack.next_cmd(1200).await.is_none(),
+            "no Hangup or spurious dial after cumulative escalation"
+        );
+
+        // The registry saw exactly one escalation resolve with the right
+        // skill group and the non-fair flag propagated.
+        let calls = registry.escalation_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "exactly one escalation resolve");
+        assert_eq!(calls[0].0, "skill-group:support");
+        assert_eq!(calls[0].1, vec!["support2".to_string()]);
+        assert!(!calls[0].2, "fair flag must be propagated as configured");
+
+        stack.cancel();
+        let _ = stack.join().await;
     }
 
     // ── Escalation: auto-armed timer + fair union widening ──────────────

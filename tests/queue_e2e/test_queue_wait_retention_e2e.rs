@@ -385,6 +385,9 @@ async fn test_busy_agent_second_caller_wait_retention_rwi_events() -> Result<()>
     );
 
     // Also confirm the adapter-side event (source of the RWI translation).
+    // The channel was drained before caller2 was placed (line ~344), so any
+    // CallQueued seen now belongs to caller2 — it MUST be present, otherwise
+    // the webhook event above had no adapter-side source.
     let mut saw_adapter_queued = false;
     while let Ok(ev) = sg_rx.try_recv() {
         if let SkillGroupEvent::CallQueued {
@@ -399,8 +402,8 @@ async fn test_busy_agent_second_caller_wait_retention_rwi_events() -> Result<()>
         }
     }
     assert!(
-        saw_adapter_queued || queued["event_type"].as_str() == Some("skill_group_call_queued"),
-        "adapter CallQueued or webhook queued must be present"
+        saw_adapter_queued,
+        "adapter SkillGroupEvent::CallQueued(all_busy) must precede the webhook event"
     );
 
     // Abandon while waiting.
