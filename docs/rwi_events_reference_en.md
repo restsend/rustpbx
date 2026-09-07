@@ -43,6 +43,12 @@ Or via query parameter: `GET /rwi/v1?token=<token>`
 url = "https://myapp.example.com/rwi-events"
 timeout_ms = 5000
 headers = { Authorization = "Bearer your-token" }
+# Retries after a failed push (transport error, 5xx or 429). Other 4xx are
+# permanent and return immediately. Backoff doubles from 200 ms. Hard cap 5.
+retries = 2
+# Opt-in: track event queueing latency (enqueued -> handler dequeued) in the
+# rwi_event_queue_latency_seconds histogram. Disabled by default.
+track_queue_latency = true
 # empty = all events (recommended). To allow-list, use valid event types.
 # Note: agent status is "agent_state_changed" (the old "dn_state_changed" was
 # removed); recording data (download URL, file size) is delivered via
@@ -56,9 +62,33 @@ events = []
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `url` | String | (required) | HTTP endpoint receiving POST requests |
-| `timeout_ms` | u64 | 5000 | HTTP request timeout in milliseconds |
+| `timeout_ms` | u64 | 5000 | HTTP request timeout in milliseconds (per attempt) |
 | `headers` | HashMap | (optional) | Custom HTTP headers sent with every request |
 | `events` | Vec\<String\> | [] (all) | Event type whitelist; empty forwards all events |
+| `retries` | u32 | 0 | Retries after a failed push (transport error, 5xx, 429); hard cap 5; exponential backoff from 200 ms |
+| `track_queue_latency` | bool | false | Record the queueing-wait histogram `rwi_event_queue_latency_seconds` |
+
+The webhook handler runs on a dedicated tokio runtime so its HTTP push never
+contends with the SIP runtime. The worker count and the event queue length
+are configured under `[proxy]`:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `[proxy] rwi_webhook_worker_threads` | 2 | Dedicated tokio workers for the webhook push consumer |
+| `[proxy] rwi_webhook_channel_size` | 512 | Event queue length (broadcast channel capacity) |
+
+### Webhook Metrics
+
+| Metric | Type | Labels | Description |
+|-------|------|--------|-------------|
+| `rwi_event_enqueued_total` | Counter | `event_type` | Events pushed into the queue by gateway dispatch |
+| `rwi_events_pushed_total` | Counter | `event_type` | Events delivered with a 2xx response |
+| `rwi_events_push_failed_total` | Counter | `event_type` | Pushes that errored or returned non-2xx |
+| `rwi_events_push_retries_total` | Counter | `event_type` | Retry attempts after a failed push |
+| `rwi_events_dropped_total` | Counter | - | Events lost to queue lag (consumer fell behind) |
+| `rwi_event_queue_size` | Gauge | - | Configured queue capacity |
+| `rwi_event_queue_current` | Gauge | - | Events currently queued (sampled every 5 s) |
+| `rwi_event_queue_latency_seconds` | Histogram | `event_type` | Queueing wait (enqueued -> handler dequeued); opt-in via `track_queue_latency` |
 
 ---
 
