@@ -144,6 +144,14 @@ pub struct MatchedRoute {
     pub name: String,
 }
 
+/// A-leg (caller side) SIP peer address `ip:port`, captured from the inbound
+/// INVITE's transport connection in `handle_invite`. Surfaced into the CDR as
+/// `callerPeer` so consumers (Grafana plugin top-N, IP filtering) need no join
+/// against the signaling table. Rides the cookie because early-failure CDRs
+/// are reported before any SipSession exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallerPeerContext(pub String);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrunkContext {
     pub id: Option<i64>,

@@ -27,6 +27,10 @@ pub struct CallSessionRecordSnapshot {
     pub connected_callee: Option<String>,
     pub routed_contact: Option<String>,
     pub routed_destination: Option<String>,
+    /// B-leg (callee side) SIP destination `ip:port` stashed at dial time
+    /// (`CallMeta::callee_peer`); the A-leg peer rides the transaction cookie
+    /// instead (`CallerPeerContext`), so it is not duplicated here.
+    pub callee_peer: Option<String>,
     pub last_queue_name: Option<String>,
     pub callee_call_ids: Vec<String>,
     pub server_dialog_id: DialogId,

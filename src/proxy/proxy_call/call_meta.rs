@@ -33,6 +33,11 @@ pub struct CallMeta {
     pub routed_callee: Option<String>,
     pub routed_contact: Option<String>,
     pub routed_destination: Option<String>,
+    /// B-leg (callee side) SIP destination `ip:port` the outbound INVITE was
+    /// sent to. Stashed at dial time (`build_target_invite_option` /
+    /// `initiate_sip_leg`) because `cleanup()` clears the leg dialogs before
+    /// CDR reporting. Last dial wins on re-dial scenarios.
+    pub callee_peer: Option<String>,
     pub queue_name: Option<String>,
     /// Primary skill-group id when the queue dials a `skill-group:{id}` target.
     /// Post-call hooks (CSAT, wrapup, hold-music) resolve skill-group

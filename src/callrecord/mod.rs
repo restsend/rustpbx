@@ -110,6 +110,13 @@ pub struct CallDetails {
     pub outbound_sip_trunk_id: Option<i64>,
     pub route_id: Option<i64>,
     pub sip_gateway: Option<String>,
+    /// A-leg (caller side) SIP peer `ip:port` — the transport source of the
+    /// inbound INVITE. Serialized as `callerPeer`.
+    pub caller_peer: Option<String>,
+    /// B-leg (callee side) SIP destination `ip:port` — where the outbound
+    /// INVITE was sent. Serialized as `calleePeer`. Not populated for RWI
+    /// originates (PBX-initiated, no inbound leg pairing at report time).
+    pub callee_peer: Option<String>,
     pub recording_url: Option<String>,
     pub recording_duration_secs: Option<i32>,
     pub has_transcript: bool,
@@ -1460,6 +1467,10 @@ impl From<rustpbx_models::call_record::Model> for CallRecord {
             outbound_sip_trunk_id: val.outbound_sip_trunk_id,
             route_id: val.route_id,
             sip_gateway: val.sip_gateway,
+            // The SQL model has no peer columns; peers live in the JSON savers'
+            // payloads only.
+            caller_peer: None,
+            callee_peer: None,
             recording_url: val.recording_url,
             recording_duration_secs: val.recording_duration_secs,
             has_transcript: val.has_transcript,

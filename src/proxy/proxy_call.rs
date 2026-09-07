@@ -242,6 +242,9 @@ impl CallSessionBuilder {
             routed_callee: None,
             routed_contact: None,
             routed_destination: None,
+            // Early failure: no B leg was ever dialed. The A-leg peer still
+            // reaches the reporter via the CallerPeerContext cookie extension.
+            callee_peer: None,
             last_queue_name: None,
             callee_call_ids: vec![],
             server_dialog_id: rsipstack::dialog::DialogId {
