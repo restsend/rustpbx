@@ -200,10 +200,9 @@ async fn recorder_sender_receives_ingress_via_tap() {
     mb.close();
 }
 
-/// Telephone-event RTP is detected by the tap but excluded from recording
-/// because it is not in the leg's configured audio-codec payload-type list.
+/// Telephone-event RTP reaches the recording backend in both directions.
 #[tokio::test]
-async fn recorder_sender_filters_non_audio_dtmf_rtp_packets() {
+async fn recorder_sender_captures_dtmf_rtp_packets() {
     use rustrtc::peer_connection::RtpObserver;
     use rustrtc::rtp::{RtpHeader, RtpPacket};
     use std::net::SocketAddr;
@@ -222,16 +221,19 @@ async fn recorder_sender_filters_non_audio_dtmf_rtp_packets() {
     let addr: SocketAddr = "127.0.0.1:5000".parse().unwrap();
 
     // Feed a DTMF "5" end-event telephone-event packet (PT 101).
-    // RFC 4733 payload: [digit_code=5, end_bit=0x80, volume=10, duration=160].
-    let dtmf = RtpPacket::new(RtpHeader::new(101, 1, 0, 1), vec![5u8, 0x80, 10, 0xA0]);
+    // RFC 4733 payload: digit 5, end bit set, volume 10, duration 160.
+    let dtmf = RtpPacket::new(RtpHeader::new(101, 1, 0, 1), vec![5u8, 0x8A, 0, 0xA0]);
     tap.on_ingress(&dtmf, addr);
+    tap.on_egress(&dtmf, addr);
 
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+    for direction in [PacketDirection::Ingress, PacketDirection::Egress] {
+        let item = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
             .await
-            .is_err(),
-        "telephone-event RTP must not enter the recorder queue"
-    );
+            .expect("telephone-event RTP must reach the recorder")
+            .expect("recorder channel closed");
+        assert_eq!(captured_direction(&item), direction);
+        assert_eq!(captured_payload_type(&item), 101);
+    }
 
     mb.close();
 }

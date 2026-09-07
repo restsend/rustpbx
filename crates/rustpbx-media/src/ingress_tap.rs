@@ -18,8 +18,9 @@
 //! feedback the existing `RtpReceiverInterceptor` is unaffected.
 //!
 //! Ingress DTMF telephone-event packets are detected for the DTMF event bus.
-//! Recording is limited to the immutable audio payload-type list installed
-//! when the leg is constructed, so video, DTMF, and unknown RTP are excluded.
+//! Audio and telephone-event RTP in both directions reach the recording task,
+//! allowing DTMF tones to be synthesized into WAV recordings. Video and unknown
+//! RTP payload types are excluded.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -259,8 +260,7 @@ impl IngressTap {
         // DTMF events are decoded only where they enter their originating leg.
         // Decoding egress too would see the same bridged digit a second time on
         // the destination leg and could poison this tap's deduplication state.
-        // Egress telephone-event RTP is ignored by the detector and excluded
-        // from recording by the audio payload-type allowlist below.
+        // Raw telephone-event RTP in both directions still reaches the recorder.
         let pt = packet.header.payload_type;
         if direction == PacketDirection::Ingress && self.is_dtmf_payload_type(pt) {
             let payload_len = packet.payload.len();
@@ -276,8 +276,9 @@ impl IngressTap {
             }
         }
 
-        // Only configured audio RTP enters the call-scoped recording queue.
-        if self.is_audio_payload_type(pt)
+        // Preserve telephone-event packets for recording, including duration
+        // updates and terminal repeats suppressed by the digit event detector.
+        if (self.is_audio_payload_type(pt) || self.is_dtmf_payload_type(pt))
             && let Some(sender) = self.recorder_sender.as_ref()
         {
             sender.capture(direction, packet);
@@ -385,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn recorder_only_receives_configured_audio_payload_types() {
+    fn recorder_receives_audio_and_dtmf_payload_types() {
         let (tx, mut captured) = tokio::sync::mpsc::channel(16);
         let sender = RecorderSender::new(tx);
         let tap = IngressTap::new(8, vec![0, 8], Some(sender));
@@ -396,20 +397,31 @@ mod tests {
         tap.on_ingress(&pcmu, test_addr());
         tap.on_egress(&pcma, test_addr());
 
-        // Neither video nor telephone-event RTP is in the audio allowlist.
+        // Telephone-event RTP must be captured even outside the audio allowlist.
+        // Video remains excluded.
         let video = make_packet(96, 3, 3000, 2, vec![3u8; 200]);
         let dtmf = make_packet(101, 1, 0, 1, vec![1u8, 0x80, 10, 0xA0]);
         tap.on_ingress(&video, test_addr());
         tap.on_egress(&video, test_addr());
         tap.on_ingress(&dtmf, test_addr());
         tap.on_egress(&dtmf, test_addr());
+        tap.on_ingress(&dtmf, test_addr());
 
         let packets: Vec<_> = std::iter::from_fn(|| captured.try_recv().ok()).collect();
-        assert_eq!(packets.len(), 2);
+        assert_eq!(packets.len(), 5);
         assert_eq!(packets[0].direction, PacketDirection::Ingress);
         assert_eq!(packets[0].packet.header.payload_type, 0);
         assert_eq!(packets[1].direction, PacketDirection::Egress);
         assert_eq!(packets[1].packet.header.payload_type, 8);
+        for (packet, direction) in packets[2..].iter().zip([
+            PacketDirection::Ingress,
+            PacketDirection::Egress,
+            PacketDirection::Ingress,
+        ]) {
+            assert_eq!(packet.direction, direction);
+            assert_eq!(packet.packet.header.payload_type, 101);
+            assert_eq!(packet.packet.payload, dtmf.payload);
+        }
     }
 
     #[test]
