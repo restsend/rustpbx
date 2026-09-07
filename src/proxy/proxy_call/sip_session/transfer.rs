@@ -2098,8 +2098,7 @@ impl SipSession {
             .map(|(id, _)| id.clone());
 
         if let Some(original_leg) = original_leg {
-            self.update_leg_state(&original_leg, LegState::Connected);
-            let _ = self.handle_unhold(original_leg.clone()).await;
+            self.handle_unhold(original_leg.clone()).await?;
             info!(session_id = %self.id, "Attended transfer canceled, original call resumed");
         }
 

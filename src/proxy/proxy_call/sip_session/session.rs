@@ -8832,8 +8832,15 @@ impl SipSession {
                 mode: _,
             } => {
                 if self.setup_bridge(leg_a.clone(), leg_b.clone()).await {
-                    self.update_leg_state(&leg_a, LegState::Connected);
-                    self.update_leg_state(&leg_b, LegState::Connected);
+                    // Independently dialled legs become connected on answer.
+                    let a_dialled = self.media_side_for_leg(&leg_a).is_none()
+                        && self.legs.get_peer(&leg_a).is_some();
+                    let b_dialled = self.media_side_for_leg(&leg_b).is_none()
+                        && self.legs.get_peer(&leg_b).is_some();
+                    if !a_dialled && !b_dialled {
+                        self.update_leg_state(&leg_a, LegState::Connected);
+                        self.update_leg_state(&leg_b, LegState::Connected);
+                    }
                     CommandResult::success()
                 } else {
                     CommandResult::failure("Cannot bridge: one or both legs not found")
@@ -9502,10 +9509,10 @@ impl SipSession {
                 // the agent INVITE was generated) and activate the A<->B relay.
                 // The "callee" leg is handled above (attach_callee_dialog);
                 // the "caller" leg never generates a LegConnected event.
-                // mb.leg(B).is_some() is the structural signal that this is
-                // the queue-agent media path (B leg exists iff create_callee_track
-                // ran in the queue originate flow).
+                // The consult leg must not overwrite the existing agent's
+                // B-side SDP.
                 if leg_id != LegId::from("callee")
+                    && leg_id != LegId::from("consult")
                     && let (Some(sdp), Some(mb)) = (answer_sdp.as_deref(), self.bridge_mut())
                     && let Some(leg_b) = mb.leg(crate::media::media_bridge::LegSide::B)
                 {
@@ -9543,116 +9550,150 @@ impl SipSession {
                 }
 
                 self.update_leg_state(&leg_id, LegState::Connected);
+                if self.bridge.active
+                    && self.bridge.contains_leg(&leg_id)
+                    && self.bridge.legs.len() == 2
+                {
+                    let pair = self.bridge.legs.clone();
+                    if !self.setup_bridge(pair[0].clone(), pair[1].clone()).await {
+                        return CommandResult::failure("Failed to connect requested media legs");
+                    }
+                }
                 self.update_media_path().await;
                 CommandResult::success()
             }
 
             CallCommand::LegFailed { leg_id, reason } => {
                 warn!(%leg_id, %reason, "Leg failed async notification");
-                let connected_bridge_leg = self
-                    .legs
-                    .get(&leg_id)
-                    .is_some_and(|leg| leg.state == LegState::Connected)
-                    && self.bridge.active
-                    && self.bridge.contains_leg(&LegId::from("caller"))
-                    && self.bridge.contains_leg(&leg_id);
-                // Forward to running app before removing the leg (so we can get the URI)
-                let agent_uri = self.legs.get(&leg_id).and_then(|l| l.endpoint.clone());
-                let event_name = if reason.contains("486") || reason.to_lowercase().contains("busy")
-                {
-                    "agent_busy"
-                } else {
-                    "agent_no_answer"
-                };
-                // Resolve the canonical agent_id from the failing LEG first
-                // (sequential fallback dials a different agent than the
-                // session-level value; validated against the registry so
-                // WebRTC contact user-parts are not mistaken for agent ids),
-                // then fall back to session extensions so the queue app can
-                // update the correct agent's presence.
-                let resolved_agent_id = self
-                    .leg_agent_id(agent_uri.as_deref())
-                    .await
-                    .unwrap_or_default();
-                let agent_id = if !resolved_agent_id.is_empty() {
-                    resolved_agent_id.clone()
-                } else {
-                    agent_uri
-                        .as_deref()
-                        .and_then(Self::uri_user_part)
-                        .unwrap_or_else(|| "unknown".to_string())
-                };
-                {
-                    self.app_event_bridge.send_app_event(
-                        crate::call::app::ControllerEvent::Custom(
-                            event_name.to_string(),
-                            serde_json::json!({
-                                "leg_id": leg_id.0,
-                                "agent_uri": agent_uri,
-                                "agent_id": agent_id,
-                                "reason": reason,
-                            }),
-                        ),
-                    );
-                }
-
-                // Surface agent rejection / no-answer in the call trace so
-                // operator-facing call records show *which* agent and *why*
-                // the queue could not connect (e.g. 486 from off-hours phone).
-                let in_queue = self.in_queue_context();
-                if in_queue {
-                    let status = reason
-                        .strip_prefix("Rejected with ")
-                        .map(str::to_string)
-                        .unwrap_or_else(|| reason.clone());
-                    let queue_name =
-                        crate::proxy::proxy_call::call_meta::effective_queue_name(&self.meta)
-                            .unwrap_or_default();
-                    let (msg, severity) = if event_name == "agent_busy" {
-                        (
-                            format!("Agent {} rejected ({})", agent_id, status),
-                            crate::call_errors::ErrSeverity::Warn,
-                        )
+                let result = if leg_id == LegId::from("consult") {
+                    let resume_caller = self
+                        .legs
+                        .get(&LegId::from("caller"))
+                        .is_some_and(|leg| leg.state == LegState::Hold);
+                    // Remote failure must use the same media cleanup as Cancel.
+                    // After merge, this removes only Alice from the shared mixer.
+                    if let Err(error) = self.handle_remove_leg(leg_id.clone()).await {
+                        return CommandResult::failure(error.to_string());
+                    }
+                    let recovery = if resume_caller {
+                        self.handle_unhold(LegId::from("caller")).await
                     } else {
-                        (
-                            format!("Agent {} no answer", agent_id),
-                            crate::call_errors::ErrSeverity::Warn,
-                        )
+                        Ok(())
                     };
-                    let ev = crate::call_errors::TraceEvent::new(
-                        crate::call_errors::TraceKind::Queue,
-                        msg,
-                    )
-                    .severity(severity)
-                    .detail(serde_json::json!({
-                        "agent": agent_id,
-                        "status": status,
-                        "reason": reason,
-                        "queue_name": queue_name,
-                    }));
-                    self.record_trace(ev);
-                }
+                    match recovery {
+                        Err(error) => CommandResult::failure(format!(
+                            "{}; failed to resume caller: {}",
+                            reason, error
+                        )),
+                        Ok(()) => CommandResult::failure(reason.clone()),
+                    }
+                } else {
+                    let connected_bridge_leg = self
+                        .legs
+                        .get(&leg_id)
+                        .is_some_and(|leg| leg.state == LegState::Connected)
+                        && self.bridge.active
+                        && self.bridge.contains_leg(&LegId::from("caller"))
+                        && self.bridge.contains_leg(&leg_id);
+                    // Forward to running app before removing the leg (so we can get the URI)
+                    let agent_uri = self.legs.get(&leg_id).and_then(|l| l.endpoint.clone());
+                    let event_name =
+                        if reason.contains("486") || reason.to_lowercase().contains("busy") {
+                            "agent_busy"
+                        } else {
+                            "agent_no_answer"
+                        };
+                    // Resolve the canonical agent_id from the failing LEG first
+                    // (sequential fallback dials a different agent than the
+                    // session-level value; validated against the registry so
+                    // WebRTC contact user-parts are not mistaken for agent ids),
+                    // then fall back to session extensions so the queue app can
+                    // update the correct agent's presence.
+                    let resolved_agent_id = self
+                        .leg_agent_id(agent_uri.as_deref())
+                        .await
+                        .unwrap_or_default();
+                    let agent_id = if !resolved_agent_id.is_empty() {
+                        resolved_agent_id.clone()
+                    } else {
+                        agent_uri
+                            .as_deref()
+                            .and_then(Self::uri_user_part)
+                            .unwrap_or_else(|| "unknown".to_string())
+                    };
+                    {
+                        self.app_event_bridge.send_app_event(
+                            crate::call::app::ControllerEvent::Custom(
+                                event_name.to_string(),
+                                serde_json::json!({
+                                    "leg_id": leg_id.0,
+                                    "agent_uri": agent_uri,
+                                    "agent_id": agent_id,
+                                    "reason": reason,
+                                }),
+                            ),
+                        );
+                    }
 
-                self.update_leg_state(&leg_id, LegState::Ended);
-                self.legs.remove(&leg_id);
-                self.update_media_path().await;
-                if connected_bridge_leg
-                    && self
-                        .caller_dialog
-                        .as_ref()
-                        .is_none_or(|d| !d.state().is_terminated())
-                {
-                    // Defer to the unified post-disconnect handler (CSAT first,
-                    // then return_app, then hangup).  Call directly since we
-                    // are already inside execute_command.
-                    self.handle_start_return_app().await;
-                    info!(
-                        session_id = %self.id,
-                        %leg_id,
-                        "Connected dynamic leg ended; post-disconnect handler ran"
-                    );
-                }
-                CommandResult::failure(reason)
+                    // Surface agent rejection / no-answer in the call trace so
+                    // operator-facing call records show *which* agent and *why*
+                    // the queue could not connect (e.g. 486 from off-hours phone).
+                    let in_queue = self.in_queue_context();
+                    if in_queue {
+                        let status = reason
+                            .strip_prefix("Rejected with ")
+                            .map(str::to_string)
+                            .unwrap_or_else(|| reason.clone());
+                        let queue_name =
+                            crate::proxy::proxy_call::call_meta::effective_queue_name(&self.meta)
+                                .unwrap_or_default();
+                        let (msg, severity) = if event_name == "agent_busy" {
+                            (
+                                format!("Agent {} rejected ({})", agent_id, status),
+                                crate::call_errors::ErrSeverity::Warn,
+                            )
+                        } else {
+                            (
+                                format!("Agent {} no answer", agent_id),
+                                crate::call_errors::ErrSeverity::Warn,
+                            )
+                        };
+                        let ev = crate::call_errors::TraceEvent::new(
+                            crate::call_errors::TraceKind::Queue,
+                            msg,
+                        )
+                        .severity(severity)
+                        .detail(serde_json::json!({
+                            "agent": agent_id,
+                            "status": status,
+                            "reason": reason,
+                            "queue_name": queue_name,
+                        }));
+                        self.record_trace(ev);
+                    }
+
+                    self.update_leg_state(&leg_id, LegState::Ended);
+                    self.legs.remove(&leg_id);
+                    self.update_media_path().await;
+                    if connected_bridge_leg
+                        && self
+                            .caller_dialog
+                            .as_ref()
+                            .is_none_or(|d| !d.state().is_terminated())
+                    {
+                        // Defer to the unified post-disconnect handler (CSAT first,
+                        // then return_app, then hangup).  Call directly since we
+                        // are already inside execute_command.
+                        self.handle_start_return_app().await;
+                        info!(
+                            session_id = %self.id,
+                            %leg_id,
+                            "Connected dynamic leg ended; post-disconnect handler ran"
+                        );
+                    }
+                    CommandResult::failure(reason.clone())
+                };
+                result
             }
 
             CallCommand::AppExited => self.handle_app_exited().await,
@@ -10308,6 +10349,24 @@ impl SipSession {
             "Removing leg from session"
         );
 
+        // Cancelling consultation returns the held customer to the agent.
+        if leg_id == LegId::from("consult")
+            && self
+                .legs
+                .get(&LegId::from("caller"))
+                .is_some_and(|leg| leg.state == LegState::Hold)
+        {
+            self.handle_leave_mixer().await?;
+        } else if let Some(conf_id) = self.conference_bridge.conf_id.as_deref() {
+            let _ = self
+                .server
+                .conference_server
+                .remove_participant(
+                    &crate::call::runtime::ConferenceId::from(conf_id),
+                    &self.participant_leg(&leg_id),
+                )
+                .await;
+        }
         if self.legs.remove(&leg_id).is_some() {
             info!(session_id = %self.id, %leg_id, "Leg removed");
         }
@@ -10433,7 +10492,9 @@ impl SipSession {
             .map(|c| c.uri.clone())
             .unwrap_or_else(|| caller.clone());
 
-        let bleg_call_id = format!("{}-{}", self.id.0, leg_id);
+        // A reused logical leg (e.g. consult after rejection) is a new SIP call.
+        // Linphone remembers declined Call-IDs and rejects attempts reusing one.
+        let bleg_call_id = format!("{}-{}-{}", self.id.0, leg_id, uuid::Uuid::new_v4());
         let invite_option = rsipstack::dialog::invitation::InviteOption {
             callee: callee_uri.clone(),
             caller: caller.clone(),
@@ -10787,9 +10848,64 @@ impl SipSession {
         }
         self.bridge = BridgeConfig::bridge(leg_a.clone(), leg_b.clone());
 
+        // A leg with its own peer outside caller/callee needs the private mixer.
+        let a_needs_mixer =
+            self.media_side_for_leg(&leg_a).is_none() && self.legs.get_peer(&leg_a).is_some();
+        let b_needs_mixer =
+            self.media_side_for_leg(&leg_b).is_none() && self.legs.get_peer(&leg_b).is_some();
+        if a_needs_mixer || b_needs_mixer {
+            let a_connected = self
+                .legs
+                .get(&leg_a)
+                .is_some_and(|leg| leg.state == LegState::Connected);
+            let b_connected = self
+                .legs
+                .get(&leg_b)
+                .is_some_and(|leg| leg.state == LegState::Connected);
+            if !a_connected || !b_connected {
+                // Keep the requested pair; retry setup when a leg answers.
+                return true;
+            }
+            // Agent and consult peer share this mixer; merge adds the held
+            // customer to it without replacing either existing audio bridge.
+            let conf_id = format!("consult-{}", self.id);
+            let result: Result<()> = async {
+                let room = crate::call::runtime::ConferenceId::from(conf_id.as_str());
+                if self
+                    .server
+                    .conference_server
+                    .get_conference(&room)
+                    .await
+                    .is_none()
+                {
+                    self.server
+                        .conference_server
+                        .create_conference_ex(
+                            room,
+                            None,
+                            Some(self.participant_leg(&leg_a)),
+                            Some(crate::call::runtime::DEFAULT_CONFERENCE_TIMEOUT_SECS),
+                        )
+                        .await?;
+                }
+                self.try_start_and_store_bridge(&conf_id, &leg_a, "consultation bridge")
+                    .await?;
+                self.try_start_and_store_bridge(&conf_id, &leg_b, "consultation bridge")
+                    .await
+            }
+            .await;
+            if let Err(error) = result {
+                let _ = self.handle_leave_mixer().await;
+                self.bridge.clear();
+                warn!(session_id = %self.id, %error, "Consultation media activation failed");
+                return false;
+            }
+            return true;
+        }
+
         // If both legs map to the MediaBridge's A/B, actually activate the
-        // media route (fast-path relay or transcode). Dynamic legs not present
-        // in the MediaBridge keep the state-only BridgeConfig.
+        // media route (fast-path relay or transcode). Independently owned
+        // dynamic peers are handled by the private mixer above.
         if let (Some(side_a), Some(side_b)) = (
             self.media_side_for_leg(&leg_a),
             self.media_side_for_leg(&leg_b),
@@ -10800,6 +10916,8 @@ impl SipSession {
                 mb.accept(side_b).await;
                 if let Err(e) = mb.bridge().await {
                     warn!(session_id = %self.id, %leg_a, %leg_b, error = %e, "RWI bridge activation failed");
+                    self.bridge.clear();
+                    return false;
                 }
             }
         }
@@ -11496,40 +11614,30 @@ impl SipSession {
             return Ok(());
         }
 
-        self.update_leg_state(&leg_id, LegState::Connected);
+        let unhold_sdp = self.generate_sdp_for_side(&leg_id, false)?;
+        self.send_reinvite_to_leg(&leg_id, unhold_sdp).await?;
 
-        // Restore the media route on the held leg (resume re-arms relay/transcode).
-        let side = if leg_id.0 == "callee" {
-            crate::media::media_bridge::LegSide::B
-        } else {
-            crate::media::media_bridge::LegSide::A
-        };
-        if let Some(mb) = self.bridge_mut() {
+        // Joining Charlie already selected mixer output. Resume direct A/B
+        // only when consultation was cancelled and the mixer was left.
+        if self.conference_bridge.conf_id.is_none()
+            && let Some(mb) = self.bridge_mut()
+        {
             mb.resume().await?;
+        }
+        if let Some(side) = self.media_side_for_leg(&leg_id)
+            && let Some(mb) = self.bridge()
+        {
             mb.resume_rtp_timeout(side);
         }
-
-        let unhold_sdp = self.generate_sdp_for_side(&leg_id, false)?;
-
-        match self.send_reinvite_to_leg(&leg_id, unhold_sdp).await {
-            Ok(_) => {
-                info!(session_id = %self.id, %leg_id, "Unhold re-INVITE sent successfully");
-
-                if !self.server.session_hooks.is_empty() {
-                    let ctx = self.session_hook_ctx();
-                    let leg_id_str = leg_id.to_string();
-                    for hook in self.server.session_hooks.iter() {
-                        hook.on_call_unheld(&ctx, &leg_id_str).await;
-                    }
-                }
-
-                Ok(())
-            }
-            Err(e) => {
-                warn!(session_id = %self.id, %leg_id, error = %e, "Failed to send unhold re-INVITE");
-                Ok(())
+        self.update_leg_state(&leg_id, LegState::Connected);
+        if !self.server.session_hooks.is_empty() {
+            let ctx = self.session_hook_ctx();
+            let leg_id_str = leg_id.to_string();
+            for hook in self.server.session_hooks.iter() {
+                hook.on_call_unheld(&ctx, &leg_id_str).await;
             }
         }
+        Ok(())
     }
 
     /// Send a re-INVITE (e.g. hold/unhold SDP) to the dialog of the target leg

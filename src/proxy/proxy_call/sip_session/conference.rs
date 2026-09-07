@@ -435,17 +435,16 @@ impl SipSession {
             return Err(anyhow!("Conference {} not found", mixer_id));
         }
 
-        // Composite id mirrors handle_join_mixer / handle_bridge_cross_session
-        // and ensures the participant is registered exactly once by
-        // start_bridge_full_duplex.
-        let participant_leg = self.participant_leg(&leg_id);
-        self.try_start_and_store_bridge(
-            &mixer_id,
-            &participant_leg,
-            "consult-transfer 3-way merge",
-        )
-        .await;
-
+        self.require_leg(&leg_id)?;
+        self.try_start_and_store_bridge(&mixer_id, &leg_id, "consult-transfer 3-way merge")
+            .await?;
+        if self
+            .legs
+            .get(&leg_id)
+            .is_some_and(|leg| leg.state == crate::call::domain::LegState::Hold)
+        {
+            self.handle_unhold(leg_id).await?;
+        }
         Ok(())
     }
 

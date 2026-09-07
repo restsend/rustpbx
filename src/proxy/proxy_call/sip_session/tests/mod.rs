@@ -4139,3 +4139,658 @@ async fn effective_ring_timeout_precedence_and_disabled() {
         "per-call value overrides the global default"
     );
 }
+
+#[tokio::test]
+async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::config::ProxyConfig;
+    use crate::media::leg::{LegConfig, LegInner};
+    use crate::media::media_bridge::{LegSide, MediaBridge};
+    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_config};
+
+    for scenario in [
+        "reject",
+        "timeout",
+        "private_hangup",
+        "merged",
+        "supervisor_switch",
+    ] {
+        let (server, _) = create_test_server_with_config(ProxyConfig::default()).await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let context = CallContext {
+            session_id: "consult-media".into(),
+            dialplan: Arc::new(Dialplan::new(
+                "consult-media".into(),
+                request,
+                DialDirection::Inbound,
+            )),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:alice@rustpbx.com".into(),
+            original_callee: "sip:bob@rustpbx.com".into(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+        let (mut session, _handle, mut _commands) = SipSession::new_uac(
+            server.clone(),
+            CancellationToken::new(),
+            None,
+            context,
+            true,
+            Arc::new(MockMediaPeer::new()),
+            Arc::new(MockMediaPeer::new()),
+        );
+        let mut bridge = MediaBridge::new("consult-media");
+        let mut remote_legs = Vec::new();
+        for (side, name) in [(LegSide::A, "caller"), (LegSide::B, "callee")] {
+            let local = LegInner::new(name, &LegConfig::rtp_pcmu(), None).unwrap();
+            let remote =
+                LegInner::new(format!("remote-{name}"), &LegConfig::rtp_pcmu(), None).unwrap();
+            let offer = local.create_offer().await.unwrap();
+            if side == LegSide::A {
+                session.media.answer = Some(offer.clone());
+                session.media.caller_offer = Some(offer.clone());
+            }
+            let answer = remote
+                .apply_sdp(&offer, rustrtc::SdpType::Offer)
+                .await
+                .unwrap();
+            local
+                .apply_sdp(&answer, rustrtc::SdpType::Answer)
+                .await
+                .unwrap();
+            session.legs.set_answer(LegId::from(name), answer);
+            session.update_leg_state(&LegId::from(name), LegState::Connected);
+            local.accept();
+            remote.accept();
+            bridge.replace_leg(side, local).await;
+            remote_legs.push(remote);
+        }
+        session.media.bridge = Some(bridge);
+        session.update_leg_state(&LegId::from("caller"), LegState::Hold);
+        let agent_pc = session
+            .bridge()
+            .unwrap()
+            .leg(LegSide::B)
+            .unwrap()
+            .pc()
+            .clone();
+        let agent_sdp = agent_pc.remote_description();
+        let consult = LegId::from("consult");
+        session
+            .legs
+            .insert(consult.clone(), Leg::new(consult.clone()));
+        let (peer, offer) = session
+            .create_leg_peer(&consult, rustrtc::TransportMode::Rtp)
+            .await
+            .unwrap();
+        session.legs.set_peer(consult.clone(), peer.clone());
+        let remote = LegInner::new("remote-consult", &LegConfig::rtp_pcmu(), None).unwrap();
+        let answer = remote
+            .apply_sdp(&offer, rustrtc::SdpType::Offer)
+            .await
+            .unwrap();
+        peer.update_remote_description(
+            "leg-consult-media-consult",
+            &answer,
+            rustrtc::SdpType::Answer,
+        )
+        .await
+        .unwrap();
+
+        session
+            .execute_command(
+                CallCommand::Bridge {
+                    leg_a: LegId::from("callee"),
+                    leg_b: consult.clone(),
+                    mode: crate::call::domain::P2PMode::Audio,
+                },
+                None,
+            )
+            .await;
+        assert_ne!(
+            session.legs.get(&consult).unwrap().state,
+            LegState::Connected
+        );
+        assert!(session.conference_bridge.conf_id.is_none());
+        if matches!(scenario, "reject" | "timeout") {
+            session
+                .execute_command(
+                    CallCommand::LegFailed {
+                        leg_id: consult.clone(),
+                        reason: if scenario == "reject" {
+                            "Rejected with 603"
+                        } else {
+                            "Timeout"
+                        }
+                        .into(),
+                    },
+                    None,
+                )
+                .await;
+            assert!(session.legs.get(&consult).is_none());
+            assert_eq!(
+                session.legs.get(&LegId::from("caller")).unwrap().state,
+                LegState::Connected
+            );
+            assert!(session.conference_bridge.conf_id.is_none());
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while ![LegSide::A, LegSide::B].iter().all(|side| {
+                    session
+                        .bridge()
+                        .unwrap()
+                        .leg(*side)
+                        .unwrap()
+                        .egress_is_relay()
+                }) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("original caller-agent relay restored");
+            assert!(!session.cancel_token.is_cancelled());
+            continue;
+        }
+        session
+            .execute_command(
+                CallCommand::LegConnected {
+                    leg_id: consult.clone(),
+                    answer_sdp: Some(answer),
+                    dialog_id: None,
+                },
+                None,
+            )
+            .await;
+        assert_eq!(
+            format!("{:?}", agent_pc.remote_description()),
+            format!("{:?}", agent_sdp)
+        );
+        assert_eq!(
+            session.conference_bridge.conf_id.as_deref(),
+            Some("consult-consult-media")
+        );
+        assert_eq!(
+            session.legs.get(&LegId::from("caller")).unwrap().state,
+            LegState::Hold
+        );
+        let mut private_tokens = Vec::new();
+        for name in ["callee", "consult"] {
+            let id = LegId::from(name);
+            let handle = session
+                .legs
+                .remove_conference_bridge_handle(&id)
+                .expect("private bridge");
+            assert!(!handle.cancel_token.is_cancelled());
+            private_tokens.push(handle.cancel_token.clone());
+            session.legs.set_conference_bridge_handle(id, handle);
+        }
+        if scenario == "supervisor_switch" {
+            session
+                .handle_supervisor_listen(consult.clone(), LegId::from("callee"), None)
+                .await
+                .unwrap();
+            assert!(private_tokens.iter().all(|token| token.is_cancelled()));
+            let listen_token = session
+                .legs
+                .conference_bridge_handle(&consult)
+                .unwrap()
+                .cancel_token
+                .clone();
+            session
+                .handle_supervisor_barge(consult.clone(), LegId::from("callee"), None)
+                .await
+                .unwrap();
+            assert!(listen_token.is_cancelled());
+            for name in ["caller", "callee", "consult"] {
+                let leg = LegId::from(name);
+                let room = server
+                    .conference_server
+                    .get_conference_id_for_leg(&session.participant_leg(&leg))
+                    .await
+                    .unwrap();
+                assert_eq!(room.0, "supervisor-consult-media-barge");
+                assert!(
+                    !session
+                        .legs
+                        .conference_bridge_handle(&leg)
+                        .unwrap()
+                        .cancel_token
+                        .is_cancelled()
+                );
+            }
+            session.handle_leave_mixer().await.unwrap();
+            continue;
+        }
+        if scenario == "private_hangup" {
+            session
+                .execute_command(
+                    CallCommand::LegFailed {
+                        leg_id: consult.clone(),
+                        reason: "Remote hung up".into(),
+                    },
+                    None,
+                )
+                .await;
+            assert!(session.legs.get(&consult).is_none());
+            assert_eq!(
+                session.legs.get(&LegId::from("caller")).unwrap().state,
+                LegState::Connected
+            );
+            assert!(session.conference_bridge.conf_id.is_none());
+            assert!(private_tokens.iter().all(|token| token.is_cancelled()));
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while ![LegSide::A, LegSide::B].iter().all(|side| {
+                    session
+                        .bridge()
+                        .unwrap()
+                        .leg(*side)
+                        .unwrap()
+                        .egress_is_relay()
+                }) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("original caller-agent relay restored");
+            assert!(!session.cancel_token.is_cancelled());
+            continue;
+        }
+        // consult_connected sends Bridge again after LegConnected has attached
+        // the private pair. Keep both existing participant bridges.
+        session
+            .execute_command(
+                CallCommand::Bridge {
+                    leg_a: LegId::from("callee"),
+                    leg_b: consult.clone(),
+                    mode: crate::call::domain::P2PMode::Audio,
+                },
+                None,
+            )
+            .await;
+        assert!(private_tokens.iter().all(|token| !token.is_cancelled()));
+        // Send real RTP from the consult endpoint; the agent must receive
+        // decoded, non-silent mixer output while the customer remains held.
+        remote.accept();
+        let mut agent_audio = crate::media::app_ingress::LegPcmStream::attach(
+            remote_legs[1].pc(),
+            remote_legs[1].negotiated().unwrap(),
+            crate::media::leg_id::LegId::from("agent-observer"),
+            CancellationToken::new(),
+        )
+        .unwrap();
+        remote
+            .set_egress_source(crate::media::egress::EgressSource::Media {
+                audio: Box::new(
+                    crate::media::audio_source::ToneAudioSource::new(
+                        440,
+                        Duration::from_secs(1),
+                        8000,
+                    )
+                    .unwrap(),
+                ),
+                loop_playback: false,
+                on_end: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let frame = agent_audio.recv().await.unwrap();
+                if !frame.silence && frame.frame.samples.iter().any(|s| s.abs() > 100) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("agent must hear consult RTP");
+        // Merge keeps the consultation mixer and adds only Charlie.
+        #[cfg(feature = "addon-cc")]
+        {
+            server
+                .active_call_registry
+                .register_handle(session.id.to_string(), _handle.clone());
+            let mut transfers = crate::addons::cc::transfer::ConsultTransferManager::new(
+                server.conference_server.manager_raw().clone(),
+            )
+            .with_call_registry(server.active_call_registry.clone());
+            transfers.initiate(
+                "transfer-media".into(),
+                session.id.to_string(),
+                "agent".into(),
+                "alice".into(),
+            );
+            transfers
+                .consultation_connected("transfer-media", session.id.to_string())
+                .unwrap();
+            let room = transfers
+                .merge_to_conference("transfer-media")
+                .await
+                .unwrap();
+            assert_eq!(room, "consult-consult-media");
+            assert!(matches!(transfers.get_state("transfer-media"),
+            Some(crate::addons::cc::transfer::TransferState::Completed { conf_id, .. })
+                if conf_id == &room));
+            let command = _commands.try_recv().unwrap();
+            assert!(
+                matches!(&command, CallCommand::JoinMixerLeg { mixer_id, leg_id }
+            if mixer_id == &room && leg_id == &LegId::from("caller"))
+            );
+            assert!(
+                matches!(_commands.try_recv().unwrap(), CallCommand::MarkTransferred),
+                "merge retains the existing transfer bookkeeping command"
+            );
+            assert!(
+                _commands.try_recv().is_err(),
+                "merge must only attach Charlie"
+            );
+            session.execute_command(command, None).await;
+        }
+        #[cfg(not(feature = "addon-cc"))]
+        session
+            .handle_join_mixer_leg("consult-consult-media".into(), LegId::from("caller"))
+            .await
+            .unwrap();
+        assert!(private_tokens.iter().all(|token| !token.is_cancelled()));
+        assert_eq!(
+            server
+                .conference_server
+                .get_conference(&crate::call::runtime::ConferenceId::from(
+                    "consult-consult-media"
+                ))
+                .await
+                .unwrap()
+                .participant_count(),
+            3
+        );
+        for side in [LegSide::A, LegSide::B] {
+            assert!(
+                !session
+                    .bridge()
+                    .unwrap()
+                    .leg(side)
+                    .unwrap()
+                    .egress_is_relay(),
+                "unhold must preserve mixer output"
+            );
+        }
+        assert_eq!(
+            session.legs.get(&LegId::from("caller")).unwrap().state,
+            LegState::Connected
+        );
+        // Verify the opposite dynamic-leg direction after merge: customer
+        // RTP must reach the consult endpoint through the three-way mixer.
+        let mut consult_audio = crate::media::app_ingress::LegPcmStream::attach(
+            remote.pc(),
+            remote.negotiated().unwrap(),
+            crate::media::leg_id::LegId::from("consult-observer"),
+            CancellationToken::new(),
+        )
+        .unwrap();
+        remote_legs[0]
+            .set_egress_source(crate::media::egress::EgressSource::Media {
+                audio: Box::new(
+                    crate::media::audio_source::ToneAudioSource::new(
+                        660,
+                        Duration::from_secs(1),
+                        8000,
+                    )
+                    .unwrap(),
+                ),
+                loop_playback: false,
+                on_end: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let frame = consult_audio.recv().await.unwrap();
+                if !frame.silence && frame.frame.samples.iter().any(|s| s.abs() > 100) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("consult must hear customer RTP after merge");
+        let mut bridge_tokens = Vec::new();
+        for name in ["caller", "callee", "consult"] {
+            let id = LegId::from(name);
+            let handle = session
+                .legs
+                .remove_conference_bridge_handle(&id)
+                .expect("merged bridge");
+            assert!(
+                !handle.cancel_token.is_cancelled(),
+                "{name} bridge was replaced by another participant"
+            );
+            bridge_tokens.push(handle.cancel_token.clone());
+            session.legs.set_conference_bridge_handle(id, handle);
+        }
+        // Real RTP: each source must reach both other endpoints and never itself.
+        // Stop earlier tones and allow their queued frames to drain first.
+        let endpoints = [&remote_legs[0], &remote_legs[1], &remote];
+        for endpoint in endpoints {
+            endpoint
+                .set_egress_source(crate::media::egress::EgressSource::Silence)
+                .await
+                .unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        for source in 0..3 {
+            let mut observers = Vec::new();
+            for (index, endpoint) in endpoints.iter().enumerate() {
+                observers.push(
+                    crate::media::app_ingress::LegPcmStream::attach(
+                        endpoint.pc(),
+                        endpoint.negotiated().unwrap(),
+                        crate::media::leg_id::LegId::from(format!("observer-{source}-{index}")),
+                        CancellationToken::new(),
+                    )
+                    .unwrap(),
+                );
+            }
+            endpoints[source]
+                .set_egress_source(crate::media::egress::EgressSource::Media {
+                    audio: Box::new(
+                        crate::media::audio_source::ToneAudioSource::new(
+                            440 + source as u32 * 220,
+                            Duration::from_secs(2),
+                            8000,
+                        )
+                        .unwrap(),
+                    ),
+                    loop_playback: false,
+                    on_end: None,
+                })
+                .await
+                .unwrap();
+            let levels =
+                futures::future::join_all(observers.into_iter().map(|mut observer| async move {
+                    let mut audible = false;
+                    let mut frames = 0;
+                    let _ = tokio::time::timeout(Duration::from_millis(600), async {
+                        loop {
+                            let frame = observer.recv().await.unwrap();
+                            frames += 1;
+                            audible |= frame
+                                .frame
+                                .samples
+                                .iter()
+                                .any(|sample| sample.unsigned_abs() > 100);
+                        }
+                    })
+                    .await;
+                    (audible, frames)
+                }))
+                .await;
+            for (destination, (audible, frames)) in levels.into_iter().enumerate() {
+                assert!(frames > 0, "destination {destination} must receive media");
+                assert_eq!(
+                    audible,
+                    source != destination,
+                    "source {source}, destination {destination}"
+                );
+            }
+            endpoints[source]
+                .set_egress_source(crate::media::egress::EgressSource::Silence)
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+        // Alice hangs up after merge: Charlie and agent retain their mixer bridges.
+        session
+            .execute_command(
+                CallCommand::LegFailed {
+                    leg_id: consult.clone(),
+                    reason: "Remote hung up".into(),
+                },
+                None,
+            )
+            .await;
+        assert!(bridge_tokens[2].is_cancelled());
+        assert!(!bridge_tokens[0].is_cancelled());
+        assert!(!bridge_tokens[1].is_cancelled());
+        assert_eq!(
+            session.legs.get(&LegId::from("caller")).unwrap().state,
+            LegState::Connected
+        );
+        assert!(!session.cancel_token.is_cancelled());
+        assert_eq!(
+            server
+                .conference_server
+                .get_conference(&crate::call::runtime::ConferenceId::from(
+                    "consult-consult-media"
+                ))
+                .await
+                .unwrap()
+                .participant_count(),
+            2
+        );
+        session.handle_leave_mixer().await.unwrap();
+        assert!(bridge_tokens.iter().all(|token| token.is_cancelled()));
+        assert!(session.conference_bridge.conf_id.is_none());
+        for name in ["caller", "callee", "consult"] {
+            assert!(
+                server
+                    .conference_server
+                    .get_conference_id_for_leg(&session.participant_leg(&LegId::from(name)))
+                    .await
+                    .is_none()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn consult_retry_uses_new_sip_call_id() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::config::ProxyConfig;
+    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_config};
+
+    let (server, _) = create_test_server_with_config(ProxyConfig::default()).await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let context = CallContext {
+        session_id: "consult-media".into(),
+        dialplan: Arc::new(Dialplan::new(
+            "consult-media".into(),
+            request,
+            DialDirection::Inbound,
+        )),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".into(),
+        original_callee: "sip:bob@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let (mut session, _handle, _commands) = SipSession::new_uac(
+        server.clone(),
+        CancellationToken::new(),
+        None,
+        context,
+        true,
+        Arc::new(MockMediaPeer::new()),
+        Arc::new(MockMediaPeer::new()),
+    );
+
+    let (_input_tx, input_rx) = mpsc::unbounded_channel();
+    let (output_tx, mut output_rx) = mpsc::unbounded_channel();
+    let address = rsipstack::transport::SipAddr {
+        r#type: Some(rsipstack::sip::Transport::Udp),
+        addr: "127.0.0.1:5060".try_into().unwrap(),
+    };
+    server
+        .endpoint
+        .inner
+        .transport_layer
+        .del_transport(&address);
+    let connection = rsipstack::transport::channel::ChannelConnection::create_connection(
+        input_rx, output_tx, address, None,
+    )
+    .await
+    .unwrap();
+    server
+        .endpoint
+        .inner
+        .transport_layer
+        .add_transport(connection.into());
+    let mut ids = std::collections::HashSet::new();
+    for _ in 0..3 {
+        session
+            .handle_add_leg_inner(
+                "sip:alice@127.0.0.1:5099".into(),
+                Some(LegId::from("consult")),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(rsipstack::transport::TransportEvent::Incoming(message, _, _)) =
+                    output_rx.recv().await
+                {
+                    let text = message.to_string();
+                    if text.starts_with("INVITE ") {
+                        break text;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("outgoing consultation INVITE");
+        let call_id = message
+            .lines()
+            .find(|line| line.to_ascii_lowercase().starts_with("call-id:"))
+            .expect("Call-ID header")
+            .to_string();
+        assert!(
+            ids.insert(call_id),
+            "each consultation attempt must use a fresh SIP Call-ID"
+        );
+        session
+            .execute_command(
+                CallCommand::LegFailed {
+                    leg_id: LegId::from("consult"),
+                    reason: "Rejected with 603".into(),
+                },
+                None,
+            )
+            .await;
+        assert!(session.legs.get(&LegId::from("consult")).is_none());
+    }
+}
