@@ -221,7 +221,9 @@ async fn start_harness(port: u16, capture: &WebhookCapture) -> Result<FullChainH
             events: WEBHOOK_EVENTS.iter().map(|s| s.to_string()).collect(),
             headers: None,
             timeout_ms: Some(5000),
-        }));
+            retries: None,
+            track_queue_latency: None,
+        }, rustpbx::rwi::webhook::WEBHOOK_CHANNEL_SIZE));
         gw
     }));
 

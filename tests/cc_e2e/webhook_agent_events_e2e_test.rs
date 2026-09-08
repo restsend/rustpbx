@@ -38,7 +38,9 @@ async fn test_agent_state_change_reaches_webhook() {
         events: vec![],
         headers: None,
         timeout_ms: Some(5000),
-    });
+            retries: None,
+            track_queue_latency: None,
+    }, rustpbx::rwi::webhook::WEBHOOK_CHANNEL_SIZE);
 
     let gateway: RwiGatewayRef = Arc::new(parking_lot::RwLock::new({
         let mut gw = RwiGateway::new();
@@ -130,7 +132,9 @@ async fn test_recording_metadata_webhook_carries_agent_context() {
         events: vec![],
         headers: None,
         timeout_ms: Some(5000),
-    });
+            retries: None,
+            track_queue_latency: None,
+    }, rustpbx::rwi::webhook::WEBHOOK_CHANNEL_SIZE);
 
     let gateway: RwiGatewayRef = Arc::new(parking_lot::RwLock::new({
         let mut gw = RwiGateway::new();
@@ -216,7 +220,9 @@ async fn test_cc_call_event_webhook_carries_context() {
         events: vec![],
         headers: None,
         timeout_ms: Some(5000),
-    });
+            retries: None,
+            track_queue_latency: None,
+    }, rustpbx::rwi::webhook::WEBHOOK_CHANNEL_SIZE);
 
     let gateway: RwiGatewayRef = Arc::new(parking_lot::RwLock::new({
         let mut gw = RwiGateway::new();

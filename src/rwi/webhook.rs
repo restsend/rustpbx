@@ -174,7 +174,7 @@ pub fn restart_rwi_webhook_handler(
     match config {
         Some(cfg) => {
             info!(url = %cfg.url, "RWI webhook handler (re)starting");
-            let tx = start_rwi_webhook_handler(cfg);
+            let tx = start_rwi_webhook_handler(cfg, WEBHOOK_CHANNEL_SIZE);
             gw.set_webhook_tx(tx);
         }
         None => {
@@ -508,6 +508,8 @@ mod tests {
             events: vec![],
             headers: None,
             timeout_ms: Some(5000),
+            retries: None,
+            track_queue_latency: None,
         };
 
         restart_rwi_webhook_handler(&gateway, Some(mk_config(server_a.url())));

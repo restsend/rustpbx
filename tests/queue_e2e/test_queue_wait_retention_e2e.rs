@@ -166,7 +166,9 @@ async fn start_harness(
         ],
         headers: None,
         timeout_ms: Some(5000),
-    });
+            retries: None,
+            track_queue_latency: None,
+    }, rustpbx::rwi::webhook::WEBHOOK_CHANNEL_SIZE);
     let gateway: RwiGatewayRef = Arc::new(parking_lot::RwLock::new({
         let mut gw = RwiGateway::new();
         gw.set_webhook_tx(webhook_tx);
