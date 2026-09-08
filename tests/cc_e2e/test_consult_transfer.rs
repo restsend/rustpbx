@@ -243,7 +243,12 @@ async fn test_consult_transfer_bc_to_abc_to_ac() {
             .merge_to_conference(&owner_tx)
             .await
             .expect("owner-anchored merge");
-        assert!(owner_conf.starts_with("conf-"));
+        // Same-session merge (consult leg added on the A-B session) anchors
+        // the conference to the owner session: `consult-{session_a}`.
+        assert!(
+            owner_conf.starts_with("consult-") && owner_conf.contains(&live_sid),
+            "owner-anchored same-session merge must produce consult-<session>, got {owner_conf}"
+        );
         info!("=== Phase 3b complete: owner-anchored merge {owner_conf} ===");
     }
     #[cfg(not(feature = "addon-cc"))]
