@@ -151,6 +151,9 @@ pub struct SipServerInner {
     /// Live emergency routing config, shared with `EmergencyInspector` so a
     /// hot-reload updates the numbers/trunk without restarting.
     pub emergency_config: ArcSwap<Option<crate::config::EmergencyConfig>>,
+    /// Last applied `[rwi_webhook]` snapshot; `reload_proxy_config` compares
+    /// against it to decide whether the webhook handler must be restarted.
+    pub rwi_webhook_config: ArcSwap<Option<crate::config::LocatorWebhookConfig>>,
 }
 
 fn random_hex() -> String {
@@ -714,6 +717,20 @@ impl SipServerBuilder {
                 None => None,
             };
 
+            if local_addr.is_unspecified()
+                && rtp_config.external_ip.is_none()
+                && sip_contact_config.sip_external_ip.is_none()
+                && sip_contact_config.auto_sip_external_ip.is_none()
+            {
+                warn!(
+                    bind = %config.addr,
+                    "SIP bind addr is a wildcard with no external_ip/sip_external_ip configured; \
+                     Contact headers will fall back to a detected local interface IP. \
+                     Set sip_external_ip (or external_ip) so peers can route in-dialog \
+                     requests (BYE, re-INVITE) back to this server"
+                );
+            }
+
             if config.all_udp_ports().is_empty()
                 && config.tcp_port.is_none()
                 && config.tls_port.is_none()
@@ -1215,6 +1232,7 @@ impl SipServerBuilder {
                 .unwrap_or_else(random_hex),
             rtc_cname: self.config.rtc_cname.clone().unwrap_or_else(random_hex),
             emergency_config: ArcSwap::from_pointee(self.config.emergency.clone()),
+            rwi_webhook_config: ArcSwap::from_pointee(None),
         });
 
         let inner_weak = Arc::downgrade(&inner);
@@ -2012,6 +2030,32 @@ impl SipServerInner {
             || old.session_state_channel_capacity != new_proxy.session_state_channel_capacity
         {
             parts.push("session channel capacity".to_string());
+        }
+
+        // Restart the RWI webhook handler when `[rwi_webhook]` changed so the
+        // new url/headers/event filter take effect without a process restart.
+        // The previous handler drains buffered events and exits once its
+        // sender is replaced. When the gateway itself doesn't exist yet (no
+        // `[rwi]` and previously no `[rwi_webhook]`), a restart is required to
+        // create it.
+        if format!("{:?}", self.rwi_webhook_config.load().as_ref())
+            != format!("{:?}", config.rwi_webhook.as_ref())
+        {
+            match self.rwi_gateway.as_ref() {
+                Some(gateway) => {
+                    crate::rwi::webhook::restart_rwi_webhook_handler(
+                        gateway,
+                        config.rwi_webhook.clone(),
+                    );
+                    parts.push("rwi_webhook".to_string());
+                }
+                None if config.rwi_webhook.is_some() => {
+                    parts.push("rwi_webhook (restart required)".to_string());
+                }
+                _ => {}
+            }
+            self.rwi_webhook_config
+                .store(Arc::new(config.rwi_webhook.clone()));
         }
 
         if parts.is_empty() {
