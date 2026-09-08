@@ -389,6 +389,43 @@ impl IvrApp {
             .definition
             .get_menu(menu_key)
             .ok_or_else(|| anyhow::anyhow!("IVR menu '{}' not found", menu_key))?;
+
+        // A menu with no DTMF wait (timeout_ms absent or 0) is a pure
+        // trampoline: skip greeting playback and the input window entirely
+        // and execute `timeout_action` right away — no timer, no retry
+        // counting. A 0 ms timer would NOT be equivalent: handle_timeout
+        // counts the fire as a retry, so with the builtin's max_retries = 0
+        // the very first (immediate) timeout takes the max-retries branch
+        // and hangs up instead of chaining (e.g. post_call_csat →
+        // csat_survey would never start).
+        if menu.timeout_ms.is_none() {
+            info!(
+                ivr = %self.definition.name,
+                menu = menu_key,
+                "IVR menu skips DTMF wait (timeout_ms none); executing timeout_action immediately"
+            );
+            match menu.timeout_action.clone() {
+                Some(action) => {
+                    // Boxed: execute_action can navigate back into enter_menu
+                    // (Menu/Back actions) — this call closes the async cycle.
+                    return Box::pin(self.execute_action(&action, ctrl, ctx, None)).await;
+                }
+                None => {
+                    // validate() rejects this; defensive fallback anyway.
+                    error!(
+                        ivr = %self.definition.name,
+                        menu = menu_key,
+                        "IVR menu has no DTMF wait and no timeout_action — hanging up"
+                    );
+                    self.state = IvrState::Done;
+                    return Ok(AppAction::Hangup {
+                        reason: Some(crate::callrecord::CallRecordHangupReason::BySystem),
+                        code: None,
+                    });
+                }
+            }
+        }
+
         let greeting = self
             .resolve_audio(
                 Some(&menu.greeting),
@@ -416,10 +453,10 @@ impl IvrApp {
     /// Start waiting for DTMF input with a timeout.
     fn start_waiting_dtmf(&mut self, menu_key: &str, retry_count: u32, ctrl: &CallController) {
         let menu = self.definition.get_menu(menu_key);
-        // `timeout_ms = None` means "never wait for DTMF" — a 0 ms window
-        // fires the timeout immediately (same convention as executor's
-        // PendingMenu).
-        let timeout_ms = menu.map(|m| m.timeout_ms.unwrap_or(0)).unwrap_or(5000);
+        // Menus that skip the DTMF wait (timeout_ms = None) never reach this
+        // fn (enter_menu dispatches their timeout_action synchronously), so
+        // the None arm is a defensive default only.
+        let timeout_ms = menu.map(|m| m.timeout_ms.unwrap_or(5000)).unwrap_or(5000);
         self.state = IvrState::WaitingDtmf {
             menu_key: menu_key.to_string(),
             retry_count,
@@ -1691,6 +1728,7 @@ mod tests {
     use crate::call::app::ivr::config::{MenuEntry, MenuNode};
     use crate::call::app::testing::MockCallStack;
     use crate::call::app::{CallInfo, ControllerEvent, ExitReason};
+    use crate::call::domain::CallCommand;
     use crate::config::Config;
     use crate::proxy::proxy_call::sip_session::SipSessionHandle;
     use sea_orm::DatabaseConnection;
@@ -2094,5 +2132,46 @@ mod tests {
             Some("transfer"),
             "timeout exit without a keypress must keep action type as result_value"
         );
+    }
+
+    /// A menu with `timeout_ms: None` is a pure trampoline: `timeout_action`
+    /// must fire synchronously on entry — no DTMF-wait timer armed, no retry
+    /// counting. Regression guard for the builtin post_call_csat /
+    /// check_voicemail chaining: a 0 ms TIMER is not equivalent, because
+    /// handle_timeout counts the fire as a retry and with max_retries = 0
+    /// the trampoline hangs up instead of chaining.
+    #[tokio::test]
+    async fn test_menu_without_dtmf_wait_executes_timeout_action_immediately() {
+        let mut def = test_definition();
+        def.root = Some(MenuNode {
+            greeting: String::new(),
+            timeout_ms: None,
+            max_retries: 0,
+            timeout_action: Some(EntryAction::Transfer {
+                target: "2001".into(),
+                params: HashMap::new(),
+                return_app: None,
+                return_target: None,
+            }),
+            entries: vec![],
+            ..MenuNode::default()
+        });
+
+        let ctx = test_context();
+        let mut stack = MockCallStack::run_with_context(Box::new(IvrApp::new(def)), ctx.clone());
+        stack.enter().await;
+        stack
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+
+        // NO timeout injection here — the transfer must already have been
+        // dispatched by the enter path itself.
+        stack
+            .assert_cmd(
+                500,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
     }
 }

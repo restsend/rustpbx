@@ -1501,6 +1501,48 @@ impl CallApp for StepIvrApp {
             }
         }
 
+        // Bridge return: digits the caller pressed while the audio was
+        // bridged to an external facade arrive here via ivr_params (written
+        // by SipSession::handle_start_return_app). This app instance is a
+        // RESUME of the original flow, so the first provider request carries
+        // the first buffered digit as a `dtmf` trigger instead of a second
+        // `session_start` — the consumer contract for menu nodes
+        // (menu_tts / menu_tts_api via voip_bridge) is
+        // `trigger.type == "dtmf"` with `detail.digit`. Remaining digits are
+        // queued and delivered on subsequent steps by the pending-DTMF
+        // buffer in `request_next`.
+        let resume_digits: Vec<String> = self
+            .ivr_params
+            .as_ref()
+            .and_then(|p| p.get("bridge_dtmf_digits"))
+            .map(|v| v.as_str())
+            .map(|s| {
+                s.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let first_event = match resume_digits.first().cloned() {
+            Some(digit) => {
+                for d in resume_digits.iter().skip(1) {
+                    self.pending_dtmf.push_back(d.clone());
+                }
+                self.current_trigger = Some(crate::rwi::TriggerInfo::with_detail(
+                    "dtmf",
+                    serde_json::json!({ "digit": digit }),
+                ));
+                tracing::info!(
+                    digit = %digit,
+                    buffered = resume_digits.len() - 1,
+                    "StepIvrApp: resuming after bridge with buffered DTMF — first provider trigger is dtmf"
+                );
+                ProviderEvent::Dtmf { digit }
+            }
+            None => ProviderEvent::SessionStart,
+        };
+
         let sess_ctx = SessionContext {
             session_id: context.call_info.session_id.clone(),
             app_execution_id: invocation.app_execution_id,
@@ -1530,7 +1572,7 @@ impl CallApp for StepIvrApp {
         .await;
 
         self.set_runtime_status(context, "awaiting_first_step");
-        let first_node = match self.request_next(Some(ProviderEvent::SessionStart)).await {
+        let first_node = match self.request_next(Some(first_event)).await {
             Ok(node) => node,
             Err(err) => {
                 self.set_runtime_status(context, "startup_error");
@@ -3624,6 +3666,180 @@ mod tests {
                 .as_ref()
                 .and_then(|d| d.get("digit").and_then(|v| v.as_str())),
             Some("1")
+        );
+    }
+
+    // ── Bridge return: buffered DTMF must reach the provider as `dtmf` ──
+    //
+    // Regression guard: `SipSession::handle_start_return_app` restarts this
+    // app with `ivr_params.bridge_dtmf_digits` after a voip_bridge ends, and
+    // those digits used to be merged into session variables WITHOUT ever
+    // being forwarded — the provider only ever saw session_start/session_end.
+
+    fn bridge_return_app(handle: &MockProviderHandle, digits: &str) -> StepIvrApp {
+        StepIvrApp::with_provider(Box::new(MockProviderHandle(handle.0.clone())))
+            .with_name("bridge-return-ivr")
+            .with_ivr_params(serde_json::json!({
+                "bridge_dtmf_digits": digits,
+                "return_menu": "lf-step-ivr",
+            }))
+    }
+
+    fn first_events(provider: &MockProvider, n: usize) -> Vec<String> {
+        provider
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .take(n)
+            .map(|e| match e {
+                Some(ProviderEvent::Dtmf { digit }) => format!("dtmf:{digit}"),
+                Some(ProviderEvent::SessionStart) => "session_start".into(),
+                Some(ProviderEvent::AudioComplete { .. }) => "audio_complete".into(),
+                Some(other) => format!("{other:?}"),
+                None => "none".into(),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_bridge_return_replays_first_digit_as_dtmf_trigger() {
+        let provider = MockProvider::new(vec![ActionNode::new(EntryAction::Transfer {
+            target: "2001".into(),
+            params: HashMap::new(),
+            return_app: None,
+            return_target: None,
+        })]);
+        let handle = MockProviderHandle(Arc::new(provider));
+
+        let mut app = bridge_return_app(&handle, "1");
+        let trace = crate::call::app::ivr::trace::IvrTraceCollector::new();
+        app.trace = Some(trace.clone());
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+
+        stack
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(
+                2000,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        let events = first_events(&handle.0, 2);
+        assert_eq!(
+            events.first().map(String::as_str),
+            Some("dtmf:1"),
+            "resumed app must deliver the buffered digit as the FIRST trigger, not session_start. events: {events:?}"
+        );
+        assert!(
+            !events.contains(&"session_start".to_string()),
+            "a bridge resume must not re-send session_start. events: {events:?}"
+        );
+
+        // Consumer contract (ivr_step_trace): the executed step carries
+        // trigger.type == "dtmf" with detail.digit.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let sessions = trace.sessions().await;
+        let sess = &sessions[0];
+        let entries = trace.query_by_session(&sess.session_id).await;
+        let traced = entries
+            .iter()
+            .find(|e| e.trigger.r#type == "dtmf")
+            .expect("expected a trace entry triggered by dtmf");
+        assert_eq!(
+            traced
+                .trigger
+                .detail
+                .as_ref()
+                .and_then(|d| d.get("digit").and_then(|v| v.as_str())),
+            Some("1")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bridge_return_extra_digits_flow_via_pending_buffer() {
+        // "1,2": digit 1 is the resume trigger; digit 2 must be delivered on
+        // the NEXT provider request (after the first node completes).
+        let provider = MockProvider::new(vec![
+            ActionNode::new(EntryAction::Prompt {
+                file: Some("bridge_resume_prompt.wav".into()),
+                tts_text: None,
+                tts_voice: None,
+                record_name_list: None,
+                interruptible: false,
+                tts_api_url: None,
+                delay_before_ms: 0,
+                delay_after_ms: 0,
+            }),
+            ActionNode::new(EntryAction::Transfer {
+                target: "2001".into(),
+                params: HashMap::new(),
+                return_app: None,
+                return_target: None,
+            }),
+        ]);
+        let handle = MockProviderHandle(Arc::new(provider));
+
+        let app = bridge_return_app(&handle, "1,2");
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+
+        stack
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(2000, "play", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
+        stack.audio_complete("bridge_resume_prompt");
+        stack
+            .assert_cmd(
+                2000,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        let events = first_events(&handle.0, 3);
+        assert_eq!(
+            events,
+            vec!["dtmf:1".to_string(), "dtmf:2".to_string()],
+            "buffered digits must replay in press order across steps. events: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bridge_return_without_digits_keeps_session_start() {
+        let provider = MockProvider::new(vec![ActionNode::new(EntryAction::Transfer {
+            target: "2001".into(),
+            params: HashMap::new(),
+            return_app: None,
+            return_target: None,
+        })]);
+        let handle = MockProviderHandle(Arc::new(provider));
+
+        let mut app = bridge_return_app(&handle, "");
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+
+        stack
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(
+                2000,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        let events = first_events(&handle.0, 1);
+        assert_eq!(
+            events.first().map(String::as_str),
+            Some("session_start"),
+            "no buffered digits → the normal SessionStart first step. events: {events:?}"
         );
     }
 
