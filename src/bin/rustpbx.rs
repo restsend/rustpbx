@@ -6,7 +6,7 @@ use rustpbx::{
     app::{AppStateBuilder, create_router},
     config::Config,
     handler::middleware::request_log::AccessLogEventFormat,
-    log_reload, observability, preflight, version,
+    log_reload, preflight, version,
 };
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -454,11 +454,6 @@ fn main() -> Result<()> {
     let (filter_layer, filter_handle) = log_reload::ReloadableFilterLayer::new(env_filter);
     log_reload::set_log_filter_handle(filter_handle);
 
-    // Install the hot-swappable reload layer BEFORE the subscriber is built.
-    // The commercial TelemetryAddon will inject an OTel layer into this slot
-    // during addon initialization.
-    let otel_reload_layer = observability::init_reload_layer();
-
     let tokio_console_enabled = cli.tokio_console.is_some()
         || std::env::var_os("TOKIO_CONSOLE").is_some()
         || std::env::var_os("TOKIO_CONSOLE_BIND").is_some();
@@ -528,27 +523,22 @@ fn main() -> Result<()> {
                 .with_ansi(false),
         );
     }
-    // Every branch receives the same OTel reload layer so that the commercial
-    // TelemetryAddon can inject a live OTel tracing layer later, regardless of
-    // which logging backend was chosen.
+    // Every branch receives the same layer stack regardless of logging backend.
     let untracked_layer = rustpbx::untracked_tasks::UntrackedTaskLayer::default();
     if let Some(console_layer) = console_layer {
         tracing_subscriber::registry()
-            .with(otel_reload_layer)
             .with(filter_layer)
             .with(untracked_layer)
             .with(console_layer)
             .try_init()?;
     } else if let Some(file_layer) = file_layer {
         tracing_subscriber::registry()
-            .with(otel_reload_layer)
             .with(filter_layer)
             .with(untracked_layer)
             .with(file_layer)
             .try_init()?;
     } else if let Some(fmt_layer) = fmt_layer {
         tracing_subscriber::registry()
-            .with(otel_reload_layer)
             .with(filter_layer)
             .with(untracked_layer)
             .with(fmt_layer)
@@ -793,10 +783,6 @@ fn main() -> Result<()> {
 
         break;
     }
-
-    // Flush any buffered OTel spans before the process exits.
-        #[cfg(feature = "addon-telemetry")]
-        rustpbx::addons::telemetry::TelemetryAddon::shutdown();
 
         Ok(())
     })?; // end of sip_runtime.block_on

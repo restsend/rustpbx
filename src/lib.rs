@@ -20,7 +20,6 @@ pub use rustpbx_http_util as http_util;
 pub use rustpbx_media as media;
 pub mod metrics;
 pub use rustpbx_models as models;
-pub mod observability;
 pub mod outbound;
 pub mod preflight;
 pub mod proxy;

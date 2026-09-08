@@ -12,10 +12,6 @@
 //! ## Feature flag
 //!
 //! Enabled by compiling with `--features addon-observability`.
-//! The commercial `addon-telemetry` feature supersedes this addon: when both
-//! are compiled the commercial addon *replaces* the Prometheus recorder with
-//! an OpenTelemetry bridge and owns the `/metrics` path (via OTLP push),
-//! but keeps `/healthz`.
 //!
 //! ## `config.toml` snippet
 //!

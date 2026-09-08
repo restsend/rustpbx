@@ -2,7 +2,7 @@
 
 /// Console metrics page hints for the Prometheus scrape endpoint.
 ///
-/// Populated by observability/telemetry addons via
+/// Populated by the observability addon via
 /// [`crate::addons::Addon::metrics_endpoint_info`] — core never loads addon config.
 #[derive(Debug, Clone)]
 pub struct MetricsEndpointInfo {

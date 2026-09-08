@@ -7,9 +7,6 @@
 [submodule "src/addons/ivr_editor"]
 	path = src/addons/ivr_editor
 	url = https://cnb.cool/miuda.ai/ivr_editor
-[submodule "src/addons/telemetry"]
-	path = src/addons/telemetry
-	url = https://cnb.cool/miuda.ai/telemetry
 [submodule "src/addons/voicemail"]
 	path = src/addons/voicemail
 	url = https://cnb.cool/miuda.ai/voicemail

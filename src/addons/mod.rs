@@ -383,6 +383,3 @@ pub mod voicemail;
 
 #[cfg(feature = "addon-ivr-editor")]
 pub mod ivr_editor;
-
-#[cfg(feature = "addon-telemetry")]
-pub mod telemetry;
