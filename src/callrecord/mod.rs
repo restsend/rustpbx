@@ -44,8 +44,9 @@ pub mod storage;
 mod tests;
 
 pub use recording_artifacts::{
-    ActiveRecording, RecordingSegment, RecordingSubdir, UploadFailedMarker, local_archive_path,
-    segment_wav_path, upload_failed_marker_path, write_upload_failed_marker,
+    ActiveRecording, RecordingSegment, RecordingSubdir, UploadFailedMarker, is_direct_child_of_root,
+    local_archive_path, preview_archive_path, segment_wav_path, upload_failed_marker_path,
+    write_upload_failed_marker,
 };
 
 const CALL_RECORD_HTTP_TIMEOUT: Duration = Duration::from_secs(10);

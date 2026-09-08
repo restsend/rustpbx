@@ -112,8 +112,16 @@ pub struct MenuNode {
     pub greeting_text: Option<String>,
     #[serde(default)]
     pub greeting_voice: Option<String>,
-    #[serde(default = "default_timeout_ms")]
-    pub timeout_ms: u64,
+    /// DTMF wait timeout in milliseconds. `None` (= TOML `timeout_ms = 0`)
+    /// means the menu never waits for input: greeting playback and the DTMF
+    /// window are skipped and `timeout_action` executes immediately —
+    /// `max_retries` never applies. Requires `timeout_action` to be set.
+    #[serde(
+        default = "default_menu_timeout_ms",
+        deserialize_with = "deserialize_menu_timeout_ms",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub timeout_ms: Option<u64>,
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
     #[serde(default)]
@@ -138,7 +146,7 @@ impl Default for MenuNode {
             greeting: String::new(),
             greeting_text: None,
             greeting_voice: None,
-            timeout_ms: 5000,
+            timeout_ms: Some(5000),
             max_retries: 3,
             invalid_prompt: None,
             invalid_text: None,
@@ -195,6 +203,14 @@ pub enum EntryAction {
         prompt_text: Option<String>,
         #[serde(default)]
         prompt_voice: Option<String>,
+        /// Silence to hold before the prompt starts playing.
+        #[serde(default)]
+        delay_before_ms: u64,
+        /// Silence to hold after the prompt finishes before the next action
+        /// runs (on top of the media layer's built-in EOF tail). Useful to
+        /// keep a pause before e.g. hangup or the next announcement.
+        #[serde(default)]
+        delay_after_ms: u64,
     },
     Repeat,
     Exit,
@@ -205,6 +221,13 @@ pub enum EntryAction {
         prompt_text: Option<String>,
         #[serde(default)]
         prompt_voice: Option<String>,
+        /// Silence to hold before the prompt starts playing.
+        #[serde(default)]
+        delay_before_ms: u64,
+        /// Silence to hold after the prompt finishes before the call hangs up
+        /// (on top of the media layer's built-in EOF tail).
+        #[serde(default)]
+        delay_after_ms: u64,
     },
     CollectExtension {
         prompt: String,
@@ -256,6 +279,13 @@ pub enum EntryAction {
         prompt_voice: Option<String>,
         #[serde(default)]
         code: Option<u16>,
+        /// Silence to hold before the prompt starts playing.
+        #[serde(default)]
+        delay_before_ms: u64,
+        /// Silence to hold after the prompt finishes before the call hangs up
+        /// (on top of the media layer's built-in EOF tail).
+        #[serde(default)]
+        delay_after_ms: u64,
     },
     Back,
 
@@ -272,6 +302,13 @@ pub enum EntryAction {
         interruptible: bool,
         #[serde(default)]
         tts_api_url: Option<String>,
+        /// Silence to hold before the prompt starts playing.
+        #[serde(default)]
+        delay_before_ms: u64,
+        /// Silence to hold after the prompt finishes before the flow advances
+        /// (on top of the media layer's built-in EOF tail).
+        #[serde(default)]
+        delay_after_ms: u64,
     },
 
     DtmfMenu {
@@ -587,12 +624,16 @@ impl WebhookResponse {
                 prompt,
                 prompt_text: None,
                 prompt_voice: None,
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             },
             WebhookResponse::Repeat => EntryAction::Repeat,
             WebhookResponse::Hangup { prompt } => EntryAction::Hangup {
                 prompt,
                 prompt_text: None,
                 prompt_voice: None,
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             },
             WebhookResponse::CollectExtension {
                 prompt,
@@ -631,6 +672,8 @@ impl WebhookResponse {
                 prompt_text: None,
                 prompt_voice: None,
                 code,
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             },
             WebhookResponse::Back => EntryAction::Back,
         }
@@ -664,6 +707,15 @@ impl IvrDefinition {
         menu_key: &str,
         menus: &HashMap<String, MenuNode>,
     ) -> Result<(), String> {
+        // A menu that never waits for input is a pure trampoline: without a
+        // timeout_action there is nothing to execute and no way to leave it.
+        if menu.timeout_ms.is_none() && menu.timeout_action.is_none() {
+            return Err(format!(
+                "menu '{}' has no DTMF wait (timeout_ms absent or 0) but no \
+                 timeout_action to execute — the menu would dead-end",
+                menu_key
+            ));
+        }
         for entry in &menu.entries {
             if let EntryAction::Menu { menu: ref target } = entry.action
                 && target != "root"
@@ -698,6 +750,21 @@ impl IvrDefinition {
 
 fn default_timeout_ms() -> u64 {
     5000
+}
+
+/// `MenuNode.timeout_ms` field default: the usual 5 s DTMF wait (as `Some`).
+fn default_menu_timeout_ms() -> Option<u64> {
+    Some(5000)
+}
+
+/// `timeout_ms = 0` (TOML/JSON) normalizes to `None` — "never wait for DTMF,
+/// execute `timeout_action` immediately". Absent keeps the 5000 ms default.
+fn deserialize_menu_timeout_ms<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<u64>::deserialize(deserializer)?;
+    Ok(raw.filter(|ms| *ms > 0))
 }
 fn default_max_retries() -> u32 {
     3
@@ -800,6 +867,18 @@ impl EntryAction {
             }
         )
     }
+
+    /// Node-configured post-playback hold (`delay_after_ms`) for the
+    /// playback-capable variants; 0 for everything else.
+    pub fn delay_after_ms(&self) -> u64 {
+        match self {
+            EntryAction::Play { delay_after_ms, .. }
+            | EntryAction::Hangup { delay_after_ms, .. }
+            | EntryAction::PlayAndHangup { delay_after_ms, .. }
+            | EntryAction::Prompt { delay_after_ms, .. } => *delay_after_ms,
+            _ => 0,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -869,11 +948,87 @@ action = { type = "menu", menu = "root" }
         let root = ivr.root.as_ref().expect("root menu");
         assert_eq!(root.greeting, "sounds/ivr/welcome.wav");
         assert_eq!(root.entries.len(), 2);
-        assert_eq!(root.timeout_ms, 5000);
+        assert_eq!(root.timeout_ms, Some(5000));
         assert_eq!(root.max_retries, 3);
         let sales = ivr.menus.get("sales").expect("sales menu");
         assert_eq!(sales.entries.len(), 3);
         ivr.validate().expect("validation should pass");
+    }
+
+    #[test]
+    fn test_menu_timeout_ms_zero_normalizes_to_none() {
+        // `timeout_ms = 0` means "never wait for DTMF" — the trampoline mode
+        // used by the builtin post_call_csat / check_voicemail definitions.
+        let toml_str = r#"
+[ivr]
+name = "trampoline"
+
+[ivr.root]
+timeout_ms = 0
+timeout_action = { type = "start_app", app = "csat_survey" }
+entries = []
+"#;
+        let config: IvrFileConfig = toml::from_str(toml_str).expect("parse TOML");
+        let root = config.ivr.root.as_ref().expect("root menu");
+        assert_eq!(root.timeout_ms, None);
+        assert!(root.timeout_action.is_some());
+        config.ivr.validate().expect("validation should pass");
+    }
+
+    #[test]
+    fn test_menu_timeout_ms_absent_defaults_to_5000() {
+        let toml_str = r#"
+[ivr]
+name = "classic"
+
+[ivr.root]
+greeting = "hello.wav"
+entries = []
+"#;
+        let config: IvrFileConfig = toml::from_str(toml_str).expect("parse TOML");
+        let root = config.ivr.root.as_ref().expect("root menu");
+        assert_eq!(root.timeout_ms, Some(5000));
+    }
+
+    #[test]
+    fn test_menu_timeout_none_without_timeout_action_fails_validation() {
+        let def = IvrDefinition {
+            name: "dead-end".into(),
+            root: Some(MenuNode {
+                timeout_ms: None,
+                timeout_action: None,
+                ..MenuNode::default()
+            }),
+            ..Default::default()
+        };
+        let err = def.validate().expect_err("must reject dead-end menu");
+        assert!(err.contains("no DTMF wait"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_menu_timeout_none_omitted_on_serialize() {
+        // ivr_editor serializes definitions with toml::to_string — a raw None
+        // would error there, hence skip_serializing_if.
+        let def = IvrDefinition {
+            name: "trampoline".into(),
+            root: Some(MenuNode {
+                timeout_ms: None,
+                timeout_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
+                }),
+                ..MenuNode::default()
+            }),
+            ..Default::default()
+        };
+        let rendered = toml::to_string_pretty(&IvrFileConfig { ivr: def }).expect("serialize TOML");
+        assert!(
+            !rendered.contains("timeout_ms"),
+            "None must be omitted: {rendered}"
+        );
     }
 
     #[test]
@@ -886,6 +1041,8 @@ action = { type = "menu", menu = "root" }
                 record_name_list: None,
                 interruptible: true,
                 tts_api_url: None,
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
@@ -1292,5 +1449,80 @@ action = { type = "bridge", create_room_uri = "wss://voip.example.com/ws", heade
             }
             other => panic!("expected Bridge action, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_playback_delay_fields_parse_and_default() {
+        // Explicit delay fields are parsed from ms values.
+        let toml_str = r##"
+[ivr]
+name = "delay-ivr"
+
+[ivr.root]
+greeting = "welcome.wav"
+timeout_ms = 5000
+
+[[ivr.root.entries]]
+key = "1"
+action = { type = "play_and_hangup", prompt = "goodbye.wav", delay_before_ms = 150, delay_after_ms = 500 }
+"##;
+        let config: IvrFileConfig = toml::from_str(toml_str).expect("parse TOML");
+        let root = config.ivr.root.as_ref().expect("root menu");
+        match &root.entries[0].action {
+            EntryAction::PlayAndHangup {
+                delay_before_ms,
+                delay_after_ms,
+                ..
+            } => {
+                assert_eq!(*delay_before_ms, 150);
+                assert_eq!(*delay_after_ms, 500);
+            }
+            other => panic!("expected PlayAndHangup, got {other:?}"),
+        }
+
+        // Legacy configs without the fields default to 0 (fully compatible).
+        let toml_str = r##"
+[ivr]
+name = "legacy-ivr"
+
+[ivr.root]
+greeting = "welcome.wav"
+
+[[ivr.root.entries]]
+key = "1"
+action = { type = "prompt", file = "hello.wav" }
+"##;
+        let config: IvrFileConfig = toml::from_str(toml_str).expect("parse TOML");
+        let root = config.ivr.root.as_ref().expect("root menu");
+        match &root.entries[0].action {
+            EntryAction::Prompt {
+                delay_before_ms,
+                delay_after_ms,
+                file,
+                ..
+            } => {
+                assert_eq!(file.as_deref(), Some("hello.wav"));
+                assert_eq!(*delay_before_ms, 0);
+                assert_eq!(*delay_after_ms, 0);
+            }
+            other => panic!("expected Prompt, got {other:?}"),
+        }
+
+        // delay_after_ms() accessor: playback variants expose it, others 0.
+        let play = EntryAction::Play {
+            prompt: "x.wav".into(),
+            prompt_text: None,
+            prompt_voice: None,
+            delay_before_ms: 0,
+            delay_after_ms: 700,
+        };
+        assert_eq!(play.delay_after_ms(), 700);
+        let transfer = EntryAction::Transfer {
+            target: "2000".into(),
+            params: HashMap::new(),
+            return_app: None,
+            return_target: None,
+        };
+        assert_eq!(transfer.delay_after_ms(), 0);
     }
 }

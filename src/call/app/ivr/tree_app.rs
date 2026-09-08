@@ -119,6 +119,9 @@ pub struct IvrApp {
     /// Set when a terminal action already emitted `IvrFlowCompleted`, so
     /// `on_exit` does not double-report an aborted flow.
     flow_completed: bool,
+    /// `delay_after_ms` of the announcement/hangup prompt currently playing,
+    /// held before `on_audio_complete` advances to the next action.
+    pending_post_delay_ms: u64,
 }
 
 impl IvrApp {
@@ -146,6 +149,7 @@ impl IvrApp {
             session_id: None,
             session_extensions: None,
             flow_completed: false,
+            pending_post_delay_ms: 0,
         }
     }
 
@@ -412,7 +416,10 @@ impl IvrApp {
     /// Start waiting for DTMF input with a timeout.
     fn start_waiting_dtmf(&mut self, menu_key: &str, retry_count: u32, ctrl: &CallController) {
         let menu = self.definition.get_menu(menu_key);
-        let timeout_ms = menu.map(|m| m.timeout_ms).unwrap_or(5000);
+        // `timeout_ms = None` means "never wait for DTMF" — a 0 ms window
+        // fires the timeout immediately (same convention as executor's
+        // PendingMenu).
+        let timeout_ms = menu.map(|m| m.timeout_ms.unwrap_or(0)).unwrap_or(5000);
         self.state = IvrState::WaitingDtmf {
             menu_key: menu_key.to_string(),
             retry_count,
@@ -473,6 +480,9 @@ impl IvrApp {
                 },
             );
         }
+        // A pending delay_after belongs to the prompt that just finished; any
+        // newly executed action supersedes it.
+        self.pending_post_delay_ms = 0;
         match action {
             EntryAction::Transfer {
                 target,
@@ -621,6 +631,8 @@ impl IvrApp {
                 prompt,
                 prompt_text,
                 prompt_voice,
+                delay_before_ms,
+                delay_after_ms,
             } => {
                 let return_menu = self.current_menu_key().to_string();
                 self.state = IvrState::PlayingAnnouncement {
@@ -634,6 +646,10 @@ impl IvrApp {
                     )
                     .await
                 {
+                    self.pending_post_delay_ms = *delay_after_ms;
+                    if *delay_before_ms > 0 {
+                        tokio::time::sleep(super::common::node_delay(*delay_before_ms)).await;
+                    }
                     info!(ivr = %self.definition.name, prompt = %path, return_menu, "IVR playing announcement");
                     ctrl.play_audio(&path, false).await?;
                     Ok(AppAction::Continue)
@@ -655,6 +671,8 @@ impl IvrApp {
                 prompt,
                 prompt_text,
                 prompt_voice,
+                delay_before_ms,
+                delay_after_ms,
                 ..
             } => {
                 if let Some(path) = self
@@ -665,7 +683,11 @@ impl IvrApp {
                     )
                     .await
                 {
+                    self.pending_post_delay_ms = *delay_after_ms;
                     self.state = IvrState::PlayingAndHangup { code: None };
+                    if *delay_before_ms > 0 {
+                        tokio::time::sleep(super::common::node_delay(*delay_before_ms)).await;
+                    }
                     debug!(ivr = %self.definition.name, prompt = %path, "Playing prompt before hangup");
                     ctrl.play_audio(&path, false).await?;
                     Ok(AppAction::Continue)
@@ -685,6 +707,8 @@ impl IvrApp {
                 prompt_text,
                 prompt_voice,
                 code,
+                delay_before_ms,
+                delay_after_ms,
             } => {
                 self.state = IvrState::PlayingAndHangup { code: *code };
                 if let Some(path) = self
@@ -695,6 +719,10 @@ impl IvrApp {
                     )
                     .await
                 {
+                    self.pending_post_delay_ms = *delay_after_ms;
+                    if *delay_before_ms > 0 {
+                        tokio::time::sleep(super::common::node_delay(*delay_before_ms)).await;
+                    }
                     debug!(ivr = %self.definition.name, prompt = %path, code = ?code, "Playing prompt before hangup with code");
                     ctrl.play_audio(&path, false).await?;
                     Ok(AppAction::Continue)
@@ -1403,6 +1431,18 @@ impl CallApp for IvrApp {
         ctrl: &mut CallController,
         _ctx: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
+        // Hold the node-configured `delay_after_ms` before advancing (e.g. to
+        // hangup), so the prompt can sink in before the call drops.
+        if self.pending_post_delay_ms > 0 {
+            let delay = super::common::node_delay(self.pending_post_delay_ms);
+            self.pending_post_delay_ms = 0;
+            debug!(
+                ivr = %self.definition.name,
+                delay_ms = delay.as_millis() as u64,
+                "IVR holding delay_after_ms"
+            );
+            tokio::time::sleep(delay).await;
+        }
         // Extract string fields we need before the mutable borrows below.
         enum AudioDone {
             Greeting { menu_key: String },
@@ -1998,7 +2038,7 @@ mod tests {
         let mut def = test_definition();
         def.root = Some(MenuNode {
             greeting: String::new(),
-            timeout_ms: 5000,
+            timeout_ms: Some(5000),
             max_retries: 1,
             timeout_action: Some(EntryAction::Transfer {
                 target: "2001".into(),

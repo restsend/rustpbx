@@ -24,7 +24,7 @@ acl_files = ["config/acl/*.toml"]
 ```
 
 ### Database Mode
-Set `generated_db = true` to store all generated configs in the application database:
+Set `generated_db = true` to store the generated resource configs in the application database:
 
 ```toml
 [proxy]
@@ -36,10 +36,12 @@ In this mode, the system reads from and writes to the `config_entries` table ins
 - IVR project definitions (when published)
 - CC ACD config, skill groups, and agents
 
-File-based `routes_files`, `trunks_files`, etc. are ignored in DB mode — all config is managed through the database. The `generated_dir` path is also unused.
+**Scope of DB mode:** only the resource configs listed above are affected. Declarative settings declared directly in `rustpbx.toml` — such as `[rwi]`, `[rwi_webhook]`, `[console]`, `[callrecord]`, `[ami]`, etc. — are **always loaded from the config file**, regardless of `generated_db`. The console saves them back to `rustpbx.toml`, never to the database.
+
+File-based `routes_files`, `trunks_files`, etc. are ignored in DB mode — the generated resource configs listed above are managed through the database. The `generated_dir` path is also unused.
 
 ## Reload Behavior
-Changes to `rustpbx.toml` usually require a restart. However, **Trunks**, **Queues**, **Routes**, and **ACLs** can be reloaded at runtime without dropping active calls via the Admin Console or API. In DB mode, the same runtime reload applies — configs are loaded from the database.
+Changes to `rustpbx.toml` usually require a restart. However, **Trunks**, **Queues**, **Routes**, and **ACLs** can be reloaded at runtime without dropping active calls via the Admin Console or API. In DB mode, the same runtime reload applies — these generated configs are loaded from the database. Some declarative settings also support hot reload (e.g. `[rwi_webhook]` and `[rwi].tokens`); everything else requires a restart.
 
 ## Addon System
 Addons (like Wholesale, Queue, Transcript) are enabled in the `[proxy]` section.

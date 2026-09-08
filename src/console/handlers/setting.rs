@@ -530,6 +530,12 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
             "dialogs": app_state.sip_server().inner.dialog_layer.len(),
         });
 
+        let generated_source = if config.proxy.use_db_config() {
+            "database"
+        } else {
+            "toml"
+        };
+
         proxy = json!({
             "enabled": true,
             "addr": config.proxy.addr.clone(),
@@ -544,8 +550,8 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
             "ua_blacklist": config.proxy.ua_black_list.clone().unwrap_or_default(),
             "ivr_fallback": config.proxy.ivr_fallback,
             "data_sources": json!({
-                "routes": "toml",
-                "trunks": "toml",
+                "routes": generated_source,
+                "trunks": generated_source,
             }),
             "rtp": config.rtp_config(),
             "sip_contact": {

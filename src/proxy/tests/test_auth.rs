@@ -498,6 +498,7 @@ async fn test_guest_call_allowed_extension() {
         recording_policy: ArcSwap::new(Arc::new(None)),
         proxy_config: ArcSwap::from_pointee(config.as_ref().clone()),
         emergency_config: ArcSwap::from_pointee(config.emergency.clone()),
+        rwi_webhook_config: ArcSwap::from_pointee(None),
         cancel_token: CancellationToken::new(),
         data_context,
         routing_state: Arc::new(parking_lot::RwLock::new(Arc::new(

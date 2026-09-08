@@ -7550,6 +7550,38 @@ impl SipSession {
         }
     }
 
+    /// Address advertised for a finished local recording in RWI events. The
+    /// CDR pipeline archives pipeline-generated WAVs into
+    /// `{root}/{YYYYMMDD}[/{HH}]/` right after session teardown (and before
+    /// the CDR row is persisted), so events must carry the final archived
+    /// location instead of the transient pre-archive path. Mirrors
+    /// `RecordingUploadHook::archive_local_artifacts`: same root, same
+    /// daily/hourly layout, date derived from the call start time (not the
+    /// recording moment), and operator-supplied custom paths outside the
+    /// root stay untouched. Falls back to the original path when no policy
+    /// is active, the media type never archives (`http`/`sipflow`), or the
+    /// call start time cannot be resolved — in every fallback the renamer
+    /// also leaves the file in place, so the address stays valid.
+    pub(crate) fn preview_recording_event_path(&self, path: &str) -> String {
+        let policy_guard = self.server.recording_policy.load();
+        let Some(policy) = policy_guard.as_ref() else {
+            return path.to_string();
+        };
+        match policy.effective_recording_type() {
+            crate::config::RecordingType::Local | crate::config::RecordingType::S3 => {}
+            crate::config::RecordingType::Http | crate::config::RecordingType::Sipflow => {
+                return path.to_string();
+            }
+        }
+        let Ok(start) = chrono::DateTime::parse_from_rfc3339(&self.context.created_at)
+            .map(|t| t.with_timezone(&chrono::Utc))
+        else {
+            return path.to_string();
+        };
+        let subdir = crate::callrecord::RecordingSubdir::parse(policy.subdir.as_deref());
+        crate::callrecord::preview_archive_path(&policy.recorder_path(), Path::new(path), subdir, start)
+    }
+
     pub(crate) fn publish_recording_complete(
         &mut self,
         result: crate::media::media_recorder::RecordingResult,
@@ -7576,13 +7608,14 @@ impl SipSession {
                 Some(ref meta) => (meta.caller_name.clone(), meta.callee_name.clone()),
                 None => (None, None),
             };
+            let reported_path = self.preview_recording_event_path(&info.path);
             gateway.read().send_to_owner(&crate::rwi::RecordStopped {
                 call_id: call_id.clone(),
                 duration_secs: Some(info.duration.as_secs()),
-                filename: Some(info.path.clone()),
+                filename: Some(reported_path.clone()),
                 unique_id: Some(call_id),
                 file_size: Some(info.size_bytes),
-                download_url: None,
+                download_url: Some(reported_path),
                 caller_name,
                 callee_name,
                 called_phone: None,

@@ -35,7 +35,7 @@ action = { type = "repeat" }
     assert_eq!(config.ivr.default_voice.as_deref(), Some("xiaoyan"));
 
     let root = config.ivr.root.expect("root menu should exist");
-    assert_eq!(root.timeout_ms, 5000, "timeout_ms should be set");
+    assert_eq!(root.timeout_ms, Some(5000), "timeout_ms should be set");
     assert_eq!(root.max_retries, 3);
     assert_eq!(root.entries.len(), 3, "should have 3 entries");
 

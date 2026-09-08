@@ -641,6 +641,12 @@ impl AppStateBuilder {
             let webhook_tx = crate::rwi::webhook::start_rwi_webhook_handler(webhook_config);
             let mut gw = gateway_ref.write();
             gw.set_webhook_tx(webhook_tx);
+            drop(gw);
+            app_state
+                .sip_server()
+                .inner
+                .rwi_webhook_config
+                .store(std::sync::Arc::new(config.rwi_webhook.clone()));
         }
 
         // Initialize addons

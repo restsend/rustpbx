@@ -249,6 +249,8 @@ impl Default for RetryConfig {
                     prompt: Some("sounds/error.wav".into()),
                     prompt_text: None,
                     prompt_voice: None,
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 },
                 ignore_prompt_dtmf: false,
                 wait_for_result: false,

@@ -783,8 +783,9 @@ impl LegInner {
     }
 
     /// Play a media source (IVR greeting / hold music / announcement).
-    /// `on_end` fires when playback stops: `false` on natural EOF, `true` when
-    /// interrupted (source switched away or leg stopped).
+    /// `on_end` fires when playback stops: `false` on natural EOF (after a
+    /// short silence tail that lets in-flight frames reach the remote), `true`
+    /// when interrupted (source switched away or leg stopped).
     pub async fn play(
         &self,
         audio: Box<dyn crate::audio_source::AudioSource>,
@@ -1044,11 +1045,9 @@ async fn wait_rtp_transport(
     kind: rustrtc::MediaKind,
     role: &str,
 ) -> Result<Arc<rustrtc::transports::rtp::RtpTransport>> {
-    let mut last: Option<Arc<rustrtc::transports::rtp::RtpTransport>> = None;
     for _ in 0..=RTP_TRANSPORT_READY_ATTEMPTS {
-        last = rtp_transport_for_kind(pc, kind);
-        if last.is_some() {
-            return Ok(last.expect("checked above"));
+        if let Some(transport) = rtp_transport_for_kind(pc, kind) {
+            return Ok(transport);
         }
         tokio::time::sleep(RTP_TRANSPORT_RETRY_INTERVAL).await;
     }

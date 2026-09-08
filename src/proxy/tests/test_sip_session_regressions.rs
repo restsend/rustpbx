@@ -2252,6 +2252,75 @@ async fn finalize_recording_for_app_shutdown_finalizes_active_recording() {
 }
 
 #[tokio::test]
+async fn record_stopped_event_path_predicts_archived_layout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (server, _) = create_test_server().await;
+    server.recording_policy.store(Arc::new(Some(
+        crate::config::RecordingPolicy {
+            enabled: Some(true),
+            recording_type: Some(crate::config::RecordingType::Local),
+            path: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        },
+    )));
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let session = build_session_on_server(server, dialplan).await;
+
+    let start = chrono::DateTime::parse_from_rfc3339(&session.context.created_at)
+        .expect("session created_at is rfc3339");
+    let day = start.with_timezone(&chrono::Utc).format("%Y%m%d").to_string();
+
+    // Pipeline artifact (direct child of the recording root) must be
+    // advertised at its final dated archive location.
+    let recorded = dir.path().join("call-1.wav").to_string_lossy().into_owned();
+    let expected = dir
+        .path()
+        .join(&day)
+        .join("call-1.wav")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(session.preview_recording_event_path(&recorded), expected);
+
+    // Operator-supplied custom path outside the root is never archived and
+    // must stay untouched.
+    let custom = "/data/ob/custom.wav";
+    assert_eq!(session.preview_recording_event_path(custom), custom);
+}
+
+#[tokio::test]
+async fn record_stopped_event_path_unchanged_for_sipflow_media() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (server, _) = create_test_server().await;
+    server.recording_policy.store(Arc::new(Some(
+        crate::config::RecordingPolicy {
+            enabled: Some(true),
+            recording_type: Some(crate::config::RecordingType::Sipflow),
+            path: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        },
+    )));
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let session = build_session_on_server(server, dialplan).await;
+
+    // Sipflow media never archives local WAVs, so the address must not
+    // gain a date segment.
+    let recorded = dir.path().join("call-2.wav").to_string_lossy().into_owned();
+    assert_eq!(session.preview_recording_event_path(&recorded), recorded);
+}
+
+#[tokio::test]
+async fn record_stopped_event_path_unchanged_without_policy() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (server, _) = create_test_server().await;
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let session = build_session_on_server(server, dialplan).await;
+
+    // No [recording] policy → no archiver → the original path stays valid.
+    let recorded = dir.path().join("call-3.wav").to_string_lossy().into_owned();
+    assert_eq!(session.preview_recording_event_path(&recorded), recorded);
+}
+
+#[tokio::test]
 async fn finalize_recording_for_app_shutdown_noop_when_idle() {
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
         "voicemail".to_string(),

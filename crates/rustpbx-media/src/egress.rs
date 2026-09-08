@@ -60,6 +60,15 @@ use crate::audio_source::{AudioSource, ResamplingAudioSource};
 /// Default ptime (packetization interval) in milliseconds.
 const DEFAULT_PTIME_MS: u32 = 20;
 
+/// Grace tail after a non-looping Media source reaches natural EOF. The
+/// pipeline keeps streaming silence for this long before firing
+/// `on_end(false)` so the final frames already handed to the sender can drain
+/// through the queue, the network and the remote jitter buffer. Apps hang up
+/// the moment they receive the completion event; without the tail the BYE
+/// tears the bridge down while the remote is still playing the prompt,
+/// clipping its last syllable (observed with TTS prompts).
+const PLAYBACK_EOF_TAIL_MS: u32 = 300;
+
 /// Callback fired when a [`EgressSource::Media`] source stops producing audio:
 /// natural EOF (`false`) or interrupted by switching away from Media / stop
 /// (`true`). Use to signal playback completion to the app/IVR layer.
@@ -91,10 +100,14 @@ pub enum EgressSource {
     /// Emit silence frames (mute / hold placeholder / idle).
     Silence,
     /// Play an [`AudioSource`] (file, stream, or generated audio), converting
-    /// its PCM to the target codec. When `loop_playback` is false and the source
-    /// reaches EOF the pipeline switches to [`EgressSource::Silence`] and
-    /// fires `on_end(false)`. When the source is replaced (switch to another
-    /// source or stop) while a Media source is active, `on_end(true)` is fired.
+    /// its PCM to the target codec. When `loop_playback` is false and the
+    /// source reaches EOF the pipeline streams silence for a short grace tail
+    /// ([`PLAYBACK_EOF_TAIL_MS`]) and then switches to
+    /// [`EgressSource::Silence`], firing `on_end(false)` only after the tail
+    /// so in-flight frames reach the remote first. When the source is
+    /// replaced (switch to another source or stop) while a Media source is
+    /// active — including during the tail — `on_end(true)` is fired
+    /// immediately.
     Media {
         audio: Box<dyn AudioSource>,
         loop_playback: bool,
@@ -197,6 +210,8 @@ impl EgressPipeline {
             noise_state: 0x9E37_79B9,
             noise_amplitude,
             noise_lp: 0.0,
+            eof_tail_total: PLAYBACK_EOF_TAIL_MS.div_ceil(ptime_ms.unwrap_or(DEFAULT_PTIME_MS)),
+            eof_tail_remaining: 0,
         };
         tokio::spawn(task.run(cmd_rx, ptime, cancel.clone()));
 
@@ -306,6 +321,11 @@ struct EgressTask {
     noise_amplitude: f32,
     /// One-pole lowpass state for a softer, less "harsh static" comfort tone.
     noise_lp: f32,
+    /// Post-EOF grace tail length in ticks (see [`PLAYBACK_EOF_TAIL_MS`]).
+    eof_tail_total: u32,
+    /// Remaining grace ticks while draining a finished non-looping Media
+    /// source. 0 = idle.
+    eof_tail_remaining: u32,
 }
 
 impl EgressTask {
@@ -359,6 +379,9 @@ impl EgressTask {
                         if let Some(cb) = prev_on_end {
                             cb(true);
                         }
+                        // A pending EOF tail belongs to the previous source;
+                        // the switch above already reported it as interrupted.
+                        self.eof_tail_remaining = 0;
                         // Resample Media sources to the codec's sample rate
                         // before encoding (e.g. 24 kHz MP3 → 48 kHz opus).
                         let s = match s {
@@ -456,22 +479,6 @@ impl EgressTask {
         // aliasing). Put it back at the end.
         let mut source = std::mem::replace(&mut self.source, EgressSource::Silence);
 
-        // Promote Media→Silence on terminal EOF; fire on_end callback.
-        if let EgressSource::Media {
-            audio,
-            loop_playback,
-            on_end,
-            ..
-        } = &mut source
-        {
-            if !audio.has_data() && !*loop_playback {
-                if let Some(cb) = on_end.take() {
-                    cb(false);
-                }
-                source = EgressSource::Silence;
-            }
-        }
-
         let frame = match &mut source {
             EgressSource::RewriteRelay { .. } => {
                 // The pacing loop skips ticks while a relay is active, so we
@@ -493,10 +500,30 @@ impl EgressTask {
                 let encoded: Bytes = if n == 0 {
                     if !audio.has_data() {
                         // True EOF (file ended / channel sender dropped + drained).
-                        if let Some(cb) = on_end.take() {
-                            cb(false);
+                        //
+                        // Keep streaming silence for a short grace tail before
+                        // signaling completion: frames already handed to the
+                        // sender still need queue + network + remote
+                        // jitter-buffer time to actually play out, and apps
+                        // hang up the moment they get the completion event.
+                        if !*loop_playback && self.eof_tail_total > 0 {
+                            if self.eof_tail_remaining == 0 {
+                                self.eof_tail_remaining = self.eof_tail_total;
+                            }
+                            self.eof_tail_remaining -= 1;
+                            if self.eof_tail_remaining == 0 {
+                                if let Some(cb) = on_end.take() {
+                                    cb(false);
+                                }
+                                source = EgressSource::Silence;
+                            }
+                            // else: stay in Media; the tail keeps ticking.
+                        } else {
+                            if let Some(cb) = on_end.take() {
+                                cb(false);
+                            }
+                            source = EgressSource::Silence;
                         }
-                        source = EgressSource::Silence;
                         self.encode_silence().into()
                     } else if *loop_playback {
                         let _ = audio.reset();
@@ -854,6 +881,8 @@ mod tests {
             noise_state: 0x9E37_79B9,
             noise_amplitude: 10f32.powf(-30.0 / 20.0) * i16::MAX as f32,
             noise_lp: 0.0,
+            eof_tail_total: 0,
+            eof_tail_remaining: 0,
         };
         // With CNG on, the encoded silence frame must differ from a pure
         // zero-encode: a zero PCMU frame is all 0xFF (μ-law of 0) and any
@@ -902,6 +931,8 @@ mod tests {
             noise_state: 1,
             noise_amplitude: 0.0,
             noise_lp: 0.0,
+            eof_tail_total: 0,
+            eof_tail_remaining: 0,
         };
 
         let first = task.next_frame().await.expect("first frame");
@@ -973,6 +1004,8 @@ mod tests {
             noise_state: 0x9E37_79B9,
             noise_amplitude: 10f32.powf(-20.0 / 20.0) * i16::MAX as f32,
             noise_lp: 0.0,
+            eof_tail_total: 0,
+            eof_tail_remaining: 0,
         };
 
         pcm_tx.try_send(vec![2_000i16; spf]).unwrap();
@@ -1047,6 +1080,8 @@ mod tests {
             noise_state: 0x9E37_79B9,
             noise_amplitude: 10f32.powf(-20.0 / 20.0) * i16::MAX as f32,
             noise_lp: 0.0,
+            eof_tail_total: 0,
+            eof_tail_remaining: 0,
         };
 
         let mut ref_enc = create_encoder(CodecType::PCMU);
@@ -1095,6 +1130,8 @@ mod tests {
             noise_state: 0x9E37_79B9,
             noise_amplitude: 10f32.powf(-20.0 / 20.0) * i16::MAX as f32,
             noise_lp: 0.0,
+            eof_tail_total: 0,
+            eof_tail_remaining: 0,
         };
 
         let mut ref_enc = create_encoder(CodecType::PCMU);
@@ -1337,6 +1374,8 @@ mod tests {
             noise_state: 0x9E37_79B9,
             noise_amplitude: 0.0,
             noise_lp: 0.0,
+            eof_tail_total: 0,
+            eof_tail_remaining: 0,
         };
         let f = task.next_frame().await.expect("silence yields a frame");
         assert_eq!(f.clock_rate, 8000);
@@ -1416,6 +1455,8 @@ mod tests {
             noise_state: 0x9E37_79B9,
             noise_amplitude: 0.0,
             noise_lp: 0.0,
+            eof_tail_total: 0,
+            eof_tail_remaining: 0,
         };
 
         let first = task.next_frame().await.expect("first DTMF frame");
@@ -1491,6 +1532,8 @@ mod tests {
             noise_state: 0x9E37_79B9,
             noise_amplitude: 0.0,
             noise_lp: 0.0,
+            eof_tail_total: 0,
+            eof_tail_remaining: 0,
         };
         // has_data() false + no loop → source becomes Silence, still yields a frame.
         let f = task
@@ -1620,5 +1663,155 @@ mod tests {
             160,
             "matching rates → direct read, no intermediate buffer"
         );
+    }
+
+    /// A Media source with a finite tail of data before EOF.
+    struct FiniteSource {
+        frames_left: u32,
+    }
+    impl AudioSource for FiniteSource {
+        fn read_samples(&mut self, buffer: &mut [i16]) -> usize {
+            if self.frames_left == 0 {
+                return 0;
+            }
+            self.frames_left -= 1;
+            buffer.fill(2_000);
+            buffer.len()
+        }
+        fn sample_rate(&self) -> u32 {
+            8000
+        }
+        fn channels(&self) -> u16 {
+            1
+        }
+        fn has_data(&self) -> bool {
+            self.frames_left > 0
+        }
+        fn reset(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Regression for the clipped-final-syllable bug: natural EOF must not
+    /// fire `on_end(false)` immediately. The pipeline streams silence for
+    /// `eof_tail_total` ticks first, so the frames already handed to the
+    /// sender can drain through the queue / network / remote jitter buffer
+    /// before the app sees the completion event (apps may hang up on it).
+    #[tokio::test]
+    async fn natural_eof_fires_on_end_after_grace_tail() {
+        let (end_tx, mut end_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, _track, _fb) = sample_track(MediaKind::Audio, 64);
+        let codec = pcmu_codec();
+        let spf = pcm_samples_per_frame(codec.codec, Duration::from_millis(20));
+        let tail = 3;
+        let mut task = EgressTask {
+            sender,
+            codec,
+            encoder: create_encoder(CodecType::PCMU),
+            source: EgressSource::Media {
+                audio: Box::new(FiniteSource { frames_left: 1 }),
+                loop_playback: false,
+                on_end: Some(Arc::new(move |interrupted| {
+                    end_tx.send(interrupted).unwrap();
+                })),
+            },
+            resampler: None,
+            ptime: Duration::from_millis(20),
+            gate: None,
+            next_rtp_timestamp: 0,
+            sequence_number: 0,
+            marker_pending: false,
+            dtmf_event_timestamp: None,
+            pcm_buf: vec![0i16; spf],
+            noise_state: 0x9E37_79B9,
+            noise_amplitude: 10f32.powf(-35.0 / 20.0) * i16::MAX as f32,
+            noise_lp: 0.0,
+            eof_tail_total: tail,
+            eof_tail_remaining: 0,
+        };
+
+        let speech_ref: Bytes = create_encoder(CodecType::PCMU)
+            .encode(&vec![2_000i16; spf])
+            .into();
+        let silence_ref: Bytes = create_encoder(CodecType::PCMU)
+            .encode(&vec![0i16; spf])
+            .into();
+
+        // Tick 1: the only real frame.
+        let f = task.next_frame().await.expect("speech frame");
+        assert_eq!(f.data, speech_ref, "first tick must carry the source audio");
+
+        // Ticks 2..tail: the grace tail streams silence, completion not yet
+        // fired.
+        for _ in 0..tail - 1 {
+            let f = task.next_frame().await.expect("tail frame");
+            assert_eq!(f.data, silence_ref, "tail ticks must emit silence");
+            assert!(
+                matches!(task.source, EgressSource::Media { .. }),
+                "tail must keep the Media source alive"
+            );
+            assert!(
+                end_rx.try_recv().is_err(),
+                "on_end must not fire before the tail expires"
+            );
+        }
+
+        // Tail expiry: on_end(false) fires exactly once and Media drains to
+        // Silence.
+        let f = task.next_frame().await.expect("tail expiry frame");
+        assert!(matches!(task.source, EgressSource::Silence));
+        assert_eq!(f.data, silence_ref);
+        assert_eq!(
+            end_rx.try_recv().ok(),
+            Some(false),
+            "on_end must fire with interrupted=false at tail expiry"
+        );
+        assert!(end_rx.try_recv().is_err(), "on_end must not fire twice");
+    }
+
+    /// Switching sources during the grace tail reports the playback as
+    /// interrupted immediately (barge-in / stop_play must not wait out the
+    /// tail).
+    #[tokio::test]
+    async fn source_switch_during_tail_fires_interrupted() {
+        let (end_tx, mut end_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, track, _fb) = sample_track(MediaKind::Audio, 64);
+        let codec = pcmu_codec();
+        let pipe =
+            EgressPipeline::start_with_gate(sender, codec, EgressSource::Silence, Some(20), None);
+
+        pipe.set_source(EgressSource::Media {
+            audio: Box::new(FiniteSource { frames_left: 1 }),
+            loop_playback: false,
+            on_end: Some(Arc::new(move |interrupted| {
+                end_tx.send(interrupted).unwrap();
+            })),
+        })
+        .await
+        .unwrap();
+
+        // Drain the real frame plus one tail frame (default tail ≫ 1 tick),
+        // then switch away mid-tail.
+        let _ = tokio::time::timeout(Duration::from_millis(500), track.recv())
+            .await
+            .expect("speech frame")
+            .expect("sample");
+        let _ = tokio::time::timeout(Duration::from_millis(500), track.recv())
+            .await
+            .expect("first tail frame")
+            .expect("sample");
+
+        pipe.set_source(EgressSource::Silence).await.unwrap();
+        let interrupted = tokio::time::timeout(Duration::from_millis(500), end_rx.recv())
+            .await
+            .expect("on_end fired promptly on switch")
+            .expect("callback sent");
+        assert!(
+            interrupted,
+            "switch during tail must report interrupted=true, not natural EOF"
+        );
+        assert!(end_rx.try_recv().is_err(), "on_end must not fire twice");
+
+        pipe.stop();
     }
 }

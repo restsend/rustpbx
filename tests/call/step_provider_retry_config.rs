@@ -33,6 +33,8 @@ fn step_provider_uses_configured_timeout_and_retry_delay() {
                 prompt: Some("sounds/error.wav".into()),
                 prompt_text: None,
                 prompt_voice: None,
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             },
         )),
         ..config

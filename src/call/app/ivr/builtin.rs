@@ -51,7 +51,11 @@ fn post_call_csat() -> IvrDefinition {
         "csat".to_string(),
         MenuNode {
             greeting: String::new(),
-            timeout_ms: 1,
+            // No DTMF wait: the moment the menu is entered, chain into the
+            // real csat_survey app (which owns all prompts/scoring). With
+            // timeout_ms = None the timeout fires synchronously without a
+            // timer and without touching max_retries.
+            timeout_ms: None,
             max_retries: 0,
             timeout_action: Some(start_csat.clone()),
             unknown_key_action: Some(start_csat),
@@ -80,7 +84,9 @@ fn check_voicemail() -> IvrDefinition {
         description: Some("Built-in voicemail retrieval entry (no TOML file)".into()),
         root: Some(MenuNode {
             greeting: String::new(),
-            timeout_ms: 1,
+            // No DTMF wait — chain into CheckVoicemailApp on entry (see
+            // post_call_csat for the timeout_ms = None semantics).
+            timeout_ms: None,
             max_retries: 0,
             timeout_action: Some(start.clone()),
             unknown_key_action: Some(start),
@@ -121,5 +127,29 @@ mod tests {
             let def = get(name).expect(name);
             def.validate().expect("builtin IVR must validate");
         }
+    }
+
+    /// The builtin trampoline menus must be `timeout_ms: None` (no DTMF
+    /// wait) WITH a timeout_action — that combination makes enter_menu
+    /// dispatch the chaining action synchronously. Regression guard for the
+    /// old 1 ms-timer + max_retries = 0 shape, where the first timeout took
+    /// the max-retries branch and hung up instead of ever chaining.
+    #[test]
+    fn builtin_trampoline_menus_have_no_dtmf_wait_and_a_timeout_action() {
+        let def = get("post_call_csat").unwrap();
+        let csat = def.menus.get("csat").unwrap();
+        assert_eq!(csat.timeout_ms, None, "post_call_csat must not wait");
+        assert!(
+            csat.timeout_action.is_some(),
+            "post_call_csat must chain via timeout_action"
+        );
+
+        let def = get("check_voicemail").unwrap();
+        let root = def.root.as_ref().unwrap();
+        assert_eq!(root.timeout_ms, None, "check_voicemail must not wait");
+        assert!(
+            root.timeout_action.is_some(),
+            "check_voicemail must chain via timeout_action"
+        );
     }
 }

@@ -111,6 +111,44 @@ pub fn local_archive_path(
         .join(file_name)
 }
 
+/// True when `path` sits directly inside `root` (ignoring `./` prefixes),
+/// i.e. it is a pipeline-generated artifact name like `{root}/{file}.wav`.
+/// Operator-supplied custom paths (e.g. an RWI `record` option pointing
+/// outside the root) are never archived, so both the renamer and the
+/// event-address preview must agree on this predicate.
+pub fn is_direct_child_of_root(root: &str, path: &Path) -> bool {
+    let normalize = |p: &Path| -> Vec<String> {
+        p.components()
+            .filter(|c| !matches!(c, std::path::Component::CurDir))
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect()
+    };
+    match path.parent() {
+        Some(parent) => normalize(parent) == normalize(Path::new(root)),
+        None => false,
+    }
+}
+
+/// Final on-disk location the recorder pipeline archives `path` into:
+/// `{root}/{YYYYMMDD}[/{HH}]/{filename}` for pipeline-generated artifacts
+/// (direct children of the recording root), or `path` unchanged for
+/// operator-supplied custom locations. Call-site invariant: `at` must be the
+/// call's start time — the renamer (`archive_local_artifacts`) derives the
+/// date directory from `record.start_time`, not from the recording moment.
+pub fn preview_archive_path(
+    root: &str,
+    path: &Path,
+    subdir: RecordingSubdir,
+    at: DateTime<Utc>,
+) -> String {
+    if is_direct_child_of_root(root, path) {
+        return local_archive_path(root, path, subdir, at)
+            .to_string_lossy()
+            .into_owned();
+    }
+    path.to_string_lossy().into_owned()
+}
+
 /// Marker file beside a failed upload: `.upload_failed.{filename}`.
 pub fn upload_failed_marker_path(source: &Path) -> PathBuf {
     let file_name = source
@@ -191,6 +229,47 @@ mod tests {
         assert_eq!(
             local_archive_path("/rec", src, RecordingSubdir::Hourly, at),
             PathBuf::from("/rec/20260820/15/foo.wav")
+        );
+    }
+
+    #[test]
+    fn direct_child_matches_archiver_predicate() {
+        assert!(is_direct_child_of_root("/rec", Path::new("/rec/a.wav")));
+        assert!(is_direct_child_of_root(
+            "./rec",
+            Path::new("./rec/a.wav")
+        ));
+        assert!(!is_direct_child_of_root(
+            "/rec",
+            Path::new("/rec/20260907/a.wav")
+        ));
+        assert!(!is_direct_child_of_root("/rec", Path::new("/tmp/a.wav")));
+        assert!(!is_direct_child_of_root("/rec", Path::new("a.wav")));
+    }
+
+    #[test]
+    fn preview_matches_local_archive_path_for_pipeline_artifacts() {
+        let at = Utc.with_ymd_and_hms(2026, 9, 7, 8, 0, 0).unwrap();
+        let root = "/sipflow";
+        let src = Path::new("/sipflow/call-1.wav");
+        let expected = local_archive_path(root, src, RecordingSubdir::Daily, at);
+        assert_eq!(
+            preview_archive_path(root, src, RecordingSubdir::Daily, at),
+            expected.to_string_lossy()
+        );
+        assert_eq!(
+            preview_archive_path(root, src, RecordingSubdir::Daily, at),
+            "/sipflow/20260907/call-1.wav"
+        );
+    }
+
+    #[test]
+    fn preview_keeps_custom_paths_untouched() {
+        let at = Utc.with_ymd_and_hms(2026, 9, 7, 8, 0, 0).unwrap();
+        let custom = "/data/ob/call.wav";
+        assert_eq!(
+            preview_archive_path("/rec", Path::new(custom), RecordingSubdir::Daily, at),
+            custom
         );
     }
 

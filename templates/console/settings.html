@@ -830,6 +830,7 @@
                             <div>
                                 <h3 class="text-sm font-semibold text-slate-900">RWI Webhook</h3>
                                 <p class="text-xs text-slate-500">Forward RWI events (call lifecycle, recording, queue, agent, conference, etc.) to an HTTP endpoint as JSON.</p>
+                                <p class="mt-1 text-xs text-slate-400">Stored in <code class="font-mono">rustpbx.toml</code> under <code class="font-mono">[rwi_webhook]</code> — not in the database. Saved changes apply immediately.</p>
                             </div>
                             <div class="grid gap-4 md:grid-cols-2">
                                 <div class="md:col-span-1">
@@ -2056,6 +2057,9 @@
                                 <div
                                     class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
                                     <p>{{ "settings_page.rwi_endpoint_desc" | t }}</p>
+                                    <p class="mt-1">Settings are stored in <code class="font-mono">rustpbx.toml</code>
+                                        under <code class="font-mono">[rwi]</code> — not in the database. Token changes
+                                        apply immediately; other fields may require a restart.</p>
                                 </div>
 
                                 <div class="grid grid-cols-2 gap-4">

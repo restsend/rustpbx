@@ -14,6 +14,7 @@ mod tests {
     use crate::call::domain::MediaSource;
     use std::collections::HashMap;
     use std::time::Duration;
+    use std::time::Instant;
 
     /// Build a minimal IVR definition with a root menu for testing.
     fn build_simple_ivr() -> IvrDefinition {
@@ -27,7 +28,7 @@ mod tests {
             tts: None,
             root: Some(MenuNode {
                 greeting: "sounds/welcome.wav".to_string(),
-                timeout_ms: 200, // short for tests
+                timeout_ms: Some(200), // short for tests
                 max_retries: 2,
                 invalid_prompt: Some("sounds/invalid.wav".to_string()),
                 timeout_action: Some(EntryAction::Repeat),
@@ -35,6 +36,9 @@ mod tests {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 entries: vec![
                     MenuEntry {
@@ -61,6 +65,9 @@ mod tests {
                             prompt: "sounds/address.wav".to_string(),
                             prompt_text: None,
                             prompt_voice: None,
+
+                            delay_before_ms: 0,
+                            delay_after_ms: 0,
                         },
                     },
                     MenuEntry {
@@ -75,6 +82,9 @@ mod tests {
                             prompt: Some("sounds/goodbye.wav".to_string()),
                             prompt_text: None,
                             prompt_voice: None,
+
+                            delay_before_ms: 0,
+                            delay_after_ms: 0,
                         },
                     },
                 ],
@@ -86,7 +96,7 @@ mod tests {
                     "support".to_string(),
                     MenuNode {
                         greeting: "sounds/support_menu.wav".to_string(),
-                        timeout_ms: 200,
+                        timeout_ms: Some(200),
                         max_retries: 1,
                         invalid_prompt: None,
                         timeout_action: Some(EntryAction::Transfer {
@@ -147,7 +157,9 @@ mod tests {
 
         // IVR should play the root greeting
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // Simulate greeting complete — IVR waits for DTMF
@@ -179,7 +191,9 @@ mod tests {
             .await;
         // Skip greeting play
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         // Greeting completes
         stack.audio_complete("default");
@@ -208,7 +222,9 @@ mod tests {
             .await;
         // Root greeting
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -248,14 +264,18 @@ mod tests {
             .await;
         // Root greeting
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
         // Press "2" → support
         stack.dtmf("2");
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -421,7 +441,9 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -460,7 +482,9 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -491,7 +515,9 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -525,7 +551,9 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -564,7 +592,9 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -625,7 +655,9 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -647,7 +679,9 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         stack.remote_hangup();
@@ -670,14 +704,18 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
         // Navigate to support sub-menu
         stack.dtmf("2");
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -698,19 +736,29 @@ action = { type = "transfer", target = "100" }
             business_hours: None,
             tts: None,
             root: Some(MenuNode {
-                greeting: "sounds/collect_menu.wav".to_string(),
-                timeout_ms: 200,
+                greeting: "sounds/welcome.wav".to_string(),
+                greeting_text: None,
+                greeting_voice: None,
+                timeout_ms: Some(200),
                 max_retries: 1,
                 invalid_prompt: None,
+                invalid_text: None,
+                invalid_voice: None,
                 timeout_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 max_retries_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 entries: vec![
                     MenuEntry {
@@ -808,7 +856,9 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -848,7 +898,9 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -881,18 +933,24 @@ action = { type = "transfer", target = "100" }
             tts: None,
             root: Some(MenuNode {
                 greeting: "sounds/bridge_menu.wav".to_string(),
-                timeout_ms: 200,
+                timeout_ms: Some(200),
                 max_retries: 1,
                 invalid_prompt: None,
                 timeout_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 max_retries_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
@@ -927,7 +985,9 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -960,7 +1020,9 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -994,18 +1056,24 @@ action = { type = "transfer", target = "100" }
             tts: None,
             root: Some(MenuNode {
                 greeting: "sounds/queue_menu.wav".to_string(),
-                timeout_ms: 200,
+                timeout_ms: Some(200),
                 max_retries: 1,
                 invalid_prompt: None,
                 timeout_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 max_retries_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 entries: vec![
                     MenuEntry {
@@ -1059,7 +1127,9 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -1091,7 +1161,9 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -1123,7 +1195,9 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -1184,18 +1258,24 @@ action = { type = "transfer", target = "100" }
             tts: None,
             root: Some(MenuNode {
                 greeting: "sounds/welcome.wav".to_string(),
-                timeout_ms: 200,
+                timeout_ms: Some(200),
                 max_retries: 1,
                 invalid_prompt: None,
                 timeout_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 max_retries_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
@@ -1278,7 +1358,9 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -1310,7 +1392,9 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -1349,7 +1433,9 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -1393,18 +1479,24 @@ action = { type = "transfer", target = "100" }
             "support".to_string(),
             MenuNode {
                 greeting: "sounds/support.wav".to_string(),
-                timeout_ms: 200,
+                timeout_ms: Some(200),
                 max_retries: 1,
                 invalid_prompt: None,
                 timeout_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 max_retries_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
@@ -1467,7 +1559,9 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -1503,7 +1597,9 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -1542,7 +1638,9 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -1586,7 +1684,9 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -1641,7 +1741,9 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -1678,7 +1780,9 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -1709,7 +1813,9 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -1743,18 +1849,24 @@ action = { type = "transfer", target = "100" }
             tts: None,
             root: Some(MenuNode {
                 greeting: "sounds/welcome.wav".to_string(),
-                timeout_ms: 200,
+                timeout_ms: Some(200),
                 max_retries: 1,
                 invalid_prompt: None,
                 timeout_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 max_retries_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 entries: vec![
                     MenuEntry {
@@ -1765,6 +1877,9 @@ action = { type = "transfer", target = "100" }
                             prompt_text: None,
                             prompt_voice: None,
                             code: Some(486),
+
+                            delay_before_ms: 0,
+                            delay_after_ms: 0,
                         },
                     },
                     MenuEntry {
@@ -1775,6 +1890,9 @@ action = { type = "transfer", target = "100" }
                             prompt_text: None,
                             prompt_voice: None,
                             code: Some(503),
+
+                            delay_before_ms: 0,
+                            delay_after_ms: 0,
                         },
                     },
                     MenuEntry {
@@ -1785,6 +1903,9 @@ action = { type = "transfer", target = "100" }
                             prompt_text: None,
                             prompt_voice: None,
                             code: None,
+
+                            delay_before_ms: 0,
+                            delay_after_ms: 0,
                         },
                     },
                 ],
@@ -1986,18 +2107,24 @@ action = { type = "transfer", target = "100" }
             tts: None,
             root: Some(MenuNode {
                 greeting: greeting_path.clone(),
-                timeout_ms: 2000,
+                timeout_ms: Some(2000),
                 max_retries: 1,
                 invalid_prompt: None,
                 timeout_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 max_retries_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
@@ -2066,18 +2193,24 @@ action = { type = "transfer", target = "100" }
             tts: None,
             root: Some(MenuNode {
                 greeting: root_wav.clone(),
-                timeout_ms: 2000,
+                timeout_ms: Some(2000),
                 max_retries: 1,
                 invalid_prompt: None,
                 timeout_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 max_retries_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 entries: vec![MenuEntry {
                     key: "2".to_string(),
@@ -2094,18 +2227,24 @@ action = { type = "transfer", target = "100" }
                     "support".to_string(),
                     MenuNode {
                         greeting: sub_wav.clone(),
-                        timeout_ms: 2000,
+                        timeout_ms: Some(2000),
                         max_retries: 1,
                         invalid_prompt: None,
                         timeout_action: Some(EntryAction::Hangup {
                             prompt: None,
                             prompt_text: None,
                             prompt_voice: None,
+
+                            delay_before_ms: 0,
+                            delay_after_ms: 0,
                         }),
                         max_retries_action: Some(EntryAction::Hangup {
                             prompt: None,
                             prompt_text: None,
                             prompt_voice: None,
+
+                            delay_before_ms: 0,
+                            delay_after_ms: 0,
                         }),
                         entries: vec![MenuEntry {
                             key: "1".to_string(),
@@ -2184,18 +2323,24 @@ action = { type = "transfer", target = "100" }
             tts: None,
             root: Some(MenuNode {
                 greeting: greeting_wav.clone(),
-                timeout_ms: 2000,
+                timeout_ms: Some(2000),
                 max_retries: 1,
                 invalid_prompt: None,
                 timeout_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 max_retries_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 entries: vec![MenuEntry {
                     key: "0".to_string(),
@@ -2204,6 +2349,9 @@ action = { type = "transfer", target = "100" }
                         prompt: Some(goodbye_wav.clone()),
                         prompt_text: None,
                         prompt_voice: None,
+
+                        delay_before_ms: 0,
+                        delay_after_ms: 0,
                     },
                 }],
                 ..Default::default()
@@ -2264,7 +2412,7 @@ action = { type = "transfer", target = "100" }
             tts: None,
             root: Some(MenuNode {
                 greeting: greeting_wav.clone(),
-                timeout_ms: 2000,
+                timeout_ms: Some(2000),
                 max_retries: 2,
                 invalid_prompt: Some(invalid_wav.clone()),
                 timeout_action: Some(EntryAction::Repeat),
@@ -2272,6 +2420,9 @@ action = { type = "transfer", target = "100" }
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
@@ -2343,18 +2494,24 @@ action = { type = "transfer", target = "100" }
             tts: None,
             root: Some(MenuNode {
                 greeting: greeting_wav.clone(),
-                timeout_ms: 2000,
+                timeout_ms: Some(2000),
                 max_retries: 1,
                 invalid_prompt: None,
                 timeout_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 max_retries_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 entries: vec![
                     MenuEntry {
@@ -2364,6 +2521,9 @@ action = { type = "transfer", target = "100" }
                             prompt: announce_wav.clone(),
                             prompt_text: None,
                             prompt_voice: None,
+
+                            delay_before_ms: 0,
+                            delay_after_ms: 0,
                         },
                     },
                     MenuEntry {
@@ -2438,18 +2598,24 @@ action = { type = "transfer", target = "100" }
             tts: None,
             root: Some(MenuNode {
                 greeting: greeting_wav.clone(),
-                timeout_ms: 2000,
+                timeout_ms: Some(2000),
                 max_retries: 1,
                 invalid_prompt: None,
                 timeout_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 max_retries_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
@@ -2480,7 +2646,9 @@ action = { type = "transfer", target = "100" }
         // Greeting starts — we deliberately DO NOT wire real playback completion
         // because we want to barge-in before it finishes.
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // Barge-in: press "1" while greeting is still "playing"
@@ -2517,7 +2685,7 @@ action = { type = "transfer", target = "100" }
             tts: None,
             root: Some(MenuNode {
                 greeting: greeting_wav.clone(),
-                timeout_ms: 150, // short so test doesn't take long
+                timeout_ms: Some(150), // short so test does not take long
                 max_retries: 2,
                 invalid_prompt: None,
                 timeout_action: Some(EntryAction::Repeat),
@@ -2525,6 +2693,9 @@ action = { type = "transfer", target = "100" }
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
@@ -2595,18 +2766,24 @@ action = { type = "transfer", target = "100" }
             tts: None,
             root: Some(MenuNode {
                 greeting: greeting_wav.clone(),
-                timeout_ms: 2000,
+                timeout_ms: Some(2000),
                 max_retries: 1,
                 invalid_prompt: None,
                 timeout_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 max_retries_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 entries: vec![MenuEntry {
                     key: "4".to_string(),
@@ -2616,6 +2793,9 @@ action = { type = "transfer", target = "100" }
                         prompt_text: None,
                         prompt_voice: None,
                         code: Some(486),
+
+                        delay_before_ms: 0,
+                        delay_after_ms: 0,
                     },
                 }],
                 ..Default::default()
@@ -2778,18 +2958,24 @@ action = { type = "transfer", target = "100" }
                 greeting: "".to_string(),
                 greeting_text: Some("hello from tts".to_string()),
                 greeting_voice: Some("xiaoxiao".to_string()),
-                timeout_ms: 200,
+                timeout_ms: Some(200),
                 max_retries: 1,
                 invalid_prompt: None,
                 timeout_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 max_retries_action: Some(EntryAction::Hangup {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }),
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
@@ -2855,7 +3041,7 @@ action = { type = "transfer", target = "100" }
             tts: None,
             root: Some(MenuNode {
                 greeting: "https://example.com/sounds/welcome.wav".to_string(),
-                timeout_ms: 5000,
+                timeout_ms: Some(5000),
                 max_retries: 1,
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
@@ -2910,7 +3096,7 @@ action = { type = "transfer", target = "100" }
             tts: None,
             root: Some(MenuNode {
                 greeting: "sounds/welcome.wav".to_string(),
-                timeout_ms: 5000,
+                timeout_ms: Some(5000),
                 max_retries: 1,
                 entries: vec![MenuEntry {
                     key: "0".to_string(),
@@ -2919,6 +3105,9 @@ action = { type = "transfer", target = "100" }
                         prompt: Some("https://example.com/sounds/goodbye.wav".to_string()),
                         prompt_text: None,
                         prompt_voice: None,
+
+                        delay_before_ms: 0,
+                        delay_after_ms: 0,
                     },
                 }],
                 ..Default::default()
@@ -3028,7 +3217,9 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // Greeting complete → DTMF "1" → Transfer
@@ -3056,5 +3247,94 @@ action = { type = "transfer", target = "100" }
 
         stack.cancel();
         let _ = stack.join().await;
+    }
+
+    // ── 40. PlayAndHangup `delay_after_ms`: hangup must wait the configured
+    // hold after the prompt finishes (on top of the media layer's EOF tail).
+
+    #[tokio::test]
+    async fn test_ivr_play_and_hangup_delay_after_holds_hangup() {
+        let ivr = IvrDefinition {
+            name: "delay-hangup-ivr".to_string(),
+            description: None,
+            lang: None,
+            default_voice: None,
+            dynamic_build: false,
+            business_hours: None,
+            tts: None,
+            root: Some(MenuNode {
+                greeting: "sounds/welcome.wav".to_string(),
+                greeting_text: None,
+                greeting_voice: None,
+                timeout_ms: Some(200),
+                max_retries: 1,
+                invalid_prompt: None,
+                invalid_text: None,
+                invalid_voice: None,
+                timeout_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
+                }),
+                max_retries_action: None,
+                unknown_key_action: None,
+                entries: vec![MenuEntry {
+                    key: "1".to_string(),
+                    label: None,
+                    action: EntryAction::PlayAndHangup {
+                        prompt: Some("sounds/goodbye.wav".to_string()),
+                        prompt_text: None,
+                        prompt_voice: None,
+                        code: None,
+                        delay_before_ms: 0,
+                        delay_after_ms: 400,
+                    },
+                }],
+            }),
+            menus: HashMap::new(),
+            ivr_mode: None,
+            provider: None,
+            ivr_fallback: None,
+        };
+        let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
+
+        stack
+            .assert_cmd(2000, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(2000, "PlayPrompt-greeting", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
+        stack.audio_complete("default");
+
+        // Press "1" → PlayAndHangup with a 400 ms delay_after_ms.
+        stack.dtmf("1");
+
+        stack
+            .assert_cmd(2000, "PlayPrompt-goodbye", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
+
+        let start = Instant::now();
+        stack.audio_complete("default");
+        stack
+            .assert_cmd(2000, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed >= Duration::from_millis(350),
+            "hangup must be held for delay_after_ms (400 ms), took {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "hangup must not be delayed excessively, took {elapsed:?}"
+        );
     }
 }

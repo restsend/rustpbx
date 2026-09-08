@@ -179,6 +179,12 @@ impl RwiGateway {
         self.webhook_tx = Some(tx);
     }
 
+    /// Drop the webhook sender. The existing handler task drains any buffered
+    /// events and exits once it observes the channel closing.
+    pub fn remove_webhook_tx(&mut self) {
+        self.webhook_tx = None;
+    }
+
     /// Subscribe to the always-on event tap.
     ///
     /// Every event that flows through the gateway (via `send_to_owner`,

@@ -14,6 +14,7 @@ use tracing::{info, warn};
 use crate::{
     callrecord::{
         CALL_RECORD_HTTP_CONNECT_TIMEOUT, CALL_RECORD_HTTP_TIMEOUT, CallRecord, CallRecordHook,
+        is_direct_child_of_root,
     },
     config::{RecordingPolicy, RecordingType},
     models::call_record::extract_sip_username,
@@ -690,21 +691,6 @@ impl CallRecordHook for RecordingUploadHook {
         }
 
         Ok(())
-    }
-}
-
-/// True when `path` sits directly inside `root` (ignoring `./` prefixes),
-/// i.e. it is a pipeline-generated artifact name like `{root}/{file}.wav`.
-fn is_direct_child_of_root(root: &str, path: &Path) -> bool {
-    let normalize = |p: &Path| -> Vec<String> {
-        p.components()
-            .filter(|c| !matches!(c, std::path::Component::CurDir))
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect()
-    };
-    match path.parent() {
-        Some(parent) => normalize(parent) == normalize(Path::new(root)),
-        None => false,
     }
 }
 

@@ -231,6 +231,16 @@ fn extract_tts_text(value: &serde_json::Value) -> Option<String> {
     None
 }
 
+/// Upper bound for node-configured playback delays (`delay_before_ms` /
+/// `delay_after_ms`) so a misconfigured node cannot stall a call forever.
+pub(crate) const MAX_NODE_DELAY_MS: u64 = 10_000;
+
+/// Convert a node-configured delay (ms) into a `Duration`, clamped to
+/// [`MAX_NODE_DELAY_MS`].
+pub(crate) fn node_delay(delay_ms: u64) -> Duration {
+    Duration::from_millis(delay_ms.min(MAX_NODE_DELAY_MS))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_action(
     action: &EntryAction,
@@ -302,6 +312,7 @@ pub async fn execute_action(
             prompt,
             prompt_text,
             prompt_voice,
+            delay_before_ms,
             ..
         } => {
             if let Some(a) = resolve_audio(
@@ -312,6 +323,9 @@ pub async fn execute_action(
             )
             .await
             {
+                if *delay_before_ms > 0 {
+                    tokio::time::sleep(node_delay(*delay_before_ms)).await;
+                }
                 ctrl.play_audio(a, false).await?;
                 return Ok(ActionResult::WaitFor(WaitEvent::AudioComplete {
                     interrupted: false,
@@ -327,6 +341,8 @@ pub async fn execute_action(
             prompt_text,
             prompt_voice,
             code,
+            delay_before_ms,
+            ..
         } => {
             let audio = resolve_audio(
                 prompt.as_deref(),
@@ -336,6 +352,9 @@ pub async fn execute_action(
             )
             .await;
             if let Some(a) = audio {
+                if *delay_before_ms > 0 {
+                    tokio::time::sleep(node_delay(*delay_before_ms)).await;
+                }
                 ctrl.play_audio(a, false).await?;
                 return Ok(ActionResult::WaitFor(WaitEvent::AudioComplete {
                     interrupted: false,
@@ -354,6 +373,7 @@ pub async fn execute_action(
             record_name_list,
             interruptible,
             tts_api_url,
+            delay_before_ms,
             ..
         } => {
             // Some("") is a successful no-media prompt; None still means missing audio input.
@@ -381,6 +401,9 @@ pub async fn execute_action(
                 .await
             };
             if let Some(a) = audio {
+                if *delay_before_ms > 0 {
+                    tokio::time::sleep(node_delay(*delay_before_ms)).await;
+                }
                 ctrl.play_audio_with_options(a, Some("ivr_prompt".into()), false, *interruptible)
                     .await?;
                 Ok(ActionResult::WaitFor(WaitEvent::AudioComplete {

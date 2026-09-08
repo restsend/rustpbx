@@ -105,6 +105,9 @@ pub struct StepIvrApp {
     /// Global `[proxy.ivr_fallback]` — when set, provider `/step` failures jump
     /// to a built-in IVR instead of the hardcoded error.wav hangup.
     ivr_fallback: Option<Arc<IvrFallbackConfig>>,
+    /// `delay_after_ms` of the prompt currently playing, held in
+    /// `on_audio_complete` before the flow advances to the next step.
+    pending_audio_delay_ms: u64,
 }
 
 #[derive(Clone)]
@@ -158,6 +161,7 @@ impl StepIvrApp {
             no_input_prompts: 0,
             probe_pending: false,
             ivr_fallback: None,
+            pending_audio_delay_ms: 0,
         }
     }
 
@@ -200,6 +204,7 @@ impl StepIvrApp {
             no_input_prompts: 0,
             probe_pending: false,
             ivr_fallback: None,
+            pending_audio_delay_ms: 0,
         }
     }
 
@@ -846,11 +851,15 @@ impl StepIvrApp {
                 record_name_list: None,
                 interruptible: false,
                 tts_api_url: None,
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             },
             ActionNode::new(EntryAction::Hangup {
                 prompt: None,
                 prompt_text: None,
                 prompt_voice: None,
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             }),
         )
     }
@@ -1037,6 +1046,8 @@ impl StepIvrApp {
                 prompt: None,
                 prompt_text: None,
                 prompt_voice: None,
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             }));
         }
         match &event {
@@ -1275,6 +1286,9 @@ impl StepIvrApp {
         )
         .await?;
         if let ActionResult::WaitFor(WaitEvent::AudioComplete { .. }) = &result {
+            // Hold the node's delay_after_ms once this prompt finishes, before
+            // the flow advances (see on_audio_complete).
+            self.pending_audio_delay_ms = node.action.delay_after_ms();
             if node.action.is_dtmf_menu() {
                 self.pending_menu = Some(self.build_pending_menu(&node.action));
             } else if node.action.is_interruptible() {
@@ -1393,6 +1407,8 @@ impl StepIvrApp {
                 prompt: None,
                 prompt_text: None,
                 prompt_voice: None,
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             }));
         }
         self.pending_menu = Some(PendingMenu {
@@ -1684,6 +1700,20 @@ impl CallApp for StepIvrApp {
         self.current_track_id = None;
         self.interrupt_on_dtmf = false;
         self.ignore_prompt_dtmf = false;
+
+        // Hold the finished prompt's configured delay_after_ms before asking
+        // the provider for the next step (e.g. so a goodbye prompt can sink
+        // in before hangup). Reset first so an error path cannot leave it
+        // stuck on.
+        if self.pending_audio_delay_ms > 0 {
+            let delay = common::node_delay(self.pending_audio_delay_ms);
+            self.pending_audio_delay_ms = 0;
+            tracing::debug!(
+                delay_ms = delay.as_millis() as u64,
+                "StepIvrApp: holding delay_after_ms"
+            );
+            tokio::time::sleep(delay).await;
+        }
 
         if was_menu && track_id == "ivr_menu_greeting" {
             if let Some(ref menu) = self.pending_menu {
@@ -2288,6 +2318,9 @@ mod tests {
             prompt: None,
             prompt_text: None,
             prompt_voice: None,
+
+            delay_before_ms: 0,
+            delay_after_ms: 0,
         });
         let gateway = RwiGateway::new();
         let mut events = gateway.subscribe_events();
@@ -2339,6 +2372,9 @@ mod tests {
                 record_name_list: None,
                 interruptible: false,
                 tts_api_url: None,
+
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
@@ -2385,6 +2421,9 @@ mod tests {
             record_name_list: None,
             interruptible: false,
             tts_api_url: None,
+
+            delay_before_ms: 0,
+            delay_after_ms: 0,
         });
         prompt.step_id = Some("prompt-step".into());
         let mut transfer = ActionNode::new(EntryAction::Transfer {
@@ -2883,6 +2922,9 @@ mod tests {
                     record_name_list: None,
                     interruptible: false,
                     tts_api_url: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 },
                 menu,
             ))
@@ -3708,6 +3750,8 @@ mod tests {
                 prompt: None,
                 prompt_text: None,
                 prompt_voice: None,
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             })])),
             "1001",
             "2000",
@@ -3782,6 +3826,8 @@ mod tests {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }))),
                 failure: None,
             })])),
@@ -3899,6 +3945,9 @@ mod tests {
                 record_name_list: None,
                 interruptible: false,
                 tts_api_url: None,
+
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
@@ -4180,6 +4229,9 @@ mod tests {
                     prompt: Some("sounds/error.wav".into()),
                     prompt_text: None,
                     prompt_voice: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 })),
             })
             .with_prefer_ivr_fallback(true);
@@ -4218,6 +4270,9 @@ mod tests {
                 record_name_list: None,
                 interruptible: false,
                 tts_api_url: None,
+
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
@@ -4408,6 +4463,9 @@ mod tests {
             record_name_list: None,
             interruptible: false,
             tts_api_url: None,
+
+            delay_before_ms: 0,
+            delay_after_ms: 0,
         });
         let transfer = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
@@ -4471,6 +4529,9 @@ mod tests {
                 record_name_list: None,
                 interruptible: false,
                 tts_api_url: None,
+
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "3003".into(),
@@ -4602,6 +4663,9 @@ mod tests {
                     record_name_list: None,
                     interruptible: false,
                     tts_api_url: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 },
                 ActionNode::new(EntryAction::Transfer {
                     target: "2001".into(),
@@ -4776,6 +4840,9 @@ mod tests {
                 record_name_list: None,
                 interruptible: false,
                 tts_api_url: None,
+
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
@@ -4944,6 +5011,9 @@ mod tests {
             prompt: None,
             prompt_text: None,
             prompt_voice: None,
+
+            delay_before_ms: 0,
+            delay_after_ms: 0,
         });
 
         let mut stack = MockCallStack::run(Box::new(mock_app(vec![menu, hangup])), "1001", "2000");
@@ -5028,6 +5098,9 @@ mod tests {
             prompt: None,
             prompt_text: None,
             prompt_voice: None,
+
+            delay_before_ms: 0,
+            delay_after_ms: 0,
         });
 
         let mut stack = MockCallStack::run(Box::new(mock_app(vec![menu, hangup])), "1001", "2000");
@@ -5087,6 +5160,9 @@ mod tests {
             record_name_list: None,
             interruptible: true,
             tts_api_url: None,
+
+            delay_before_ms: 0,
+            delay_after_ms: 0,
         });
         let transfer = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
@@ -5147,6 +5223,9 @@ mod tests {
             record_name_list: None,
             interruptible: false,
             tts_api_url: None,
+
+            delay_before_ms: 0,
+            delay_after_ms: 0,
         });
 
         let mut stack = MockCallStack::run(Box::new(mock_app(vec![node])), "1001", "2000");
@@ -5179,6 +5258,9 @@ mod tests {
             record_name_list: None,
             interruptible: true,
             tts_api_url: None,
+
+            delay_before_ms: 0,
+            delay_after_ms: 0,
         });
 
         let mut stack = MockCallStack::run(Box::new(mock_app(vec![node])), "1001", "2000");
@@ -5212,6 +5294,9 @@ mod tests {
                 record_name_list: None,
                 interruptible: true,
                 tts_api_url: None,
+
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             },
             ActionNode::new(EntryAction::Prompt {
                 file: Some("second.wav".into()),
@@ -5220,6 +5305,9 @@ mod tests {
                 record_name_list: None,
                 interruptible: false,
                 tts_api_url: None,
+
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             }),
         );
 
@@ -5290,6 +5378,9 @@ mod tests {
                 record_name_list: None,
                 interruptible: false,
                 tts_api_url: None,
+
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
@@ -5371,6 +5462,9 @@ mod tests {
                 record_name_list: None,
                 interruptible: false,
                 tts_api_url: None,
+
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             },
         )]));
         let mut app = StepIvrApp::with_provider(Box::new(MockProviderHandle(provider.clone())));
@@ -6022,7 +6116,10 @@ mod tests {
         // current deterministic loop behavior: exactly one /step call, no
         // retry storm, and one session-end notification after fallback.
         stack.remote_hangup();
-        stack.join().await.expect("timeout fallback should stop app");
+        stack
+            .join()
+            .await
+            .expect("timeout fallback should stop app");
 
         assert_eq!(state.start_calls.lock().await.len(), 1);
         assert_eq!(state.step_calls.lock().await.len(), 1);
@@ -6299,11 +6396,17 @@ mod tests {
             record_name_list: None,
             interruptible: false,
             tts_api_url: None,
+
+            delay_before_ms: 0,
+            delay_after_ms: 0,
         });
         let hangup = ActionNode::new(EntryAction::Hangup {
             prompt: None,
             prompt_text: None,
             prompt_voice: None,
+
+            delay_before_ms: 0,
+            delay_after_ms: 0,
         });
 
         let mut stack = MockCallStack::run(
@@ -6614,6 +6717,9 @@ mod tests {
                     record_name_list: None,
                     interruptible: true,
                     tts_api_url: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 })),
                 Some(ProviderEvent::AudioComplete { .. }) => {
                     let mut node = ActionNode::new(EntryAction::Prompt {
@@ -6623,6 +6729,9 @@ mod tests {
                         record_name_list: None,
                         interruptible: false,
                         tts_api_url: None,
+
+                        delay_before_ms: 0,
+                        delay_after_ms: 0,
                     });
                     node.ignore_prompt_dtmf = self.ignore_prompt_dtmf;
                     Ok(node)
@@ -6639,6 +6748,8 @@ mod tests {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 })),
             }
         }
@@ -6798,6 +6909,9 @@ mod tests {
                 record_name_list: None,
                 interruptible: true,
                 tts_api_url: None,
+
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             }))
         }
 
@@ -6863,6 +6977,9 @@ mod tests {
                 record_name_list: None,
                 interruptible: false,
                 tts_api_url: None,
+
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             }))
         }
 
@@ -6876,6 +6993,9 @@ mod tests {
                 prompt: Some("sounds/recovered.wav".into()),
                 prompt_text: None,
                 prompt_voice: None,
+
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             }))
         }
     }

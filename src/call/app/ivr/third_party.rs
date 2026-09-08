@@ -150,6 +150,8 @@ impl ThirdPartyTreeProvider {
                 record_name_list: None,
                 interruptible: false,
                 tts_api_url: None,
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             },
 
             "prompt_break" => EntryAction::Prompt {
@@ -159,6 +161,8 @@ impl ThirdPartyTreeProvider {
                 record_name_list: None,
                 interruptible: true,
                 tts_api_url: None,
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             },
 
             "prompt_tts_break_api" => {
@@ -170,6 +174,8 @@ impl ThirdPartyTreeProvider {
                     record_name_list: None,
                     interruptible: true,
                     tts_api_url: Some(api_url),
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }
             }
 
@@ -192,6 +198,8 @@ impl ThirdPartyTreeProvider {
                 prompt: None,
                 prompt_text: None,
                 prompt_voice: None,
+                delay_before_ms: 0,
+                delay_after_ms: 0,
             },
 
             "input_phone" => EntryAction::InputPhone {
@@ -216,6 +224,8 @@ impl ThirdPartyTreeProvider {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }
             }
         }
@@ -330,6 +340,8 @@ impl ThirdPartyTreeProvider {
             prompt: None,
             prompt_text: None,
             prompt_voice: None,
+            delay_before_ms: 0,
+            delay_after_ms: 0,
         })
     }
 
@@ -452,6 +464,8 @@ impl ActionProvider for ThirdPartyTreeProvider {
                         prompt: None,
                         prompt_text: None,
                         prompt_voice: None,
+                        delay_before_ms: 0,
+                        delay_after_ms: 0,
                     }));
                 };
 
@@ -484,6 +498,8 @@ impl ActionProvider for ThirdPartyTreeProvider {
                                 prompt: None,
                                 prompt_text: None,
                                 prompt_voice: None,
+                                delay_before_ms: 0,
+                                delay_after_ms: 0,
                             }));
                         }
                     }
@@ -514,6 +530,8 @@ impl ActionProvider for ThirdPartyTreeProvider {
                     prompt: None,
                     prompt_text: None,
                     prompt_voice: None,
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
                 }))
             }
 
@@ -529,6 +547,8 @@ impl ActionProvider for ThirdPartyTreeProvider {
                         prompt: None,
                         prompt_text: None,
                         prompt_voice: None,
+                        delay_before_ms: 0,
+                        delay_after_ms: 0,
                     }));
                 };
                 let node = tree.nodes.get(&cid).cloned();
@@ -537,6 +557,8 @@ impl ActionProvider for ThirdPartyTreeProvider {
                         prompt: None,
                         prompt_text: None,
                         prompt_voice: None,
+                        delay_before_ms: 0,
+                        delay_after_ms: 0,
                     }));
                 };
 
@@ -546,6 +568,8 @@ impl ActionProvider for ThirdPartyTreeProvider {
                         prompt: None,
                         prompt_text: None,
                         prompt_voice: None,
+                        delay_before_ms: 0,
+                        delay_after_ms: 0,
                     }));
                 };
                 let next = tree.nodes.get(&nid).cloned();
@@ -554,6 +578,8 @@ impl ActionProvider for ThirdPartyTreeProvider {
                         prompt: None,
                         prompt_text: None,
                         prompt_voice: None,
+                        delay_before_ms: 0,
+                        delay_after_ms: 0,
                     }));
                 };
 

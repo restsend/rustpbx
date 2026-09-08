@@ -102,6 +102,32 @@ pub fn start_rwi_webhook_handler(
     tx
 }
 
+/// (Re)start the RWI webhook handler with a new configuration, e.g. after a
+/// hot-reload of `[rwi_webhook]`.
+///
+/// A fresh broadcast channel + handler task is created and installed on the
+/// gateway. Replacing the previous sender drops the only strong reference to
+/// the old channel, so the old handler drains any buffered events and then
+/// exits on `RecvError::Closed` — no in-flight event is lost across the swap.
+/// Passing `None` stops delivery (`[rwi_webhook]` removed from the config).
+pub fn restart_rwi_webhook_handler(
+    gateway: &crate::rwi::RwiGatewayRef,
+    config: Option<LocatorWebhookConfig>,
+) {
+    let mut gw = gateway.write();
+    match config {
+        Some(cfg) => {
+            info!(url = %cfg.url, "RWI webhook handler (re)starting");
+            let tx = start_rwi_webhook_handler(cfg);
+            gw.set_webhook_tx(tx);
+        }
+        None => {
+            info!("RWI webhook handler stopping ([rwi_webhook] removed)");
+            gw.remove_webhook_tx();
+        }
+    }
+}
+
 /// Dedup identity for webhook delivery retries/redeliveries.
 ///
 /// Includes the event TYPE: `cached_at` has microsecond resolution, so two
@@ -396,6 +422,49 @@ mod tests {
             body["event"]["early_media"].as_bool(),
             Some(true),
             "call_ringing must carry the early_media flag through the webhook"
+        );
+    }
+
+    /// Hot-reload regression: `restart_rwi_webhook_handler` must re-target
+    /// event delivery to the new endpoint without touching the old one, and
+    /// `None` (config section removed) must stop delivery entirely.
+    #[tokio::test]
+    async fn test_restart_rwi_webhook_handler_retargets_and_stops_delivery() {
+        let server_a = TestHttpServer::start().await;
+        let server_b = TestHttpServer::start().await;
+        let gateway: crate::rwi::RwiGatewayRef =
+            std::sync::Arc::new(parking_lot::RwLock::new(crate::rwi::RwiGateway::new()));
+        let mk_config = |url: String| LocatorWebhookConfig {
+            url,
+            events: vec![],
+            headers: None,
+            timeout_ms: Some(5000),
+        };
+
+        restart_rwi_webhook_handler(&gateway, Some(mk_config(server_a.url())));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        restart_rwi_webhook_handler(&gateway, Some(mk_config(server_b.url())));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        gateway.read().broadcast(&crate::rwi::CallAnswered {
+            call_id: "swap-1".into(),
+        });
+        wait_for_events(&server_b.received, 1, 2000).await;
+        assert!(
+            server_a.received.lock().unwrap().is_empty(),
+            "the old endpoint must not receive events after the restart"
+        );
+
+        restart_rwi_webhook_handler(&gateway, None);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        gateway.read().broadcast(&crate::rwi::CallAnswered {
+            call_id: "swap-2".into(),
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            server_b.received.lock().unwrap().len(),
+            1,
+            "no further delivery after [rwi_webhook] removal"
         );
     }
 

@@ -1049,7 +1049,8 @@ impl MediaBridge {
     /// PCM→codec at its own 20 ms cadence ("filetrack mode").
     ///
     /// `on_end` (if provided) fires when playback stops: `false` on natural
-    /// EOF after the channel drains, `true` if interrupted.
+    /// EOF after the channel drains (delayed by the EOF grace tail so the
+    /// last frames play out remotely), `true` if interrupted.
     pub async fn bridge_play_pcm(
         &self,
         side: LegSide,
