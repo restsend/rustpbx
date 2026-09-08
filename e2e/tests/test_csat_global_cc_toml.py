@@ -1,22 +1,30 @@
-"""CSAT via global [csat] cc.toml + post_call_ivr — the REAL call-path wiring.
+"""CSAT via global [csat] (cc.toml) + post_call_ivr — the REAL call-path wiring.
 
-Regression coverage for two bugs that the flow1 CSAT test cannot see:
+Regression coverage for two bugs that the skill-group-metadata CSAT tests
+(``test_csat_survey_score_persisted`` in the cc e2e-regression suite and the
+flow1 suite) cannot see:
 
-1. proxy_server_hook wiring: the call-path CcCallSessionHook used to be built
-   WITHOUT the cc addon config, so a global `[csat]` section in
-   config/cc/cc.toml was invisible to calls (skill-group metadata and console
-   overrides still worked, masking the bug). This test enables CSAT ONLY via
-   the global [csat] section — no skill-group metadata — so the survey only
-   runs if the hook actually received the cc.toml config.
+1. proxy_server_hook wiring: the call-path ``CcCallSessionHook`` used to be
+   built WITHOUT the cc addon config, so a global ``[csat]`` section in
+   ``config/cc/cc.toml`` was invisible to calls (skill-group metadata and the
+   console override still worked, masking the bug). This test enables CSAT
+   ONLY via the global ``[csat]`` section — no skill-group metadata — so the
+   survey only runs if the hook actually received the cc.toml config.
 
-2. builtin post_call_csat chaining: with `post_call_ivr` set, the hook starts
-   the builtin trampoline IVR which must chain into csat_survey on entry
-   (timeout_ms = None semantics). The old 1 ms-timer + max_retries = 0 shape
-   hung up on the first timeout instead of ever chaining.
+2. builtin ``post_call_csat`` chaining: with ``post_call_ivr`` set, the hook
+   starts the builtin trampoline IVR which must chain into ``csat_survey`` on
+   entry (``timeout_ms = None`` semantics). The old 1 ms-timer +
+   ``max_retries = 0`` shape hung up on the first timeout instead of ever
+   chaining.
+
+This test lives in the generic suite (not the cc e2e-regression suite)
+because it needs its OWN function-scoped rustpbx with a custom cc.toml —
+the cc suite's session-scoped PBX boots once with a fixed cc.toml shared
+by tests that must not get CSAT prompts.
 
 Flow: caller → IVR (auto-timeout) → queue "support" → agent 1002 answers →
 agent hangs up → post_call_csat IVR → csat_survey → caller presses 5 →
-CSAT: score collected score=5 → CDR csat_score == 5.
+``CSAT: score collected score=5`` → CDR ``csat_score == 5``.
 """
 
 from __future__ import annotations
@@ -97,7 +105,7 @@ async def _seed_cc(pbx, api) -> None:
 
 @pytest.mark.asyncio
 async def test_csat_global_cc_toml_with_post_call_ivr(
-    pbx, sipbot_pool, api, event_checker, webhook_server, tmp_path,
+    pbx, sipbot_pool, api, event_checker, webhook_server, tmp_path
 ):
     greeting = tmp_path / "csat_flow_greeting.wav"
     h.generate_sine_wav(greeting, 880.0, 1.5, 8000, 0.4)
@@ -144,6 +152,7 @@ async def test_csat_global_cc_toml_with_post_call_ivr(
     answered = await caller.wait_output_async(r"200 OK|Call established", timeout=25)
     assert answered, f"call never answered:\n{caller.output[-1500:]}"
 
+    # Queue dispatched the agent.
     ringing = await event_checker.webhook.wait_for_event("cc_ringing", timeout=20)
     assert ringing is not None, (
         f"no cc_ringing — queue did not dispatch. events: "
@@ -156,13 +165,14 @@ async def test_csat_global_cc_toml_with_post_call_ivr(
     await h.wait_log(pbx, r"Post-call survey started", 25, "survey started (global [csat] wiring)")
     await h.wait_log(
         pbx,
-        r"skips DTMF wait.*executing timeout_action immediately|chaining to sub-app ivr=post_call_csat",
+        r"skips DTMF wait.*executing timeout_action immediately"
+        r"|chaining to sub-app ivr=post_call_csat",
         15,
         "builtin trampoline chained into csat_survey",
     )
-    await h.wait_log(pbx, r"CSAT: playing score prompt", 20, "score prompt")
+    await h.wait_log(pbx, r"CSAT: playing score prompt", 30, "score prompt")
 
-    # Score 5 via stdin DTMF (two presses hedge prompt barge-in, same as flow1).
+    # Score 5 via stdin DTMF (two presses hedge prompt barge-in).
     assert caller.send_stdin_dtmf("5"), "caller stdin DTMF failed"
     await asyncio.sleep(2)
     caller.send_stdin_dtmf("5")
@@ -170,16 +180,16 @@ async def test_csat_global_cc_toml_with_post_call_ivr(
     await h.wait_log(pbx, r"CSAT: score collected score=5", 20, "score collected")
     await h.wait_log(pbx, r"CSAT: survey complete", 15, "survey complete")
 
-    # The call record is queryable only after the call has ended.
+    # NOTE: with post_call_ivr the hook forces after_completion="return_ivr";
+    # with no IVR to return to the caller leg stays open until its own BYE —
+    # documented behavior, the safety-net hangup=35 ends the call.
     hangup_ev = await event_checker.webhook.wait_for_event("cc_hangup", timeout=30)
     assert hangup_ev is not None, (
         f"call never hung up after survey. events: {event_checker.webhook.event_types()}"
     )
+    call_id = hangup_ev.call_id
 
-    # CDR must carry the surveyed score.
-    call_id = (answered_ev.call_id if hasattr(answered_ev, "call_id") else None) or (
-        ringing.call_id
-    )
+    # CDR must carry the surveyed score (queryable only after the call ends).
     score = None
     cdr = None
     for _ in range(12):
