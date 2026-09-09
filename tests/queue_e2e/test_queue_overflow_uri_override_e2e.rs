@@ -57,6 +57,7 @@ mod overflow_uri_e2e {
             sla_target_secs: 30,
             max_wait_secs,
             acd_policy: None,
+            overflow_mode: None,
         }
     }
 

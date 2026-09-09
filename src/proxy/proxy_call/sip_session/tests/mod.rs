@@ -130,6 +130,52 @@ fn forward_dtmf_with_active_bridge_owns_digit_without_app_injection() {
     assert!(ev.event.payload["end_reason"].is_null());
 }
 
+/// When an IVR flow dies while suspended on a bridge (caller hangup before
+/// the return app runs), the proxy must emit the compensating `session_end`
+/// `ivr_step_trace` the executor suppressed at hand-off time — carrying the
+/// real end reason and the originating node context (exactly-once contract).
+#[test]
+fn suspended_flow_death_emits_compensating_session_end_trace() {
+    use crate::call::app::ivr::provider::SessionEndTag;
+    use crate::proxy::proxy_call::sip_session::transfer::BridgeTraceContext;
+    use crate::proxy::proxy_call::sip_session::util::emit_suspended_flow_session_end;
+    use crate::rwi::gateway::RwiGateway;
+
+    let gateway = RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let gw_ref = Arc::new(parking_lot::RwLock::new(gateway));
+
+    let trace_ctx = Arc::new(parking_lot::Mutex::new(Some(BridgeTraceContext {
+        step_id: Some("step-menu-tts".to_string()),
+        step_name: Some("菜单".to_string()),
+        extra: Some(serde_json::json!({"nodetype": "menu_tts"})),
+    })));
+
+    emit_suspended_flow_session_end(
+        "test-session",
+        "sip:1001@x",
+        "sip:2000@x",
+        &Some(gw_ref),
+        &trace_ctx,
+        SessionEndTag::UserHangup,
+    );
+
+    let ev = events
+        .try_recv()
+        .expect("suspended-flow death must emit a session_end trace");
+    assert_eq!(ev.event.event_type, "ivr_step_trace");
+    assert_eq!(ev.event.payload["trigger"]["type"], "session_end");
+    assert_eq!(ev.event.payload["end_reason"], "user_hangup");
+    assert_eq!(ev.event.payload["step_id"], "step-menu-tts");
+    assert_eq!(ev.event.payload["action_type"], "Bridge");
+    assert_eq!(ev.event.payload["session_id"], "test-session");
+    assert!(
+        ev.event.payload["step_start_time"].is_null(),
+        "synthetic end trace carries no step start time"
+    );
+    // No node context → generic Transfer label, still a valid end marker.
+}
+
 // ── parse_dial_target ─────────────────────────────────────────────────
 
 #[test]

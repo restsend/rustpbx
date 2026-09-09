@@ -295,6 +295,49 @@ pub(super) fn forward_dtmf_event(
     inject_dtmf_into_app(digit, leg_id, session_id, app_runtime, rwi_gateway)
 }
 
+/// Emit the compensating `session_end` `ivr_step_trace` for an IVR flow that
+/// died while suspended (caller hangup during a bridge/queue hand-off, or a
+/// JumpIvr target that failed to start). The step-IVR executor suppresses its
+/// own session_end trace for resumable hand-offs, so this synthetic event
+/// guarantees consumers still see exactly one session_end per logical flow —
+/// carrying the REAL end reason instead of a premature `transfer`. Node
+/// context comes from the bridge trace context when the suspension was a
+/// voip_bridge.
+pub(super) fn emit_suspended_flow_session_end(
+    session_id: &str,
+    caller: &str,
+    callee: &str,
+    rwi_gateway: &Option<crate::rwi::RwiGatewayRef>,
+    bridge_trace_context: &parking_lot::Mutex<Option<super::transfer::BridgeTraceContext>>,
+    end_reason: crate::call::app::ivr::provider::SessionEndTag,
+) {
+    let Some(gw) = rwi_gateway.as_ref() else {
+        return;
+    };
+    let ctx = bridge_trace_context.lock().clone();
+    let ev = crate::rwi::IvrStepTrace {
+        call_id: session_id.to_string(),
+        session_id: session_id.to_string(),
+        caller: caller.to_string(),
+        callee: callee.to_string(),
+        step_index: 0,
+        trigger: crate::rwi::TriggerInfo::new("session_end"),
+        action_type: if ctx.is_some() { "Bridge" } else { "Transfer" }.to_string(),
+        action_json: None,
+        duration_ms: 0,
+        error: None,
+        step_id: ctx.as_ref().and_then(|c| c.step_id.clone()),
+        step_name: ctx.as_ref().and_then(|c| c.step_name.clone()),
+        step_start_time: None,
+        step_end_time: Some(chrono::Utc::now().to_rfc3339()),
+        extra: ctx.as_ref().and_then(|c| c.extra.clone()),
+        sip_headers: None,
+        end_reason: Some(end_reason),
+        end_detail: None,
+    };
+    gw.read().fan_out(session_id, &ev);
+}
+
 pub(super) fn trunk_host_port(dest: &str) -> Option<(String, u16)> {
     if dest.trim().is_empty() {
         return None;

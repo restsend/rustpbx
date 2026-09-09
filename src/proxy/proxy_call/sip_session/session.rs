@@ -7591,7 +7591,12 @@ impl SipSession {
             return path.to_string();
         };
         let subdir = crate::callrecord::RecordingSubdir::parse(policy.subdir.as_deref());
-        crate::callrecord::preview_archive_path(&policy.recorder_path(), Path::new(path), subdir, start)
+        crate::callrecord::preview_archive_path(
+            &policy.recorder_path(),
+            Path::new(path),
+            subdir,
+            start,
+        )
     }
 
     pub(crate) fn publish_recording_complete(
@@ -9841,6 +9846,15 @@ impl SipSession {
             .is_none_or(|d| d.state().is_terminated());
 
         if !caller_alive {
+            // Caller died while the flow was suspended on a bridge/queue —
+            // the suspended IVR will never resume, so emit the compensating
+            // session_end trace it suppressed at hand-off time.
+            if self.meta.ivr_flow_suspended {
+                self.meta.ivr_flow_suspended = false;
+                self.emit_suspended_flow_session_end(
+                    crate::call::app::ivr::provider::SessionEndTag::UserHangup,
+                );
+            }
             self.meta.pending_transfer_outcome = None;
             return CommandResult::success();
         }
@@ -9898,7 +9912,11 @@ impl SipSession {
                 .ensure_app_running(&spec.app_name, Some(spec.params), &label)
                 .await
             {
-                Ok(()) => return CommandResult::success(),
+                Ok(()) => {
+                    // Flow resumed — the successor app owns the lifecycle now.
+                    self.meta.ivr_flow_suspended = false;
+                    return CommandResult::success();
+                }
                 Err(e) => {
                     warn!(session_id = %self.id,
                         app = %spec.app_name,
@@ -9912,6 +9930,29 @@ impl SipSession {
         // 3. Neither hook nor return app — hang up the caller.
         self.pending_hangup.insert(self.caller_dialog_id());
         CommandResult::success()
+    }
+
+    /// Emit the compensating `session_end` `ivr_step_trace` for an IVR flow
+    /// that died while suspended (caller hangup during a bridge/queue
+    /// hand-off, or a JumpIvr target that failed to start).
+    ///
+    /// The step-IVR executor suppresses its own session_end trace for
+    /// resumable hand-offs, so this synthetic event guarantees consumers
+    /// still see exactly one session_end per logical flow — carrying the
+    /// REAL end reason instead of a premature `transfer`. Node context comes
+    /// from the bridge trace context when the suspension was a voip_bridge.
+    pub(crate) fn emit_suspended_flow_session_end(
+        &self,
+        end_reason: crate::call::app::ivr::provider::SessionEndTag,
+    ) {
+        super::util::emit_suspended_flow_session_end(
+            &self.context.session_id,
+            &self.context.original_caller,
+            &self.context.original_callee,
+            &self.server.rwi_gateway,
+            &self.bridge_trace_context,
+            end_reason,
+        );
     }
 
     pub(crate) fn deliver_pending_transfer_result(&mut self) -> bool {
@@ -10087,6 +10128,17 @@ impl SipSession {
             return CommandResult::success();
         }
         self.bridge.clear();
+
+        // Compensating session_end: an IVR flow suspended on a resumable
+        // hand-off (bridge/queue return pending) dies with the session when
+        // the caller hangs up before the return app runs — emit the
+        // session_end trace its executor suppressed (exactly-once contract).
+        if self.meta.ivr_flow_suspended {
+            self.meta.ivr_flow_suspended = false;
+            self.emit_suspended_flow_session_end(
+                crate::call::app::ivr::provider::SessionEndTag::UserHangup,
+            );
+        }
 
         if self.app_runtime.is_running() {
             let reason_str = cmd.reason.as_ref().map(|r| r.to_string());

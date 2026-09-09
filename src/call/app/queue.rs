@@ -2078,7 +2078,7 @@ impl CallApp for QueueApp {
                                 extract_sip_username(uri).unwrap_or_else(|| uri.to_string())
                             });
                         let _ = registry
-                            .update_presence(&agent_id, PresenceState::Idle)
+                            .note_agent_no_answer(&agent_id, &self.call_id)
                             .await;
 
                         ctrl.notify_event(

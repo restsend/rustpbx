@@ -22,14 +22,20 @@ because it needs its OWN function-scoped rustpbx with a custom cc.toml —
 the cc suite's session-scoped PBX boots once with a fixed cc.toml shared
 by tests that must not get CSAT prompts.
 
-Flow: caller → IVR (auto-timeout) → queue "support" → agent 1002 answers →
-agent hangs up → post_call_csat IVR → csat_survey → caller presses 5 →
-``CSAT: score collected score=5`` → CDR ``csat_score == 5``.
+Cases:
+- ``test_csat_global_cc_toml_with_post_call_ivr`` — plain queue call; agent
+  hangup fires the survey; score persisted.
+- ``test_ivr_exec_mid_call_then_csat`` — after the agent answers, an
+  ``ivr.exec`` (SIP INFO) injects a mid-call collect IVR on the caller leg
+  (agent held); the collected result is POSTed verbatim to the dedicated
+  ``ivr_exec_completed`` webhook; the agent then hangs up and the CSAT
+  survey still runs (``after_transfer = true``) with the score persisted.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 
@@ -206,3 +212,173 @@ async def test_csat_global_cc_toml_with_post_call_ivr(
     )
     assert int(score) == 5, f"csat_score mismatch: {score!r} (want 5)"
     print(f"\n[global-csat] ✓ csat=5 via cc.toml [csat] + post_call_ivr (call {call_id})")
+
+
+def _exec_collect_ivr() -> str:
+    """Mid-call ivr.exec target: unknown key seeds a 2-digit `order` collect.
+
+    "4" is unmapped → unknown_key_action starts collecting `order` seeded
+    with "4"; "2" completes it. Root timeout then exits the IVR (call stays
+    up, the ivr_exec hook unholds the agent) and the result is POSTed
+    verbatim to the dedicated webhook as `ivr_exec_completed`
+    (`collected.order == "42"`).
+    """
+    return """\
+[ivr]
+name = "csat-exec"
+ivr_mode = "tree"
+
+[ivr.root]
+greeting_text = "Please enter your order number."
+timeout_ms = 4000
+max_retries = 2
+timeout_action = { type = "exit" }
+max_retries_action = { type = "exit" }
+unknown_key_action = { type = "collect", variable = "order", min_digits = 2, max_digits = 2, inter_digit_timeout_ms = 3000 }
+entries = []
+"""
+
+
+@pytest.mark.asyncio
+async def test_ivr_exec_mid_call_then_csat(
+    pbx, sipbot_pool, api, event_checker, webhook_server, tmp_path
+):
+    """Agent answers → mid-call ivr.exec (SIP INFO) runs a collect IVR on the
+    caller leg with the agent held → result POSTed to the dedicated webhook →
+    agent hangs up → the global-[csat] survey still fires (after_transfer)
+    and the score is persisted."""
+    from aiohttp import web
+
+    greeting = tmp_path / "csat_exec_greeting.wav"
+    h.generate_sine_wav(greeting, 880.0, 1.5, 8000, 0.4)
+
+    pbx.config_builder.add_ivr("csat-flow", _flow_ivr(greeting))
+    pbx.config_builder.add_ivr("csat-exec", _exec_collect_ivr())
+    pbx.config_builder.add_queue(
+        "support",
+        strategy_mode="sequential",
+        targets=["skill-group:support"],
+    )
+    pbx.config_builder.add_route(
+        "csat-flow-route",
+        match={"to.user": "csat-flow"},
+        priority=10,
+        action="application",
+        app="ivr",
+        app_params={"file": "config/ivr/csat-flow.toml"},
+        auto_answer=True,
+    )
+
+    pbx.prepare(webhook_url=webhook_server.url, build=False)
+    cc_toml = pbx.work_dir / "config" / "cc" / "cc.toml"
+    cc_toml.write_text(cc_toml.read_text(encoding="utf-8") + CSAT_CC_TOML, encoding="utf-8")
+    pbx.start(timeout=90)
+
+    await _seed_cc(pbx, api)
+
+    # Dedicated capture endpoint for the ivr_exec_completed result POST (the
+    # global webhook cannot match its {event: ...} envelope).
+    exec_payload: dict = {}
+    exec_received = asyncio.Event()
+
+    async def _capture(request):
+        exec_payload.update(await request.json())
+        exec_received.set()
+        return web.json_response({"ok": True})
+
+    capture_app = web.Application()
+    capture_app.router.add_post("/ivr-exec", _capture)
+    runner = web.AppRunner(capture_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    exec_webhook_url = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}/ivr-exec"
+
+    try:
+        # Agent answers ~t2.5, hangs up at t17 (hangup_after=15).
+        agent = sipbot_pool.callee(
+            host=pbx.host, port=h.ua_port(17230), username=AGENT, password="123456",
+            register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
+            ring_secs=1, answer_mode="echo", hangup_after=15,
+        )
+        await h.wait_registered(agent, f"agent {AGENT}")
+
+        # Caller: queue → agent; INFO fires at 6 s (after the answer).
+        ivr_exec_body = json.dumps({
+            "action": "ivr.exec",
+            "params": {
+                "route_point": "csat-exec",
+                "request_id": "csat-exec-001",
+                "webhook_url": exec_webhook_url,
+                "hold_agent": True,
+            },
+        })
+        caller = sipbot_pool.caller(
+            target=f"sip:csat-flow@{pbx.sip_addr}", username="1001", password="123456",
+            hangup=45,
+            info_flows=f"6s:application/vnd.rustpbx+json:{ivr_exec_body}",
+        )
+        answered = await caller.wait_output_async(r"200 OK|Call established", timeout=25)
+        assert answered, f"call never answered:\n{caller.output[-1500:]}"
+
+        await event_checker.expect_webhook_event("cc_answered", timeout=20)
+
+        # ── ivr.exec: collect IVR runs on the caller leg, agent held. ──
+        await h.wait_log(pbx, r"SIP INFO rustpbx command accepted", 20, "ivr.exec INFO")
+        await h.wait_log(
+            pbx, r"ivr=csat-exec menu=.root. retry_count=0", 20, "collect IVR ready",
+        )
+        # "4" unmapped → unknown_key_action seeds `order` with 4; "2" completes.
+        assert caller.send_stdin_dtmf("4"), "caller stdin DTMF failed"
+        await h.wait_log(pbx, r"unknown_key_action.*digit=4", 10, "collect seeded with '4'")
+        await asyncio.sleep(0.4)
+        assert caller.send_stdin_dtmf("2"), "caller stdin DTMF failed"
+
+        await asyncio.wait_for(exec_received.wait(), timeout=30)
+        assert exec_payload.get("event") == "ivr_exec_completed", (
+            f"ivr_exec envelope mismatch: {exec_payload!r:.300}"
+        )
+        assert exec_payload.get("status") not in (None, "", "error"), (
+            f"collect IVR did not complete cleanly: {exec_payload!r:.300}"
+        )
+        collected = exec_payload.get("collected") or {}
+        assert collected.get("order") == "42", (
+            f"DTMF accuracy failure — collected={collected!r}, want order=='42'. "
+            f"payload: {exec_payload!r:.400}"
+        )
+
+        # ── Agent hangs up (hangup_after=15) → global-[csat] survey. ──
+        await h.wait_log(pbx, r"Post-call survey started", 30, "survey after ivr.exec call")
+        await h.wait_log(pbx, r"CSAT: playing score prompt", 30, "score prompt")
+        assert caller.send_stdin_dtmf("5"), "caller stdin DTMF failed"
+        await asyncio.sleep(2)
+        caller.send_stdin_dtmf("5")
+
+        await h.wait_log(pbx, r"CSAT: score collected score=5", 20, "score collected")
+        await h.wait_log(pbx, r"CSAT: survey complete", 15, "survey complete")
+
+        hangup_ev = await event_checker.webhook.wait_for_event("cc_hangup", timeout=30)
+        assert hangup_ev is not None, "call never hung up after survey"
+        call_id = hangup_ev.call_id
+
+        score = None
+        cdr = None
+        for _ in range(12):
+            await asyncio.sleep(1)
+            detail = await api.get(f"/api/cc/calls/{call_id}")
+            if isinstance(detail, dict):
+                cdr = detail.get("data", detail)
+                score = cdr.get("csat_score") or cdr.get("csatScore")
+                if score is not None:
+                    break
+        assert score is not None, (
+            f"CSAT score not persisted for {call_id} after ivr.exec mid-call. "
+            f"CDR: {cdr!r:.300}"
+        )
+        assert int(score) == 5, f"csat_score mismatch: {score!r} (want 5)"
+        print(
+            f"\n[global-csat] ✓ ivr.exec collected order='42', csat=5 "
+            f"after agent hangup (call {call_id})"
+        )
+    finally:
+        await runner.cleanup()

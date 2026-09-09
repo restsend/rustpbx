@@ -1174,7 +1174,7 @@ action = { type = "transfer", target = "100" }
         stack
             .assert_cmd(300, "TransferTarget-queue-with-return", |c| {
                 matches!(c, CallCommand::Transfer { target, .. }
-                        if target == "queue:support?return_app=ivr&return_target=test-queue-return")
+                        if target == "queue:support?return_app=ivr&return_target=test-queue-return&return_ivr_resume=1")
             })
             .await;
 

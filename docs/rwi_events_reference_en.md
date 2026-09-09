@@ -731,6 +731,12 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 > **Session-end entry (`session_end`)**: when the IVR session ends (including caller hangup `RemoteHangup` and system cancel `Cancelled`), an extra trace entry with `trigger.type="session_end"` is emitted. `action_type`/`step_id`/`step_name` record the last executed node, and `end_reason`/`end_detail` describe how the whole session ended. The external provider `/end` webhook is **not** called on `RemoteHangup`/`Cancelled` (the local trace event is still emitted).
 >
 > **Single completion event**: each step — including waiting steps (playback, digit collection, transfer awaiting result) — emits exactly **one** trace entry upon completion. The `trigger` keeps the step's original trigger source (e.g. `phone_collected`, `dtmf`) with its detail; a non-null `step_end_time` marks completion. No intermediate or duplicate events are emitted.
+>
+> **Exactly-once lifecycle contract**: within one logical IVR flow (including voip_bridge round-trips, queue returns, and JumpIvr jumps), `trigger.type="session_start"` and `trigger.type="session_end"` each appear **exactly once**:
+> - `session_start` only on the first node's trace entry at the flow's true first entry;
+> - resumable hand-offs (voip_bridge, queue return, JumpIvr) do **not** trigger `session_end` (the flow has not ended);
+> - if the caller hangs up or the successor fails to start while the flow is suspended, the proxy synthesizes the single compensating `session_end` (`end_reason=user_hangup` / `error`; node context from the bridge trace context);
+> - when the flow resumes after suspension, the resumed first node carries a `resume` trigger (no buffered digits) or `dtmf` (buffered digits) — never a second `session_start`.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -763,7 +769,7 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 >
 > | Sub-field | Type | Description |
 > |-----------|------|-------------|
-> | `type` | String | Trigger source type: `session_start`, `session_end`, `dtmf`, `dtmf_menu`, `dtmf_menu_timeout`, `audio_complete`, `action_execute`, `chained`, `api_response`, `phone_collected`, `recording_complete`, `input_voice`, `error`, `dtmf_menu_invalid`, `unknown` |
+> | `type` | String | Trigger source type: `session_start`, `session_end`, `resume`, `dtmf`, `dtmf_menu`, `dtmf_menu_timeout`, `audio_complete`, `action_execute`, `chained`, `api_response`, `phone_collected`, `recording_complete`, `input_voice`, `error`, `dtmf_menu_invalid`, `unknown`. `resume` marks a flow resuming from a bridge/queue/JumpIvr suspension without buffered digits |
 > | `detail` | Option\<JSON Object\> | Structured trigger detail, omitted when none. Common values: DTMF → `{"digit":"2"}`; API response → `{"status":200}`; phone collection → `{"number":"13800138000"}` |
 >
 > **Timing fields**:

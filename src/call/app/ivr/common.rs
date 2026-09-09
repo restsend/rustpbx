@@ -605,6 +605,12 @@ pub async fn execute_action(
                     target.push_str(&format!("{}={}", k, urlencoding::encode(v)));
                 }
             }
+            // Lifecycle marker: a JumpIvr continues the SAME logical flow —
+            // the target IVR resumes instead of starting fresh (trace
+            // contract: one session_start / one session_end per flow). The
+            // route-point start path maps this to `ivr_params.ivr_resumed`.
+            let sep = if target.contains('?') { "&" } else { "?" };
+            target.push_str(&format!("{sep}_ivr_resume=1"));
             sess.variables.insert(
                 "jump_params".into(),
                 serde_json::to_string(params).unwrap_or_default(),

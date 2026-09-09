@@ -259,6 +259,23 @@ pub trait AgentRegistry: Send + Sync {
     async fn update_presence(&self, agent_id: &str, new_state: PresenceState)
     -> anyhow::Result<()>;
 
+    /// Called when a dialled agent fails to answer within the ring timeout:
+    /// the agent must end up NON-idle instead of silently returning to Idle,
+    /// so operators see the missed call and the ACD does not immediately
+    /// re-offer. Default wraps the agent into a `Wrapup` presence bound to
+    /// the call; implementations may add recovery (auto-idle timer, stats,
+    /// webhooks).
+    async fn note_agent_no_answer(&self, agent_id: &str, call_id: &str) {
+        let _ = self
+            .update_presence(
+                agent_id,
+                PresenceState::Wrapup {
+                    call_id: Some(call_id.to_string()),
+                },
+            )
+            .await;
+    }
+
     /// Increment call count when agent receives call
     async fn start_call(&self, agent_id: &str) -> anyhow::Result<()>;
 

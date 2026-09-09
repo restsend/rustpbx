@@ -106,6 +106,14 @@ pub struct CallMeta {
     /// must NOT cascade into a caller hangup (the customer keeps talking to
     /// the supervisor in the conference).
     pub supervisor_takeover_active: bool,
+    /// True while an IVR flow is suspended on a resumable hand-off (voip_
+    /// bridge / queue with `return_ivr_resume=1`, or a JumpIvr route point
+    /// with `_ivr_resume=1`). The step-IVR executor suppresses its own
+    /// session_end trace for such hand-offs; if the flow dies while
+    /// suspended (caller hangup, successor start failure), the session must
+    /// emit the compensating session_end `ivr_step_trace` — see
+    /// `SipSession::emit_suspended_flow_session_end`.
+    pub ivr_flow_suspended: bool,
 }
 
 /// Queue name for this session (authoritative store in [`CallMeta`]).

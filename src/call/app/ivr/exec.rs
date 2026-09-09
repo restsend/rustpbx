@@ -143,6 +143,11 @@ pub async fn prepare_start_app(
 }
 
 /// Append `return_app` / `return_target` (and optional `return_menu`) to a query string.
+///
+/// Also appends the `return_ivr_resume=1` lifecycle marker whenever a return
+/// app is effective: the return IVR must resume the SAME logical flow (trace
+/// contract: one `session_start` / one `session_end` per flow). The
+/// return-app start path translates it into `ivr_params.ivr_resumed`.
 pub fn append_return_app_query(
     query: &mut String,
     return_app: &Option<String>,
@@ -160,10 +165,14 @@ pub fn append_return_app_query(
         if let Some(menu) = return_menu.filter(|s| !s.is_empty() && *s != "root") {
             query.push_str(&format!("&return_menu={}", urlencoding::encode(menu)));
         }
+        query.push_str("&return_ivr_resume=1");
     }
 }
 
 /// Append `return_app` / `return_target` to a URI path (adds `?` or `&` as needed).
+///
+/// Also appends the `return_ivr_resume=1` lifecycle marker (see
+/// [`append_return_app_query`]).
 pub fn append_return_app_to_uri(
     uri: &mut String,
     return_app: &Option<String>,
@@ -175,6 +184,7 @@ pub fn append_return_app_to_uri(
         if let Some(rt) = return_target.as_deref().filter(|s| !s.is_empty()) {
             uri.push_str(&format!("&return_target={}", urlencoding::encode(rt)));
         }
+        uri.push_str("&return_ivr_resume=1");
     }
 }
 

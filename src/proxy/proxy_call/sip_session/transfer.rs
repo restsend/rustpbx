@@ -758,6 +758,25 @@ impl SipSession {
             return Err(anyhow!("wait_for_result requires a SIP transfer target"));
         }
 
+        // Lifecycle: arm "flow suspended" when the step-IVR executor marked
+        // this hand-off as resumable (`return_ivr_resume=1` on bridge/queue
+        // targets, `_ivr_resume=1` on JumpIvr route points). While suspended,
+        // the executor suppresses its own session_end trace; if the flow dies
+        // before the successor starts, the session emits the compensating
+        // session_end (handle_hangup / handle_start_return_app).
+        self.meta.ivr_flow_suspended = match &target {
+            TransferTarget::Queue { return_app, .. }
+            | TransferTarget::Bridge { return_app, .. } => return_app
+                .as_ref()
+                .and_then(|s| s.params.get("return_ivr_resume"))
+                .map(|v| v == "1")
+                .unwrap_or(false),
+            TransferTarget::RoutePoint { params, .. } => {
+                params.get("_ivr_resume").map(|v| v == "1").unwrap_or(false)
+            }
+            _ => false,
+        };
+
         match target {
             TransferTarget::Queue {
                 name,
@@ -771,11 +790,30 @@ impl SipSession {
             }
             TransferTarget::Ivr { name, params } => {
                 info!(session_id = %self.id, %leg_id, ivr = %name, "Handling IVR transfer by starting IvrApp");
-                self.start_ivr_app(&name, params).await
+                // Normalize the JumpIvr lifecycle marker into the ivr_params
+                // key the step-IVR executor consumes, then start: a successful
+                // start means the flow resumed in the successor.
+                let mut params = params;
+                if params.remove("_ivr_resume").as_deref() == Some("1") {
+                    params.insert("ivr_resumed".to_string(), "1".to_string());
+                }
+                let resumed = params.get("ivr_resumed").map(|v| v == "1").unwrap_or(false);
+                let result = self.start_ivr_app(&name, params).await;
+                if result.is_ok() && resumed {
+                    self.meta.ivr_flow_suspended = false;
+                }
+                result
             }
             TransferTarget::RoutePoint { name, params } => {
                 info!(session_id = %self.id, %leg_id, route_point = %name, "Handling IVR route-point transfer");
-                self.start_route_point_app(&name, params).await
+                let result = self.start_route_point_app(&name, params).await;
+                // The route-point params reach the successor via the route
+                // context (the executor consumes `_ivr_resume` from its
+                // variables); a successful start hands the lifecycle over.
+                if result.is_ok() {
+                    self.meta.ivr_flow_suspended = false;
+                }
+                result
             }
             TransferTarget::Voicemail { extension } => {
                 info!(session_id = %self.id, %leg_id, %extension, "Handling voicemail transfer by starting VoicemailApp");
@@ -1240,13 +1278,18 @@ impl SipSession {
             );
             let resolved = self.resolve_return_app(Some(spec.clone())).await;
             if let Some(rspec) = resolved {
-                return self
+                let result = self
                     .ensure_app_running(
                         &rspec.app_name,
                         Some(rspec.params),
                         &format!("Return app '{}' (queue failed)", rspec.app_name),
                     )
                     .await;
+                if result.is_ok() {
+                    // Flow resumed — the return app owns the lifecycle now.
+                    self.meta.ivr_flow_suspended = false;
+                }
+                return result;
             }
         }
 
@@ -1448,7 +1491,15 @@ impl SipSession {
             "ivr" => {
                 let ivr_name = spec.target.as_deref().unwrap_or("default");
                 let ivr_file = self.server.data_context.resolve_ivr_file(ivr_name).await;
-                Some(ReturnAppSpec::ivr(ivr_file, spec.params))
+                let mut extra = spec.params;
+                // Lifecycle marker: `return_ivr_resume=1` (appended by the
+                // step-IVR executor's return-app query helpers) means the
+                // return IVR resumes the SAME logical flow — translate it to
+                // the `ivr_params.ivr_resumed` key the executor consumes.
+                if extra.remove("return_ivr_resume").as_deref() == Some("1") {
+                    extra.insert("ivr_resumed".to_string(), "1".to_string());
+                }
+                Some(ReturnAppSpec::ivr(ivr_file, extra))
             }
             _ => {
                 let mut params = serde_json::Map::new();
@@ -2855,10 +2906,7 @@ mod tests {
         let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_ne_bytes()).collect();
 
         let messages: Vec<Result<Message, tokio_tungstenite::tungstenite::Error>> =
-            vec![
-                Ok(Message::Binary(bytes.into())),
-                Ok(Message::Close(None)),
-            ];
+            vec![Ok(Message::Binary(bytes.into())), Ok(Message::Close(None))];
 
         let (pcm_tx, mut pcm_rx) = mpsc::channel(4);
         tokio::time::timeout(

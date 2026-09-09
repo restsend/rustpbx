@@ -108,6 +108,10 @@ pub struct StepIvrApp {
     /// `delay_after_ms` of the prompt currently playing, held in
     /// `on_audio_complete` before the flow advances to the next step.
     pending_audio_delay_ms: u64,
+    /// True when this instance resumes an already-started logical flow
+    /// (`ivr_resumed` / `_ivr_resume` markers): the first node's lifecycle
+    /// trace trigger is `resume` (or `dtmf`), never a second `session_start`.
+    resumed_flow: bool,
 }
 
 #[derive(Clone)]
@@ -162,6 +166,7 @@ impl StepIvrApp {
             probe_pending: false,
             ivr_fallback: None,
             pending_audio_delay_ms: 0,
+            resumed_flow: false,
         }
     }
 
@@ -205,6 +210,7 @@ impl StepIvrApp {
             probe_pending: false,
             ivr_fallback: None,
             pending_audio_delay_ms: 0,
+            resumed_flow: false,
         }
     }
 
@@ -1143,6 +1149,12 @@ impl StepIvrApp {
 
         // Store trigger event info for __exec_node to use when recording trace after node execution
         self.current_trigger = Some(match &ctx.event {
+            // A resumed flow's first node must carry the `resume` lifecycle
+            // trigger — the flow already emitted session_start at its true
+            // first entry (provider protocol unchanged: still SessionStart).
+            Some(ProviderEvent::SessionStart) if self.resumed_flow => {
+                crate::rwi::TriggerInfo::new("resume")
+            }
             Some(ProviderEvent::SessionStart) => crate::rwi::TriggerInfo::new("session_start"),
             Some(ProviderEvent::AudioComplete { .. }) => {
                 crate::rwi::TriggerInfo::new("audio_complete")
@@ -1489,28 +1501,54 @@ impl CallApp for StepIvrApp {
 
         // Merge ivr_params (from JumpIvr query string) into session variables
         // so they are available for $var$ substitution and sent to the provider.
+        // Reserved lifecycle keys stay out of the variable pool: they are
+        // executor bookkeeping, must not reach the provider, and buffered
+        // digits must not leak into provider payloads.
+        const RESERVED_IVR_PARAM_KEYS: [&str; 2] = ["ivr_resumed", "bridge_dtmf_digits"];
         if let Some(ref ivp) = self.ivr_params {
             for (k, v) in ivp {
+                if RESERVED_IVR_PARAM_KEYS.contains(&k.as_str()) {
+                    continue;
+                }
                 self.sess.variables.insert(k.clone(), v.clone());
             }
             // Also write to shared session_vars so the next chained app can see them.
             if let Some(ref runtime) = self.runtime_vars {
                 for (k, v) in ivp {
+                    if RESERVED_IVR_PARAM_KEYS.contains(&k.as_str()) {
+                        continue;
+                    }
                     runtime.insert(k.clone(), v.clone());
                 }
             }
         }
 
-        // Bridge return: digits the caller pressed while the audio was
-        // bridged to an external facade arrive here via ivr_params (written
-        // by SipSession::handle_start_return_app). This app instance is a
-        // RESUME of the original flow, so the first provider request carries
-        // the first buffered digit as a `dtmf` trigger instead of a second
-        // `session_start` — the consumer contract for menu nodes
-        // (menu_tts / menu_tts_api via voip_bridge) is
-        // `trigger.type == "dtmf"` with `detail.digit`. Remaining digits are
-        // queued and delivered on subsequent steps by the pending-DTMF
-        // buffer in `request_next`.
+        // Lifecycle resume detection: `ivr_resumed=1` in ivr_params marks
+        // this app instance as a CONTINUATION of an already-started logical
+        // IVR flow (voip_bridge return, queue return — written by the
+        // proxy's return-app start path from the `return_ivr_resume` marker;
+        // JumpIvr — the `_ivr_resume` route-point param lands in the merged
+        // variables and is consumed here). The trace lifecycle contract is
+        // exactly-once per flow: `session_start` only on the true first
+        // entry, `session_end` only on the true final exit. A resumed
+        // instance's first node therefore carries a `dtmf` trigger (digits
+        // buffered while suspended — the consumer contract for menu nodes
+        // via voip_bridge) or a `resume` trigger (no digits), never a second
+        // `session_start`. The provider protocol is unchanged: it still
+        // receives SessionStart for this new instance.
+        let jump_resume_marker = self
+            .sess
+            .variables
+            .remove("_ivr_resume")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let resumed = jump_resume_marker
+            || self
+                .ivr_params
+                .as_ref()
+                .and_then(|p| p.get("ivr_resumed"))
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(false);
         let resume_digits: Vec<String> = self
             .ivr_params
             .as_ref()
@@ -1529,10 +1567,6 @@ impl CallApp for StepIvrApp {
                 for d in resume_digits.iter().skip(1) {
                     self.pending_dtmf.push_back(d.clone());
                 }
-                self.current_trigger = Some(crate::rwi::TriggerInfo::with_detail(
-                    "dtmf",
-                    serde_json::json!({ "digit": digit }),
-                ));
                 tracing::info!(
                     digit = %digit,
                     buffered = resume_digits.len() - 1,
@@ -1540,8 +1574,16 @@ impl CallApp for StepIvrApp {
                 );
                 ProviderEvent::Dtmf { digit }
             }
-            None => ProviderEvent::SessionStart,
+            None => {
+                if resumed {
+                    tracing::info!(
+                        "StepIvrApp: resuming suspended flow without buffered digits — first trace trigger is resume"
+                    );
+                }
+                ProviderEvent::SessionStart
+            }
         };
+        self.resumed_flow = resumed;
 
         let sess_ctx = SessionContext {
             session_id: context.call_info.session_id.clone(),
@@ -1563,13 +1605,18 @@ impl CallApp for StepIvrApp {
 
         self.step_prev_start_time = Some(chrono::Utc::now().to_rfc3339());
 
-        self.record_session_start(
-            &sess_ctx.session_id,
-            &sess_ctx.caller,
-            &sess_ctx.callee,
-            &sess_ctx.direction,
-        )
-        .await;
+        // A resumed flow keeps the original collector session row — the row
+        // is created once at the true first entry and closed once at the
+        // true final exit (exactly-once lifecycle contract).
+        if !resumed {
+            self.record_session_start(
+                &sess_ctx.session_id,
+                &sess_ctx.caller,
+                &sess_ctx.callee,
+                &sess_ctx.direction,
+            )
+            .await;
+        }
 
         self.set_runtime_status(context, "awaiting_first_step");
         let first_node = match self.request_next(Some(first_event)).await {
@@ -2011,25 +2058,53 @@ impl CallApp for StepIvrApp {
         };
         let caller = provider_session.caller;
         let callee = provider_session.callee;
-        self.record_trace(IvrTraceEntry {
-            session_id: session_id.clone(),
-            caller,
-            callee,
-            step_index: self.step_index,
-            trigger: crate::rwi::TriggerInfo::new("session_end"),
-            provider_url: None,
-            action_type: last_action_type,
-            action_json: None,
-            error: None,
-            step_id: last_step_id,
-            step_name: last_step_name,
-            step_start_time: self.current_step_start_time.clone(),
-            step_end_time: Some(chrono::Utc::now().to_rfc3339()),
-            duration_ms: 0,
-            extra: last_extra,
-            end_reason: Some(end_sr.reason.clone()),
-            end_detail: end_sr.detail.clone(),
-        });
+        // Lifecycle exactly-once: a hand-off the flow will resume from
+        // (voip_bridge with return_app, queue with return_app, or a jump to
+        // another IVR) does NOT end the logical flow — suppress the
+        // `session_end` trace and leave the collector session row active.
+        // The proxy compensates with a synthetic session_end if the flow
+        // dies while suspended (caller hangup / hand-off failure). Only the
+        // trace lifecycle changes here: provider /end hooks and shared
+        // ivr_status/ivr_end_reason variables behave exactly as before.
+        let resumable_handoff = match &self.current_node {
+            Some(node) => match &node.action {
+                EntryAction::Bridge {
+                    return_app: Some(_),
+                    ..
+                }
+                | EntryAction::Transfer {
+                    return_app: Some(_),
+                    ..
+                }
+                | EntryAction::Queue {
+                    return_app: Some(_),
+                    ..
+                } => true,
+                _ => matches!(&end_reason.reason, SessionEndTag::TransferToIvr),
+            },
+            None => false,
+        };
+        if !resumable_handoff {
+            self.record_trace(IvrTraceEntry {
+                session_id: session_id.clone(),
+                caller,
+                callee,
+                step_index: self.step_index,
+                trigger: crate::rwi::TriggerInfo::new("session_end"),
+                provider_url: None,
+                action_type: last_action_type,
+                action_json: None,
+                error: None,
+                step_id: last_step_id,
+                step_name: last_step_name,
+                step_start_time: self.current_step_start_time.clone(),
+                step_end_time: Some(chrono::Utc::now().to_rfc3339()),
+                duration_ms: 0,
+                extra: last_extra,
+                end_reason: Some(end_sr.reason.clone()),
+                end_detail: end_sr.detail.clone(),
+            });
+        }
 
         if !skip_provider_end {
             let provider_session = self.provider_session_context();
@@ -2042,7 +2117,9 @@ impl CallApp for StepIvrApp {
             .unwrap_or_else(|_| "\"unknown\"".to_string())
             .trim_matches('"')
             .to_string();
-        self.record_session_end(&status).await;
+        if !resumable_handoff {
+            self.record_session_end(&status).await;
+        }
         if let Some(name) = &self.ivr_name {
             self.sess
                 .variables
@@ -3682,6 +3759,9 @@ mod tests {
             .with_ivr_params(serde_json::json!({
                 "bridge_dtmf_digits": digits,
                 "return_menu": "lf-step-ivr",
+                // Lifecycle marker written by SipSession::resolve_return_app
+                // from the executor's `return_ivr_resume=1` bridge param.
+                "ivr_resumed": "1",
             }))
     }
 
@@ -3740,11 +3820,10 @@ mod tests {
         );
 
         // Consumer contract (ivr_step_trace): the executed step carries
-        // trigger.type == "dtmf" with detail.digit.
+        // trigger.type == "dtmf" with detail.digit. (A resumed flow creates
+        // no new collector session row — query by the fixed session id.)
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        let sessions = trace.sessions().await;
-        let sess = &sessions[0];
-        let entries = trace.query_by_session(&sess.session_id).await;
+        let entries = trace.query_by_session("test-session").await;
         let traced = entries
             .iter()
             .find(|e| e.trigger.r#type == "dtmf")
@@ -3790,9 +3869,7 @@ mod tests {
             .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(2000, "play", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(2000, "play", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("bridge_resume_prompt");
         stack
@@ -3812,7 +3889,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bridge_return_without_digits_keeps_session_start() {
+    async fn test_bridge_return_without_digits_uses_resume_trigger() {
+        // No digits buffered while suspended: the provider protocol still
+        // receives SessionStart, but the lifecycle trace trigger of the first
+        // node must be `resume` — the flow already emitted its session_start
+        // at the true first entry (exactly-once contract).
         let provider = MockProvider::new(vec![ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             params: HashMap::new(),
@@ -3822,6 +3903,8 @@ mod tests {
         let handle = MockProviderHandle(Arc::new(provider));
 
         let mut app = bridge_return_app(&handle, "");
+        let trace = crate::call::app::ivr::trace::IvrTraceCollector::new();
+        app.trace = Some(trace.clone());
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
         stack
@@ -3839,7 +3922,22 @@ mod tests {
         assert_eq!(
             events.first().map(String::as_str),
             Some("session_start"),
-            "no buffered digits → the normal SessionStart first step. events: {events:?}"
+            "provider protocol unchanged: a resume still opens with SessionStart. events: {events:?}"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let entries = trace.query_by_session("test-session").await;
+        assert!(
+            entries.iter().any(|e| e.trigger.r#type == "resume"),
+            "resumed first node must carry the `resume` lifecycle trigger, got: {:?}",
+            entries
+                .iter()
+                .map(|e| e.trigger.r#type.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !entries.iter().any(|e| e.trigger.r#type == "session_start"),
+            "a resumed flow must never re-emit session_start"
         );
     }
 
@@ -3996,7 +4094,7 @@ mod tests {
         stack
             .assert_cmd(2000, "transfer", |c| {
                 matches!(c, CallCommand::Transfer { target, .. }
-                    if target == "toivr:39290?businessType=7")
+                    if target == "toivr:39290?businessType=7&_ivr_resume=1")
             })
             .await;
     }
@@ -4056,9 +4154,203 @@ mod tests {
         stack
             .assert_cmd(2000, "transfer", |c| {
                 matches!(c, CallCommand::Transfer { target, .. }
-                    if target == "bridge:wss://voip.example.com/room1?return_app=ivr&return_target=main")
+                    if target == "bridge:wss://voip.example.com/room1?return_app=ivr&return_target=main&return_ivr_resume=1")
             })
             .await;
+    }
+
+    // ── Lifecycle exactly-once: resumable hand-offs suppress session_end ──
+
+    #[tokio::test]
+    async fn test_on_exit_suppresses_session_end_on_bridge_handoff() {
+        use crate::call::app::ivr::trace::IvrTraceCollector;
+
+        let mut app = mock_app(vec![ActionNode::new(EntryAction::Bridge {
+            create_room_uri: "wss://voip.example.com/room1".into(),
+            headers: HashMap::new(),
+            timeout_ms: None,
+            return_app: Some("ivr".into()),
+            return_target: Some("main".into()),
+            success: None,
+            failure: None,
+        })]);
+        let trace = IvrTraceCollector::new();
+        app.trace = Some(trace.clone());
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+        stack
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(2000, "transfer", |c| {
+                matches!(c, CallCommand::Transfer { target, .. } if target.starts_with("bridge:"))
+            })
+            .await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let sessions = trace.sessions().await;
+        let sess = &sessions[0];
+        let entries = trace.query_by_session(&sess.session_id).await;
+        assert!(
+            !entries.iter().any(|e| e.trigger.r#type == "session_end"),
+            "bridge hand-off with return_app must NOT emit session_end (flow resumes), got: {:?}",
+            entries
+                .iter()
+                .map(|e| e.trigger.r#type.clone())
+                .collect::<Vec<_>>()
+        );
+        // The node's own execution trace is still recorded.
+        assert!(
+            entries.iter().any(|e| e.action_type == "Bridge"),
+            "the Bridge node's execution trace must remain"
+        );
+        // The collector session row stays open until the flow truly ends.
+        assert_eq!(
+            sess.status, "active",
+            "suspended flow must not close the collector session row"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_on_exit_suppresses_session_end_on_jumpivr() {
+        use crate::call::app::ivr::trace::IvrTraceCollector;
+
+        let mut app = mock_app(vec![ActionNode::new(EntryAction::JumpIvr {
+            route_point: "39290".into(),
+            params: HashMap::new(),
+        })]);
+        let trace = IvrTraceCollector::new();
+        app.trace = Some(trace.clone());
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+        stack
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(2000, "transfer", |c| {
+                matches!(c, CallCommand::Transfer { target, .. }
+                    if target.starts_with("toivr:39290"))
+            })
+            .await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let sessions = trace.sessions().await;
+        let sess = &sessions[0];
+        let entries = trace.query_by_session(&sess.session_id).await;
+        assert!(
+            !entries.iter().any(|e| e.trigger.r#type == "session_end"),
+            "JumpIvr continues the SAME logical flow — no session_end at the jump, got: {:?}",
+            entries
+                .iter()
+                .map(|e| e.trigger.r#type.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            sess.status, "active",
+            "jump must not close the collector session row"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_on_exit_records_session_end_for_terminal_transfer() {
+        use crate::call::app::ivr::trace::IvrTraceCollector;
+
+        // Regression guard for the suppression: a plain Transfer (no
+        // return_app, not an IVR jump) is a true flow end — session_end stays.
+        let mut app = mock_app(vec![ActionNode::new(EntryAction::Transfer {
+            target: "2001".into(),
+            params: HashMap::new(),
+            return_app: None,
+            return_target: None,
+        })]);
+        let trace = IvrTraceCollector::new();
+        app.trace = Some(trace.clone());
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+        stack
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(
+                2000,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let sessions = trace.sessions().await;
+        let sess = &sessions[0];
+        let entries = trace.query_by_session(&sess.session_id).await;
+        let session_end = entries
+            .iter()
+            .find(|e| e.trigger.r#type == "session_end")
+            .expect("terminal transfer must still record session_end");
+        assert_eq!(sess.status, "transfer");
+        assert_eq!(
+            session_end.end_reason,
+            Some(crate::call::app::ivr::provider::SessionEndTag::Transfer)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_start_recorded_once_across_resume() {
+        use crate::call::app::ivr::trace::IvrTraceCollector;
+
+        // The first app instance (fresh flow) creates the collector session
+        // row; a resumed instance (`ivr_resumed=1`) must NOT add a second row
+        // for the same session_id.
+        let trace = IvrTraceCollector::new();
+
+        let mut first = mock_app(vec![ActionNode::new(EntryAction::Bridge {
+            create_room_uri: "wss://voip.example.com/room1".into(),
+            headers: HashMap::new(),
+            timeout_ms: None,
+            return_app: Some("ivr".into()),
+            return_target: Some("main".into()),
+            success: None,
+            failure: None,
+        })]);
+        first.trace = Some(trace.clone());
+        let mut stack = MockCallStack::run(Box::new(first), "1001", "2000");
+        stack
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(2000, "transfer", |c| {
+                matches!(c, CallCommand::Transfer { .. })
+            })
+            .await;
+
+        // Resume in a second app instance sharing the same collector + session_id
+        // (MockCallStack uses the same "test-session" call_info for both).
+        let resumed =
+            StepIvrApp::with_provider(Box::new(MockProvider::new(vec![ActionNode::new(
+                EntryAction::Transfer {
+                    target: "2001".into(),
+                    params: HashMap::new(),
+                    return_app: None,
+                    return_target: None,
+                },
+            )])))
+            .with_ivr_params(serde_json::json!({ "ivr_resumed": "1" }));
+        let mut resumed = resumed;
+        resumed.trace = Some(trace.clone());
+        let mut stack2 = MockCallStack::run(Box::new(resumed), "1001", "2000");
+        stack2
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack2
+            .assert_cmd(2000, "transfer", |c| {
+                matches!(c, CallCommand::Transfer { .. })
+            })
+            .await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let sessions = trace.sessions().await;
+        assert_eq!(
+            sessions.len(),
+            1,
+            "a resumed flow must not create a second collector session row, got {} rows",
+            sessions.len()
+        );
     }
 
     #[tokio::test]

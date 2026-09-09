@@ -900,9 +900,14 @@ mod tests {
         let has_hangup = cmds.iter().any(|c| matches!(c, CallCommand::Hangup(_)));
         assert!(has_hangup, "Expected Hangup after timeout");
 
-        // Verify agent state is back to available
+        // After a ring timeout the agent must be left NON-idle (wrapup),
+        // not silently returned to Idle.
         let agent = agent_registry.get_agent("agent-001").await.unwrap();
-        assert!(matches!(agent.presence, PresenceState::Idle));
+        assert!(
+            matches!(agent.presence, PresenceState::Wrapup { .. }),
+            "ring timeout must move the agent to Wrapup (non-idle), got {:?}",
+            agent.presence
+        );
 
         let result: anyhow::Result<()> = stack.join().await;
         result.expect("should complete successfully");

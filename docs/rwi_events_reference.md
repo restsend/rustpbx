@@ -715,6 +715,12 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 > **会话终止条目（`session_end`）**：当 IVR 会话结束（含主叫挂机 `RemoteHangup`、系统取消 `Cancelled`）时，会额外 emit 一条 `trigger.type="session_end"` 的跟踪事件，`action_type`/`step_id`/`step_name` 记录最后执行的节点，并填充 `end_reason`/`end_detail` 表示整个会话的结束原因。外部 provider 的 `/end` webhook 在 `RemoteHangup`/`Cancelled` 时不会被调用（本地跟踪事件照常发出）。
 >
 > **单条完成事件**：每个步骤（含等待类：播放、收号、转接等待结果）只在完成时发出**一条**跟踪事件。`trigger` 保留触发该步骤的原始来源（如 `phone_collected`、`dtmf`）及 detail，以 `step_end_time` 有值作为完成标记；不发送任何中间态或重复事件。
+>
+> **生命周期 exactly-once 契约**：一个逻辑 IVR 流程（含 voip_bridge 往返、队列 return、JumpIvr 跳转）中，`trigger.type="session_start"` 与 `trigger.type="session_end"` 各**只出现一次**：
+> - `session_start` 仅在流程真正首次进入时的首个节点跟踪事件上出现；
+> - bridge / queue / JumpIvr 等可恢复交接**不会**触发 `session_end`（流程并未结束）；
+> - 可恢复交接时挂机或后继应用启动失败，由 proxy 合成补发唯一的 `session_end`（`end_reason=user_hangup` / `error`，节点上下文取自 bridge trace context）；
+> - 挂起期间返回的流程，恢复后首个节点的触发类型为 `resume`（无缓冲按键）或 `dtmf`（有缓冲按键），不会再次出现 `session_start`。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -747,7 +753,7 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 >
 > | 子字段 | 类型 | 说明 |
 > |--------|------|------|
-> | `type` | String | 触发源类型：`session_start`、`session_end`、`dtmf`、`dtmf_menu`、`dtmf_menu_timeout`、`audio_complete`、`action_execute`、`chained`、`api_response`、`phone_collected`、`recording_complete`、`input_voice`、`error`、`dtmf_menu_invalid`、`unknown` |
+> | `type` | String | 触发源类型：`session_start`、`session_end`、`resume`、`dtmf`、`dtmf_menu`、`dtmf_menu_timeout`、`audio_complete`、`action_execute`、`chained`、`api_response`、`phone_collected`、`recording_complete`、`input_voice`、`error`、`dtmf_menu_invalid`、`unknown`。其中 `resume` 表示流程从 bridge/queue/JumpIvr 挂起中恢复且无缓冲按键 |
 > | `detail` | Option\<JSON Object\> | 触发详情对象，无详情时省略。常见取值：DTMF → `{"digit":"2"}`；API 响应 → `{"status":200}`；号码收集 → `{"number":"13800138000"}` |
 >
 > **时间字段说明**：

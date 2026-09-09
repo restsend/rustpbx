@@ -1251,6 +1251,7 @@ fn make_skill_cache(
             sla_target_secs: 30,
             max_wait_secs: 90,
             acd_policy: acd_policy.map(|p| p.to_string()),
+            overflow_mode: None,
         },
     );
     Arc::new(tokio::sync::RwLock::new(cache))
@@ -1698,6 +1699,7 @@ mod escalation_helpers {
             sla_target_secs: 30,
             max_wait_secs,
             acd_policy: None,
+            overflow_mode: None,
         }
     }
 
