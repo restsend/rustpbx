@@ -110,6 +110,7 @@ async fn start_harness(
     E2eTestServer,
     Arc<CcAgentRegistryAdapter>,
     tokio::sync::mpsc::UnboundedReceiver<SkillGroupEvent>,
+    Arc<rustpbx::addons::cc::metrics::MetricsCollector>,
 )> {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     rustpbx::addons::cc::migration::Migrator::up(&db, None)
@@ -141,6 +142,7 @@ async fn start_harness(
         .await
         .unwrap();
 
+    let metrics = Arc::new(rustpbx::addons::cc::metrics::MetricsCollector::new());
     let (sg_tx, sg_rx) = tokio::sync::mpsc::unbounded_channel::<SkillGroupEvent>();
     let adapter = Arc::new(
         CcAgentRegistryAdapter::new(
@@ -151,7 +153,8 @@ async fn start_harness(
             })),
             "localhost",
         )
-        .with_skill_group_event_tx(sg_tx),
+        .with_skill_group_event_tx(sg_tx)
+        .with_metrics(metrics.clone()),
     );
 
     // Production drain: SkillGroupEvent → translate → gateway → webhook,
@@ -225,7 +228,7 @@ async fn start_harness(
     )
     .await?;
 
-    Ok((server, adapter, mirror_rx))
+    Ok((server, adapter, mirror_rx, metrics))
 }
 
 fn make_ua(proxy_addr: std::net::SocketAddr, username: &str) -> TestUa {
@@ -310,7 +313,7 @@ async fn test_busy_agent_second_caller_wait_retention_rwi_events() -> Result<()>
 
     let capture = WebhookCapture::start().await;
     let port = portpicker::pick_unused_port().unwrap_or(16100);
-    let (server, _adapter, mut sg_rx) = start_harness(port, &capture).await?;
+    let (server, _adapter, mut sg_rx, metrics) = start_harness(port, &capture).await?;
     let proxy_addr = server.proxy_addr;
 
     let mut bob = make_ua(proxy_addr, "bob");
@@ -408,6 +411,23 @@ async fn test_busy_agent_second_caller_wait_retention_rwi_events() -> Result<()>
         "adapter SkillGroupEvent::CallQueued(all_busy) must precede the webhook event"
     );
 
+    // Strong acceptance: waiting depth must move (not just webhook presence).
+    sleep(Duration::from_millis(100)).await;
+    let m = metrics
+        .get_metrics(SKILL_GROUP)
+        .await
+        .expect("CallQueued must create MetricsCollector row for skill group");
+    assert_eq!(
+        m.current_waiting, 1,
+        "SIP wait-retention CallQueued must increment current_waiting, got {}",
+        m.current_waiting
+    );
+    assert!(
+        m.calls_offered >= 1,
+        "offered must increment on enqueue, got {}",
+        m.calls_offered
+    );
+
     // Abandon while waiting.
     caller2.hangup(&dialog2).await?;
 
@@ -422,6 +442,19 @@ async fn test_busy_agent_second_caller_wait_retention_rwi_events() -> Result<()>
         abandoned["event"]["skill_group_id"].as_str(),
         Some(SKILL_GROUP),
         "abandoned skill_group_id: {abandoned}"
+    );
+
+    sleep(Duration::from_millis(100)).await;
+    let m = metrics.get_metrics(SKILL_GROUP).await.unwrap();
+    assert_eq!(
+        m.current_waiting, 0,
+        "abandon must clear current_waiting, got {}",
+        m.current_waiting
+    );
+    assert_eq!(
+        m.calls_abandoned, 1,
+        "abandon must increment calls_abandoned exactly once, got {}",
+        m.calls_abandoned
     );
 
     // Bob must still not have been rung again.
