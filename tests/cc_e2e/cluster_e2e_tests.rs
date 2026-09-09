@@ -342,6 +342,51 @@ async fn cluster_reaper_removes_rows_claimed_by_crashed_node() {
     );
 }
 
+/// ACCEPT: Busy presence aged >120s must survive reap (long in-call calls
+/// do not refresh presence on a timer).
+#[tokio::test]
+async fn cluster_reaper_keeps_stale_busy_presence() {
+    let db = shared_db().await;
+
+    rustpbx::addons::cc::stats_writer::upsert_agent_presence(
+        &db,
+        "busy-on-call",
+        "busy",
+        &[],
+        &std::collections::HashMap::new(),
+        1,
+        1,
+        0,
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .await;
+
+    use rustpbx::addons::cc::models::cc_agent_presence;
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter};
+    let record = cc_agent_presence::Entity::find()
+        .filter(cc_agent_presence::Column::AgentId.eq("busy-on-call"))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut active: cc_agent_presence::ActiveModel = record.into();
+    active.updated_at = sea_orm::Set(chrono::Utc::now() - chrono::Duration::seconds(300));
+    active.update(&db).await.unwrap();
+
+    rustpbx::addons::cc::stats_writer::reap_stale_presence(&db).await;
+
+    let kept = cc_agent_presence::Entity::find()
+        .filter(cc_agent_presence::Column::AgentId.eq("busy-on-call"))
+        .one(&db)
+        .await
+        .unwrap();
+    assert!(
+        kept.is_some(),
+        "stale Busy presence must survive 120s reap (long-call safety)"
+    );
+    assert_eq!(kept.unwrap().status, "busy");
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Test 6: Affinity — peer does not steal live call; dead owner cleaned
 // ═══════════════════════════════════════════════════════════════════
