@@ -1038,6 +1038,189 @@ async fn loop_playback_does_not_resolve_until_stopped() {
     mb.close();
 }
 
+/// Contract: the second `play_file`'s internal `unbridge()` switches leg A
+/// away from its just-started Media source, so the FIRST handle resolves
+/// immediately with `interrupted: true` (mirror kill). The second handle
+/// still completes naturally. This is why "both"-leg announcements must use
+/// [`MediaBridge::play_file_both`] — the test pins the footgun so a future
+/// refactor either preserves or consciously removes this behavior.
+#[tokio::test]
+async fn double_play_file_interrupts_first_handle_contract() {
+    let mut mb = MediaBridge::new("it-double-play");
+    mb.replace_leg(
+        LegSide::A,
+        LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap(),
+    )
+    .await;
+    mb.replace_leg(
+        LegSide::B,
+        LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap(),
+    )
+    .await;
+    let la = mb.leg(LegSide::A).unwrap();
+    let lb = mb.leg(LegSide::B).unwrap();
+    let offer = la.create_offer().await.expect("offer");
+    let answer = lb.answer(&offer).await.expect("answer");
+    la.apply_sdp(&answer, rustrtc::SdpType::Answer)
+        .await
+        .expect("apply");
+    mb.accept(LegSide::A).await;
+    mb.accept(LegSide::B).await;
+    assert!(mb.is_bridged());
+
+    // ~500ms file: long enough that only the mirror kill can end leg A early.
+    let wav = tempfile_wav_silence(8000, 1, 4000);
+    let ha = mb.play_file(LegSide::A, &wav, false).await.expect("play A");
+    let hb = mb.play_file(LegSide::B, &wav, false).await.expect("play B");
+    assert!(!mb.is_bridged(), "play must break the route");
+
+    let ra = tokio::time::timeout(std::time::Duration::from_millis(300), ha.done)
+        .await
+        .expect("first handle must resolve (mirror kill is immediate)")
+        .expect("done channel must resolve");
+    assert!(
+        ra.interrupted,
+        "second play_file's unbridge() must interrupt leg A's playback"
+    );
+
+    let rb = tokio::time::timeout(std::time::Duration::from_secs(3), hb.done)
+        .await
+        .expect("second handle must finish naturally")
+        .expect("done channel must resolve");
+    assert!(!rb.interrupted, "leg B playback must run to EOF");
+
+    mb.resume().await.expect("resume");
+    assert!(mb.is_bridged(), "resume must re-arm the route");
+    mb.unbridge().await.unwrap();
+    mb.close();
+}
+
+/// Contract for [`MediaBridge::play_file_both`] (the fixed console-API
+/// insert-play primitive): breaks the route exactly once, BOTH handles run to
+/// natural EOF (neither is mirror-killed), and `resume()` re-arms the route.
+#[tokio::test]
+async fn play_file_both_handles_complete_and_resume_rebridges() {
+    let mut mb = MediaBridge::new("it-play-both");
+    mb.replace_leg(
+        LegSide::A,
+        LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap(),
+    )
+    .await;
+    mb.replace_leg(
+        LegSide::B,
+        LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap(),
+    )
+    .await;
+    let la = mb.leg(LegSide::A).unwrap();
+    let lb = mb.leg(LegSide::B).unwrap();
+    let offer = la.create_offer().await.expect("offer");
+    let answer = lb.answer(&offer).await.expect("answer");
+    la.apply_sdp(&answer, rustrtc::SdpType::Answer)
+        .await
+        .expect("apply");
+    mb.accept(LegSide::A).await;
+    mb.accept(LegSide::B).await;
+    assert!(mb.is_bridged());
+
+    // ~300ms file.
+    let wav = tempfile_wav_silence(8000, 1, 2400);
+    let mut handles = mb.play_file_both(&wav, false).await.expect("play_file_both");
+    assert_eq!(handles.len(), 2, "both legs exist → both must play");
+    assert!(!mb.is_bridged(), "play_file_both must break the route");
+
+    let hb = handles.pop().expect("leg B handle");
+    let ha = handles.pop().expect("leg A handle");
+    let ra = tokio::time::timeout(std::time::Duration::from_secs(3), ha.done)
+        .await
+        .expect("leg A handle must finish")
+        .expect("done channel must resolve");
+    let rb = tokio::time::timeout(std::time::Duration::from_secs(3), hb.done)
+        .await
+        .expect("leg B handle must finish")
+        .expect("done channel must resolve");
+    assert!(
+        !ra.interrupted && !rb.interrupted,
+        "neither leg may be mirror-killed: a={{{ra:?}}} b={{{rb:?}}}"
+    );
+
+    mb.resume().await.expect("resume");
+    assert!(mb.is_bridged(), "resume must re-arm the route");
+    mb.unbridge().await.unwrap();
+    mb.close();
+}
+
+/// Contract: `play_file_both` on a bridge whose B leg is missing (app-mode
+/// call) degrades to an A-only announcement instead of failing.
+#[tokio::test]
+async fn play_file_both_degrades_to_single_leg_without_b() {
+    let mut mb = MediaBridge::new("it-play-both-nob");
+    mb.replace_leg(
+        LegSide::A,
+        LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap(),
+    )
+    .await;
+
+    // No B leg at all (app-mode call shape).
+    let wav = tempfile_wav_silence(8000, 1, 240); // ~30ms
+    let mut handles = mb
+        .play_file_both(&wav, false)
+        .await
+        .expect("play_file_both must tolerate a missing B leg");
+    assert_eq!(handles.len(), 1, "only leg A must play");
+    assert!(!mb.is_bridged());
+    let ha = handles.pop().expect("leg A handle");
+    let r = tokio::time::timeout(std::time::Duration::from_secs(3), ha.done)
+        .await
+        .expect("leg A handle must finish")
+        .expect("done channel must resolve");
+    assert!(!r.interrupted);
+    mb.close();
+}
+
+/// Contract: `stop_play` on a leg that is NOT actively playing (e.g. hold
+/// music installed via `hold_file`, which never registers in `active_play`)
+/// is a guarded no-op — it must neither error nor switch the egress source.
+#[tokio::test]
+async fn stop_play_is_noop_when_not_playing() {
+    let mut mb = MediaBridge::new("it-stop-noop");
+    mb.replace_leg(
+        LegSide::A,
+        LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap(),
+    )
+    .await;
+    mb.replace_leg(
+        LegSide::B,
+        LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap(),
+    )
+    .await;
+    let la = mb.leg(LegSide::A).unwrap();
+    let lb = mb.leg(LegSide::B).unwrap();
+    let offer = la.create_offer().await.expect("offer");
+    let answer = lb.answer(&offer).await.expect("answer");
+    la.apply_sdp(&answer, rustrtc::SdpType::Answer)
+        .await
+        .expect("apply");
+    mb.accept(LegSide::A).await;
+    mb.accept(LegSide::B).await;
+    assert!(mb.is_bridged());
+
+    // Hold music on A (not in active_play).
+    let wav = tempfile_wav_silence(8000, 1, 800);
+    mb.hold_file(LegSide::A, wav).await.expect("hold_file");
+
+    // stop_play on a non-playing leg: no error, and the hold state survives
+    // (route stays torn down; egress not switched by the no-op).
+    mb.stop_play(LegSide::A).await.expect("stop_play no-op");
+    assert!(!mb.is_bridged(), "no-op stop must not re-bridge");
+    mb.stop_play(LegSide::B).await.expect("stop_play no-op");
+
+    // The bridge must still be resumable after the no-op stops.
+    mb.resume().await.expect("resume");
+    assert!(mb.is_bridged());
+    mb.unbridge().await.unwrap();
+    mb.close();
+}
+
 /// Regression: replacing a leg (transfer / REFER) must release the replaced
 /// leg and exit the RTCP-relay forwarder tasks that previously pinned it.
 ///

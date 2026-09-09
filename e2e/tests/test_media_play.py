@@ -64,6 +64,24 @@ async def _setup_call(sipbot_pool, pbx, rwi, port, call_prefix, tmp_path=None):
     return callee, call_id
 
 
+async def _assert_rtp_resumes(ua, label: str):
+    """Anti-fake-e2e: after playback ends, relayed media must flow again.
+
+    Event-only assertions pass even when the media route was never restored
+    (both sides deaf); a positive RX delta proves the relay is live. The RWI
+    app-caller streams only sparse audio, so the threshold is low — but a
+    torn route freezes RX at exactly 0 delta.
+    """
+    before = ua.get_rtp_stats().rx_packets
+    await asyncio.sleep(3.0)
+    after = ua.get_rtp_stats().rx_packets
+    delta = after - before
+    assert delta > 10, (
+        f"{label}: media did not resume after playback "
+        f"(RX delta {delta} packets / 3s): {ua.get_rtp_stats()}"
+    )
+
+
 @pytest.mark.asyncio
 async def test_media_play_file_loop_then_stop(pbx, sipbot_pool, rwi, tmp_path):
     """media.play(file, loop=True) -> started -> stop -> finished(interrupted=True)."""
@@ -89,6 +107,8 @@ async def test_media_play_file_loop_then_stop(pbx, sipbot_pool, rwi, tmp_path):
     assert finished is not None, "media_play_finished not received"
     assert finished.get("interrupted") is True, f"expected interrupted=True, got: {finished}"
 
+    await _assert_rtp_resumes(callee, "callee after loop stop")
+
     await rwi.hangup(call_id)
 
 
@@ -111,6 +131,8 @@ async def test_media_play_natural_finish(pbx, sipbot_pool, rwi, tmp_path):
     finished = await _wait_event_all(rwi, "media_play_finished", timeout=10)
     assert finished is not None, "media_play_finished not received"
     assert finished.get("interrupted") is False, f"expected interrupted=False, got: {finished}"
+
+    await _assert_rtp_resumes(callee, "callee after natural EOF")
 
     await rwi.hangup(call_id)
 
@@ -147,7 +169,9 @@ async def test_media_play_loop_persists_until_stop(pbx, sipbot_pool, rwi, tmp_pa
     callee, call_id = await _setup_call(sipbot_pool, pbx, rwi, 15086, "loop")
 
     rwi.clear_events()
-    resp = await rwi.media_play(call_id, "file", str(tone), loop=True)
+    # leg_id="both": the insert-play path — historically never restored the
+    # route after finishing (both sides deaf).
+    resp = await rwi.media_play(call_id, "file", str(tone), loop=True, leg_id="both")
     assert resp.get("status") == "success", resp
     assert await _wait_event_all(rwi, "media_play_started", timeout=10) is not None
 
@@ -159,5 +183,7 @@ async def test_media_play_loop_persists_until_stop(pbx, sipbot_pool, rwi, tmp_pa
     finished = await _wait_event_all(rwi, "media_play_finished", timeout=10)
     assert finished is not None
     assert finished.get("interrupted") is True
+
+    await _assert_rtp_resumes(callee, "callee after both-leg loop stop")
 
     await rwi.hangup(call_id)

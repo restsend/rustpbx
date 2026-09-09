@@ -11184,23 +11184,39 @@ impl SipSession {
         let target_side = match leg_id.as_ref().map(|l| l.0.as_str()) {
             Some("callee") => crate::media::media_bridge::LegSide::B,
             Some("both") => {
-                if let Some(mb) = self.bridge_mut() {
-                    mb.play_file(
-                        crate::media::media_bridge::LegSide::A,
-                        &file_path,
-                        loop_playback,
-                    )
-                    .await?;
-                    mb.play_file(
-                        crate::media::media_bridge::LegSide::B,
-                        &file_path,
-                        loop_playback,
-                    )
-                    .await?;
-                } else {
-                    return Err(anyhow!("Playback requires MediaBridge"));
-                }
+                let handles: Vec<crate::media::media_bridge::PlaybackHandle> =
+                    if let Some(mb) = self.bridge_mut() {
+                        mb.play_file_both(file_path.clone(), loop_playback)
+                            .await?
+                    } else {
+                        return Err(anyhow!("Playback requires MediaBridge"));
+                    };
                 info!(session_id = %self.id, file = %file_path, "Playback started (both)");
+                // Playback unbridged the route; without restoring it once the
+                // prompt ends the call stays deaf in both directions (egress
+                // silenced, all relayed ingress dropped as rx_idrop).
+                let app_event_bridge = self.app_event_bridge.clone();
+                let handle_for_restore = self.handle.clone();
+                let rwi_gateway = self.server.rwi_gateway.clone();
+                let session_id = self.id.clone();
+                let event_leg_id_str = leg_id.as_ref().map(|l| l.0.clone());
+                crate::utils::spawn(async move {
+                    let mut interrupted = false;
+                    for handle in handles {
+                        if let Some(result) = handle.done.await.ok() {
+                            interrupted |= result.interrupted;
+                        }
+                    }
+                    Self::dispatch_playback_completion(
+                        &app_event_bridge,
+                        &rwi_gateway,
+                        &session_id,
+                        &event_leg_id_str,
+                        &track_id,
+                        interrupted,
+                        &handle_for_restore,
+                    );
+                });
                 return Ok(());
             }
             _ => crate::media::media_bridge::LegSide::A,
@@ -11283,17 +11299,25 @@ impl SipSession {
         let sides: Vec<crate::media::media_bridge::LegSide> =
             match leg_id.as_ref().map(|l| l.0.as_str()) {
                 Some("callee") => vec![crate::media::media_bridge::LegSide::B],
-                Some("both") => vec![
+                // Unspecified means ALL legs (per CallCommand::StopPlayback's
+                // doc): a both-leg loop stopped via RWI media.stop / console
+                // stop_playback without a leg_id must stop BOTH legs —
+                // stopping only A left B looping forever and the route torn.
+                None | Some("both") => vec![
                     crate::media::media_bridge::LegSide::A,
                     crate::media::media_bridge::LegSide::B,
                 ],
-                // "caller" or unspecified → stop caller leg only.
+                // "caller" → stop caller leg only.
                 _ => vec![crate::media::media_bridge::LegSide::A],
             };
 
         if let Some(mb) = self.bridge_mut() {
             for side in sides {
-                mb.stop_play(side).await?;
+                // "All legs" semantics: skip legs that do not exist (app-mode
+                // calls have no B leg) instead of failing the whole stop.
+                if mb.leg(side).is_some() {
+                    mb.stop_play(side).await?;
+                }
             }
         }
         Ok(())

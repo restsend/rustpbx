@@ -41,20 +41,31 @@ pub async fn create_test_server_with_config_and_sipflow_backend(
     sipflow_backend: Option<Arc<dyn crate::sipflow::SipFlowBackend>>,
 ) -> (Arc<SipServerInner>, Arc<ProxyConfig>) {
     let locator = Arc::new(Box::new(MemoryLocator::new()) as Box<dyn Locator>);
-    create_test_server_with_dependencies(config, sipflow_backend, locator).await
+    create_test_server_with_dependencies(config, sipflow_backend, locator, Vec::new()).await
+}
+
+/// Like [`create_test_server`] but with session hooks pre-installed (e.g.
+/// `IvrExecHook` for app-exit restore lifecycle tests).
+pub async fn create_test_server_with_session_hooks(
+    config: ProxyConfig,
+    hooks: Vec<Arc<dyn crate::proxy::proxy_call::session_hooks::CallSessionHook>>,
+) -> (Arc<SipServerInner>, Arc<ProxyConfig>) {
+    let locator = Arc::new(Box::new(MemoryLocator::new()) as Box<dyn Locator>);
+    create_test_server_with_dependencies(config, None, locator, hooks).await
 }
 
 pub async fn create_test_server_with_config_and_locator(
     config: ProxyConfig,
     locator: Arc<Box<dyn Locator>>,
 ) -> (Arc<SipServerInner>, Arc<ProxyConfig>) {
-    create_test_server_with_dependencies(config, None, locator).await
+    create_test_server_with_dependencies(config, None, locator, Vec::new()).await
 }
 
 async fn create_test_server_with_dependencies(
     mut config: ProxyConfig,
     sipflow_backend: Option<Arc<dyn crate::sipflow::SipFlowBackend>>,
     locator: Arc<Box<dyn Locator>>,
+    session_hooks: Vec<Arc<dyn crate::proxy::proxy_call::session_hooks::CallSessionHook>>,
 ) -> (Arc<SipServerInner>, Arc<ProxyConfig>) {
     // Add rustpbx.com to the allowed realms for testing
     if config.realms.is_none() {
@@ -161,7 +172,7 @@ async fn create_test_server_with_dependencies(
         session_registry_heartbeat: None,
         media_policy: Arc::new(crate::call::DefaultMediaPolicy),
         trunk_health: None,
-        session_hooks: Arc::new(Vec::new()),
+        session_hooks: Arc::new(session_hooks),
         contact_username: "rustpbx".to_string(),
         rtc_cname: "test-cname".to_string(),
     });

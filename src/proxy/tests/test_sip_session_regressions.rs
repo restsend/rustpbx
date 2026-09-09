@@ -1,6 +1,7 @@
 use super::common::{
     create_test_request, create_test_server, create_test_server_with_config,
-    create_test_server_with_config_and_sipflow_backend, create_transaction,
+    create_test_server_with_config_and_sipflow_backend, create_test_server_with_session_hooks,
+    create_transaction,
 };
 use crate::call::app::{AppInvocationContext, ApplicationContext, CallInfo};
 use crate::call::domain::{CallCommand, Leg, LegId, LegState, MediaPathMode, ReturnAppSpec};
@@ -1969,6 +1970,388 @@ async fn handle_play_returns_immediately_when_not_awaited() {
         elapsed < std::time::Duration::from_millis(150),
         "await_completion=false should return immediately, took {:?}",
         elapsed
+    );
+}
+
+// ─── handle_play("both") must restore the route after the prompt ends ────────
+//
+// Regression for the bug where the "both" branch of `handle_play` started
+// playback on both legs and returned without wiring the completion watcher,
+// so `ResumeMedia` was never sent. `play_file`/`play` unbridge the route
+// first, so after the prompt finished the bridge stayed torn down: every
+// relayed ingress packet was dropped (rx_idrop == all) and neither side
+// heard anything until hangup.
+
+/// Same as [`build_session_on_server`] but also returns the command receiver
+/// so tests can observe CallCommands the session loop would consume.
+async fn build_session_with_cmd_rx(
+    dialplan: Dialplan,
+) -> (
+    SipSession,
+    crate::proxy::proxy_call::sip_session::SipSessionHandle,
+    tokio::sync::mpsc::Receiver<CallCommand>,
+) {
+    let (server, _) = create_test_server().await;
+    build_session_with_cmd_rx_on(server, dialplan).await
+}
+
+/// [`build_session_with_cmd_rx`] on a caller-provided server (e.g. one with
+/// session hooks pre-installed).
+async fn build_session_with_cmd_rx_on(
+    server: Arc<crate::proxy::server::SipServerInner>,
+    dialplan: Dialplan,
+) -> (
+    SipSession,
+    crate::proxy::proxy_call::sip_session::SipSessionHandle,
+    tokio::sync::mpsc::Receiver<CallCommand>,
+) {
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let (tx, _) = create_transaction(request).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let server_dialog = server
+        .dialog_layer
+        .get_or_create_server_invite(&tx, state_tx, None, None)
+        .expect("failed to create server dialog");
+
+    let context = CallContext {
+        session_id: "test-session".to_string(),
+        dialplan: Arc::new(dialplan),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".to_string(),
+        original_callee: "sip:ivr@rustpbx.com".to_string(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+
+    let caller_peer = Arc::new(MockMediaPeer::new());
+    let callee_peer = Arc::new(MockMediaPeer::new());
+    let use_media_proxy =
+        SipSession::check_media_proxy(&context, &context.dialplan.media.proxy_mode);
+    let (session, handle, cmd_rx) = SipSession::new(
+        server,
+        CancellationToken::new(),
+        None,
+        context,
+        server_dialog,
+        use_media_proxy,
+        caller_peer,
+        callee_peer,
+    );
+    (session, handle, cmd_rx)
+}
+
+/// Wait for the playback completion watcher to enqueue `ResumeMedia`, run it
+/// through the REAL `execute_command` handler, and assert the bridge route is
+/// restored. Shared by all play/stop restore regression tests.
+async fn assert_resume_media_restores_route(
+    session: &mut SipSession,
+    cmd_rx: &mut mpsc::Receiver<CallCommand>,
+) {
+    let cmd = tokio::time::timeout(std::time::Duration::from_secs(5), cmd_rx.recv())
+        .await
+        .expect("completion watcher should fire after playback")
+        .expect("session command channel must stay open");
+    assert!(
+        matches!(cmd, CallCommand::ResumeMedia),
+        "expected ResumeMedia after playback, got {cmd:?}"
+    );
+    let result = session
+        .execute_command(CallCommand::ResumeMedia, None)
+        .await;
+    assert!(
+        result.success,
+        "ResumeMedia handler must succeed: {:?}",
+        result.message
+    );
+    assert!(
+        session
+            .media
+            .bridge
+            .as_ref()
+            .unwrap()
+            .is_bridged(),
+        "route must be restored once ResumeMedia is executed"
+    );
+}
+
+/// Build an answered, bridged session (real negotiated MediaBridge) ready for
+/// a playback-restore regression test.
+async fn bridged_session_for_play_test(
+    session_id: &str,
+) -> (SipSession, tokio::sync::mpsc::Receiver<CallCommand>) {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+        "ivr".to_string(),
+        None,
+        true,
+    );
+    let (mut session, _handle, cmd_rx) = build_session_with_cmd_rx(dialplan).await;
+    let mut mb = playable_bridge(session_id).await;
+    mb.accept(crate::media::media_bridge::LegSide::A).await;
+    mb.accept(crate::media::media_bridge::LegSide::B).await;
+    assert!(
+        mb.is_bridged(),
+        "route should be active before playback starts"
+    );
+    session.media.bridge = Some(mb);
+    (session, cmd_rx)
+}
+
+async fn play_prompt(
+    session: &mut SipSession,
+    wav: &std::path::Path,
+    leg_id: Option<LegId>,
+    loop_playback: bool,
+) {
+    session
+        .handle_play(
+            leg_id,
+            crate::call::domain::MediaSource::File {
+                path: wav.to_str().unwrap().to_string(),
+            },
+            Some(crate::call::domain::PlayOptions {
+                await_completion: false,
+                loop_playback,
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("play should succeed");
+    assert!(
+        !session
+            .media
+            .bridge
+            .as_ref()
+            .unwrap()
+            .is_bridged(),
+        "route should be inactive while the prompt plays"
+    );
+}
+
+#[tokio::test]
+async fn handle_play_both_restores_route_after_completion() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // 300ms of silence @8kHz.
+    let wav = write_silence_wav(dir.path(), "prompt-both.wav", 8000, 8000 * 300 / 1000);
+
+    let (mut session, mut cmd_rx) = bridged_session_for_play_test("play-both-restore").await;
+    play_prompt(&mut session, &wav, Some(LegId::from("both")), false).await;
+    assert_resume_media_restores_route(&mut session, &mut cmd_rx).await;
+}
+
+#[tokio::test]
+async fn handle_play_caller_side_restores_route_after_completion() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wav = write_silence_wav(dir.path(), "prompt-caller.wav", 8000, 8000 * 300 / 1000);
+
+    let (mut session, mut cmd_rx) = bridged_session_for_play_test("play-caller-restore").await;
+    play_prompt(&mut session, &wav, None, false).await;
+    assert_resume_media_restores_route(&mut session, &mut cmd_rx).await;
+}
+
+#[tokio::test]
+async fn handle_play_callee_side_restores_route_after_completion() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wav = write_silence_wav(dir.path(), "prompt-callee.wav", 8000, 8000 * 300 / 1000);
+
+    let (mut session, mut cmd_rx) = bridged_session_for_play_test("play-callee-restore").await;
+    play_prompt(&mut session, &wav, Some(LegId::from("callee")), false).await;
+    assert_resume_media_restores_route(&mut session, &mut cmd_rx).await;
+}
+
+#[tokio::test]
+async fn stop_playback_restores_route_after_loop() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wav = write_silence_wav(dir.path(), "prompt-loop.wav", 8000, 8000 * 100 / 1000);
+
+    let (mut session, mut cmd_rx) = bridged_session_for_play_test("play-stop-restore").await;
+    play_prompt(&mut session, &wav, Some(LegId::from("both")), true).await;
+
+    // Let the loop play for a moment, then stop it via the real command path.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let result = session
+        .execute_command(
+            CallCommand::StopPlayback {
+                leg_id: Some(LegId::from("both")),
+            },
+            None,
+        )
+        .await;
+    assert!(
+        result.success,
+        "StopPlayback must succeed: {:?}",
+        result.message
+    );
+
+    // The interrupted handles must resolve and the watcher must restore the
+    // route — a looping prompt must not leave the call deaf after a stop.
+    assert_resume_media_restores_route(&mut session, &mut cmd_rx).await;
+}
+
+#[tokio::test]
+async fn stop_playback_without_leg_stops_both_legs() {
+    // Regression: StopPlayback{leg_id: None} documented "all legs" but only
+    // stopped leg A — a both-leg loop left B looping forever with the route
+    // torn (no ResumeMedia ever fired because the B handle never resolved).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wav = write_silence_wav(dir.path(), "prompt-loop2.wav", 8000, 8000 * 100 / 1000);
+
+    let (mut session, mut cmd_rx) = bridged_session_for_play_test("play-stop-all").await;
+    play_prompt(&mut session, &wav, Some(LegId::from("both")), true).await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let result = session
+        .execute_command(CallCommand::StopPlayback { leg_id: None }, None)
+        .await;
+    assert!(
+        result.success,
+        "StopPlayback(None) must succeed: {:?}",
+        result.message
+    );
+
+    // BOTH legs stopped → both handles resolve → watcher restores the route.
+    assert_resume_media_restores_route(&mut session, &mut cmd_rx).await;
+}
+
+#[tokio::test]
+async fn hold_unhold_commands_tear_and_restore_route() {
+    let (mut session, mut _cmd_rx) = bridged_session_for_play_test("hold-unhold-restore").await;
+    // No SIP peer in unit tests: the hold/unhold re-INVITE becomes a no-op so
+    // the media-side lifecycle is what is under test.
+    session.caller_dialog = None;
+    session.media.caller_offer = Some(recording_test_offer());
+
+    let result = session
+        .execute_command(
+            CallCommand::Hold {
+                leg_id: LegId::from("caller"),
+                music: None,
+            },
+            None,
+        )
+        .await;
+    assert!(
+        result.success,
+        "Hold must succeed: {:?}",
+        result.message
+    );
+    assert!(
+        !session
+            .media
+            .bridge
+            .as_ref()
+            .unwrap()
+            .is_bridged(),
+        "hold must tear the media route"
+    );
+
+    let result = session
+        .execute_command(
+            CallCommand::Unhold {
+                leg_id: LegId::from("caller"),
+            },
+            None,
+        )
+        .await;
+    assert!(
+        result.success,
+        "Unhold must succeed: {:?}",
+        result.message
+    );
+    assert!(
+        session
+            .media
+            .bridge
+            .as_ref()
+            .unwrap()
+            .is_bridged(),
+        "unhold must restore the media route"
+    );
+}
+
+#[tokio::test]
+async fn ivr_exec_app_exit_restores_held_route() {
+    let (server, _) = create_test_server_with_session_hooks(
+        crate::config::ProxyConfig::default(),
+        vec![Arc::new(
+            crate::proxy::proxy_call::ivr_exec_hook::IvrExecHook,
+        )],
+    )
+    .await;
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+        "ivr".to_string(),
+        None,
+        true,
+    );
+    let (mut session, _handle, mut _cmd_rx) =
+        build_session_with_cmd_rx_on(server, dialplan).await;
+    let mut mb = playable_bridge("ivr-exec-restore").await;
+    mb.accept(crate::media::media_bridge::LegSide::A).await;
+    mb.accept(crate::media::media_bridge::LegSide::B).await;
+    assert!(mb.is_bridged());
+    session.media.bridge = Some(mb);
+    session.media.callee_offer = Some(recording_test_offer());
+    session
+        .legs
+        .insert(LegId::from("callee"), Leg::new(LegId::from("callee")));
+
+    // ivr.exec entry: the callee leg is held (no SIP dialog → the re-INVITE
+    // is a no-op; the media-side hold is what matters).
+    let result = session
+        .execute_command(
+            CallCommand::Hold {
+                leg_id: LegId::from("callee"),
+                music: None,
+            },
+            None,
+        )
+        .await;
+    assert!(result.success, "Hold(callee) must succeed: {:?}", result.message);
+    assert!(
+        !session
+            .media
+            .bridge
+            .as_ref()
+            .unwrap()
+            .is_bridged(),
+        "ivr.exec hold must tear the media route"
+    );
+
+    // ivr.exec exit: AppExited → IvrExecHook → propagate_unhold(callee) must
+    // restore the route. A regression here leaves the agent leg deaf after
+    // every ivr.exec flow.
+    session
+        .extensions
+        .write()
+        .insert(crate::proxy::proxy_call::ivr_exec_hook::IvrExecState {
+            request_id: "req-test".to_string(),
+            held_leg: Some(LegId::from("callee")),
+            initiator_leg: LegId::from("callee"),
+            webhook_url: None,
+            app_name: "ivr".to_string(),
+            metadata: serde_json::Value::Null,
+        });
+    let result = session.execute_command(CallCommand::AppExited, None).await;
+    assert!(
+        result.success,
+        "AppExited must succeed: {:?}",
+        result.message
+    );
+    assert!(
+        session
+            .media
+            .bridge
+            .as_ref()
+            .unwrap()
+            .is_bridged(),
+        "AppExited must restore the route held by ivr.exec"
     );
 }
 

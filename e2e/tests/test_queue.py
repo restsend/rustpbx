@@ -56,8 +56,12 @@ async def test_queue_sequential_agent_answers(pbx, sipbot_pool):
 
 @pytest.mark.asyncio
 async def test_queue_hold_music_audio(pbx, sipbot_pool, tmp_path):
-    """Queue with hold music: caller receives non-silent audio while waiting."""
-    from helpers import generate_sine_wav
+    """Queue with hold music: caller receives the actual hold music (440 Hz),
+    not just any RTP, while waiting."""
+    from helpers import (
+        generate_sine_wav, read_wav_stereo, find_signal_start,
+        extract_audio_region, find_dominant_frequency, has_audio_content,
+    )
 
     hold = tmp_path / "hold_music.wav"
     generate_sine_wav(hold, 440.0, 2.0, 8000, 0.5)
@@ -80,11 +84,31 @@ async def test_queue_hold_music_audio(pbx, sipbot_pool, tmp_path):
     )
     h.boot_pbx(pbx)
 
+    rec = tmp_path / "caller_recording.wav"
     caller = sipbot_pool.caller(
         target=f"sip:support@{pbx.sip_addr}", username="1001", password="123456", hangup=8,
+        record_file=str(rec),
     )
     assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
     await h.wait_rtp(caller, "caller", 20)
+    # Accumulate enough recorded audio for frequency analysis.
+    deadline = asyncio.get_event_loop().time() + 12
+    while asyncio.get_event_loop().time() < deadline:
+        if caller.get_rtp_stats().rx_packets >= 120:
+            break
+        await asyncio.sleep(0.3)
+    caller.terminate()
+
+    # Anti-fake-e2e: RTP presence alone passed even when silence was relayed;
+    # the recorded audio must contain the 440 Hz hold-music tone.
+    assert rec.exists() and rec.stat().st_size > 44, f"no caller recording: {caller.output[-800:]}"
+    rx, _tx, sr = read_wav_stereo(rec)
+    start = find_signal_start(rx, 0.01, sr // 50)
+    assert start is not None and start >= 0, "hold-music recording is silent"
+    region = extract_audio_region(rx, sr, start, int(sr * 0.5))
+    assert has_audio_content(region, -40.0), "hold-music region is silent"
+    freq, _ = find_dominant_frequency(region, sr, 150, 900, 5)
+    assert abs(freq - 440.0) < 80.0, f"hold music freq {freq} != ~440"
 
 
 @pytest.mark.asyncio

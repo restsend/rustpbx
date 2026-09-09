@@ -229,6 +229,12 @@ struct TestMediaHarness {
     mb: MediaBridge,
     test_a: TestPeer,
     test_b: TestPeer,
+    /// Whether send_and_receive / send_b_to_a_receive may periodically re-run
+    /// `bridge()` to re-arm the relay (needed for WebRTC stability under
+    /// parallel load). MUST stay false in lifecycle tests: the self-healing
+    /// re-bridge masks exactly the "forgot to resume after play/hold" bug
+    /// class those tests exist to catch.
+    auto_rebridge: bool,
 }
 
 /// Build an RtcConfiguration restricted to a single audio codec so both sides
@@ -383,7 +389,12 @@ impl TestMediaHarness {
             mb.set_recorder(recorder, None).await.unwrap();
         }
 
-        Self { mb, test_a, test_b }
+        Self {
+            mb,
+            test_a,
+            test_b,
+            auto_rebridge: true,
+        }
     }
 
     /// Explicitly tear down the bridge (stops legs + PCs) before the test ends.
@@ -453,7 +464,9 @@ impl TestMediaHarness {
             }
             // Under parallel load the WebRTC relay may take a moment to fully
             // establish; re-run bridge() periodically to re-arm it.
-            if tokio::time::Instant::now() - last_rebridge >= Duration::from_secs(2) {
+            if self.auto_rebridge
+                && tokio::time::Instant::now() - last_rebridge >= Duration::from_secs(2)
+            {
                 let _ = self.mb.bridge().await;
                 last_rebridge = tokio::time::Instant::now();
             }
@@ -492,7 +505,9 @@ impl TestMediaHarness {
                     return Some(frame);
                 }
             }
-            if tokio::time::Instant::now() - last_rebridge >= Duration::from_secs(2) {
+            if self.auto_rebridge
+                && tokio::time::Instant::now() - last_rebridge >= Duration::from_secs(2)
+            {
                 let _ = self.mb.bridge().await;
                 last_rebridge = tokio::time::Instant::now();
             }
@@ -2391,3 +2406,226 @@ impl rustpbx_media::audio_source::AudioSource for TestBeep {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────
+
+// ── Lifecycle media canary (auto-rebridge DISABLED) ───────────────────────
+//
+// The tests above assert packet flow only on freshly bridged legs, and
+// send_and_receive historically re-ran bridge() every 2s — self-healing that
+// masks exactly the "forgot to resume after a temporary media state" bug
+// class (e.g. the console-API insert-play leaving both sides deaf). These
+// canaries pin the full lifecycle with the self-heal switched OFF: media must
+// flow before, be blocked during, and flow again after restore.
+
+fn temp_wav_silence(sample_rate: u32, frames: u32) -> String {
+    use std::io::Write;
+    let path = std::env::temp_dir().join(format!(
+        "rtp_canary_{}.wav",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let data_len = frames * 2; // 16-bit mono
+    let mut f = std::fs::File::create(&path).unwrap();
+    f.write_all(b"RIFF").unwrap();
+    f.write_all(&(36 + data_len).to_le_bytes()).unwrap();
+    f.write_all(b"WAVEfmt ").unwrap();
+    f.write_all(&16u32.to_le_bytes()).unwrap();
+    f.write_all(&1u16.to_le_bytes()).unwrap();
+    f.write_all(&1u16.to_le_bytes()).unwrap();
+    f.write_all(&sample_rate.to_le_bytes()).unwrap();
+    f.write_all(&(sample_rate * 2).to_le_bytes()).unwrap();
+    f.write_all(&2u16.to_le_bytes()).unwrap();
+    f.write_all(&16u16.to_le_bytes()).unwrap();
+    f.write_all(b"data").unwrap();
+    f.write_all(&data_len.to_le_bytes()).unwrap();
+    f.write_all(&vec![0u8; data_len as usize]).unwrap();
+    path.to_string_lossy().to_string()
+}
+
+/// True when a PCMU frame carries (near-)silence. μ-law zero codes are
+/// 0xFF/0x7F; the egress pipeline's comfort-noise silence and the
+/// silence-file prompt both sit within a few quantization steps of them,
+/// while relayed speech from the fixtures does not. SSRCs cannot be used for
+/// this (the relay arms/re-arms with fresh random SSRCs).
+fn pcmu_frame_is_near_silent(frame: &AudioFrame) -> bool {
+    if frame.data.is_empty() {
+        return true;
+    }
+    let near = |b: u8, c: u8| b.abs_diff(c) <= 8;
+    let quiet = frame
+        .data
+        .iter()
+        .filter(|&&b| near(b, 0xFF) || near(b, 0x7F))
+        .count();
+    quiet * 100 >= frame.data.len() * 95
+}
+
+/// Both-leg announcement lifecycle: bridged → play_file_both (route torn,
+/// relay blocked) → natural EOF on both handles → resume() → bidirectional
+/// relay must flow again with no self-heal re-bridge.
+#[tokio::test]
+async fn canary_media_resumes_bidirectionally_after_play_file_both() {
+    let mut h = TestMediaHarness::create(
+        TransportMode::Rtp,
+        CodecType::PCMU,
+        TransportMode::Rtp,
+        CodecType::PCMU,
+    )
+    .await;
+    h.auto_rebridge = false;
+    h.bridge_and_accept().await;
+    h.assert_relay(true);
+
+    // Baseline: bidirectional media flows before the announcement.
+    h.send_and_receive(CodecType::PCMU, 3000)
+        .await
+        .expect("A→B must flow before playback");
+    h.send_b_to_a_receive(CodecType::PCMU, 3000)
+        .await
+        .expect("B→A must flow before playback");
+
+    // ~300ms prompt on both legs.
+    let wav = temp_wav_silence(8000, 2400);
+    let mut handles = h.mb.play_file_both(&wav, false).await.expect("play both");
+    let ha = handles.pop().expect("leg A handle");
+    let hb = handles.pop().expect("leg B handle");
+    assert!(!h.mb.is_bridged(), "play_file_both must tear the route");
+
+    // During playback the peers may only see the local (silent) prompt —
+    // a loud frame would mean the relay leaked and peer audio is still
+    // being forwarded.
+    if let Some(f) = h.send_and_receive(CodecType::PCMU, 300).await {
+        assert!(
+            pcmu_frame_is_near_silent(&f),
+            "no relayed A→B audio may flow while the prompt plays"
+        );
+    }
+    if let Some(f) = h.send_b_to_a_receive(CodecType::PCMU, 300).await {
+        assert!(
+            pcmu_frame_is_near_silent(&f),
+            "no relayed B→A audio may flow while the prompt plays"
+        );
+    }
+
+    let ra = tokio::time::timeout(Duration::from_secs(5), ha.done)
+        .await
+        .expect("leg A handle must finish")
+        .expect("done channel must resolve");
+    let rb = tokio::time::timeout(Duration::from_secs(5), hb.done)
+        .await
+        .expect("leg B handle must finish")
+        .expect("done channel must resolve");
+    assert!(
+        !ra.interrupted && !rb.interrupted,
+        "both-leg prompt must run to natural EOF"
+    );
+
+    // What the session layer does on ResumeMedia. Without it (the original
+    // bug) this test's final canaries fail.
+    h.mb.resume().await.expect("resume");
+
+    h.send_and_receive(CodecType::PCMU, 5000)
+        .await
+        .expect("A→B must flow again after resume (no self-heal re-bridge)");
+    h.send_b_to_a_receive(CodecType::PCMU, 5000)
+        .await
+        .expect("B→A must flow again after resume (no self-heal re-bridge)");
+    assert!(h.mb.is_bridged());
+
+    h.close();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+}
+
+/// Stop lifecycle: looping prompt on both legs → stop_play each → resume()
+/// → bidirectional relay must flow again (no self-heal re-bridge).
+#[tokio::test]
+async fn canary_media_resumes_after_stop_play_loop() {
+    let mut h = TestMediaHarness::create(
+        TransportMode::Rtp,
+        CodecType::PCMU,
+        TransportMode::Rtp,
+        CodecType::PCMU,
+    )
+    .await;
+    h.auto_rebridge = false;
+    h.bridge_and_accept().await;
+    h.assert_relay(true);
+
+    h.send_and_receive(CodecType::PCMU, 3000)
+        .await
+        .expect("A→B must flow before playback");
+
+    // Tiny looping prompt on both legs.
+    let wav = temp_wav_silence(8000, 160); // 20ms, loops
+    let mut handles = h.mb.play_file_both(&wav, true).await.expect("play both");
+    let ha = handles.pop().expect("leg A handle");
+    let hb = handles.pop().expect("leg B handle");
+    assert!(!h.mb.is_bridged());
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    h.mb.stop_play(LegSide::A).await.expect("stop A");
+    h.mb.stop_play(LegSide::B).await.expect("stop B");
+    let ra = tokio::time::timeout(Duration::from_secs(5), ha.done)
+        .await
+        .expect("leg A handle must resolve on stop")
+        .expect("done channel must resolve");
+    let rb = tokio::time::timeout(Duration::from_secs(5), hb.done)
+        .await
+        .expect("leg B handle must resolve on stop")
+        .expect("done channel must resolve");
+    assert!(ra.interrupted && rb.interrupted);
+
+    h.mb.resume().await.expect("resume");
+    h.send_and_receive(CodecType::PCMU, 5000)
+        .await
+        .expect("A→B must flow again after stop+resume");
+    h.send_b_to_a_receive(CodecType::PCMU, 5000)
+        .await
+        .expect("B→A must flow again after stop+resume");
+
+    h.close();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+}
+
+/// Hold lifecycle: hold with silence → resume() → bidirectional relay must
+/// flow again (no self-heal re-bridge).
+#[tokio::test]
+async fn canary_media_resumes_after_hold_resume() {
+    let mut h = TestMediaHarness::create(
+        TransportMode::Rtp,
+        CodecType::PCMU,
+        TransportMode::Rtp,
+        CodecType::PCMU,
+    )
+    .await;
+    h.auto_rebridge = false;
+    h.bridge_and_accept().await;
+    h.assert_relay(true);
+
+    h.send_and_receive(CodecType::PCMU, 3000)
+        .await
+        .expect("A→B must flow before hold");
+
+    h.mb.hold(LegSide::A, None).await.expect("hold");
+    assert!(!h.mb.is_bridged(), "hold must tear the route");
+    // While on hold, test_b may only see near-silence — a loud frame would
+    // mean the relay leaked and test_a audio is still being forwarded.
+    if let Some(f) = h.send_and_receive(CodecType::PCMU, 300).await {
+        assert!(
+            pcmu_frame_is_near_silent(&f),
+            "no relayed A→B audio may flow while on hold"
+        );
+    }
+
+    h.mb.resume().await.expect("resume");
+    h.send_and_receive(CodecType::PCMU, 5000)
+        .await
+        .expect("A→B must flow again after unhold");
+    h.send_b_to_a_receive(CodecType::PCMU, 5000)
+        .await
+        .expect("B→A must flow again after unhold");
+
+    h.close();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+}

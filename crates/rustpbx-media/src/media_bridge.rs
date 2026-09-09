@@ -860,6 +860,37 @@ impl MediaBridge {
         .await
     }
 
+    /// Play the same file (or http URL) on BOTH legs as an announcement
+    /// (e.g. the console-API insert-play). Breaks the route exactly once,
+    /// then starts each leg side-only; each started leg's handle resolves on
+    /// natural EOF or interruption. The caller is expected to restore the
+    /// route (e.g. [`Self::resume`]) once playback ends.
+    ///
+    /// A missing opposite leg is tolerated (app-mode calls have no B leg):
+    /// only the legs that exist are started. Prefers this over calling
+    /// [`Self::play_file`] twice: the second `play_file` internally
+    /// `unbridge()`s again, which switches the first leg away from its
+    /// just-started Media source and fires its `on_end` as interrupted
+    /// immediately (the first playback dies).
+    pub async fn play_file_both(
+        &mut self,
+        path: impl Into<String>,
+        loop_playback: bool,
+    ) -> Result<Vec<PlaybackHandle>> {
+        let path = path.into();
+        self.unbridge().await?;
+        let mut handles = Vec::new();
+        for side in [LegSide::A, LegSide::B] {
+            if self.leg(side).is_some() {
+                handles.push(
+                    self.play_file_side_only(side, path.clone(), loop_playback)
+                        .await?,
+                );
+            }
+        }
+        Ok(handles)
+    }
+
     /// Play a procedurally generated tone on one leg without breaking the
     /// opposite leg's egress.
     pub async fn play_tone_side_only(
