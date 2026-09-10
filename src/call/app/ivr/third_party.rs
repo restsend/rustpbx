@@ -179,6 +179,42 @@ impl ThirdPartyTreeProvider {
                 }
             }
 
+            // TTS forced play — barge-in disabled. `nodename` carries the TTS text.
+            "prompt_tts_must" => EntryAction::Prompt {
+                file: None,
+                tts_text: Some(node.nodename.clone()).filter(|t| !t.is_empty()),
+                tts_voice: None,
+                record_name_list: None,
+                interruptible: false,
+                tts_api_url: None,
+                delay_before_ms: 0,
+                delay_after_ms: 0,
+            },
+
+            // TTS play with barge-in. `nodename` carries the TTS text.
+            "prompt_ttsbreak" => EntryAction::Prompt {
+                file: None,
+                tts_text: Some(node.nodename.clone()).filter(|t| !t.is_empty()),
+                tts_voice: None,
+                record_name_list: None,
+                interruptible: true,
+                tts_api_url: None,
+                delay_before_ms: 0,
+                delay_after_ms: 0,
+            },
+
+            // Dynamic prompt (file path or http(s) URL in `nodename`) with barge-in.
+            "prompt_dynamic_break" => EntryAction::Prompt {
+                file: Some(node.nodename.clone()).filter(|f| !f.is_empty()),
+                tts_text: None,
+                tts_voice: None,
+                record_name_list: None,
+                interruptible: true,
+                tts_api_url: None,
+                delay_before_ms: 0,
+                delay_after_ms: 0,
+            },
+
             "toagent_by_kfb" => {
                 let (skill_group_id, key_id) = Self::parse_toagent_nodevalue(&node.nodevalue);
                 EntryAction::RouteToAgent {
@@ -748,6 +784,74 @@ mod tests {
                 assert_eq!(skill_group_id.as_deref(), Some("2618"));
             }
             _ => panic!("expected RouteToAgent"),
+        }
+    }
+
+    #[test]
+    fn test_prompt_tts_and_dynamic_aliases_do_not_hangup() {
+        let provider =
+            ThirdPartyTreeProvider::from_json(&sample_tree_json(), "http://localhost".into())
+                .unwrap();
+
+        let must = provider.convert_node(&ThirdPartyNode {
+            businessnodeid: "n1".into(),
+            nodetype: "prompt_tts_must".into(),
+            nodename: "forced-tts-text".into(),
+            nodevalue: String::new(),
+            controltype: String::new(),
+            children: Default::default(),
+        });
+        match must {
+            EntryAction::Prompt {
+                ref tts_text,
+                interruptible: false,
+                ref file,
+                ref tts_api_url,
+                ..
+            } => {
+                assert_eq!(tts_text.as_deref(), Some("forced-tts-text"));
+                assert!(file.is_none());
+                assert!(tts_api_url.is_none());
+            }
+            other => panic!("prompt_tts_must must map to Prompt, got {other:?}"),
+        }
+
+        let ttsbreak = provider.convert_node(&ThirdPartyNode {
+            businessnodeid: "n2".into(),
+            nodetype: "prompt_ttsbreak".into(),
+            nodename: "barge-in-tts-text".into(),
+            nodevalue: String::new(),
+            controltype: String::new(),
+            children: Default::default(),
+        });
+        match ttsbreak {
+            EntryAction::Prompt {
+                ref tts_text,
+                interruptible: true,
+                ..
+            } => assert_eq!(tts_text.as_deref(), Some("barge-in-tts-text")),
+            other => panic!("prompt_ttsbreak must map to Prompt, got {other:?}"),
+        }
+
+        let dynamic = provider.convert_node(&ThirdPartyNode {
+            businessnodeid: "n3".into(),
+            nodetype: "prompt_dynamic_break".into(),
+            nodename: "https://cdn.example/dyn.wav".into(),
+            nodevalue: String::new(),
+            controltype: String::new(),
+            children: Default::default(),
+        });
+        match dynamic {
+            EntryAction::Prompt {
+                ref file,
+                interruptible: true,
+                ref tts_text,
+                ..
+            } => {
+                assert_eq!(file.as_deref(), Some("https://cdn.example/dyn.wav"));
+                assert!(tts_text.is_none());
+            }
+            other => panic!("prompt_dynamic_break must map to Prompt, got {other:?}"),
         }
     }
 
