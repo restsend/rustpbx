@@ -534,6 +534,20 @@ mod tests {
             serde_json::to_value(event).unwrap(),
             serde_json::json!({"type": "transfer_result", "outcome": "not_connected"})
         );
+        assert_eq!(
+            serde_json::to_value(ProviderEvent::TransferResult {
+                outcome: TransferOutcome::Busy,
+            })
+            .unwrap(),
+            serde_json::json!({"type": "transfer_result", "outcome": "busy"})
+        );
+        assert_eq!(
+            serde_json::to_value(ProviderEvent::TransferResult {
+                outcome: TransferOutcome::NoAnswer,
+            })
+            .unwrap(),
+            serde_json::json!({"type": "transfer_result", "outcome": "no_answer"})
+        );
     }
 
     #[test]

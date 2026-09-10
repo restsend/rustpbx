@@ -805,6 +805,54 @@ pub mod cdr {
     }
 }
 
+pub mod recording {
+    /// Hangup/first-fail → successful upload latency.
+    pub fn upload_latency_seconds(duration_secs: f64, destination: &str) {
+        metrics::histogram!(
+            "rustpbx_recording_upload_latency_seconds",
+            "destination" => destination.to_string()
+        )
+        .record(duration_secs);
+    }
+
+    pub fn upload_success(destination: &str) {
+        metrics::counter!(
+            "rustpbx_recording_upload_success_total",
+            "destination" => destination.to_string()
+        )
+        .increment(1);
+    }
+
+    pub fn upload_failure(destination: &str) {
+        metrics::counter!(
+            "rustpbx_recording_upload_failure_total",
+            "destination" => destination.to_string()
+        )
+        .increment(1);
+    }
+
+    /// Upload completed after the configured SLA window (default 10 min).
+    pub fn upload_sla_breach(destination: &str) {
+        metrics::counter!(
+            "rustpbx_recording_upload_sla_breach_total",
+            "destination" => destination.to_string()
+        )
+        .increment(1);
+    }
+
+    pub fn retry_attempt(destination: &str) {
+        metrics::counter!(
+            "rustpbx_recording_upload_retry_total",
+            "destination" => destination.to_string()
+        )
+        .increment(1);
+    }
+
+    pub fn set_pending_failed(count: usize) {
+        metrics::gauge!("rustpbx_recording_upload_pending_failed").set(count as f64);
+    }
+}
+
 pub fn init_static_gauges() {
     let version = crate::version::get_short_version();
     metrics::gauge!("rustpbx_info", "version" => version).set(1.0);

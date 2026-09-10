@@ -21,8 +21,51 @@ use super::{HangupCommand, LegId, MediaSource, RingbackPolicy};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransferOutcome {
+    /// Legacy catch-all when the transfer target never connected.
     NotConnected,
+    /// Target connected and later ended (caller may resume IVR).
     TargetEnded,
+    /// CPA: callee busy / rejected the call (SIP 486/600/603…).
+    Busy,
+    /// CPA: ring timeout / temporarily unavailable (SIP 408/480…).
+    NoAnswer,
+    /// CPA: other 4xx/5xx/6xx dial failure.
+    Failed,
+    /// CPA: request cancelled before answer (SIP 487).
+    Cancelled,
+}
+
+impl TransferOutcome {
+    /// Map a SIP final response status to a CPA-oriented transfer outcome.
+    pub fn from_sip_status(status: u16) -> Self {
+        match status {
+            486 | 600 | 603 => Self::Busy,
+            487 => Self::Cancelled,
+            408 | 480 | 484 | 485 | 604 => Self::NoAnswer,
+            0 => Self::NotConnected,
+            _ if (400..700).contains(&status) => Self::Failed,
+            _ => Self::NotConnected,
+        }
+    }
+
+    /// Best-effort parse of dial/REFER error strings that embed a SIP status.
+    pub fn from_error_message(msg: &str) -> Self {
+        // Prefer explicit "status NNN" / "failed: NNN " patterns from transfer.rs.
+        for token in msg.split(|c: char| !c.is_ascii_digit()) {
+            if token.len() == 3
+                && let Ok(code) = token.parse::<u16>()
+                && (400..700).contains(&code)
+            {
+                return Self::from_sip_status(code);
+            }
+        }
+        if msg.to_ascii_lowercase().contains("timeout")
+            || msg.to_ascii_lowercase().contains("timed out")
+        {
+            return Self::NoAnswer;
+        }
+        Self::NotConnected
+    }
 }
 
 /// Type alias for CallCommand sender.
@@ -655,5 +698,30 @@ mod tests {
             options: None,
         };
         assert!(!play.is_signaling_only());
+    }
+
+    #[test]
+    fn transfer_outcome_from_sip_status_cpa() {
+        assert_eq!(TransferOutcome::from_sip_status(486), TransferOutcome::Busy);
+        assert_eq!(
+            TransferOutcome::from_sip_status(408),
+            TransferOutcome::NoAnswer
+        );
+        assert_eq!(
+            TransferOutcome::from_sip_status(487),
+            TransferOutcome::Cancelled
+        );
+        assert_eq!(
+            TransferOutcome::from_sip_status(503),
+            TransferOutcome::Failed
+        );
+        assert_eq!(
+            TransferOutcome::from_error_message("B-leg transfer failed: 486 Busy - "),
+            TransferOutcome::Busy
+        );
+        assert_eq!(
+            TransferOutcome::from_error_message("REFER timed out"),
+            TransferOutcome::NoAnswer
+        );
     }
 }

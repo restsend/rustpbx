@@ -171,6 +171,26 @@ pub struct CallTransferAccepted {
 rwi_event!(CallTransferAccepted, "call_transfer_accepted");
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ConsultSwitched {
+    pub call_id: String,
+    pub transfer_id: String,
+    /// `customer` or `consult`
+    pub talking_to: String,
+}
+rwi_event!(ConsultSwitched, "consult_switched");
+
+/// Customer DTMF response to a conference-authorization IVR
+/// (`authorized` / `denied` / `timeout`).
+#[derive(Debug, Clone, Serialize)]
+pub struct ConferenceAuthResult {
+    pub call_id: String,
+    pub transfer_id: String,
+    /// `authorized`, `denied`, or `timeout`
+    pub result: String,
+}
+rwi_event!(ConferenceAuthResult, "conference_auth_result");
+
+#[derive(Debug, Clone, Serialize)]
 pub struct CallTransferFailed {
     pub call_id: String,
     pub sip_status: Option<u16>,

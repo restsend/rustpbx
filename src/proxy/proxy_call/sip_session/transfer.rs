@@ -637,6 +637,18 @@ impl SipSession {
             .await;
         if disposition == TransferDisposition::AwaitResult {
             if result.is_err() {
+                // Refine the pre-seeded NotConnected using any SIP status the
+                // inner path already stamped, or parse it from the error text.
+                if matches!(
+                    self.meta.pending_transfer_outcome,
+                    Some(crate::call::domain::TransferOutcome::NotConnected) | None
+                ) {
+                    if let Err(ref err) = result {
+                        self.meta.pending_transfer_outcome = Some(
+                            crate::call::domain::TransferOutcome::from_error_message(&err.to_string()),
+                        );
+                    }
+                }
                 self.deliver_pending_transfer_result();
             } else {
                 self.meta.pending_transfer_outcome =
@@ -950,6 +962,13 @@ impl SipSession {
                             _ if status >= 400 => {
                                 warn!(session_id = %self.id, status = %status, "REFER rejected");
                                 self.meta.transfer_return_app = None;
+                                if disposition == TransferDisposition::AwaitResult {
+                                    self.meta.pending_transfer_outcome = Some(
+                                        crate::call::domain::TransferOutcome::from_sip_status(
+                                            status,
+                                        ),
+                                    );
+                                }
                                 return Err(anyhow!("REFER rejected with status {}", status));
                             }
                             _ => {
@@ -968,6 +987,10 @@ impl SipSession {
                         )
                         .await;
                         self.meta.transfer_return_app = None;
+                        if disposition == TransferDisposition::AwaitResult {
+                            self.meta.pending_transfer_outcome =
+                                Some(crate::call::domain::TransferOutcome::NoAnswer);
+                        }
                         return Err(anyhow!("REFER timed out"));
                     }
                     Err(e) => {
@@ -1092,6 +1115,10 @@ impl SipSession {
         }
         result.map_err(|(code, text, reason)| {
             self.meta.transfer_return_app = None;
+            if self.meta.pending_transfer_outcome.is_some() {
+                self.meta.pending_transfer_outcome =
+                    Some(crate::call::domain::TransferOutcome::from_sip_status(code));
+            }
             anyhow!(
                 "B-leg transfer failed: {} {} - {}",
                 code,

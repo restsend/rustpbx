@@ -4200,6 +4200,7 @@ async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
         "timeout",
         "private_hangup",
         "merged",
+        "switch_then_merge",
         "supervisor_switch",
     ] {
         let (server, _) = create_test_server_with_config(ProxyConfig::default()).await;
@@ -4449,54 +4450,102 @@ async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
             assert!(!session.cancel_token.is_cancelled());
             continue;
         }
+        // consult_switch to Customer leaves agent↔customer media; production
+        // consult_merge calls prepare_conference_merge_media before merge to
+        // rebuild agent↔consult then attach the customer.
+        if scenario == "switch_then_merge" {
+            session.execute_command(CallCommand::LeaveMixer, None).await;
+            session
+                .execute_command(
+                    CallCommand::Hold {
+                        leg_id: consult.clone(),
+                        music: None,
+                    },
+                    None,
+                )
+                .await;
+            session
+                .execute_command(
+                    CallCommand::Unhold {
+                        leg_id: LegId::from("caller"),
+                    },
+                    None,
+                )
+                .await;
+            session
+                .execute_command(
+                    CallCommand::Bridge {
+                        leg_a: LegId::from("callee"),
+                        leg_b: LegId::from("caller"),
+                        mode: crate::call::domain::P2PMode::Audio,
+                    },
+                    None,
+                )
+                .await;
+            assert_eq!(
+                session.legs.get(&LegId::from("caller")).unwrap().state,
+                LegState::Connected
+            );
+            assert_eq!(
+                session.legs.get(&consult).unwrap().state,
+                LegState::Hold
+            );
+        }
         // consult_connected sends Bridge again after LegConnected has attached
         // the private pair. Keep both existing participant bridges.
-        session
-            .execute_command(
-                CallCommand::Bridge {
-                    leg_a: LegId::from("callee"),
-                    leg_b: consult.clone(),
-                    mode: crate::call::domain::P2PMode::Audio,
-                },
-                None,
-            )
-            .await;
-        assert!(private_tokens.iter().all(|token| !token.is_cancelled()));
+        // switch_then_merge stays on customer talk; prepare+merge follows later.
+        if scenario != "switch_then_merge" {
+            session
+                .execute_command(
+                    CallCommand::Bridge {
+                        leg_a: LegId::from("callee"),
+                        leg_b: consult.clone(),
+                        mode: crate::call::domain::P2PMode::Audio,
+                    },
+                    None,
+                )
+                .await;
+            assert!(private_tokens.iter().all(|token| !token.is_cancelled()));
+        }
         // Send real RTP from the consult endpoint; the agent must receive
         // decoded, non-silent mixer output while the customer remains held.
+        // switch_then_merge has consult on hold (agent talking to customer) —
+        // skip this check and verify 3-way audio after prepare+merge instead.
         remote.accept();
-        let mut agent_audio = crate::media::app_ingress::LegPcmStream::attach(
-            remote_legs[1].pc(),
-            remote_legs[1].negotiated().unwrap(),
-            crate::media::leg_id::LegId::from("agent-observer"),
-            CancellationToken::new(),
-        )
-        .unwrap();
-        remote
-            .set_egress_source(crate::media::egress::EgressSource::Media {
-                audio: Box::new(
-                    crate::media::audio_source::ToneAudioSource::new(
-                        440,
-                        Duration::from_secs(1),
-                        8000,
-                    )
-                    .unwrap(),
-                ),
-                loop_playback: false,
-                on_end: None,
+        if scenario != "switch_then_merge" {
+            let mut agent_audio = crate::media::app_ingress::LegPcmStream::attach(
+                remote_legs[1].pc(),
+                remote_legs[1].negotiated().unwrap(),
+                crate::media::leg_id::LegId::from("agent-observer"),
+                CancellationToken::new(),
+            )
+            .unwrap();
+            remote
+                .set_egress_source(crate::media::egress::EgressSource::Media {
+                    audio: Box::new(
+                        crate::media::audio_source::ToneAudioSource::new(
+                            440,
+                            Duration::from_secs(1),
+                            8000,
+                        )
+                        .unwrap(),
+                    ),
+                    loop_playback: false,
+                    on_end: None,
+                })
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let frame = agent_audio.recv().await.unwrap();
+                    if !frame.silence && frame.frame.samples.iter().any(|s| s.abs() > 100) {
+                        break;
+                    }
+                }
             })
             .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let frame = agent_audio.recv().await.unwrap();
-                if !frame.silence && frame.frame.samples.iter().any(|s| s.abs() > 100) {
-                    break;
-                }
-            }
-        })
-        .await
-        .expect("agent must hear consult RTP");
+            .expect("agent must hear consult RTP");
+        }
         // Merge keeps the consultation mixer and adds only Charlie.
         #[cfg(feature = "addon-cc")]
         {
@@ -4516,6 +4565,52 @@ async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
             transfers
                 .consultation_connected("transfer-media", session.id.to_string())
                 .unwrap();
+            if scenario == "switch_then_merge" {
+                // Restore agent↔consult with LeaveMixer (not Unbridge) — the
+                // same topology prepare_conference_merge_media / switch-back
+                // must establish before same-session merge.
+                session.execute_command(CallCommand::LeaveMixer, None).await;
+                session
+                    .execute_command(
+                        CallCommand::Hold {
+                            leg_id: LegId::from("caller"),
+                            music: None,
+                        },
+                        None,
+                    )
+                    .await;
+                session
+                    .execute_command(
+                        CallCommand::Unhold {
+                            leg_id: consult.clone(),
+                        },
+                        None,
+                    )
+                    .await;
+                session
+                    .execute_command(
+                        CallCommand::Bridge {
+                            leg_a: LegId::from("callee"),
+                            leg_b: consult.clone(),
+                            mode: crate::call::domain::P2PMode::Audio,
+                        },
+                        None,
+                    )
+                    .await;
+                assert_eq!(
+                    session.conference_bridge.conf_id.as_deref(),
+                    Some("consult-consult-media")
+                );
+                private_tokens.clear();
+                for name in ["callee", "consult"] {
+                    let id = LegId::from(name);
+                    let handle = session
+                        .legs
+                        .conference_bridge_handle(&id)
+                        .expect("restored consultation bridge");
+                    private_tokens.push(handle.cancel_token.clone());
+                }
+            }
             let room = transfers
                 .merge_to_conference("transfer-media")
                 .await
@@ -4529,15 +4624,31 @@ async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
                 matches!(&command, CallCommand::JoinMixerLeg { mixer_id, leg_id }
             if mixer_id == &room && leg_id == &LegId::from("caller"))
             );
+            // Same-session merge also re-attaches agent + consult (idempotent
+            // when the consultation mixer is still intact).
+            let cmd_b = _commands.try_recv().unwrap();
+            assert!(
+                matches!(&cmd_b, CallCommand::JoinMixerLeg { mixer_id, leg_id }
+            if mixer_id == &room && leg_id == &LegId::from("callee"))
+            );
+            let cmd_c = _commands.try_recv().unwrap();
+            assert!(
+                matches!(&cmd_c, CallCommand::JoinMixerLeg { mixer_id, leg_id }
+            if mixer_id == &room && leg_id == &LegId::from("consult"))
+            );
             assert!(
                 matches!(_commands.try_recv().unwrap(), CallCommand::MarkTransferred),
                 "merge retains the existing transfer bookkeeping command"
             );
             assert!(
                 _commands.try_recv().is_err(),
-                "merge must only attach Charlie"
+                "merge must only attach A/B/C + MarkTransferred"
             );
             session.execute_command(command, None).await;
+            if scenario == "switch_then_merge" {
+                session.execute_command(cmd_b, None).await;
+                session.execute_command(cmd_c, None).await;
+            }
         }
         #[cfg(not(feature = "addon-cc"))]
         session
@@ -4556,16 +4667,18 @@ async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
                 .participant_count(),
             3
         );
-        for side in [LegSide::A, LegSide::B] {
-            assert!(
-                !session
-                    .bridge()
-                    .unwrap()
-                    .leg(side)
-                    .unwrap()
-                    .egress_is_relay(),
-                "unhold must preserve mixer output"
-            );
+        if scenario != "switch_then_merge" {
+            for side in [LegSide::A, LegSide::B] {
+                assert!(
+                    !session
+                        .bridge()
+                        .unwrap()
+                        .leg(side)
+                        .unwrap()
+                        .egress_is_relay(),
+                    "unhold must preserve mixer output"
+                );
+            }
         }
         assert_eq!(
             session.legs.get(&LegId::from("caller")).unwrap().state,

@@ -336,6 +336,12 @@ auto_start_at = "media" # default; use "answer" to wait for 200
 # On upload failure a sibling
 # .upload_failed.{filename} JSON marker is written (time/address/duration_ms/error);
 # local files are deleted only after a successful remote upload.
+# A background retry worker rescans markers (HTTP/S3) until success or
+# retry_max_attempts. Latency vs upload_sla_secs is exported as Prometheus
+# metrics (rustpbx_recording_upload_*).
+# retry_interval_secs = 60   # 0 disables the worker
+# retry_max_attempts = 30
+# upload_sla_secs = 600      # 10-minute completion SLA
 #
 # type = "local" archival layout under path:
 # subdir = "daily"   # default — {path}/YYYYMMDD/{file}

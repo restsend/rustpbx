@@ -246,6 +246,18 @@ pub struct RecordingPolicy {
     /// caps validity at 7 days (604800), so larger values are clamped.
     #[serde(default)]
     pub signed_url_expiry_secs: Option<u64>,
+    /// Background scan interval for `.upload_failed.*` markers (seconds).
+    /// Default 60 when unset; set `0` to disable the retry worker.
+    #[serde(default)]
+    pub retry_interval_secs: Option<u64>,
+    /// Max retry attempts per failed upload before giving up (marker kept).
+    /// Default 30 (~30 min at 60s interval).
+    #[serde(default)]
+    pub retry_max_attempts: Option<u32>,
+    /// Upload completion SLA window in seconds (hangup/first-fail → success).
+    /// Default 600 (10 minutes). Breaches increment a Prometheus counter.
+    #[serde(default)]
+    pub upload_sla_secs: Option<u64>,
 }
 
 impl RecordingPolicy {
@@ -290,6 +302,20 @@ impl RecordingPolicy {
         self.signed_url_expiry_secs
             .unwrap_or(DEFAULT_SIGNED_URL_EXPIRY_SECS)
             .clamp(1, crate::storage::MAX_PRESIGN_EXPIRY_SECS)
+    }
+
+    /// Seconds between `.upload_failed.*` scan passes. `0` disables retry.
+    pub fn effective_retry_interval_secs(&self) -> u64 {
+        self.retry_interval_secs.unwrap_or(60)
+    }
+
+    pub fn effective_retry_max_attempts(&self) -> u32 {
+        self.retry_max_attempts.unwrap_or(30).max(1)
+    }
+
+    /// Hangup/fail → upload-success SLA window (default 10 minutes).
+    pub fn effective_upload_sla_secs(&self) -> u64 {
+        self.upload_sla_secs.unwrap_or(600).max(1)
     }
 
     pub fn ensure_defaults(&mut self) -> bool {

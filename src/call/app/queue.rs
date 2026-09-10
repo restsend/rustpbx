@@ -195,11 +195,11 @@ impl Default for QueueConfig {
             fallback: None,
             agents: Vec::new(),
             strategy: DialStrategy::Sequential(Vec::new()),
-            ring_timeout: Some(Duration::from_secs(20)),
+            ring_timeout: Some(Duration::from_secs(30)),
             skill_routing_enabled: false,
             required_skills: Vec::new(),
             sla_threshold_secs: 20,
-            max_wait_secs: 300,
+            max_wait_secs: 7200,
             announce_position: false,
             retry_interval_secs: 5,
             max_retries: 2,
@@ -509,9 +509,20 @@ impl QueueApp {
             // the caller's promised max wait.
             return;
         }
+        // 0 = infinite loop wait (acceptance: keep comfort/retry until caller
+        // hangs up; do not auto-fallback on a wall-clock max_wait).
+        if self.config.max_wait_secs == 0 {
+            info!(
+                queue = %self.config.name,
+                "Queue: max_wait_secs=0 — infinite wait (no max_wait_timeout)"
+            );
+            return;
+        }
         self.max_wait_armed = true;
-        let secs = self.config.max_wait_secs.max(1);
-        ctrl.set_timeout("max_wait_timeout", Duration::from_secs(secs));
+        ctrl.set_timeout(
+            "max_wait_timeout",
+            Duration::from_secs(self.config.max_wait_secs),
+        );
     }
 
     /// Remember an agent id this queue entry dialed (for phantom release).
@@ -889,9 +900,9 @@ impl QueueApp {
         Ok(())
     }
 
-    /// Arm the per-agent ring timeout (default 20s).
+    /// Arm the per-agent ring timeout (default 30s).
     fn arm_ring_timeout(&self, ctrl: &mut CallController) {
-        let ring_timeout = self.config.ring_timeout.unwrap_or(Duration::from_secs(20));
+        let ring_timeout = self.config.ring_timeout.unwrap_or(Duration::from_secs(30));
         ctrl.set_timeout("agent_ring_timeout", ring_timeout);
     }
 

@@ -1,7 +1,7 @@
 use crate::{
     callrecord::{
         CallRecordManagerBuilder, CallRecordSender,
-        recording_upload::{RecordingUploadHook, RecordingUploadManager},
+        recording_upload::{RecordingRetryWorker, RecordingUploadHook, RecordingUploadManager},
         sipflow_upload::SipFlowUploadHook,
     },
     config::{CallRecordStorageConfig, ClusterConfig, Config, UserBackendConfig},
@@ -323,6 +323,7 @@ impl AppStateBuilder {
         let mut callrecord_manager = None;
         let mut recording_upload_manager: Option<RecordingUploadManager> = None;
         let mut recording_upload_storage: Option<crate::storage::Storage> = None;
+        let mut recording_retry_policy: Option<crate::config::RecordingPolicy> = None;
         let mut sipflow_upload_storage: Option<crate::storage::Storage> = None;
         // Late-bound handle to the SipFlow wrapper, shared with the call-record
         // upload hooks. Filled in as soon as the SIP server (owning SipFlow)
@@ -405,6 +406,7 @@ impl AppStateBuilder {
                 let (mut hook, upload_manager, storage) = RecordingUploadHook::new(policy.clone())?;
                 recording_upload_manager = upload_manager;
                 recording_upload_storage = storage;
+                recording_retry_policy = Some(policy.clone());
                 if let Some(ref gw) = rwi_gateway {
                     hook = hook.with_rwi_gateway(gw.clone());
                 }
@@ -626,6 +628,20 @@ impl AppStateBuilder {
             crate::utils::spawn(async move {
                 manager.serve().await;
             });
+        }
+
+        if let Some(policy) = recording_retry_policy {
+            let storage = recording_upload_storage.clone();
+            match RecordingRetryWorker::new(policy, storage) {
+                Ok(worker) => {
+                    crate::utils::spawn(async move {
+                        worker.serve().await;
+                    });
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "failed to start recording upload retry worker");
+                }
+            }
         }
 
         if let Some(mut manager) = callrecord_manager {

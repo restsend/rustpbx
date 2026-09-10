@@ -14,7 +14,7 @@ use tracing::{info, warn};
 use crate::{
     callrecord::{
         CALL_RECORD_HTTP_CONNECT_TIMEOUT, CALL_RECORD_HTTP_TIMEOUT, CallRecord, CallRecordHook,
-        is_direct_child_of_root,
+        UploadFailedMarker, is_direct_child_of_root,
     },
     config::{RecordingPolicy, RecordingType},
     models::call_record::extract_sip_username,
@@ -273,6 +273,7 @@ impl RecordingUploadManager {
                 _ => "application/octet-stream",
             };
             let attributes = Attributes::from_iter([(Attribute::ContentType, content_type)]);
+            let started = std::time::Instant::now();
             if let Err(err) = self
                 .storage
                 .write_opts(
@@ -291,6 +292,27 @@ impl RecordingUploadManager {
                     %err,
                     "recording upload failed"
                 );
+                crate::metrics::recording::upload_failure("s3");
+                let address = self
+                    .policy
+                    .bucket
+                    .clone()
+                    .unwrap_or_else(|| "s3".to_string());
+                if let Err(write_err) = crate::callrecord::write_upload_failed_marker_ex(
+                    &path,
+                    &address,
+                    started.elapsed().as_millis() as u64,
+                    &err.to_string(),
+                    None,
+                )
+                .await
+                {
+                    warn!(
+                        path = %path.display(),
+                        %write_err,
+                        "failed to write upload failure marker"
+                    );
+                }
                 continue;
             }
             info!(
@@ -300,15 +322,248 @@ impl RecordingUploadManager {
                 content_type,
                 "recording uploaded"
             );
+            crate::metrics::recording::upload_success("s3");
+            crate::metrics::recording::upload_latency_seconds(
+                started.elapsed().as_secs_f64(),
+                "s3",
+            );
             if let Err(err) = tokio::fs::remove_file(&path).await {
                 warn!(
                     path = %path.display(),
                     %err,
                     "failed to remove local recording after upload"
                 );
+            } else {
+                let marker = crate::callrecord::upload_failed_marker_path(&path);
+                let _ = tokio::fs::remove_file(marker).await;
             }
         }
     }
+}
+
+/// Periodically scans `[recording].path` for `.upload_failed.*` markers and
+/// retries remote uploads (HTTP or S3). Tracks hangup→success latency against
+/// the configured SLA window (default 10 minutes).
+pub struct RecordingRetryWorker {
+    policy: RecordingPolicy,
+    client: reqwest::Client,
+    storage: Option<Storage>,
+}
+
+impl RecordingRetryWorker {
+    pub fn new(policy: RecordingPolicy, storage: Option<Storage>) -> Result<Self> {
+        Ok(Self {
+            policy,
+            client: crate::http_util::build_keepalive_client(
+                Some(CALL_RECORD_HTTP_CONNECT_TIMEOUT),
+                Some(CALL_RECORD_HTTP_TIMEOUT),
+            )?,
+            storage,
+        })
+    }
+
+    pub async fn serve(self) {
+        let interval = self.policy.effective_retry_interval_secs();
+        if interval == 0 {
+            info!("recording upload retry worker disabled (retry_interval_secs=0)");
+            return;
+        }
+        let ty = self.policy.effective_recording_type();
+        if !matches!(ty, RecordingType::Http | RecordingType::S3) {
+            info!(?ty, "recording upload retry worker idle (local/sipflow)");
+            return;
+        }
+        info!(
+            interval_secs = interval,
+            sla_secs = self.policy.effective_upload_sla_secs(),
+            "recording upload retry worker started"
+        );
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval));
+        loop {
+            ticker.tick().await;
+            if let Err(err) = self.scan_once().await {
+                warn!(%err, "recording upload retry scan failed");
+            }
+        }
+    }
+
+    async fn scan_once(&self) -> Result<()> {
+        let root = PathBuf::from(self.policy.recorder_path());
+        if !root.exists() {
+            crate::metrics::recording::set_pending_failed(0);
+            return Ok(());
+        }
+        let markers = collect_upload_failed_markers(&root).await?;
+        crate::metrics::recording::set_pending_failed(markers.len());
+        let max_attempts = self.policy.effective_retry_max_attempts();
+        for marker_path in markers {
+            if let Err(err) = self.retry_marker(&marker_path, max_attempts).await {
+                warn!(
+                    marker = %marker_path.display(),
+                    %err,
+                    "recording upload retry failed"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn retry_marker(&self, marker_path: &Path, max_attempts: u32) -> Result<()> {
+        let source = source_path_from_marker(marker_path).ok_or_else(|| {
+            anyhow!("cannot derive source path from marker {}", marker_path.display())
+        })?;
+        if !source.exists() {
+            // Orphan marker — drop it.
+            let _ = tokio::fs::remove_file(marker_path).await;
+            return Ok(());
+        }
+        let marker: UploadFailedMarker = serde_json::from_slice(&tokio::fs::read(marker_path).await?)?;
+        if marker.attempts >= max_attempts {
+            let dest = match self.policy.effective_recording_type() {
+                RecordingType::Http => "http",
+                RecordingType::S3 => "s3",
+                _ => "unknown",
+            };
+            if let Some(age) = marker_age_secs(&marker)
+                && age > self.policy.effective_upload_sla_secs() as f64
+            {
+                crate::metrics::recording::upload_sla_breach(dest);
+            }
+            return Ok(());
+        }
+        let dest = match self.policy.effective_recording_type() {
+            RecordingType::Http => "http",
+            RecordingType::S3 => "s3",
+            _ => return Ok(()),
+        };
+        crate::metrics::recording::retry_attempt(dest);
+        let started = std::time::Instant::now();
+        match self.upload_source(&source, marker.call_id.as_deref()).await {
+            Ok(()) => {
+                let latency = marker_age_secs(&marker).unwrap_or_else(|| started.elapsed().as_secs_f64());
+                crate::metrics::recording::upload_success(dest);
+                crate::metrics::recording::upload_latency_seconds(latency, dest);
+                if latency > self.policy.effective_upload_sla_secs() as f64 {
+                    crate::metrics::recording::upload_sla_breach(dest);
+                }
+                let _ = tokio::fs::remove_file(&source).await;
+                let _ = tokio::fs::remove_file(marker_path).await;
+                info!(
+                    path = %source.display(),
+                    attempts = marker.attempts + 1,
+                    latency_secs = latency,
+                    "recording upload retry succeeded"
+                );
+            }
+            Err(err) => {
+                crate::metrics::recording::upload_failure(dest);
+                let address = marker.address.clone();
+                let _ = crate::callrecord::write_upload_failed_marker_ex(
+                    &source,
+                    &address,
+                    started.elapsed().as_millis() as u64,
+                    &err.to_string(),
+                    marker.call_id.as_deref(),
+                )
+                .await;
+            }
+        }
+        Ok(())
+    }
+
+    async fn upload_source(&self, source: &Path, call_id: Option<&str>) -> Result<()> {
+        let data = tokio::fs::read(source).await?;
+        match self.policy.effective_recording_type() {
+            RecordingType::Http => {
+                let url = RecordingUploadHook::required(&self.policy.url, "url")?;
+                let file_name = source
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("recording.wav"))
+                    .to_string_lossy()
+                    .to_string();
+                let part = Part::bytes(data)
+                    .file_name(file_name)
+                    .mime_str("audio/wav")?;
+                let form = Form::new()
+                    .text("call_id", call_id.unwrap_or("retry").to_string())
+                    .text("track_id", "retry".to_string())
+                    .part("recording", part);
+                let mut request = self.client.post(&url).multipart(form);
+                if let Some(headers) = self.policy.headers.as_ref() {
+                    for (key, value) in headers {
+                        request = request.header(key, value);
+                    }
+                }
+                let resp = request.send().await?;
+                if !resp.status().is_success() {
+                    return Err(anyhow!("HTTP upload retry status {}", resp.status()));
+                }
+                Ok(())
+            }
+            RecordingType::S3 => {
+                let storage = self
+                    .storage
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("S3 storage unavailable for retry"))?;
+                let key = RecordingUploadHook::storage_key(&self.policy, source);
+                let content_type = match source.extension().and_then(|e| e.to_str()) {
+                    Some(ext) if ext.eq_ignore_ascii_case("wav") => "audio/wav",
+                    Some(ext) if ext.eq_ignore_ascii_case("jsonl") => "application/jsonl",
+                    _ => "application/octet-stream",
+                };
+                let attributes = Attributes::from_iter([(Attribute::ContentType, content_type)]);
+                storage
+                    .write_opts(
+                        &key,
+                        Bytes::from(data),
+                        PutOptions {
+                            attributes,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(|e| anyhow!(e))?;
+                Ok(())
+            }
+            other => Err(anyhow!("unsupported recording type for retry: {other:?}")),
+        }
+    }
+}
+
+fn source_path_from_marker(marker_path: &Path) -> Option<PathBuf> {
+    let name = marker_path.file_name()?.to_str()?;
+    let rest = name.strip_prefix(".upload_failed.")?;
+    Some(marker_path.parent()?.join(rest))
+}
+
+fn marker_age_secs(marker: &UploadFailedMarker) -> Option<f64> {
+    let t = chrono::DateTime::parse_from_rfc3339(&marker.time).ok()?;
+    let age = chrono::Utc::now().signed_duration_since(t.with_timezone(&chrono::Utc));
+    Some(age.num_milliseconds().max(0) as f64 / 1000.0)
+}
+
+async fn collect_upload_failed_markers(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let ft = entry.file_type().await?;
+            if ft.is_dir() {
+                stack.push(path);
+            } else if ft.is_file() {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.starts_with(".upload_failed.") {
+                    out.push(path);
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 impl RecordingUploadHook {
@@ -398,7 +653,9 @@ impl CallRecordHook for RecordingUploadHook {
     }
 
     async fn on_record_completed(&self, records: &mut [CallRecord]) -> anyhow::Result<()> {
-        use crate::callrecord::{RecordingSubdir, local_archive_path, write_upload_failed_marker};
+        use crate::callrecord::{
+            RecordingSubdir, local_archive_path, write_upload_failed_marker_ex,
+        };
         use std::time::Instant;
 
         let recording_type = self.policy.effective_recording_type();
@@ -547,6 +804,14 @@ impl CallRecordHook for RecordingUploadHook {
                                     bytes = data_len,
                                     "recording uploaded"
                                 );
+                                crate::metrics::recording::upload_success("http");
+                                if let Ok(age) = (chrono::Utc::now() - record.end_time).to_std() {
+                                    let secs = age.as_secs_f64();
+                                    crate::metrics::recording::upload_latency_seconds(secs, "http");
+                                    if secs > self.policy.effective_upload_sla_secs() as f64 {
+                                        crate::metrics::recording::upload_sla_breach("http");
+                                    }
+                                }
                                 if first_uploaded_url.is_none() && track_id != "signaling" {
                                     first_uploaded_url = Some(url.clone());
                                 }
@@ -583,11 +848,13 @@ impl CallRecordHook for RecordingUploadHook {
                                     path,
                                     "recording upload failed: {err}"
                                 );
-                                if let Err(write_err) = write_upload_failed_marker(
+                                crate::metrics::recording::upload_failure("http");
+                                if let Err(write_err) = write_upload_failed_marker_ex(
                                     Path::new(&path),
                                     &address,
                                     elapsed_ms,
                                     &err.to_string(),
+                                    Some(record.call_id.as_str()),
                                 )
                                 .await
                                 {
@@ -1010,6 +1277,80 @@ mod tests {
         assert!(parsed.get("address").is_some());
         assert!(parsed.get("duration_ms").is_some());
         assert!(parsed.get("error").is_some());
+    }
+
+    #[tokio::test]
+    async fn retry_worker_clears_marker_after_http_success() {
+        use axum::{Router, body::Bytes, routing::post};
+        use std::net::SocketAddr;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("retry.wav");
+        tokio::fs::write(&path, b"wav-bytes")
+            .await
+            .expect("write recording");
+        let marker = crate::callrecord::upload_failed_marker_path(&path);
+        let body = serde_json::json!({
+            "time": chrono::Utc::now().to_rfc3339(),
+            "address": "http://placeholder",
+            "duration_ms": 1,
+            "error": "previous failure",
+            "attempts": 1,
+            "call_id": "retry-call",
+        });
+        tokio::fs::write(&marker, serde_json::to_vec_pretty(&body).unwrap())
+            .await
+            .expect("write marker");
+
+        let hit = Arc::new(AtomicBool::new(false));
+        let hit_flag = hit.clone();
+        let app = Router::new().route(
+            "/recording",
+            post(move |_body: Bytes| {
+                let hit_flag = hit_flag.clone();
+                async move {
+                    hit_flag.store(true, Ordering::SeqCst);
+                    axum::http::StatusCode::OK
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr: SocketAddr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        let policy = RecordingPolicy {
+            enabled: Some(true),
+            recording_type: Some(RecordingType::Http),
+            path: Some(dir.path().to_string_lossy().into_owned()),
+            url: Some(format!("http://{addr}/recording")),
+            retry_interval_secs: Some(60),
+            retry_max_attempts: Some(5),
+            upload_sla_secs: Some(600),
+            ..Default::default()
+        };
+        let worker = RecordingRetryWorker::new(policy, None).expect("worker");
+        worker.scan_once().await.expect("scan");
+
+        assert!(hit.load(Ordering::SeqCst), "upload endpoint hit");
+        assert!(!path.exists(), "local file removed after retry success");
+        assert!(!marker.exists(), "marker cleared after retry success");
+    }
+
+    #[test]
+    fn source_path_from_upload_failed_marker() {
+        let marker = PathBuf::from("/rec/20260101/.upload_failed.call.wav");
+        assert_eq!(
+            source_path_from_marker(&marker),
+            Some(PathBuf::from("/rec/20260101/call.wav"))
+        );
     }
 
     #[tokio::test]

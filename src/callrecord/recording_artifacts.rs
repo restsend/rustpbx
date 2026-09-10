@@ -167,6 +167,15 @@ pub struct UploadFailedMarker {
     pub address: String,
     pub duration_ms: u64,
     pub error: String,
+    /// Number of upload attempts that have failed so far (including the first).
+    #[serde(default = "default_attempts")]
+    pub attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+}
+
+fn default_attempts() -> u32 {
+    1
 }
 
 pub async fn write_upload_failed_marker(
@@ -175,13 +184,37 @@ pub async fn write_upload_failed_marker(
     duration_ms: u64,
     error: &str,
 ) -> std::io::Result<()> {
+    write_upload_failed_marker_ex(source, address, duration_ms, error, None).await
+}
+
+pub async fn write_upload_failed_marker_ex(
+    source: &Path,
+    address: &str,
+    duration_ms: u64,
+    error: &str,
+    call_id: Option<&str>,
+) -> std::io::Result<()> {
+    let path = upload_failed_marker_path(source);
+    let prior = tokio::fs::read(&path)
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<UploadFailedMarker>(&bytes).ok());
     let marker = UploadFailedMarker {
-        time: Utc::now().to_rfc3339(),
+        time: prior
+            .as_ref()
+            .map(|m| m.time.clone())
+            .unwrap_or_else(|| Utc::now().to_rfc3339()),
         address: address.to_string(),
         duration_ms,
         error: error.to_string(),
+        attempts: prior
+            .as_ref()
+            .map(|m| m.attempts.saturating_add(1))
+            .unwrap_or(1),
+        call_id: call_id
+            .map(|s| s.to_string())
+            .or_else(|| prior.as_ref().and_then(|m| m.call_id.clone())),
     };
-    let path = upload_failed_marker_path(source);
     let body = serde_json::to_vec_pretty(&marker).unwrap_or_default();
     tokio::fs::write(path, body).await
 }
