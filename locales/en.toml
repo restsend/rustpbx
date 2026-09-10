@@ -2242,3 +2242,7 @@ internal = "Internal SIP"
 
 [rtp]
 "provider.net" = "Provider network (RTP)"
+
+[errors.proxy]
+rtp_timeout = "RTP inactivity timeout"
+leg_media_incomplete = "Answered but one or more legs delivered no media"

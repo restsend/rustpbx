@@ -8583,6 +8583,59 @@ impl SipSession {
         // dialplan extensions (also HashMap<String, String>). Values are JSON
         // so structured entries (e.g. the `trace` array) persist cleanly.
         let extensions = self.context.dialplan.extensions.clone();
+        // Per-leg media counters, captured once: they feed both the CDR
+        // `media_quality` metadata and the answered-but-silent-leg detection
+        // below. Empty when no bridge legs exist.
+        let legs = self
+            .bridge()
+            .map(|mb| mb.quality_summary())
+            .unwrap_or_default();
+        // Answered but a leg never delivered a single media packet — the
+        // "silent leg" (browser ICE/DTLS never completed, one-way NAT/UDP
+        // filtering, muted softphone, carrier answering without media).
+        // Diagnostic only: never changes the hangup outcome; logged once and
+        // annotated into the CDR (error chip + trace) so recordings without
+        // audio are explainable. Skipped when a more specific error already
+        // claimed the call (e.g. the RTP watchdog's `proxy.rtp_timeout`).
+        // The callee side is only checked when a real remote callee leg
+        // answered (`ever_connected_callee`): IVR/app playback legs never
+        // receive remote RTP, so flagging them would be noise.
+        let leg_silent = |side: &str| {
+            legs.iter()
+                .any(|leg| leg.side == side && leg.transport_rx_packets == 0 && leg.ingress_packets == 0)
+        };
+        let caller_silent = leg_silent("A");
+        let callee_silent = self.meta.ever_connected_callee && leg_silent("B");
+        let media_issue_legs = match (caller_silent, callee_silent) {
+            (true, true) => Some("caller+callee"),
+            (true, false) => Some("caller"),
+            (false, true) => Some("callee"),
+            (false, false) => None,
+        };
+        let media_issue =
+            self.meta.answer_time.is_some() && self.meta.error_code.is_none() && media_issue_legs.is_some();
+        if media_issue {
+            let legs_str = media_issue_legs.unwrap_or_default();
+            let callee_rx = legs
+                .iter()
+                .find(|leg| leg.side == "B")
+                .map(|leg| leg.transport_rx_packets);
+            warn!(
+                session_id = %self.context.session_id,
+                call_id = %self.context.session_id,
+                legs = legs_str,
+                caller_rx_packets = 0u64,
+                callee_rx_packets = callee_rx.unwrap_or(0),
+                "answered call ended with no media on leg(s); recording will have no audio from the affected side(s) (code=proxy.leg_media_incomplete)"
+            );
+        }
+        // The effective error code: the detected leg-media issue applies only
+        // when no more specific error already claimed the call.
+        let effective_error_code = if media_issue {
+            Some(&crate::proxy::proxy_call::error_catalog::LEG_MEDIA_INCOMPLETE)
+        } else {
+            self.meta.error_code
+        };
         let metadata = {
             // Start with session extensions (CC agent info)
             let mut meta: std::collections::HashMap<String, serde_json::Value> = self
@@ -8610,7 +8663,7 @@ impl SipSession {
                     serde_json::Value::String(qn.clone()),
                 );
             }
-            if let Some(info) = self.meta.error_code {
+            if let Some(info) = effective_error_code {
                 meta.insert(
                     "error_code".to_string(),
                     serde_json::Value::String(info.code.to_string()),
@@ -8621,6 +8674,27 @@ impl SipSession {
                         serde_json::Value::String(app.to_string()),
                     );
                 }
+            }
+            // Which leg(s) lacked media + a human-readable detail line. The
+            // reporter's error enrichment prefers `error_detail` over the
+            // catalog's generic message, so the UI chip names the side too;
+            // `mediaIssueLegs` stays a flat string for queryability.
+            if media_issue {
+                if let Some(legs_str) = media_issue_legs {
+                    meta.insert(
+                        "mediaIssueLegs".to_string(),
+                        serde_json::Value::String(legs_str.to_string()),
+                    );
+                }
+                let detail = match media_issue_legs {
+                    Some("caller+callee") => "no media from the caller and callee legs",
+                    Some("callee") => "no media from the callee leg",
+                    _ => "no media from the caller leg",
+                };
+                meta.insert(
+                    "error_detail".to_string(),
+                    serde_json::Value::String(detail.to_string()),
+                );
             }
             if let Some(ref app) = self.meta.app_name {
                 meta.insert(
@@ -8656,13 +8730,27 @@ impl SipSession {
             // Call trace: ordered timeline of transitions + media plays +
             // terminal outcome. Stored as a real JSON array under `trace`.
             let mut trace: Vec<crate::call_errors::TraceEvent> = self.meta.trace.clone();
+            // One-shot media-issue event so the timeline explains the missing
+            // audio next to the terminal outcome.
+            if media_issue {
+                let detail = serde_json::json!({ "legs": media_issue_legs });
+                let mut ev = crate::call_errors::TraceEvent::new(
+                    crate::call_errors::TraceKind::MediaIssue,
+                    "No media received on leg(s) of an answered call (0 RTP packets)",
+                )
+                .severity(crate::call_errors::ErrSeverity::Warn)
+                .code(crate::proxy::proxy_call::error_catalog::LEG_MEDIA_INCOMPLETE.code)
+                .detail(detail);
+                ev.ts = self.context.start_time.elapsed().as_millis() as i64;
+                trace.push(ev);
+            }
             // Terminal End event — carries the hangup initiator and any
             // standardized error code so "why did the call end" is visible.
             {
                 let queue_ctx =
                     crate::proxy::proxy_call::call_meta::effective_queue_name(&self.meta)
                         .map(|q| format!(" (queue '{}')", q));
-                let (severity, code, msg) = if let Some(info) = self.meta.error_code {
+                let (severity, code, msg) = if let Some(info) = effective_error_code {
                     let base = format!("Call ended: {}", info.message);
                     (
                         info.severity,
@@ -8734,17 +8822,11 @@ impl SipSession {
             meta
         };
 
-        let media_quality = self
-            .bridge()
-            .map(|mb| {
-                let legs = mb.quality_summary();
-                if legs.is_empty() {
-                    None
-                } else {
-                    serde_json::to_value(&legs).ok()
-                }
-            })
-            .flatten();
+        let media_quality = if legs.is_empty() {
+            None
+        } else {
+            serde_json::to_value(&legs).ok()
+        };
 
         CallSessionRecordSnapshot {
             ring_time: self.meta.ring_time,

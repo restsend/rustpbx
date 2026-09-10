@@ -285,6 +285,31 @@ pub const RTP_TIMEOUT: CallErrInfo = CallErrInfo {
     remediation_key: None,
 };
 
+/// Answered call where one or more bridge legs never delivered a single media
+/// packet (transport RX == 0): browser ICE/DTLS never completed, one-way
+/// NAT/UDP filtering, a muted/micless softphone, or a carrier answering
+/// without media. Detected at call end — the call itself may have completed
+/// normally (200 + BYE), so this never changes the hangup outcome; it only
+/// annotates the CDR (error chip + trace) and logs one warn, so recordings
+/// without audio are explainable. The affected side(s) ride
+/// `metadata.mediaIssueLegs` ("caller" | "callee" | "caller+callee") and
+/// `metadata.error_detail` (human-readable), and the callee side is only
+/// checked for calls where a real remote callee leg answered (gated by
+/// `CallMeta::ever_connected_callee`) so IVR/app playback legs are never
+/// flagged.
+pub const LEG_MEDIA_INCOMPLETE: CallErrInfo = CallErrInfo {
+    app: "proxy",
+    code: "proxy.leg_media_incomplete",
+    message: "Answered but one or more legs delivered no media",
+    sip_status: None,
+    // Detection-only diagnostic: the call ended by its own cause (caller /
+    // callee / system), never by this code — keep the outcome empty.
+    hangup_reason: CallRecordHangupReason::Other(String::new()),
+    severity: ErrSeverity::Warn,
+    locale_key: "errors.proxy.leg_media_incomplete",
+    remediation_key: None,
+};
+
 pub const CATALOG: &[CallErrInfo] = &[
     QUEUE_ABANDONED,
     QUEUE_ALL_AGENTS_UNAVAILABLE,
@@ -311,4 +336,5 @@ pub const CATALOG: &[CallErrInfo] = &[
     TRANSFER_INVALID_STATE,
     TRANSFER_INTERNAL_ERROR,
     RTP_TIMEOUT,
+    LEG_MEDIA_INCOMPLETE,
 ];

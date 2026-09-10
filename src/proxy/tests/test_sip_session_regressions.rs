@@ -963,6 +963,104 @@ async fn test_session_captures_rewritten_dialplan_uris_for_call_record() {
 }
 
 #[tokio::test]
+async fn test_record_snapshot_flags_silent_legs_only_when_answered() {
+    // MediaProxyMode::All anchors the MediaBridge so per-leg counters exist.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::All);
+    let mut session = build_session(dialplan).await;
+    setup_recording_test_media(&mut session).await;
+
+    // Not answered (e.g. caller cancelled while ringing): silent legs are
+    // expected and must NOT be flagged.
+    let snapshot = session.record_snapshot();
+    assert!(
+        !snapshot.metadata.contains_key("error_code"),
+        "unanswered calls must not carry leg_media_incomplete, got {:?}",
+        snapshot.metadata.get("error_code")
+    );
+
+    // Answered, caller leg silent. The callee check is gated on
+    // `ever_connected_callee` (IVR/app B-legs never receive remote RTP), so
+    // only the caller is flagged here.
+    session.meta.answer_time = Some(std::time::Instant::now());
+    let snapshot = session.record_snapshot();
+    assert_eq!(
+        snapshot.metadata.get("error_code").and_then(|v| v.as_str()),
+        Some("proxy.leg_media_incomplete")
+    );
+    assert_eq!(
+        snapshot.metadata.get("mediaIssueLegs").and_then(|v| v.as_str()),
+        Some("caller")
+    );
+    assert_eq!(
+        snapshot
+            .metadata
+            .get("error_detail")
+            .and_then(|v| v.as_str()),
+        Some("no media from the caller leg")
+    );
+    let trace = snapshot
+        .metadata
+        .get("trace")
+        .and_then(|v| v.as_array())
+        .expect("trace array present");
+    assert!(
+        trace
+            .iter()
+            .any(|ev| ev["kind"] == "media_issue"
+                && ev["code"] == "proxy.leg_media_incomplete"
+                && ev["severity"] == "warn"
+                && ev["detail"]["legs"] == "caller"),
+        "expected a media_issue trace event for the caller, got {trace:?}"
+    );
+
+    // Both legs silent (callee answered for real) → caller+callee.
+    session.meta.ever_connected_callee = true;
+    let snapshot = session.record_snapshot();
+    assert_eq!(
+        snapshot.metadata.get("mediaIssueLegs").and_then(|v| v.as_str()),
+        Some("caller+callee")
+    );
+
+    // Once caller media flows, only the callee leg remains flagged.
+    use rustrtc::peer_connection::RtpObserver;
+    if let Some(bridge) = session.media.bridge.as_ref() {
+        let packet = rustrtc::rtp::RtpPacket::new(
+            rustrtc::rtp::RtpHeader::new(0, 2, 160, 1234),
+            vec![0xff; 160],
+        );
+        bridge
+            .leg(crate::media::media_bridge::LegSide::A)
+            .expect("caller leg")
+            .ingress_tap()
+            .on_ingress(&packet, "127.0.0.1:40000".parse().unwrap());
+    }
+    let snapshot = session.record_snapshot();
+    assert_eq!(
+        snapshot.metadata.get("mediaIssueLegs").and_then(|v| v.as_str()),
+        Some("callee")
+    );
+
+    // All legs with media → not flagged at all.
+    if let Some(bridge) = session.media.bridge.as_ref() {
+        let packet = rustrtc::rtp::RtpPacket::new(
+            rustrtc::rtp::RtpHeader::new(0, 3, 160, 4321),
+            vec![0xff; 160],
+        );
+        bridge
+            .leg(crate::media::media_bridge::LegSide::B)
+            .expect("callee leg")
+            .ingress_tap()
+            .on_ingress(&packet, "127.0.0.1:40001".parse().unwrap());
+    }
+    let snapshot = session.record_snapshot();
+    assert!(
+        !snapshot.metadata.contains_key("error_code"),
+        "fully medialized call must not be flagged, got {:?}",
+        snapshot.metadata.get("error_code")
+    );
+}
+
+#[tokio::test]
 async fn test_start_ivr_app_restarts_after_already_running() {
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
         "ivr".to_string(),

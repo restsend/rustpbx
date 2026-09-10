@@ -2224,3 +2224,7 @@ internal = "内部 SIP"
 
 [rtp]
 "provider.net" = "运营商网络 (RTP)"
+
+[errors.proxy]
+rtp_timeout = "RTP 无活动超时"
+leg_media_incomplete = "已接通但有一侧或双侧未收到任何媒体"

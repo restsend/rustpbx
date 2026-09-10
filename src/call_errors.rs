@@ -236,6 +236,10 @@ pub enum TraceKind {
     Play,
     /// The RTP-inactivity watchdog fired (no media from one side).
     RtpTimeout,
+    /// An answered call ended without any media from one leg (detected at
+    /// call end; unlike RtpTimeout the watchdog did not tear the call down —
+    /// the leg simply never sent media, e.g. browser ICE/DTLS never completed).
+    MediaIssue,
     /// The call ended (terminal event).
     End,
 }
@@ -450,5 +454,22 @@ mod tests {
         assert_eq!(v["kind"], "play");
         assert_eq!(v["duration_ms"], 1234);
         assert_eq!(v["interrupted"], true);
+    }
+
+    #[test]
+    fn media_issue_kind_serializes_and_catalog_registers_leg_media_incomplete() {
+        let ev = TraceEvent::new(TraceKind::MediaIssue, "No media from caller")
+            .severity(ErrSeverity::Warn)
+            .code("proxy.leg_media_incomplete");
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v["kind"], "media_issue");
+        assert_eq!(v["severity"], "warn");
+        assert_eq!(v["code"], "proxy.leg_media_incomplete");
+
+        let reg = crate::call_errors::build_registry();
+        let info = reg
+            .find("proxy.leg_media_incomplete")
+            .expect("LEG_MEDIA_INCOMPLETE registered in catalog");
+        assert_eq!(info.severity, ErrSeverity::Warn);
     }
 }
