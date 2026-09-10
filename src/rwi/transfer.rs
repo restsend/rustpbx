@@ -235,6 +235,7 @@ impl TransferController {
         gw.send_to_owner(&crate::rwi::CallTransferAccepted {
             call_id: call_id.clone(),
             transfer_target: Some(target.clone()),
+            transfer_target_type: crate::call::transfer_target_kind(&target),
         });
 
         Ok(transaction)
@@ -357,6 +358,7 @@ impl TransferController {
                 sip_status,
                 reason: Some(reason.as_str().to_string()),
                 transfer_target: Some(failed_tx.target.clone()),
+                transfer_target_type: crate::call::transfer_target_kind(&failed_tx.target),
             });
         }
     }
@@ -400,6 +402,7 @@ impl TransferController {
         gw.send_to_owner(&crate::rwi::CallTransferAccepted {
             call_id: call_id.clone(),
             transfer_target: Some(target.clone()),
+            transfer_target_type: crate::call::transfer_target_kind(&target),
         });
 
         Ok(transaction)
@@ -458,6 +461,11 @@ impl TransferController {
         gw.send_to_owner(&crate::rwi::CallTransferred {
             call_id: call_id.clone(),
             transfer_target: Some(transaction.target.clone()),
+            transfer_target_type: crate::call::transfer_target_kind(&transaction.target),
+            transfer_source: gw
+                .meta_store
+                .get_sync(&call_id)
+                .and_then(|m| m.transfer_source),
         });
 
         Ok(transaction)
@@ -502,6 +510,7 @@ impl TransferController {
                 sip_status: Some(487),
                 reason: Some("cancelled".to_string()),
                 transfer_target: Some(transaction.target.clone()),
+                transfer_target_type: crate::call::transfer_target_kind(&transaction.target),
             });
         }
 
@@ -560,6 +569,7 @@ impl TransferController {
                 gw.send_to_owner(&crate::rwi::CallTransferAccepted {
                     call_id: call_id.clone(),
                     transfer_target: Some(tx_clone.target.clone()),
+                    transfer_target_type: crate::call::transfer_target_kind(&tx_clone.target),
                 });
             }
             GatewayEvent::Failed {
@@ -573,6 +583,7 @@ impl TransferController {
                     sip_status: Some(sip_status),
                     reason: Some(reason.as_str().to_string()),
                     transfer_target: Some(tx_clone.target.clone()),
+                    transfer_target_type: crate::call::transfer_target_kind(&tx_clone.target),
                 });
             }
             GatewayEvent::None => {}
@@ -628,6 +639,13 @@ impl TransferController {
                     gw.send_to_owner(&crate::rwi::CallTransferred {
                         call_id: completed_tx.call_id.clone(),
                         transfer_target: Some(completed_tx.target.clone()),
+                        transfer_target_type: crate::call::transfer_target_kind(
+                            &completed_tx.target,
+                        ),
+                        transfer_source: gw
+                            .meta_store
+                            .get_sync(&completed_tx.call_id)
+                            .and_then(|m| m.transfer_source),
                     });
                     return Some(completed_tx);
                 }
@@ -656,6 +674,7 @@ impl TransferController {
                     sip_status: Some(notify_status),
                     reason: Some(reason.as_str().to_string()),
                     transfer_target: Some(failed_tx.target.clone()),
+                    transfer_target_type: crate::call::transfer_target_kind(&failed_tx.target),
                 });
                 Some(failed_tx)
             }

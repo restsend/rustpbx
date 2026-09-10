@@ -146,6 +146,9 @@ Webhook 处理器运行在专用的 tokio 运行时上,其 HTTP 推送不会与 
 | `trunk` | Option\<String\> | SIP 中继名称 |
 | `app_id` | Option\<String\> | IVR 应用 ID |
 | `routing_target` | Option\<String\> | 当前路由目标 |
+| `agent_id` | Option\<String\> | CC 坐席 ID —— **仅当呼叫实际涉及已注册 CC 坐席时**出现 |
+| `agent_name` | Option\<String\> | CC 坐席显示名（与 `agent_id` 同条件） |
+| `queue_id` | Option\<String\> | 服务该呼叫的队列（如有） |
 | `root` | Option\<Object\> | 根呼叫标识（嵌套对象，见下） |
 
 **`root`（根呼叫）** — 标识当前呼叫的根（跨转接保持不变）：
@@ -291,12 +294,16 @@ Webhook 使用 `(call_id, timestamp)` 元组去重，环形缓冲区容量 4096 
     "callee": "sip:4000@pbx.local",
     "caller_name": "13800138000",
     "callee_name": "4000",
-    "direction": "inbound"
+    "direction": "inbound",
+    "agent_id": "1001",
+    "queue_id": "support"
   }
 }
 ```
 
 > 被叫先回 183（带 SDP）再回 180 的呼叫会先后收到两条 `call_ringing`：`early_media` 先 `true` 后 `false`。
+>
+> **坐席呼叫**：呼叫涉及已注册 CC 坐席时，上下文携带 `agent_id` / `agent_name` / `queue_id` —— 取代了原先独立的 `cc_ringing` / `cc_answered` 事件。
 
 #### call_answered / call_unbridged / call_no_answer / call_busy
 
@@ -305,6 +312,20 @@ Webhook 使用 `(call_id, timestamp)` 元组去重，环形缓冲区容量 4096 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `call_id` | String | 呼叫标识 |
+| *+ctx* | | 扁平化上下文 |
+
+> 队列/IVR 应用的呼叫：主叫腿应答时应用正在运行（不发事件），坐席腿接通（LegConnected）时发 `call_answered` —— 即坐席接听时刻。
+
+#### call_held / call_unheld
+
+分发：call_owner
+
+呼叫腿被保持 / 恢复（显式 Hold 命令或入向 re-INVITE 携带 `sendonly`/`inactive`）。取代原先的 `cc_held` / `cc_unheld` 事件；坐席归因经由扁平化上下文注入（涉及坐席时）。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫标识 |
+| `leg_id` | String | 被保持 / 恢复的腿（`caller` / `callee` / ...） |
 | *+ctx* | | 扁平化上下文 |
 
 #### call_bridged
@@ -324,9 +345,10 @@ Webhook 使用 `(call_id, timestamp)` 元组去重，环形缓冲区容量 4096 
 |------|------|------|
 | `call_id` | String | 呼叫标识 |
 | `reason` | Option\<String\> | 挂机原因（见下表） |
-| `hangup_by` | Option\<String\> | 归一化发起方：`agent` / `caller` / `system` / `transfer` / `unknown`（与 `cc_hangup.hangup_by` 同词汇表；未涉及坐席的被叫挂机记为 `callee`） |
+| `hangup_by` | Option\<String\> | 归一化发起方：`agent` / `caller` / `system` / `transfer` / `unknown`（仅当呼叫实际涉及 CC 坐席——队列路由或 resolved_agent_id——被叫挂机才记为 `agent`，否则记为 `callee`） |
 | `sip_status` | Option\<u16\> | SIP 响应码 |
-| *+ctx* | | 扁平化上下文 |
+| `duration_secs` | Option\<u64\> | 通话时长（应答 → 挂机，秒）；未应答呼叫省略 |
+| *+ctx* | | 扁平化上下文（涉及坐席时含 `agent_id` / `agent_name` / `queue_id`） |
 
 **reason 枚举值**：
 
@@ -350,15 +372,37 @@ Webhook 使用 `(call_id, timestamp)` 元组去重，环形缓冲区容量 4096 
   "call_hangup": {
     "call_id": "call-abc",
     "reason": "caller",
+    "hangup_by": "caller",
     "sip_status": null,
+    "duration_secs": 42,
     "caller": "sip:13800138000@pbx.local",
     "callee": "sip:4000@pbx.local",
     "caller_name": "13800138000",
     "callee_name": "4000",
-    "direction": "inbound"
+    "direction": "inbound",
+    "agent_id": "1001",
+    "queue_id": "support"
   }
 }
 ```
+
+> **坐席呼叫**：呼叫涉及已注册 CC 坐席时，挂机上下文携带 `agent_id` / `agent_name` / `queue_id`（坐席发起的挂机 `hangup_by` 记为 `agent`）。取代原先独立的 `cc_hangup` 事件。
+>
+> 历史沿革：曾存在独立的 `cc_hangup` 事件（更早名为 `cc_ended`，`reason` 为内部枚举 Debug 形式如 `"ByCallee"`）；先归一化为与 `call_hangup` 一致，随后完全并入 `call_hangup`。
+
+##### 迁移对照表：原 `cc_*` 事件 → 统一 `call_*`
+
+CC addon 的独立呼叫生命周期事件已移除。坐席归因改由核心事件的扁平化上下文富化（`agent_id` / `agent_name` / `queue_id`）承载，**仅当涉及已注册 CC 坐席时出现**：
+
+| 原事件 | 统一后的表达 | 说明 |
+|---|---|---|
+| `cc_ringing` | `call_ringing`（+ctx） | `early_media` 为核心事件自有字段；每个 provisional 响应一条 |
+| `cc_answered` | `call_answered`（+ctx） | 按流程在应答时刻发射：无应用 `accept_call`、外呼 200 OK、或队列坐席腿接通（LegConnected） |
+| `cc_hangup` | `call_hangup`（+ctx、`duration_secs`） | `reason`/`hangup_by` 词汇表不变；未应答呼叫 `duration_secs` 省略（不再为 0） |
+| `cc_held` | `call_held`（+ctx） | `leg_id` 不变 |
+| `cc_unheld` | `call_unheld`（+ctx） | `leg_id` 不变 |
+
+分发模式由 broadcast 改为 `call_owner`；webhook / event-tap 投递不受影响（所有分发模式都会转发）。事件同时进入 resume 缓存（重连可回放）。**Webhook 允许列表**（`[rwi_webhook].events`）中引用 `cc_*` 名称必须改为 `call_*` —— 未知名会静默过滤掉所有事件。
 
 ### 6.2 转接事件
 
@@ -369,8 +413,45 @@ Webhook 使用 `(call_id, timestamp)` 元组去重，环形缓冲区容量 4096 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `call_id` | String | 呼叫标识 |
-| `transfer_target` | Option\<String\> | 原始转接目标字符串（如 `queue:queue-name?target=skillgroup:tech-support_G`）。在 SIP REFER Replaces 接管等场景下为 `None`。 |
+| `transfer_target` | Option\<String\> | 原始转接目标字符串（如 `queue:queue-name?target=skillgroup:tech-support_G`，或路由表兜转的裸号码）。在 SIP REFER Replaces 接管等场景下为 `None`。 |
+| `transfer_target_type` | Option\<String\> | 解析后的目标类型：`queue` \| `ivr` \| `route_point` \| `voicemail` \| `conference` \| `bridge` \| `sip`。未知时省略。 |
+| `transfer_source` | Option\<Object\> | 转接时捕获的 IVR 流转来源（仅 `call_transferred`），嵌套对象，见下。 |
 | *+ctx* | | 扁平化上下文 |
+
+`transfer_source` 嵌套字段（均可选）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `source_type` | String | `ivr`（从运行中的 IVR 流程转出）\| `queue`（由排队呼叫的坐席发起）\| `agent`（归因到已知坐席腿的转接）。当前代码仅产生这三个值 |
+| `name` | Option\<String\> | 来源 IVR 名称（如 `main-ivr`）或队列名（如 `sales`） |
+| `ivr_node_id` | Option\<String\> | 转接发生时呼叫所在的 IVR 节点 |
+| `agent_id` | Option\<String\> | 发起转接的坐席（已知时） |
+
+示例 — 从 IVR 节点盲转到队列：
+
+```json
+{
+  "event_type": "call_transferred",
+  "call_id": "a1b2c3",
+  "transfer_target": "queue:sales",
+  "transfer_target_type": "queue",
+  "transfer_source": {
+    "source_type": "ivr",
+    "name": "main-ivr",
+    "ivr_node_id": "menu-2"
+  }
+}
+```
+
+说明：
+
+- 盲转到会话内应用目标（`queue:` / `ivr:` / `toivr:` / `voicemail:` /
+  `conference:`）在交接完成时发出 `call_transferred`；SIP URI 目标在
+  拨叫/REFER 成功时发出。
+- 盲转**裸号码**且路由表映射到队列或应用时，会在原会话内启动对应
+  流程（`transfer_target_type` 为 `queue` / `ivr`，`transfer_target`
+  保留原始号码）。CTI/API 转接与话机 REFER 均受
+  `proxy.route_originated_calls` 门控。
 
 #### call_transfer_failed
 
@@ -382,6 +463,33 @@ Webhook 使用 `(call_id, timestamp)` 元组去重，环形缓冲区容量 4096 
 | `sip_status` | Option\<u16\> | SIP 状态码 |
 | `reason` | Option\<String\> | 失败原因 |
 | `transfer_target` | Option\<String\> | 原始转接目标字符串（同上） |
+| `transfer_target_type` | Option\<String\> | 解析后的目标类型（同上） |
+| *+ctx* | | 扁平化上下文 |
+
+#### consult_switched
+
+分发：broadcast
+
+咨询转接中客户/被咨询方通话对象切换时触发（owner-anchored consult 流程）。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫标识 |
+| `transfer_id` | String | 转接事务 ID |
+| `talking_to` | String | 当前通话对象：`customer` \| `consult` |
+| *+ctx* | | 扁平化上下文 |
+
+#### conference_auth_result
+
+分发：broadcast
+
+客户对会议授权 IVR 的 DTMF 应答结果（`conference_auth` 流程）。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫标识 |
+| `transfer_id` | String | 转接事务 ID |
+| `result` | String | `authorized` \| `denied` \| `timeout` |
 | *+ctx* | | 扁平化上下文 |
 
 ### 6.3 媒体事件
@@ -400,7 +508,7 @@ Webhook 使用 `(call_id, timestamp)` 元组去重，环形缓冲区容量 4096 
 > `call.transfer` → `voip_bridge:` WebSocket 端点（呼入/外呼均支持），
 > 不再产生这两个事件。
 
-#### media_ringback_passthrough_started / media_ringback_passthrough_stopped
+#### media_ringback_passthrough_started
 
 分发：call_owner
 
@@ -408,6 +516,8 @@ Webhook 使用 `(call_id, timestamp)` 元组去重，环形缓冲区容量 4096 
 |------|------|------|
 | `source` | String | 源 leg call_id |
 | `target` | String | 目标 leg call_id |
+
+> 只有 `started` 事件；回铃透传结束不发 `stopped` 事件（代码中无该定义）。
 
 #### media_play_started / media_play_finished
 
@@ -421,7 +531,7 @@ Webhook 使用 `(call_id, timestamp)` 元组去重，环形缓冲区容量 4096 
 
 #### dtmf
 
-分发：fan_out_to_context
+分发：call_owner
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -446,16 +556,15 @@ Webhook 使用 `(call_id, timestamp)` 元组去重，环形缓冲区容量 4096 
 
 ### 6.4 录音事件
 
-#### record_started / record_paused / record_resumed / record_failed
+#### record_started / record_paused / record_resumed
 
 分发：call_owner
 
-> 触发方式：通过 `RecordStart` / `RecordPause` / `RecordResume` / `RecordStop` RWI 命令触发，**非自动**。录音不会在通话接通后自动开始。
+> 触发方式：通过 `RecordStart` / `RecordPause` / `RecordResume` / `RecordStop` RWI 命令触发，**非自动**。录音不会在通话接通后自动开始。不存在 `record_failed` 事件——启动/停止失败通过命令错误响应返回。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `call_id` | String | 呼叫标识 |
-| `error` | String | `record_failed` 专用：错误信息 |
 | *+ctx* | | 扁平化上下文 |
 
 #### record_stopped（增强版）
@@ -517,6 +626,10 @@ Webhook 使用 `(call_id, timestamp)` 元组去重，环形缓冲区容量 4096 
 
 录音文件上传完成后触发，包含完整元数据。
 
+> **分段录音**：通话内每段录音（IVR 段、坐席段等）上传成功后**各自触发一条**本事件——`filename` / `download_url` / `file_size` 为该段独有，`extra` 在呼叫级元数据之外附带 `seq`（本通通话内序号）、`label`（坐席 id 或 IVR 名）、`segment_type`、`segment_id`、`started_at` / `ended_at`。`record_end` 仍保持每通呼叫一条汇总。
+>
+> **兼容**：改造前的**聚合事件仍然每通呼叫发一条**（共 N+1 条）——其 `extra.recording_segments` 依旧是一个 JSON **字符串**（内容为数组，需 `JSON.parse`），`filename` 取第一段文件。只按 `filename` 去重的新旧订阅方均可正常工作；只想要分段事件的消费方可忽略 `extra` 中含 `recording_segments` 键的那条聚合事件。CDR 的 `metadata.recording_segments` 保持原生 JSON 数组不变。
+
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `call_id` | String | 呼叫标识 |
@@ -536,32 +649,73 @@ Webhook 使用 `(call_id, timestamp)` 元组去重，环形缓冲区容量 4096 
 
 > 注意：不存在 `unique_id` typed 字段；`agent_id` 等业务字段依赖 addon 是否写入 `extra`。
 
+RWI WebSocket 帧（payload 平铺，`event_type` 由网关注入）：
+
+```json
+{
+  "event_type": "recording_metadata_available",
+  "call_id": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40",
+  "metadata": {
+    "filename": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40_02_1001.wav",
+    "file_size": 153344,
+    "download_url": "./config/recorders/20260910/0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40_02_1001.wav",
+    "caller_name": "330909",
+    "callee_name": "1001",
+    "call_type": "inbound",
+    "call_start_time": "2026-09-10T08:54:01.155781+00:00",
+    "call_end_time": "2026-09-10T08:54:48.155781+00:00",
+    "upload_time": "2026-09-10T08:54:18.157941+00:00",
+    "session_id": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40",
+    "segment_id": "9c1f02ab",
+    "queue_id": "support",
+    "label": "1001",
+    "agent_name": "Agent 1001",
+    "agent_id": "1001",
+    "started_at": "2026-09-10T08:54:18.155781+00:00",
+    "segment_type": "agent",
+    "seq": "2",
+    "ended_at": "2026-09-10T08:54:46.155781+00:00"
+  }
+}
+```
+
+Webhook 投递使用信封（`webhook.rs`：`rwi` / `event_id` 幂等键 / `timestamp` / `event` 内嵌同一 payload）：
+
 ```json
 {
   "rwi": "1.0",
-  "recording_metadata_available": {
-    "call_id": "call-abc",
+  "event_id": "6b1f0a44-2f0e-4a3e-8e5d-9c7b1d2e3f45",
+  "timestamp": "2026-09-10T08:54:18.312004+00:00",
+  "call_id": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40",
+  "event_type": "recording_metadata_available",
+  "event": {
+    "call_id": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40",
     "metadata": {
-      "filename": "uuid_2026-05-14.mp3",
-      "unique_id": "uuid-abc-123",
-      "file_size": 149517,
-      "download_url": "https://storage.example.com/rec.mp3",
+      "filename": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40_02_1001.wav",
+      "file_size": 153344,
+      "download_url": "./config/recorders/20260910/0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40_02_1001.wav",
       "caller_name": "330909",
-      "callee_name": "9242000001",
-      "called_phone": null,
+      "callee_name": "1001",
       "call_type": "inbound",
-      "agent_id": "451447",
-      "agent_name": "luoxiaofeng90_v",
-      "call_start_time": "2026-05-14T08:11:35Z",
-      "call_end_time": "2026-05-14T08:12:26Z",
-      "upload_time": "2026-05-14T16:14:46Z",
-      "switch_flag": "ks",
-      "process_flag": "ks_22_normal",
-      "session_id": "call-root-42"
+      "call_start_time": "2026-09-10T08:54:01.155781+00:00",
+      "call_end_time": "2026-09-10T08:54:48.155781+00:00",
+      "upload_time": "2026-09-10T08:54:18.157941+00:00",
+      "session_id": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40",
+      "segment_id": "9c1f02ab",
+      "queue_id": "support",
+      "label": "1001",
+      "agent_name": "Agent 1001",
+      "agent_id": "1001",
+      "started_at": "2026-09-10T08:54:18.155781+00:00",
+      "segment_type": "agent",
+      "seq": "2",
+      "ended_at": "2026-09-10T08:54:46.155781+00:00"
     }
   }
 }
 ```
+
+> 上面是坐席段的真实序列化输出（`cargo test segment_metadata_wire_shape -- --nocapture`）：文件名 `filename` 中 seq 为两位零填充（`_02_`）；`extra` 内所有值均为字符串（`seq` 数字同样序列化为 `"2"`）；`extra` 键序不定（HashMap）；typed 字段为 `None` 时整个键不出现（如无主被叫信息时没有 `caller_name`/`callee_name`）。`download_url`：`type=local` 为归档路径（`{path}/{YYYYMMDD}/{filename}`），`type=http`/`s3` 为上传返回/预构造的 URL。addon 透传键（wholesale 的 `switch_flag` 等）原样附加；不存在 `unique_id` typed 字段。无分段录音时（整通话录制 / SipFlow）事件保持原有单条形态，`metadata` 不含 `seq` / `label` / `segment_*` 键。
 
 #### record_end
 
@@ -768,7 +922,7 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 ### 6.6 队列 / ACD 事件
 
 > **事件来源说明**：队列相关事件分两个家族，由不同子系统产生，可同时出现：
-> - **`queue_*`（队列生命周期）**：由 Queue 应用（`src/call/app/queue.rs`）产生，**无论是否启用 CC addon 都会发**。覆盖入队、振铃、接通、放弃、超时、回退等通用生命周期。
+> - **`queue_*`（队列生命周期）**：由 Queue 应用（`src/call/app/queue.rs`，经 `gw.broadcast`）与 CC addon 的 ACD 桥（`src/addons/cc/mod.rs`，经 `broadcast_event`）产生，**无论是否启用 CC addon 都会发**。覆盖入队、振铃、接通、放弃、超时、回退等通用生命周期。两个子系统都以 broadcast 分发（唯一例外：`queue.enqueue` RWI 命令路径走 owner）。
 > - **`skill_group_*`（技能组调度决策）**：由 CC addon 的 ACD 适配器（`src/addons/cc/agent_registry_adapter.rs`）在队列向 ACD 询问坐席、ACD 产出调度结果时产生，**仅在启用 CC addon 且使用技能路由时发**。
 >
 > 一通走技能组的呼叫，典型事件序列：
@@ -794,11 +948,13 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 
 #### queue_position_changed
 
+分发：broadcast（由 CC ACD 桥转发；核心 queue 应用不单独发射）
+
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `call_id` | String | 呼叫标识 |
 | `queue_id` | String | 队列 ID |
-| `position` | u32 | 当前排队位置 |
+| `position` | usize | 当前排队位置 |
 | *+ctx* | | 扁平化上下文 |
 
 #### queue_agent_offered / queue_agent_connected
@@ -827,35 +983,42 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 | `queue_id` | String | 队列 ID |
 | *+ctx* | | 扁平化上下文 |
 
-
-#### queue_voicemail_redirected
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `call_id` | String | 呼叫标识 |
-| `queue_id` | String | 队列 ID |
-| `reason` | String | 原因 |
-| *+ctx* | | 扁平化上下文 |
+> 等待超时后的留言转接不产生独立事件——它以 `queue_fallback_executed`（`action = "voicemail"`）表达。文档早先列出的 `queue_voicemail_redirected` 事件不存在。
 
 #### queue_candidates_found
+
+分发：broadcast
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `call_id` | String | 呼叫标识 |
 | `queue_id` | String | 队列 ID |
 | `candidates` | Vec\<String\> | 候选坐席列表 |
-| `trace_id` | String | ACD 跟踪 ID |
 | *+ctx* | | 扁平化上下文 |
 
-#### queue_agent_ringing / queue_agent_no_answer / queue_agent_rejected
+#### queue_agent_offered
+
+分发：broadcast
+
+> 原 ACD 桥以 `queue_agent_ringing` 发射的重名事件已并入 —— 无论驱动方（内置 queue 应用或 ACD 引擎），坐席振铃一律以 `queue_agent_offered` 上报。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `call_id` | String | 呼叫标识 |
 | `queue_id` | String | 队列 ID |
 | `agent_id` | String | 坐席 ID |
-| `attempt` | u32 | `no_answer`/`rejected` 专用：尝试次数 |
-| `trace_id` | String | ACD 跟踪 ID |
+| *+ctx* | | 扁平化上下文 |
+
+#### queue_agent_no_answer / queue_agent_rejected
+
+分发：broadcast
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫标识 |
+| `queue_id` | String | 队列 ID |
+| `agent_id` | String | 坐席 ID |
+| `attempt` | u32 | 尝试次数 |
 | *+ctx* | | 扁平化上下文 |
 
 #### queue_fallback_executed
@@ -866,7 +1029,6 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 | `queue_id` | String | 队列 ID |
 | `action` | String | 执行的回退动作 |
 | `reason` | String | 原因 |
-| `trace_id` | String | ACD 跟踪 ID |
 | *+ctx* | | 扁平化上下文 |
 
 #### queue_alert
@@ -890,7 +1052,6 @@ ACD 调度器为技能组找到候选坐席时触发。
 | `call_id` | String | 呼叫标识 |
 | `skill_group_id` | Option\<String\> | 技能组 ID（显式 `skill-group:{id}` 路径为 `Some`；自主技能路由为 `None`） |
 | `candidates` | Vec\<String\> | 候选坐席 ID 列表 |
-| `trace_id` | String | 跟踪 ID |
 
 #### skill_group_agent_assigned
 
@@ -903,7 +1064,7 @@ ACD 调度器决定将某坐席分配给该呼叫时触发（ACD `Assign` 决策
 | `call_id` | String | 呼叫标识 |
 | `skill_group_id` | Option\<String\> | 技能组 ID |
 | `agent_id` | String | 被分配的坐席 ID |
-| `trace_id` | String | 跟踪 ID |
+| `dispatch_reason` | String | 派发原因：`regular` \| `forced_available`（强制就绪溢出） \| `overflow` |
 
 #### skill_group_no_agent
 
@@ -971,26 +1132,94 @@ ACD 调度器无法为技能组提供坐席时触发。
 }
 ```
 
+#### agent_registered / agent_unregistered
+
+分发：broadcast
+
+坐席签入 / 签出时触发（注册表写入或 SIP 注册桥接）。
+
+**agent_registered**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `agent_id` | String | 坐席 ID |
+| `agent_name` | Option\<String\> | 坐席名称 |
+| `agent_extension` | Option\<String\> | 绑定分机号 |
+| `team_id` | Option\<String\> | 团队 ID |
+
+**agent_unregistered**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `agent_id` | String | 坐席 ID |
+| `agent_name` | Option\<String\> | 坐席名称 |
+| `reason_code` | Option\<String\> | 注销原因码 |
+
+#### presence_state_changed
+
+分发：broadcast
+
+SIP PUBLISH  presence 状态变化（每个本地 PUBLISH 触发）。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `identity` | String | presence 身份（分机/AOR） |
+| `from_status` | String | 原状态 |
+| `to_status` | String | 新状态 |
+| `note` | Option\<String\> | 附加说明 |
+| `agent_id` | Option\<String\> | 关联坐席 ID（可解析时） |
+
 ---
 
-#### cc_ringing / cc_answered / cc_held / cc_unheld
+#### 原 cc_ringing / cc_answered / cc_hangup / cc_held / cc_unheld（已并入 call_* 事件）
 
-CC 坐席呼叫生命周期事件（addon-cc）。`cc_ringing`：坐席话机振铃；
-`cc_answered`：坐席接听；`cc_held` / `cc_unheld`：坐席侧保持 / 恢复。
-载荷含 `call_id`、`agent_id`、`queue_id` 与扁平化上下文。
-
-#### cc_hangup
-
-CC 呼叫挂机。载荷含 `call_id`、`agent_id`、`hangup_by`
-（`agent` / `caller` / `system` / `transfer` / `unknown`）、`talk_secs`。
+> **已移除**：这些独立的 CC 坐席呼叫事件已并入统一的 `call_*` 生命周期事件——
+> 当呼叫实际涉及已注册 CC 坐席时，`call_ringing` / `call_answered` /
+> `call_hangup` / `call_held` / `call_unheld` 经扁平化上下文携带
+> `agent_id`（规范坐席 ID，endpoint → primary_endpoint → agent_id 解析）、
+> `agent_name` 与 `queue_id`。见 §6.1 呼叫生命周期与 §4 扁平化上下文。
+> 未涉及坐席的呼叫不携带坐席相关字段。
 
 #### skill_group_call_queued / skill_group_call_abandoned / skill_group_service_unavailable
 
-技能组排队事件：呼叫进入 / 放弃技能组排队；无可用坐席。
-载荷含 `call_id`、`skill_group_id`、`waiting_count` 等。
+分发：broadcast
+
+技能组排队事件（ACD 调度上下文，与通用 `queue_*` 家族区分）。
+
+**skill_group_call_queued** — 呼叫进入技能组排队（无立即可用坐席）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫标识 |
+| `skill_group_id` | String | 技能组 ID |
+| `position` | usize | 排队位置 |
+| `ewt_secs` | u32 | 预计等待时长（秒） |
+| `reason` | String | `no_agent_available` \| `all_busy` \| `skill_mismatch` \| `capacity_full` |
+
+**skill_group_call_abandoned** — 呼叫者在分配坐席前放弃等待（统计 `calls_abandoned`）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫标识 |
+| `skill_group_id` | String | 技能组 ID |
+| `waited_secs` | u64 | 已等待时长（秒） |
+| `position` | usize | 放弃时位置 |
+
+**skill_group_service_unavailable** — 排队呼叫最终无法服务（触发 no-answer 动作链）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫标识 |
+| `skill_group_id` | String | 技能组 ID |
+| `reason` | String | `exhausted_retries` \| `no_matching_skill` \| `overflow_chain_end` \| `schedule_off_hours` \| `timeout` |
+| `attempts` | u32 | 派发尝试次数 |
+| `waited_secs` | u64 | 已等待时长（秒） |
+| `fallback_action` | String | `voicemail` \| `hangup` \| `callback` \| `back_to_ivr` |
+
+> 注意：不存在 `waiting_count` 字段；文档早先版本的该描述有误。
 
 
-### 6.10 会议事件
+### 6.8 会议事件
 
 #### conference_created / conference_destroyed
 
@@ -999,6 +1228,21 @@ CC 呼叫挂机。载荷含 `call_id`、`agent_id`、`hangup_by`
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `conf_id` | String | 会议房间 ID |
+
+#### conference_joined / conference_left
+
+分发：call_owner
+
+会议应用（`conference:` 目标）拨入 / 离开会议房间时触发。与
+`conference_member_*` 家族不同：后者由会议控制命令（静音、踢出等）产生。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `conf_id` | String | 会议 ID |
+| `call_id` | String | 成员呼叫 ID |
+| `leg_id` | String | 成员 leg |
+
+> `conference_left` 目前仅有类型定义、**无发射点**（预留）；`conference_joined` 在成员加入会议时实际发射。
 
 #### conference_member_joined / conference_member_left / conference_member_muted / conference_member_unmuted
 
@@ -1012,6 +1256,8 @@ CC 呼叫挂机。载荷含 `call_id`、`agent_id`、`hangup_by`
 
 #### conference_ended_by_host
 
+分发：broadcast
+
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `conf_id` | String | 会议 ID |
@@ -1019,13 +1265,7 @@ CC 呼叫挂机。载荷含 `call_id`、`agent_id`、`hangup_by`
 | `removed_call_ids` | Vec\<String\> | 被移除的成员 |
 | *+ctx* | | 扁平化上下文 |
 
-#### conference_auto_ended
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `conf_id` | String | 会议 ID |
-| `reason` | String | 结束原因 |
-| *+ctx* | | 扁平化上下文 |
+> 不存在 `conference_auto_ended` 事件（文档早先版本有误）；会议随主持人结束由本事件表达。
 
 #### conference_error
 
@@ -1034,15 +1274,11 @@ CC 呼叫挂机。载荷含 `call_id`、`agent_id`、`hangup_by`
 | `conf_id` | String | 会议 ID |
 | `error` | String | 错误信息 |
 
-#### conference_consult_dialing / conference_consult_connected
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `call_id` | String | 咨询呼叫 ID |
-| `target` | String | 咨询目标 |
-| *+ctx* | | 扁平化上下文 |
+> 咨询转接的拨打/接通不产生 `conference_consult_dialing` / `conference_consult_connected` 事件（文档早先版本有误）；实际事件为 §6.2 的 `consult_switched`。
 
 #### conference_merge_requested / conference_merged / conference_merge_failed
+
+分发：broadcast
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -1052,14 +1288,16 @@ CC 呼叫挂机。载荷含 `call_id`、`agent_id`、`hangup_by`
 | `reason` | String | `merge_failed` 专用：失败原因 |
 | *+ctx* | | 扁平化上下文 |
 
-#### conference_seat_replace_started / ...succeeded / ...failed / ...rollback_failed
+#### conference_seat_replace_started / ...succeeded / ...failed
+
+分发：broadcast
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `conf_id` | String | 会议 ID |
 | `old_call_id` | String | 原成员呼叫 ID |
 | `new_call_id` | String | 新成员呼叫 ID |
-| `reason` | String | `failed`/`rollback_failed` 专用：失败原因 |
+| `reason` | String | `failed` 专用：失败原因 |
 
 **座位替换事件序列（成功路径）**：
 1. `conference_seat_replace_started`
@@ -1067,9 +1305,11 @@ CC 呼叫挂机。载荷含 `call_id`、`agent_id`、`hangup_by`
 3. `conference_member_joined`（新成员加入）
 4. `conference_seat_replace_succeeded`
 
+> 不存在 `conference_seat_replace_rollback_failed` 事件（文档早先版本有误）；家族仅 started/succeeded/failed 三个。
+
 ---
 
-### 6.11 管理监控事件
+### 6.9 管理监控事件
 
 #### supervisor_listen_started / supervisor_whisper_started / supervisor_barge_started / supervisor_takeover_started
 
@@ -1087,7 +1327,7 @@ CC 呼叫挂机。载荷含 `call_id`、`agent_id`、`hangup_by`
 
 ---
 
-### 6.13 SIP 信令事件
+### 6.10 SIP 信令事件
 
 #### sip_message_received / sip_notify_received
 
@@ -1101,16 +1341,9 @@ CC 呼叫挂机。载荷含 `call_id`、`agent_id`、`hangup_by`
 
 ---
 
-### 6.14 会话系统事件
+### 6.11 会话系统事件
 
-#### call_ownership_changed
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `call_id` | String | 呼叫标识 |
-| `session_id` | String | 接管会话 ID |
-| `mode` | String | 模式（`control`/`listen`/`whisper`/`barge`） |
-| *+ctx* | | 扁平化上下文 |
+> 不存在 `call_ownership_changed` 事件（文档早先版本有误）；呼叫所有权/接管通过 supervisor 命令与其 `supervisor_*_started` 事件表达。
 
 #### session.resume / call.resume（命令结果，非事件）
 
@@ -1126,14 +1359,16 @@ CC 呼叫挂机。载荷含 `call_id`、`agent_id`、`hangup_by`
 | 事件类型 | 分发 | call_id | 上下文 |
 |----------|------|---------|--------|
 | `call_created` | owner | ✅ | 自有字段（入呼 INVITE 与外呼 originate） |
-| `call_ringing` | owner | ✅ | +ctx +`early_media`（每条 provisional 一条事件） |
-| `call_answered` | owner | ✅ | +ctx |
+| `call_ringing` | owner | ✅ | +ctx +`early_media`（每条 provisional 一条事件；涉及坐席时 +ctx 含 agent_id） |
+| `call_answered` | owner | ✅ | +ctx（涉及坐席时含 agent_id） |
+| `call_held` | owner | ✅ | +ctx（涉及坐席时含 agent_id） |
+| `call_unheld` | owner | ✅ | +ctx（涉及坐席时含 agent_id） |
 | `call_bridged` | owner | leg_a | — |
 | `call_unbridged` | owner | ✅ | +ctx |
 | `call_transferred` | owner | ✅ | +ctx |
 | `call_transfer_accepted` | owner | ✅ | +ctx |
 | `call_transfer_failed` | owner | ✅ | +ctx |
-| `call_hangup` | owner | ✅ | +ctx |
+| `call_hangup` | owner | ✅ | +ctx（涉及坐席时含 agent_id/queue_id；+`duration_secs`） |
 | `call_no_answer` | owner | ✅ | +ctx |
 | `call_busy` | owner | ✅ | +ctx |
 | `media_hold_started` | owner | ✅ | +ctx |
@@ -1145,13 +1380,12 @@ CC 呼叫挂机。载荷含 `call_id`、`agent_id`、`hangup_by`
 | `record_paused` | owner | ✅ | +ctx |
 | `record_resumed` | owner | ✅ | +ctx |
 | `record_stopped` | owner | ✅ | 自有字段+enrich |
-| `record_failed` | owner | ✅ | +ctx |
-| `recording_metadata_available` | owner | ✅ | — |
+| `recording_metadata_available` | owner | ✅ | 自有字段+enrich（分段录音每段一条 + 每呼叫一条聚合，聚合条 extra 含 `recording_segments` JSON 字符串） |
 | `transcript_started` | owner | ✅ | 自有字段 |
 | `transcript_segment` | owner | ✅ | 自有字段+enrich |
 | `transcript_error` | owner | ✅ | 自有字段+enrich |
 | `transcript_ended` | owner | ✅ | 自有字段 |
-| `dtmf` | fan_out | ✅ | +ctx |
+| `dtmf` | owner | ✅ | +ctx |
 | `dtmf_collected` | owner | ✅ | +ctx |
 | `dtmf_collection_timeout` | owner | ✅ | +ctx |
 | `ivr_node_entered` | fan_out | ✅ | +ctx |
@@ -1159,22 +1393,32 @@ CC 呼叫挂机。载荷含 `call_id`、`agent_id`、`hangup_by`
 | `ivr_flow_completed` | fan_out | ✅ | +ctx |
 | `ivr_step_trace` | fan_out | ✅ | — |
 | `queue_joined` | owner/broadcast | ✅ | +ctx |
-| `queue_position_changed` | owner | ✅ | +ctx |
+| `queue_position_changed` | broadcast | ✅ | +ctx |
 | `queue_agent_offered` | broadcast | ✅ | +ctx |
-| `queue_agent_connected` | owner | ✅ | +ctx |
+| `queue_agent_connected` | broadcast | ✅ | +ctx |
 | `queue_left` | broadcast | ✅ | +ctx |
-| `queue_wait_timeout` | owner | ✅ | +ctx |
-| `queue_candidates_found` | owner | ✅ | +ctx |
-| `queue_agent_ringing` | owner | ✅ | +ctx |
-| `queue_agent_no_answer` | owner | ✅ | +ctx |
-| `queue_agent_rejected` | owner | ✅ | +ctx |
-| `queue_fallback_executed` | owner | ✅ | +ctx |
+| `queue_wait_timeout` | broadcast | ✅ | +ctx |
+| `queue_candidates_found` | broadcast | ✅ | +ctx |
+| `queue_agent_offered` | broadcast | ✅ | +ctx |
+| `queue_agent_no_answer` | broadcast | ✅ | +ctx |
+| `queue_agent_rejected` | broadcast | ✅ | +ctx |
+| `queue_fallback_executed` | broadcast | ✅ | +ctx（留言转接以 `action = "voicemail"` 表达，无独立事件） |
 | `queue_alert` | broadcast | — | — |
 | `skill_group_candidates_found` | broadcast | ✅ | — |
 | `skill_group_agent_assigned` | broadcast | ✅ | — |
 | `skill_group_no_agent` | broadcast | ✅ | — |
+| `skill_group_call_queued` | broadcast | ✅ | — |
+| `skill_group_call_abandoned` | broadcast | ✅ | — |
+| `skill_group_service_unavailable` | broadcast | ✅ | — |
 | `agent_state_changed` | broadcast | 可选 | — |
+| `agent_registered` | broadcast | — | — |
+| `agent_unregistered` | broadcast | — | — |
+| `presence_state_changed` | broadcast | — | — |
+| `consult_switched` | broadcast | ✅ | +ctx |
+| `conference_auth_result` | broadcast | ✅ | +ctx |
 | `conference_created` | broadcast | — | — |
+| `conference_joined` | owner | ✅ | +ctx |
+| `conference_left` | —（已定义未发射） | ✅ | +ctx |
 | `conference_member_joined` | broadcast | ✅ | +ctx |
 | `conference_member_left` | broadcast | ✅ | +ctx |
 | `conference_member_muted` | broadcast | ✅ | +ctx |
@@ -1182,13 +1426,12 @@ CC 呼叫挂机。载荷含 `call_id`、`agent_id`、`hangup_by`
 | `conference_destroyed` | broadcast | — | — |
 | `conference_ended_by_host` | broadcast | — | +ctx |
 | `conference_error` | broadcast | — | — |
-| `conference_merge_requested` | fan_out | ✅ | +ctx |
-| `conference_merged` | fan_out | ✅ | +ctx |
-| `conference_merge_failed` | fan_out | ✅ | +ctx |
-| `conference_seat_replace_started` | fan_out | ✅ | — |
-| `conference_seat_replace_succeeded` | fan_out | ✅ | — |
-| `conference_seat_replace_failed` | fan_out | ✅ | — |
-| `conference_seat_replace_rollback_failed` | fan_out | ✅ | — |
+| `conference_merge_requested` | broadcast | ✅ | +ctx |
+| `conference_merged` | broadcast | ✅ | +ctx |
+| `conference_merge_failed` | broadcast | ✅ | +ctx |
+| `conference_seat_replace_started` | broadcast | ✅ | — |
+| `conference_seat_replace_succeeded` | broadcast | ✅ | — |
+| `conference_seat_replace_failed` | broadcast | ✅ | — |
 | `supervisor_listen_started` | owner | — | — |
 | `supervisor_whisper_started` | owner | — | — |
 | `supervisor_barge_started` | owner | — | — |

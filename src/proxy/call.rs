@@ -503,6 +503,16 @@ pub struct CallModule {
     pub(crate) inner: Arc<CallModuleInner>,
 }
 
+/// Outcome of [`CallModule::try_execute_refer_app_handoff`].
+enum ReferExecution {
+    /// Hand-off dispatched — transfer executed inside the original session
+    /// (events already emitted there).
+    Done,
+    /// No queue/application route matched — the caller should proceed with
+    /// the raw originate.
+    FallThrough,
+}
+
 impl CallModule {
     pub fn create(server: SipServerRef, config: Arc<ProxyConfig>) -> Result<Box<dyn ProxyModule>> {
         let module = CallModule::new(config, server);
@@ -1011,7 +1021,24 @@ impl CallModule {
             .map(|r| r.new_recording_config())
             .unwrap_or_default();
 
+        // Global session id (RFC 7989): use the Call-ID when UUID-shaped,
+        // else a fresh UUID. Plain P2P extension dialling keeps the raw
+        // Call-ID — no Session-ID is generated or injected for those calls.
+        // Cross-node/cross-entity root inheritance happens later in the
+        // session constructor via the Session-ID header (UUI fallback), so
+        // this leg id stays unique per node (cluster session registry keys
+        // on it).
+        let session_id_enabled = !(direction == DialDirection::Internal
+            && pending_app.is_none()
+            && pending_queue.is_none()
+            && preview_forward.is_none());
+        let session_id = if session_id_enabled {
+            crate::call::session_id::normalize_or_generate(&dialog_id)
+        } else {
+            session_id
+        };
         let mut dialplan = Dialplan::new(session_id.clone(), original.clone(), direction)
+            .with_session_id_enabled(session_id_enabled)
             .with_caller(
                 preview_forward
                     .as_ref()
@@ -2001,6 +2028,13 @@ impl CallModule {
                                     g.broadcast(&crate::rwi::CallTransferred {
                                         call_id: old_session_id.clone(),
                                         transfer_target: None,
+                                        // Replaces takeover — the effective
+                                        // target is opaque to this node.
+                                        transfer_target_type: None,
+                                        transfer_source: g
+                                            .meta_store
+                                            .get_sync(&old_session_id)
+                                            .and_then(|m| m.transfer_source),
                                     });
                                 }
                             }
@@ -2236,6 +2270,9 @@ impl CallModule {
         let original_handle = original_handle.unwrap();
         let original_session_id = original_handle.session_id().to_string();
         let user = cookie.get_user().clone();
+        // Fresh cookie for the route preview (carries no transaction state —
+        // see `try_execute_refer_app_handoff`).
+        let route_cookie = crate::call::cookie::TransactionCookie::from(&tx.key);
 
         // Track transfer via CC addon event system
         let transfer_id = format!("refer-{}", dialog_id.call_id);
@@ -2262,15 +2299,77 @@ impl CallModule {
             // Determine if this REFER includes a Replaces parameter
             let (target_uri, replaces_header) = Self::parse_refer_to(&refer_to_clone);
 
-            // Originate new call to transfer target
-            let result = Self::execute_inbound_refer_transfer(
-                &server,
-                &original_handle,
-                &original_session_id,
-                &target_uri,
-                replaces_header.as_deref(),
-            )
-            .await;
+            // Queue/application hand-off first: a REFER to a bare number that
+            // the route table maps to a queue or IVR keeps the call inside
+            // the original session (UUI root inheritance, transfer-source
+            // recording, return-app fallbacks). REFERs carrying `Replaces`
+            // are attended-style takeovers and always take the raw originate.
+            // Every other blind REFER also executes inside the original
+            // session by default (B-leg swap via `CallCommand::Transfer`);
+            // the raw originate only runs when the switch is disabled or the
+            // session is already gone.
+            let (result, event_emitted_by_session) = if replaces_header.is_none() {
+                match Self::try_execute_refer_app_handoff(
+                    &server,
+                    &original_handle,
+                    &original_session_id,
+                    &target_uri,
+                    &route_cookie,
+                    &dialog_id,
+                )
+                .await
+                {
+                    Ok(ReferExecution::Done) => (Ok(()), true),
+                    Ok(ReferExecution::FallThrough) => {
+                        if server.proxy_config.load().inbound_refer_in_session {
+                            match Self::execute_inbound_refer_in_session(
+                                &original_handle,
+                                &dialog_id,
+                                &target_uri,
+                            )
+                            .await
+                            {
+                                Ok(true) => (Ok(()), true),
+                                // Session gone / dispatch failed — fall back
+                                // to the legacy raw originate.
+                                Ok(false) => {
+                                    let result = Self::execute_inbound_refer_transfer(
+                                        &server,
+                                        &original_handle,
+                                        &original_session_id,
+                                        &target_uri,
+                                        replaces_header.as_deref(),
+                                    )
+                                    .await;
+                                    (result, false)
+                                }
+                                Err(e) => (Err(e), false),
+                            }
+                        } else {
+                            let result = Self::execute_inbound_refer_transfer(
+                                &server,
+                                &original_handle,
+                                &original_session_id,
+                                &target_uri,
+                                replaces_header.as_deref(),
+                            )
+                            .await;
+                            (result, false)
+                        }
+                    }
+                    Err(e) => (Err(e), false),
+                }
+            } else {
+                let result = Self::execute_inbound_refer_transfer(
+                    &server,
+                    &original_handle,
+                    &original_session_id,
+                    &target_uri,
+                    replaces_header.as_deref(),
+                )
+                .await;
+                (result, false)
+            };
 
             // Send final NOTIFY based on result
             let (notify_status, notify_reason) = match result {
@@ -2295,19 +2394,212 @@ impl CallModule {
                 info!(status = notify_status, "Sent final NOTIFY for REFER");
             }
 
-            // Emit transfer event to RWI if applicable
-            if let Some(_user) = user
+            // Emit transfer event to RWI if applicable. The in-session
+            // hand-off path already emitted its own `call_transferred` with
+            // the flow-source annotation — never double-emit.
+            if !event_emitted_by_session
+                && let Some(_user) = user
                 && let Some(ref gw) = server.rwi_gateway
             {
                 let g = gw.read();
                 g.send_to_owner(&crate::rwi::CallTransferred {
                     call_id: original_session_id.clone(),
                     transfer_target: Some(refer_to_clone.clone()),
+                    transfer_target_type: crate::call::transfer_target_kind(&refer_to_clone),
+                    transfer_source: g
+                        .meta_store
+                        .get_sync(&original_session_id)
+                        .and_then(|m| m.transfer_source),
                 });
             }
         });
 
         Ok(())
+    }
+
+    /// Execute an inbound blind REFER inside the original session.
+    ///
+    /// Dispatches a `CallCommand::Transfer` (attended: false) to the session
+    /// that received the REFER; the session swaps its B leg in-place via the
+    /// blind-transfer B2BUA path (`dial_blind_transfer_b2bua`). One logical
+    /// call therefore stays one session — and one CDR: root session-id
+    /// inheritance, transfer-source recording and return-app fallbacks keep
+    /// working, and the transferor leg is hung up only after the new leg
+    /// answers (left untouched on failure, so the caller keeps talking to
+    /// the original party).
+    ///
+    /// Returns `Ok(false)` when the session could not be reached (torn down,
+    /// command channel closed, transferor leg resolution timed out) so the
+    /// caller can fall back to the legacy raw originate.
+    pub(crate) async fn execute_inbound_refer_in_session(
+        original_handle: &crate::proxy::proxy_call::sip_session::SipSessionHandle,
+        dialog_id: &DialogId,
+        target_uri: &str,
+    ) -> Result<bool, (u16, String)> {
+        // Identify the transferor leg (the REFER-sending party) inside the
+        // session. Unknown dialog (race with teardown) → assume the callee
+        // side, which `resolve_transfer_leg` maps to the connected agent leg.
+        // Any sign the session is unreachable (channel closed, leg resolution
+        // timed out) falls through to the legacy raw originate.
+        let leg_id = {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            if original_handle
+                .send_command(crate::call::domain::CallCommand::QueryLegByDialog {
+                    dialog_id: dialog_id.to_string(),
+                    reply: reply_tx,
+                })
+                .is_err()
+            {
+                info!(dialog_id = %dialog_id, "session command channel closed; falling back to raw originate");
+                return Ok(false);
+            }
+            match tokio::time::timeout(std::time::Duration::from_secs(2), reply_rx).await {
+                Ok(Ok(Some(leg))) => leg,
+                Ok(Ok(None)) => {
+                    info!(dialog_id = %dialog_id, "REFER dialog not found in session; falling back to raw originate");
+                    return Ok(false);
+                }
+                Err(_) => {
+                    info!(dialog_id = %dialog_id, "transferor leg resolution timed out; falling back to raw originate");
+                    return Ok(false);
+                }
+                Ok(Err(_)) => {
+                    info!(dialog_id = %dialog_id, "session closed before leg resolution; falling back to raw originate");
+                    return Ok(false);
+                }
+            }
+        };
+
+        info!(
+            session_id = %original_handle.session_id(),
+            leg = %leg_id,
+            target = %target_uri,
+            "Executing inbound REFER as in-session blind transfer"
+        );
+        if original_handle
+            .send_command(crate::call::domain::CallCommand::Transfer {
+                leg_id,
+                target: target_uri.to_string(),
+                attended: false,
+            })
+            .is_err()
+        {
+            info!(
+                session_id = %original_handle.session_id(),
+                "transfer dispatch failed (session gone); falling back to raw originate"
+            );
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// Attempt to execute an inbound REFER as an in-session application
+    /// hand-off.
+    ///
+    /// When the Refer-To target is a bare number that the route table maps to
+    /// a queue or application (IVR, ...), dispatching a `CallCommand::Transfer`
+    /// with an explicit `queue:` / `toivr:` target keeps the whole call inside
+    /// the original session: UUI root inheritance, transfer-source recording
+    /// on `call_transferred` events and return-app fallbacks all keep working
+    /// — none of which a raw originate ([`Self::execute_inbound_refer_transfer`])
+    /// can offer.
+    ///
+    /// Gated by the global `route_originated_calls` switch. Returns
+    /// [`ReferExecution::FallThrough`] when routing is disabled, the target is
+    /// not a route-table queue/application match, or required context is
+    /// missing.
+    async fn try_execute_refer_app_handoff(
+        server: &SipServerRef,
+        original_handle: &crate::proxy::proxy_call::sip_session::SipSessionHandle,
+        original_session_id: &str,
+        target_uri: &str,
+        cookie: &crate::call::cookie::TransactionCookie,
+        dialog_id: &DialogId,
+    ) -> Result<ReferExecution, (u16, String)> {
+        if !server.proxy_config.load().route_originated_calls {
+            return Ok(ReferExecution::FallThrough);
+        }
+        // Route matching keys off the request-URI user part — a bare number.
+        let Ok(parsed) = rsipstack::sip::Uri::try_from(target_uri) else {
+            return Ok(ReferExecution::FallThrough);
+        };
+        let Some(user) = parsed.user().map(|u| u.to_string()) else {
+            return Ok(ReferExecution::FallThrough);
+        };
+        // Caller identity for the route preview: the original call's caller
+        // as recorded in the RWI meta store. Without it the preview could
+        // not run caller-sensitive match rules — fall through to the raw
+        // originate rather than guess.
+        let Some(caller_str) = server.rwi_gateway.as_ref().and_then(|gw| {
+            gw.read()
+                .meta_store
+                .get_sync(original_session_id)
+                .and_then(|m| m.caller)
+        }) else {
+            return Ok(ReferExecution::FallThrough);
+        };
+        let Ok(caller_uri) = rsipstack::sip::Uri::try_from(caller_str.as_str()) else {
+            return Ok(ReferExecution::FallThrough);
+        };
+        let routed = crate::proxy::proxy_call::sip_session::route_outbound_leg(
+            server,
+            &parsed,
+            &caller_uri,
+            &caller_uri,
+            None,
+            cookie.clone(),
+        )
+        .await
+        .map_err(|e| (500, format!("route preview failed: {}", e)))?;
+
+        // Map queue/application routes onto the in-session transfer targets
+        // (`handle_blind_transfer_inner` vocabulary). Everything else —
+        // Forward / NotHandled / None — dials through the raw originate.
+        let handoff_target = match routed {
+            Some(crate::config::RouteResult::Queue { queue, .. }) => {
+                format!("queue:{}", queue.queue_name)
+            }
+            Some(crate::config::RouteResult::Application { .. }) => {
+                format!("toivr:{}", user)
+            }
+            _ => return Ok(ReferExecution::FallThrough),
+        };
+
+        // Identify the transferor leg (the REFER-sending party) inside the
+        // session. Unknown dialog (race with teardown) → assume the callee
+        // side, which `resolve_transfer_leg` maps to the connected agent leg.
+        let leg_id = {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            original_handle
+                .send_command(crate::call::domain::CallCommand::QueryLegByDialog {
+                    dialog_id: dialog_id.to_string(),
+                    reply: reply_tx,
+                })
+                .map_err(|e| (500, format!("failed to query transferor leg: {}", e)))?;
+            match tokio::time::timeout(std::time::Duration::from_secs(2), reply_rx).await {
+                Ok(Ok(Some(leg))) => leg,
+                Ok(Ok(None)) => crate::call::domain::LegId::from("callee"),
+                Err(_) => return Err((500, "transferor leg resolution timed out".to_string())),
+                Ok(Err(_)) => {
+                    return Err((500, "session closed before leg resolution".to_string()));
+                }
+            }
+        };
+
+        info!(
+            session_id = %original_session_id,
+            leg = %leg_id,
+            target = %handoff_target,
+            "Inbound REFER target routed to queue/application; dispatching in-session transfer"
+        );
+        original_handle
+            .send_command(crate::call::domain::CallCommand::Transfer {
+                leg_id,
+                target: handoff_target,
+                attended: false,
+            })
+            .map_err(|e| (500, format!("failed to dispatch transfer command: {}", e)))?;
+        Ok(ReferExecution::Done)
     }
 
     /// Parse Replaces header from incoming request headers.
@@ -2462,6 +2754,10 @@ impl CallModule {
             credential: None,
             headers: Some(headers),
             call_id: Some(new_call_id.clone()),
+            // RFC 7989: carry the root session id when it is UUID-shaped so
+            // the transfer target correlates the logical call. Legacy root
+            // ids (raw Call-IDs) keep relying on the UUI header above.
+            session_id: crate::call::session_id::normalize(&root_session_id),
             ..Default::default()
         };
 

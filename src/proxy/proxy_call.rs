@@ -42,7 +42,7 @@ fn build_call_context(
     let session_id = dialplan
         .session_id
         .clone()
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        .unwrap_or_else(crate::call::session_id::generate);
     CallContext {
         session_id,
         dialplan,

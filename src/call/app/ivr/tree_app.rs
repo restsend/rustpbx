@@ -360,6 +360,20 @@ impl IvrApp {
         }
         self.node_entered_at = Some(std::time::Instant::now());
         self.nodes_traversed += 1;
+        // Publish the current node into the session-extensions string bag so
+        // session-side snapshots (transfer source recording) can attribute
+        // the flow position to this menu. Same map `SipSession::session_ext_get`
+        // reads.
+        if let Some(ref ext) = self.session_extensions {
+            let mut guard = ext.write();
+            if let Some(existing) = guard.get_mut::<std::collections::HashMap<String, String>>() {
+                existing.insert("ivr_node".to_string(), menu_key.to_string());
+            } else {
+                let mut m = std::collections::HashMap::new();
+                m.insert("ivr_node".to_string(), menu_key.to_string());
+                guard.insert(m);
+            }
+        }
         info!(
             ivr = %self.definition.name,
             menu = menu_key,

@@ -843,15 +843,18 @@ async fn test_originate_explicit_trunk_skips_route() {
     );
 }
 
-/// Agent click-to-call (CTI originate): the RWI originate path must fire the
-/// full cc_* webhook chain — `cc_ringing` when the dialed customer leg rings
-/// (180), `cc_answered` when it connects — attributed to the originating
-/// agent via `resolved_agent_id`, plus `cc_hangup` on teardown.
+/// Agent click-to-call (CTI originate): the RWI originate path must emit the
+/// full unified `call_*` webhook chain — `call_ringing` when the dialed
+/// customer leg rings (180), `call_answered` when it connects — enriched with
+/// the originating agent's `agent_id` (resolved via `resolved_agent_id` and
+/// published by the CC session hook), plus `call_hangup` on teardown.
 ///
-/// Before the fix the originate setup loop dialed its first leg outside the
-/// session-hook lifecycle, so agent originates only ever emitted `cc_hangup`.
+/// Before the unification these were separate `cc_ringing`/`cc_answered`/
+/// `cc_hangup` events emitted by the CC addon; the originate setup loop
+/// dialing its first leg outside the session-hook lifecycle used to skip the
+/// ringing/answered events entirely.
 #[tokio::test]
-async fn test_originate_agent_click_to_call_emits_cc_events() {
+async fn test_originate_agent_click_to_call_emits_agent_attributed_call_events() {
     use crate::common::e2e_test_server::{E2eTestServer, E2eTestServerInject};
     use crate::common::rtp_utils::RtpReceiver;
     use crate::common::test_ua::TestUaEvent;
@@ -860,7 +863,7 @@ async fn test_originate_agent_click_to_call_emits_cc_events() {
     use rustpbx::addons::cc::agent_registry_adapter::CcAgentRegistryAdapter;
     use rustpbx::config::ProxyConfig;
 
-    // ── CC wiring: agent registry + event tap + session hook ──────────────
+    // ── CC wiring: agent registry + session hook ──────────────────────────
     let cc_registry = Arc::new(CcAgentRegistry::new());
     cc_registry
         .register("1001".to_string(), vec![], 1)
@@ -870,9 +873,6 @@ async fn test_originate_agent_click_to_call_emits_cc_events() {
         .update_status("1001", AgentStatus::Idle)
         .await
         .expect("agent idle");
-
-    let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel();
-    cc_registry.set_event_tx(ev_tx);
 
     let hook = Arc::new(
         rustpbx::addons::cc::cc_call_session_hook::CcCallSessionHook::new(
@@ -886,9 +886,15 @@ async fn test_originate_agent_click_to_call_emits_cc_events() {
         "127.0.0.1",
     ));
 
+    // Shared gateway: the server AND the originate processor must use the SAME
+    // gateway so the session-published agent meta enriches the core events.
+    let gateway: Arc<RwLock<RwiGateway>> = Arc::new(RwLock::new(RwiGateway::new()));
+    let mut tap = gateway.read().subscribe_events();
+
     let inject = E2eTestServerInject {
         session_hook: Some(hook),
         agent_registry: Some(adapter),
+        rwi_gateway: Some(gateway.clone()),
         ..Default::default()
     };
     let server = E2eTestServer::start_with_inject(ProxyConfig::default(), inject)
@@ -901,7 +907,7 @@ async fn test_originate_agent_click_to_call_emits_cc_events() {
 
     let processor = RwiCommandProcessor::new(
         Arc::new(ActiveProxyCallRegistry::new()),
-        Arc::new(RwLock::new(RwiGateway::new())),
+        gateway.clone(),
         Arc::new(ConferenceManager::new()),
     )
     .with_sip_server(server.server_ref.clone());
@@ -935,7 +941,7 @@ async fn test_originate_agent_click_to_call_emits_cc_events() {
         let events = bob.process_dialog_events().await.expect("bob events");
         for event in events {
             if let TestUaEvent::IncomingCall(id, _offer) = event {
-                // 180 Ringing first — this must produce cc_ringing.
+                // 180 Ringing first — this must produce call_ringing.
                 bob.ring_call(&id).await.expect("bob rings 180");
                 bob_dialog = Some(id.clone());
                 break;
@@ -948,14 +954,18 @@ async fn test_originate_agent_click_to_call_emits_cc_events() {
     }
     let bob_id = bob_dialog.expect("bob never received the originate INVITE");
 
-    // cc_ringing must arrive after the 180, attributed to agent 1001.
-    let ringing = wait_for_cc_event(&mut ev_rx, "cc_ringing", std::time::Duration::from_secs(5))
+    // call_ringing must arrive after the 180, enriched with agent_id = 1001.
+    let ringing = wait_for_tap_event(&mut tap, "call_ringing", std::time::Duration::from_secs(5))
         .await
-        .expect("cc_ringing expected after 180 Ringing");
-    assert_eq!(ringing.payload["agent_id"].as_str(), Some("1001"));
-    assert_eq!(ringing.call_id.as_deref(), Some(call_id.as_str()));
+        .expect("call_ringing expected after 180 Ringing");
     assert_eq!(
-        ringing.payload["early_media"].as_bool(),
+        ringing.event.payload["agent_id"].as_str(),
+        Some("1001"),
+        "call_ringing must carry the originating agent's id"
+    );
+    assert_eq!(ringing.call_id, call_id);
+    assert_eq!(
+        ringing.event.payload["early_media"].as_bool(),
         Some(false),
         "plain 180 must carry early_media=false"
     );
@@ -972,12 +982,16 @@ async fn test_originate_agent_click_to_call_emits_cc_events() {
         .await
         .expect("bob answers");
 
-    // cc_answered must arrive after the 200 OK.
-    let answered = wait_for_cc_event(&mut ev_rx, "cc_answered", std::time::Duration::from_secs(5))
+    // call_answered must arrive after the 200 OK, still attributed to 1001.
+    let answered = wait_for_tap_event(&mut tap, "call_answered", std::time::Duration::from_secs(5))
         .await
-        .expect("cc_answered expected after 200 OK");
-    assert_eq!(answered.payload["agent_id"].as_str(), Some("1001"));
-    assert_eq!(answered.call_id.as_deref(), Some(call_id.as_str()));
+        .expect("call_answered expected after 200 OK");
+    assert_eq!(
+        answered.event.payload["agent_id"].as_str(),
+        Some("1001"),
+        "call_answered must carry the agent's id"
+    );
+    assert_eq!(answered.call_id, call_id);
     {
         let agent = cc_registry.get_agent("1001").await.expect("agent");
         assert!(
@@ -987,12 +1001,16 @@ async fn test_originate_agent_click_to_call_emits_cc_events() {
         );
     }
 
-    // ── Teardown: customer hangs up → cc_hangup ───────────────────────────
+    // ── Teardown: customer hangs up → call_hangup ─────────────────────────
     bob.hangup(&bob_id).await.expect("bob hangs up");
-    let hangup = wait_for_cc_event(&mut ev_rx, "cc_hangup", std::time::Duration::from_secs(10))
+    let hangup = wait_for_tap_event(&mut tap, "call_hangup", std::time::Duration::from_secs(10))
         .await
-        .expect("cc_hangup expected after hangup");
-    assert_eq!(hangup.payload["agent_id"].as_str(), Some("1001"));
+        .expect("call_hangup expected after hangup");
+    assert_eq!(
+        hangup.event.payload["agent_id"].as_str(),
+        Some("1001"),
+        "call_hangup must carry the agent's id"
+    );
 
     server.stop();
 }
@@ -1107,13 +1125,14 @@ async fn test_originate_provisionals_emit_call_ringing_with_early_media_flag() {
     server.stop();
 }
 
-/// Failure release: when an agent originate rings (180 → cc_ringing, agent
-/// Idle → Ringing) and the customer then REJECTS (486), the originate setup
-/// loop must fire `on_call_ended` — the agent returns to Idle and a
-/// `cc_hangup` webhook is emitted. Without this the agent stays stuck in
-/// Ringing forever (the UAC session loop never starts on failed setup).
+/// Failure release: when an agent originate rings (180 → `call_ringing`
+/// enriched with agent_id, agent Idle → Ringing) and the customer then
+/// REJECTS (486), the originate setup loop must fire `on_call_ended` — the
+/// agent returns to Idle and an agent-attributed `call_hangup` webhook is
+/// emitted. Without this the agent stays stuck in Ringing forever (the UAC
+/// session loop never starts on failed setup).
 #[tokio::test]
-async fn test_originate_rejected_releases_agent_and_emits_cc_hangup() {
+async fn test_originate_rejected_releases_agent_and_emits_call_hangup() {
     use crate::common::e2e_test_server::{E2eTestServer, E2eTestServerInject};
     use crate::common::test_ua::TestUaEvent;
     use rustpbx::addons::cc::agent::{AgentRegistry as CcAgentRegistry, AgentStatus};
@@ -1129,9 +1148,6 @@ async fn test_originate_rejected_releases_agent_and_emits_cc_hangup() {
         .await
         .expect("agent idle");
 
-    let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel();
-    cc_registry.set_event_tx(ev_tx);
-
     let hook = Arc::new(
         rustpbx::addons::cc::cc_call_session_hook::CcCallSessionHook::new(
             cc_registry.clone(),
@@ -1139,8 +1155,14 @@ async fn test_originate_rejected_releases_agent_and_emits_cc_hangup() {
         ),
     );
 
+    // Shared gateway: the server AND the originate processor must use the SAME
+    // gateway so the session-published agent meta enriches the core events.
+    let gateway: Arc<RwLock<RwiGateway>> = Arc::new(RwLock::new(RwiGateway::new()));
+    let mut tap = gateway.read().subscribe_events();
+
     let inject = E2eTestServerInject {
         session_hook: Some(hook),
+        rwi_gateway: Some(gateway.clone()),
         ..Default::default()
     };
     let server = E2eTestServer::start_with_inject(ProxyConfig::default(), inject)
@@ -1152,7 +1174,7 @@ async fn test_originate_rejected_releases_agent_and_emits_cc_hangup() {
 
     let processor = RwiCommandProcessor::new(
         Arc::new(ActiveProxyCallRegistry::new()),
-        Arc::new(RwLock::new(RwiGateway::new())),
+        gateway.clone(),
         Arc::new(ConferenceManager::new()),
     )
     .with_sip_server(server.server_ref.clone());
@@ -1192,11 +1214,15 @@ async fn test_originate_rejected_releases_agent_and_emits_cc_hangup() {
     }
     let bob_id = bob_dialog.expect("bob never received the originate INVITE");
 
-    // 180 → cc_ringing, agent Idle → Ringing.
-    let ringing = wait_for_cc_event(&mut ev_rx, "cc_ringing", std::time::Duration::from_secs(5))
+    // 180 → call_ringing enriched with agent_id, agent Idle → Ringing.
+    let ringing = wait_for_tap_event(&mut tap, "call_ringing", std::time::Duration::from_secs(5))
         .await
-        .expect("cc_ringing expected");
-    assert_eq!(ringing.payload["agent_id"].as_str(), Some("1001"));
+        .expect("call_ringing expected");
+    assert_eq!(
+        ringing.event.payload["agent_id"].as_str(),
+        Some("1001"),
+        "call_ringing must carry the agent's id"
+    );
     {
         let agent = cc_registry.get_agent("1001").await.expect("agent");
         assert!(matches!(agent.status, AgentStatus::Ringing { .. }));
@@ -1204,12 +1230,16 @@ async fn test_originate_rejected_releases_agent_and_emits_cc_hangup() {
 
     bob.reject_call(&bob_id).await.expect("bob rejects 486");
 
-    // cc_hangup must arrive and the agent must be released back to Idle.
-    let hangup = wait_for_cc_event(&mut ev_rx, "cc_hangup", std::time::Duration::from_secs(10))
+    // call_hangup must arrive and the agent must be released back to Idle.
+    let hangup = wait_for_tap_event(&mut tap, "call_hangup", std::time::Duration::from_secs(10))
         .await
-        .expect("cc_hangup expected after 486 reject");
-    assert_eq!(hangup.payload["agent_id"].as_str(), Some("1001"));
-    assert_eq!(hangup.call_id.as_deref(), Some(call_id.as_str()));
+        .expect("call_hangup expected after 486 reject");
+    assert_eq!(
+        hangup.event.payload["agent_id"].as_str(),
+        Some("1001"),
+        "call_hangup must carry the agent's id"
+    );
+    assert_eq!(hangup.call_id, call_id);
     {
         let agent = cc_registry.get_agent("1001").await.expect("agent");
         assert!(
@@ -1222,21 +1252,26 @@ async fn test_originate_rejected_releases_agent_and_emits_cc_hangup() {
     server.stop();
 }
 
-/// Wait for the next cc_* event of the given type on the registry event
-/// channel, skipping unrelated events (e.g. agent_state_changed).
-async fn wait_for_cc_event(
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<rustpbx::rwi::proto::RwiEvent>,
+/// Wait for the next event of the given type on the gateway event tap,
+/// skipping unrelated events (e.g. agent_state_changed, record_started).
+async fn wait_for_tap_event(
+    rx: &mut tokio::sync::broadcast::Receiver<rustpbx::rwi::gateway::EventCacheEntry>,
     event_type: &str,
     timeout: std::time::Duration,
-) -> Option<rustpbx::rwi::proto::RwiEvent> {
+) -> Option<rustpbx::rwi::gateway::EventCacheEntry> {
     let deadline = tokio::time::Instant::now() + timeout;
-    while let Ok(event) = tokio::time::timeout_at(deadline, rx.recv()).await {
-        let event = event?;
-        if event.event_type == event_type {
-            return Some(event);
+    loop {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Ok(entry)) => {
+                if entry.event.event_type == event_type {
+                    return Some(entry);
+                }
+            }
+            // Lagged receivers just skip the missed entries and keep waiting.
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+            _ => return None,
         }
     }
-    None
 }
 
 #[tokio::test]
@@ -1682,6 +1717,7 @@ async fn test_record_start_success() {
         .process_command(RwiCommandPayload::RecordStart(
             rustpbx::rwi::session::RecordStartRequest {
                 call_id: "call-rec".into(),
+                label: None,
                 mode: "mixed".into(),
                 beep: Some(true),
                 max_duration_secs: Some(3600),
@@ -1708,6 +1744,7 @@ async fn test_record_start_not_found() {
         .process_command(RwiCommandPayload::RecordStart(
             rustpbx::rwi::session::RecordStartRequest {
                 call_id: "nonexistent".into(),
+                label: None,
                 mode: "mixed".into(),
                 beep: Some(true),
                 max_duration_secs: Some(3600),
@@ -1740,6 +1777,7 @@ async fn test_record_pause_success() {
         .process_command(RwiCommandPayload::RecordStart(
             rustpbx::rwi::session::RecordStartRequest {
                 call_id: "call-rec-p".into(),
+                label: None,
                 mode: "mixed".into(),
                 beep: Some(false),
                 max_duration_secs: None,
@@ -1806,6 +1844,7 @@ async fn test_record_resume_success() {
         .process_command(RwiCommandPayload::RecordStart(
             rustpbx::rwi::session::RecordStartRequest {
                 call_id: "call-rec-r".into(),
+                label: None,
                 mode: "mixed".into(),
                 beep: Some(false),
                 max_duration_secs: None,
@@ -1883,6 +1922,7 @@ async fn test_record_stop_success() {
         .process_command(RwiCommandPayload::RecordStart(
             rustpbx::rwi::session::RecordStartRequest {
                 call_id: "call-rec-s".into(),
+                label: None,
                 mode: "mixed".into(),
                 beep: Some(false),
                 max_duration_secs: None,

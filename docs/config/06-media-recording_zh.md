@@ -189,6 +189,35 @@ root = "recordings"
 
 使用 `[recording] type = "http"` 或 `type = "s3"` 时，CDR 可能在媒体上传结束前写入。上传成功后更新数据库中的 `recording_url`。本地 CDR JSON 在 `recordingUrl` 中保留本地录音路径，在 `recorder[]` 中保留录音器元数据。
 
+### 按需分段录音
+
+每个媒体 leg 都带有录音捕获通道，任何通话都可以**通话中**随时开始/停止录音——即使 `[recording] enabled = false`、路由策略未命中也是如此。用于"只录 IVR 阶段"、"坐席接通后才录"等分阶段录音场景，无需开启整通话录音。
+
+触发方式：
+
+- IVR 节点 `record_start` / `record_stop`（见 IVR Step 协议文档）
+- RWI `record.start` / `record.stop`（`call.originate` 也支持内联 `record`）
+- Console / CTI HTTP API（`POST /calls/active/{session_id}/commands`、`POST /cc/calls/{call_id}/record`）
+- 对话内 SIP INFO（`application/vnd.rustpbx+json`，`{"action": "record.start", "params": {...}}`）
+
+自动生成的分段文件名为 `{path}/{root_session_id}_{seq}_{label}.wav`：
+
+- `seq` — 本通通话内从 1 递增的录音序号；目标文件已存在时自动顺延（同一逻辑通话的不同 leg——如转接前后——共享根 session id）。
+- `label` — 启动时解析：显式 `label` 参数 → 会话扩展 `resolved_agent_id` / `agent_id`（坐席接通后写入）→ 会话扩展 `ivr`（IVR 阶段写入）→ `segment_type`。
+
+示例：来电在主 IVR 录一段、坐席接通后录一段 → `abc123_1_main-ivr.wav`、`abc123_2_1001.wav`。
+
+每个完成的片段都会写入 CDR（`metadata.recording_segments`，每段含 `seq` / `label` / `segment_type` / `segment_id` / 起止时间）。上传成功后**每个片段各发一条** `recording_metadata_available` RWI/webhook 事件（`filename` / `download_url` / `file_size` 为该段独有，`extra` 在呼叫级元数据之外附带 `seq` / `label` / `segment_type`）；`record_end` 仍保持每通呼叫一条汇总。上传配置与整通话录音一致（`type = "local"|"http"|"s3"`，失败写 `.upload_failed.*` 标记并后台重试）。
+
+呼叫中心坐席段：cc.toml 支持
+
+```toml
+[recording]
+record_on_agent_connect = true
+```
+
+开启后，坐席接通时 CC addon 自动启动一段 `segment_type = "agent"` 的录音（以坐席 id 作为 label）；坐席挂断但客户通话继续时（满意度调查、回 IVR）自动收段。已在录音中的会话（策略整通话录音或前一段未结束）不会被改动。
+
 ### SIP 信令 JSONL 伴随文件
 
 使用 `[recording] enabled = true` 且**没有**配置 `[sipflow]` 后端（或使用 `force_file = true`）时，每通录音都会在 WAV 文件旁额外写入 SIP 信令伴随文件：

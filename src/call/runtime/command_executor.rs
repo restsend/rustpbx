@@ -219,6 +219,7 @@ mod tests {
                 mono_caller_only: None,
                 segment_type: None,
                 segment_id: None,
+                label: None,
                 notify_app: None,
             },
         };
@@ -246,6 +247,7 @@ mod tests {
                 mono_caller_only: None,
                 segment_type: None,
                 segment_id: None,
+                label: None,
                 notify_app: None,
             },
         };

@@ -961,7 +961,8 @@ fn test_hangup_reason_abandoned_roundtrip() {
 // ── CallRecordHangupReason::initiator() (module C) ───────────────────────
 
 /// `initiator()` is the single source of truth for the normalized hangup
-/// initiator used by both `call_hangup` and `cc_hangup`. Exhaustive mapping.
+/// initiator used by `call_hangup` (formerly shared with `cc_hangup`).
+/// Exhaustive mapping.
 #[test]
 fn test_initiator_mapping() {
     use CallRecordHangupReason::*;

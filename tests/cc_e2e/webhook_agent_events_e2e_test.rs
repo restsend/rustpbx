@@ -207,9 +207,12 @@ async fn test_recording_metadata_webhook_carries_agent_context() {
     );
 }
 
-/// A CC call-lifecycle event delivered through the `[rwi_webhook]` must carry
-/// the primary call's flat context (caller/callee/names/direction), the `root`
-/// block, and the agent's `agent_id`/`agent_name`.
+/// A unified core call-lifecycle event (`call_answered`) delivered through the
+/// `[rwi_webhook]` must carry the primary call's flat context
+/// (caller/callee/names/direction), the `root` block, and — when the call
+/// involves a CC agent — the `agent_id`/`agent_name`/`queue_id` enriched from
+/// the session-published call meta. This replaces the former separate
+/// `cc_answered` event.
 #[tokio::test]
 async fn test_cc_call_event_webhook_carries_context() {
     let _ = tracing_subscriber::fmt::try_init();
@@ -230,7 +233,8 @@ async fn test_cc_call_event_webhook_carries_context() {
         gw
     }));
 
-    // Simulate the session's CallMetaStore entry (what sip_session writes).
+    // Simulate the session's CallMetaStore entry (what sip_session writes,
+    // including the agent attribution synced from the CC session hook).
     gateway.read().meta_store.insert(
         "call-cc-1".to_string(),
         rustpbx::rwi::CallMeta {
@@ -239,6 +243,9 @@ async fn test_cc_call_event_webhook_carries_context() {
             caller_name: Some("alice".to_string()),
             callee_name: Some("4000".to_string()),
             direction: Some("inbound".to_string()),
+            agent_id: Some("1001".to_string()),
+            agent_name: Some("Agent 1001".to_string()),
+            queue_id: Some("support".to_string()),
             root: Some(rustpbx::rwi::RootCallInfo {
                 caller: Some("sip:alice@localhost".to_string()),
                 caller_name: Some("alice".to_string()),
@@ -253,31 +260,25 @@ async fn test_cc_call_event_webhook_carries_context() {
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // Broadcast the cc_answered event (the path CC events take).
+    // Emit the unified core call_answered for the agent call.
     gateway
         .read()
-        .broadcast_event(&rustpbx::rwi::event::to_legacy_event(
-            &rustpbx::addons::cc::cc_events::CcCallAnswered {
-                call_id: "call-cc-1".to_string(),
-                agent_id: "1001".to_string(),
-                agent_name: Some("Agent 1001".to_string()),
-                queue_id: Some("support".to_string()),
-            },
-            None,
-        ));
+        .send_to_owner(&rustpbx::rwi::CallAnswered {
+            call_id: "call-cc-1".to_string(),
+        });
 
     tokio::time::sleep(Duration::from_millis(800)).await;
 
     let events = capture.received.lock().unwrap();
-    let cc_events: Vec<&serde_json::Value> = events
+    let call_events: Vec<&serde_json::Value> = events
         .iter()
-        .filter(|v| v["event_type"].as_str() == Some("cc_answered"))
+        .filter(|v| v["event_type"].as_str() == Some("call_answered"))
         .collect();
-    assert!(!cc_events.is_empty(), "no cc_answered in webhook");
+    assert!(!call_events.is_empty(), "no call_answered in webhook");
 
-    let ev = cc_events[0];
+    let ev = call_events[0];
     let p = &ev["event"];
-    // Own fields.
+    // Agent attribution via call-meta enrichment.
     assert_eq!(p["agent_id"].as_str(), Some("1001"));
     assert_eq!(p["agent_name"].as_str(), Some("Agent 1001"));
     assert_eq!(p["queue_id"].as_str(), Some("support"));

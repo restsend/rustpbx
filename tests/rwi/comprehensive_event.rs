@@ -387,6 +387,7 @@ async fn test_comprehensive_core_event_structs() {
                 reason: Some("normal".into()),
                 hangup_by: None,
                 sip_status: Some(200),
+                duration_secs: None,
             },
         );
 
@@ -500,6 +501,7 @@ async fn test_new_api_event_structs() {
             reason: Some("normal".into()),
             hangup_by: None,
             sip_status: Some(200),
+            duration_secs: None,
         });
     }
 
@@ -610,7 +612,7 @@ async fn test_new_cc_event_structs() {
         duration_secs: None,
         reason_code: Some("registered".into()),
     });
-    gw.broadcast(&rustpbx::addons::cc::cc_events::QueueJoined {
+    gw.broadcast(&rustpbx::rwi::QueueJoined {
         call_id: "c1".into(),
         queue_id: "q1".into(),
     });

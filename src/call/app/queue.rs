@@ -711,7 +711,6 @@ impl QueueApp {
             queue_id: self.config.name.clone(),
             action: action_label,
             reason: reason.to_string(),
-            trace_id: self.call_id.clone(),
         });
 
         Ok(action)
@@ -1265,23 +1264,28 @@ impl QueueApp {
                     "Queue: escalation triggered"
                 );
 
-                if let Some(ref registry) = self.agent_registry {
-                    let agent_uris = match self.config.skill_group.as_deref() {
-                        Some(sg) => {
-                            // Skill-group queue: resolve the primary group and
-                            // the escalation target as ONE candidate set so the
-                            // addon can order the union fairly (round-robin)
-                            // when the step is marked fair.
-                            let primary = format!("skill-group:{}", sg);
-                            registry
-                                .resolve_escalation_targets(
-                                    &primary,
-                                    &[step.add_skill_group.clone()],
-                                    &self.call_id,
-                                    step.fair,
-                                )
-                                .await
-                        }
+                    if let Some(ref registry) = self.agent_registry {
+                        let agent_uris = match self.config.skill_group.as_deref() {
+                            Some(sg) => {
+                                // Skill-group queue: resolve the primary group and
+                                // the escalation target as ONE candidate set so the
+                                // addon can order the union fairly (round-robin)
+                                // when the step is marked fair. Replace mode
+                                // excludes the primary group entirely ("原组
+                                // 不可拾取" after escalate).
+                                let primary = format!("skill-group:{}", sg);
+                                let include_primary =
+                                    matches!(self.config.escalation_mode, EscalationMode::Cumulative);
+                                registry
+                                    .resolve_escalation_targets(
+                                        &primary,
+                                        &[step.add_skill_group.clone()],
+                                        &self.call_id,
+                                        step.fair,
+                                        include_primary,
+                                    )
+                                    .await
+                            }
                         None => {
                             let skill_uri = format!("skill-group:{}", step.add_skill_group);
                             registry.resolve_target(&skill_uri).await
@@ -2107,7 +2111,6 @@ impl CallApp for QueueApp {
                             queue_id: self.config.name.clone(),
                             agent_id: agent_id.clone(),
                             attempt: self.dial_attempts,
-                            trace_id: self.call_id.clone(),
                         });
                     }
                 }

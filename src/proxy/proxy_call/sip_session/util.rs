@@ -126,10 +126,13 @@ pub(crate) async fn route_leg(
         format!("<{}>", target_uri).into(),
     ));
     headers.push(rsipstack::sip::Header::CallId(
-        rsipstack::transaction::make_call_id(server.endpoint.inner.option.callid_suffix.as_deref())
-            .value()
-            .to_string()
-            .into(),
+        rsipstack::transaction::make_call_id(
+            server.endpoint.inner.option.callid_suffix.as_deref(),
+            server.endpoint.inner.option.callid_format,
+        )
+        .value()
+        .to_string()
+        .into(),
     ));
     headers.push(rsipstack::sip::Header::CSeq(
         format!("20 INVITE")

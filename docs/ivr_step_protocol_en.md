@@ -144,12 +144,16 @@ Every response is a JSON object with a `"type"` field. Two categories:
 { "type": "record_stop" }
 ```
 
-> Mid-call recording: use `record_start` / `record_stop` when
-> `[recording].enabled = true` and `auto_start = false`. Segments are named
-> `{session_id}_{timestamp}_{type}_{id}.wav` and recorded in CDR
-> `metadata.recording_segments`. Call `record_stop` before `transfer` / REFER
-> so the current slice closes cleanly. `torecord` remains the voicemail-style
-> capture that waits for `recording_complete`.
+> Mid-call recording: `record_start` / `record_stop` work at any time — the
+> capture tap is armed for every call, no `[recording].enabled` required.
+> Segments are auto-named `{root_session_id}_{seq}_{label}.wav`: `seq` is the
+> per-call recording counter and `label` resolves to the answering agent id
+> (after agent connect) or the IVR name (while inside an IVR), falling back to
+> `segment_type`. Slices are recorded in CDR `metadata.recording_segments`,
+> and one `recording_metadata_available` event is emitted per segment on
+> upload. Call `record_stop` before `transfer` / REFER so the current slice
+> closes cleanly. `torecord` remains the voicemail-style capture that waits
+> for `recording_complete`.
 
 ### Transparent Passthrough Fields
 
@@ -233,7 +237,7 @@ RustPBX plays the prompt → on audio complete → automatically executes the dt
 | `input_voice` | ASR voice input | `scene: string` | `timeout_ms: u64` (default: 5000) | If ASR is unavailable, returns a `WaitFor` to the IVR executor, which then sends an `error` event to the provider. Next event: `input_voice` |
 | `api` | Call an external HTTP API | `url: string` | `method: string` (default: `"GET"`), `headers: Map<string,string>`, `variables: string` (comma‑separated variable names to pass), `timeout: u64` (default: 10, seconds), `get_dynamic_tree: bool` | The response body is returned as `api_response.body`. Next event: `api_response` |
 | `torecord` | Capture a voice recording / voicemail message | — | `prompt: string`, `beep: bool` (default: false), `max_duration_secs: u32 or null` | Recording is saved to `recordings/{session_id}/{timestamp}.wav`. Next event: `recording_complete` |
-| `record_start` | Start a mid-call recording segment (no wait) | — | `segment_type` / `type_id: string` (default `ivr`), `id: string`, `beep: bool`, `max_duration_secs: u32` | Requires `[recording].enabled`; typically `auto_start=false`. File: `{session_id}_{ts}_{type}_{id}.wav`. Next: provider asked immediately (`recording_started`) |
+| `record_start` | Start a mid-call recording segment (no wait) | — | `segment_type` / `type_id: string` (default `ivr`), `id: string`, `beep: bool`, `max_duration_secs: u32` | No `[recording].enabled` required. File: `{root_session_id}_{seq}_{label}.wav` (`label` auto-resolves to the agent id / IVR name, falling back to `segment_type`). Next: provider asked immediately (`recording_started`) |
 | `record_stop` | Stop the active mid-call segment | — | `reason: string` | Prefer before `transfer`/REFER. Next: provider asked immediately (`recording_stopped`) |
 
 ### DtmfMenu local resolution (in step mode)

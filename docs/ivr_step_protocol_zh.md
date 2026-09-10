@@ -146,7 +146,7 @@ POST {url}/end            ──→ your provider (session cleanup, fire‑and�
 { "type": "record_stop" }
 ```
 
-> 通话中录音：当 `[recording].enabled = true` 且 `auto_start = false` 时使用 `record_start` / `record_stop`。分段命名为 `{session_id}_{timestamp}_{type}_{id}.wav`，记录在 CDR 的 `metadata.recording_segments` 中。在 `transfer` / REFER 前调用 `record_stop`，确保当前片段正常结束。`torecord` 仍为语音信箱式采集，会等待 `recording_complete`。
+> 通话中录音：`record_start` / `record_stop` 可随时使用——录音捕获通道对所有通话常备，无需 `[recording].enabled`。分段自动命名为 `{root_session_id}_{seq}_{label}.wav`：`seq` 为本通通话内递增序号，`label` 自动解析为当前坐席 id（坐席接通后）或 IVR 名（IVR 阶段），均无则回退 `segment_type`。片段记录在 CDR 的 `metadata.recording_segments` 中，上传后每个片段各触发一条 `recording_metadata_available`。在 `transfer` / REFER 前调用 `record_stop`，确保当前片段正常结束。`torecord` 仍为语音信箱式采集，会等待 `recording_complete`。
 
 ### 透明透传字段
 
@@ -230,7 +230,7 @@ RustPBX 播放提示音 → 音频完成 → 自动执行 dtmf_menu（两者之�
 | `input_voice` | ASR 语音输入 | `scene: string` | `timeout_ms: u64`（默认 5000） | ASR 不可用时向 IVR 执行器返回 `WaitFor`，再由执行器向 Provider 发送 `error` 事件。下一事件：`input_voice` |
 | `api` | 调用外部 HTTP API | `url: string` | `method: string`（默认 `"GET"`）、`headers: Map<string,string>`、`variables: string`（逗号分隔的待传变量名）、`timeout: u64`（默认 10，单位秒）、`get_dynamic_tree: bool` | 响应体以 `api_response.body` 返回。下一事件：`api_response` |
 | `torecord` | 采集录音/语音留言 | — | `prompt: string`、`beep: bool`（默认 false）、`max_duration_secs: u32 or null` | 保存至 `recordings/{session_id}/{timestamp}.wav`。下一事件：`recording_complete` |
-| `record_start` | 启动通话中录音片段（不等待） | — | `segment_type` / `type_id: string`（默认 `ivr`）、`id: string`、`beep: bool`、`max_duration_secs: u32` | 需要 `[recording].enabled`，通常设置 `auto_start=false`。文件：`{session_id}_{ts}_{type}_{id}.wav`。随后立即请求 Provider（`recording_started`） |
+| `record_start` | 启动通话中录音片段（不等待） | — | `segment_type` / `type_id: string`（默认 `ivr`）、`id: string`、`beep: bool`、`max_duration_secs: u32` | 无需 `[recording].enabled`。文件：`{root_session_id}_{seq}_{label}.wav`（`label` 自动取坐席 id / IVR 名，回退 `segment_type`）。随后立即请求 Provider（`recording_started`） |
 | `record_stop` | 停止当前通话中录音片段 | — | `reason: string` | 建议在 `transfer`/REFER 前使用。随后立即请求 Provider（`recording_stopped`） |
 
 ### DtmfMenu 本地解析（Step 模式）

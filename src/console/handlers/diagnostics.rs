@@ -1739,6 +1739,8 @@ struct RouteQueueOutcome {
 
 #[derive(Serialize)]
 struct QueuePlanView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    queue_name: Option<String>,
     accept_immediately: bool,
     passthrough_ringback: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1762,7 +1764,9 @@ impl From<&crate::call::QueuePlan> for QueuePlanView {
                 format!("redirect: {}", target)
             }
         });
+        let queue_name = (!plan.queue_name.is_empty()).then(|| plan.queue_name.clone());
         Self {
+            queue_name,
             accept_immediately: plan.accept_immediately,
             passthrough_ringback: plan.passthrough_ringback,
             hold_audio,

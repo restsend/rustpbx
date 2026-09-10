@@ -383,6 +383,7 @@ impl CallController {
             mono_caller_only,
             segment_type,
             segment_id: None,
+            label: None,
             notify_app: Some(true),
         };
         self.session
@@ -409,6 +410,7 @@ impl CallController {
             mono_caller_only: None,
             segment_type: Some(segment_type.into()),
             segment_id,
+            label: None,
             notify_app: Some(false),
         };
         self.session

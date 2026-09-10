@@ -45,8 +45,8 @@ mod tests;
 
 pub use recording_artifacts::{
     ActiveRecording, RecordingSegment, RecordingSubdir, UploadFailedMarker, is_direct_child_of_root,
-    local_archive_path, preview_archive_path, segment_wav_path, upload_failed_marker_path,
-    write_upload_failed_marker, write_upload_failed_marker_ex,
+    local_archive_path, preview_archive_path, segment_wav_path, segmented_wav_path,
+    upload_failed_marker_path, write_upload_failed_marker, write_upload_failed_marker_ex,
 };
 
 const CALL_RECORD_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -379,8 +379,9 @@ impl std::fmt::Display for CallRecordHangupReason {
 impl CallRecordHangupReason {
     /// Normalized hangup initiator: who ended the call.
     ///
-    /// This is the single source of truth used by both the core `call_hangup`
-    /// event and the CC-layer `cc_hangup` event so the two stay consistent.
+    /// This is the single source of truth for the normalized initiator carried
+    /// by the core `call_hangup` event (formerly also the CC-layer `cc_hangup`,
+    /// now unified).
     ///
     /// - `"agent"`   — the contact-center agent (callee leg) hung up.
     /// - `"caller"`  — the calling party hung up.
@@ -984,6 +985,14 @@ impl CallRecordRow {
         };
 
         let mut metadata_map = details.metadata.clone().unwrap_or_default();
+        // Global session id (RFC 7989): stored inside the existing metadata
+        // JSON column to avoid a schema migration (same pattern as cdr_path).
+        if let Some(session_id) = &record.session_id {
+            metadata_map.insert(
+                "session_id".to_string(),
+                serde_json::Value::String(session_id.clone()),
+            );
+        }
         if !record.sip_leg_roles.is_empty() {
             let json = serde_json::to_string(&record.sip_leg_roles).unwrap_or_default();
             metadata_map.insert("sip_leg_roles".to_string(), serde_json::Value::String(json));

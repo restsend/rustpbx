@@ -41,6 +41,14 @@ pub struct RecordingSegment {
     pub size: u64,
     pub segment_type: String,
     pub segment_id: String,
+    /// 1-based sequence of the recording within the logical call, mirrored
+    /// into auto-generated file names (`{session}_{seq}_{label}.wav`).
+    #[serde(default)]
+    pub seq: u32,
+    /// File-name label resolved at start time (ivr name / agent id); falls
+    /// back to `segment_type` when nothing more specific is known.
+    #[serde(default)]
+    pub label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -54,6 +62,9 @@ pub struct ActiveRecording {
     pub path: String,
     pub segment_type: String,
     pub segment_id: String,
+    /// Sequence and file-name label resolved when the segment started.
+    pub seq: u32,
+    pub label: String,
     pub started_at: DateTime<Utc>,
     /// When true, `RecordingComplete` is delivered to the running CallApp
     /// (voicemail / IVR `torecord`). Mid-call `record_start` segments set
@@ -80,6 +91,25 @@ pub fn segment_wav_path(
         safe_id
     );
     PathBuf::from(root).join(name)
+}
+
+/// Build `{session_id}_{seq:02}_{label}.wav` under `root`, bumping `seq`
+/// while the candidate file already exists (segments started in different
+/// sessions of the same logical call — e.g. before/after a transfer — share
+/// the root session id, so per-session counters can collide). Returns the
+/// resolved seq together with the path.
+pub fn segmented_wav_path(root: &str, session_id: &str, seq: u32, label: &str) -> (u32, PathBuf) {
+    let safe_session = sanitize_id(session_id);
+    let safe_label = sanitize_component(label.trim(), "segment");
+    let mut seq = seq.max(1);
+    loop {
+        let path =
+            PathBuf::from(root).join(format!("{}_{:02}_{}.wav", safe_session, seq, safe_label));
+        if seq == u32::MAX || !path.exists() {
+            return (seq, path);
+        }
+        seq = seq.saturating_add(1);
+    }
 }
 
 /// Signaling sidecar path for a call: `{root}/{session_id}_{call_id}.jsonl`
@@ -220,8 +250,8 @@ pub async fn write_upload_failed_marker_ex(
 }
 
 fn sanitize_component(raw: &str, fallback: &str) -> String {
-    let cleaned = sanitize_id(raw);
-    if cleaned.is_empty() {
+    let cleaned = sanitize_id(raw.trim());
+    if cleaned.is_empty() || cleaned.chars().all(|c| c == '_') {
         fallback.to_string()
     } else {
         cleaned
@@ -241,6 +271,38 @@ mod tests {
             path,
             PathBuf::from("/rec/sess-1_20260820010203_ivr_a1b2.wav")
         );
+    }
+
+    #[test]
+    fn segmented_path_uses_session_seq_label() {
+        let (seq, path) = segmented_wav_path("/rec", "sess-1", 1, "main-ivr");
+        assert_eq!(seq, 1);
+        assert_eq!(path, PathBuf::from("/rec/sess-1_01_main-ivr.wav"));
+    }
+
+    #[test]
+    fn segmented_path_falls_back_on_empty_label() {
+        let (seq, path) = segmented_wav_path("/rec", "sess-1", 3, " / ");
+        assert_eq!(seq, 3);
+        assert_eq!(path, PathBuf::from("/rec/sess-1_03_segment.wav"));
+    }
+
+    #[test]
+    fn segmented_path_bumps_seq_when_file_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        std::fs::write(dir.path().join("sess_01_ivr.wav"), b"x").unwrap();
+        std::fs::write(dir.path().join("sess_02_ivr.wav"), b"x").unwrap();
+        let (seq, path) = segmented_wav_path(&root, "sess", 1, "ivr");
+        assert_eq!(seq, 3);
+        assert_eq!(path, dir.path().join("sess_03_ivr.wav"));
+    }
+
+    #[test]
+    fn segmented_path_floors_seq_to_one() {
+        let (seq, path) = segmented_wav_path("/rec", "sess", 0, "agent");
+        assert_eq!(seq, 1);
+        assert_eq!(path, PathBuf::from("/rec/sess_01_agent.wav"));
     }
 
     #[test]

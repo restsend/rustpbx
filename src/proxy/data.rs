@@ -1434,8 +1434,10 @@ pub(crate) async fn load_routes_from_db(
     ivr_dir: Option<&Path>,
     config_store: Option<&GeneratedConfigStore>,
 ) -> Result<Vec<RouteRule>> {
+    // Paused routes are exported as well and carry `disabled = true` so the
+    // generated config mirrors the full routing table; the matcher skips them
+    // at runtime.
     let models = routing::Entity::find()
-        .filter(routing::Column::IsActive.eq(true))
         .order_by_desc(routing::Column::Priority)
         .all(db)
         .await?;
@@ -1565,7 +1567,7 @@ async fn convert_route(
         match_conditions,
         rewrite: rewrite_rules,
         action,
-        disabled: Some(!model.is_active),
+        disabled: (!model.is_active).then_some(true),
         policy: None,
         origin: ConfigOrigin::embedded(),
         codecs: Vec::new(),
@@ -2023,6 +2025,115 @@ mod tests {
             .expect("route produced");
         assert_eq!(route.id, Some(42));
         assert_eq!(route.name, "us-outbound");
+    }
+
+    fn route_model_fixture(id: i64, name: &str, priority: i32, is_active: bool) -> routing::Model {
+        routing::Model {
+            id,
+            name: name.to_string(),
+            description: None,
+            direction: routing::RoutingDirection::Outbound,
+            priority,
+            is_active,
+            selection_strategy: routing::RoutingSelectionStrategy::RoundRobin,
+            hash_key: None,
+            source_trunk_id: None,
+            default_trunk_id: None,
+            source_pattern: None,
+            destination_pattern: Some("1001".to_string()),
+            header_filters: None,
+            rewrite_rules: None,
+            target_trunks: None,
+            owner: None,
+            notes: None,
+            metadata: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            last_deployed_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn convert_route_marks_paused_routes_disabled() {
+        // Paused routes must serialize `disabled = true` so the generated
+        // config keeps them visible while the matcher skips them at runtime;
+        // active routes must not emit the field at all.
+        let trunk_lookup = HashMap::new();
+
+        let paused = convert_route(
+            route_model_fixture(1, "paused-route", 10, false),
+            &trunk_lookup,
+            None,
+            None,
+        )
+        .await
+        .expect("convert paused route")
+        .expect("paused route produced");
+        assert_eq!(paused.disabled, Some(true));
+        let paused_toml = serialize_routes_toml(&[paused]).expect("serialize paused route");
+        assert!(paused_toml.contains("disabled = true"));
+
+        let active = convert_route(
+            route_model_fixture(2, "active-route", 10, true),
+            &trunk_lookup,
+            None,
+            None,
+        )
+        .await
+        .expect("convert active route")
+        .expect("active route produced");
+        assert_eq!(active.disabled, None);
+        let active_toml = serialize_routes_toml(&[active]).expect("serialize active route");
+        assert!(!active_toml.contains("disabled"));
+    }
+
+    #[tokio::test]
+    async fn load_routes_from_db_exports_paused_routes_as_disabled() {
+        let db = Database::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let manager = SchemaManager::new(&db);
+        sip_trunk::Migration
+            .up(&manager)
+            .await
+            .expect("create sip trunk table");
+        routing::Migration
+            .up(&manager)
+            .await
+            .expect("create routing table");
+
+        routing::ActiveModel {
+            name: Set("active-first".to_string()),
+            priority: Set(10),
+            is_active: Set(true),
+            destination_pattern: Set(Some("1001".to_string())),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert active route");
+        routing::ActiveModel {
+            name: Set("paused-second".to_string()),
+            priority: Set(5),
+            is_active: Set(false),
+            destination_pattern: Set(Some("1001".to_string())),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert paused route");
+
+        let trunk_lookup = HashMap::new();
+        let routes = load_routes_from_db(&db, &trunk_lookup, None, None)
+            .await
+            .expect("load routes from db");
+
+        // Both routes are exported, ordered by priority (higher first), and
+        // the paused one carries `disabled = true`.
+        let names: Vec<_> = routes.iter().map(|route| route.name.as_str()).collect();
+        assert_eq!(names, vec!["active-first", "paused-second"]);
+        assert_eq!(routes[0].disabled, None);
+        assert_eq!(routes[1].disabled, Some(true));
     }
 
     #[tokio::test]

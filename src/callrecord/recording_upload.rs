@@ -14,11 +14,11 @@ use tracing::{info, warn};
 use crate::{
     callrecord::{
         CALL_RECORD_HTTP_CONNECT_TIMEOUT, CALL_RECORD_HTTP_TIMEOUT, CallRecord, CallRecordHook,
-        UploadFailedMarker, is_direct_child_of_root,
+        CallRecordMedia, UploadFailedMarker, is_direct_child_of_root,
     },
     config::{RecordingPolicy, RecordingType},
     models::call_record::extract_sip_username,
-    rwi::RwiGatewayRef,
+    rwi::{RwiGatewayRef, proto::RecordingMetadata},
     storage::{Storage, StorageConfig},
 };
 
@@ -632,6 +632,73 @@ impl RecordingUploadHook {
             ))
         }
     }
+
+    /// Emit one `recording_metadata_available` per recording segment. The
+    /// `filename` / `download_url` / `file_size` describe this segment only;
+    /// `extra` flattens the call-level metadata (agent_id, ivr, …) plus the
+    /// segment extras (segment_type, segment_id, seq, label, time window) so
+    /// consumers can reconcile multi-segment calls (IVR stage + agent stage).
+    fn emit_segment_metadata(&self, record: &CallRecord, media: &CallRecordMedia, url: &str) {
+        let Some(ref gw) = self.rwi_gateway else {
+            return;
+        };
+        if media.track_id == "signaling" {
+            return;
+        }
+        let metadata = build_segment_recording_metadata(record, media, url);
+        let gw_ref = gw.read();
+        gw_ref.send_to_owner(&crate::rwi::RecordingMetadataAvailable {
+            call_id: record.call_id.clone(),
+            metadata,
+        });
+    }
+}
+
+/// Pure builder for per-segment `recording_metadata_available` payloads.
+/// `extra` flattens call-level metadata first, then the segment's own extras
+/// (segment_type/segment_id/seq/label/…) so segment-specific values win.
+fn build_segment_recording_metadata(
+    record: &CallRecord,
+    media: &CallRecordMedia,
+    url: &str,
+) -> RecordingMetadata {
+    fn flatten(value: &serde_json::Value) -> Option<String> {
+        match value {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            serde_json::Value::Bool(b) => Some(b.to_string()),
+            other => serde_json::to_string(other).ok(),
+        }
+    }
+    let mut extra = record.details.metadata.clone().map(|m| {
+        m.into_iter()
+            .filter_map(|(k, v)| flatten(&v).map(|s| (k, s)))
+            .collect::<HashMap<_, _>>()
+    });
+    if let Some(media_extra) = &media.extra {
+        let bag = extra.get_or_insert_with(HashMap::new);
+        for (key, value) in media_extra {
+            if let Some(s) = flatten(value) {
+                bag.insert(key.clone(), s);
+            }
+        }
+    }
+    let filename = Path::new(&media.path)
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| format!("{}.wav", record.call_id));
+    RecordingMetadata {
+        filename,
+        file_size: media.size,
+        download_url: Some(url.to_string()),
+        caller_name: extract_sip_username(&record.caller),
+        callee_name: extract_sip_username(&record.callee),
+        call_type: record.details.direction.clone(),
+        call_start_time: Some(record.start_time.to_rfc3339()),
+        call_end_time: Some(record.end_time.to_rfc3339()),
+        upload_time: Some(chrono::Utc::now().to_rfc3339()),
+        extra,
+    }
 }
 
 #[async_trait]
@@ -724,6 +791,9 @@ impl CallRecordHook for RecordingUploadHook {
                         "size": record.recorder[index].size,
                         "upload_url": url,
                     }));
+                    if let Some(media) = record.recorder.get(index) {
+                        self.emit_segment_metadata(record, media, &url);
+                    }
                     continue;
                 }
 
@@ -785,6 +855,9 @@ impl CallRecordHook for RecordingUploadHook {
                             "track_id": track_id,
                             "size": data_len,
                         }));
+                        if let Some(media) = record.recorder.get(index) {
+                            self.emit_segment_metadata(record, media, &archived);
+                        }
                     }
                     RecordingType::Http => {
                         let address = self
@@ -840,6 +913,9 @@ impl CallRecordHook for RecordingUploadHook {
                                     "size": data_len,
                                     "upload_url": url,
                                 }));
+                                if let Some(media) = record.recorder.get(index) {
+                                    self.emit_segment_metadata(record, media, &url);
+                                }
                             }
                             Err(err) => {
                                 warn!(
@@ -907,7 +983,6 @@ impl CallRecordHook for RecordingUploadHook {
                 }
 
                 if let Some(ref gw) = self.rwi_gateway {
-                    use crate::rwi::proto::RecordingMetadata;
                     let mut extra = record.details.metadata.clone().map(|m| {
                         m.into_iter()
                             .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
@@ -1008,6 +1083,123 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    /// Prints the exact wire shape produced by the real serialization path
+    /// (`build_segment_recording_metadata` + `RecordingMetadataAvailable`
+    /// serde): zero-padded seq in the file name, RFC3339 timestamps, string
+    /// extras. Run with `cargo test segment_metadata -- --nocapture`.
+    #[test]
+    fn segment_metadata_wire_shape() {
+        let root = tempfile::tempdir().unwrap();
+        let root_session = "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40";
+        // Real naming function — zero-pads seq, sanitizes the label.
+        let (seq, path) =
+            crate::callrecord::segmented_wav_path(root.path().to_str().unwrap(), root_session, 2, "1001");
+        let started = chrono::Utc::now();
+        let ended = started + chrono::Duration::seconds(28);
+
+        let mut details = CallDetails::default();
+        details.direction = "inbound".to_string();
+        // Keys the CC session hook publishes into session extensions, copied
+        // verbatim into CallDetails.metadata by record_snapshot.
+        details.metadata = Some(std::collections::HashMap::from([
+            ("agent_id".to_string(), json!("1001")),
+            ("agent_name".to_string(), json!("Agent 1001")),
+            ("queue_id".to_string(), json!("support")),
+        ]));
+
+        // CallRecordMedia.extra exactly as reporter::collect_recording_artifacts writes it.
+        let media = CallRecordMedia {
+            track_id: format!("segment:agent:{seq}"),
+            path: path.to_string_lossy().into_owned(),
+            size: 153_344,
+            extra: Some(std::collections::HashMap::from([
+                ("session_id".to_string(), json!(root_session)),
+                ("segment_type".to_string(), json!("agent")),
+                ("segment_id".to_string(), json!("9c1f02ab")),
+                ("seq".to_string(), json!(seq)),
+                ("label".to_string(), json!("1001")),
+                ("started_at".to_string(), json!(started.to_rfc3339())),
+                ("ended_at".to_string(), json!(ended.to_rfc3339())),
+            ])),
+        };
+        let record = CallRecord {
+            call_id: root_session.to_string(),
+            start_time: started - chrono::Duration::seconds(17),
+            end_time: ended + chrono::Duration::seconds(2),
+            caller: "sip:330909@192.168.1.10:5060".to_string(),
+            callee: "sip:1001@192.168.1.5:5060".to_string(),
+            recorder: vec![media.clone()],
+            details,
+            ..Default::default()
+        };
+
+        let event = crate::rwi::RecordingMetadataAvailable {
+            call_id: record.call_id.clone(),
+            metadata: build_segment_recording_metadata(&record, &media, path.to_string_lossy().as_ref()),
+        };
+        println!("{}", serde_json::to_string_pretty(&event).unwrap());
+
+        let value = serde_json::to_value(&event).unwrap();
+        let meta = &value["metadata"];
+        assert_eq!(
+            meta["filename"].as_str(),
+            Some(format!("{}_{}_{}.wav", root_session, "02", "1001").as_str())
+        );
+        assert_eq!(meta["seq"].as_str(), Some("2"));
+        assert!(meta.get("caller_name").is_some());
+    }
+
+    #[test]
+    fn segment_metadata_carries_segment_extras_and_call_context() {
+        let now = chrono::Utc::now();
+        let mut details = CallDetails::default();
+        details.direction = "inbound".to_string();
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("agent_id".to_string(), json!("1001"));
+        metadata.insert("ivr".to_string(), json!("main"));
+        details.metadata = Some(metadata);
+        let record = CallRecord {
+            call_id: "call-1".into(),
+            start_time: now,
+            end_time: now + chrono::Duration::seconds(30),
+            recorder: vec![],
+            details,
+            ..Default::default()
+        };
+        let mut seg_extra = std::collections::HashMap::new();
+        seg_extra.insert("segment_type".to_string(), json!("agent"));
+        seg_extra.insert("segment_id".to_string(), json!("ab12"));
+        seg_extra.insert("seq".to_string(), json!(2));
+        seg_extra.insert("label".to_string(), json!("1001"));
+        seg_extra.insert("started_at".to_string(), json!("t0"));
+        seg_extra.insert("ended_at".to_string(), json!("t1"));
+        let media = CallRecordMedia {
+            track_id: "segment:agent:ab12".into(),
+            path: "/recorders/call-1_02_1001.wav".into(),
+            size: 4096,
+            extra: Some(seg_extra),
+        };
+        let meta =
+            build_segment_recording_metadata(&record, &media, "https://up/call-1_02_1001.wav");
+        assert_eq!(meta.filename, "call-1_02_1001.wav");
+        assert_eq!(meta.file_size, 4096);
+        assert_eq!(
+            meta.download_url.as_deref(),
+            Some("https://up/call-1_02_1001.wav")
+        );
+        assert_eq!(meta.call_type, "inbound");
+        let extra = meta.extra.expect("extra");
+        assert_eq!(extra.get("agent_id").map(String::as_str), Some("1001"));
+        assert_eq!(extra.get("ivr").map(String::as_str), Some("main"));
+        assert_eq!(extra.get("seq").map(String::as_str), Some("2"));
+        assert_eq!(extra.get("label").map(String::as_str), Some("1001"));
+        assert_eq!(
+            extra.get("segment_type").map(String::as_str),
+            Some("agent")
+        );
+        assert_eq!(extra.get("started_at").map(String::as_str), Some("t0"));
+    }
 
     #[tokio::test]
     async fn aliyun_empty_bucket_and_region_initialize_recording_hook() {

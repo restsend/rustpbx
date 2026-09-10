@@ -1037,9 +1037,13 @@
                 status_not_handled: '{{ "routing.status_not_handled" | t }}',
                 status_forwarded: '{{ "routing.status_forwarded" | t }}',
                 status_rejected: '{{ "routing.status_rejected" | t }}',
+                status_queued: '{{ "routing.status_queued" | t }}',
+                status_application: '{{ "routing.status_application" | t }}',
                 outcome_no_match: '{{ "routing.outcome_no_match" | t }}',
                 outcome_forwarded: '{{ "routing.outcome_forwarded" | t }}',
                 outcome_rejected: '{{ "routing.outcome_rejected" | t }}',
+                outcome_queued: '{{ "routing.outcome_queued" | t }}',
+                outcome_application: '{{ "routing.outcome_application" | t }}',
                 no_rewrite_changes: '{{ "routing.no_rewrite_changes" | t }}',
                 default_route_label: '{{ "routing.default_route_label" | t }}',
                 validation_provide_number: '{{ "routing.validation_provide_number" | t }}',
@@ -2011,6 +2015,23 @@
                     const detail = `${code}${reason}`.trim();
                     outcomeLabel = this.translations.outcome_rejected.replace('{detail}', detail);
                     historyDetails = outcomeLabel;
+                } else if (type === 'queue') {
+                    // A matched queue rule enters the queue flow: it IS a hit,
+                    // just not a forward/abort outcome.
+                    status = 'info';
+                    statusLabel = this.translations.status_queued;
+                    badgeClass = 'bg-sky-50 text-sky-600 ring-1 ring-sky-200';
+                    const queueName = outcome.queue?.queue_name || data?.matched_rule || '';
+                    outcomeLabel = this.translations.outcome_queued.replace('{queue}', queueName);
+                    historyDetails = outcomeLabel;
+                } else if (type === 'application') {
+                    // Matched an application action (IVR, voicemail, ...).
+                    status = 'info';
+                    statusLabel = this.translations.status_application;
+                    badgeClass = 'bg-sky-50 text-sky-600 ring-1 ring-sky-200';
+                    const appName = outcome.app_type || '';
+                    outcomeLabel = this.translations.outcome_application.replace('{app}', appName);
+                    historyDetails = outcomeLabel;
                 }
 
                 const rewriteOperations = Array.isArray(data?.rewrite_operations)
@@ -2056,6 +2077,8 @@
                         return 'bg-rose-500';
                     case 'warning':
                         return 'bg-amber-500';
+                    case 'info':
+                        return 'bg-sky-500';
                     default:
                         return 'bg-slate-400';
                 }

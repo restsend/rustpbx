@@ -41,7 +41,7 @@ pub async fn create_test_server_with_config_and_sipflow_backend(
     sipflow_backend: Option<Arc<dyn crate::sipflow::SipFlowBackend>>,
 ) -> (Arc<SipServerInner>, Arc<ProxyConfig>) {
     let locator = Arc::new(Box::new(MemoryLocator::new()) as Box<dyn Locator>);
-    create_test_server_with_dependencies(config, sipflow_backend, locator, Vec::new()).await
+    create_test_server_with_dependencies(config, sipflow_backend, locator, Vec::new(), None).await
 }
 
 /// Like [`create_test_server`] but with session hooks pre-installed (e.g.
@@ -51,14 +51,25 @@ pub async fn create_test_server_with_session_hooks(
     hooks: Vec<Arc<dyn crate::proxy::proxy_call::session_hooks::CallSessionHook>>,
 ) -> (Arc<SipServerInner>, Arc<ProxyConfig>) {
     let locator = Arc::new(Box::new(MemoryLocator::new()) as Box<dyn Locator>);
-    create_test_server_with_dependencies(config, None, locator, hooks).await
+    create_test_server_with_dependencies(config, None, locator, hooks, None).await
 }
 
 pub async fn create_test_server_with_config_and_locator(
     config: ProxyConfig,
     locator: Arc<Box<dyn Locator>>,
 ) -> (Arc<SipServerInner>, Arc<ProxyConfig>) {
-    create_test_server_with_dependencies(config, None, locator, Vec::new()).await
+    create_test_server_with_dependencies(config, None, locator, Vec::new(), None).await
+}
+
+/// Like [`create_test_server_with_config`] but with an RWI gateway installed
+/// on the server, so session-side event emissions become observable through
+/// the gateway's event tap.
+pub async fn create_test_server_with_rwi_gateway(
+    config: ProxyConfig,
+    rwi_gateway: crate::rwi::RwiGatewayRef,
+) -> (Arc<SipServerInner>, Arc<ProxyConfig>) {
+    let locator = Arc::new(Box::new(MemoryLocator::new()) as Box<dyn Locator>);
+    create_test_server_with_dependencies(config, None, locator, Vec::new(), Some(rwi_gateway)).await
 }
 
 async fn create_test_server_with_dependencies(
@@ -66,6 +77,7 @@ async fn create_test_server_with_dependencies(
     sipflow_backend: Option<Arc<dyn crate::sipflow::SipFlowBackend>>,
     locator: Arc<Box<dyn Locator>>,
     session_hooks: Vec<Arc<dyn crate::proxy::proxy_call::session_hooks::CallSessionHook>>,
+    rwi_gateway: Option<crate::rwi::RwiGatewayRef>,
 ) -> (Arc<SipServerInner>, Arc<ProxyConfig>) {
     // Add rustpbx.com to the allowed realms for testing
     if config.realms.is_none() {
@@ -156,7 +168,7 @@ async fn create_test_server_with_dependencies(
         storage: None,
         presence_manager: Arc::new(crate::proxy::presence::PresenceManager::new(None)),
         addon_registry: None,
-        rwi_gateway: None,
+        rwi_gateway,
         ivr_trace: None,
         tls_listener: None,
         conference_manager: conf_mgr,

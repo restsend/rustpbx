@@ -82,6 +82,17 @@ async fn acceptance_partial_skill_match_dials_when_require_exact_false() {
         "any-skill".into(),
         AcdPolicy {
             name: "any-skill".into(),
+            schedule: rustpbx::addons::cc::acd::ScheduleConfig {
+                // Clock-independent: default 09:00-18:00 business hours make
+                // OffHours nights resolve to ACD Fallback (Blocked) and fail
+                // these acceptance tests after 18:00 local.
+                business_hours: Some(rustpbx::addons::cc::acd::BusinessHours {
+                    start: "00:00".to_string(),
+                    end: "23:59".to_string(),
+                    timezone: "UTC".to_string(),
+                }),
+                ..Default::default()
+            },
             strategy: StrategyConfig {
                 require_exact_skill: false,
                 ..Default::default()
@@ -134,6 +145,17 @@ async fn acceptance_away_agent_reserved_when_available_states_include_away() {
         "force-away".into(),
         AcdPolicy {
             name: "force-away".into(),
+            schedule: rustpbx::addons::cc::acd::ScheduleConfig {
+                // Clock-independent: default 09:00-18:00 business hours make
+                // OffHours nights resolve to ACD Fallback (Blocked) and fail
+                // these acceptance tests after 18:00 local.
+                business_hours: Some(rustpbx::addons::cc::acd::BusinessHours {
+                    start: "00:00".to_string(),
+                    end: "23:59".to_string(),
+                    timezone: "UTC".to_string(),
+                }),
+                ..Default::default()
+            },
             available_states: vec![PresenceStateKind::Idle, PresenceStateKind::Away],
             ..Default::default()
         },

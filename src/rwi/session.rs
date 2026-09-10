@@ -606,6 +606,11 @@ pub struct RecordStartRequest {
     /// Optional segment id; generated when empty and path is empty.
     #[serde(default, alias = "segment_id")]
     pub id: Option<String>,
+    /// Optional file-name label for auto-generated segment paths
+    /// (`{session_id}_{seq}_{label}.wav`). Resolved from call context
+    /// (agent id / ivr name) when omitted.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 impl RecordStartRequest {

@@ -1889,6 +1889,7 @@ mod tests {
             add_group_ids: &[String],
             _call_id: &str,
             fair: bool,
+            include_primary: bool,
         ) -> Vec<String> {
             self.escalation_calls.lock().unwrap().push((
                 primary_target_uri.to_string(),

@@ -130,7 +130,7 @@ rand = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
 hex = { version = "0.4.3", optional = true }
-rsipstack = "0.6.7"
+rsipstack = "0.6.10"
 audio-codec = "0.4.7"
 rustrtc = "0.3.133"
 reqwest = { version = "0.13.4", default-features = false, features = [
@@ -300,4 +300,3 @@ codegen-units = 16
 # (file + line per frame via tracing_panic::panic_hook) at a small binary
 # size cost; full debuginfo is not embedded, so symbol/variable data stays out.
 debug = "line-tables-only"
-

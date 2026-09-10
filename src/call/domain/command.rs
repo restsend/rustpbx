@@ -245,6 +245,16 @@ pub enum CallCommand {
         reply: oneshot::Sender<anyhow::Result<crate::media::media_recorder::RecorderStatus>>,
     },
 
+    /// Resolve which session leg owns a SIP dialog. Used by the inbound-REFER
+    /// blind-transfer path to identify the transferor (REFER sending) leg.
+    /// Internal request/reply command, never serialized.
+    #[serde(skip)]
+    QueryLegByDialog {
+        /// Dialog identifier (Display form) the REFER arrived on.
+        dialog_id: String,
+        reply: oneshot::Sender<Option<LegId>>,
+    },
+
     /// Start live transcription. Reference-counted: the transcription pump
     /// starts on the first request and runs until the matching number of
     /// `StopTranscription` commands (or call end).
@@ -442,7 +452,8 @@ pub enum CallCommand {
 
     /// Leg received 180 Ringing (async notification from the dynamic-leg
     /// INVITE task). Lets the session fire `on_call_ringing` session hooks so
-    /// the CC addon can emit `cc_ringing` for queue-dialed agents.
+    /// the CC addon publishes the agent attribution enriching the core
+    /// `call_ringing` for queue-dialed agents.
     LegRinging {
         /// Leg ID that is ringing
         leg_id: LegId,
@@ -592,6 +603,12 @@ pub struct RecordConfig {
     /// Segment id (short uuid when omitted by the caller).
     #[serde(default)]
     pub segment_id: Option<String>,
+    /// Label appended to auto-generated segment file names
+    /// (`{session_id}_{seq}_{label}.wav`). When empty the session resolves it
+    /// from its extensions (`agent_id` → `ivr`) and finally falls back to
+    /// `segment_type`.
+    #[serde(default)]
+    pub label: Option<String>,
     /// Deliver `RecordingComplete` to the CallApp (default true). Mid-call
     /// IVR `record_start` sets this false so `record_stop` does not advance
     /// the step provider.
@@ -610,6 +627,7 @@ impl Default for RecordConfig {
             mono_caller_only: None,
             segment_type: None,
             segment_id: None,
+            label: None,
             notify_app: None,
         }
     }

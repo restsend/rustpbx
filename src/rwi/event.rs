@@ -138,11 +138,36 @@ pub struct CallHangup {
     pub call_id: String,
     pub reason: Option<String>,
     /// Normalized initiator: `"agent"` | `"caller"` | `"system"` | `"transfer"`
-    /// | `"unknown"`. Consistent with the CC-layer `cc_hangup.hangup_by`.
+    /// | `"unknown"`. Consistent with the former CC-layer `cc_hangup.hangup_by`.
     pub hangup_by: Option<String>,
     pub sip_status: Option<u16>,
+    /// Talk time in seconds (answer → hangup). `None` when the call was never
+    /// answered (originate setup failures). Replaces the `duration_secs`
+    /// previously carried only by `cc_hangup`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<u64>,
 }
 rwi_event!(CallHangup, "call_hangup");
+
+/// A call leg was put on hold (re-INVITE with `sendonly`/`inactive`, or an
+/// explicit Hold command). Agent attribution (`agent_id` / `agent_name`) is
+/// injected via `EventCallContext` enrichment when a CC agent participates —
+/// replaces the former `cc_held` event.
+#[derive(Debug, Clone, Serialize)]
+pub struct CallHeld {
+    pub call_id: String,
+    pub leg_id: String,
+}
+rwi_event!(CallHeld, "call_held");
+
+/// A previously held call leg was retrieved (resume). Replaces the former
+/// `cc_unheld` event.
+#[derive(Debug, Clone, Serialize)]
+pub struct CallUnheld {
+    pub call_id: String,
+    pub leg_id: String,
+}
+rwi_event!(CallUnheld, "call_unheld");
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CallNoAnswer {
@@ -156,10 +181,34 @@ pub struct CallBusy {
 }
 rwi_event!(CallBusy, "call_busy");
 
+/// Where a transfer originated from — the flow position of the call at the
+/// moment it was transferred (IVR / queue / agent / SIP REFER), so consumers
+/// can reconstruct the call path from RWI events alone.
+#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+pub struct TransferSource {
+    /// `ivr` | `queue` | `agent` | `refer` | `external`
+    pub source_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ivr_node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CallTransferred {
     pub call_id: String,
     pub transfer_target: Option<String>,
+    /// Resolved target kind: `queue` | `ivr` | `route_point` | `voicemail` |
+    /// `conference` | `bridge` | `sip`. `None` when unknown (e.g. a Replaces
+    /// takeover where the target is opaque).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_target_type: Option<String>,
+    /// Flow origin captured at transfer time: the IVR (and node) or queue the
+    /// call was in, or the agent / REFER party that initiated the transfer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_source: Option<TransferSource>,
 }
 rwi_event!(CallTransferred, "call_transferred");
 
@@ -167,6 +216,9 @@ rwi_event!(CallTransferred, "call_transferred");
 pub struct CallTransferAccepted {
     pub call_id: String,
     pub transfer_target: Option<String>,
+    /// Resolved target kind, same vocabulary as `CallTransferred`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_target_type: Option<String>,
 }
 rwi_event!(CallTransferAccepted, "call_transfer_accepted");
 
@@ -196,6 +248,9 @@ pub struct CallTransferFailed {
     pub sip_status: Option<u16>,
     pub reason: Option<String>,
     pub transfer_target: Option<String>,
+    /// Resolved target kind, same vocabulary as `CallTransferred`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_target_type: Option<String>,
 }
 rwi_event!(CallTransferFailed, "call_transfer_failed");
 
@@ -397,7 +452,6 @@ pub struct QueueAgentNoAnswer {
     pub queue_id: String,
     pub agent_id: String,
     pub attempt: u32,
-    pub trace_id: String,
 }
 rwi_event!(QueueAgentNoAnswer, "queue_agent_no_answer");
 
@@ -407,7 +461,6 @@ pub struct QueueAgentRejected {
     pub queue_id: String,
     pub agent_id: String,
     pub attempt: u32,
-    pub trace_id: String,
 }
 rwi_event!(QueueAgentRejected, "queue_agent_rejected");
 
@@ -439,7 +492,6 @@ pub struct QueueCandidatesFound {
     pub call_id: String,
     pub queue_id: String,
     pub candidates: Vec<String>,
-    pub trace_id: String,
 }
 rwi_event!(QueueCandidatesFound, "queue_candidates_found");
 
@@ -449,7 +501,6 @@ pub struct QueueFallbackExecuted {
     pub queue_id: String,
     pub action: String,
     pub reason: String,
-    pub trace_id: String,
 }
 rwi_event!(QueueFallbackExecuted, "queue_fallback_executed");
 
@@ -881,5 +932,51 @@ mod tests {
 
         assert!(dtmf_with_extra.get("extra").is_some());
         assert_eq!(dtmf_with_extra["extra"]["foo"], "bar");
+    }
+
+    #[test]
+    fn transfer_source_serializes_nested_and_omits_none() {
+        let payload = to_flat_payload(
+            &CallTransferred {
+                call_id: "call-1".into(),
+                transfer_target: Some("queue:sales".into()),
+                transfer_target_type: Some("queue".into()),
+                transfer_source: Some(TransferSource {
+                    source_type: "ivr".into(),
+                    name: Some("main-ivr".into()),
+                    ivr_node_id: Some("menu-2".into()),
+                    agent_id: None,
+                }),
+            },
+            None,
+        );
+
+        assert_eq!(payload["transfer_target_type"], "queue");
+        assert_eq!(payload["transfer_source"]["source_type"], "ivr");
+        assert_eq!(payload["transfer_source"]["name"], "main-ivr");
+        assert_eq!(payload["transfer_source"]["ivr_node_id"], "menu-2");
+        assert!(
+            payload["transfer_source"].get("agent_id").is_none(),
+            "None source fields must be omitted entirely"
+        );
+    }
+
+    #[test]
+    fn call_transferred_omits_absent_source_fields() {
+        let payload = to_flat_payload(
+            &CallTransferred {
+                call_id: "call-1".into(),
+                transfer_target: Some("sip:1001@rustpbx.com".into()),
+                transfer_target_type: Some("sip".into()),
+                transfer_source: None,
+            },
+            None,
+        );
+
+        assert_eq!(payload["transfer_target_type"], "sip");
+        assert!(
+            payload.get("transfer_source").is_none(),
+            "missing transfer_source must be omitted entirely"
+        );
     }
 }

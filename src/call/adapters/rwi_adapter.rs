@@ -243,6 +243,7 @@ pub fn rwi_to_call_command(
                     mono_caller_only: Some(false),
                     segment_type: req.segment_type.clone(),
                     segment_id: req.id.clone(),
+                    label: req.label.clone(),
                     notify_app: Some(false),
                 },
             })
@@ -473,6 +474,7 @@ mod tests {
             },
             segment_type: Some("ivr".into()),
             id: Some("s1".into()),
+            label: None,
         });
         let cmd = rwi_to_call_command(payload, Some("c1")).unwrap();
         match cmd {

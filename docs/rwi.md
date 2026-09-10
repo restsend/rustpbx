@@ -334,6 +334,8 @@ returns if the bridge disconnects).
     "mode": "mixed",
     "beep": false,
     "max_duration_secs": 7200,
+    "segment_type": "ivr",
+    "label": "main-ivr",
     "storage": {
       "path": "records/2026/03/13/c_92f4.wav"
     }
@@ -342,11 +344,17 @@ returns if the bridge disconnects).
 ```
 
 `record.start` works on inbound **and outbound (originated) calls** — an
-explicit start is honoured regardless of the dialplan auto-record flag. When
-the recording finishes (explicit stop or call hangup) the owner receives
+explicit start is honoured regardless of the dialplan auto-record flag, and
+even when `[recording] enabled = false` (the capture tap is armed on every
+call). When `storage.path` is empty, the segment file is auto-named
+`{recording_root}/{root_session_id}_{seq}_{label}.wav`: `seq` is the per-call
+recording counter and `label` resolves from the explicit `label` param → the
+answering agent id → the current IVR name → `segment_type`. When the
+recording finishes (explicit stop or call hangup) the owner receives
 `record_stopped`, and the CDR carries the recording file (→ `recording_url`).
 With `[recording]` enabled, `recording_metadata_available` and `record_end`
-are also emitted.
+are also emitted — one `recording_metadata_available` per segment, `record_end`
+once per call.
 
 **Recording on originate (auto-start on media):** `call.originate` (and
 `POST /ami/v1/outbound/dial`) accepts a `record` object with the same shape as

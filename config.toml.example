@@ -330,8 +330,17 @@ auto_start_at = "media" # default; use "answer" to wait for 200
 # Mid-call / IVR segmented recording: set auto_start = false so the call does
 # not record by default; IVR `record_start`/`record_stop` (or RWI
 # record.start/stop) open slices named
-# {session_id}_{YYYYMMDDHHMMSS}_{type}_{id}.wav. CDR metadata.recording_segments
-# lists every slice. Prefer record_stop before transfer/REFER.
+# {root_session_id}_{seq}_{label}.wav — the label resolves from the call
+# context (agent id once an agent answers, ivr name during IVR, else the
+# segment type), and seq is the per-call recording counter. Every media leg
+# carries a capture tap, so on-demand recording works even with
+# enabled = false. CDR metadata.recording_segments lists every slice, and a
+# `recording_metadata_available` event is emitted per segment on upload.
+# Prefer record_stop before transfer/REFER.
+#
+# Contact-center agent segments: in cc.toml, `[recording]
+# record_on_agent_connect = true` starts a segment automatically when an
+# agent answers (segment_type "agent"), and closes it when the agent leaves.
 #
 # On upload failure a sibling
 # .upload_failed.{filename} JSON marker is written (time/address/duration_ms/error);

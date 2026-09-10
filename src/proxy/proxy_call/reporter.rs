@@ -432,6 +432,15 @@ fn collect_recording_artifacts(
                 "segment_id".to_string(),
                 serde_json::Value::String(seg.segment_id.clone()),
             );
+            if seg.seq > 0 {
+                extra.insert("seq".to_string(), serde_json::Value::from(seg.seq));
+            }
+            if !seg.label.is_empty() {
+                extra.insert(
+                    "label".to_string(),
+                    serde_json::Value::String(seg.label.clone()),
+                );
+            }
             if let Some(ref started) = seg.started_at {
                 extra.insert(
                     "started_at".to_string(),
@@ -889,6 +898,8 @@ mod tests {
             size: 7,
             segment_type: "ivr".into(),
             segment_id: "ab".into(),
+            seq: 1,
+            label: "main-ivr".into(),
             started_at: Some("t0".into()),
             ended_at: Some("t1".into()),
             duration_secs: 1.5,
@@ -905,6 +916,22 @@ mod tests {
                 .and_then(|e| e.get("session_id"))
                 .and_then(|v| v.as_str()),
             Some("root-sess")
+        );
+        assert_eq!(
+            recorder[0]
+                .extra
+                .as_ref()
+                .and_then(|e| e.get("seq"))
+                .and_then(|v| v.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            recorder[0]
+                .extra
+                .as_ref()
+                .and_then(|e| e.get("label"))
+                .and_then(|v| v.as_str()),
+            Some("main-ivr")
         );
         assert!(meta.get("recording_segments").is_some());
         assert!(meta.get("sipflow_jsonl").is_none());
@@ -931,6 +958,8 @@ mod tests {
             size: 0,
             segment_type: "ivr".into(),
             segment_id: "x".into(),
+            seq: 1,
+            label: "ivr".into(),
             started_at: None,
             ended_at: None,
             duration_secs: 0.0,

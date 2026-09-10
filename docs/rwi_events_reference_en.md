@@ -149,6 +149,9 @@ All call-scoped events use `#[serde(flatten)]` to embed the following fields **d
 | `trunk` | Option\<String\> | SIP trunk name |
 | `app_id` | Option\<String\> | IVR application ID |
 | `routing_target` | Option\<String\> | Current routing target |
+| `agent_id` | Option\<String\> | CC agent identifier — present **only** when the call actually involves a registered CC agent |
+| `agent_name` | Option\<String\> | CC agent display name (same condition as `agent_id`) |
+| `queue_id` | Option\<String\> | Queue the call is being served by, when any |
 | `root` | Option\<Object\> | Root call identity (see below) |
 
 **Root call (`root`)** — nested object identifying the root call of this call
@@ -167,10 +170,14 @@ Populated with the session's own call context (`root = self`). Transferred
 legs that run in a separate session keep their own context — there is no
 cross-session root propagation.
 
-**Notes**: the flat context never contains `agent_id`/`agent_name` — those are
-event-specific fields (e.g. `cc_*` events, `record_stopped`) that only appear
-when the event itself carries them. A `call_*` event without agent involvement
-never has agent-related values.
+**Notes**: the flat context carries `agent_id`/`agent_name` **only when the
+call actually involves a registered CC agent** — the CC session hook resolves
+and publishes the attribution (canonical agent id, resolved from endpoint →
+primary_endpoint → agent_id) and the proxy session syncs it into the call
+meta. Calls without CC agent involvement never carry agent-related values.
+This is how the former separate `cc_ringing` / `cc_answered` / `cc_hangup` /
+`cc_held` / `cc_unheld` events are now expressed: as the unified `call_*`
+lifecycle events enriched with agent context.
 
 **Notes**:
 - `ani` vs `caller`: `ani` is a plain number (for business logic), `caller` is the full SIP URI
@@ -284,13 +291,14 @@ First event in any call flow.
 }
 ```
 
-#### call_ringing / call_early_media / call_answered / call_unbridged / call_no_answer / call_busy
+#### call_ringing / call_answered / call_unbridged / call_no_answer / call_busy
 
 Dispatch: call_owner
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
+| `early_media` | bool | `call_ringing` only: `true` = provisional response carried SDP (183 Session Progress or 180 with SDP, i.e. early media); `false` = plain 180 Ringing. The former separate `call_early_media` event was merged into this field |
 | *+ctx* | | Flat context fields |
 
 ```json
@@ -302,10 +310,33 @@ Dispatch: call_owner
     "callee": "sip:4000@pbx.local",
     "caller_name": "13800138000",
     "callee_name": "4000",
-    "direction": "inbound"
+    "direction": "inbound",
+    "agent_id": "1001",
+    "queue_id": "support"
   }
 }
 ```
+
+> When the call involves a registered CC agent, the context carries
+> `agent_id`/`agent_name`/`queue_id` — this replaces the former separate
+> `cc_ringing` / `cc_answered` events. `call_ringing` is emitted **once per
+> provisional response**; consumers tell ringback from early media by the
+> `early_media` flag instead of a separate event.
+
+#### call_held / call_unheld
+
+Dispatch: call_owner
+
+A call leg was put on hold / retrieved from hold (explicit Hold command or an
+inbound re-INVITE with `sendonly`/`inactive`). These replace the former
+`cc_held` / `cc_unheld` events; agent attribution arrives via the flat
+context when a CC agent participates.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | String | Call identifier |
+| `leg_id` | String | Held/resumed leg (`caller` / `callee` / ...) |
+| *+ctx* | | Flat context fields |
 
 #### call_bridged
 
@@ -324,8 +355,9 @@ Dispatch: call_owner
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
 | `reason` | Option\<String\> | Hangup reason (see table below) |
-| `hangup_by` | Option\<String\> | Normalized initiator: `agent` \| `caller` \| `system` \| `transfer` \| `unknown`. Same vocabulary as `cc_hangup.hangup_by`. A callee hangup is reported as `agent` only when the call actually involved a CC agent (queue-routed or `resolved_agent_id`); otherwise it is `callee`. |
+| `hangup_by` | Option\<String\> | Normalized initiator: `agent` \| `caller` \| `system` \| `transfer` \| `unknown`. A callee hangup is reported as `agent` only when the call actually involved a CC agent (queue-routed or `resolved_agent_id`); otherwise it is `callee`. |
 | `sip_status` | Option\<u16\> | SIP response code |
+| `duration_secs` | Option\<u64\> | Talk time in seconds (answer → hangup); omitted when the call was never answered |
 | *+ctx* | | Flat context fields |
 
 **reason values**:
@@ -352,65 +384,48 @@ Dispatch: call_owner
     "reason": "caller",
     "hangup_by": "caller",
     "sip_status": null,
+    "duration_secs": 42,
     "caller": "sip:13800138000@pbx.local",
     "callee": "sip:4000@pbx.local",
     "caller_name": "13800138000",
     "callee_name": "4000",
-    "direction": "inbound"
-  }
-}
-```
-
-#### cc_hangup
-
-Contact-center layer hangup (CC-routed calls only). Emitted alongside
-`call_hangup`; named `cc_hangup` for consistency with the core event. `reason`
-uses the **same Display vocabulary** as `call_hangup.reason` (e.g. `caller`,
-`callee`, `abandoned` — NOT the Debug form). `hangup_by` makes it explicit
-whether the agent, the caller, the system, or a transfer ended the call —
-this is critical for contact-center reporting.
-
-Dispatch: broadcast (delivered to the configured `[rwi_webhook]`). Broadcast
-events carry the primary call's flat context (`caller`/`callee`/names/
-`direction`) via gateway enrichment, like all call-scoped events.
-
-cc_* events (including `cc_ringing`/`cc_answered`) are emitted **only when the
-call actually involves a registered CC agent** — a plain extension-to-extension
-call produces no `cc_*` events.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `call_id` | String | Call identifier |
-| `agent_id` | Option\<String\> | CC agent identifier (callee leg) |
-| `agent_name` | Option\<String\> | CC agent display name |
-| `queue_id` | Option\<String\> | Queue/skill-group the call was routed through |
-| `reason` | String | Normalized reason, same vocabulary as `call_hangup.reason` |
-| `hangup_by` | Option\<String\> | `agent` \| `caller` \| `system` \| `transfer` \| `unknown` |
-| `duration_secs` | u64 | Talk time in seconds (0 for unanswered) |
-| *+ctx* | | Flat context fields |
-
-`cc_ringing` / `cc_answered` / `cc_held` / `cc_unheld` also carry `agent_id`
-(canonical agent id, resolved from endpoint → primary_endpoint → agent_id) and
-`agent_name`.
-
-```json
-{
-  "rwi": "1.0",
-  "event_type": "cc_hangup",
-  "event": {
-    "call_id": "call-abc",
+    "direction": "inbound",
     "agent_id": "1001",
-    "queue_id": "support",
-    "reason": "callee",
-    "hangup_by": "agent",
-    "duration_secs": 42
+    "queue_id": "support"
   }
 }
 ```
 
-> Previously this event was named `cc_ended` and carried `reason` as the Debug
-> form of the internal enum (e.g. `"ByCallee"`). Both were normalized to match
-> `call_hangup`.
+> **CC agent calls**: when the call involved a registered CC agent, the hangup
+> context carries `agent_id` / `agent_name` / `queue_id` (and `hangup_by`
+> reports `agent` for agent-initiated hangups). This replaces the former
+> separate `cc_hangup` event.
+
+> Historically there was a separate `cc_hangup` event (before that,
+> `cc_ended` carrying `reason` as the Debug form of the internal enum, e.g.
+> `"ByCallee"`). Both were first normalized to match `call_hangup`, then
+> folded into `call_hangup` entirely.
+
+##### Migration table: former `cc_*` events → unified `call_*`
+
+The CC addon's separate call lifecycle events were removed. Agent context now
+arrives via the flat context enrichment (`agent_id` / `agent_name` /
+`queue_id`) on the core events, present **only when a registered CC agent
+participates**:
+
+| Former event | Unified expression | Notes |
+|---|---|---|
+| `cc_ringing` | `call_ringing` (+ctx) | `early_media` is the core event's own flag; one event per provisional response |
+| `cc_answered` | `call_answered` (+ctx) | Fires at the answer moment per flow: no-app `accept_call`, originate 200 OK, or the queue-agent leg connect (LegConnected) |
+| `cc_hangup` | `call_hangup` (+ctx, `duration_secs`) | `reason`/`hangup_by` keep the same vocabulary; `duration_secs` is omitted (not 0) for unanswered calls |
+| `cc_held` | `call_held` (+ctx) | `leg_id` unchanged |
+| `cc_unheld` | `call_unheld` (+ctx) | `leg_id` unchanged |
+
+Dispatch changed from broadcast to `call_owner`; webhook / event-tap delivery
+is unaffected (all dispatch modes forward there). Events now also enter the
+resume cache (replayable after reconnect). **Webhook allow-lists**
+(`[rwi_webhook].events`) referencing `cc_*` names must be updated to the
+`call_*` names — unknown names silently filter everything out.
 
 ### 6.2 Transfer Events
 
@@ -421,8 +436,45 @@ Dispatch: call_owner
 | Field | Type | Description |
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
-| `transfer_target` | Option\<String\> | Original transfer target string (e.g. `queue:queue-name?target=skillgroup:tech-support_G`). `None` when the target is unavailable (e.g. SIP REFER Replaces takeover). |
+| `transfer_target` | Option\<String\> | Original transfer target string (e.g. `queue:queue-name?target=skillgroup:tech-support_G`, or the bare number of a route-table hand-off). `None` when the target is unavailable (e.g. SIP REFER Replaces takeover). |
+| `transfer_target_type` | Option\<String\> | Resolved target kind: `queue` \| `ivr` \| `route_point` \| `voicemail` \| `conference` \| `bridge` \| `sip`. Omitted when unknown. |
+| `transfer_source` | Option\<Object\> | Flow origin captured at transfer time (`call_transferred` only). Nested object, see below. |
 | *+ctx* | | Flat context fields |
+
+`transfer_source` nested fields (all optional):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `source_type` | String | `ivr` (transfer out of a running IVR flow) \| `queue` (transfer by a queue-served agent) \| `agent` (transfer attributed to a known agent leg). Only these three values are produced today. |
+| `name` | Option\<String\> | Source IVR name (e.g. `main-ivr`) or queue name (e.g. `sales`) |
+| `ivr_node_id` | Option\<String\> | IVR node the call was at when transferred |
+| `agent_id` | Option\<String\> | Agent that initiated the transfer, when known |
+
+Example — blind transfer from an IVR node into a queue:
+
+```json
+{
+  "event_type": "call_transferred",
+  "call_id": "a1b2c3",
+  "transfer_target": "queue:sales",
+  "transfer_target_type": "queue",
+  "transfer_source": {
+    "source_type": "ivr",
+    "name": "main-ivr",
+    "ivr_node_id": "menu-2"
+  }
+}
+```
+
+Notes:
+
+- Blind transfers to in-session application targets (`queue:` / `ivr:` /
+  `toivr:` / `voicemail:` / `conference:`) emit `call_transferred` when the
+  hand-off completes; SIP-URI targets emit on dial/REFER success.
+- A blind transfer to a **bare number** that the route table maps to a queue
+  or application starts that flow in-session (target type `queue` / `ivr`,
+  original number kept in `transfer_target`). Gated by
+  `proxy.route_originated_calls` for both CTI/API transfers and phone REFERs.
 
 #### call_transfer_failed
 
@@ -434,6 +486,35 @@ Dispatch: call_owner
 | `sip_status` | Option\<u16\> | SIP status code |
 | `reason` | Option\<String\> | Failure reason |
 | `transfer_target` | Option\<String\> | Original transfer target string (see above) |
+| `transfer_target_type` | Option\<String\> | Resolved target kind (see above) |
+| *+ctx* | | Flat context fields |
+
+#### consult_switched
+
+Dispatch: broadcast
+
+Emitted when the talking party flips between customer and consult target
+during an owner-anchored consultative transfer.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | String | Call identifier |
+| `transfer_id` | String | Transfer transaction ID |
+| `talking_to` | String | Current talking party: `customer` \| `consult` |
+| *+ctx* | | Flat context fields |
+
+#### conference_auth_result
+
+Dispatch: broadcast
+
+Customer's DTMF response to the conference-authorization IVR
+(`conference_auth` flow).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | String | Call identifier |
+| `transfer_id` | String | Transfer transaction ID |
+| `result` | String | `authorized` \| `denied` \| `timeout` |
 | *+ctx* | | Flat context fields |
 
 ### 6.3 Media Events
@@ -452,7 +533,7 @@ Dispatch: call_owner
 > bidirectional PCM now uses `call.transfer` → a `voip_bridge:` WebSocket
 > endpoint (inbound and outbound calls); these events no longer exist.
 
-#### media_ringback_passthrough_started / media_ringback_passthrough_stopped
+#### media_ringback_passthrough_started
 
 Dispatch: call_owner
 
@@ -460,6 +541,9 @@ Dispatch: call_owner
 |-------|------|-------------|
 | `source` | String | Source leg call_id |
 | `target` | String | Target leg call_id |
+
+> Only the `started` event exists; no `stopped` event is emitted when the
+> ringback pass-through ends (no such definition in code).
 
 #### media_play_started / media_play_finished
 
@@ -473,7 +557,7 @@ Dispatch: call_owner
 
 #### dtmf
 
-Dispatch: fan_out_to_context
+Dispatch: call_owner
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -498,16 +582,15 @@ Dispatch: call_owner
 
 ### 6.4 Recording Events
 
-#### record_started / record_paused / record_resumed / record_failed
+#### record_started / record_paused / record_resumed
 
 Dispatch: call_owner
 
-> Trigger: Via `RecordStart` / `RecordPause` / `RecordResume` / `RecordStop` RWI commands. **Not automatic** — recording does not start automatically when a call is answered.
+> Trigger: Via `RecordStart` / `RecordPause` / `RecordResume` / `RecordStop` RWI commands. **Not automatic** — recording does not start automatically when a call is answered. There is no `record_failed` event — start/stop failures are returned as command errors.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
-| `error` | String | `record_failed` only: error message |
 | *+ctx* | | Flat context fields |
 
 #### record_stopped (Enhanced)
@@ -568,6 +651,22 @@ Dispatch: call_owner
 
 Triggered when the recording file upload completes, containing full metadata.
 
+> **Segmented recording**: each recording segment of a call (IVR slice, agent
+> slice, …) emits **its own** event once uploaded — `filename` /
+> `download_url` / `file_size` describe that segment only, and `extra`
+> carries `seq` (per-call recording counter), `label` (agent id or IVR name),
+> `segment_type`, `segment_id`, `started_at` / `ended_at` next to the
+> call-level metadata. `record_end` remains a single per-call summary.
+>
+> **Backwards compatibility**: the pre-existing **aggregate event is still
+> emitted once per call** (N segments → N+1 events) — its
+> `extra.recording_segments` remains a JSON **string** (containing the array;
+> `JSON.parse` it), and its `filename` is the first segment's file. Old
+> subscribers keep working; consumers that only want per-segment events can
+> skip the aggregate one (the event whose `extra` contains the
+> `recording_segments` key). The CDR's `metadata.recording_segments` stays a
+> native JSON array, unchanged.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
@@ -593,32 +692,86 @@ Triggered when the recording file upload completes, containing full metadata.
 > via endpoint → primary_endpoint → agent_id; `agent_name` is the agent display
 > name). For calls without CC agent involvement they are absent.
 
+RWI WebSocket frame (flat payload, `event_type` injected by the gateway):
+
+```json
+{
+  "event_type": "recording_metadata_available",
+  "call_id": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40",
+  "metadata": {
+    "filename": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40_02_1001.wav",
+    "file_size": 153344,
+    "download_url": "./config/recorders/20260910/0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40_02_1001.wav",
+    "caller_name": "330909",
+    "callee_name": "1001",
+    "call_type": "inbound",
+    "call_start_time": "2026-09-10T08:54:01.155781+00:00",
+    "call_end_time": "2026-09-10T08:54:48.155781+00:00",
+    "upload_time": "2026-09-10T08:54:18.157941+00:00",
+    "session_id": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40",
+    "segment_id": "9c1f02ab",
+    "queue_id": "support",
+    "label": "1001",
+    "agent_name": "Agent 1001",
+    "agent_id": "1001",
+    "started_at": "2026-09-10T08:54:18.155781+00:00",
+    "segment_type": "agent",
+    "seq": "2",
+    "ended_at": "2026-09-10T08:54:46.155781+00:00"
+  }
+}
+```
+
+Webhook delivery wraps the same payload in an envelope (`webhook.rs`: `rwi` /
+`event_id` idempotency key / `timestamp` / nested `event`):
+
 ```json
 {
   "rwi": "1.0",
-  "recording_metadata_available": {
-    "call_id": "call-abc",
+  "event_id": "6b1f0a44-2f0e-4a3e-8e5d-9c7b1d2e3f45",
+  "timestamp": "2026-09-10T08:54:18.312004+00:00",
+  "call_id": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40",
+  "event_type": "recording_metadata_available",
+  "event": {
+    "call_id": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40",
     "metadata": {
-      "filename": "uuid_2026-05-14.mp3",
-      "unique_id": "uuid-abc-123",
-      "file_size": 149517,
-      "download_url": "https://storage.example.com/rec.mp3",
+      "filename": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40_02_1001.wav",
+      "file_size": 153344,
+      "download_url": "./config/recorders/20260910/0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40_02_1001.wav",
       "caller_name": "330909",
-      "callee_name": "9242000001",
-      "called_phone": null,
+      "callee_name": "1001",
       "call_type": "inbound",
-      "agent_id": "451447",
-      "agent_name": "luoxiaofeng90_v",
-      "call_start_time": "2026-05-14T08:11:35Z",
-      "call_end_time": "2026-05-14T08:12:26Z",
-      "upload_time": "2026-05-14T16:14:46Z",
-      "switch_flag": "ks",
-      "process_flag": "ks_22_normal",
-      "session_id": "call-root-42"
+      "call_start_time": "2026-09-10T08:54:01.155781+00:00",
+      "call_end_time": "2026-09-10T08:54:48.155781+00:00",
+      "upload_time": "2026-09-10T08:54:18.157941+00:00",
+      "session_id": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40",
+      "segment_id": "9c1f02ab",
+      "queue_id": "support",
+      "label": "1001",
+      "agent_name": "Agent 1001",
+      "agent_id": "1001",
+      "started_at": "2026-09-10T08:54:18.155781+00:00",
+      "segment_type": "agent",
+      "seq": "2",
+      "ended_at": "2026-09-10T08:54:46.155781+00:00"
     }
   }
 }
 ```
+
+> The examples above are the actual serialized output of the agent segment
+> (`cargo test segment_metadata_wire_shape -- --nocapture`): the seq inside
+> `filename` is zero-padded to two digits (`_02_`); every `extra` value is a
+> string (`seq` serializes as `"2"`); `extra` key order is unspecified
+> (HashMap); typed fields that are `None` are omitted entirely (e.g. no
+> `caller_name`/`callee_name` when the CDR carries no SIP parties).
+> `download_url`: `type=local` yields the archive path
+> (`{path}/{YYYYMMDD}/{filename}`); `type=http`/`s3` yield the upload /
+> preconstructed URL. Addon pass-through keys (wholesale `switch_flag`, …)
+> are appended verbatim; there is no typed `unique_id` field. Without
+> segmented recording (whole-call recording / SipFlow) the event keeps its
+> legacy single-event shape and `metadata` carries no `seq` / `label` /
+> `segment_*` keys.
 
 #### record_end
 
@@ -784,7 +937,7 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 ### 6.6 Queue / ACD Events
 
 > **Event origin**: Queue-related events come in two families, produced by different subsystems and may co-occur:
-> - **`queue_*` (queue lifecycle)**: produced by the Queue app (`src/call/app/queue.rs`) **and** the CC ACD engine bridge. Covers the generic lifecycle: join, ringing, connected, abandon, timeout, fallback.
+> - **`queue_*` (queue lifecycle)**: produced by the Queue app (`src/call/app/queue.rs`, via `gw.broadcast`) **and** the CC ACD engine bridge (`src/addons/cc/mod.rs`, via `broadcast_event`). Covers the generic lifecycle: join, ringing, connected, abandon, timeout, fallback. Both subsystems dispatch as broadcast (the only exception is the `queue.enqueue` RWI command path, which answers to the owner).
 > - **`skill_group_*` (skill-group scheduling decisions)**: produced **exclusively** by the CC addon's ACD adapter (`src/addons/cc/agent_registry_adapter.rs`) when the queue asks the ACD for an agent. Fires only when the CC addon is active and skill routing is used. The ACD-engine `queue_*` bridge intentionally does **not** emit `skill_group_*` (single source, no duplicates).
 >
 > Typical event sequence for a skill-group-routed call:
@@ -795,7 +948,7 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 All queue events carry flat context fields.
 
 > **session_id correlation (since 2026-08)**: all call-scoped events
-> (`queue_*` / `skill_group_*` / `cc_*` / `call_*`) are enriched from
+> (`queue_*` / `skill_group_*` / `call_*`) are enriched from
 > CallMetaStore with a top-level `session_id` — the root logical-call id
 > (first INVITE Call-ID; stable across transfer / dispatch / consult).
 > `call_id` is the current leg and changes for transfer children.
@@ -814,11 +967,13 @@ Dispatch: call_owner / broadcast
 
 #### queue_position_changed
 
+Dispatch: broadcast (relayed by the CC ACD bridge; the core Queue app does not emit it separately)
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
 | `queue_id` | String | Queue ID |
-| `position` | u32 | Current queue position |
+| `position` | usize | Current queue position |
 | *+ctx* | | Flat context fields |
 
 #### queue_agent_offered / queue_agent_connected
@@ -847,35 +1002,48 @@ Dispatch: call_owner / broadcast
 | `queue_id` | String | Queue ID |
 | *+ctx* | | Flat context fields |
 
-
-#### queue_voicemail_redirected
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `call_id` | String | Call identifier |
-| `queue_id` | String | Queue ID |
-| `reason` | String | Reason |
-| *+ctx* | | Flat context fields |
+> Voicemail redirection after wait-timeout has no dedicated event — it is
+> expressed as `queue_fallback_executed` with `action = "voicemail"`. The
+> `queue_voicemail_redirected` event listed in earlier revisions of this
+> document does not exist.
 
 #### queue_candidates_found
+
+Dispatch: broadcast
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
 | `queue_id` | String | Queue ID |
 | `candidates` | Vec\<String\> | Candidate agent list |
-| `trace_id` | String | ACD trace ID |
 | *+ctx* | | Flat context fields |
 
-#### queue_agent_ringing / queue_agent_no_answer / queue_agent_rejected
+#### queue_agent_offered
+
+Dispatch: broadcast
+
+> Formerly emitted as `queue_agent_ringing` by the ACD bridge; the duplicate
+> name was consolidated — one agent ring is always reported as
+> `queue_agent_offered` regardless of the driver (built-in queue app or ACD
+> engine).
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
 | `queue_id` | String | Queue ID |
 | `agent_id` | String | Agent ID |
-| `attempt` | u32 | `no_answer`/`rejected` only: attempt number |
-| `trace_id` | String | ACD trace ID |
+| *+ctx* | | Flat context fields |
+
+#### queue_agent_no_answer / queue_agent_rejected
+
+Dispatch: broadcast
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | String | Call identifier |
+| `queue_id` | String | Queue ID |
+| `agent_id` | String | Agent ID |
+| `attempt` | u32 | Attempt number |
 | *+ctx* | | Flat context fields |
 
 #### queue_fallback_executed
@@ -886,7 +1054,6 @@ Dispatch: call_owner / broadcast
 | `queue_id` | String | Queue ID |
 | `action` | String | Fallback action executed |
 | `reason` | String | Reason |
-| `trace_id` | String | ACD trace ID |
 | *+ctx* | | Flat context fields |
 
 #### queue_alert
@@ -910,7 +1077,6 @@ Emitted when the ACD scheduler finds candidate agents for a skill group.
 | `call_id` | String | Call identifier |
 | `skill_group_id` | Option\<String\> | Skill group ID (`Some` for the explicit `skill-group:{id}` path; `None` for autonomous skill routing) |
 | `candidates` | Vec\<String\> | Candidate agent ID list |
-| `trace_id` | String | Trace ID |
 | *+ctx* | | Flat context fields |
 
 #### skill_group_agent_assigned
@@ -927,7 +1093,6 @@ inline ACD policy is configured ("first agent selected by the strategy").
 | `skill_group_id` | Option\<String\> | Skill group ID |
 | `agent_id` | String | Assigned agent ID |
 | `dispatch_reason` | String | `regular` / `forced_available` / `overflow` |
-| `trace_id` | String | Trace ID |
 | *+ctx* | | Flat context fields |
 
 #### skill_group_no_agent
@@ -958,8 +1123,7 @@ currently available agent (best-effort `position`/`ewt_secs`).
 | `skill_group_id` | String | Skill group ID |
 | `position` | usize | Queue position |
 | `ewt_secs` | u32 | Estimated wait time (seconds) |
-| `reason` | String | `no_agent_available` |
-| `trace_id` | String | Trace ID |
+| `reason` | String | `no_agent_available` \| `all_busy` \| `skill_mismatch` \| `capacity_full` |
 | *+ctx* | | Flat context fields |
 
 #### skill_group_call_abandoned
@@ -975,7 +1139,6 @@ Emitted when the caller hangs up while still waiting in the skill-group queue
 | `skill_group_id` | String | Skill group ID |
 | `waited_secs` | u64 | Time waited before abandoning |
 | `position` | usize | Queue position at abandon |
-| `trace_id` | String | Trace ID |
 | *+ctx* | | Flat context fields |
 
 #### skill_group_service_unavailable
@@ -988,11 +1151,10 @@ Emitted when a queued call could not be serviced (queue timeout or fallback).
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
 | `skill_group_id` | String | Skill group ID |
-| `reason` | String | `timeout` / fallback reason |
+| `reason` | String | `exhausted_retries` \| `no_matching_skill` \| `overflow_chain_end` \| `schedule_off_hours` \| `timeout` |
 | `attempts` | u32 | Retry attempts |
 | `waited_secs` | u64 | Time waited |
 | `fallback_action` | String | Executed fallback action |
-| `trace_id` | String | Trace ID |
 | *+ctx* | | Flat context fields |
 
 ---
@@ -1049,9 +1211,46 @@ Agent state machine transition.
 }
 ```
 
+#### agent_registered / agent_unregistered
+
+Dispatch: broadcast
+
+Emitted when an agent signs in / out (registry write or SIP registration bridge).
+
+**agent_registered**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `agent_id` | String | Agent ID |
+| `agent_name` | Option\<String\> | Agent display name |
+| `agent_extension` | Option\<String\> | Bound extension |
+| `team_id` | Option\<String\> | Team ID |
+
+**agent_unregistered**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `agent_id` | String | Agent ID |
+| `agent_name` | Option\<String\> | Agent display name |
+| `reason_code` | Option\<String\> | Logout reason code |
+
+#### presence_state_changed
+
+Dispatch: broadcast
+
+SIP PUBLISH presence state change (emitted on every local PUBLISH).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `identity` | String | Presence identity (extension / AOR) |
+| `from_status` | String | Previous status |
+| `to_status` | String | New status |
+| `note` | Option\<String\> | Optional note |
+| `agent_id` | Option\<String\> | Associated agent ID, when resolvable |
+
 ---
 
-### 6.10 Conference Events
+### 6.8 Conference Events
 
 #### conference_created / conference_destroyed
 
@@ -1060,6 +1259,24 @@ Dispatch: broadcast
 | Field | Type | Description |
 |-------|------|-------------|
 | `conf_id` | String | Conference room ID |
+
+#### conference_joined / conference_left
+
+Dispatch: call_owner
+
+Emitted when a member dials into (or leaves) a conference room via the
+conference application (`conference:` target). Distinct from the
+`conference_member_*` family, which is produced by conference control
+commands (mute, kick, …).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `conf_id` | String | Conference ID |
+| `call_id` | String | Member call ID |
+| `leg_id` | String | Member leg |
+
+> `conference_left` currently has a type definition but **no emission point**
+> (reserved); `conference_joined` is emitted when a member joins.
 
 #### conference_member_joined / conference_member_left / conference_member_muted / conference_member_unmuted
 
@@ -1080,13 +1297,19 @@ Dispatch: broadcast
 | `removed_call_ids` | Vec\<String\> | Removed member call IDs |
 | *+ctx* | | Flat context fields |
 
-#### conference_auto_ended
+#### conference_ended_by_host
+
+Dispatch: broadcast
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `conf_id` | String | Conference ID |
-| `reason` | String | End reason |
+| `host_call_id` | String | Host call ID |
+| `removed_call_ids` | Vec\<String\> | Removed member call IDs |
 | *+ctx* | | Flat context fields |
+
+> No `conference_auto_ended` event exists (earlier revisions of this document
+> were incorrect); conference teardown by the host is expressed by this event.
 
 #### conference_error
 
@@ -1095,15 +1318,13 @@ Dispatch: broadcast
 | `conf_id` | String | Conference ID |
 | `error` | String | Error message |
 
-#### conference_consult_dialing / conference_consult_connected
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `call_id` | String | Consultation call ID |
-| `target` | String | Consultation target |
-| *+ctx* | | Flat context fields |
+> The consult flow does not emit `conference_consult_dialing` /
+> `conference_consult_connected` (earlier revisions were incorrect); the real
+> event is `consult_switched` (§6.2).
 
 #### conference_merge_requested / conference_merged / conference_merge_failed
+
+Dispatch: broadcast
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -1113,14 +1334,16 @@ Dispatch: broadcast
 | `reason` | String | `merge_failed` only: failure reason |
 | *+ctx* | | Flat context fields |
 
-#### conference_seat_replace_started / ...succeeded / ...failed / ...rollback_failed
+#### conference_seat_replace_started / ...succeeded / ...failed
+
+Dispatch: broadcast
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `conf_id` | String | Conference ID |
 | `old_call_id` | String | Old member call ID |
 | `new_call_id` | String | New member call ID |
-| `reason` | String | `failed`/`rollback_failed` only: failure reason |
+| `reason` | String | `failed` only: failure reason |
 
 **Seat replacement event sequence (success path)**:
 1. `conference_seat_replace_started`
@@ -1128,9 +1351,12 @@ Dispatch: broadcast
 3. `conference_member_joined` (new member joins)
 4. `conference_seat_replace_succeeded`
 
+> No `conference_seat_replace_rollback_failed` event exists (earlier revisions
+> were incorrect); the family has exactly started/succeeded/failed.
+
 ---
 
-### 6.11 Supervisor Events
+### 6.9 Supervisor Events
 
 #### supervisor_listen_started / supervisor_whisper_started / supervisor_barge_started / supervisor_takeover_started
 
@@ -1148,7 +1374,7 @@ Dispatch: broadcast
 
 ---
 
-### 6.13 SIP Signaling Events
+### 6.10 SIP Signaling Events
 
 #### sip_message_received / sip_notify_received
 
@@ -1162,16 +1388,11 @@ Dispatch: broadcast
 
 ---
 
-### 6.14 Session System Events
+### 6.11 Session System Events
 
-#### call_ownership_changed
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `call_id` | String | Call identifier |
-| `session_id` | String | Taking-over session ID |
-| `mode` | String | Mode (`control`/`listen`/`whisper`/`barge`) |
-| *+ctx* | | Flat context fields |
+> No `call_ownership_changed` event exists (earlier revisions of this document
+> were incorrect); call ownership / takeover is expressed through supervisor
+> commands and their `supervisor_*_started` events.
 
 #### session.resume / call.resume (command results, not events)
 
@@ -1187,17 +1408,20 @@ Dispatch: broadcast
 | Event Type | Dispatch | call_id | Context |
 |------------|----------|---------|---------|
 | `call_created` | owner | yes | own fields (inbound INVITE & originate) |
-| `call_ringing` | owner | yes | +ctx |
-| `call_early_media` | owner | yes | +ctx |
+| `call_ringing` | owner | yes | +ctx (+`early_media`; one event per provisional response; carries agent_id when an agent is involved — there is no separate `call_early_media` event) |
 | `call_answered` | owner | yes | +ctx |
 | `call_bridged` | owner | leg_a | — |
 | `call_unbridged` | owner | yes | +ctx |
 | `call_transferred` | owner | yes | +ctx |
 | `call_transfer_accepted` | owner | yes | +ctx |
 | `call_transfer_failed` | owner | yes | +ctx |
-| `call_hangup` | owner | yes | +ctx |
+| `consult_switched` | broadcast | yes | +ctx |
+| `conference_auth_result` | broadcast | yes | +ctx |
+| `call_hangup` | owner | yes | +ctx (+`duration_secs`) |
 | `call_no_answer` | owner | yes | +ctx |
 | `call_busy` | owner | yes | +ctx |
+| `call_held` | owner | yes | +ctx |
+| `call_unheld` | owner | yes | +ctx |
 | `media_hold_started` | owner | yes | +ctx |
 | `media_hold_stopped` | owner | yes | +ctx |
 | `media_ringback_passthrough_started` | owner | yes | — |
@@ -1207,9 +1431,12 @@ Dispatch: broadcast
 | `record_paused` | owner | yes | +ctx |
 | `record_resumed` | owner | yes | +ctx |
 | `record_stopped` | owner | yes | own fields + enrich |
-| `record_failed` | owner | yes | +ctx |
-| `recording_metadata_available` | owner | yes | — |
-| `dtmf` | fan_out | yes | +ctx |
+| `recording_metadata_available` | owner | yes | own fields + enrich (segmented recording: one per segment + one legacy aggregate per call whose extra carries the `recording_segments` JSON string) |
+| `transcript_started` | owner | yes | own fields |
+| `transcript_segment` | owner | yes | own fields + enrich |
+| `transcript_error` | owner | yes | own fields + enrich |
+| `transcript_ended` | owner | yes | own fields |
+| `dtmf` | owner | yes | +ctx |
 | `dtmf_collected` | owner | yes | +ctx |
 | `dtmf_collection_timeout` | owner | yes | +ctx |
 | `ivr_node_entered` | fan_out | yes | +ctx |
@@ -1217,16 +1444,16 @@ Dispatch: broadcast
 | `ivr_flow_completed` | fan_out | yes | +ctx |
 | `ivr_step_trace` | fan_out | yes | — |
 | `queue_joined` | owner/broadcast | yes | +ctx |
-| `queue_position_changed` | owner | yes | +ctx |
+| `queue_position_changed` | broadcast | yes | +ctx |
 | `queue_agent_offered` | broadcast | yes | +ctx |
-| `queue_agent_connected` | owner | yes | +ctx |
+| `queue_agent_connected` | broadcast | yes | +ctx |
 | `queue_left` | broadcast | yes | +ctx |
-| `queue_wait_timeout` | owner | yes | +ctx |
-| `queue_candidates_found` | owner | yes | +ctx |
-| `queue_agent_ringing` | owner | yes | +ctx |
-| `queue_agent_no_answer` | owner | yes | +ctx |
-| `queue_agent_rejected` | owner | yes | +ctx |
-| `queue_fallback_executed` | owner | yes | +ctx |
+| `queue_wait_timeout` | broadcast | yes | +ctx |
+| `queue_candidates_found` | broadcast | yes | +ctx |
+| `queue_agent_offered` | broadcast | yes | +ctx |
+| `queue_agent_no_answer` | broadcast | yes | +ctx |
+| `queue_agent_rejected` | broadcast | yes | +ctx |
+| `queue_fallback_executed` | broadcast | yes | +ctx (voicemail redirection is `action = "voicemail"`, no dedicated event) |
 | `queue_alert` | broadcast | — | — |
 | `skill_group_candidates_found` | broadcast | yes | +ctx |
 | `skill_group_agent_assigned` | broadcast | yes | +ctx |
@@ -1235,12 +1462,14 @@ Dispatch: broadcast
 | `skill_group_call_abandoned` | broadcast | yes | +ctx |
 | `skill_group_service_unavailable` | broadcast | yes | +ctx |
 | `agent_state_changed` | broadcast | optional | +ctx |
-| `cc_ringing` | broadcast | yes | +ctx |
-| `cc_answered` | broadcast | yes | +ctx |
-| `cc_hangup` | broadcast | yes | +ctx |
-| `cc_held` | broadcast | yes | +ctx |
-| `cc_unheld` | broadcast | yes | +ctx |
+| `agent_registered` | broadcast | — | — |
+| `agent_unregistered` | broadcast | — | — |
+| `presence_state_changed` | broadcast | — | — |
+| `call_held` | owner | yes | +ctx |
+| `call_unheld` | owner | yes | +ctx |
 | `conference_created` | broadcast | — | — |
+| `conference_joined` | owner | yes | +ctx |
+| `conference_left` | — (defined, not emitted) | yes | +ctx |
 | `conference_member_joined` | broadcast | yes | +ctx |
 | `conference_member_left` | broadcast | yes | +ctx |
 | `conference_member_muted` | broadcast | yes | +ctx |
@@ -1248,13 +1477,12 @@ Dispatch: broadcast
 | `conference_destroyed` | broadcast | — | — |
 | `conference_ended_by_host` | broadcast | — | +ctx |
 | `conference_error` | broadcast | — | — |
-| `conference_merge_requested` | fan_out | yes | +ctx |
-| `conference_merged` | fan_out | yes | +ctx |
-| `conference_merge_failed` | fan_out | yes | +ctx |
-| `conference_seat_replace_started` | fan_out | yes | — |
-| `conference_seat_replace_succeeded` | fan_out | yes | — |
-| `conference_seat_replace_failed` | fan_out | yes | — |
-| `conference_seat_replace_rollback_failed` | fan_out | yes | — |
+| `conference_merge_requested` | broadcast | yes | +ctx |
+| `conference_merged` | broadcast | yes | +ctx |
+| `conference_merge_failed` | broadcast | yes | +ctx |
+| `conference_seat_replace_started` | broadcast | yes | — |
+| `conference_seat_replace_succeeded` | broadcast | yes | — |
+| `conference_seat_replace_failed` | broadcast | yes | — |
 | `supervisor_listen_started` | owner | — | — |
 | `supervisor_whisper_started` | owner | — | — |
 | `supervisor_barge_started` | owner | — | — |

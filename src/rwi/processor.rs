@@ -800,12 +800,18 @@ impl RwiCommandProcessor {
         let caller_uri: rsipstack::sip::Uri = rsipstack::sip::Uri::try_from(caller_str.as_str())
             .map_err(|_| CommandError::CommandFailed("invalid caller_id".into()))?;
 
+        // Global session id (RFC 7989): originates are session roots. The
+        // wire call_id stays client-addressable, but the session id carried
+        // in the Session-ID header / UUI / CallMeta is normalized to the
+        // canonical 32 hex form so downstream nodes inherit one stable id.
+        let global_session_id = crate::call::session_id::normalize_or_generate(&req.call_id);
+
         let mut headers: Vec<rsipstack::sip::Header> =
             vec![rsipstack::sip::headers::MaxForwards::from(70u32).into()];
         // Root session id via RFC 7433 UUI — the originate call is a session
         // root; the header lets external legs re-attach on the way back in.
         headers.push(crate::call::uui::build_uui_header(
-            &req.call_id,
+            &global_session_id,
             None,
             None,
             None,
@@ -854,6 +860,9 @@ impl RwiCommandProcessor {
             credential: None,
             headers: Some(headers),
             call_id: Some(req.call_id.clone()),
+            // RFC 7989: the originate INVITE carries the normalized global
+            // session id as its local-uuid; downstream PBXs/SBCs mirror it.
+            session_id: Some(global_session_id.clone()),
             ..Default::default()
         };
 
@@ -1121,10 +1130,14 @@ impl RwiCommandProcessor {
                     metadata.insert("resolved_agent_id".to_string(), user.to_string());
                 }
             }
-            let mut dialplan =
-                Dialplan::new(call_id.clone(), synthetic_request, DialDirection::Outbound)
-                    .with_caller(caller_uri.clone())
-                    .with_media(media.clone());
+            let mut dialplan = Dialplan::new(
+                global_session_id.clone(),
+                synthetic_request,
+                DialDirection::Outbound,
+            )
+            .with_caller(caller_uri.clone())
+            .with_media(media.clone())
+            .with_session_id_enabled(true);
             // Every RWI-originated call prepares the capture sender/task before
             // constructing its caller media leg. A `record` option activates
             // the file recorder when remote SDP establishes media; otherwise
@@ -1174,6 +1187,7 @@ impl RwiCommandProcessor {
                         reason: Some(format!("media_setup_failed: {}", e)),
                         hangup_by: None,
                         sip_status: None,
+                        duration_secs: None,
                     });
                     cancel_token.cancel();
                     cleanup(cdr_ring_time, cdr_answer_time);
@@ -1197,6 +1211,7 @@ impl RwiCommandProcessor {
                     mono_caller_only: Some(false),
                     segment_type: rec.segment_type.clone(),
                     segment_id: rec.id.clone(),
+                    label: rec.label.clone(),
                     notify_app: Some(false),
                 };
                 (path, config)
@@ -1226,7 +1241,7 @@ impl RwiCommandProcessor {
             gateway.read().meta_store.insert(
                 call_id.clone(),
                 crate::rwi::proto::CallMeta {
-                    session_id: Some(call_id.clone()),
+                    session_id: Some(global_session_id.clone()),
                     caller: Some(caller_display.clone()),
                     callee: Some(callee_display.clone()),
                     direction: Some("outbound".to_string()),
@@ -1246,12 +1261,12 @@ impl RwiCommandProcessor {
             let mut originate_recording_started = false;
             let mut pending_commands = VecDeque::new();
             let mut setup_hangup: Option<(Option<String>, Option<u16>)> = None;
-            // `cc_ringing` session hooks fire once, on the FIRST provisional
+            // `call_ringing` session hooks fire once, on the FIRST provisional
             // response — whichever of 180/183 arrives first.
             let mut ringing_hooks_fired = false;
             // Normalized hangup reason for failed setup paths — fed to the
             // `on_call_ended` session hooks after the setup block so the CC
-            // addon releases the agent (Ringing → Idle) and emits `cc_hangup`.
+            // addon releases the agent (Ringing → Idle).
             // (Paths that never assign read the initial `None`.)
             #[allow(unused_assignments)]
             let mut setup_end_reason: Option<CallRecordHangupReason> = None;
@@ -1296,29 +1311,32 @@ impl RwiCommandProcessor {
                                             !body.is_empty()
                                                 && String::from_utf8_lossy(body).contains("v=0")
                                         };
+                                        let early_media = code != 180 || has_sdp;
+                                        // Fire the ringing session hooks once, on the
+                                        // first provisional response — the CC addon
+                                        // publishes the agent attribution (agent
+                                        // Idle → Ringing) for agent originates,
+                                        // carrying the same `early_media` flag as
+                                        // the core event.
+                                        if !ringing_hooks_fired {
+                                            ringing_hooks_fired = true;
+                                            session
+                                                .fire_on_call_ringing_hooks(early_media)
+                                                .await;
+                                        }
+
                                         // One `call_ringing` per provisional response.
                                         // `early_media` marks a 183/180-with-SDP
                                         // provisional so consumers can distinguish
-                                        // ringback from early media.
-                                        let early_media = code != 180 || has_sdp;
+                                        // ringback from early media. Emitted after
+                                        // the hooks so it is enriched with the
+                                        // agent context.
                                         {
                                             let gw = gateway.read();
                                             gw.send_to_owner(&crate::rwi::CallRinging {
                                                 call_id: call_id.clone(),
                                                 early_media,
                                             });
-                                        }
-
-                                        // Fire the ringing session hooks once, on the
-                                        // first provisional response — the CC addon
-                                        // emits `cc_ringing` (agent Idle → Ringing)
-                                        // for agent originates, carrying the same
-                                        // `early_media` flag as the core event.
-                                        if !ringing_hooks_fired {
-                                            ringing_hooks_fired = true;
-                                            session
-                                                .fire_on_call_ringing_hooks(early_media)
-                                                .await;
                                         }
 
                                         let body = response.body();
@@ -1511,6 +1529,7 @@ impl RwiCommandProcessor {
                                     reason: Some(format!("media_setup_failed: {}", e)),
                                     hangup_by: None,
                                     sip_status: Some(resp.status_code().code()),
+                                    duration_secs: None,
                                 });
                             }
                             setup_end_reason = Some(CallRecordHangupReason::Failed);
@@ -1519,8 +1538,8 @@ impl RwiCommandProcessor {
 
                         // Fire the connected session hooks now that the first
                         // outbound leg is confirmed and its media attached —
-                        // the CC addon emits `cc_answered` (agent
-                        // Ringing/Idle → Busy) for agent originates.
+                        // the CC addon publishes the agent attribution
+                        // (agent Ringing/Idle → Busy) for agent originates.
                         session.fire_on_call_connected_hooks().await;
 
                         if !originate_recording_started
@@ -1640,6 +1659,7 @@ impl RwiCommandProcessor {
                                     reason: Some("originate_failed".to_string()),
                                     hangup_by: None,
                                     sip_status,
+                                    duration_secs: None,
                                 });
                             }
                         }
@@ -1652,6 +1672,7 @@ impl RwiCommandProcessor {
                             reason: Some(e.to_string()),
                             hangup_by: None,
                             sip_status: None,
+                            duration_secs: None,
                         });
                     }
                     Ok(None) => {
@@ -1664,6 +1685,7 @@ impl RwiCommandProcessor {
                             reason,
                             hangup_by: Some("system".to_string()),
                             sip_status,
+                            duration_secs: None,
                         });
                     }
                     Err(_) => {
@@ -1681,7 +1703,7 @@ impl RwiCommandProcessor {
             // the UAC session loop never started, so the `on_call_ended`
             // session hooks must fire here — otherwise an agent already moved
             // to Ringing by the first provisional stays stuck and no
-            // `cc_hangup` webhook is emitted.
+            // agent-attributed `call_hangup` webhook is emitted.
             session
                 .fire_on_call_ended_hooks(setup_end_reason.as_ref(), 0)
                 .await;
@@ -2242,6 +2264,7 @@ impl RwiCommandProcessor {
                     mono_caller_only: Some(false),
                     segment_type: req.segment_type.clone(),
                     segment_id: req.id.clone(),
+                    label: req.label.clone(),
                     notify_app: Some(false),
                 },
             })

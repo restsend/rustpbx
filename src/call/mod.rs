@@ -31,6 +31,7 @@ pub mod domain;
 pub mod policy;
 pub mod queue_config;
 pub mod runtime;
+pub mod session_id;
 pub mod sip;
 pub mod transcription;
 pub mod user;
@@ -272,6 +273,18 @@ pub enum TransferEndpoint {
 }
 
 impl TransferEndpoint {
+    /// Stable type tag used by RWI transfer events (`transfer_target_type`).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            TransferEndpoint::Uri(_) => "sip",
+            TransferEndpoint::Queue(_) => "queue",
+            TransferEndpoint::RoutePoint(_) => "route_point",
+            TransferEndpoint::Ivr(_) => "ivr",
+            TransferEndpoint::Voicemail(_) => "voicemail",
+            TransferEndpoint::Conference(_) => "conference",
+        }
+    }
+
     /// Parse a prefix‑based destination string.
     ///
     /// Handles `queue:`, `toivr:`, `ivr:`, `voicemail:`, `conference:`.
@@ -318,6 +331,22 @@ impl std::fmt::Display for TransferEndpoint {
             TransferEndpoint::Conference(id) => write!(f, "conference:{}", id),
         }
     }
+}
+
+/// Classify a raw transfer target string into the RWI `transfer_target_type`
+/// vocabulary: `queue` | `ivr` | `route_point` | `voicemail` | `conference` |
+/// `bridge` | `sip`. Returns `None` for empty/unparseable targets.
+pub fn transfer_target_kind(target: &str) -> Option<String> {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("bridge:")
+        || trimmed.len() >= 12 && trimmed[..12].eq_ignore_ascii_case("voip_bridge:")
+    {
+        return Some("bridge".to_string());
+    }
+    TransferEndpoint::parse(trimmed).map(|endpoint| endpoint.kind().to_string())
 }
 
 /// Normalize a SIP URI target string by adding the `sip:` scheme and default
@@ -838,7 +867,7 @@ impl MediaConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DialDirection {
     Outbound, // 1. Outbound call initiated by us, usually to a PSTN gateway or another relay server
     Inbound,  // 2. Inbound call received by us, usually from a PSTN gateway
@@ -859,6 +888,14 @@ pub struct Dialplan {
     pub direction: DialDirection,
     pub call_id: Option<String>,
     pub session_id: Option<String>,
+    /// Whether the global session id (RFC 7989) participates in this call.
+    ///
+    /// Set by the inbound routing layer for every non-P2P flow (queue, IVR,
+    /// app, forwarding, trunk in/out). When `true` the session injects the
+    /// normalized `session_id` as the `Session-ID` local-uuid on every
+    /// outgoing leg. Plain P2P extension dialling keeps this `false` — no
+    /// Session-ID is generated or injected (legacy behaviour).
+    pub session_id_enabled: bool,
     pub caller_contact: Option<rsipstack::sip::typed::Contact>,
     pub caller_display_name: Option<String>,
     pub caller: Option<rsipstack::sip::Uri>,
@@ -962,6 +999,7 @@ impl Dialplan {
         Self {
             direction,
             session_id: Some(session_id),
+            session_id_enabled: false,
             call_id: None,
             original: Arc::new(original),
             caller_display_name: None,
@@ -994,6 +1032,11 @@ impl Dialplan {
     /// Set the caller URI
     pub fn with_caller(mut self, caller: rsipstack::sip::Uri) -> Self {
         self.caller = Some(caller);
+        self
+    }
+    /// Enable RFC 7989 Session-ID participation for this call.
+    pub fn with_session_id_enabled(mut self, enabled: bool) -> Self {
+        self.session_id_enabled = enabled;
         self
     }
     pub fn with_targets(mut self, targets: DialStrategy) -> Self {
@@ -1320,6 +1363,53 @@ mod tests {
         let endpoint = TransferEndpoint::parse("toivr:39230").expect("route point must parse");
 
         assert_eq!(endpoint.to_string(), "toivr:39230");
+    }
+
+    #[test]
+    fn transfer_target_kind_classifies_prefixes() {
+        assert_eq!(
+            transfer_target_kind("queue:sales?target=skillgroup:sg_1"),
+            Some("queue".to_string())
+        );
+        assert_eq!(
+            transfer_target_kind("ivr:main-ivr"),
+            Some("ivr".to_string())
+        );
+        assert_eq!(
+            transfer_target_kind("toivr:8000"),
+            Some("route_point".to_string())
+        );
+        assert_eq!(
+            transfer_target_kind("voicemail:1001"),
+            Some("voicemail".to_string())
+        );
+        assert_eq!(
+            transfer_target_kind("conference:room-1"),
+            Some("conference".to_string())
+        );
+        assert_eq!(
+            transfer_target_kind("bridge:ws://127.0.0.1:9100?samplerate=8000"),
+            Some("bridge".to_string())
+        );
+        assert_eq!(
+            transfer_target_kind("voip_bridge:ws://127.0.0.1:9100"),
+            Some("bridge".to_string())
+        );
+        // Bare numbers / SIP URIs dial as plain SIP targets.
+        assert_eq!(transfer_target_kind("8000"), Some("sip".to_string()));
+        assert_eq!(
+            transfer_target_kind("sip:1001@rustpbx.com"),
+            Some("sip".to_string())
+        );
+        // Prefix matching is case-insensitive like TransferEndpoint::parse.
+        assert_eq!(
+            transfer_target_kind("QUEUE:sales"),
+            Some("queue".to_string())
+        );
+        // Empty / prefix-only targets are unclassifiable.
+        assert_eq!(transfer_target_kind(""), None);
+        assert_eq!(transfer_target_kind("   "), None);
+        assert_eq!(transfer_target_kind("queue:"), None);
     }
 
     fn minimal_request() -> rsipstack::sip::Request {

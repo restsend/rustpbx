@@ -1414,6 +1414,9 @@ pub async fn toggle_routing(
     match active.update(db).await {
         Ok(updated) => {
             let disabled = !updated.is_active;
+            // Pause/resume must go through the same reload flow as
+            // create/update/delete so the UI prompts for a routes reload.
+            state.mark_pending_reload(ReloadTarget::Routes);
             Json(json!({
                 "status": "ok",
                 "id": id,
@@ -1712,6 +1715,36 @@ mod tests {
         };
         let resp = create_routing(State(state), AuthRequired(user), Json(doc)).await;
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn toggle_routing_marks_routes_pending_reload() {
+        use sea_orm::ActiveModelTrait;
+
+        let state = setup_state().await;
+        let db = state.db();
+        let model = RoutingActiveModel {
+            name: Set("toggle-route".to_string()),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert route");
+
+        assert!(!state
+            .pending_reload_targets()
+            .contains(&ReloadTarget::Routes));
+
+        let resp = toggle_routing(AxumPath(model.id), State(state.clone()), AuthRequired(superuser()))
+            .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        assert!(
+            state
+                .pending_reload_targets()
+                .contains(&ReloadTarget::Routes),
+            "toggling a route must mark routes pending reload"
+        );
     }
 
     #[test]

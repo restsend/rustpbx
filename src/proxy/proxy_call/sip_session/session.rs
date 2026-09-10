@@ -83,6 +83,14 @@ pub struct SipSession {
 
     pub reporter: Option<CallReporter>,
     cdr_sent: Arc<std::sync::atomic::AtomicBool>,
+    /// One-shot latch for the core `call_answered` event: `accept_call`
+    /// (direct UAS answer) and the queue-agent `LegConnected` branch can both
+    /// observe an answer moment for the same logical call (app-startup race);
+    /// only the first emits. Mirrors the dedup the former CC-addon
+    /// `cc_answered` got from the agent state machine (Ringing/Idle → Busy
+    /// fired exactly once per call). A transfer to a new agent runs in a NEW
+    /// session with its own latch, so per-agent attribution is preserved.
+    answered_event_emitted: bool,
 
     pub app_event_bridge: crate::proxy::proxy_call::state::AppEventBridge,
 
@@ -137,6 +145,10 @@ pub struct SipSession {
     active_recording: Option<crate::callrecord::ActiveRecording>,
     /// Completed recording segments for this leg (full-call + mid-call slices).
     completed_recording_segments: Vec<crate::callrecord::RecordingSegment>,
+    /// 1-based counter feeding auto-generated segment file names
+    /// (`{session_id}_{seq}_{label}.wav`). Per-session; `segmented_wav_path`
+    /// bumps on file collision for cross-session (transfer) segments.
+    recording_seq: u32,
 }
 #[derive(Clone)]
 pub struct SipSessionHandle {
@@ -459,12 +471,14 @@ impl SipSession {
 
     /// Create the capture queue and task before constructing caller leg A.
     /// The sender becomes immutable state on the leg's plaintext RTP tap.
+    /// The tap is unconditionally attached to every media leg so a call can
+    /// start recording on demand at any later stage (IVR node, agent
+    /// connect, API command) even when no recording policy enabled it.
+    /// Without an installed recorder the task simply discards the tapped
+    /// packets, so the idle cost is a single lightweight task per session.
     fn setup_recording_capture(
         &mut self,
     ) -> Result<Option<crate::media::media_recorder::RecorderSender>> {
-        if !self.context.dialplan.recording.enabled {
-            return Ok(None);
-        }
         let _media_runtime_guard = crate::utils::media_enter();
         let sender = self
             .bridge_mut()
@@ -500,6 +514,8 @@ impl SipSession {
                 path,
                 segment_type: "full".to_string(),
                 segment_id: "full".to_string(),
+                seq: 1,
+                label: "full".to_string(),
                 started_at: chrono::Utc::now(),
                 notify_app: false,
             });
@@ -542,21 +558,47 @@ impl SipSession {
             .unwrap_or_else(|| "recordings".to_string())
     }
 
+    /// Resolve the file-name label for a recording segment: explicit
+    /// `config.label` → resolved/known agent id → ivr name (session
+    /// extensions) → `segment_type`. Extensions are populated by the routing
+    /// layer (`ivr`) and the CC addon (`resolved_agent_id` / `agent_id`) as
+    /// the call progresses, so the same session yields `main-ivr` during the
+    /// IVR stage and `1001` once an agent answers.
+    fn recording_label(&self, config_label: Option<&str>, segment_type: &str) -> String {
+        config_label
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| self.session_ext_get("resolved_agent_id"))
+            .or_else(|| self.session_ext_get("agent_id"))
+            .or_else(|| self.session_ext_get("ivr"))
+            .unwrap_or_else(|| segment_type.to_string())
+    }
+
     fn finalize_active_recording_segment(
         &mut self,
         result: &crate::media::media_recorder::RecordingResult,
     ) -> bool {
         let ended_at = chrono::Utc::now();
-        let (segment_type, segment_id, started_at, notify_app) =
+        let (segment_type, segment_id, seq, label, started_at, notify_app) =
             if let Some(active) = self.active_recording.take() {
                 (
                     active.segment_type,
                     active.segment_id,
+                    active.seq,
+                    active.label,
                     Some(active.started_at.to_rfc3339()),
                     active.notify_app,
                 )
             } else {
-                ("full".to_string(), "full".to_string(), None, false)
+                (
+                    "full".to_string(),
+                    "full".to_string(),
+                    0,
+                    "full".to_string(),
+                    None,
+                    false,
+                )
             };
         self.completed_recording_segments
             .push(crate::callrecord::RecordingSegment {
@@ -564,6 +606,8 @@ impl SipSession {
                 size: result.file_size,
                 segment_type,
                 segment_id,
+                seq,
+                label,
                 started_at,
                 ended_at: Some(ended_at.to_rfc3339()),
                 duration_secs: result.duration_secs,
@@ -854,15 +898,21 @@ impl SipSession {
             ConstructMode::Uac => Default::default(),
         };
         // Resolve the root session id for the whole logical call.
-        // UAS: an inbound INVITE carrying a CC User-to-User header
-        // (RFC 7433, purpose=call-center) re-attaches this leg to an
-        // existing root session (e.g. a transfer returning from an
-        // external network). Otherwise this session IS the root.
+        // UAS: an inbound INVITE re-attaches this leg to an existing root
+        // session when it carries, in priority order:
+        //   1. a SIP `Session-ID` header (RFC 7989) whose local-uuid is the
+        //      upstream PBX/cluster global session id (B2BUA legs stamped by
+        //      `session_id_for_outgoing_leg`);
+        //   2. a CC User-to-User header (RFC 7433, purpose=call-center) —
+        //      legacy channel, kept for mixed-version clusters.
+        // Otherwise this session IS the root.
         // UAC (originate): this session is the root by definition.
         let root_session_id = match mode {
             ConstructMode::Uas { server_dialog } => {
-                crate::call::uui::extract_cc_uui(&server_dialog.initial_request().headers)
-                    .map(|uui| uui.session_id)
+                let request = server_dialog.initial_request();
+                crate::call::session_id::extract_inherited(&request).or_else(|| {
+                    crate::call::uui::extract_cc_uui(&request.headers).map(|uui| uui.session_id)
+                })
             }
             ConstructMode::Uac => None,
         };
@@ -1015,6 +1065,7 @@ impl SipSession {
             callee_guards: Vec::new(),
             reporter: None,
             cdr_sent: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            answered_event_emitted: false,
             app_event_bridge: app_event_bridge.clone(),
             extensions: session_extensions,
             conference_bridge: crate::call::runtime::SessionConferenceBridge::new(),
@@ -1033,6 +1084,7 @@ impl SipSession {
             live_transcription: None,
             active_recording: None,
             completed_recording_segments: Vec::new(),
+            recording_seq: 0,
         };
 
         // Phase 0: Initialize MediaBridge eagerly when media is anchored.
@@ -2187,6 +2239,124 @@ impl SipSession {
         }
     }
 
+    /// Resolve the leg that owns the given dialog (Display form). Checks the
+    /// caller dialog first, then the leg registry, then the registered callee
+    /// dialogs. Used by the inbound-REFER blind-transfer path to identify the
+    /// transferor leg; the literal `callee` answer resolves to the connected
+    /// agent leg via `resolve_transfer_leg` at transfer time.
+    pub(crate) fn leg_id_for_dialog(&self, dialog_id: &str) -> Option<LegId> {
+        if self
+            .caller_dialog
+            .as_ref()
+            .is_some_and(|d| d.id().to_string() == dialog_id)
+        {
+            return Some(LegId::from("caller"));
+        }
+        for (leg_id, _) in self.legs.iter() {
+            if self
+                .legs
+                .get_dialog(leg_id)
+                .is_some_and(|d| d.id().to_string() == dialog_id)
+            {
+                return Some(leg_id.clone());
+            }
+        }
+        if self
+            .callee_dialogs
+            .iter()
+            .any(|entry| entry.key().to_string() == dialog_id)
+        {
+            return Some(LegId::from("callee"));
+        }
+        None
+    }
+
+    /// Publish CC agent attribution into the RWI `CallMetaStore` so every
+    /// `call_*` event dispatched from this session is enriched with
+    /// `agent_id` / `agent_name` / `queue_id` (same flat-merge mechanism as
+    /// `direction`). This replaces the addon-emitted `cc_ringing` /
+    /// `cc_answered` / `cc_hangup` / `cc_held` / `cc_unheld` events.
+    ///
+    /// Sources:
+    /// - `agent_id` / `agent_name` — session extensions, written by the CC
+    ///   session hook (`publish_agent_context`) during the ringing /
+    ///   connected / ended lifecycle callbacks. Call this only AFTER the
+    ///   hooks have fired.
+    /// - `queue_id` — the effective queue name from the session call meta.
+    ///
+    /// Existing meta fields are never cleared: a call that stops resolving an
+    /// agent (e.g. sequential fallback to a non-agent) keeps its earlier
+    /// attribution.
+    ///
+    /// When the meta entry has already been REMOVED (a queue→agent dispatch
+    /// transfers the caller away and the transfer completion releases the
+    /// original session's gateway state — including its CallMetaStore entry —
+    /// before this session's final `call_hangup` is emitted), it is REBUILT
+    /// from the live session context so the last lifecycle events keep their
+    /// flat enrichment (caller/callee/direction + agent attribution).
+    fn sync_agent_context_to_rwi_meta(&self) {
+        let Some(ref gw) = self.server.rwi_gateway else {
+            return;
+        };
+        let agent_id = self.session_ext_get("agent_id");
+        let agent_name = self.session_ext_get("agent_name");
+        let queue_id = crate::proxy::proxy_call::call_meta::effective_queue_name(&self.meta);
+        if agent_id.is_none() && agent_name.is_none() && queue_id.is_none() {
+            return;
+        }
+        let session_id = self.context.session_id.clone();
+        let gw = gw.read();
+        let mut meta = gw.meta_store.get_sync(&session_id).unwrap_or_else(|| {
+            // Rebuild from the live session (mirror of the constructor's
+            // initial CallMeta population).
+            crate::rwi::proto::CallMeta {
+                session_id: Some(
+                    self.meta
+                        .root_session_id
+                        .clone()
+                        .unwrap_or_else(|| session_id.clone()),
+                ),
+                caller: Some(self.context.original_caller.clone()),
+                callee: Some(self.context.original_callee.clone()),
+                caller_name: extract_sip_username(&self.context.original_caller),
+                callee_name: extract_sip_username(&self.context.original_callee),
+                direction: Some(self.context.dialplan.direction.to_string()),
+                trunk: self
+                    .context
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.get("trunk").cloned()),
+                agent_id: agent_id.clone(),
+                agent_name: agent_name.clone(),
+                queue_id: queue_id.clone(),
+                root: Some(crate::rwi::proto::RootCallInfo {
+                    caller: Some(self.context.original_caller.clone()),
+                    caller_name: extract_sip_username(&self.context.original_caller),
+                    callee: Some(self.context.original_callee.clone()),
+                    callee_name: extract_sip_username(&self.context.original_callee),
+                    call_id: Some(
+                        self.meta
+                            .root_session_id
+                            .clone()
+                            .unwrap_or_else(|| session_id.clone()),
+                    ),
+                    start_time: Some(self.context.created_at.clone()),
+                }),
+                ..Default::default()
+            }
+        });
+        if meta.agent_id.is_none() {
+            meta.agent_id = agent_id;
+        }
+        if meta.agent_name.is_none() {
+            meta.agent_name = agent_name;
+        }
+        if meta.queue_id.is_none() {
+            meta.queue_id = queue_id;
+        }
+        gw.meta_store.insert(session_id, meta);
+    }
+
     fn session_hook_ctx(&self) -> crate::proxy::proxy_call::session_hooks::CallSessionContext {
         // Merge routing metadata (X-CRM-* / X-CC-*) into extensions.
         // Use entry() to avoid overwriting keys already set by addons (e.g.
@@ -2225,8 +2395,9 @@ impl SipSession {
     /// Used by paths that dial a leg outside the regular `dial_sequential`
     /// flow (notably the RWI originate setup loop in `rwi/processor.rs`),
     /// so a ringing provisional (180, or 183/180-with-SDP early media when
-    /// `early_media` is set) reaches addons — the CC addon emits `cc_ringing`
-    /// and transitions the agent Idle → Ringing.
+    /// `early_media` is set) reaches addons — the CC addon resolves and
+    /// publishes the agent attribution and transitions the agent Idle →
+    /// Ringing.
     pub(crate) async fn fire_on_call_ringing_hooks(&self, early_media: bool) {
         if self.server.session_hooks.is_empty() {
             return;
@@ -2235,14 +2406,17 @@ impl SipSession {
         for hook in self.server.session_hooks.iter() {
             hook.on_call_ringing(&ctx, early_media).await;
         }
+        // Hooks may have resolved + published the agent attribution — make it
+        // visible to event enrichment before the caller emits `call_ringing`.
+        self.sync_agent_context_to_rwi_meta();
     }
 
     /// Fire the `on_call_connected` session hooks for this session.
     ///
     /// Used by the RWI originate setup loop after the first outbound INVITE
     /// is confirmed (200 OK) and attached as the caller dialog, so addons
-    /// learn the call connected — the CC addon emits `cc_answered` and
-    /// transitions the agent Ringing/Idle → Busy.
+    /// learn the call connected — the CC addon transitions the agent
+    /// Ringing/Idle → Busy.
     pub(crate) async fn fire_on_call_connected_hooks(&self) {
         if self.server.session_hooks.is_empty() {
             return;
@@ -2251,6 +2425,7 @@ impl SipSession {
         for hook in self.server.session_hooks.iter() {
             hook.on_call_connected(&ctx).await;
         }
+        self.sync_agent_context_to_rwi_meta();
     }
 
     /// Fire the `on_call_ended` session hooks for this session.
@@ -2258,8 +2433,7 @@ impl SipSession {
     /// Used by the RWI originate setup loop when the first outbound INVITE
     /// FAILS (rejected / no-answer / timeout / media setup failure) — the
     /// UAC session loop never starts on those paths, so without this the
-    /// CC addon would never learn the call ended (agent stuck in Ringing,
-    /// no `cc_hangup` webhook).
+    /// CC addon would never learn the call ended (agent stuck in Ringing).
     pub(crate) async fn fire_on_call_ended_hooks(
         &self,
         reason: Option<&crate::callrecord::CallRecordHangupReason>,
@@ -2272,6 +2446,7 @@ impl SipSession {
         for hook in self.server.session_hooks.iter() {
             hook.on_call_ended(&ctx, reason, duration_secs).await;
         }
+        self.sync_agent_context_to_rwi_meta();
     }
 
     fn ok_or_failure<T>(result: anyhow::Result<T>) -> CommandResult {
@@ -2681,6 +2856,26 @@ impl SipSession {
             .map_err(|e| anyhow::anyhow!("Failed to parse {} SDP: {}", context, e))
     }
 
+    /// RFC 7989 Session-ID local-uuid to stamp on outgoing legs.
+    ///
+    /// Prefers the inherited root session id (one stable id across the whole
+    /// logical call — cluster peers and downstream legs re-attach to it),
+    /// falling back to this session's own id when it is the root. `None` for
+    /// P2P flows (`session_id_enabled == false`) or non-UUID-shaped legacy
+    /// ids, which keep relying on the UUI (RFC 7433) correlation channel.
+    fn session_id_for_outgoing_leg(&self) -> Option<String> {
+        if !self.context.dialplan.session_id_enabled {
+            return None;
+        }
+        let candidate = self
+            .meta
+            .root_session_id
+            .as_deref()
+            .or(self.context.dialplan.session_id.as_deref())
+            .unwrap_or(&self.context.session_id);
+        crate::call::session_id::normalize(candidate)
+    }
+
     async fn build_target_invite_option(
         &mut self,
         target: &crate::call::Location,
@@ -2832,6 +3027,7 @@ impl SipSession {
         let callee_call_id = self.context.dialplan.call_id.clone().unwrap_or_else(|| {
             rsipstack::transaction::make_call_id(
                 self.server.endpoint.inner.option.callid_suffix.as_deref(),
+                self.server.endpoint.inner.option.callid_format,
             )
             .value()
             .to_string()
@@ -2859,6 +3055,10 @@ impl SipSession {
             credential: target.credential.clone(),
             headers: Some(headers),
             call_id: Some(callee_call_id.clone()),
+            // RFC 7989: carry the global session id as the local-uuid so the
+            // downstream endpoint/cluster peer can correlate the logical call.
+            // P2P flows (session_id_enabled == false) stay header-free.
+            session_id: self.session_id_for_outgoing_leg(),
             contact: contact_uri,
             ..Default::default()
         };
@@ -3342,6 +3542,10 @@ impl SipSession {
                         .map(|s| s.to_string()),
                     segment_id: params
                         .and_then(|p| p.get("id").or_else(|| p.get("segment_id")))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    label: params
+                        .and_then(|p| p.get("label"))
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string()),
                     notify_app: params
@@ -4567,6 +4771,10 @@ impl SipSession {
             for hook in self.server.session_hooks.iter() {
                 hook.on_call_ringing(&ctx, false).await;
             }
+            // The CC hook resolves + publishes the agent attribution here
+            // (parallel-ring targets) — sync it so the per-provisional
+            // `call_ringing` emitted below carries it.
+            self.sync_agent_context_to_rwi_meta();
         }
 
         let mut failures = 0u32;
@@ -5479,21 +5687,17 @@ impl SipSession {
                                 self.media.early_media_sent = true;
                                 self.update_leg_state(&LegId::from("callee"), LegState::EarlyMedia);
 
-                                // Provisional response carried SDP — emit the
-                                // core ringing event with early_media = true and
-                                // fire the ringing session hooks with the same
-                                // flag (e.g. the CC addon turns this into
-                                // `cc_ringing`).
+                                // Provisional response carried SDP — fire the
+                                // ringing session hooks first (the CC addon
+                                // resolves + publishes the agent attribution)
+                                // and then emit the core ringing event with
+                                // early_media = true, enriched with the agent
+                                // context.
+                                self.fire_on_call_ringing_hooks(true).await;
                                 self.emit_typed_rwi_event(&crate::rwi::CallRinging {
                                     call_id: self.context.session_id.clone(),
                                     early_media: true,
                                 });
-                                if !self.server.session_hooks.is_empty() {
-                                    let ctx = self.session_hook_ctx();
-                                    for hook in self.server.session_hooks.iter() {
-                                        hook.on_call_ringing(&ctx, true).await;
-                                    }
-                                }
 
                                 if self.media_profile.path == MediaPathMode::Anchored {
                                     let caller_sdp = match self
@@ -5556,18 +5760,14 @@ impl SipSession {
                             }
                             }
 
+                            // Fire on_call_ringing hooks first (plain 180, no
+                            // SDP) so agent attribution is published, then
+                            // emit the enriched core ringing event.
+                            self.fire_on_call_ringing_hooks(false).await;
                             self.emit_typed_rwi_event(&crate::rwi::CallRinging {
                                 call_id: self.context.session_id.clone(),
                                 early_media: false,
                             });
-
-                            // Fire on_call_ringing hooks (plain 180, no SDP)
-                            if !self.server.session_hooks.is_empty() {
-                                let ctx = self.session_hook_ctx();
-                                for hook in self.server.session_hooks.iter() {
-                                    hook.on_call_ringing(&ctx, false).await;
-                                }
-                            }
                         }
                         self.update_snapshot_cache();
                     }
@@ -6522,12 +6722,6 @@ impl SipSession {
             self.meta.ever_connected_callee = true;
         }
 
-        if !self.app_runtime.is_running() {
-            self.emit_typed_rwi_event(&crate::rwi::CallAnswered {
-                call_id: self.context.session_id.clone(),
-            });
-        }
-
         let mut timer_headers = vec![];
         if self
             .server
@@ -6696,12 +6890,26 @@ impl SipSession {
                 }
             });
 
-        // Fire session lifecycle hooks.
+        // Fire session lifecycle hooks first (the CC addon resolves + publishes
+        // the agent attribution), then emit the core `call_answered` —
+        // enriched with the agent context. Gated to sessions without a
+        // running app: queue/IVR calls answer the caller leg under the app
+        // and the agent-side `call_answered` fires at LegConnected instead.
+        // The one-shot latch keeps the two paths mutually exclusive (an
+        // app-startup race can reach here after the queue app already
+        // answered).
         if !self.server.session_hooks.is_empty() {
             let ctx = self.session_hook_ctx();
             for hook in self.server.session_hooks.iter() {
                 hook.on_call_connected(&ctx).await;
             }
+            self.sync_agent_context_to_rwi_meta();
+        }
+        if !self.app_runtime.is_running() && !self.answered_event_emitted {
+            self.answered_event_emitted = true;
+            self.emit_typed_rwi_event(&crate::rwi::CallAnswered {
+                call_id: self.context.session_id.clone(),
+            });
         }
 
         Ok(())
@@ -7815,7 +8023,7 @@ impl SipSession {
         }
 
         // Fire on_call_ended hooks.
-        if !self.server.session_hooks.is_empty() {
+        let ended_duration_secs = if !self.server.session_hooks.is_empty() {
             let duration_secs = self
                 .meta
                 .answer_time
@@ -7827,7 +8035,16 @@ impl SipSession {
                 hook.on_call_ended(&ctx, reason.as_ref(), duration_secs)
                     .await;
             }
-        }
+            // Hooks may have published the agent attribution — make it
+            // visible to event enrichment before `call_hangup` is emitted.
+            self.sync_agent_context_to_rwi_meta();
+            duration_secs
+        } else {
+            self.meta
+                .answer_time
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or(0)
+        };
 
         // Emit hangup webhook with Display (lowercase) reason and actual SIP status.
         let hangup_reason_str = self.meta.hangup_reason.clone().map(|r| r.to_string());
@@ -7849,6 +8066,7 @@ impl SipSession {
             reason: hangup_reason_str,
             hangup_by,
             sip_status,
+            duration_secs: Some(ended_duration_secs),
         });
 
         // Tear down the transport-level RTP rewrite bridge (fast-path relay)
@@ -7925,8 +8143,18 @@ impl SipSession {
         // ── 1. Queue abandon catch-all ──────────────────────────────
         // Covers the CallApp-based queue path (where execute_queue is not
         // called and meta.queue_name may not be set via the SIP layer).
+        // EXCLUDED: sessions already dispatched to an agent via the
+        // transfer/bridge path (`MarkTransferred` marks the surviving caller
+        // session there). The agent leg lives in another session, so this
+        // session's `ever_connected_callee` stays false — without the
+        // exclusion the caller-side teardown after a served call (including
+        // the post-call CSAT survey's system hangup) would be misclassified
+        // as a queue abandon. `resolved_agent_id` cannot be used here: it is
+        // planted at TARGET RESOLUTION time, before the agent ever connects,
+        // so genuine abandons during agent ringing carry it too.
         let in_queue = crate::proxy::proxy_call::call_meta::has_queue_name(&self.meta);
         if in_queue
+            && !self.meta.transferred
             && !self.meta.ever_connected_callee
             && self.meta.connected_callee.is_none()
             && matches!(
@@ -9129,13 +9357,10 @@ impl SipSession {
 
             CallCommand::StartRecording { config } => {
                 let result = async {
-                    // The recorder sender/task is attached only while building
-                    // an enabled recording call. An explicit start activates
-                    // that prepared task; it cannot retrofit capture onto a
-                    // call whose media leg was built with recording disabled.
-                    if !self.context.dialplan.recording.enabled {
-                        return Err(anyhow!("recording is not enabled for this call"));
-                    }
+                    // The capture tap is attached to every media leg at build
+                    // time, so recording can be activated on demand at any
+                    // stage (IVR node, agent connect, API command) regardless
+                    // of the routing-time recording policy.
                     let segment_type = config
                         .segment_type
                         .clone()
@@ -9146,16 +9371,23 @@ impl SipSession {
                         .clone()
                         .filter(|s| !s.trim().is_empty())
                         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()[..8].to_string());
+                    let label = self.recording_label(config.label.as_deref(), &segment_type);
+                    // Every start is a new segment in the logical call; the
+                    // auto-generated name additionally bumps past any file
+                    // collision left by segments of other legs (transfers).
+                    self.recording_seq = self.recording_seq.saturating_add(1);
+                    let mut seq = self.recording_seq;
                     let path = if config.path.trim().is_empty() {
-                        crate::callrecord::segment_wav_path(
-                            &self.recording_root_dir(),
-                            &self.root_session_id_str(),
-                            &segment_type,
-                            &segment_id,
-                            chrono::Utc::now(),
-                        )
-                        .to_string_lossy()
-                        .into_owned()
+                        let (resolved_seq, resolved_path) =
+                            crate::callrecord::segmented_wav_path(
+                                &self.recording_root_dir(),
+                                &self.root_session_id_str(),
+                                seq,
+                                &label,
+                            );
+                        seq = resolved_seq;
+                        self.recording_seq = resolved_seq;
+                        resolved_path.to_string_lossy().into_owned()
                     } else {
                         config.path.clone()
                     };
@@ -9180,6 +9412,8 @@ impl SipSession {
                         path,
                         segment_type,
                         segment_id,
+                        seq,
+                        label,
                         started_at: chrono::Utc::now(),
                         notify_app,
                     });
@@ -9223,6 +9457,12 @@ impl SipSession {
                 };
                 let _ = reply.send(result);
                 command_result
+            }
+
+            CallCommand::QueryLegByDialog { dialog_id, reply } => {
+                let leg = self.leg_id_for_dialog(&dialog_id);
+                let _ = reply.send(leg);
+                CommandResult::success()
             }
 
             CallCommand::Trace { event } => {
@@ -9474,14 +9714,10 @@ impl SipSession {
             CallCommand::LegRinging { leg_id } => {
                 info!(session_id = %self.id, %leg_id, "Leg ringing async notification");
                 // The agent leg is ringing — fire on_call_ringing session hooks
-                // so the CC addon can emit `cc_ringing` (agent Idle → Ringing).
+                // so the CC addon publishes the agent attribution (agent Idle
+                // → Ringing) before the enriched `call_ringing` is emitted.
                 self.update_leg_state(&leg_id, LegState::Ringing);
-                if !self.server.session_hooks.is_empty() {
-                    let ctx = self.session_hook_ctx();
-                    for hook in self.server.session_hooks.iter() {
-                        hook.on_call_ringing(&ctx, false).await;
-                    }
-                }
+                self.fire_on_call_ringing_hooks(false).await;
                 // Notify the running queue app that the agent is ringing so
                 // it can track per-leg state and emit QueueAgentOffered.
                 let agent_uri = self.legs.get(&leg_id).and_then(|l| l.endpoint.clone());
@@ -9654,19 +9890,42 @@ impl SipSession {
                     mb.accept(crate::media::media_bridge::LegSide::A).await;
                     let _ = mb.bridge().await;
 
+                    // A real callee/agent leg answered — record it so the
+                    // queue-abandon detector can tell "served then hung up"
+                    // apart from "hung up while waiting" (same flag
+                    // accept_call maintains for the direct-answer path).
+                    // Without this, a caller hangup after a dynamic-leg
+                    // dispatch was misclassified as a queue abandon.
+                    self.meta.ever_connected_callee = true;
+                    if let Some(endpoint) = self.legs.get(&leg_id).and_then(|l| l.endpoint.clone()) {
+                        self.meta.connected_callee = Some(endpoint);
+                    }
+
                     // The queue-agent leg answering IS the call-connect moment
                     // for the agent (the caller was already answered by the
                     // IVR/queue app, so accept_call's hook never sees this
                     // transition). Fire the session lifecycle hooks here —
-                    // CcCallSessionHook emits cc_answered and moves the agent
-                    // Ringing → Busy. Without this the CC layer never learns
-                    // the agent connected (agent stuck in Ringing, no
-                    // cc_answered webhook).
+                    // CcCallSessionHook publishes the agent attribution and
+                    // moves the agent Ringing → Busy. Without this the CC
+                    // layer never learns the agent connected (agent stuck in
+                    // Ringing). Then emit the core `call_answered` (the
+                    // unified replacement of the addon-emitted `cc_answered`),
+                    // enriched with the agent context.
                     if !self.server.session_hooks.is_empty() {
                         let ctx = self.session_hook_ctx();
                         for hook in self.server.session_hooks.iter() {
                             hook.on_call_connected(&ctx).await;
                         }
+                        self.sync_agent_context_to_rwi_meta();
+                    }
+                    // One-shot: the queue-app answer path (accept_call) may
+                    // have already emitted under an app-startup race — see
+                    // `answered_event_emitted`.
+                    if !self.answered_event_emitted {
+                        self.answered_event_emitted = true;
+                        self.emit_typed_rwi_event(&crate::rwi::CallAnswered {
+                            call_id: self.context.session_id.clone(),
+                        });
                     }
                 }
 
@@ -9680,6 +9939,7 @@ impl SipSession {
                     for hook in self.server.session_hooks.iter() {
                         hook.on_call_connected(&ctx).await;
                     }
+                    self.sync_agent_context_to_rwi_meta();
                 }
 
                 self.update_leg_state(&leg_id, LegState::Connected);
@@ -10259,13 +10519,14 @@ impl SipSession {
         self.legs.get(leg_id).map(|leg| leg.state)
     }
 
-    /// Fire `on_call_held` / `on_call_unheld` session hooks when a leg
-    /// transitions to/from [`LegState::Hold`].
+    /// Fire `on_call_held` / `on_call_unheld` session hooks and emit the core
+    /// `call_held` / `call_unheld` events when a leg transitions to/from
+    /// [`LegState::Hold`].
     ///
     /// This centralizes hold detection so it works regardless of whether the
     /// transition is caused by an explicit `CallCommand::Hold/Unhold` or by an
     /// inbound re-INVITE carrying `sendonly`/`inactive` (or back to
-    /// `sendrecv`). No-op when there is no transition or no hooks registered.
+    /// `sendrecv`). No-op when there is no transition.
     async fn fire_hold_transition_hooks(
         &mut self,
         leg_id: &LegId,
@@ -10295,6 +10556,22 @@ impl SipSession {
             );
         }
         if self.server.session_hooks.is_empty() {
+            // No hooks — still emit the core hold/unheld events (agent
+            // attribution comes from the meta already published at
+            // ringing/connected time).
+            let event_call_id = self.context.session_id.clone();
+            let leg_id_str = leg_id.to_string();
+            if entered_hold {
+                self.emit_typed_rwi_event(&crate::rwi::CallHeld {
+                    call_id: event_call_id,
+                    leg_id: leg_id_str,
+                });
+            } else {
+                self.emit_typed_rwi_event(&crate::rwi::CallUnheld {
+                    call_id: event_call_id,
+                    leg_id: leg_id_str,
+                });
+            }
             return;
         }
         let ctx = self.session_hook_ctx();
@@ -10305,6 +10582,17 @@ impl SipSession {
             } else {
                 hook.on_call_unheld(&ctx, &leg_id_str).await;
             }
+        }
+        if entered_hold {
+            self.emit_typed_rwi_event(&crate::rwi::CallHeld {
+                call_id: ctx.session_id.clone(),
+                leg_id: leg_id_str.clone(),
+            });
+        } else {
+            self.emit_typed_rwi_event(&crate::rwi::CallUnheld {
+                call_id: ctx.session_id.clone(),
+                leg_id: leg_id_str.clone(),
+            });
         }
     }
 
@@ -10700,6 +10988,8 @@ impl SipSession {
             credential: location.credential.clone(),
             headers: location.headers.clone(),
             call_id: Some(bleg_call_id.clone()),
+            // RFC 7989: queue/consult agent legs inherit the global session id.
+            session_id: self.session_id_for_outgoing_leg(),
             ..Default::default()
         };
 
@@ -11769,6 +12059,14 @@ impl SipSession {
                     }
                 }
 
+                // Core hold event — agent attribution (agent_id / agent_name /
+                // queue_id) is injected from the RWI call meta published at
+                // ringing/connected time (replaces the former `cc_held`).
+                self.emit_typed_rwi_event(&crate::rwi::CallHeld {
+                    call_id: self.context.session_id.clone(),
+                    leg_id: leg_id.to_string(),
+                });
+
                 // Switch the held leg's media egress to hold music (looping) or
                 // CNG/silence. Mirrors propagate_hold_to_callee / _to_caller: without
                 // this the leg stays on EgressSource::RewriteRelay, which parks the
@@ -11861,6 +12159,11 @@ impl SipSession {
                 hook.on_call_unheld(&ctx, &leg_id_str).await;
             }
         }
+        // Core unhold event (replaces the former `cc_unheld`).
+        self.emit_typed_rwi_event(&crate::rwi::CallUnheld {
+            call_id: self.context.session_id.clone(),
+            leg_id: leg_id.to_string(),
+        });
         Ok(())
     }
 

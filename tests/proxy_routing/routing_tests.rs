@@ -562,6 +562,97 @@ async fn test_match_invite_exact_match() {
 }
 
 #[tokio::test]
+async fn test_match_invite_skips_disabled_route() {
+    // Paused routes are exported with `disabled = true`; the matcher must skip
+    // them so a lower-priority enabled route can take the call.
+    let routing_state = Arc::new(RoutingState::new());
+    let mut trunks = HashMap::new();
+
+    trunks.insert(
+        "paused_trunk".to_string(),
+        TrunkConfig {
+            dest: "sip:paused.rustpbx.com:5060".to_string(),
+            ..Default::default()
+        },
+    );
+    trunks.insert(
+        "fallback_trunk".to_string(),
+        TrunkConfig {
+            dest: "sip:gateway.rustpbx.com:5060".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let routes = vec![
+        RouteRule {
+            name: "paused_rule".to_string(),
+            priority: 100,
+            match_conditions: MatchConditions {
+                to_user: Some("1001".to_string()),
+                ..Default::default()
+            },
+            action: RouteAction {
+                dest: Some(DestConfig::Single("paused_trunk".to_string())),
+                select: "rr".to_string(),
+                ..Default::default()
+            },
+            disabled: Some(true),
+            ..Default::default()
+        },
+        RouteRule {
+            name: "fallback_rule".to_string(),
+            priority: 10,
+            match_conditions: MatchConditions {
+                to_user: Some("1001".to_string()),
+                ..Default::default()
+            },
+            action: RouteAction {
+                dest: Some(DestConfig::Single("fallback_trunk".to_string())),
+                select: "rr".to_string(),
+                ..Default::default()
+            },
+            disabled: None,
+            ..Default::default()
+        },
+    ];
+
+    let option = create_test_invite_option();
+    let origin = create_test_request();
+
+    let result = match_invite(
+        Some(&trunks),
+        Some(&routes),
+        None,
+        option,
+        &origin,
+        None,
+        routing_state,
+        &DialDirection::Outbound,
+    )
+    .await
+    .expect("Failed to match invite");
+
+    match result {
+        RouteResult::Forward(option, _) => {
+            let dest = option
+                .destination
+                .expect("forwarded invite should carry a destination");
+            assert_eq!(
+                dest.addr.to_string(),
+                "gateway.rustpbx.com:5060",
+                "the disabled high-priority route must be skipped in favor of the enabled fallback"
+            );
+        }
+        RouteResult::NotHandled(_, _) => panic!("Expected forward, got not handled"),
+        RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
+        RouteResult::Queue { .. } => {
+            panic!("unexpected queue result")
+        }
+        RouteResult::Application { .. } => panic!("unexpected Application route in test"),
+    }
+}
+
+#[tokio::test]
 async fn test_trunk_external_ip_propagates_to_hints() {
     // Bug 1+2: per-trunk external_ip / bind_ip must flow through DialplanHints
     // so that the SDP generated for this trunk's leg advertises the correct IP

@@ -268,7 +268,7 @@ async def test_flow2_queue_skill_overflow_dispatch(
     )
 
     # ── 6. Agent answers → live media bridge (wait-mode UA reports RX).    ─
-    answered_ev = await event_checker.webhook.wait_for_event("cc_answered", timeout=20)
+    answered_ev = await event_checker.webhook.wait_for_event("call_answered", timeout=20)
     assert answered_ev is not None, "overflowed agent never answered"
     await h.wait_rtp_rx(agent, f"agent {AGENT_B}", 15)
     await asyncio.sleep(2)  # accumulate bidirectional media + the DTMF burst
@@ -292,9 +292,9 @@ async def test_flow2_queue_skill_overflow_dispatch(
     )
 
     # ── 8. Caller hangs up (t=25 s); clean teardown.                       ─
-    hangup_ev = await event_checker.webhook.wait_for_event("cc_hangup", timeout=40)
+    hangup_ev = await event_checker.webhook.wait_for_event("call_hangup", timeout=40)
     assert hangup_ev is not None, (
-        f"no cc_hangup. events: {event_checker.webhook.event_types()}"
+        f"no call_hangup. events: {event_checker.webhook.event_types()}"
     )
 
     # ── 9. Audio fidelity: the agent's recording carries the caller's      ─

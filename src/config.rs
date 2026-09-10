@@ -1260,10 +1260,24 @@ pub struct ProxyConfig {
     pub dialog_auth_cache: Option<AuthCacheConfig>,
     #[serde(default)]
     pub blind_transfer_use_refer: bool,
+    /// Execute inbound blind REFERs (no Replaces) inside the original session
+    /// by swapping the B leg (`CallCommand::Transfer` → blind-transfer B2BUA)
+    /// instead of originating a new session. One logical call therefore stays
+    /// one session/CDR: root session-id inheritance, transfer-source
+    /// recording, return-app fallbacks and the cluster session registry all
+    /// keep working, and the transferor leg hangs up only after the new leg
+    /// answers (restored untouched on failure). Replaces (attended) REFERs
+    /// always take the raw originate. Default: enabled.
+    #[serde(default = "default_true")]
+    pub inbound_refer_in_session: bool,
     /// When enabled, app/transfer/RWI-originated calls whose target is not a
     /// registered internal contact are routed through the route table
     /// (match/rewrite/trunk selection) just like inbound calls. Default off —
     /// legacy direct-dial behavior is preserved unless explicitly enabled.
+    /// For blind transfers this also enables the queue/application hand-off:
+    /// a bare number whose route resolves to a queue or application (IVR,
+    /// ...) starts that flow in-session — both for CTI/API transfers
+    /// (`CallCommand::Transfer`) and phone-initiated REFERs.
     #[serde(default)]
     pub route_originated_calls: bool,
 
@@ -1348,6 +1362,9 @@ fn default_uri_max_length() -> usize {
     256
 }
 fn default_parallel_fork() -> bool {
+    true
+}
+fn default_true() -> bool {
     true
 }
 fn default_session_cmd_channel_capacity() -> usize {
@@ -1835,6 +1852,7 @@ impl Default for ProxyConfig {
             video_codecs: default_video_codecs(),
             dialog_auth_cache: default_dialog_auth_cache(),
             blind_transfer_use_refer: false,
+            inbound_refer_in_session: true,
             route_originated_calls: false,
             parallel_fork: default_parallel_fork(),
             max_ring_time: None,

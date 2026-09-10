@@ -659,26 +659,58 @@ async fn test_media_proxy_auto_keeps_plain_targets_bypass_without_recording() {
 }
 
 #[tokio::test]
-async fn recording_disabled_does_not_create_capture_task() {
+async fn recording_disabled_still_arms_capture_and_allows_on_demand_start() {
+    let dir = tempfile::tempdir().expect("tempdir");
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
         "ivr".to_string(),
         None,
         true,
     );
+    // Recording policy left disabled: the capture tap is armed unconditionally
+    // so a call can start recording on demand at any stage (IVR node, agent
+    // connect, API command) regardless of the routing-time policy.
     let mut session = build_session(dialplan).await;
 
     setup_recording_test_media(&mut session).await;
 
+    {
+        let bridge = session.media.bridge.as_ref().expect("media bridge");
+        assert!(
+            bridge.has_recorder_task(),
+            "capture sender/task must be armed even with recording disabled"
+        );
+        assert!(
+            !bridge.has_recorder().await,
+            "no recorder backend may be installed until recording starts"
+        );
+    }
+
+    // On-demand start succeeds without recording enabled.
+    let out_path = dir.path().join("ondemand.wav");
+    let result = session
+        .execute_command(
+            CallCommand::StartRecording {
+                config: crate::call::domain::RecordConfig {
+                    path: out_path.to_string_lossy().into_owned(),
+                    ..Default::default()
+                },
+            },
+            None,
+        )
+        .await;
     assert!(
-        !session
-            .media
-            .bridge
-            .as_ref()
-            .expect("media bridge")
-            .has_recorder_task(),
-        "disabled recording must not create a capture sender/task"
+        result.success,
+        "on-demand start must succeed with recording disabled: {result:?}"
     );
+    {
+        let bridge = session.media.bridge.as_ref().expect("media bridge");
+        assert!(
+            bridge.has_recorder().await,
+            "recorder must be installed by the on-demand start"
+        );
+    }
     if let Some(mut bridge) = session.media.bridge.take() {
+        bridge.stop_recording().await.expect("stop on-demand recorder");
         bridge.close();
     }
 }
@@ -2082,7 +2114,7 @@ async fn handle_play_returns_immediately_when_not_awaited() {
 
 /// Same as [`build_session_on_server`] but also returns the command receiver
 /// so tests can observe CallCommands the session loop would consume.
-async fn build_session_with_cmd_rx(
+pub(crate) async fn build_session_with_cmd_rx(
     dialplan: Dialplan,
 ) -> (
     SipSession,
@@ -3016,7 +3048,7 @@ async fn queue_transfer_start_failure_with_return_app_returns_to_ivr() {
     );
 }
 
-// ── cc_ringing for queue-dialed agents (dynamic leg 180 Ringing) ─────────────
+// ── call_ringing hooks for queue-dialed agents (dynamic leg 180 Ringing) ─────
 
 /// Recording hook that captures whether `on_call_ringing` fired (and with
 /// which `early_media` flag) plus `on_call_connected` firings.
@@ -3059,10 +3091,11 @@ impl crate::proxy::proxy_call::session_hooks::CallSessionHook for RingingRecordi
 }
 
 /// Regression: a dynamic leg (queue-dialed agent) that receives 180 Ringing
-/// must fire the `on_call_ringing` session hooks (which the CC addon turns into
-/// `cc_ringing`). Before the fix, `initiate_sip_leg`'s spawned task only handled
-/// 183 early media and never notified the session of a 180 Ringing, so
-/// queue-dialed agents produced no `cc_ringing`.
+/// must fire the `on_call_ringing` session hooks (the CC addon publishes the
+/// agent attribution there, enriching the core `call_ringing`). Before the
+/// fix, `initiate_sip_leg`'s spawned task only handled 183 early media and
+/// never notified the session of a 180 Ringing, so queue-dialed agent legs
+/// produced no ringing notification at all.
 #[tokio::test]
 async fn test_leg_ringing_fires_on_call_ringing_hook() {
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
@@ -3106,8 +3139,8 @@ async fn test_leg_ringing_fires_on_call_ringing_hook() {
 /// `dial_sequential` flow, so it drives the session lifecycle hooks through
 /// `fire_on_call_ringing_hooks` / `fire_on_call_connected_hooks`. These
 /// helpers must fan out to every registered hook with the early_media flag
-/// preserved (the CC addon turns them into `cc_ringing`/`cc_answered` for
-/// agent click-to-call originates).
+/// preserved (the CC addon publishes the agent attribution there, enriching
+/// the core `call_ringing`/`call_answered` for agent click-to-call originates).
 #[tokio::test]
 async fn test_originate_fire_helpers_reach_session_hooks() {
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);

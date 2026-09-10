@@ -413,6 +413,8 @@ async fn test_leg_timeline_via_call_resume() {
                 &rustpbx::rwi::CallTransferred {
                     call_id: "timeline-call".to_string(),
                     transfer_target: None,
+                    transfer_target_type: None,
+                    transfer_source: None,
                 },
                 None,
             ),

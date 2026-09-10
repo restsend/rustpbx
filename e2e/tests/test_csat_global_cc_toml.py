@@ -159,13 +159,13 @@ async def test_csat_global_cc_toml_with_post_call_ivr(
     assert answered, f"call never answered:\n{caller.output[-1500:]}"
 
     # Queue dispatched the agent.
-    ringing = await event_checker.webhook.wait_for_event("cc_ringing", timeout=20)
+    ringing = await event_checker.webhook.wait_for_event("call_ringing", timeout=20)
     assert ringing is not None, (
-        f"no cc_ringing — queue did not dispatch. events: "
+        f"no call_ringing — queue did not dispatch. events: "
         f"{event_checker.webhook.event_types()}"
     )
-    answered_ev = await event_checker.webhook.wait_for_event("cc_answered", timeout=20)
-    assert answered_ev is not None, "agent never answered (no cc_answered)"
+    answered_ev = await event_checker.webhook.wait_for_event("call_answered", timeout=20)
+    assert answered_ev is not None, "agent never answered (no call_answered)"
 
     # Agent hangs up (hangup_after=8) → global-CSAT survey via post_call_ivr.
     await h.wait_log(pbx, r"Post-call survey started", 25, "survey started (global [csat] wiring)")
@@ -189,7 +189,7 @@ async def test_csat_global_cc_toml_with_post_call_ivr(
     # NOTE: with post_call_ivr the hook forces after_completion="return_ivr";
     # with no IVR to return to the caller leg stays open until its own BYE —
     # documented behavior, the safety-net hangup=35 ends the call.
-    hangup_ev = await event_checker.webhook.wait_for_event("cc_hangup", timeout=30)
+    hangup_ev = await event_checker.webhook.wait_for_event("call_hangup", timeout=30)
     assert hangup_ev is not None, (
         f"call never hung up after survey. events: {event_checker.webhook.event_types()}"
     )
@@ -321,7 +321,7 @@ async def test_ivr_exec_mid_call_then_csat(
         answered = await caller.wait_output_async(r"200 OK|Call established", timeout=25)
         assert answered, f"call never answered:\n{caller.output[-1500:]}"
 
-        await event_checker.expect_webhook_event("cc_answered", timeout=20)
+        await event_checker.expect_webhook_event("call_answered", timeout=20)
 
         # ── ivr.exec: collect IVR runs on the caller leg, agent held. ──
         await h.wait_log(pbx, r"SIP INFO rustpbx command accepted", 20, "ivr.exec INFO")
@@ -357,7 +357,7 @@ async def test_ivr_exec_mid_call_then_csat(
         await h.wait_log(pbx, r"CSAT: score collected score=5", 20, "score collected")
         await h.wait_log(pbx, r"CSAT: survey complete", 15, "survey complete")
 
-        hangup_ev = await event_checker.webhook.wait_for_event("cc_hangup", timeout=30)
+        hangup_ev = await event_checker.webhook.wait_for_event("call_hangup", timeout=30)
         assert hangup_ev is not None, "call never hung up after survey"
         call_id = hangup_ev.call_id
 

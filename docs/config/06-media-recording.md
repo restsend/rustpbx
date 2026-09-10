@@ -203,6 +203,60 @@ rewritten. Other vendors retain their existing addressing behavior.
 
 When `[recording] type = "http"` or `type = "s3"` is used, the CDR may be written before the media upload finishes. The database `recording_url` is updated after the upload succeeds. The local CDR JSON keeps the local recorder path in `recordingUrl` and the recorder metadata in `recorder[]`.
 
+### On-Demand Segmented Recording
+
+Every media leg carries a recording capture tap, so any call can start/stop
+recording **mid-call** — even when `[recording] enabled = false` and no
+recording policy matched the call. This powers stage-based recording such as
+"record only the IVR stage" or "record once an agent answers" without arming
+whole-call recording.
+
+Triggers:
+
+- IVR nodes `record_start` / `record_stop` (see the IVR step protocol docs)
+- RWI `record.start` / `record.stop` (also inline on `call.originate`)
+- Console / CTI HTTP APIs (`POST /calls/active/{session_id}/commands`,
+  `POST /cc/calls/{call_id}/record`)
+- In-dialog SIP INFO (`application/vnd.rustpbx+json`,
+  `{"action": "record.start", "params": {...}}`)
+
+Auto-generated segment file names follow `{path}/{root_session_id}_{seq}_{label}.wav`:
+
+- `seq` — 1-based per-call recording counter; bumped automatically when a file
+  with the candidate name already exists (segments started on different legs
+  of the same logical call — e.g. around transfers — share the root session
+  id).
+- `label` — resolved at start time: explicit `label` parameter →
+  `resolved_agent_id` / `agent_id` session extension (set when a CC agent
+  answers) → `ivr` session extension (set while the call is inside an IVR) →
+  `segment_type`.
+
+Example: an inbound call records one slice inside the main IVR and another
+once the agent answers → `abc123_1_main-ivr.wav`, `abc123_2_1001.wav`.
+
+Each completed segment is listed in the CDR
+(`metadata.recording_segments`, one entry with `seq` / `label` /
+`segment_type` / `segment_id` / start/end times per slice). On upload, one
+`recording_metadata_available` RWI/webhook event is emitted **per segment**
+(`filename` / `download_url` / `file_size` describe that segment; `extra`
+carries `seq` / `label` / `segment_type` next to the call-level metadata).
+`record_end` stays a single per-call summary. Upload works the same as
+whole-call recordings (`type = "local"|"http"|"s3"`, `.upload_failed.*`
+markers + retry worker).
+
+Contact-center agent segments: cc.toml accepts
+
+```toml
+[recording]
+record_on_agent_connect = true
+```
+
+With this on, the CC addon starts a `segment_type = "agent"` segment
+automatically when an agent answers (labeled with the agent id) and closes it
+when the agent leg leaves while the customer call continues (CSAT survey,
+return-to-IVR). Sessions already recording (policy full-call recording or a
+previous segment) are left untouched.
+
 ### SIP Signaling JSONL Sidecar
 
 When `[recording] enabled = true` is used **without** a `[sipflow]` backend (or with `force_file = true`), each recorded call additionally writes a SIP signalling sidecar next to the WAV file:

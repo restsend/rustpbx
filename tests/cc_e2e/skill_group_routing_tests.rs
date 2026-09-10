@@ -1736,7 +1736,8 @@ async fn test_escalation_plan_synthesized_from_overflow_groups() {
 
     assert_eq!(
         plan.mode,
-        rustpbx::call::app::queue::EscalationMode::Cumulative
+        rustpbx::call::app::queue::EscalationMode::Replace,
+        "no overflow_mode metadata defaults to Replace escalation"
     );
     assert_eq!(plan.steps.len(), 2, "one step per overflow group");
     assert_eq!(plan.steps[0].add_skill_group, "support_l2");
@@ -1744,9 +1745,12 @@ async fn test_escalation_plan_synthesized_from_overflow_groups() {
         plan.steps[0].threshold_secs, 45,
         "threshold = max_wait_secs"
     );
-    assert!(plan.steps[0].fair, "synthesized steps must widen fairly");
+    assert!(
+        !plan.steps[0].fair,
+        "Replace-mode synthesized steps keep the primary group's ordering (fair = false)"
+    );
     assert_eq!(plan.steps[1].add_skill_group, "support_l3");
-    assert!(plan.steps[1].fair);
+    assert!(!plan.steps[1].fair);
 }
 
 /// `escalation_plan_for` prefers the ACD policy's escalation timeline when
@@ -1849,6 +1853,7 @@ async fn test_resolve_escalation_targets_union() {
             &["support_l2".to_string()],
             "call-e1",
             true,
+            true,
         )
         .await;
 
@@ -1900,6 +1905,7 @@ async fn test_resolve_escalation_targets_fair_rotation() {
             &["support_l2".to_string()],
             "call-f1",
             true,
+        true,
         )
         .await;
     let head1 = uris1[0]
@@ -1920,6 +1926,7 @@ async fn test_resolve_escalation_targets_fair_rotation() {
             &["support_l2".to_string()],
             "call-f2",
             true,
+        true,
         )
         .await;
     let head2 = uris2[0]
@@ -1956,6 +1963,7 @@ async fn test_resolve_escalation_targets_non_fair_primary_first() {
             &["support_l2".to_string()],
             "call-nf",
             false,
+            true,
         )
         .await;
 

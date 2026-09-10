@@ -326,9 +326,9 @@ async def test_flow1_ivr_queue_ivrexec_bc_transfer_csat(
         assert answered, f"call never answered:\n{caller.output[-1500:]}"
 
         # ── 4. Queue dispatched agent B.                                     ─
-        ringing = await event_checker.webhook.wait_for_event("cc_ringing", timeout=20)
+        ringing = await event_checker.webhook.wait_for_event("call_ringing", timeout=20)
         assert ringing is not None, (
-            f"no cc_ringing — queue did not dispatch. events: "
+            f"no call_ringing — queue did not dispatch. events: "
             f"{event_checker.webhook.event_types()}"
         )
         assert ringing.payload.get("agent_id") == AGENT_B, (
@@ -336,9 +336,9 @@ async def test_flow1_ivr_queue_ivrexec_bc_transfer_csat(
         )
         call_id = ringing.call_id
         answered_ev = await event_checker.webhook.wait_for_event(
-            "cc_answered", timeout=20,
+            "call_answered", timeout=20,
         )
-        assert answered_ev is not None, "agent B never answered (no cc_answered)"
+        assert answered_ev is not None, "agent B never answered (no call_answered)"
 
         # ── 5. ivr.exec fired by agent B → collect IVR ran on caller leg.    ─
         await h.wait_log(pbx, r"SIP INFO rustpbx command accepted", 20, "ivr.exec")
@@ -435,7 +435,7 @@ async def test_flow1_ivr_queue_ivrexec_bc_transfer_csat(
         await asyncio.sleep(5)
         caller.send_stdin_dtmf("5")
 
-        hangup_ev = await event_checker.webhook.wait_for_event("cc_hangup", timeout=60)
+        hangup_ev = await event_checker.webhook.wait_for_event("call_hangup", timeout=60)
         assert hangup_ev is not None, (
             f"call never hung up after survey. events: {event_checker.webhook.event_types()}"
         )

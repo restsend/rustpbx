@@ -530,6 +530,13 @@ impl RwiGateway {
             merge_event_context(&mut payload, Some(&ctx));
             payload
         } else {
+            if let Some(call_id) = &flat.call_id {
+                tracing::debug!(
+                    call_id = %call_id,
+                    event_type = flat.event_type,
+                    "event enrichment missed: no CallMeta entry"
+                );
+            }
             flat.payload.clone()
         };
 
@@ -692,6 +699,7 @@ mod tests {
             reason: Some("normal".into()),
             hangup_by: Some("callee".into()),
             sip_status: None,
+            duration_secs: None,
         });
         assert_eq!(rx.recv().await.unwrap()["event_type"], "call_hangup");
 
@@ -934,7 +942,7 @@ mod tests {
         );
     }
 
-    /// When the event already carries its own `caller` field (e.g. cc_ringing
+    /// When the event already carries its own `caller` field (e.g. call_ringing
     /// or call_created), enrichment must not overwrite it with the context value.
     #[tokio::test]
     async fn test_broadcast_event_preserves_explicit_caller() {
@@ -1054,14 +1062,14 @@ mod tests {
         gw.set_session_event_sender(&sid, tx);
 
         let mut payload = serde_json::json!({
-            "event_type": "cc_ringing",
+            "event_type": "call_ringing",
             "call_id": "c1",
             "agent_id": "agent-1",
             "src_ip": "192.168.1.9",
         });
-        payload["event_type"] = "cc_ringing".into();
+        payload["event_type"] = "call_ringing".into();
         gw.broadcast_event(&crate::rwi::event::RwiEvent {
-            event_type: "cc_ringing",
+            event_type: "call_ringing",
             call_id: Some("c1".into()),
             payload,
         });
@@ -1143,10 +1151,10 @@ mod tests {
         gw.set_session_event_sender(&sid, tx);
 
         gw.broadcast_event(&crate::rwi::event::RwiEvent {
-            event_type: "cc_ringing",
+            event_type: "call_ringing",
             call_id: Some("c1".into()),
             payload: serde_json::json!({
-                "event_type": "cc_ringing",
+                "event_type": "call_ringing",
                 "call_id": "c1",
                 "agent_id": "agent-1",
                 "client_ip": "192.168.1.50",

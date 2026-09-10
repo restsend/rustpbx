@@ -350,6 +350,25 @@ impl StepIvrApp {
         }
     }
 
+    /// Write a string into the shared session-extensions bag (visible to the
+    /// owning `SipSession` via `session_ext_get` — same underlying map).
+    fn set_session_ext(&self, key: &str, value: impl Into<String>) {
+        let value = value.into();
+        if value.is_empty() {
+            return;
+        }
+        if let Some(ref ext) = self.session_extensions {
+            let mut guard = ext.write();
+            if let Some(existing) = guard.get_mut::<std::collections::HashMap<String, String>>() {
+                existing.insert(key.to_string(), value);
+            } else {
+                let mut m = std::collections::HashMap::new();
+                m.insert(key.to_string(), value);
+                guard.insert(m);
+            }
+        }
+    }
+
     async fn record_session_start(
         &self,
         session_id: &str,
@@ -474,6 +493,21 @@ impl StepIvrApp {
         ctx: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
         let node = self.current_node.as_ref().unwrap().clone();
+
+        // Publish the current node into the session-extensions string bag so
+        // session-side snapshots (transfer source recording, queue dispatch
+        // context) can attribute the flow position to this node.
+        {
+            let node_id = node
+                .step_id
+                .clone()
+                .or_else(|| self.current_step_id.clone())
+                .or_else(|| node.step_name.clone())
+                .or_else(|| self.current_step_name.clone());
+            if let Some(node_id) = node_id {
+                self.set_session_ext("ivr_node", node_id);
+            }
+        }
 
         // Executing a node means the flow has left any DtmfMenu waiting state.
         // Cancel the `ivr_dtmf_timeout` that was armed while the menu awaited

@@ -45,6 +45,17 @@ pub struct EventCallContext {
     pub app_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_target: Option<String>,
+    /// CC agent attribution — present only when the call actually involves a
+    /// registered CC agent. Flattened into every call-scoped event payload
+    /// (same mechanism as `direction`), replacing the former separate
+    /// `cc_ringing` / `cc_answered` / `cc_hangup` events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    /// Queue (or skill-group queue label) the call is being served by, when any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<RootCallInfo>,
 }
@@ -74,7 +85,18 @@ pub struct CallMeta {
     pub trunk: Option<String>,
     pub app_id: Option<String>,
     pub routing_target: Option<String>,
+    /// CC agent attribution, synced from the session extensions by the proxy
+    /// session (`agent_id` / `agent_name` written by the CC session hook).
+    /// `None` for calls without CC agent participation.
+    pub agent_id: Option<String>,
+    pub agent_name: Option<String>,
+    pub queue_id: Option<String>,
     pub root: Option<RootCallInfo>,
+    /// Flow-origin snapshot captured when a transfer starts on the session
+    /// (which IVR/node or queue the call was in, or the transferring agent).
+    /// Consumed by transfer events only — deliberately NOT mapped into
+    /// [`EventCallContext`] so ordinary call events stay unchanged.
+    pub transfer_source: Option<crate::rwi::event::TransferSource>,
 }
 
 impl From<CallMeta> for EventCallContext {
@@ -89,6 +111,9 @@ impl From<CallMeta> for EventCallContext {
             trunk: m.trunk,
             app_id: m.app_id,
             routing_target: m.routing_target,
+            agent_id: m.agent_id,
+            agent_name: m.agent_name,
+            queue_id: m.queue_id,
             root: m.root,
         }
     }

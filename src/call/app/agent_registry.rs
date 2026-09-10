@@ -352,22 +352,32 @@ pub trait AgentRegistry: Send + Sync {
         None
     }
 
-    /// Resolve the escalation dial targets: the union of the primary skill
-    /// group (`primary_target_uri`, e.g. `"skill-group:support"`) and the
-    /// escalation groups (`add_group_ids`), deduplicated.
+    /// Resolve the escalation dial targets.
+    ///
+    /// - `include_primary = true` (Cumulative widening): the union of the
+    ///   primary skill group (`primary_target_uri`, e.g.
+    ///   `"skill-group:support"`) and the escalation groups (`add_group_ids`).
+    /// - `include_primary = false` (Replace): the primary group STOPS
+    ///   scheduling the call after escalation ("原组不可拾取") — only the
+    ///   escalation groups' candidates are returned.
     ///
     /// When `fair` is set, addon implementations order the union with a
     /// round-robin discipline (the counter advances once per call) so
     /// successive calls rotate across all groups. The default implementation
-    /// resolves each group independently and concatenates primary-first.
+    /// resolves each group independently and concatenates primary-first
+    /// (primary included only when `include_primary`).
     async fn resolve_escalation_targets(
         &self,
         primary_target_uri: &str,
         add_group_ids: &[String],
         _call_id: &str,
         _fair: bool,
+        include_primary: bool,
     ) -> Vec<String> {
-        let mut uris = self.resolve_target(primary_target_uri).await;
+        let mut uris = Vec::new();
+        if include_primary {
+            uris.extend(self.resolve_target(primary_target_uri).await);
+        }
         for group in add_group_ids {
             uris.extend(self.resolve_target(&format!("skill-group:{group}")).await);
         }
