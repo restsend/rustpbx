@@ -90,6 +90,61 @@ enable_latching = false
 | Overlay-network trunk | `auto` | `force_transcode` | `100.64.x.x` | Anchored through PBX, overlay IP in SDP |
 | Outbound trunk (NAT'd callee) | `auto` | `force_transcode` | — | Anchored + latching handles NAT |
 | Direct extension calls | `auto` | — | — | Bypass, SIP handles NAT naturally |
+
+### Relay-only WebRTC legs (`relay_only`)
+
+Per-dialplan switch (`media.relay_only`, default `false`). When enabled, the
+call's WebRTC legs advertise — and only check — TURN **relay** candidates:
+host and server-reflexive candidates are omitted from the SDP answer, so the
+remote peer can only reach the PBX through the TURN allocation.
+
+#### When to use it: the EIP NAT case
+
+A PBX host behind a 1:1 NAT (e.g. a cloud elastic IP) exhibits a specific
+failure mode with WebRTC caller legs:
+
+- The pair "browser srflx ↔ PBX host (NAT'd)" **passes a single STUN binding
+  check**, so the browser (ICE controlling) nominates it and the SIP call
+  proceeds normally.
+- The following **DTLS handshake datagrams never arrive** at the PBX — the
+  NAT/firewall passes small STUN payloads, but drops the DTLS payload that
+  follows on flows the PBX has not initiated outbound itself.
+- Result: SIP `200 OK` answered, `PC state New → Failed` ~30 s later, zero
+  media from the caller leg, empty recording. The same agent **answering** a
+  PBX-initiated call works, because there the PBX (ICE controlling) sends the
+  first packet and registers the NAT flow.
+
+Setting `relay_only = true` moves DTLS onto the `browser → TURN → PBX` path,
+which bypasses the NAT entirely.
+
+```toml
+# dialplan media config (route `media` section / API dialplans)
+[media]
+relay_only = true
+# Requires ICE servers with a turn: URL (server [rtp] ice_servers or the
+# dialplan ice_servers) — relay-only without a TURN server yields no usable
+# candidates.
+```
+
+**Operational notes**
+
+- TURN becomes the media path for relay-only calls: size the coturn box
+  (bandwidth ≈ 2 × audio bitrate per call) and monitor it; if TURN is down,
+  relay-only calls cannot establish media.
+- Rollback is immediate: set `relay_only = false` and the legs return to
+  standard RFC 5245 candidate handling.
+- Calls failing this way are visible in CDRs: answered calls that end with
+  zero media on a leg are flagged with error code `proxy.leg_media_incomplete`
+  (call-record `metadata.error_code` / trace event `media_issue`).
+- Related ICE option: `prefer_srflx_over_natted_host` (server side — controls
+  check ordering when the PBX itself is the controlling agent).
+
+**Diagnostics** (rustrtc ≥ 0.3.133): debug logs `ClientHello decoded`
+(offered cipher suites), `Buffering out-of-order handshake message` /
+`Handshake message reassembled`, and the
+`Received DTLS packet but no receiver registered — dropped` counter localize
+the failure to browser-side / reception race / network drop.
+
 ## Recording Policy
 
 > **[recording] and [sipflow] are mutually exclusive for RTP capture.**

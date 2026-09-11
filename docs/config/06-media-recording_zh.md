@@ -90,6 +90,52 @@ enable_latching = false
 | 出站中继（被叫在 NAT 后） | `auto` | `force_transcode` | — | 锚定并通过 latching 处理 NAT |
 | 分机直接通话 | `auto` | — | — | 旁路，由 SIP 自然处理 NAT |
 
+### 仅中继的 WebRTC 腿（`relay_only`）
+
+拨号计划级开关（`media.relay_only`，默认 `false`）。启用后，该通话的
+WebRTC 腿只广播、只检查 TURN **中继（relay）** 候选：SDP 应答中不再包含
+host 与 server-reflexive 候选，对端只能通过 TURN 分配通道到达 PBX。
+
+#### 适用场景：EIP NAT（1:1 NAT）故障
+
+PBX 位于 1:1 NAT（如云厂商弹性公网 IP）后时，WebRTC 主叫腿会出现特定故障：
+
+- “浏览器 srflx ↔ PBX host（NAT 后）”候选对**能通过单个 STUN binding
+  check**，浏览器（ICE controlling）据此提名，呼叫正常接通。
+- 随后的 **DTLS 握手报文无法到达 PBX**——NAT/防火墙对 PBX 未先外发注册的
+  流放行小体积 STUN，但拦截其后的 DTLS 载荷。
+- 结果：SIP `200 OK` 已接通，约 30 秒后 `PC state New → Failed`，主叫腿
+  零媒体、无录音。而同一坐席**应答** PBX 发起的呼叫一切正常——因为该方向
+  由 PBX（ICE controlling）先发包，已注册 NAT 流。
+
+设置 `relay_only = true` 将 DTLS 迁移到 `浏览器 → TURN → PBX` 路径，完全
+绕开该 NAT。
+
+```toml
+# 拨号计划媒体配置（路由 media 段 / API 拨号计划）
+[media]
+relay_only = true
+# 需要含 turn: 的 ICE 服务器（服务器 [rtp] ice_servers 或拨号计划
+# ice_servers）——没有 TURN 服务器时 relay-only 无可用候选
+```
+
+**运维注意**
+
+- relay-only 通话的媒体全部经过 TURN：按话务量规划 coturn（带宽 ≈ 每通话
+  2 × 音频码率）并监控；TURN 不可用时 relay-only 通话无法建立媒体。
+- 回退即时：`relay_only = false`（配置热加载）后恢复标准 RFC 5245 行为。
+- 该类失败在 CDR 可见：应答后某腿零媒体结束的通话会标记错误码
+  `proxy.leg_media_incomplete`（见通话记录 `metadata.error_code` /
+  trace 事件 `media_issue`）。
+- 相关 ICE 选项：`prefer_srflx_over_natted_host`（服务端作为 controlling
+  时的检查排序）。
+
+**诊断**（rustrtc ≥ 0.3.133）：debug 日志 `ClientHello decoded`（对端
+套件）、`Buffering out-of-order handshake message` /
+`Handshake message reassembled`，以及
+`Received DTLS packet but no receiver registered — dropped` 计数，可将
+失败精确定位到浏览器侧 / 接收竞态 / 网络丢包。
+
 ## 录音策略
 
 > **对于 RTP 采集，[recording] 和 [sipflow] 互斥。**
