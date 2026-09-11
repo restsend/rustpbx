@@ -780,6 +780,12 @@ pub struct MediaConfig {
     /// server default when unset.
     #[serde(skip)]
     pub sip_contact: Option<crate::config::SipContactConfig>,
+    /// Advertise (and check) only TURN relay candidates on this call's
+    /// WebRTC legs. For deployments where the PBX host sits behind a NAT
+    /// that passes a single STUN binding on its host candidate but cannot
+    /// sustain the DTLS handshake. Defaults to false.
+    #[serde(default)]
+    pub relay_only: bool,
 }
 
 impl Default for MediaConfig {
@@ -805,6 +811,7 @@ impl MediaConfig {
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
             sip_contact: None,
+            relay_only: false,
         }
     }
 

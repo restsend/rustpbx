@@ -23,8 +23,8 @@ use anyhow::{Result, anyhow};
 use audio_codec::CodecType;
 use parking_lot::Mutex;
 use rustrtc::{
-    PeerConnection, RtcConfiguration, RtpCodecParameters, SdpType, SessionDescription,
-    TransportMode,
+    IceServer, IceTransportPolicy, PeerConnection, RtcConfiguration, RtpCodecParameters, SdpType,
+    SessionDescription, TransportMode,
     config::BufferDropStrategy,
     media::MediaKind,
     media::track::sample_track,
@@ -64,6 +64,14 @@ pub struct LegConfig {
     pub comfort_noise: bool,
     /// Comfort-noise level in dBFS. Ignored when `comfort_noise` is false.
     pub comfort_noise_level_db: f32,
+    /// ICE servers (STUN/TURN) used for gathering. Empty = use the
+    /// process-level default ICE configuration.
+    pub ice_servers: Vec<IceServer>,
+    /// Advertise (and check) only relay candidates on this leg. Used for
+    /// deployments where the host sits behind a NAT that passes a single
+    /// STUN binding on its host candidate but cannot sustain the DTLS
+    /// handshake (see `dialplan.media.relay_only`). Defaults to false.
+    pub relay_only: bool,
 }
 
 impl LegConfig {
@@ -85,6 +93,8 @@ impl LegConfig {
             cname: None,
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
+            ice_servers: Vec::new(),
+            relay_only: false,
         }
     }
 }
@@ -1161,6 +1171,14 @@ fn build_rtc_config(cfg: &LegConfig) -> RtcConfiguration {
         rtp_end_port,
         external_ip: cfg.external_ip.clone(),
         bind_ip: cfg.bind_ip.clone(),
+        // Relay-only: advertise (and check) only TURN relay candidates. See
+        // `LegConfig::relay_only` for when an operator wants this.
+        ice_servers: cfg.ice_servers.clone(),
+        ice_transport_policy: if cfg.relay_only {
+            IceTransportPolicy::Relay
+        } else {
+            IceTransportPolicy::All
+        },
         cname: cfg.cname.clone(),
         buffer_drop_strategy: BufferDropStrategy::DropOldest,
         // Plain SIP/RTP peers (and SDES-SRTP trunks) do not understand BUNDLE:
@@ -1299,6 +1317,62 @@ fn distinct_relay_audio_ssrc(pc: &PeerConnection) -> u32 {
 /// The audio sender SSRC of a PC.
 fn sender_ssrc(pc: &PeerConnection) -> u32 {
     sender_ssrc_for_kind(pc, rustrtc::MediaKind::Audio)
+}
+
+#[cfg(test)]
+mod relay_policy_tests {
+    use super::*;
+
+    fn webrtc_cfg(relay_only: bool, ice_servers: Vec<IceServer>) -> LegConfig {
+        LegConfig {
+            transport: TransportMode::WebRtc,
+            codecs: vec![CodecInfo {
+                payload_type: 111,
+                codec: CodecType::Opus,
+                clock_rate: 48000,
+                channels: 2,
+                fmtp: None,
+            }],
+            video_codecs: Vec::new(),
+            rtp_port_range: None,
+            external_ip: None,
+            bind_ip: None,
+            cname: None,
+            comfort_noise: true,
+            comfort_noise_level_db: -35.0,
+            ice_servers,
+            relay_only,
+        }
+    }
+
+    #[test]
+    fn relay_only_maps_to_relay_ice_policy() {
+        let turn = IceServer {
+            urls: vec!["turn:116.62.74.130:3478".to_string()],
+            username: Some("u".to_string()),
+            credential: Some("c".to_string()),
+            ..Default::default()
+        };
+        let cfg = webrtc_cfg(true, vec![turn.clone()]);
+        let rtc = build_rtc_config(&cfg);
+        assert_eq!(
+            rtc.ice_transport_policy,
+            IceTransportPolicy::Relay,
+            "relay_only must force the relay ICE policy"
+        );
+        assert_eq!(rtc.ice_servers, vec![turn], "ice servers must reach the PC");
+    }
+
+    #[test]
+    fn default_leg_keeps_all_ice_policy() {
+        let rtc = build_rtc_config(&webrtc_cfg(false, Vec::new()));
+        assert_eq!(
+            rtc.ice_transport_policy,
+            IceTransportPolicy::All,
+            "default (relay_only=false) must keep standard RFC 5245 behavior"
+        );
+        assert!(rtc.ice_servers.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -1508,6 +1582,8 @@ mod tests {
         // DTLS fingerprint, ICE creds and a UDP/TLS/RTP/SAVPF m-line — this is
         // the proxy-side capability P6 real WebRTC e2e relies on.
         let cfg = LegConfig {
+            ice_servers: Vec::new(),
+            relay_only: false,
             transport: TransportMode::WebRtc,
             codecs: vec![CodecInfo {
                 payload_type: 111,
@@ -1585,6 +1661,8 @@ mod tests {
         // codec. The `a=ssrc` lets the remote browser demux relayed video
         // immediately instead of waiting out the 2–3 s unsignaled-SSRC timeout.
         let cfg = LegConfig {
+            ice_servers: Vec::new(),
+            relay_only: false,
             transport: TransportMode::WebRtc,
             codecs: vec![CodecInfo {
                 payload_type: 111,
@@ -1639,6 +1717,8 @@ mod tests {
         // m-line was recvonly with no SSRC and the caller suffered the demux
         // delay.
         let cfg = LegConfig {
+            ice_servers: Vec::new(),
+            relay_only: false,
             transport: TransportMode::WebRtc,
             codecs: vec![CodecInfo {
                 payload_type: 111,
@@ -1735,6 +1815,8 @@ mod tests {
         use std::net::SocketAddr;
 
         let cfg = LegConfig {
+            ice_servers: Vec::new(),
+            relay_only: false,
             transport: TransportMode::Rtp,
             codecs: vec![
                 CodecInfo {
@@ -1841,6 +1923,8 @@ mod p24_uac_test {
     #[tokio::test]
     async fn plain_rtp_av_offer_must_be_legacy_sip_compatible() {
         let cfg = LegConfig {
+            ice_servers: Vec::new(),
+            relay_only: false,
             transport: TransportMode::Rtp,
             codecs: vec![CodecInfo {
                 payload_type: 0,

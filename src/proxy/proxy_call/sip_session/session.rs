@@ -427,6 +427,16 @@ impl SipSession {
                 .zip(self.context.dialplan.media.rtp_end_port)
         };
         crate::media::leg::LegConfig {
+            // WebRTC legs gather ICE candidates; relay-only (per dialplan)
+            // strips host/srflx so the browser must use the TURN path.
+            ice_servers: self
+                .context
+                .dialplan
+                .media
+                .ice_servers
+                .clone()
+                .unwrap_or_default(),
+            relay_only: self.context.dialplan.media.relay_only,
             transport,
             codecs,
             video_codecs,
@@ -8829,8 +8839,9 @@ impl SipSession {
         // answered (`ever_connected_callee`): IVR/app playback legs never
         // receive remote RTP, so flagging them would be noise.
         let leg_silent = |side: &str| {
-            legs.iter()
-                .any(|leg| leg.side == side && leg.transport_rx_packets == 0 && leg.ingress_packets == 0)
+            legs.iter().any(|leg| {
+                leg.side == side && leg.transport_rx_packets == 0 && leg.ingress_packets == 0
+            })
         };
         let caller_silent = leg_silent("A");
         let callee_silent = self.meta.ever_connected_callee && leg_silent("B");
@@ -8840,8 +8851,9 @@ impl SipSession {
             (false, true) => Some("callee"),
             (false, false) => None,
         };
-        let media_issue =
-            self.meta.answer_time.is_some() && self.meta.error_code.is_none() && media_issue_legs.is_some();
+        let media_issue = self.meta.answer_time.is_some()
+            && self.meta.error_code.is_none()
+            && media_issue_legs.is_some();
         if media_issue {
             let legs_str = media_issue_legs.unwrap_or_default();
             let callee_rx = legs
@@ -11569,8 +11581,7 @@ impl SipSession {
             Some("both") => {
                 let handles: Vec<crate::media::media_bridge::PlaybackHandle> =
                     if let Some(mb) = self.bridge_mut() {
-                        mb.play_file_both(file_path.clone(), loop_playback)
-                            .await?
+                        mb.play_file_both(file_path.clone(), loop_playback).await?
                     } else {
                         return Err(anyhow!("Playback requires MediaBridge"));
                     };
