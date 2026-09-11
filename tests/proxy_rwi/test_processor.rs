@@ -90,6 +90,22 @@ fn create_test_processor() -> (Arc<RwiCommandProcessor>, Arc<ConferenceManager>)
     (processor, cm)
 }
 
+fn create_test_processor_with_gateway() -> (
+    Arc<RwiCommandProcessor>,
+    Arc<RwLock<RwiGateway>>,
+    Arc<ConferenceManager>,
+) {
+    let registry = Arc::new(ActiveProxyCallRegistry::new());
+    let gateway = Arc::new(RwLock::new(RwiGateway::new()));
+    let cm = Arc::new(ConferenceManager::new());
+    let processor = Arc::new(RwiCommandProcessor::new(
+        registry,
+        gateway.clone(),
+        cm.clone(),
+    ));
+    (processor, gateway, cm)
+}
+
 fn create_test_processor_with_registry(
     registry: Arc<ActiveProxyCallRegistry>,
 ) -> (Arc<RwiCommandProcessor>, Arc<ConferenceManager>) {
@@ -637,6 +653,111 @@ async fn test_vars_are_isolated_per_call() {
 
     assert!(matches!(&ra, CommandResult::CallVar { value, .. } if value.as_deref() == Some("va")));
     assert!(matches!(&rb, CommandResult::CallVar { value, .. } if value.as_deref() == Some("vb")));
+}
+
+// ── call.set_userdata / call.get_userdata tests ────────────────────────
+
+#[tokio::test]
+async fn test_set_userdata_roundtrip() {
+    let (processor, gw, _cm) = create_test_processor_with_gateway();
+
+    // The gateway only accepts userdata for a session with live call meta.
+    gw.write()
+        .meta_store
+        .insert("sess-1".into(), Default::default());
+
+    let mut data = serde_json::Map::new();
+    data.insert("crm_id".to_string(), serde_json::json!("C-1001"));
+    data.insert("nested".to_string(), serde_json::json!({"tier": "gold"}));
+    let result = processor
+        .process_command(RwiCommandPayload::SetUserData {
+            call_id: "sess-1".into(),
+            data: data.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(result, CommandResult::Success));
+
+    let result = processor
+        .process_command(RwiCommandPayload::GetUserData {
+            call_id: "sess-1".into(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(&result, CommandResult::UserData { user_data }
+            if user_data == &serde_json::Value::Object(data)),
+        "expected full user_data roundtrip, got: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_set_userdata_replace_all_semantics() {
+    let (processor, gw, _cm) = create_test_processor_with_gateway();
+    gw.write()
+        .meta_store
+        .insert("sess-1".into(), Default::default());
+
+    let mut first = serde_json::Map::new();
+    first.insert("a".to_string(), serde_json::json!(1));
+    processor
+        .process_command(RwiCommandPayload::SetUserData {
+            call_id: "sess-1".into(),
+            data: first,
+        })
+        .await
+        .unwrap();
+
+    let mut second = serde_json::Map::new();
+    second.insert("b".to_string(), serde_json::json!(2));
+    processor
+        .process_command(RwiCommandPayload::SetUserData {
+            call_id: "sess-1".into(),
+            data: second,
+        })
+        .await
+        .unwrap();
+
+    let result = processor
+        .process_command(RwiCommandPayload::GetUserData {
+            call_id: "sess-1".into(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(&result, CommandResult::UserData { user_data }
+            if user_data == &serde_json::json!({"b": 2})),
+        "replace-all must discard previous keys, got: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_set_userdata_unknown_session_rejected() {
+    let (processor, _cm) = create_test_processor();
+    let result = processor
+        .process_command(RwiCommandPayload::SetUserData {
+            call_id: "ghost".into(),
+            data: serde_json::Map::new(),
+        })
+        .await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("Call not found"));
+}
+
+#[tokio::test]
+async fn test_get_userdata_defaults_to_empty_object() {
+    let (processor, _cm) = create_test_processor();
+    let result = processor
+        .process_command(RwiCommandPayload::GetUserData {
+            call_id: "no-meta-call".into(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(&result, CommandResult::UserData { user_data }
+            if user_data == &serde_json::json!({})),
+        "expected empty object, got: {result:?}"
+    );
 }
 
 #[tokio::test]

@@ -57,6 +57,21 @@ pub enum RwiCommandPayload {
         #[serde(default)]
         key: String,
     },
+    /// Replace the whole user data object of a call session. Requires the
+    /// call's `session_id` (for the main call this equals the `call_id`).
+    #[serde(rename = "call.set_userdata")]
+    SetUserData {
+        #[serde(default)]
+        call_id: String,
+        #[serde(default)]
+        data: serde_json::Map<String, serde_json::Value>,
+    },
+    /// Read the whole user data object of a call session.
+    #[serde(rename = "call.get_userdata")]
+    GetUserData {
+        #[serde(default)]
+        call_id: String,
+    },
     #[serde(rename = "session.attach_call")]
     AttachCall {
         #[serde(default)]
@@ -478,7 +493,9 @@ impl RwiCommandPayload {
             RwiCommandPayload::QueueEnqueue(req) => Some(req.call_id.as_str()),
             RwiCommandPayload::DtmfCollect(req) => Some(req.call_id.as_str()),
             RwiCommandPayload::SetVar { call_id, .. }
-            | RwiCommandPayload::GetVar { call_id, .. } => Some(call_id.as_str()),
+            | RwiCommandPayload::GetVar { call_id, .. }
+            | RwiCommandPayload::SetUserData { call_id, .. }
+            | RwiCommandPayload::GetUserData { call_id, .. } => Some(call_id.as_str()),
             RwiCommandPayload::CallSendDtmf { call_id, .. }
             | RwiCommandPayload::AppStart { call_id, .. }
             | RwiCommandPayload::AppStop { call_id, .. }

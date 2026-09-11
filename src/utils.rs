@@ -6,6 +6,19 @@ use tokio::runtime::Handle;
 
 use dashmap::DashMap;
 
+/// Stable instance identity for CDR/diagnostics metadata. Precedence:
+/// `RUSTPBX_INSTANCE_ID` -> `HOSTNAME` -> `HOST` -> `"unknown"` (same
+/// precedence as the CC stats writer's `get_instance_id`).
+pub fn self_hostname() -> &'static str {
+    static HOSTNAME: OnceLock<String> = OnceLock::new();
+    HOSTNAME.get_or_init(|| {
+        std::env::var("RUSTPBX_INSTANCE_ID")
+            .or_else(|_| std::env::var("HOSTNAME"))
+            .or_else(|_| std::env::var("HOST"))
+            .unwrap_or_else(|_| "unknown".to_string())
+    })
+}
+
 /// IPs of the local network interfaces — used to skip fan-out targets that
 /// are actually this node (cluster configs commonly list every member,
 /// including self).
@@ -443,6 +456,11 @@ mod tests {
         assert_eq!(sanitize_id("symbols=&%$"), "symbols____");
         assert_eq!(sanitize_id("safe-id_123"), "safe-id_123");
         assert_eq!(sanitize_id("more:;*+#"), "more_____");
+    }
+
+    #[test]
+    fn test_self_hostname_non_empty() {
+        assert!(!self_hostname().is_empty());
     }
 
     #[test]

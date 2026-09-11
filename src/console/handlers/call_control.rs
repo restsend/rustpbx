@@ -1,10 +1,11 @@
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 use crate::proxy::proxy_call::sip_session::SessionSnapshot;
+use crate::rwi::SetUserDataError;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
@@ -22,6 +23,10 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
         .route(
             "/calls/active/{session_id}/commands",
             post(dispatch_call_command),
+        )
+        .route(
+            "/calls/active/{session_id}/userdata",
+            put(set_call_userdata).get(get_call_userdata),
         )
 }
 
@@ -347,6 +352,161 @@ fn snapshot_for(
     registry
         .get_handle(session_id)
         .and_then(|handle| handle.snapshot())
+}
+
+// ── Session user data ────────────────────────────────────────────────────
+
+/// Replace the whole user data object of an active call session.
+///
+/// Body must be a JSON object (replace-all semantics). The value is stored on
+/// the RWI gateway keyed by `session_id`, attached to every subsequent
+/// call-scoped RWI event under `user_data` (a `call_userdata_updated` event
+/// announces the change), and persisted into the CDR `metadata["user_data"]`.
+pub async fn set_call_userdata(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+    AxumPath(session_id): AxumPath<String>,
+    Json(payload): Json<serde_json::Value>,
+) -> Response {
+    set_call_userdata_inner(&state, &session_id, payload, &user.username)
+}
+
+pub fn set_call_userdata_inner(
+    state: &Arc<ConsoleState>,
+    session_id: &str,
+    payload: serde_json::Value,
+    operator: &str,
+) -> Response {
+    let data = match payload {
+        serde_json::Value::Object(map) => map,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "message": "user data must be a JSON object" })),
+            )
+                .into_response();
+        }
+    };
+
+    let Some(server) = state.sip_server() else {
+        tracing::info!(
+            audit_event = "call_userdata_update",
+            session_id = %session_id,
+            source = "console_api",
+            operator = %operator,
+            result = "not_found",
+            "User data update: call not found"
+        );
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "message": "Call not found" })),
+        )
+            .into_response();
+    };
+    if server.active_call_registry.get_handle(session_id).is_none() {
+        tracing::info!(
+            audit_event = "call_userdata_update",
+            session_id = %session_id,
+            source = "console_api",
+            operator = %operator,
+            result = "not_found",
+            "User data update: call not found"
+        );
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "message": "Call not found" })),
+        )
+            .into_response();
+    }
+
+    let Some(ref gateway) = server.rwi_gateway else {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "message": "RWI gateway is not available" })),
+        )
+            .into_response();
+    };
+
+    let mut gw = gateway.write();
+    match gw.set_user_data(&session_id.to_string(), data) {
+        Ok(()) => {
+            let stored = serde_json::Value::Object(gw.get_user_data(&session_id.to_string()));
+            drop(gw);
+            tracing::info!(
+                audit_event = "call_userdata_update",
+                session_id = %session_id,
+                source = "console_api",
+                operator = %operator,
+                result = "success",
+                "User data updated"
+            );
+            Json(json!({ "message": "User data updated", "data": stored })).into_response()
+        }
+        Err(e) => {
+            drop(gw);
+            let (status, message) = match e {
+                SetUserDataError::SessionNotFound => (
+                    StatusCode::NOT_FOUND,
+                    "Call not found".to_string(),
+                ),
+                SetUserDataError::TooLarge { size } => (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    format!(
+                        "User data too large: {} bytes (max {})",
+                        size,
+                        crate::rwi::MAX_USER_DATA_BYTES
+                    ),
+                ),
+            };
+            tracing::info!(
+                audit_event = "call_userdata_update",
+                session_id = %session_id,
+                source = "console_api",
+                operator = %operator,
+                result = "failure",
+                message = %message,
+                "User data update rejected"
+            );
+            (status, Json(json!({ "message": message }))).into_response()
+        }
+    }
+}
+
+/// Read the whole user data object of an active call session.
+pub async fn get_call_userdata(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+    AxumPath(session_id): AxumPath<String>,
+) -> Response {
+    let Some(server) = state.sip_server() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "message": "Call not found" })),
+        )
+            .into_response();
+    };
+    if server
+        .active_call_registry
+        .get_handle(&session_id)
+        .is_none()
+    {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "message": "Call not found" })),
+        )
+            .into_response();
+    }
+
+    let Some(ref gateway) = server.rwi_gateway else {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "message": "RWI gateway is not available" })),
+        )
+            .into_response();
+    };
+
+    let data = gateway.read().get_user_data(&session_id);
+    Json(json!({ "data": serde_json::Value::Object(data) })).into_response()
 }
 
 #[cfg(feature = "commerce")]

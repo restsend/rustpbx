@@ -261,6 +261,30 @@ REST endpoints are mounted under the console `api_prefix`
    }
    ```
 
+**Session User Data**:
+
+Attach arbitrary business context (CRM ticket, customer profile, ...) to an
+active call. The value must be a JSON object (≤ 16 KiB) and replaces the
+whole object on every write (replace-all semantics). It is keyed by the
+call's `session_id` and:
+
+- rides every subsequent call-scoped RWI event / webhook under `user_data`,
+- is announced via the `call_userdata_updated` event on each change,
+- is persisted into the CDR `metadata["user_data"]` when the call ends.
+
+`PUT {api_prefix}/calls/active/{session_id}/userdata`
+
+```json
+{ "crm_id": "C-1001", "customer": { "tier": "gold" } }
+```
+
+Response: `200` with `{ "message": "User data updated", "data": { ... } }`,
+`404` when the call is unknown/finished, `400` when the body is not a JSON
+object, `413` when the payload exceeds 16 KiB.
+
+`GET {api_prefix}/calls/active/{session_id}/userdata` — read the current
+object (empty object when nothing was set).
+
 ### 2.1.1 Live Call Transcription (SSE)
 Stream real-time transcription text for an active call. Transcription starts
 lazily on first subscriber and stops when the last one disconnects or the call

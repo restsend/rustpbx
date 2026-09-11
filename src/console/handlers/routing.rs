@@ -973,6 +973,10 @@ pub async fn page_routing(
         .ami_path
         .clone()
         .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string());
+    let is_cluster = state
+        .app_state()
+        .map(|app| app.is_cluster())
+        .unwrap_or(false);
     let catalog = load_catalogs(state.as_ref()).await;
 
     state.render_with_headers(
@@ -990,6 +994,7 @@ pub async fn page_routing(
             "current_user": current_user,
             "has_file_routes": has_file_routes,
             "ami_endpoint": ami_endpoint,
+            "is_cluster": is_cluster,
         }),
         &headers,
     )
@@ -1731,12 +1736,18 @@ mod tests {
         .await
         .expect("insert route");
 
-        assert!(!state
-            .pending_reload_targets()
-            .contains(&ReloadTarget::Routes));
+        assert!(
+            !state
+                .pending_reload_targets()
+                .contains(&ReloadTarget::Routes)
+        );
 
-        let resp = toggle_routing(AxumPath(model.id), State(state.clone()), AuthRequired(superuser()))
-            .await;
+        let resp = toggle_routing(
+            AxumPath(model.id),
+            State(state.clone()),
+            AuthRequired(superuser()),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
 
         assert!(

@@ -1905,7 +1905,7 @@ async fn test_resolve_escalation_targets_fair_rotation() {
             &["support_l2".to_string()],
             "call-f1",
             true,
-        true,
+            true,
         )
         .await;
     let head1 = uris1[0]
@@ -1926,7 +1926,7 @@ async fn test_resolve_escalation_targets_fair_rotation() {
             &["support_l2".to_string()],
             "call-f2",
             true,
-        true,
+            true,
         )
         .await;
     let head2 = uris2[0]
@@ -2072,4 +2072,489 @@ async fn test_second_call_dispatch_after_wrapup_releases_capacity() {
         "second call should dispatch after capacity release"
     );
     assert_eq!(selected.unwrap().agent_id, "agent-001");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Line-review additions: capacity, skill-requirement forms, schedule
+// integration through the REAL adapter → engine → registry path.
+// ═══════════════════════════════════════════════════════════════════
+
+use rustpbx::addons::cc::acd::{
+    AcdPolicy, BusinessHours, PresenceStateKind, ScheduleConfig, StrategyConfig,
+};
+use rustpbx::addons::cc::skill_group::get_skill_group;
+use sea_orm_migration::MigratorTrait as _;
+use std::collections::HashMap;
+
+async fn sg_db() -> sea_orm::DatabaseConnection {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    rustpbx::addons::cc::migration::Migrator::up(&db, None)
+        .await
+        .unwrap();
+    db
+}
+
+async fn create_sg(db: &sea_orm::DatabaseConnection, id: &str, skills: &[&str], policy: &str) {
+    rustpbx::addons::cc::skill_group::create_skill_group(
+        db,
+        CreateSkillGroupRequest {
+            skill_group_id: id.to_string(),
+            display_name: Some(id.to_string()),
+            skills_required: skills.iter().map(|s| s.to_string()).collect(),
+            overflow_groups: vec![],
+            sla_target_secs: 20,
+            max_wait_secs: 60,
+            metadata: None,
+        },
+    )
+    .await
+    .unwrap();
+    let sg = get_skill_group(db, id).await.unwrap().unwrap();
+    let mut active: rustpbx::addons::cc::models::cc_skill_group::ActiveModel = sg.into();
+    active.acd_policy = Set(Some(policy.to_string()));
+    active.update(db).await.unwrap();
+}
+
+fn policy_open(name: &str) -> AcdPolicy {
+    AcdPolicy {
+        name: name.to_string(),
+        schedule: ScheduleConfig {
+            // Clock-independent: always inside business hours.
+            business_hours: Some(BusinessHours {
+                start: "00:00".to_string(),
+                end: "23:59".to_string(),
+                timezone: "UTC".to_string(),
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+fn policy_closed(name: &str) -> AcdPolicy {
+    AcdPolicy {
+        name: name.to_string(),
+        schedule: ScheduleConfig {
+            // [00:00, 00:00] inclusive matches only the exact midnight
+            // instant — deterministic "always OffHours".
+            business_hours: Some(BusinessHours {
+                start: "00:00".to_string(),
+                end: "00:00".to_string(),
+                timezone: "UTC".to_string(),
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+fn engine_with_policies(policies: Vec<AcdPolicy>, default: &str) -> Arc<AcdEngine> {
+    let mut map = HashMap::new();
+    for p in policies {
+        map.insert(p.name.clone(), p);
+    }
+    Arc::new(AcdEngine::new(AcdConfig {
+        enabled: true,
+        policies: map,
+        default_policy: default.to_string(),
+    }))
+}
+
+/// B1 regression: `max_concurrency=0` (the console once accepted it) made
+/// `current_calls(0) >= max_concurrency(0)` permanently true — an idle agent
+/// blacklisted from every dispatch with zero warnings ("agents idle but the
+/// queue says busy"). The registry now clamps 0 → 1 at ingestion.
+#[tokio::test]
+async fn zero_max_concurrency_is_normalized_and_dispatchable() {
+    let db = sg_db().await;
+    create_sg(&db, "sg-zero", &["support"], "open").await;
+
+    let cc_registry = Arc::new(AgentRegistry::with_db(db));
+    cc_registry
+        .register("a-zero".to_string(), vec!["support".to_string()], 0)
+        .await
+        .unwrap();
+    cc_registry
+        .update_status("a-zero", AgentStatus::Idle)
+        .await
+        .unwrap();
+
+    let agent = cc_registry.get_agent("a-zero").await.unwrap();
+    assert_eq!(
+        agent.max_concurrency, 1,
+        "a 0 max_concurrency must be normalized to 1 at ingestion"
+    );
+    assert!(
+        agent.can_accept_call(),
+        "idle agent with normalized capacity must accept calls"
+    );
+
+    let adapter = CcAgentRegistryAdapter::new(
+        cc_registry.clone(),
+        engine_with_policies(vec![policy_open("open")], "open"),
+        "localhost",
+    );
+    let uris = adapter
+        .resolve_target_with_policy("skill-group:sg-zero", None, "call-zero")
+        .await;
+    assert_eq!(
+        uris,
+        vec!["sip:a-zero@localhost".to_string()],
+        "the headline production symptom: idle agent with 0 capacity must be dialable, got {uris:?}"
+    );
+}
+
+/// Capacity semantics with a leaked in-flight count: an Idle agent at their
+/// concurrency ceiling is excluded; releasing one slot re-admits them. With
+/// capacity 2 a single leaked slot must NOT exclude (1 < 2).
+#[tokio::test]
+async fn capacity_ceiling_excludes_until_a_slot_is_released() {
+    // ── capacity 1: one leaked call blocks, release re-admits ──
+    let db = sg_db().await;
+    create_sg(&db, "sg-cap1", &["support"], "open").await;
+    let cc_registry = Arc::new(AgentRegistry::with_db(db));
+    cc_registry
+        .register("a-cap".to_string(), vec!["support".to_string()], 1)
+        .await
+        .unwrap();
+    cc_registry
+        .update_status("a-cap", AgentStatus::Idle)
+        .await
+        .unwrap();
+    cc_registry.increment_call_count("a-cap").await.unwrap();
+
+    let adapter = CcAgentRegistryAdapter::new(
+        cc_registry.clone(),
+        engine_with_policies(vec![policy_open("open")], "open"),
+        "localhost",
+    );
+    let uris = adapter
+        .resolve_target_with_policy("skill-group:sg-cap1", None, "call-cap-1")
+        .await;
+    assert!(
+        uris.is_empty(),
+        "Idle agent at their ceiling (current_calls=1, max=1) must not be dispatched"
+    );
+
+    cc_registry.decrement_call_count("a-cap").await.unwrap();
+    let uris = adapter
+        .resolve_target_with_policy("skill-group:sg-cap1", None, "call-cap-2")
+        .await;
+    assert_eq!(
+        uris,
+        vec!["sip:a-cap@localhost".to_string()],
+        "released slot must re-admit the agent, got {uris:?}"
+    );
+
+    // ── capacity 2: one in-flight call still leaves headroom ──
+    let cc_registry2 = Arc::new(AgentRegistry::new());
+    cc_registry2
+        .register("a-cap2".to_string(), vec!["support".to_string()], 2)
+        .await
+        .unwrap();
+    cc_registry2
+        .update_status("a-cap2", AgentStatus::Idle)
+        .await
+        .unwrap();
+    cc_registry2.increment_call_count("a-cap2").await.unwrap();
+    let adapter2 = CcAgentRegistryAdapter::new(
+        cc_registry2.clone(),
+        engine_with_policies(vec![policy_open("open")], "open"),
+        "localhost",
+    );
+    let uris = adapter2
+        .resolve_target_with_policy("skill-group:x", None, "call-h")
+        .await;
+    // No DB skill group → resolution stops early; assert at candidate level.
+    let candidates = cc_registry2.find_candidates(&["support".to_string()]).await;
+    assert_eq!(
+        candidates.len(),
+        1,
+        "one in-flight call must not exclude an agent with headroom (1 < 2)"
+    );
+    drop((adapter2, uris));
+}
+
+/// Skill names are matched case-sensitively — a group requiring "Support"
+/// does not match an agent carrying "support". Anchors the current
+/// conservative behaviour (operators must use consistent casing).
+#[tokio::test]
+async fn skill_case_mismatch_excludes_agent() {
+    let db = sg_db().await;
+    create_sg(&db, "sg-case", &["Support"], "open").await;
+    let cc_registry = Arc::new(AgentRegistry::with_db(db));
+    cc_registry
+        .register("a-case".to_string(), vec!["support".to_string()], 1)
+        .await
+        .unwrap();
+    cc_registry
+        .update_status("a-case", AgentStatus::Idle)
+        .await
+        .unwrap();
+    let adapter = CcAgentRegistryAdapter::new(
+        cc_registry,
+        engine_with_policies(vec![policy_open("open")], "open"),
+        "localhost",
+    );
+    let uris = adapter
+        .resolve_target_with_policy("skill-group:sg-case", None, "call-case")
+        .await;
+    assert!(
+        uris.is_empty(),
+        "case-mismatched skill must not match (case-sensitive), got {uris:?}"
+    );
+}
+
+/// Surrounding whitespace in a skill requirement is trimmed before matching —
+/// " support " must still match an agent carrying "support".
+#[tokio::test]
+async fn skill_requirement_whitespace_is_trimmed() {
+    let db = sg_db().await;
+    create_sg(&db, "sg-space", &[" support "], "open").await;
+    let cc_registry = Arc::new(AgentRegistry::with_db(db));
+    cc_registry
+        .register("a-space".to_string(), vec!["support".to_string()], 1)
+        .await
+        .unwrap();
+    cc_registry
+        .update_status("a-space", AgentStatus::Idle)
+        .await
+        .unwrap();
+    let adapter = CcAgentRegistryAdapter::new(
+        cc_registry,
+        engine_with_policies(vec![policy_open("open")], "open"),
+        "localhost",
+    );
+    let uris = adapter
+        .resolve_target_with_policy("skill-group:sg-space", None, "call-space")
+        .await;
+    assert_eq!(
+        uris,
+        vec!["sip:a-space@localhost".to_string()],
+        "trimmed requirement must match the agent skill, got {uris:?}"
+    );
+}
+
+/// A malformed level expression ("support>=abc") silently degrades to a
+/// plain skill named "support>=abc" — nobody carries that skill, so the
+/// group resolves to NO candidates (with the warn diagnostics now emitted).
+#[tokio::test]
+async fn malformed_level_expression_excludes_everyone() {
+    let db = sg_db().await;
+    create_sg(&db, "sg-malformed", &["support>=abc"], "open").await;
+    let cc_registry = Arc::new(AgentRegistry::with_db(db));
+    cc_registry
+        .register("a-mf".to_string(), vec!["support".to_string()], 1)
+        .await
+        .unwrap();
+    cc_registry
+        .update_status("a-mf", AgentStatus::Idle)
+        .await
+        .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let adapter = CcAgentRegistryAdapter::new(
+        cc_registry,
+        engine_with_policies(vec![policy_open("open")], "open"),
+        "localhost",
+    )
+    .with_skill_group_event_tx(tx);
+    let uris = adapter
+        .resolve_target_with_policy("skill-group:sg-malformed", None, "call-mf")
+        .await;
+    assert!(
+        uris.is_empty(),
+        "a malformed level expression cannot match any agent, got {uris:?}"
+    );
+    // The queued event must carry candidate diagnostics so operators can see
+    // total=1 / matched=0 without enabling debug logs.
+    let event = rx.try_recv().expect("NoAgent/CallQueued event expected");
+    match event {
+        rustpbx::addons::cc::agent_registry_adapter::SkillGroupEvent::NoAgent {
+            reason, ..
+        } => {
+            assert_eq!(reason, "no_candidates");
+        }
+        other => panic!("expected NoAgent, got {other:?}"),
+    }
+}
+
+/// A level requirement against agents WITHOUT any configured levels treats
+/// them as level 0 — "support>=5" excludes a support-skilled agent who never
+/// had levels configured. Anchors the current strictness.
+#[tokio::test]
+async fn level_requirement_excludes_agents_without_levels() {
+    let db = sg_db().await;
+    create_sg(&db, "sg-level", &["support>=5"], "open").await;
+    let cc_registry = Arc::new(AgentRegistry::with_db(db));
+    cc_registry
+        .register("a-lvl".to_string(), vec!["support".to_string()], 1)
+        .await
+        .unwrap();
+    cc_registry
+        .update_status("a-lvl", AgentStatus::Idle)
+        .await
+        .unwrap();
+    let adapter = CcAgentRegistryAdapter::new(
+        cc_registry.clone(),
+        engine_with_policies(vec![policy_open("open")], "open"),
+        "localhost",
+    );
+    let uris = adapter
+        .resolve_target_with_policy("skill-group:sg-level", None, "call-lvl")
+        .await;
+    assert!(
+        uris.is_empty(),
+        "level >=5 must exclude a level-less support agent, got {uris:?}"
+    );
+
+    // Configure the level → dispatchable.
+    let mut levels = HashMap::new();
+    levels.insert("support".to_string(), 7);
+    cc_registry
+        .set_agent_skill_levels("a-lvl", levels)
+        .await
+        .unwrap();
+    let uris = adapter
+        .resolve_target_with_policy("skill-group:sg-level", None, "call-lvl-2")
+        .await;
+    assert_eq!(
+        uris,
+        vec!["sip:a-lvl@localhost".to_string()],
+        "agent meeting the level requirement must be dispatched, got {uris:?}"
+    );
+}
+
+/// An empty skills_required matches every idle agent (vacuous ALL).
+#[tokio::test]
+async fn empty_skills_required_matches_all_idle() {
+    let db = sg_db().await;
+    create_sg(&db, "sg-open", &[], "open").await;
+    let cc_registry = Arc::new(AgentRegistry::with_db(db));
+    cc_registry
+        .register("a-any".to_string(), vec!["sales".to_string()], 1)
+        .await
+        .unwrap();
+    cc_registry
+        .update_status("a-any", AgentStatus::Idle)
+        .await
+        .unwrap();
+    let adapter = CcAgentRegistryAdapter::new(
+        cc_registry,
+        engine_with_policies(vec![policy_open("open")], "open"),
+        "localhost",
+    );
+    let uris = adapter
+        .resolve_target_with_policy("skill-group:sg-open", None, "call-open")
+        .await;
+    assert_eq!(
+        uris,
+        vec!["sip:a-any@localhost".to_string()],
+        "empty skill requirement must match any idle agent, got {uris:?}"
+    );
+}
+
+/// OffHours integration chain: a deterministically-closed business window
+/// must produce the full `schedule → engine Fallback → adapter Blocked →
+/// empty dial list + skill_group NoAgent(acd_blocked)` path — the config
+/// error that presents as "idle agents but callers hear the busy prompt
+/// after waiting".
+#[tokio::test]
+async fn closed_schedule_blocks_dispatch_with_acd_blocked() {
+    let db = sg_db().await;
+    create_sg(&db, "sg-closed", &["support"], "closed").await;
+    let cc_registry = Arc::new(AgentRegistry::with_db(db));
+    cc_registry
+        .register("a-closed".to_string(), vec!["support".to_string()], 1)
+        .await
+        .unwrap();
+    cc_registry
+        .update_status("a-closed", AgentStatus::Idle)
+        .await
+        .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let adapter = CcAgentRegistryAdapter::new(
+        cc_registry,
+        engine_with_policies(vec![policy_closed("closed")], "closed"),
+        "localhost",
+    )
+    .with_skill_group_event_tx(tx);
+    let uris = adapter
+        .resolve_target_with_policy("skill-group:sg-closed", None, "call-closed")
+        .await;
+    assert!(
+        uris.is_empty(),
+        "OffHours must block dispatch even with idle agents, got {uris:?}"
+    );
+    // Events arrive in order: CandidatesFound first, then NoAgent(acd_blocked).
+    let mut saw_blocked = false;
+    while let Ok(event) = rx.try_recv() {
+        if let rustpbx::addons::cc::agent_registry_adapter::SkillGroupEvent::NoAgent {
+            reason,
+            ..
+        } = event
+        {
+            assert_eq!(reason, "acd_blocked", "the block reason must surface");
+            saw_blocked = true;
+        }
+    }
+    assert!(
+        saw_blocked,
+        "the blocked decision must emit skill_group NoAgent(acd_blocked)"
+    );
+}
+
+/// An `acd_policy` name that does not exist (or is empty) silently resolves
+/// to the DEFAULT policy — including its schedule. Anchors the trap: a typo'd
+/// policy inherits the default policy's window, not an always-open one.
+#[tokio::test]
+async fn unknown_policy_name_falls_back_to_default_policy() {
+    let db = sg_db().await;
+    // Group points at a non-existent policy; default policy is CLOSED.
+    create_sg(&db, "sg-typo", &["support"], "no-such-policy").await;
+    let cc_registry = Arc::new(AgentRegistry::with_db(db.clone()));
+    cc_registry
+        .register("a-typo".to_string(), vec!["support".to_string()], 1)
+        .await
+        .unwrap();
+    cc_registry
+        .update_status("a-typo", AgentStatus::Idle)
+        .await
+        .unwrap();
+    let adapter = CcAgentRegistryAdapter::new(
+        cc_registry,
+        engine_with_policies(vec![policy_open("open"), policy_closed("closed")], "closed"),
+        "localhost",
+    );
+    let uris = adapter
+        .resolve_target_with_policy("skill-group:sg-typo", None, "call-typo")
+        .await;
+    assert!(
+        uris.is_empty(),
+        "unknown policy must inherit the default policy (closed here), got {uris:?}"
+    );
+
+    // Same typo'd policy with an OPEN default policy → dispatched.
+    create_sg(&db, "sg-typo-open", &["support"], "also-missing").await;
+    let cc_registry2 = Arc::new(AgentRegistry::with_db(db));
+    cc_registry2
+        .register("a-typo2".to_string(), vec!["support".to_string()], 1)
+        .await
+        .unwrap();
+    cc_registry2
+        .update_status("a-typo2", AgentStatus::Idle)
+        .await
+        .unwrap();
+    let adapter2 = CcAgentRegistryAdapter::new(
+        cc_registry2,
+        engine_with_policies(vec![policy_open("open"), policy_closed("closed")], "open"),
+        "localhost",
+    );
+    let uris = adapter2
+        .resolve_target_with_policy("skill-group:sg-typo-open", None, "call-typo-2")
+        .await;
+    assert_eq!(
+        uris,
+        vec!["sip:a-typo2@localhost".to_string()],
+        "unknown policy with open default must dispatch, got {uris:?}"
+    );
 }

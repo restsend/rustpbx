@@ -39,3 +39,7 @@ mod webhook_agent_events_e2e_test;
 #[cfg(feature = "addon-cc")]
 #[path = "cc_e2e/agent_acd_status_acceptance_e2e.rs"]
 mod agent_acd_status_acceptance_e2e;
+
+#[cfg(feature = "addon-cc")]
+#[path = "cc_e2e/queue_alert_e2e.rs"]
+mod queue_alert_e2e;

@@ -1,7 +1,7 @@
 use super::common::{
     create_test_request, create_test_server, create_test_server_with_config,
-    create_test_server_with_config_and_sipflow_backend, create_test_server_with_session_hooks,
-    create_transaction,
+    create_test_server_with_config_and_sipflow_backend, create_test_server_with_rwi_gateway,
+    create_test_server_with_session_hooks, create_transaction,
 };
 use crate::call::app::{AppInvocationContext, ApplicationContext, CallInfo};
 use crate::call::domain::{CallCommand, Leg, LegId, LegState, MediaPathMode, ReturnAppSpec};
@@ -991,6 +991,68 @@ async fn test_session_captures_rewritten_dialplan_uris_for_call_record() {
     assert_eq!(
         snapshot.routed_callee.as_deref(),
         Some("sip:001234@carrier.example.com:5060")
+    );
+}
+
+/// Session user data set through the RWI gateway (REST `PUT .../userdata` or
+/// `call.set_userdata`) must ride into the CDR metadata under the namespaced
+/// `user_data` key.
+#[tokio::test]
+async fn test_record_snapshot_includes_session_user_data() {
+    use parking_lot::RwLock as PlRwLock;
+    use crate::rwi::gateway::RwiGateway;
+
+    let gateway = Arc::new(PlRwLock::new(RwiGateway::new()));
+    let (server, _config) = create_test_server_with_rwi_gateway(
+        ProxyConfig::default(),
+        gateway.clone(),
+    )
+    .await;
+
+    // Simulate a REST/RWI write for this session before the record is built.
+    {
+        let mut gw = gateway.write();
+        gw.meta_store.insert("test-session".into(), Default::default());
+        let mut data = serde_json::Map::new();
+        data.insert("crm_id".to_string(), serde_json::json!("C-1001"));
+        gw.set_user_data(&"test-session".to_string(), data)
+            .expect("user data accepted for live session");
+    }
+
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let session = build_session_on_server(server, dialplan).await;
+    let snapshot = session.record_snapshot();
+
+    let user_data = snapshot
+        .metadata
+        .get("user_data")
+        .and_then(|v| v.as_object())
+        .expect("user_data object must be present in CDR metadata");
+    assert_eq!(
+        user_data.get("crm_id").and_then(|v| v.as_str()),
+        Some("C-1001")
+    );
+}
+
+/// No user data set → no `user_data` key in the CDR metadata.
+#[tokio::test]
+async fn test_record_snapshot_omits_user_data_when_unset() {
+    use parking_lot::RwLock as PlRwLock;
+    use crate::rwi::gateway::RwiGateway;
+
+    let gateway = Arc::new(PlRwLock::new(RwiGateway::new()));
+    let (server, _config) =
+        create_test_server_with_rwi_gateway(ProxyConfig::default(), gateway.clone())
+            .await;
+
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let session = build_session_on_server(server, dialplan).await;
+    let snapshot = session.record_snapshot();
+
+    assert!(
+        !snapshot.metadata.contains_key("user_data"),
+        "user_data must be absent when nothing was set, got {:?}",
+        snapshot.metadata.get("user_data")
     );
 }
 

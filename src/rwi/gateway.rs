@@ -73,6 +73,14 @@ pub struct RwiGateway {
     dtmf_taps: DashMap<CallId, tokio::sync::mpsc::UnboundedSender<(Option<String>, char)>>,
     /// Per-call channel variables (key/value store).
     call_vars: HashMap<CallId, HashMap<String, String>>,
+    /// Per-session user data: one arbitrary JSON object per call session,
+    /// keyed by session_id (the main call's `call_id` equals its session_id).
+    /// Written wholesale via REST `PUT /calls/active/{session_id}/userdata`
+    /// or the RWI `call.set_userdata` command; merged into every call-scoped
+    /// event payload under `user_data` and persisted into the CDR
+    /// `metadata["user_data"]`. Same lifecycle as `meta_store`: present from
+    /// session construction until `call_finished`.
+    user_data: DashMap<SessionId, serde_json::Map<String, serde_json::Value>>,
     /// Per-session event type filter; if set, only events whose type name is in the set are delivered.
     session_event_filters: HashMap<SessionId, HashSet<String>>,
     /// Optional broadcast sender for the RWI webhook handler.
@@ -133,6 +141,7 @@ impl RwiGateway {
             max_cache_age_secs,
             dtmf_taps: DashMap::new(),
             call_vars: HashMap::new(),
+            user_data: DashMap::new(),
             session_event_filters: HashMap::new(),
             webhook_tx: None,
             event_tap,
@@ -326,6 +335,7 @@ impl RwiGateway {
             .is_some_and(|session| session.write().release_call(call_id));
 
         self.remove_call_vars(call_id);
+        self.remove_user_data(call_id);
         self.dtmf_taps.remove(call_id);
         self.meta_store.remove(call_id);
 
@@ -439,6 +449,51 @@ impl RwiGateway {
         self.call_vars.remove(call_id);
     }
 
+    /// Replace the entire user data object of a session (keyed by session_id).
+    ///
+    /// Replace-all semantics: the previous object is discarded. On success a
+    /// `call_userdata_updated` event carrying the full new value is dispatched
+    /// to the call owner (and fanned out to webhook/event-tap subscribers).
+    ///
+    /// Fails when the session is unknown (no live call meta) or the serialized
+    /// payload exceeds [`MAX_USER_DATA_BYTES`].
+    pub fn set_user_data(
+        &mut self,
+        session_id: &SessionId,
+        data: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), SetUserDataError> {
+        if !self.meta_store.contains_key(session_id) {
+            return Err(SetUserDataError::SessionNotFound);
+        }
+        let size = serde_json::to_vec(&data)
+            .map(|bytes| bytes.len())
+            .unwrap_or(usize::MAX);
+        if size > MAX_USER_DATA_BYTES {
+            return Err(SetUserDataError::TooLarge { size });
+        }
+        self.user_data.insert(session_id.clone(), data.clone());
+        self.send_to_owner(&crate::rwi::CallUserDataUpdated {
+            call_id: session_id.clone(),
+            user_data: serde_json::Value::Object(data),
+        });
+        Ok(())
+    }
+
+    /// Get the user data object of a session (keyed by session_id).
+    /// Returns an empty map when nothing was set.
+    pub fn get_user_data(&self, session_id: &SessionId) -> serde_json::Map<String, serde_json::Value> {
+        self.user_data
+            .get(session_id)
+            .map(|d| d.clone())
+            .unwrap_or_default()
+    }
+
+    /// Remove all user data for the given session (call hangup cleanup,
+    /// same lifecycle as the call-meta store).
+    pub fn remove_user_data(&mut self, session_id: &SessionId) {
+        self.user_data.remove(session_id);
+    }
+
     /// Cache an event for later session/call resume replay.
     pub fn cache_event(&self, call_id: &CallId, event: &RwiEvent) {
         let mut cache_state = self.event_cache.lock();
@@ -539,6 +594,22 @@ impl RwiGateway {
             }
             flat.payload.clone()
         };
+
+        // Attach the session user data object (REST/RWI-set business context)
+        // under `user_data`. Keyed by session_id; for the main call the event
+        // `call_id` equals the session_id. Existing keys win, matching the
+        // `merge_event_context` convention (the `call_userdata_updated` event
+        // carries its own `user_data` field, which is never overwritten).
+        if let Some(call_id) = &flat.call_id
+            && let Some(data) = self.user_data.get(call_id)
+            && let Some(obj) = payload.as_object_mut()
+            && !obj.contains_key("user_data")
+        {
+            obj.insert(
+                "user_data".to_string(),
+                serde_json::Value::Object(data.clone()),
+            );
+        }
 
         self.inject_origin_fields(&mut payload);
 
@@ -641,6 +712,31 @@ pub enum ClaimError {
     SessionNotFound,
 }
 
+/// Upper bound for the serialized session user data object (16 KiB). Guards
+/// against unbounded memory growth from REST/RWI writers.
+pub const MAX_USER_DATA_BYTES: usize = 16 * 1024;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SetUserDataError {
+    /// No live call meta for the session — the call is unknown or finished.
+    SessionNotFound,
+    /// Serialized user data exceeds [`MAX_USER_DATA_BYTES`].
+    TooLarge { size: usize },
+}
+
+impl std::fmt::Display for SetUserDataError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SetUserDataError::SessionNotFound => write!(f, "session not found"),
+            SetUserDataError::TooLarge { size } => write!(
+                f,
+                "user data too large: {} bytes (max {})",
+                size, MAX_USER_DATA_BYTES
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -708,6 +804,112 @@ mod tests {
         assert!(!gw.sessions[&sid].read().owns_call("c1"));
         assert!(gw.meta_store.get_sync("c1").is_none());
         assert!(!gw.call_finished(&"c1".to_string()));
+    }
+
+    // ── session user data ──────────────────────────────────────────────────
+
+    fn setup_owned_call(gw: &mut RwiGateway, call_id: &str) -> mpsc::UnboundedReceiver<serde_json::Value> {
+        let sid = gw.create_session(create_identity()).read().id.clone();
+        let (tx, rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, tx);
+        gw.claim_call_ownership(&sid, call_id.to_string(), OwnershipMode::Control)
+            .unwrap();
+        gw.meta_store
+            .insert(call_id.to_string(), Default::default());
+        rx
+    }
+
+    #[tokio::test]
+    async fn test_set_user_data_replaces_wholesale_and_emits_event() {
+        let mut gw = RwiGateway::new();
+        let mut rx = setup_owned_call(&mut gw, "sess-1");
+
+        let mut data = serde_json::Map::new();
+        data.insert("crm_id".to_string(), serde_json::json!("C-1001"));
+        data.insert("nested".to_string(), serde_json::json!({"tier": "gold"}));
+        gw.set_user_data(&"sess-1".to_string(), data).unwrap();
+
+        // Stored wholesale, keyed by session_id.
+        let stored = gw.get_user_data(&"sess-1".to_string());
+        assert_eq!(stored.get("crm_id").and_then(|v| v.as_str()), Some("C-1001"));
+
+        // Replace-all: the previous object is fully discarded.
+        let mut replacement = serde_json::Map::new();
+        replacement.insert("ticket_id".to_string(), serde_json::json!("T-9"));
+        gw.set_user_data(&"sess-1".to_string(), replacement)
+            .unwrap();
+        let stored = gw.get_user_data(&"sess-1".to_string());
+        assert!(stored.get("crm_id").is_none(), "old keys must not survive");
+        assert_eq!(stored.get("ticket_id").and_then(|v| v.as_str()), Some("T-9"));
+
+        // Both updates announced with the full new value.
+        let first = rx.recv().await.unwrap();
+        assert_eq!(first["event_type"], "call_userdata_updated");
+        assert_eq!(first["user_data"]["crm_id"], "C-1001");
+        let second = rx.recv().await.unwrap();
+        assert_eq!(second["event_type"], "call_userdata_updated");
+        assert_eq!(second["user_data"]["ticket_id"], "T-9");
+        assert!(second["user_data"].get("crm_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_set_user_data_unknown_session_rejected() {
+        let mut gw = RwiGateway::new();
+        let err = gw
+            .set_user_data(&"ghost".to_string(), serde_json::Map::new())
+            .unwrap_err();
+        assert_eq!(err, SetUserDataError::SessionNotFound);
+        assert!(gw.get_user_data(&"ghost".to_string()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_set_user_data_too_large_rejected() {
+        let mut gw = RwiGateway::new();
+        let mut rx = setup_owned_call(&mut gw, "sess-1");
+
+        let mut data = serde_json::Map::new();
+        data.insert(
+            "blob".to_string(),
+            serde_json::Value::String("x".repeat(MAX_USER_DATA_BYTES + 1)),
+        );
+        let err = gw.set_user_data(&"sess-1".to_string(), data).unwrap_err();
+        assert!(matches!(err, SetUserDataError::TooLarge { .. }));
+        // Nothing stored, no event emitted.
+        assert!(gw.get_user_data(&"sess-1".to_string()).is_empty());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_user_data_rides_call_events() {
+        let mut gw = RwiGateway::new();
+        let mut rx = setup_owned_call(&mut gw, "sess-1");
+
+        let mut data = serde_json::Map::new();
+        data.insert("customer_id".to_string(), serde_json::json!(42));
+        gw.set_user_data(&"sess-1".to_string(), data).unwrap();
+        let _ = rx.recv().await.unwrap(); // consume the call_userdata_updated event
+
+        // A subsequent call-scoped event carries user_data via enrichment.
+        gw.send_to_owner(&crate::rwi::CallAnswered {
+            call_id: "sess-1".into(),
+        });
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event["event_type"], "call_answered");
+        assert_eq!(event["user_data"]["customer_id"], 42);
+    }
+
+    #[tokio::test]
+    async fn test_call_finished_cleans_user_data() {
+        let mut gw = RwiGateway::new();
+        let _rx = setup_owned_call(&mut gw, "sess-1");
+
+        let mut data = serde_json::Map::new();
+        data.insert("k".to_string(), serde_json::json!("v"));
+        gw.set_user_data(&"sess-1".to_string(), data).unwrap();
+        assert!(gw.get_user_data(&"sess-1".to_string()).contains_key("k"));
+
+        gw.call_finished(&"sess-1".to_string());
+        assert!(gw.get_user_data(&"sess-1".to_string()).is_empty());
     }
 
     #[tokio::test]

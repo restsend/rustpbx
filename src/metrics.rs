@@ -679,6 +679,18 @@ pub mod cc {
         .increment(1);
     }
 
+    /// Skill-group queue threshold alert fired by the periodic checker
+    /// (`[cc.alerting]`): waiting overflow / longest wait / SLA breach /
+    /// agents exhausted.
+    pub fn queue_alert_triggered(queue_id: &str, alert_type: &str) {
+        metrics::counter!(
+            "rustpbx_cc_queue_alert_total",
+            "queue" => queue_id.to_string(),
+            "type" => alert_type.to_string()
+        )
+        .increment(1);
+    }
+
     // ===== Transfer Metrics =====
     pub fn transfer_consult_initiated(queue_id: &str) {
         metrics::counter!(

@@ -4,7 +4,7 @@ use crate::{
         recording_upload::{RecordingRetryWorker, RecordingUploadHook, RecordingUploadManager},
         sipflow_upload::SipFlowUploadHook,
     },
-    config::{CallRecordStorageConfig, ClusterConfig, Config, UserBackendConfig},
+    config::{CallRecordStorageConfig, ClusterConfig, ClusterPeer, Config, UserBackendConfig},
     handler::middleware::clientaddr::ClientAddr,
     proxy::{
         acl::AclModule,
@@ -107,6 +107,27 @@ impl AppStateInner {
     /// Update the cluster config in-memory (used after save to enable backfill on refresh).
     pub fn update_cluster_config(&self, config: Option<ClusterConfig>) {
         *self.cluster_config.write().unwrap() = config;
+    }
+
+    /// Resolve the currently configured cluster peers.
+    ///
+    /// Prefers the in-memory [`Self::cluster_config`] override (hot-updated by
+    /// the settings UI) and falls back to the static `[cluster]` config.
+    pub fn cluster_peers(&self) -> Vec<ClusterPeer> {
+        let in_memory = self
+            .cluster_config
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone());
+        in_memory
+            .or_else(|| self.config().cluster.clone())
+            .map(|c| c.peers)
+            .unwrap_or_default()
+    }
+
+    /// Whether this node is part of a cluster (at least one peer configured).
+    pub fn is_cluster(&self) -> bool {
+        !self.cluster_peers().is_empty()
     }
 
     /// Get an addon state by type from the console state.

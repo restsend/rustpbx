@@ -48,6 +48,8 @@ fn all_wire_command_names_deserialize() {
         ("call.set_ringback_source", serde_json::json!({})),
         ("call.set_var", serde_json::json!({})),
         ("call.get_var", serde_json::json!({})),
+        ("call.set_userdata", serde_json::json!({})),
+        ("call.get_userdata", serde_json::json!({})),
         ("call.send_dtmf", serde_json::json!({})),
         ("call.leg_add", serde_json::json!({})),
         ("call.leg_remove", serde_json::json!({})),

@@ -527,6 +527,35 @@ impl RwiCommandProcessor {
                     value,
                 });
             }
+            RwiCommandPayload::SetUserData { call_id, data } => {
+                let mut gw = self.gateway.write();
+                gw.set_user_data(call_id, data.clone()).map_err(|e| {
+                    tracing::info!(
+                        audit_event = "call_userdata_update",
+                        session_id = %call_id,
+                        source = "rwi",
+                        result = "failure",
+                        message = %e,
+                        "call.set_userdata rejected"
+                    );
+                    match e {
+                        crate::rwi::SetUserDataError::SessionNotFound => {
+                            CommandError::CallNotFound(call_id.clone())
+                        }
+                        crate::rwi::SetUserDataError::TooLarge { .. } => {
+                            CommandError::CommandFailed(e.to_string())
+                        }
+                    }
+                })?;
+                return Ok(CommandResult::Success);
+            }
+            RwiCommandPayload::GetUserData { call_id } => {
+                let gw = self.gateway.read();
+                let user_data = gw.get_user_data(call_id);
+                return Ok(CommandResult::UserData {
+                    user_data: serde_json::Value::Object(user_data),
+                });
+            }
             RwiCommandPayload::SipMessage {
                 call_id,
                 content_type,
@@ -3076,6 +3105,9 @@ pub enum CommandResult {
     CallVar {
         key: String,
         value: Option<String>,
+    },
+    UserData {
+        user_data: serde_json::Value,
     },
 }
 

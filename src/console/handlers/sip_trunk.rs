@@ -95,6 +95,10 @@ async fn page_sip_trunks(
         .ami_path
         .clone()
         .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string());
+    let is_cluster = state
+        .app_state()
+        .map(|app| app.is_cluster())
+        .unwrap_or(false);
     state.render_with_headers(
         "console/sip_trunk.html",
         json!({
@@ -104,6 +108,7 @@ async fn page_sip_trunks(
             "current_user": current_user,
             "has_file_trunks": has_file_trunks,
             "ami_endpoint": ami_endpoint,
+            "is_cluster": is_cluster,
         }),
         &headers,
     )

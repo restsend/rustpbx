@@ -204,6 +204,7 @@ Some commands support aliases for convenience:
 | `call.unhold` | Unhold call |
 | `call.set_ringback_source` | Set ringback source |
 | `call.set_var` / `call.get_var` | Set / read a call variable |
+| `call.set_userdata` / `call.get_userdata` | Replace / read the session user data object (see below) |
 | `call.send_dtmf` | Send DTMF digits to the remote party |
 | `dtmf.collect` | Collect a multi-digit DTMF string |
 | `call.leg_add` / `call.leg_remove` | Dynamically add / remove a call leg |
@@ -256,6 +257,30 @@ Some commands support aliases for convenience:
 ```
 
 Valid `reason` values: `busy`, `forbidden`, `not_found`
+
+**Set session user data** (replace-all — the previous object is discarded):
+
+```json
+{
+  "action": "call.set_userdata",
+  "action_id": "req-011",
+  "params": {
+    "call_id": "c_92f4",
+    "data": {
+      "crm_id": "C-1001",
+      "customer": { "tier": "gold", "locale": "en-US" }
+    }
+  }
+}
+```
+
+`data` must be a JSON object, at most 16 KiB when serialized, and `call_id`
+is the call session's `session_id` (for the main call this equals the
+`call_id`). On success a `call_userdata_updated` event carrying the full new
+value is emitted; the object also rides every subsequent call-scoped event
+under `user_data` and is persisted into the CDR `metadata["user_data"]`.
+Read it back with `call.get_userdata` (`params`: `{ "call_id": "..." }`,
+result `data.user_data`).
 
 ### 5.3 Media Commands
 
@@ -534,6 +559,7 @@ Valid `mode` values:
 | `call.hangup` | Call ended |
 | `call.no_answer` | Outbound leg timed out |
 | `call.busy` | Outbound leg returned 486 Busy |
+| `call_userdata_updated` | Session user data was replaced (carries the full new `user_data` object) |
 
 ### 6.3 Media Events
 

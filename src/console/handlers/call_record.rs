@@ -1586,6 +1586,8 @@ async fn build_record_payload(
         "outbound_trunk_dest": outbound_trunk_dest,
         "route_id": record.route_id,
         "route_name": route_name,
+        "self_ip": metadata_string(record.metadata.as_ref(), "self_ip"),
+        "hostname": metadata_string(record.metadata.as_ref(), "hostname"),
         "tags": tags,
         "has_transcript": record.has_transcript,
         "transcript_status": record.transcript_status,

@@ -68,6 +68,10 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
             .route("/cluster/reload_config", get(cluster_reload_config_handler))
             .route("/cluster/reload_sync", post(cluster_reload_sync_handler))
             .route(
+                "/cluster/evaluate_route",
+                post(cluster_evaluate_route_handler),
+            )
+            .route(
                 "/cluster/dispatch_command",
                 post(cluster_dispatch_command_handler),
             )
@@ -361,8 +365,66 @@ async fn list_transactions(State(state): State<AppState>) -> Response {
     Json(result).into_response()
 }
 
-async fn reload_trunks_handler(State(state): State<AppState>, client_ip: ClientAddr) -> Response {
-    info!(%client_ip, "Reload SIP trunks via /reload/trunks endpoint");
+/// Finalize a trunks/routes reload response, optionally fanning the reload out
+/// to every configured cluster peer.
+///
+/// When `sync_cluster` is true (commerce feature), the supplied payload is
+/// broadcast via [`fanout_reload_to_peers`] and `"synced"` / `"peers"` keys
+/// are added to the response (same shape as `/reload/queues`).
+#[cfg_attr(not(feature = "commerce"), allow(unused_variables))]
+async fn finish_trunk_route_reload(
+    state: &AppState,
+    body: serde_json::Value,
+    sync_cluster: bool,
+    trunks: bool,
+    routes: bool,
+) -> Response {
+    #[cfg(feature = "commerce")]
+    if sync_cluster {
+        let payload = PingReloadPayload {
+            trunks,
+            routes,
+            addons: Vec::new(),
+        };
+        let peers = fanout_reload_to_peers(state, &payload).await;
+        let peers_json = serde_json::to_value(&peers).unwrap_or(serde_json::json!([]));
+        let mut body = body;
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("synced".into(), serde_json::Value::Bool(true));
+            obj.insert("peers".into(), peers_json);
+        }
+        return Json(body).into_response();
+    }
+
+    #[cfg(not(feature = "commerce"))]
+    if sync_cluster {
+        let mut body = body;
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("synced".into(), serde_json::Value::Bool(false));
+            obj.insert("peers".into(), serde_json::json!([]));
+            obj.insert(
+                "note".into(),
+                serde_json::Value::String(
+                    "cluster sync requires the 'commerce' feature".to_string(),
+                ),
+            );
+        }
+        return Json(body).into_response();
+    }
+
+    Json(body).into_response()
+}
+
+async fn reload_trunks_handler(
+    State(state): State<AppState>,
+    client_ip: ClientAddr,
+    Query(params): Query<ReloadAddonParams>,
+) -> Response {
+    info!(
+        %client_ip,
+        sync_cluster = params.sync_cluster,
+        "Reload SIP trunks via /reload/trunks endpoint"
+    );
 
     let config_override = match load_proxy_config_override(&state).await {
         Ok(cfg) => cfg,
@@ -384,13 +446,19 @@ async fn reload_trunks_handler(State(state): State<AppState>, client_ip: ClientA
                     console.clear_pending_reload(ReloadTarget::Trunks);
                 }
             }
-            Json(serde_json::json!({
-                "status": "ok",
-                "trunks_reloaded": total,
-                "metrics": metrics,
-            }))
+            finish_trunk_route_reload(
+                &state,
+                serde_json::json!({
+                    "status": "ok",
+                    "trunks_reloaded": total,
+                    "metrics": metrics,
+                }),
+                params.sync_cluster,
+                true,
+                false,
+            )
+            .await
         }
-        .into_response(),
         Err(error) => {
             warn!(%client_ip, error = %error, "Trunk reload failed");
             (
@@ -418,8 +486,16 @@ async fn trunk_registrations_handler(State(state): State<AppState>) -> Response 
     .into_response()
 }
 
-async fn reload_routes_handler(State(state): State<AppState>, client_ip: ClientAddr) -> Response {
-    info!(%client_ip, "Reload routing rules via /reload/routes endpoint");
+async fn reload_routes_handler(
+    State(state): State<AppState>,
+    client_ip: ClientAddr,
+    Query(params): Query<ReloadAddonParams>,
+) -> Response {
+    info!(
+        %client_ip,
+        sync_cluster = params.sync_cluster,
+        "Reload routing rules via /reload/routes endpoint"
+    );
 
     let config_override = match load_proxy_config_override(&state).await {
         Ok(cfg) => cfg,
@@ -441,13 +517,19 @@ async fn reload_routes_handler(State(state): State<AppState>, client_ip: ClientA
                     console.clear_pending_reload(ReloadTarget::Routes);
                 }
             }
-            Json(serde_json::json!({
-                "status": "ok",
-                "routes_reloaded": total,
-                "metrics": metrics,
-            }))
+            finish_trunk_route_reload(
+                &state,
+                serde_json::json!({
+                    "status": "ok",
+                    "routes_reloaded": total,
+                    "metrics": metrics,
+                }),
+                params.sync_cluster,
+                false,
+                true,
+            )
+            .await
         }
-        .into_response(),
         Err(error) => {
             warn!(%client_ip, error = %error, "Route reload failed");
             (
@@ -1643,6 +1725,49 @@ async fn cluster_reload_sync_handler(
     }
 
     Json(serde_json::json!({ "status": "completed", "results": results })).into_response()
+}
+
+/// Runtime route evaluation on this node only — the receiving end of the
+/// console diagnostics cluster comparison.
+///
+/// Peer calls land here via the AMI peer-IP trust list. The payload matches
+/// the console `POST /diagnostics/routes/evaluate` body; the runtime
+/// (in-memory) dataset is always used regardless of the `dataset` field.
+#[cfg(all(feature = "commerce", feature = "console"))]
+async fn cluster_evaluate_route_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<crate::console::handlers::diagnostics::RouteEvaluationPayload>,
+) -> Response {
+    use crate::console::handlers::diagnostics::{RouteEvalError, evaluate_route_with_snapshots};
+
+    let server = state.sip_server();
+    let data_context = server.inner.data_context.clone();
+    let default_host = server
+        .inner
+        .proxy_config
+        .load_full()
+        .realms
+        .clone()
+        .and_then(|realms| realms.into_iter().next())
+        .unwrap_or_else(|| "localhost".to_string());
+
+    let trunks = data_context.trunks_snapshot();
+    let routes = data_context.routes_snapshot();
+
+    match evaluate_route_with_snapshots(data_context, &default_host, &payload, trunks, routes).await
+    {
+        Ok(resp) => Json(resp).into_response(),
+        Err(RouteEvalError::BadRequest(msg)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "message": msg })),
+        )
+            .into_response(),
+        Err(RouteEvalError::Internal(msg)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "message": msg })),
+        )
+            .into_response(),
+    }
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────

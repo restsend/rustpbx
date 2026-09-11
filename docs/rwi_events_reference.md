@@ -163,6 +163,16 @@ Webhook 处理器运行在专用的 tokio 运行时上,其 HTTP 推送不会与 
 - `dnis` vs `callee`：同上
 - 上下文由 `CallMetaStore` 在 gateway 分发时自动注入，事件生产者无需手动填充
 
+### user_data（会话用户数据自动注入）
+
+除上述字段外，gateway 还会把**会话用户数据**整体注入到**所有 call-scoped 事件**的 `user_data` 键下（嵌套对象，非扁平化）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `user_data` | Option\<Object\> | 会话用户数据，通过 REST `PUT /calls/active/{session_id}/userdata` 或 RWI `call.set_userdata` 全量替换；未设置时不出现 |
+
+业务系统可在通话任意阶段把 CRM 工单号、客户画像等上下文写入 `user_data`，此后每个事件（含 webhook）都自动携带，通话结束后落入 CDR `metadata["user_data"]`。变更时会发出 `call_userdata_updated` 事件（携带全量新值）。
+
 ### 来源字段（gateway 自动注入）
 
 集群模式下 gateway 还会给**所有**事件注入以下字段，Webhook 与 WS 消费者都可见：
@@ -326,6 +336,18 @@ Webhook 使用 `(call_id, timestamp)` 元组去重，环形缓冲区容量 4096 
 |------|------|------|
 | `call_id` | String | 呼叫标识 |
 | `leg_id` | String | 被保持 / 恢复的腿（`caller` / `callee` / ...） |
+| *+ctx* | | 扁平化上下文 |
+
+#### call_userdata_updated
+
+分发：call_owner
+
+会话用户数据被**全量替换**时发出（REST `PUT /calls/active/{session_id}/userdata` 或 RWI `call.set_userdata`）。携带完整新对象，消费方以替换本地副本的方式跟踪变更（无增量合并语义）。新值同时随后续所有 call-scoped 事件（`user_data` 键）分发，并在通话结束后写入 CDR `metadata["user_data"]`。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫会话标识（session_id） |
+| `user_data` | Object | 全量新用户数据（≤ 16 KiB 的 JSON 对象） |
 | *+ctx* | | 扁平化上下文 |
 
 #### call_bridged

@@ -1157,11 +1157,19 @@ impl EvaluationDataset {
     }
 }
 
+/// Error surface of the shared route-evaluation core.
+pub(crate) enum RouteEvalError {
+    /// Invalid request input (HTTP 400).
+    BadRequest(String),
+    /// Evaluation failure (HTTP 500).
+    Internal(String),
+}
+
 async fn route_evaluate(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
     Json(payload): Json<RouteEvaluationPayload>,
-) -> impl IntoResponse {
+) -> Response {
     let Some(server) = state.sip_server() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1169,31 +1177,6 @@ async fn route_evaluate(
         )
             .into_response();
     };
-
-    let callee_input = payload.callee.trim();
-    if callee_input.is_empty() {
-        return bad_request("callee is required");
-    }
-
-    let direction = if let Some(ref raw) = payload.direction {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "inbound" => DialDirection::Inbound,
-            "internal" => DialDirection::Internal,
-            "outbound" => DialDirection::Outbound,
-            other => {
-                return bad_request(format!(
-                    "unsupported direction '{}': use inbound/outbound/internal",
-                    other
-                ));
-            }
-        }
-    } else if payload.source_trunk.is_some() || payload.source_ip.is_some() {
-        DialDirection::Inbound
-    } else {
-        DialDirection::Outbound
-    };
-
-    let direction_label = direction.to_string();
 
     let dataset_label = payload
         .dataset
@@ -1219,53 +1202,6 @@ async fn route_evaluate(
         .clone()
         .and_then(|realms| realms.into_iter().next())
         .unwrap_or_else(|| "localhost".to_string());
-
-    let default_caller_value = default_caller_for(&direction, &default_host);
-    let caller_input = normalize_optional_string(&payload.caller).unwrap_or(default_caller_value);
-    let request_uri_input = normalize_optional_string(&payload.request_uri);
-
-    let caller_uri_str = crate::call::build_sip_uri(&caller_input, &default_host);
-    let callee_uri_str = crate::call::build_sip_uri(callee_input, &default_host);
-    let request_uri_str = request_uri_input
-        .as_deref()
-        .map(|value| crate::call::build_sip_uri(value, &default_host))
-        .unwrap_or_else(|| callee_uri_str.clone());
-
-    let caller_uri: rsipstack::sip::Uri = match caller_uri_str.try_into() {
-        Ok(uri) => uri,
-        Err(err) => return bad_request(format!("invalid caller uri: {}", err)),
-    };
-    let callee_uri: rsipstack::sip::Uri = match callee_uri_str.try_into() {
-        Ok(uri) => uri,
-        Err(err) => return bad_request(format!("invalid callee uri: {}", err)),
-    };
-    let request_uri: rsipstack::sip::Uri = match request_uri_str.try_into() {
-        Ok(uri) => uri,
-        Err(err) => return bad_request(format!("invalid request uri: {}", err)),
-    };
-
-    let custom_headers = payload
-        .headers
-        .as_ref()
-        .map(headers_to_vec)
-        .unwrap_or_default();
-    let invite_option = InviteOption {
-        caller: caller_uri.clone(),
-        callee: callee_uri.clone(),
-        contact: caller_uri.clone(),
-        headers: if custom_headers.is_empty() {
-            None
-        } else {
-            Some(custom_headers.clone())
-        },
-        ..Default::default()
-    };
-
-    let request =
-        match build_diagnostics_request(&caller_uri, &callee_uri, &request_uri, custom_headers) {
-            Ok(req) => req,
-            Err(err) => return bad_request(err),
-        };
 
     let data_context = server.data_context.clone();
 
@@ -1340,6 +1276,190 @@ async fn route_evaluate(
         }
     };
 
+    let local = match evaluate_route_with_snapshots(
+        data_context,
+        &default_host,
+        &payload,
+        trunks_snapshot,
+        routes_snapshot,
+    )
+    .await
+    {
+        Ok(resp) => resp,
+        Err(RouteEvalError::BadRequest(msg)) => return bad_request(msg),
+        Err(RouteEvalError::Internal(msg)) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": msg })),
+            )
+                .into_response();
+        }
+    };
+
+    // Cluster-wide comparison (runtime dataset only, commerce builds).
+    #[cfg(feature = "commerce")]
+    {
+        let cluster_requested =
+            matches!(dataset, EvaluationDataset::Runtime) && payload.cluster.unwrap_or(true);
+
+        if cluster_requested {
+            let peers = state
+                .app_state()
+                .map(|app| app.cluster_peers())
+                .unwrap_or_default();
+            if !peers.is_empty() {
+                let ami_path = state
+                    .config()
+                    .proxy
+                    .ami_path
+                    .clone()
+                    .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string());
+                let http_client = state.app_state().map(|app| app.http_client().clone());
+
+                let local_json = serde_json::to_value(&local).unwrap_or(json!({}));
+                let local_signature = route_eval_signature_value(&local_json);
+
+                let mut nodes = vec![RouteEvalClusterNode {
+                    node: "local".to_string(),
+                    status: "ok".to_string(),
+                    elapsed_ms: None,
+                    consistent: Some(true),
+                    result: Some(local_json.clone()),
+                    error: None,
+                }];
+
+                if let Some(http_client) = http_client {
+                    let peer_nodes = evaluate_route_on_peers(
+                        http_client,
+                        peers,
+                        &ami_path,
+                        &payload,
+                        &local_signature,
+                    )
+                    .await;
+                    nodes.extend(peer_nodes);
+                }
+
+                let consistent = nodes
+                    .iter()
+                    .all(|n| n.status == "ok" && n.consistent.unwrap_or(false));
+
+                let mut body = local_json;
+                if let Some(obj) = body.as_object_mut() {
+                    obj.insert("cluster".into(), json!(true));
+                    obj.insert("consistent".into(), json!(consistent));
+                    obj.insert(
+                        "nodes".into(),
+                        serde_json::to_value(&nodes).unwrap_or(json!([])),
+                    );
+                }
+                return Json(body).into_response();
+            }
+        }
+    }
+
+    Json(local).into_response()
+}
+
+/// Shared route-evaluation core used by the console diagnostics handler and
+/// the AMI cluster peer endpoint (`POST {ami_path}/cluster/evaluate_route`).
+///
+/// Runs the real matching engine (`match_invite_with_trace`) against the
+/// supplied trunks/routes snapshots without dispatching any SIP traffic.
+pub(crate) async fn evaluate_route_with_snapshots(
+    data_context: Arc<crate::proxy::data::ProxyDataContext>,
+    default_host: &str,
+    payload: &RouteEvaluationPayload,
+    trunks_snapshot: HashMap<String, routing::TrunkConfig>,
+    routes_snapshot: Vec<routing::RouteRule>,
+) -> Result<RouteEvaluationResponse, RouteEvalError> {
+    let callee_input = payload.callee.trim();
+    if callee_input.is_empty() {
+        return Err(RouteEvalError::BadRequest("callee is required".to_string()));
+    }
+
+    let direction = if let Some(ref raw) = payload.direction {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "inbound" => DialDirection::Inbound,
+            "internal" => DialDirection::Internal,
+            "outbound" => DialDirection::Outbound,
+            other => {
+                return Err(RouteEvalError::BadRequest(format!(
+                    "unsupported direction '{}': use inbound/outbound/internal",
+                    other
+                )));
+            }
+        }
+    } else if payload.source_trunk.is_some() || payload.source_ip.is_some() {
+        DialDirection::Inbound
+    } else {
+        DialDirection::Outbound
+    };
+
+    let direction_label = direction.to_string();
+
+    let default_caller_value = default_caller_for(&direction, default_host);
+    let caller_input = normalize_optional_string(&payload.caller).unwrap_or(default_caller_value);
+    let request_uri_input = normalize_optional_string(&payload.request_uri);
+
+    let caller_uri_str = crate::call::build_sip_uri(&caller_input, default_host);
+    let callee_uri_str = crate::call::build_sip_uri(callee_input, default_host);
+    let request_uri_str = request_uri_input
+        .as_deref()
+        .map(|value| crate::call::build_sip_uri(value, default_host))
+        .unwrap_or_else(|| callee_uri_str.clone());
+
+    let caller_uri: Uri = match caller_uri_str.try_into() {
+        Ok(uri) => uri,
+        Err(err) => {
+            return Err(RouteEvalError::BadRequest(format!(
+                "invalid caller uri: {}",
+                err
+            )));
+        }
+    };
+    let callee_uri: Uri = match callee_uri_str.try_into() {
+        Ok(uri) => uri,
+        Err(err) => {
+            return Err(RouteEvalError::BadRequest(format!(
+                "invalid callee uri: {}",
+                err
+            )));
+        }
+    };
+    let request_uri: Uri = match request_uri_str.try_into() {
+        Ok(uri) => uri,
+        Err(err) => {
+            return Err(RouteEvalError::BadRequest(format!(
+                "invalid request uri: {}",
+                err
+            )));
+        }
+    };
+
+    let custom_headers = payload
+        .headers
+        .as_ref()
+        .map(headers_to_vec)
+        .unwrap_or_default();
+    let invite_option = InviteOption {
+        caller: caller_uri.clone(),
+        callee: callee_uri.clone(),
+        contact: caller_uri.clone(),
+        headers: if custom_headers.is_empty() {
+            None
+        } else {
+            Some(custom_headers.clone())
+        },
+        ..Default::default()
+    };
+
+    let request =
+        match build_diagnostics_request(&caller_uri, &callee_uri, &request_uri, custom_headers) {
+            Ok(req) => req,
+            Err(err) => return Err(RouteEvalError::BadRequest(err)),
+        };
+
     let source_ip_input = normalize_optional_string(&payload.source_ip);
 
     let mut detected_trunk_from_ip = None;
@@ -1348,7 +1468,7 @@ async fn route_evaluate(
             Ok(addr) => {
                 detected_trunk_from_ip = detect_trunk_by_ip(&trunks_snapshot, &addr).await;
             }
-            Err(_) => return bad_request("invalid source_ip"),
+            Err(_) => return Err(RouteEvalError::BadRequest("invalid source_ip".to_string())),
         }
     }
 
@@ -1360,14 +1480,17 @@ async fn route_evaluate(
     let mut source_trunk_value: Option<SourceTrunk> = None;
     if let Some(name) = source_trunk_name.as_ref() {
         let Some(config) = trunks_snapshot.get(name) else {
-            return bad_request(format!("source trunk '{}' not found", name));
+            return Err(RouteEvalError::BadRequest(format!(
+                "source trunk '{}' not found",
+                name
+            )));
         };
         source_trunk_value = build_source_trunk(name.clone(), config, &direction);
         if source_trunk_value.is_none() {
-            return bad_request(format!(
+            return Err(RouteEvalError::BadRequest(format!(
                 "trunk '{}' does not allow {:?} calls",
                 name, direction
-            ));
+            )));
         }
     }
 
@@ -1397,11 +1520,10 @@ async fn route_evaluate(
     {
         Ok(res) => res,
         Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": format!("routing evaluation failed: {}", err) })),
-            )
-                .into_response();
+            return Err(RouteEvalError::Internal(format!(
+                "routing evaluation failed: {}",
+                err
+            )));
         }
     };
 
@@ -1490,7 +1612,7 @@ async fn route_evaluate(
         }
     };
 
-    Json(RouteEvaluationResponse {
+    Ok(RouteEvaluationResponse {
         evaluated_at: Utc::now().to_rfc3339(),
         direction: direction_label,
         caller: caller_render,
@@ -1506,7 +1628,120 @@ async fn route_evaluate(
         rewrites,
         outcome,
     })
-    .into_response()
+}
+
+/// Extract the routing-decision fields used for cluster consistency checks
+/// (ignores timestamps and other metadata).
+#[cfg(feature = "commerce")]
+fn route_eval_signature_value(resp: &JsonValue) -> JsonValue {
+    json!({
+        "direction": resp.get("direction"),
+        "matched_rule": resp.get("matched_rule"),
+        "selected_trunk": resp.get("selected_trunk"),
+        "used_default_route": resp.get("used_default_route"),
+        "rewrite_operations": resp.get("rewrite_operations"),
+        "rewrites": resp.get("rewrites"),
+        "outcome": resp.get("outcome"),
+    })
+}
+
+/// One node's route-evaluation result in the cluster comparison response.
+#[cfg(feature = "commerce")]
+#[derive(Debug, Serialize)]
+struct RouteEvalClusterNode {
+    /// `"local"` or `"{addr}:{ami_port}"`.
+    node: String,
+    /// `"ok"` or `"error"`.
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    elapsed_ms: Option<u64>,
+    /// `Some(true/false)` when the node answered; local is always the
+    /// reference (`Some(true)`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    consistent: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<JsonValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// Timeout for one peer's route-evaluation round-trip.
+#[cfg(feature = "commerce")]
+const ROUTE_EVAL_PEER_TIMEOUT_SECS: u64 = 15;
+
+/// Fan the runtime route evaluation out to every configured cluster peer
+/// (concurrently) and collect each node's result for comparison.
+#[cfg(feature = "commerce")]
+async fn evaluate_route_on_peers(
+    http_client: reqwest::Client,
+    peers: Vec<crate::config::ClusterPeer>,
+    ami_path: &str,
+    payload: &RouteEvaluationPayload,
+    local_signature: &JsonValue,
+) -> Vec<RouteEvalClusterNode> {
+    let mut handles = Vec::with_capacity(peers.len());
+    for peer in peers {
+        let url = format!(
+            "http://{}:{}{}/cluster/evaluate_route",
+            peer.addr, peer.ami_port, ami_path
+        );
+        let client = http_client.clone();
+        let mut forwarded = payload.clone();
+        // Never recurse: the peer evaluates locally only.
+        forwarded.cluster = Some(false);
+        let local_signature = local_signature.clone();
+        handles.push(tokio::spawn(async move {
+            let node = format!("{}:{}", peer.addr, peer.ami_port);
+            let start = std::time::Instant::now();
+            let opts = crate::http_util::HttpFetchOptions::new()
+                .with_timeout(Duration::from_secs(ROUTE_EVAL_PEER_TIMEOUT_SECS));
+            let req = client.post(&url).json(&forwarded);
+            match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
+                Ok(resp) => {
+                    let elapsed_ms = start.elapsed().as_millis() as u64;
+                    match resp.json::<JsonValue>().await {
+                        Ok(result) => {
+                            let consistent = route_eval_signature_value(&result) == local_signature;
+                            RouteEvalClusterNode {
+                                node,
+                                status: "ok".to_string(),
+                                elapsed_ms: Some(elapsed_ms),
+                                consistent: Some(consistent),
+                                result: Some(result),
+                                error: None,
+                            }
+                        }
+                        Err(e) => RouteEvalClusterNode {
+                            node,
+                            status: "error".to_string(),
+                            elapsed_ms: Some(elapsed_ms),
+                            consistent: None,
+                            result: None,
+                            error: Some(format!("Invalid response: {e}")),
+                        },
+                    }
+                }
+                Err(e) => {
+                    let elapsed_ms = start.elapsed().as_millis() as u64;
+                    RouteEvalClusterNode {
+                        node,
+                        status: "error".to_string(),
+                        elapsed_ms: Some(elapsed_ms),
+                        consistent: None,
+                        result: None,
+                        error: Some(format!("Connection failed: {e}")),
+                    }
+                }
+            }
+        }));
+    }
+    let mut nodes = Vec::with_capacity(handles.len());
+    for handle in handles {
+        if let Ok(node) = handle.await {
+            nodes.push(node);
+        }
+    }
+    nodes
 }
 
 #[derive(Debug, Deserialize)]
@@ -1654,20 +1889,24 @@ struct TrunkIpEvaluation {
     matched_sources: Vec<String>,
 }
 
-#[derive(Deserialize)]
-struct RouteEvaluationPayload {
-    callee: String,
-    caller: Option<String>,
-    direction: Option<String>,
-    dataset: Option<String>,
-    source_trunk: Option<String>,
-    source_ip: Option<String>,
-    request_uri: Option<String>,
-    headers: Option<HashMap<String, String>>,
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct RouteEvaluationPayload {
+    pub callee: String,
+    pub caller: Option<String>,
+    pub direction: Option<String>,
+    pub dataset: Option<String>,
+    /// When true (default) and the runtime dataset is used, the evaluation is
+    /// compared across every configured cluster peer.
+    #[serde(default)]
+    pub cluster: Option<bool>,
+    pub source_trunk: Option<String>,
+    pub source_ip: Option<String>,
+    pub request_uri: Option<String>,
+    pub headers: Option<HashMap<String, String>>,
 }
 
 #[derive(Serialize)]
-struct RouteEvaluationResponse {
+pub(crate) struct RouteEvaluationResponse {
     evaluated_at: String,
     direction: String,
     caller: String,
@@ -2567,6 +2806,87 @@ mod tests {
                 .as_ref()
                 .map(|raw| raw.starts_with("SIP/2.0 200"))
                 .unwrap_or(false)
+        );
+    }
+
+    #[cfg(feature = "commerce")]
+    #[test]
+    fn route_eval_signature_ignores_metadata() {
+        let a = json!({
+            "evaluated_at": "2026-09-11T01:00:00+00:00",
+            "direction": "outbound",
+            "matched_rule": "rule-a",
+            "selected_trunk": "carrier-x",
+            "used_default_route": false,
+            "outcome": { "type": "forward", "destination": "203.0.113.5:5060" },
+        });
+        let b = json!({
+            "evaluated_at": "2026-09-11T02:00:00+00:00",
+            "direction": "outbound",
+            "matched_rule": "rule-a",
+            "selected_trunk": "carrier-x",
+            "used_default_route": false,
+            "outcome": { "type": "forward", "destination": "203.0.113.5:5060" },
+        });
+        assert_eq!(
+            route_eval_signature_value(&a),
+            route_eval_signature_value(&b)
+        );
+    }
+
+    #[cfg(feature = "commerce")]
+    #[test]
+    fn route_eval_signature_detects_differences() {
+        let a = json!({
+            "direction": "outbound",
+            "matched_rule": "rule-a",
+            "selected_trunk": "carrier-x",
+            "used_default_route": false,
+            "outcome": { "type": "forward", "destination": "203.0.113.5:5060" },
+        });
+        // Different selected trunk.
+        let b = json!({
+            "direction": "outbound",
+            "matched_rule": "rule-a",
+            "selected_trunk": "carrier-y",
+            "used_default_route": false,
+            "outcome": { "type": "forward", "destination": "203.0.113.5:5060" },
+        });
+        // Different outcome shape.
+        let c = json!({
+            "direction": "outbound",
+            "matched_rule": "rule-a",
+            "selected_trunk": "carrier-x",
+            "used_default_route": false,
+            "outcome": { "type": "not_handled" },
+        });
+        let sig_a = route_eval_signature_value(&a);
+        assert_ne!(sig_a, route_eval_signature_value(&b));
+        assert_ne!(sig_a, route_eval_signature_value(&c));
+    }
+
+    #[cfg(feature = "commerce")]
+    #[test]
+    fn route_eval_signature_treats_missing_fields_as_null() {
+        let explicit = json!({
+            "direction": "outbound",
+            "matched_rule": null,
+            "selected_trunk": null,
+            "used_default_route": false,
+            "rewrite_operations": null,
+            "rewrites": null,
+            "outcome": { "type": "not_handled" },
+        });
+        // Serialized responses omit None fields entirely; the signature must
+        // normalize both forms to the same value.
+        let omitted = json!({
+            "direction": "outbound",
+            "used_default_route": false,
+            "outcome": { "type": "not_handled" },
+        });
+        assert_eq!(
+            route_eval_signature_value(&explicit),
+            route_eval_signature_value(&omitted)
         );
     }
 }

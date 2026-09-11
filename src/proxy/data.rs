@@ -2136,6 +2136,161 @@ mod tests {
         assert_eq!(routes[1].disabled, Some(true));
     }
 
+    /// Real-world `db://routes/routes.generated.toml` content (trimmed to the
+    /// entries relevant for callee `88880002`; route names anglicized).
+    const PRODUCTION_GENERATED_ROUTES_TOML: &str = r#"
+[[routes]]
+name = "staging-inbound"
+id = 22
+priority = 1071
+select = "rr"
+app = "ivr"
+auto_answer = true
+
+[routes.match]
+"to.user" = "^88880002$"
+
+[routes.rewrite]
+"header.X-Entry-Node-ID" = "1411020000U"
+"header.tenantId" = "didi"
+"header.X-Business-Type" = "1411"
+"header.X-Customer-Type" = "2"
+
+[routes.app_params]
+file = "db://ivr/lf-step-ivr.generated.toml"
+
+[[routes]]
+name = "chunsun-drivers-test"
+id = 32
+priority = 1001
+select = "rr"
+app = "ivr"
+auto_answer = true
+disabled = true
+
+[routes.match]
+"to.user" = "^(88880002)$"
+
+[routes.rewrite]
+"header.tenantid" = "didi"
+"header.x-entry-node-id" = "3420000U"
+"header.x-customer-type" = "2"
+"header.x-business-type" = "34"
+"header.routepoint" = "chunsun-drivers-test"
+
+[routes.app_params]
+file = "db://ivr/lf-step-ivr.generated.toml"
+
+[[routes]]
+name = "test-route"
+id = 2
+priority = 100
+select = "rr"
+app = "ivr"
+auto_answer = true
+
+[routes.match]
+"from.user" = "^0001212000(.*)|183****8383$"
+
+[routes.app_params]
+file = "db://ivr/lf-step-ivr.generated.toml"
+"#;
+
+    fn parse_generated_routes(toml_str: &str) -> Vec<RouteRule> {
+        let data: RouteIncludeFile = toml::from_str(toml_str).expect("parse generated routes toml");
+        let mut routes = data.routes;
+        // Mirror `reload_routes`: same sort the runtime snapshot uses.
+        routes.sort_by_key(|route| Reverse(route.priority));
+        routes
+    }
+
+    async fn match_callee_88880002(
+        routes: &Vec<RouteRule>,
+    ) -> crate::proxy::routing::matcher::RouteTrace {
+        use crate::proxy::routing::matcher::match_invite_with_trace;
+        use crate::proxy::tests::common::create_test_request;
+        use rsipstack::dialog::invitation::InviteOption;
+
+        let uri = rsipstack::sip::Uri::try_from("sip:88880002@10.0.0.1").expect("callee uri");
+        let option = InviteOption {
+            caller: uri.clone(),
+            callee: uri,
+            ..Default::default()
+        };
+        let origin = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "88880002",
+            None,
+            "10.0.0.1",
+            None,
+        );
+
+        let mut trace = crate::proxy::routing::matcher::RouteTrace::default();
+        let result = match_invite_with_trace(
+            None,
+            Some(routes),
+            None,
+            option,
+            &origin,
+            None,
+            Arc::new(crate::call::RoutingState::new()),
+            &crate::call::DialDirection::Inbound,
+            &mut trace,
+        )
+        .await
+        .expect("match invite");
+        assert!(
+            matches!(result, crate::config::RouteResult::Application { .. }),
+            "expected an ivr application route"
+        );
+        trace
+    }
+
+    #[tokio::test]
+    async fn generated_toml_routes_match_higher_priority_and_skip_disabled() {
+        // With the CURRENT generated file loaded, a call to 88880002 must hit
+        // staging-inbound (priority 1071); chunsun-drivers-test is disabled and
+        // must be skipped even though it also matches `to.user`.
+        let routes = parse_generated_routes(PRODUCTION_GENERATED_ROUTES_TOML);
+
+        let stale = routes
+            .iter()
+            .find(|route| route.name == "chunsun-drivers-test")
+            .expect("chunsun-drivers-test route present");
+        assert_eq!(stale.disabled, Some(true));
+        assert_eq!(stale.priority, 1001);
+
+        let trace = match_callee_88880002(&routes).await;
+        assert_eq!(
+            trace.matched_rule.as_deref(),
+            Some("staging-inbound"),
+            "the enabled higher-priority rule must win"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_snapshot_without_reload_reproduces_stale_route_match() {
+        // Reproduces the production report: if the running proxy still holds
+        // the OLD snapshot (chunsun-drivers-test still enabled,
+        // staging-inbound not yet present), the same call hits
+        // chunsun-drivers-test. This proves the discrepancy comes from a stale
+        // runtime snapshot, not from rule evaluation.
+        let mut routes = parse_generated_routes(PRODUCTION_GENERATED_ROUTES_TOML);
+        routes.retain(|route| route.name != "staging-inbound");
+        let stale = routes
+            .iter_mut()
+            .find(|route| route.name == "chunsun-drivers-test")
+            .expect("chunsun-drivers-test route present");
+        stale.disabled = None; // old snapshot: route was still active
+
+        let trace = match_callee_88880002(&routes).await;
+        assert_eq!(
+            trace.matched_rule.as_deref(),
+            Some("chunsun-drivers-test"),
+            "a stale snapshot without the newer rule hits the old route"
+        );
+    }
+
     #[tokio::test]
     async fn route_metadata_sets_queue_fields() {
         let mut action = RouteAction::default();

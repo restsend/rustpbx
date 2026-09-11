@@ -169,6 +169,19 @@ pub struct CallUnheld {
 }
 rwi_event!(CallUnheld, "call_unheld");
 
+/// The full user data object of a call session was replaced (REST
+/// `PUT /calls/active/{session_id}/userdata` or RWI `call.set_userdata`).
+/// Carries the complete new object — consumers track changes by replacing
+/// their local copy, there is no partial merge. The new value also rides
+/// every subsequent call-scoped event under `user_data` (enrichment) and is
+/// persisted into the CDR `metadata["user_data"]`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CallUserDataUpdated {
+    pub call_id: String,
+    pub user_data: serde_json::Value,
+}
+rwi_event!(CallUserDataUpdated, "call_userdata_updated");
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CallNoAnswer {
     pub call_id: String,

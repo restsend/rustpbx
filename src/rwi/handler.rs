@@ -474,6 +474,10 @@ fn build_command_result_event(
                     event["status"] = serde_json::json!("success");
                     event["data"] = serde_json::json!({ "key": key, "value": value });
                 }
+                CommandResult::UserData { user_data } => {
+                    event["status"] = serde_json::json!("success");
+                    event["data"] = serde_json::json!({ "user_data": user_data });
+                }
             }
             event
         }

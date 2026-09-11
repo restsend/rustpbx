@@ -6,7 +6,8 @@
         basePath: {{ base_url | tojson }},
         filters: {{ filters | default({}) | tojson }},
         createUrl: {{ create_url | tojson }},
-        amiEndpoint: {{ ami_endpoint | default("/ami/v1") | tojson }}
+        amiEndpoint: {{ ami_endpoint | default("/ami/v1") | tojson }},
+        isCluster: {{ is_cluster | default(false) | tojson }}
     })' x-init="init()">
     <div class="mx-auto max-w-7xl space-y-6">
         <header class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
@@ -17,6 +18,12 @@
                 <p class="text-sm text-slate-500">{{ "sip_trunk.review_carrier" | t }}</p>
             </div>
             <div class="flex flex-wrap items-center gap-3">
+                <label x-show="isCluster"
+                    class="inline-flex select-none items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 shadow-sm">
+                    <input type="checkbox" class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                        x-model="reloadCluster">
+                    <span>{{ "sip_trunk.reload_scope_cluster" | t }}</span>
+                </label>
                 <button type="button"
                     class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-200 focus:ring-offset-2"
                     :class="[reloading ? 'cursor-wait border-slate-200 text-slate-400 hover:border-slate-200 hover:text-slate-400' : '', pendingReload && !reloading ? 'reload-glow reload-glow-accent' : '']"
@@ -524,6 +531,8 @@
             reloading: false,
             pendingReload: false,
             lastReload: null,
+            isCluster: !!options.isCluster,
+            reloadCluster: true,
             page: 1,
             perPage: 20,
             sortOrder: '',
@@ -1032,7 +1041,8 @@
                 this.pendingReload = false;
                 this.reloading = true;
                 this.error = null;
-                const endpoint = `${this.amiEndpoint.replace(/\/$/, '')}/reload/trunks`;
+                const syncCluster = this.isCluster && this.reloadCluster;
+                const endpoint = `${this.amiEndpoint.replace(/\/$/, '')}/reload/trunks${syncCluster ? '?sync_cluster=true' : ''}`;
                 let successMessage = null;
                 try {
                     const response = await fetch(endpoint, {
@@ -1060,6 +1070,10 @@
                             ? `Reloaded ${count} trunk${count === 1 ? '' : 's'}.`
                             : 'SIP trunks reloaded.';
                     }
+                    const clusterSummary = this.summarizeClusterReload(data);
+                    if (clusterSummary) {
+                        successMessage = `${successMessage} ${clusterSummary}`;
+                    }
                     await this.fetchTrunks();
                     this.flash = successMessage;
                 } catch (err) {
@@ -1068,6 +1082,20 @@
                 } finally {
                     this.reloading = false;
                 }
+            },
+            summarizeClusterReload(data) {
+                if (!data || !Array.isArray(data.peers) || !data.peers.length) {
+                    return null;
+                }
+                const failed = data.peers.filter(p => p?.status !== 'ok');
+                if (!failed.length) {
+                    return `Cluster: all ${data.peers.length} node${data.peers.length === 1 ? '' : 's'} reloaded.`;
+                }
+                const detail = failed
+                    .map(p => `${p?.node || '?'}: ${p?.error || 'failed'}`)
+                    .join('; ');
+                const okCount = data.peers.length - failed.length;
+                return `Cluster: ${okCount}/${data.peers.length} nodes reloaded. Failed: ${detail}`;
             },
         }));
     });

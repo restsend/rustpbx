@@ -7,14 +7,21 @@
         filters: {{ filters | tojson }},
         createUrl: {{ create_url | tojson }},
         amiEndpoint: {{ ami_endpoint | default("/ami/v1") | tojson }},
-        forwardingCatalog: {{ forwarding_catalog | default({}) | tojson }}
+        forwardingCatalog: {{ forwarding_catalog | default({}) | tojson }},
+        isCluster: {{ is_cluster | default(false) | tojson }}
     })' x-init="init()">
         <div class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
             <div>
                 <h1 class="text-2xl font-semibold text-slate-900">{{ "routing.title" | t }}</h1>
                 <p class="mt-2 text-sm text-slate-500">{{ "routing.prioritise_trunks" | t }}</p>
             </div>
-            <div class="flex flex-wrap gap-3">
+            <div class="flex flex-wrap items-center gap-3">
+                <label x-show="isCluster"
+                    class="inline-flex select-none items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 shadow-sm">
+                    <input type="checkbox" class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                        x-model="reloadCluster">
+                    <span>{{ "routing.reload_scope_cluster" | t }}</span>
+                </label>
                 <button type="button"
                     class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-200 focus:ring-offset-2"
                     :class="[reloading ? 'cursor-wait border-slate-200 text-slate-400 hover:border-slate-200 hover:text-slate-400' : '', pendingReload && !reloading ? 'reload-glow reload-glow-accent' : '']"
@@ -763,6 +770,12 @@
                                 <span>{{ "routing.validation_database" | t }}</span>
                             </label>
                         </div>
+                        <label class="inline-flex items-center gap-2 text-sm text-slate-600"
+                            x-show="isCluster && validationDataset === 'runtime'" x-cloak>
+                            <input type="checkbox" x-model="validationClusterCompare"
+                                class="h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-500">
+                            <span>{{ "routing.validation_cluster_compare" | t }}</span>
+                        </label>
                         <p class="text-xs text-slate-400">{{ "routing.validation_data_source_hint" | t }}</p>
                     </div>
                     <button type="button"
@@ -840,11 +853,55 @@
                         <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700"
                             x-text="validationError"></div>
                     </template>
+                    <template x-if="validationCluster && !validationLoading">
+                        <div class="space-y-2">
+                            <div class="flex flex-wrap items-center gap-2 rounded-lg border px-4 py-3 text-xs font-semibold"
+                                :class="validationConsistent ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-rose-300 bg-rose-50 text-rose-800'">
+                                <span x-text="validationConsistent ? translations.validation_cluster_consistent : translations.validation_cluster_inconsistent"></span>
+                                <span class="rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                    :class="validationConsistent ? 'bg-emerald-200 text-emerald-800' : 'bg-rose-200 text-rose-800'"
+                                    x-text="`${validationClusterNodes.length} nodes`"></span>
+                            </div>
+                            <template x-if="!validationConsistent">
+                                <div class="space-y-2">
+                                    <div class="text-[11px] text-slate-400"
+                                        x-text="translations.validation_cluster_node_hint"></div>
+                                    <div class="grid gap-2 sm:grid-cols-2">
+                                        <template x-for="entry in validationClusterNodes" :key="entry.node">
+                                            <button type="button" @click="selectValidationNode(entry)"
+                                                class="flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-xs transition"
+                                                :class="[
+                                                    entry.status !== 'ok'
+                                                        ? 'border-rose-200 bg-rose-50 text-rose-700'
+                                                        : (entry.consistent ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-amber-300 bg-amber-50 text-amber-800 ring-1 ring-amber-200'),
+                                                    validationSelectedNode === entry.node ? 'ring-2 ring-sky-300' : '',
+                                                    entry.view ? 'cursor-pointer hover:brightness-95' : 'cursor-default opacity-80',
+                                                ]">
+                                                <span class="font-semibold" x-text="validationNodeLabel(entry.node)"></span>
+                                                <span class="inline-flex items-center gap-1">
+                                                    <span class="h-1.5 w-1.5 rounded-full"
+                                                        :class="entry.status !== 'ok' ? 'bg-rose-500' : (entry.consistent ? 'bg-emerald-500' : 'bg-amber-500')"></span>
+                                                    <span x-text="entry.status !== 'ok'
+                                                        ? translations.validation_cluster_node_error
+                                                        : (entry.consistent ? translations.validation_cluster_node_ok : translations.validation_cluster_node_mismatch)"></span>
+                                                </span>
+                                            </button>
+                                        </template>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+                    </template>
                     <template x-if="validationResult && !validationLoading">
                         <div
                             class="space-y-3 rounded-lg border border-slate-200 bg-white px-4 py-3 text-xs text-slate-600">
                             <div class="flex flex-wrap items-center gap-2">
                                 <span class="font-semibold text-slate-700">{{ "routing.validation_result_rule" | t }}:</span>
+                                <template x-if="validationCluster && validationSelectedNode">
+                                    <span
+                                        class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600 ring-1 ring-slate-200"
+                                        x-text="validationNodeLabel(validationSelectedNode)"></span>
+                                </template>
                                 <span x-text="validationResult.rule || '{{ "routing.validation_result_none" | t }}'"></span>
                                 <span
                                     class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
@@ -975,6 +1032,8 @@
             reloading: false,
             pendingReload: false,
             lastReload: null,
+            isCluster: !!options.isCluster,
+            reloadCluster: true,
             processingDelete: null,
             processingClone: null,
             processingToggle: null,
@@ -988,6 +1047,11 @@
             validationRequestUri: '',
             validationSourceIp: '',
             validationDataset: 'database',
+            validationClusterCompare: true,
+            validationCluster: null,
+            validationConsistent: null,
+            validationClusterNodes: [],
+            validationSelectedNode: null,
             validationLoading: false,
             validationError: null,
             validationResult: null,
@@ -1011,6 +1075,8 @@
                 failed_toggle: '{{ "routing.failed_toggle" | t }}',
                 failed_reload: '{{ "routing.failed_reload" | t }}',
                 reload_complete: '{{ "routing.reload_complete" | t }}',
+                reload_cluster_ok: '{{ "routing.reload_cluster_ok" | t }}',
+                reload_cluster_failed: '{{ "routing.reload_cluster_failed" | t }}',
                 reload_summary: '{{ "routing.reload_summary" | t }}',
                 reload_summary_count: '{{ "routing.reload_summary_count" | t }}',
                 reload_summary_duration: '{{ "routing.reload_summary_duration" | t }}',
@@ -1048,6 +1114,14 @@
                 default_route_label: '{{ "routing.default_route_label" | t }}',
                 validation_provide_number: '{{ "routing.validation_provide_number" | t }}',
                 validation_eval_failed: '{{ "routing.validation_eval_failed" | t }}',
+                validation_cluster_compare: '{{ "routing.validation_cluster_compare" | t }}',
+                validation_cluster_consistent: '{{ "routing.validation_cluster_consistent" | t }}',
+                validation_cluster_inconsistent: '{{ "routing.validation_cluster_inconsistent" | t }}',
+                validation_cluster_node_ok: '{{ "routing.validation_cluster_node_ok" | t }}',
+                validation_cluster_node_mismatch: '{{ "routing.validation_cluster_node_mismatch" | t }}',
+                validation_cluster_node_error: '{{ "routing.validation_cluster_node_error" | t }}',
+                validation_cluster_node_local: '{{ "routing.validation_cluster_node_local" | t }}',
+                validation_cluster_node_hint: '{{ "routing.validation_cluster_node_hint" | t }}',
                 sel_queue_handoff: '{{ "routing.sel_queue_handoff" | t }}',
                 sel_round_robin_balancing: '{{ "routing.sel_round_robin_balancing" | t }}',
                 sel_weighted_distribution: '{{ "routing.sel_weighted_distribution" | t }}',
@@ -1881,7 +1955,8 @@
                 this.pendingReload = false;
                 this.reloading = true;
                 this.error = null;
-                const endpoint = `${this.amiEndpoint.replace(/\/$/, '')}/reload/routes`;
+                const syncCluster = this.isCluster && this.reloadCluster;
+                const endpoint = `${this.amiEndpoint.replace(/\/$/, '')}/reload/routes${syncCluster ? '?sync_cluster=true' : ''}`;
                 let successMessage = null;
                 try {
                     const response = await fetch(endpoint, {
@@ -1899,6 +1974,10 @@
                     const metrics = this.normalizeReloadMetrics(data?.metrics);
                     this.lastReload = metrics;
                     successMessage = this.buildReloadSummary(metrics || (count !== null ? { total: count } : null));
+                    const clusterSummary = this.summarizeClusterReload(data);
+                    if (clusterSummary) {
+                        successMessage = `${successMessage} ${clusterSummary}`;
+                    }
                     await this.fetchRoutes();
                     this.flash = successMessage;
                 } catch (err) {
@@ -1907,6 +1986,22 @@
                 } finally {
                     this.reloading = false;
                 }
+            },
+            summarizeClusterReload(data) {
+                if (!data || !Array.isArray(data.peers) || !data.peers.length) {
+                    return null;
+                }
+                const failed = data.peers.filter(p => p?.status !== 'ok');
+                if (!failed.length) {
+                    return this.translations.reload_cluster_ok
+                        .replace('{count}', data.peers.length);
+                }
+                const detail = failed
+                    .map(p => `${p?.node || '?'}: ${p?.error || 'failed'}`)
+                    .join('; ');
+                return this.translations.reload_cluster_failed
+                    .replace('{count}', data.peers.length - failed.length)
+                    .replace('{total}', data.peers.length) + detail;
             },
             resetValidation() {
                 this.validationInput = '';
@@ -1921,6 +2016,10 @@
                 this.validationError = null;
                 this.validationResult = null;
                 this.validationLatencyMs = null;
+                this.validationCluster = null;
+                this.validationConsistent = null;
+                this.validationClusterNodes = [];
+                this.validationSelectedNode = null;
             },
             openValidation() {
                 if (this.validationLoading) {
@@ -1961,10 +2060,20 @@
                 if (sourceTrunk) {
                     payload.source_trunk = sourceTrunk;
                 }
+                const clusterCompare = this.isCluster
+                    && this.validationDataset === 'runtime'
+                    && this.validationClusterCompare;
+                if (clusterCompare) {
+                    payload.cluster = true;
+                }
                 this.validationLoading = true;
                 this.validationError = null;
                 this.validationResult = null;
                 this.validationLatencyMs = null;
+                this.validationCluster = null;
+                this.validationConsistent = null;
+                this.validationClusterNodes = [];
+                this.validationSelectedNode = null;
                 const started = typeof performance !== 'undefined' ? performance.now() : Date.now();
                 try {
                     const response = await fetch(this.buildUrl('/diagnostics/routes/evaluate'), {
@@ -1979,7 +2088,25 @@
                         throw new Error(message);
                     }
                     const summary = this.transformValidationResult(data, callee);
-                    this.validationResult = summary;
+                    if (data?.cluster === true) {
+                        this.validationCluster = true;
+                        this.validationConsistent = !!data.consistent;
+                        const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+                        this.validationClusterNodes = nodes.map((node) => ({
+                            node: node?.node || '?',
+                            status: node?.status || 'error',
+                            consistent: node?.consistent === true,
+                            error: node?.error || null,
+                            elapsedMs: Number.isFinite(Number(node?.elapsed_ms)) ? Number(node.elapsed_ms) : null,
+                            view: node?.result ? this.transformValidationResult(node.result, callee) : null,
+                        }));
+                        const localEntry = this.validationClusterNodes.find((n) => n.node === 'local');
+                        const firstAvailable = this.validationClusterNodes.find((n) => n.view) || null;
+                        this.validationSelectedNode = firstAvailable ? firstAvailable.node : null;
+                        this.validationResult = localEntry?.view || firstAvailable?.view || summary;
+                    } else {
+                        this.validationResult = summary;
+                    }
                     const ended = typeof performance !== 'undefined' ? performance.now() : Date.now();
                     const latencyMs = Math.max(1, Math.round(ended - started));
                     this.validationLatencyMs = latencyMs;
@@ -1988,6 +2115,16 @@
                 } finally {
                     this.validationLoading = false;
                 }
+            },
+            selectValidationNode(entry) {
+                if (!entry || !entry.view) {
+                    return;
+                }
+                this.validationSelectedNode = entry.node;
+                this.validationResult = entry.view;
+            },
+            validationNodeLabel(node) {
+                return node === 'local' ? this.translations.validation_cluster_node_local : node;
             },
             transformValidationResult(data, input) {
                 const outcome = data?.outcome || {};

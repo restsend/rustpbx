@@ -27,6 +27,8 @@ pub fn rwi_to_call_command(
         | RwiCommandPayload::ListCalls
         | RwiCommandPayload::SetVar { .. }
         | RwiCommandPayload::GetVar { .. }
+        | RwiCommandPayload::SetUserData { .. }
+        | RwiCommandPayload::GetUserData { .. }
         | RwiCommandPayload::AttachCall { .. }
         | RwiCommandPayload::DetachCall { .. }
         | RwiCommandPayload::SipMessage { .. }

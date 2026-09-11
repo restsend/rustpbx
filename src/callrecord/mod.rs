@@ -1371,6 +1371,13 @@ impl CallRecordManager {
         let receiver = &mut self.receiver;
         let saver = self.saver.as_ref();
         let hooks = &self.hooks;
+        // Identity of the node processing this call — stamped into every
+        // record's metadata so the console can tell which machine handled a
+        // CDR in multi-node deployments. Reuses the Contact-advertising
+        // address resolved once per process at startup.
+        let self_ip = crate::proxy::sip_contact::pick_local_interface_ip()
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| "127.0.0.1".to_string());
         let mut records = Vec::with_capacity(batch_size);
         let mut receiver_closed = false;
         let mut shutting_down = false;
@@ -1401,6 +1408,17 @@ impl CallRecordManager {
                     }
 
                     let started_at = Instant::now();
+                    for record in records.iter_mut() {
+                        let metadata = record.details.metadata.get_or_insert_with(Default::default);
+                        metadata
+                            .entry("self_ip".to_string())
+                            .or_insert_with(|| serde_json::Value::String(self_ip.clone()));
+                        metadata
+                            .entry("hostname".to_string())
+                            .or_insert_with(|| {
+                                serde_json::Value::String(crate::utils::self_hostname().to_string())
+                            });
+                    }
                     for hook in hooks {
                         if let Err(e) = hook.on_record_enrich(&mut records).await {
                             warn!(batch_size = records.len(), "CallRecordHook enrich failed: {}", e);

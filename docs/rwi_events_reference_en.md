@@ -184,6 +184,22 @@ lifecycle events enriched with agent context.
 - `dnis` vs `callee`: same distinction
 - Context is injected by `CallMetaStore` at gateway dispatch time — event producers never fill it manually
 
+### user_data (session user data injection)
+
+On top of the fields above, the gateway injects the **session user data**
+object into **every call-scoped event** under the `user_data` key (a nested
+object, not flattened):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `user_data` | Option\<Object\> | Session user data — replaced wholesale via REST `PUT /calls/active/{session_id}/userdata` or the RWI `call.set_userdata` command; omitted when unset |
+
+Business systems can write CRM ticket ids, customer profiles, etc. at any
+point of the call; every subsequent event (including webhooks) then carries
+the object automatically, and it is persisted into the CDR
+`metadata["user_data"]` when the call ends. Replacements are announced via
+the `call_userdata_updated` event (carrying the full new value).
+
 ### Field Overlap Explanation
 
 Some events (e.g., `RecordStopped`, `IvrNodeEntered`) carry their own `ani`/`dnis` fields. When an event's own field is `None`, `enrich()` automatically backfills from context. Webhook consumers always receive the merged result.
@@ -336,6 +352,23 @@ context when a CC agent participates.
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
 | `leg_id` | String | Held/resumed leg (`caller` / `callee` / ...) |
+| *+ctx* | | Flat context fields |
+
+#### call_userdata_updated
+
+Dispatch: call_owner
+
+The session user data object was **replaced wholesale** (REST
+`PUT /calls/active/{session_id}/userdata` or RWI `call.set_userdata`).
+Carries the complete new object — consumers track changes by replacing their
+local copy (no incremental merge semantics). The new value also rides every
+subsequent call-scoped event under `user_data` and is persisted into the CDR
+`metadata["user_data"]` when the call ends.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | String | Call session identifier (session_id) |
+| `user_data` | Object | Full new user data (JSON object, ≤ 16 KiB serialized) |
 | *+ctx* | | Flat context fields |
 
 #### call_bridged

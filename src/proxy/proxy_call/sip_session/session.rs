@@ -9047,6 +9047,17 @@ impl SipSession {
                     );
                 }
             }
+            // Session user data (set via REST `PUT .../userdata` or the RWI
+            // `call.set_userdata` command) rides into the CDR under a
+            // namespaced `user_data` key so it cannot collide with the flat
+            // system keys above. Safe to read here: the RwiCallRecordGuard
+            // keeps gateway state alive until the record has been built.
+            if let Some(ref gw) = self.server.rwi_gateway {
+                let data = gw.read().get_user_data(&self.context.session_id);
+                if !data.is_empty() {
+                    meta.insert("user_data".to_string(), serde_json::Value::Object(data));
+                }
+            }
             meta
         };
 

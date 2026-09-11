@@ -139,6 +139,11 @@ impl CallMetaStore {
         self.store.get(call_id).map(|r| r.clone())
     }
 
+    /// Whether live call meta exists for `call_id`.
+    pub fn contains_key(&self, call_id: &str) -> bool {
+        self.store.contains_key(call_id)
+    }
+
     pub fn remove(&self, call_id: &str) {
         self.store.remove(call_id);
     }

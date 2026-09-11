@@ -208,6 +208,7 @@ RWI 命令使用 JSON 带标签联合格式。`action` 标识命令类型，`par
 | `call.unhold` | 取消保持 |
 | `call.set_ringback_source` | 设置回铃音来源 |
 | `call.set_var` / `call.get_var` | 设置/读取通话变量 |
+| `call.set_userdata` / `call.get_userdata` | 全量替换/读取会话用户数据对象（见下） |
 | `call.send_dtmf` | 向远端发送 DTMF 数字 |
 | `dtmf.collect` | 收集多位 DTMF 字符串 |
 | `call.leg_add` / `call.leg_remove` | 动态添加/移除通话腿 |
@@ -260,6 +261,29 @@ RWI 命令使用 JSON 带标签联合格式。`action` 标识命令类型，`par
 ```
 
 有效 `reason` 值：`busy`、`forbidden`、`not_found`。
+
+**设置会话用户数据**（全量替换——旧对象整体丢弃）：
+
+```json
+{
+  "action": "call.set_userdata",
+  "action_id": "req-011",
+  "params": {
+    "call_id": "c_92f4",
+    "data": {
+      "crm_id": "C-1001",
+      "customer": { "tier": "gold", "locale": "zh-CN" }
+    }
+  }
+}
+```
+
+`data` 必须是 JSON 对象，序列化后不超过 16 KiB；`call_id` 为通话会话的
+`session_id`（主叫通话与 `call_id` 相同）。成功后会发出携带全量新值的
+`call_userdata_updated` 事件；该对象同时自动附加到后续所有 call-scoped
+事件的 `user_data` 键下，并在通话结束后写入 CDR `metadata["user_data"]`。
+用 `call.get_userdata` 回读（`params`: `{ "call_id": "..." }`，结果在
+`data.user_data`）。
 
 ### 5.3 媒体命令
 
@@ -515,6 +539,7 @@ RWI 命令使用 JSON 带标签联合格式。`action` 标识命令类型，`par
 | `call.hangup` | 通话结束 |
 | `call.no_answer` | 出站腿超时 |
 | `call.busy` | 出站腿返回 486 Busy |
+| `call_userdata_updated` | 会话用户数据被全量替换（携带全量新 `user_data` 对象） |
 
 ### 6.3 媒体事件
 

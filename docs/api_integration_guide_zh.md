@@ -277,6 +277,24 @@ REST 端点挂载在控制台的 `api_prefix` 下（默认为 `/api`，通过 `[
    }
    ```
 
+**会话用户数据（User Data）**：
+
+为活动通话挂载任意业务上下文（CRM 工单号、客户画像等）。值必须是 JSON 对象（≤ 16 KiB），每次写入**全量替换**旧对象。以通话的 `session_id` 为键，并且：
+
+- 自动附加到后续所有 call-scoped RWI 事件 / webhook 的 `user_data` 键下；
+- 每次变更发出 `call_userdata_updated` 事件（携带全量新值）；
+- 通话结束后写入 CDR `metadata["user_data"]`。
+
+`PUT {api_prefix}/calls/active/{session_id}/userdata`
+
+```json
+{ "crm_id": "C-1001", "customer": { "tier": "gold" } }
+```
+
+响应：`200` 返回 `{ "message": "User data updated", "data": { ... } }`；通话不存在/已结束返回 `404`；body 不是 JSON 对象返回 `400`；超过 16 KiB 返回 `413`。
+
+`GET {api_prefix}/calls/active/{session_id}/userdata` — 回读当前对象（未设置时为空对象）。
+
 ### 2.1.1 实时通话转写（SSE）
 
 流式输出活动通话的实时转写文本。第一个订阅者连接时才启动转写，最后一个订阅者断开或通话结束时停止。需要配置 `[proxy.transcript.remote]`（流式 ASR，兼容 Deepgram）；未配置时返回 `503`。

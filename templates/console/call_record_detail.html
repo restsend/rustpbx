@@ -132,6 +132,19 @@
                             <span x-text="record.route_name"></span>
                         </span>
                     </template>
+                    <template x-if="record.self_ip">
+                        <span
+                            class="inline-flex items-center gap-1 rounded-full bg-violet-50 px-3 py-1 text-[11px] font-semibold text-violet-700"
+                            :title="record.hostname ? record.hostname + ' / ' + record.self_ip : record.self_ip">
+                            <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M4 4h12v4.5H4z" />
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M4 11.5h12V16H4z" />
+                                <circle cx="6.4" cy="6.25" r="0.75" fill="currentColor" stroke="none" />
+                                <circle cx="6.4" cy="13.75" r="0.75" fill="currentColor" stroke="none" />
+                            </svg>
+                            <span class="font-mono" x-text="record.self_ip"></span>
+                        </span>
+                    </template>
                 </div>
                 <template x-if="record.hangup_messages && record.hangup_messages.length">
                     <div class="mt-2 space-y-1 text-xs text-slate-500">
