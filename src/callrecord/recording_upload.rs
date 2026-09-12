@@ -654,9 +654,25 @@ impl RecordingUploadHook {
     }
 }
 
+/// Metadata keys that stay CDR/console-only and are stripped from the
+/// `recording_metadata_available` payload: console timeline data (`trace`),
+/// the full segment array (`recording_segments` — the event already carries
+/// the current segment's own extras), RTP quality stats (`media_quality`),
+/// node identity duplicated by the gateway-injected `node_ip` (`self_ip`),
+/// and the root session id duplicated by the event's `session_id` context
+/// field (`session_id`).
+const EVENT_METADATA_EXCLUDED_KEYS: &[&str] = &[
+    "trace",
+    "recording_segments",
+    "self_ip",
+    "media_quality",
+    "session_id",
+];
+
 /// Pure builder for per-segment `recording_metadata_available` payloads.
 /// `extra` flattens call-level metadata first, then the segment's own extras
 /// (segment_type/segment_id/seq/label/…) so segment-specific values win.
+/// Keys in [`EVENT_METADATA_EXCLUDED_KEYS`] are dropped (CDR keeps them).
 fn build_segment_recording_metadata(
     record: &CallRecord,
     media: &CallRecordMedia,
@@ -672,12 +688,16 @@ fn build_segment_recording_metadata(
     }
     let mut extra = record.details.metadata.clone().map(|m| {
         m.into_iter()
+            .filter(|(k, _)| !EVENT_METADATA_EXCLUDED_KEYS.contains(&k.as_str()))
             .filter_map(|(k, v)| flatten(&v).map(|s| (k, s)))
             .collect::<HashMap<_, _>>()
     });
     if let Some(media_extra) = &media.extra {
         let bag = extra.get_or_insert_with(HashMap::new);
         for (key, value) in media_extra {
+            if EVENT_METADATA_EXCLUDED_KEYS.contains(&key.as_str()) {
+                continue;
+            }
             if let Some(s) = flatten(value) {
                 bag.insert(key.clone(), s);
             }
@@ -983,8 +1003,14 @@ impl CallRecordHook for RecordingUploadHook {
                 }
 
                 if let Some(ref gw) = self.rwi_gateway {
+                    // Same exclusion policy as the per-segment events (see
+                    // build_segment_recording_metadata). `recording_segments`
+                    // is re-added below as the documented aggregate-event
+                    // discriminator, so consumers can tell this summary apart
+                    // from the per-segment events.
                     let mut extra = record.details.metadata.clone().map(|m| {
                         m.into_iter()
+                            .filter(|(k, _)| !EVENT_METADATA_EXCLUDED_KEYS.contains(&k.as_str()))
                             .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
                             .collect::<HashMap<_, _>>()
                     });
@@ -1101,11 +1127,25 @@ mod tests {
         let mut details = CallDetails::default();
         details.direction = "inbound".to_string();
         // Keys the CC session hook publishes into session extensions, copied
-        // verbatim into CallDetails.metadata by record_snapshot.
+        // verbatim into CallDetails.metadata by record_snapshot — plus the
+        // console-only heavy keys that must NOT leak into the RWI event.
         details.metadata = Some(std::collections::HashMap::from([
             ("agent_id".to_string(), json!("1001")),
             ("agent_name".to_string(), json!("Agent 1001")),
             ("queue_id".to_string(), json!("support")),
+            ("self_ip".to_string(), json!("10.0.0.7")),
+            (
+                "media_quality".to_string(),
+                json!([{"codec": "Opus", "lossPct": 0.0}]),
+            ),
+            (
+                "recording_segments".to_string(),
+                json!([{"segmentType": "agent", "size": 153344}]),
+            ),
+            (
+                "trace".to_string(),
+                json!([{"kind": "answer", "message": "Call answered"}]),
+            ),
         ]));
 
         // CallRecordMedia.extra exactly as reporter::collect_recording_artifacts writes it.
@@ -1148,6 +1188,27 @@ mod tests {
         );
         assert_eq!(meta["seq"].as_str(), Some("2"));
         assert!(meta.get("caller_name").is_some());
+
+        // Console/CDR-only keys are stripped from the event payload; the
+        // event's own segment extras and call-level business keys survive.
+        for excluded in [
+            "session_id",
+            "self_ip",
+            "media_quality",
+            "recording_segments",
+            "trace",
+        ] {
+            assert!(
+                meta.get(excluded).is_none(),
+                "event metadata must not carry `{excluded}`: {meta}"
+            );
+        }
+        for expected in ["agent_id", "agent_name", "queue_id", "segment_type", "segment_id"] {
+            assert!(
+                meta.get(expected).is_some(),
+                "event metadata must keep `{expected}`: {meta}"
+            );
+        }
     }
 
     #[test]

@@ -1557,6 +1557,16 @@ impl CallApp for StepIvrApp {
             }
         }
 
+        // Route-context starts (JumpIvr via `toivr:`) deliver `transferred_from`
+        // as a plain invocation variable rather than ivr_params; surface it on
+        // the dedicated ProviderContext field too (the ivr_params path sets it
+        // at construction time in the builtin app factory).
+        if self.transferred_from.is_none()
+            && let Some(tf) = self.sess.variables.get("transferred_from")
+        {
+            self.transferred_from = Some(tf.clone());
+        }
+
         // Lifecycle resume detection: `ivr_resumed=1` in ivr_params marks
         // this app instance as a CONTINUATION of an already-started logical
         // IVR flow (voip_bridge return, queue return — written by the

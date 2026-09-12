@@ -4365,6 +4365,7 @@ impl SipSession {
                     call_id: self.context.session_id.clone(),
                     queue_id: plan.display_queue_id(),
                     reason: Some("start_failed".to_string()),
+                    skill_groups: None,
                 });
             }
             anyhow!("Failed to start queue app: {:?}", e)
@@ -9490,6 +9491,39 @@ impl SipSession {
 
             CallCommand::Trace { event } => {
                 self.record_trace(event);
+                CommandResult::success()
+            }
+
+            CallCommand::UpdateQueueMeta {
+                queue_name,
+                queue_label,
+                skill_group_id,
+            } => {
+                if let Some(q) = queue_name.clone().filter(|s| !s.is_empty()) {
+                    self.meta.queue_name = Some(q);
+                }
+                if let Some(label) = queue_label.clone().filter(|s| !s.is_empty()) {
+                    self.meta.queue_label = Some(label);
+                }
+                if let Some(sg) = skill_group_id.clone().filter(|s| !s.is_empty()) {
+                    self.meta.skill_group_id = Some(sg);
+                }
+                // Merge into ActiveCallContextMeta: only the queue fields are
+                // overwritten; ivr_node_id / ticket_id / customer_id must
+                // survive the overflow switch.
+                let registry = self.server.active_call_registry.clone();
+                let session_id = self.context.session_id.clone();
+                let mut ctx = registry.get_context_meta(&session_id).unwrap_or_default();
+                if let Some(q) = queue_name.clone().filter(|s| !s.is_empty()) {
+                    ctx.queue_id = Some(q);
+                    if let Some(label) = queue_label.clone().filter(|s| !s.is_empty()) {
+                        ctx.queue_name = Some(label);
+                    }
+                }
+                if let Some(sg) = skill_group_id.clone().filter(|s| !s.is_empty()) {
+                    ctx.skill_group_id = Some(sg);
+                }
+                registry.set_context_meta(session_id, ctx);
                 CommandResult::success()
             }
 

@@ -54,6 +54,7 @@ mod escalation_e2e {
             max_wait_secs,
             acd_policy: None,
             overflow_mode: None,
+            overflow_after_secs: None,
         }
     }
 

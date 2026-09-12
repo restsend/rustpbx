@@ -150,6 +150,26 @@ impl CallController {
         let _ = self.session.send_command(CallCommand::Trace { event });
     }
 
+    /// Update the session's queue metadata (`CallCommand::UpdateQueueMeta`).
+    ///
+    /// Used by the queue app after an overflow / escalation stage joins
+    /// another skill group so CDR / screen-pop / REST context reflect the
+    /// queue the call is CURRENTLY queued in. `None` fields are preserved;
+    /// non-queue context fields (ivr_node_id, ticket_id, customer_id) are
+    /// never touched. Fire-and-forget, like `record_trace`.
+    pub fn update_queue_meta(
+        &self,
+        queue_name: Option<String>,
+        queue_label: Option<String>,
+        skill_group_id: Option<String>,
+    ) {
+        let _ = self.session.send_command(CallCommand::UpdateQueueMeta {
+            queue_name,
+            queue_label,
+            skill_group_id,
+        });
+    }
+
     pub async fn hangup(
         &self,
         reason: Option<CallRecordHangupReason>,

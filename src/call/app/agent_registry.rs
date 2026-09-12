@@ -398,8 +398,29 @@ pub trait AgentRegistry: Send + Sync {
     /// before any agent answered. Default no-op; addon implementations (e.g. CC)
     /// use it to emit skill-group lifecycle events (`skill_group_call_abandoned`).
     /// `queue_id` is the generic queue name — addon implementations map it to
-    /// their own resource identifiers.
-    async fn notify_call_abandoned(&self, _call_id: &str, _queue_id: &str, _waited_secs: u64) {}
+    /// their own resource identifiers. `skill_groups` carries ALL groups the
+    /// call had been queued in (primary + overflow stages, join order) so the
+    /// abandon event shows the full picture.
+    async fn notify_call_abandoned(
+        &self,
+        _call_id: &str,
+        _queue_id: &str,
+        _waited_secs: u64,
+        _skill_groups: &[String],
+    ) {
+    }
+
+    /// Notify the dispatcher that a queued call moved from one overflow /
+    /// escalation skill group to the next (sequential rotation). Implementations
+    /// keep waiting-depth accounting paired per group
+    /// (dequeue `from_group`, enqueue `to_group`). Default no-op.
+    async fn notify_group_switch(
+        &self,
+        _call_id: &str,
+        _from_group: &str,
+        _to_group: &str,
+    ) {
+    }
 
     /// Notify the dispatcher that a queued call exceeded its max wait time.
     /// Addon implementations use it to emit `skill_group_service_unavailable`.

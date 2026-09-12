@@ -2144,6 +2144,7 @@ impl RwiCommandProcessor {
                 call_id: call_id.to_string(),
                 queue_id: qid,
                 reason: None,
+                skill_groups: None,
             });
         }
         Ok(CommandResult::Success)
@@ -2258,6 +2259,7 @@ impl RwiCommandProcessor {
             call_id: call_id.to_string(),
             queue_id: old_queue_id,
             reason: Some("requeued".to_string()),
+            skill_groups: None,
         });
 
         gw.broadcast(&crate::rwi::QueueJoined {

@@ -121,7 +121,8 @@ embedded `event_type` key identifying the event:
   "call_id": "call-abc123",
   "event_type": "call_ringing",
   "event": {
-    /* identical to WS event content (no event_type wrapper) */
+    /* same as the WS event content, minus event_type —
+       the envelope's top-level event_type is the single source of truth */
   }
 }
 
@@ -131,7 +132,7 @@ embedded `event_type` key identifying the event:
 | `timestamp` | u64 | Unix epoch seconds |
 | `call_id` | string | Call identifier (empty string for broadcast-only events) |
 | `event_type` | string | snake_case event type name |
-| `event` | object | Event payload with fields flattened directly (no event_type wrapper) |
+| `event` | object | Event payload with fields flattened directly (**no `event_type` key** — the top-level one governs) |
 
 ---
 
@@ -741,7 +742,6 @@ RWI WebSocket frame (flat payload, `event_type` injected by the gateway):
     "call_start_time": "2026-09-10T08:54:01.155781+00:00",
     "call_end_time": "2026-09-10T08:54:48.155781+00:00",
     "upload_time": "2026-09-10T08:54:18.157941+00:00",
-    "session_id": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40",
     "segment_id": "9c1f02ab",
     "queue_id": "support",
     "label": "1001",
@@ -756,7 +756,8 @@ RWI WebSocket frame (flat payload, `event_type` injected by the gateway):
 ```
 
 Webhook delivery wraps the same payload in an envelope (`webhook.rs`: `rwi` /
-`event_id` idempotency key / `timestamp` / nested `event`):
+`event_id` idempotency key / `timestamp` / nested `event`, which carries no
+`event_type` key):
 
 ```json
 {
@@ -777,7 +778,6 @@ Webhook delivery wraps the same payload in an envelope (`webhook.rs`: `rwi` /
       "call_start_time": "2026-09-10T08:54:01.155781+00:00",
       "call_end_time": "2026-09-10T08:54:48.155781+00:00",
       "upload_time": "2026-09-10T08:54:18.157941+00:00",
-      "session_id": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40",
       "segment_id": "9c1f02ab",
       "queue_id": "support",
       "label": "1001",
@@ -805,6 +805,15 @@ Webhook delivery wraps the same payload in an envelope (`webhook.rs`: `rwi` /
 > segmented recording (whole-call recording / SipFlow) the event keeps its
 > legacy single-event shape and `metadata` carries no `seq` / `label` /
 > `segment_*` keys.
+>
+> **CDR-only keys never enter the event payload**: `trace` (console
+> timeline), `recording_segments` (full segment array), `media_quality`
+> (RTP quality stats), `self_ip` (node IP — the gateway injects `node_ip`
+> at the event level instead), and `session_id` (duplicated by the
+> event-level `session_id` context field) stay in the CDR `metadata` for
+> the console only; the `metadata` pass-through bag strips them. The
+> `recording_segments` key on the aggregate event is unaffected (kept as
+> the aggregate-event discriminator).
 
 #### record_end
 

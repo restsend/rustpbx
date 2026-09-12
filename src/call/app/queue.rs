@@ -143,6 +143,12 @@ pub enum EscalationMode {
     Replace,
     /// Add new skill group agents alongside existing ones (cumulative).
     Cumulative,
+    /// Sequential rotation: wait `threshold_secs` in the current queue, then
+    /// LEAVE it (queue_left{overflow}) and re-queue into the next overflow
+    /// skill group — one group at a time, in step order. Thresholds are
+    /// per-stage dwell times (the stage timer resets at every switch); the
+    /// final group is kept until the global max_wait fires.
+    Sequential,
 }
 
 impl Default for EscalationMode {
@@ -314,7 +320,7 @@ pub struct QueueApp {
     /// Call ID for tracking.
     call_id: String,
     /// When the call entered the queue.
-    enqueued_at: Option<Instant>,
+    pub(crate) enqueued_at: Option<Instant>,
     /// Queue statistics.
     /// (agent_uri, call_id) for agents being dialed concurrently (parallel mode).
     /// When the first agent answers, the rest are cancelled via LegRemove.
@@ -326,6 +332,14 @@ pub struct QueueApp {
     // ── Escalation ──
     /// Skill groups already escalated (to avoid duplicates).
     pub(crate) escalated_groups: Vec<String>,
+    /// Overflow / escalation stage the call is CURRENTLY queued in. `None`
+    /// while still in the primary group — all non-sequential paths (and the
+    /// period before the first sequential switch) keep the legacy behavior.
+    pub(crate) current_group: Option<String>,
+    /// When the current overflow stage started (sequential mode). Stage
+    /// thresholds are evaluated against this timer, which resets at every
+    /// switch; `enqueued_at` remains the global max_wait base.
+    pub(crate) stage_started_at: Option<Instant>,
     /// RWI gateway captured from the application context (for queue lifecycle
     /// webhook events). Captured in `on_enter` so that `on_exit` (which has no
     /// context) can still emit abandon events.
@@ -377,6 +391,8 @@ impl QueueApp {
             comfort_index: 0,
             last_comfort_played: None,
             escalated_groups: Vec::new(),
+            current_group: None,
+            stage_started_at: None,
             rwi_gateway: None,
             transfer_prompt_played: false,
             transfer_token: None,
@@ -445,14 +461,35 @@ impl QueueApp {
 
     /// Notify the agent dispatcher that a queued call was abandoned before any
     /// agent answered. Only meaningful for skill-group-routed queues; the CC
-    /// addon translates this into `skill_group_call_abandoned`.
+    /// addon translates this into `skill_group_call_abandoned`. The event
+    /// carries ALL skill groups the call was queued in (primary + overflow
+    /// stages).
     async fn notify_abandoned(&self, wait_secs: u64) {
         if !self.skill_events_enabled() {
             return;
         }
         if let Some(ref registry) = self.agent_registry {
+            let groups = self.all_skill_groups();
             let _ = registry
-                .notify_call_abandoned(&self.call_id, self.skill_queue_id(), wait_secs)
+                .notify_call_abandoned(
+                    &self.call_id,
+                    self.skill_queue_id(),
+                    wait_secs,
+                    &groups,
+                )
+                .await;
+        }
+    }
+
+    /// Notify the agent dispatcher that a sequential overflow stage switched
+    /// from `from_group` to `to_group` (waiting-depth accounting stays paired).
+    async fn notify_group_switch(&self, from_group: &str, to_group: &str) {
+        if !self.skill_events_enabled() {
+            return;
+        }
+        if let Some(ref registry) = self.agent_registry {
+            let _ = registry
+                .notify_group_switch(&self.call_id, from_group, to_group)
                 .await;
         }
     }
@@ -490,11 +527,37 @@ impl QueueApp {
     }
 
     /// Queue / skill-group id reported to the dispatcher (prefer skill group).
+    ///
+    /// After a sequential overflow switch the dispatcher must attribute
+    /// abandon/timeout events to the stage group the call is queued in NOW,
+    /// not the primary group it originally joined.
     fn skill_queue_id(&self) -> &str {
+        if let Some(group) = self.current_group.as_deref() {
+            return group;
+        }
         self.config
             .skill_group
             .as_deref()
             .unwrap_or(self.config.name.as_str())
+    }
+
+    /// All skill groups this call has been queued in, primary first, in join
+    /// order, deduplicated. Reported on terminal `queue_left` events and to
+    /// the dispatcher so consumers see the COMPLETE skill-group picture even
+    /// after overflow switches.
+    fn all_skill_groups(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if let Some(primary) = self.config.skill_group.as_deref() {
+            if !primary.is_empty() {
+                out.push(primary.to_string());
+            }
+        }
+        for group in &self.escalated_groups {
+            if !out.contains(group) {
+                out.push(group.clone());
+            }
+        }
+        out
     }
 
     /// Skill-group queues with a registry may wait for Idle agents (wait retention).
@@ -632,7 +695,14 @@ impl QueueApp {
             return Ok(AppAction::Continue);
         }
 
-        let Some(ref sg) = self.config.skill_group.clone() else {
+        // Poll the group the call is queued in NOW: after a sequential
+        // overflow switch that is the current stage group, otherwise the
+        // primary group (legacy behavior).
+        let target_group = self
+            .current_group
+            .clone()
+            .or_else(|| self.config.skill_group.clone());
+        let Some(ref sg) = target_group else {
             self.arm_queue_retry(ctrl);
             return Ok(AppAction::Continue);
         };
@@ -1039,10 +1109,18 @@ impl QueueApp {
         self.notify_abandoned(wait_secs).await;
 
         // Emit RWI queue lifecycle event: the call abandoned the queue.
+        // skill_groups carries every group the call was queued in (primary +
+        // overflow stages) — consumers get the full picture in ONE event.
+        let groups = self.all_skill_groups();
         self.emit_rwi(&crate::rwi::event::QueueLeft {
             call_id: self.call_id.clone(),
             queue_id,
             reason: Some("abandoned".to_string()),
+            skill_groups: if groups.is_empty() {
+                None
+            } else {
+                Some(groups)
+            },
         });
 
         let prompts = self.prompts();
@@ -1232,7 +1310,7 @@ impl QueueApp {
     /// degrade to the historical 10s polling cadence. Returns `None` when
     /// every step has already triggered — the timer then stops re-arming.
     pub(crate) fn next_escalation_check_delay(&self) -> Option<Duration> {
-        let wait = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        let wait = self.stage_wait_secs();
         let next = self
             .config
             .escalation_timeline
@@ -1244,12 +1322,41 @@ impl QueueApp {
         Some(Duration::from_secs(remaining.clamp(1, 10)))
     }
 
+    /// Seconds the CURRENT escalation stage has been running.
+    ///
+    /// Sequential mode measures per-stage dwell (`stage_started_at`, reset at
+    /// every overflow switch) so each `threshold_secs` means "stay N seconds
+    /// in the current queue". Replace/Cumulative keep the legacy
+    /// entry-relative timeline — their thresholds remain "seconds since
+    /// enqueue", which is what existing configurations expect.
+    fn stage_wait_secs(&self) -> u64 {
+        match self.config.escalation_mode {
+            EscalationMode::Sequential => self
+                .stage_started_at
+                .or(self.enqueued_at)
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or(0),
+            _ => self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+        }
+    }
+
     /// Check escalation timeline and add/switch skill groups.
+    ///
+    /// Every mode that joins a new overflow group announces it: `UpdateQueueMeta`
+    /// moves the session's reported skill group to the newly joined one
+    /// ("排了哪个队列就设置哪个") and `queue_overflow_joined` tells external
+    /// systems the call queued into the overflow group. Dial behavior differs:
+    /// - Cumulative: dial the new group's agents ALONGSIDE existing legs; the
+    ///   call remains queued in the primary group too.
+    /// - Replace: cancel existing legs, dial the new group only.
+    /// - Sequential: LEAVE the current group first (`queue_left{overflow}` +
+    ///   dispatcher group-switch accounting), then re-queue into the new one —
+    ///   one stage at a time, per-stage dwell measured from the switch.
     async fn check_escalation(&mut self, ctrl: &mut CallController) -> anyhow::Result<()> {
         if self.config.escalation_timeline.is_empty() {
             return Ok(());
         }
-        let wait_secs = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        let wait_secs = self.stage_wait_secs();
 
         for step in self.config.escalation_timeline.clone() {
             if wait_secs >= step.threshold_secs
@@ -1264,15 +1371,48 @@ impl QueueApp {
                     "Queue: escalation triggered"
                 );
 
+                // ── Sequential: leave the CURRENT group before joining the new one.
+                if matches!(self.config.escalation_mode, EscalationMode::Sequential) {
+                    let from_group = self.skill_queue_id().to_string();
+                    if from_group != step.add_skill_group {
+                        // RWI: the call left the queue/stage it was queued in.
+                        // skill_groups lists everything queued SO FAR (up to
+                        // and including the stage being left).
+                        let groups = self.all_skill_groups();
+                        self.emit_rwi(&crate::rwi::event::QueueLeft {
+                            call_id: self.call_id.clone(),
+                            queue_id: self.config.name.clone(),
+                            reason: Some("overflow".to_string()),
+                            skill_groups: if groups.is_empty() {
+                                None
+                            } else {
+                                Some(groups)
+                            },
+                        });
+                        // Dispatcher: paired waiting-depth accounting
+                        // (dequeue `from`, enqueue the new stage).
+                        self.notify_group_switch(&from_group, &step.add_skill_group)
+                            .await;
+                    }
+                }
+
+                // ── Common: the call has now joined another skill group.
+                ctrl.update_queue_meta(None, None, Some(step.add_skill_group.clone()));
+                self.emit_rwi(&crate::rwi::event::QueueOverflowJoined {
+                    call_id: self.call_id.clone(),
+                    queue_id: self.config.name.clone(),
+                    skill_group: step.add_skill_group.clone(),
+                });
+
                     if let Some(ref registry) = self.agent_registry {
                         let agent_uris = match self.config.skill_group.as_deref() {
                             Some(sg) => {
                                 // Skill-group queue: resolve the primary group and
                                 // the escalation target as ONE candidate set so the
                                 // addon can order the union fairly (round-robin)
-                                // when the step is marked fair. Replace mode
-                                // excludes the primary group entirely ("原组
-                                // 不可拾取" after escalate).
+                                // when the step is marked fair. Replace / Sequential
+                                // modes exclude the primary group entirely (the
+                                // call no longer waits on the previous stage).
                                 let primary = format!("skill-group:{}", sg);
                                 let include_primary =
                                     matches!(self.config.escalation_mode, EscalationMode::Cumulative);
@@ -1292,7 +1432,9 @@ impl QueueApp {
                         }
                     };
                     // The union may include agents already being dialed for the
-                    // primary group — never dial a duplicate leg.
+                    // primary group — never dial a duplicate leg. Sequential
+                    // modes never overlap (the previous stage's legs are
+                    // cancelled below first), the filter is harmless there.
                     let agent_uris: Vec<String> = agent_uris
                         .into_iter()
                         .filter(|uri| {
@@ -1316,19 +1458,7 @@ impl QueueApp {
                         }
                         EscalationMode::Replace => {
                             // Cancel existing legs and dial new agents
-                            if !self.pending_agents.is_empty() {
-                                let old_legs: Vec<String> = self
-                                    .pending_agents
-                                    .iter()
-                                    .map(|(_, cid)| cid.clone())
-                                    .collect();
-                                ctrl.remove_legs(&old_legs);
-                                self.pending_agents.clear();
-                            }
-                            // Also reset dynamic agents for new skill group
-                            self.dynamic_agents = None;
-                            self.current_agent_idx = 0;
-
+                            Self::cancel_pending_legs(self, ctrl).await;
                             self.dial_agents(
                                 ctrl,
                                 &agent_uris,
@@ -1336,6 +1466,25 @@ impl QueueApp {
                                 "Queue: replace escalation - failed to dial agent",
                             )
                             .await;
+                        }
+                        EscalationMode::Sequential => {
+                            // Stage switch: drop the previous stage's legs,
+                            // dial ONLY the new stage's candidates, then move
+                            // the stage timer. When the new group resolves to
+                            // zero candidates the switch still counts (the
+                            // call IS queued there) — wait retention keeps
+                            // polling the new group and the next escalation
+                            // check advances the chain.
+                            Self::cancel_pending_legs(self, ctrl).await;
+                            self.dial_agents(
+                                ctrl,
+                                &agent_uris,
+                                "Queue: sequential overflow - dialed agent",
+                                "Queue: sequential overflow - failed to dial agent",
+                            )
+                            .await;
+                            self.current_group = Some(step.add_skill_group.clone());
+                            self.stage_started_at = Some(Instant::now());
                         }
                     }
                 }
@@ -1346,6 +1495,23 @@ impl QueueApp {
         }
 
         Ok(())
+    }
+
+    /// Cancel every in-flight agent leg (Replace / Sequential stage switch).
+    async fn cancel_pending_legs(&mut self, ctrl: &mut CallController) {
+        if !self.pending_agents.is_empty() {
+            let old_legs: Vec<String> = self
+                .pending_agents
+                .iter()
+                .map(|(_, cid)| cid.clone())
+                .collect();
+            ctrl.remove_legs(&old_legs);
+            self.pending_agents.clear();
+        }
+        // Also reset dynamic agents for the new skill group
+        self.dynamic_agents = None;
+        self.current_agent_idx = 0;
+        self.dial_attempts = 0;
     }
 
     fn track_matches(token: Option<&PlaybackToken>, track_id: &str) -> bool {
@@ -1941,6 +2107,14 @@ impl CallApp for QueueApp {
                             call_id: self.call_id.clone(),
                             queue_id: queue_id.clone(),
                             reason: Some("connected".to_string()),
+                            skill_groups: {
+                                let groups = self.all_skill_groups();
+                                if groups.is_empty() {
+                                    None
+                                } else {
+                                    Some(groups)
+                                }
+                            },
                         });
 
                         // The pre-connect transfer prompt may still be playing
@@ -2198,10 +2372,16 @@ impl CallApp for QueueApp {
             // up while waiting). The gateway was captured in `on_enter`.
             // Guarded so that already-connected calls don't emit a duplicate
             // abandon (they emit QueueLeft{reason:"connected"} instead).
+            let groups = self.all_skill_groups();
             self.emit_rwi(&crate::rwi::event::QueueLeft {
                 call_id: self.call_id.clone(),
                 queue_id,
                 reason: Some("abandoned".to_string()),
+                skill_groups: if groups.is_empty() {
+                    None
+                } else {
+                    Some(groups)
+                },
             });
         }
 

@@ -954,6 +954,8 @@ impl SipSession {
                 if params.remove("_ivr_resume").as_deref() == Some("1") {
                     params.insert("ivr_resumed".to_string(), "1".to_string());
                 }
+                self.inject_transfer_origin_params(&leg_id, &mut params)
+                    .await;
                 let resumed = params.get("ivr_resumed").map(|v| v == "1").unwrap_or(false);
                 let result = self.start_ivr_app(&name, params).await;
                 if result.is_ok() && resumed {
@@ -963,10 +965,13 @@ impl SipSession {
             }
             TransferTarget::RoutePoint { name, params } => {
                 info!(session_id = %self.id, %leg_id, route_point = %name, "Handling IVR route-point transfer");
+                // The params reach the successor via the route context (the
+                // executor consumes `_ivr_resume` from its variables); a
+                // successful start hands the lifecycle over.
+                let mut params = params;
+                self.inject_transfer_origin_params(&leg_id, &mut params)
+                    .await;
                 let result = self.start_route_point_app(&name, params).await;
-                // The route-point params reach the successor via the route
-                // context (the executor consumes `_ivr_resume` from its
-                // variables); a successful start hands the lifecycle over.
                 if result.is_ok() {
                     self.meta.ivr_flow_suspended = false;
                 }
@@ -1492,6 +1497,32 @@ impl SipSession {
         g.meta_store
             .get_sync(&self.context.session_id.to_string())
             .and_then(|m| m.transfer_source)
+    }
+
+    /// Surface who handed the call to an IVR target so the successor's step
+    /// provider can see it: `transferred_from` (feeds the existing
+    /// `ProviderContext.transferred_from` field — `"ivr"` / `"queue"` /
+    /// `"agent"`) plus `source_ivr` / `source_node` as plain passthrough
+    /// variables. Without injection the successor is indistinguishable from
+    /// a fresh call entry at the provider boundary.
+    async fn inject_transfer_origin_params(
+        &self,
+        leg_id: &LegId,
+        params: &mut HashMap<String, String>,
+    ) {
+        let source = match self.stashed_transfer_source() {
+            Some(s) => Some(s),
+            None => self.transfer_source_snapshot(leg_id).await,
+        };
+        if let Some(src) = source {
+            params.insert("transferred_from".to_string(), src.source_type.clone());
+            if let Some(ivr) = src.name {
+                params.insert("source_ivr".to_string(), ivr);
+            }
+            if let Some(node) = src.ivr_node_id {
+                params.insert("source_node".to_string(), node);
+            }
+        }
     }
 
     pub(crate) async fn handle_queue_transfer(
@@ -2883,6 +2914,29 @@ mod tests {
                 assert_eq!(
                     o.mode,
                     Some(crate::call::app::queue::EscalationMode::Cumulative)
+                );
+            }
+            other => panic!("expected queue target, got {:?}", other),
+        }
+    }
+
+    /// Sequential overflow via the transfer URI: `overflow_mode=sequential`
+    /// with per-stage dwell in `overflow_after` (60s per stage).
+    #[test]
+    fn test_parse_transfer_target_queue_overflow_overrides_sequential() {
+        let t = parse_transfer_target(
+            "queue:support?overflow_group=l2&overflow_group=l3&overflow_after=60&overflow_mode=sequential&overflow_wait=600",
+        );
+        match t {
+            TransferTarget::Queue { overflow_overrides, .. } => {
+                let o = overflow_overrides.expect("overflow overrides expected");
+                assert_eq!(o.groups, vec!["l2".to_string(), "l3".to_string()]);
+                assert_eq!(o.threshold_secs, Some(60));
+                assert_eq!(o.max_wait_secs, Some(600));
+                assert_eq!(
+                    o.mode,
+                    Some(crate::call::app::queue::EscalationMode::Sequential),
+                    "URI overflow_mode=sequential must parse to EscalationMode::Sequential"
                 );
             }
             other => panic!("expected queue target, got {:?}", other),

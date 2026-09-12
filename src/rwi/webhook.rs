@@ -284,8 +284,14 @@ async fn run_rwi_webhook_handler(
         }
 
         // Determine the RWI event type name and flat value from the enum variant.
-        let event_value = &entry.event.payload;
+        // The nested `event` object carries the flat RWI payload without its
+        // `event_type` key — the envelope's top-level `event_type` is the
+        // single source of truth, so receivers don't see it twice.
         let event_type = entry.event.event_type;
+        let mut event_value = entry.event.payload;
+        if let Some(obj) = event_value.as_object_mut() {
+            obj.remove("event_type");
+        }
 
         // Apply event type filter if configured.
         if !sender.accepts_event(event_type) {
@@ -731,6 +737,20 @@ mod tests {
             types.contains(&"record_end".to_string()),
             "record_end should be delivered via webhook: {types:?}"
         );
+
+        // Envelope contract: the top-level `event_type` is the single source
+        // of truth — the nested flat payload must not repeat it.
+        for body in received.iter() {
+            let event = body["event"].as_object().expect("event object");
+            assert!(
+                !event.contains_key("event_type"),
+                "nested event must not carry event_type: {body}"
+            );
+            assert!(
+                body["event_type"].is_string(),
+                "envelope carries event_type"
+            );
+        }
     }
 
     /// `send_payload` returns a `WebhookCallRecord` capturing the response

@@ -93,6 +93,7 @@ POST {url}/end            ──→ your provider (session cleanup, fire‑and�
 | `ivr_id` | `string` 或 `null` | 用于追踪的 IVR 项目标识 |
 | `variables` | `Map<string, string>` | 会话变量（见“变量”章节） |
 | `event` | `ProviderEvent` 或 `null` | 触发此步骤的事件 |
+| `transferred_from` | `string` 或 `null` | 本次会话是否由转接进入：`"ivr"`（JumpIvr / IVR 间跳转）、`"agent"`、`"queue"`；`null` 表示全新进入。为 `"ivr"` 时，`variables` 中还会附带 `source_ivr`（来源 IVR 短码）与 `source_node`（来源节点 ID） |
 
 ### ProviderEvent 类型
 
@@ -443,6 +444,8 @@ Provider 提供三个 POST 端点，RustPBX 自动调用它们：
 Provider 在 `ProviderContext.variables` 中返回的任何变量也都可用。
 
 通过 `transfer`（`target="ivr:other_ivr"`）或 `jump_ivr` 进入 IVR 时，源动作的所有 `params` 会在发送首个 `ProviderEvent::SessionStart` 前合并入会话变量。因此目标 IVR 的 Provider 会立即在 `ProviderContext.variables` 看到这些值，并可在响应中使用 `$param_name$` 替换。
+
+此外，RustPBX 会**自动注入转接来源**：跳转/转接进入的 IVR，其 `ProviderContext.transferred_from` 为 `"ivr"`（或 `"agent"` / `"queue"`），`variables` 中附带 `source_ivr`（来源 IVR 短码）与 `source_node`（来源节点 ID）。Provider 据此可区分"被跳转续接"与"全新进入"，无需业务方手工传参。
 
 ---
 

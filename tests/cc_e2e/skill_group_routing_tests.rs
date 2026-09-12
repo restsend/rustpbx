@@ -1252,6 +1252,7 @@ fn make_skill_cache(
             max_wait_secs: 90,
             acd_policy: acd_policy.map(|p| p.to_string()),
             overflow_mode: None,
+            overflow_after_secs: None,
         },
     );
     Arc::new(tokio::sync::RwLock::new(cache))
@@ -1439,7 +1440,7 @@ async fn test_notify_abandoned_emits_call_abandoned() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SkillGroupEvent>();
     let adapter = disabled_adapter(cc_registry).with_skill_group_event_tx(tx);
 
-    let _ = TraitAgentRegistry::notify_call_abandoned(&adapter, "call-1", "support", 42).await;
+    let _ = TraitAgentRegistry::notify_call_abandoned(&adapter, "call-1", "support", 42, &[]).await;
 
     match rx.try_recv() {
         Ok(SkillGroupEvent::CallAbandoned {
@@ -1700,6 +1701,7 @@ mod escalation_helpers {
             max_wait_secs,
             acd_policy: None,
             overflow_mode: None,
+            overflow_after_secs: None,
         }
     }
 

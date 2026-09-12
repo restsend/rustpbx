@@ -267,6 +267,7 @@ struct NameCapturingRuntime {
 
 struct RoutePointRuntime {
     started_apps: std::sync::Mutex<Vec<(String, Option<serde_json::Value>)>>,
+    route_variables: std::sync::Mutex<Vec<HashMap<String, String>>>,
     failed_apps: Vec<String>,
     invocation: Option<AppInvocationContext>,
     context: Option<Arc<ApplicationContext>>,
@@ -276,6 +277,7 @@ impl RoutePointRuntime {
     fn new(failed_apps: &[&str]) -> Self {
         Self {
             started_apps: std::sync::Mutex::new(Vec::new()),
+            route_variables: std::sync::Mutex::new(Vec::new()),
             failed_apps: failed_apps.iter().map(|name| name.to_string()).collect(),
             invocation: None,
             context: None,
@@ -284,6 +286,10 @@ impl RoutePointRuntime {
 
     fn started_apps(&self) -> Vec<(String, Option<serde_json::Value>)> {
         self.started_apps.lock().unwrap().clone()
+    }
+
+    fn route_variables(&self) -> Vec<HashMap<String, String>> {
+        self.route_variables.lock().unwrap().clone()
     }
 }
 
@@ -307,6 +313,20 @@ impl AppRuntime for RoutePointRuntime {
             return Err(AppRuntimeError::UnknownApp(app_name.to_string()));
         }
         Ok(())
+    }
+
+    async fn start_app_with_route_context(
+        &self,
+        app_name: &str,
+        params: Option<serde_json::Value>,
+        auto_answer: bool,
+        route_context: crate::call::app::AppRouteContext,
+    ) -> crate::call::runtime::AppResult<()> {
+        self.route_variables
+            .lock()
+            .unwrap()
+            .push(route_context.variables);
+        self.start_app(app_name, params, auto_answer).await
     }
 
     async fn current_app_invocation(&self) -> Option<AppInvocationContext> {
@@ -710,7 +730,10 @@ async fn recording_disabled_still_arms_capture_and_allows_on_demand_start() {
         );
     }
     if let Some(mut bridge) = session.media.bridge.take() {
-        bridge.stop_recording().await.expect("stop on-demand recorder");
+        bridge
+            .stop_recording()
+            .await
+            .expect("stop on-demand recorder");
         bridge.close();
     }
 }
@@ -999,20 +1022,18 @@ async fn test_session_captures_rewritten_dialplan_uris_for_call_record() {
 /// `user_data` key.
 #[tokio::test]
 async fn test_record_snapshot_includes_session_user_data() {
-    use parking_lot::RwLock as PlRwLock;
     use crate::rwi::gateway::RwiGateway;
+    use parking_lot::RwLock as PlRwLock;
 
     let gateway = Arc::new(PlRwLock::new(RwiGateway::new()));
-    let (server, _config) = create_test_server_with_rwi_gateway(
-        ProxyConfig::default(),
-        gateway.clone(),
-    )
-    .await;
+    let (server, _config) =
+        create_test_server_with_rwi_gateway(ProxyConfig::default(), gateway.clone()).await;
 
     // Simulate a REST/RWI write for this session before the record is built.
     {
         let mut gw = gateway.write();
-        gw.meta_store.insert("test-session".into(), Default::default());
+        gw.meta_store
+            .insert("test-session".into(), Default::default());
         let mut data = serde_json::Map::new();
         data.insert("crm_id".to_string(), serde_json::json!("C-1001"));
         gw.set_user_data(&"test-session".to_string(), data)
@@ -1037,13 +1058,12 @@ async fn test_record_snapshot_includes_session_user_data() {
 /// No user data set → no `user_data` key in the CDR metadata.
 #[tokio::test]
 async fn test_record_snapshot_omits_user_data_when_unset() {
-    use parking_lot::RwLock as PlRwLock;
     use crate::rwi::gateway::RwiGateway;
+    use parking_lot::RwLock as PlRwLock;
 
     let gateway = Arc::new(PlRwLock::new(RwiGateway::new()));
     let (server, _config) =
-        create_test_server_with_rwi_gateway(ProxyConfig::default(), gateway.clone())
-            .await;
+        create_test_server_with_rwi_gateway(ProxyConfig::default(), gateway.clone()).await;
 
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
     let session = build_session_on_server(server, dialplan).await;
@@ -1082,7 +1102,10 @@ async fn test_record_snapshot_flags_silent_legs_only_when_answered() {
         Some("proxy.leg_media_incomplete")
     );
     assert_eq!(
-        snapshot.metadata.get("mediaIssueLegs").and_then(|v| v.as_str()),
+        snapshot
+            .metadata
+            .get("mediaIssueLegs")
+            .and_then(|v| v.as_str()),
         Some("caller")
     );
     assert_eq!(
@@ -1098,12 +1121,10 @@ async fn test_record_snapshot_flags_silent_legs_only_when_answered() {
         .and_then(|v| v.as_array())
         .expect("trace array present");
     assert!(
-        trace
-            .iter()
-            .any(|ev| ev["kind"] == "media_issue"
-                && ev["code"] == "proxy.leg_media_incomplete"
-                && ev["severity"] == "warn"
-                && ev["detail"]["legs"] == "caller"),
+        trace.iter().any(|ev| ev["kind"] == "media_issue"
+            && ev["code"] == "proxy.leg_media_incomplete"
+            && ev["severity"] == "warn"
+            && ev["detail"]["legs"] == "caller"),
         "expected a media_issue trace event for the caller, got {trace:?}"
     );
 
@@ -1111,7 +1132,10 @@ async fn test_record_snapshot_flags_silent_legs_only_when_answered() {
     session.meta.ever_connected_callee = true;
     let snapshot = session.record_snapshot();
     assert_eq!(
-        snapshot.metadata.get("mediaIssueLegs").and_then(|v| v.as_str()),
+        snapshot
+            .metadata
+            .get("mediaIssueLegs")
+            .and_then(|v| v.as_str()),
         Some("caller+callee")
     );
 
@@ -1130,7 +1154,10 @@ async fn test_record_snapshot_flags_silent_legs_only_when_answered() {
     }
     let snapshot = session.record_snapshot();
     assert_eq!(
-        snapshot.metadata.get("mediaIssueLegs").and_then(|v| v.as_str()),
+        snapshot
+            .metadata
+            .get("mediaIssueLegs")
+            .and_then(|v| v.as_str()),
         Some("callee")
     );
 
@@ -2264,12 +2291,7 @@ async fn assert_resume_media_restores_route(
         result.message
     );
     assert!(
-        session
-            .media
-            .bridge
-            .as_ref()
-            .unwrap()
-            .is_bridged(),
+        session.media.bridge.as_ref().unwrap().is_bridged(),
         "route must be restored once ResumeMedia is executed"
     );
 }
@@ -2317,12 +2339,7 @@ async fn play_prompt(
         .await
         .expect("play should succeed");
     assert!(
-        !session
-            .media
-            .bridge
-            .as_ref()
-            .unwrap()
-            .is_bridged(),
+        !session.media.bridge.as_ref().unwrap().is_bridged(),
         "route should be inactive while the prompt plays"
     );
 }
@@ -2429,18 +2446,9 @@ async fn hold_unhold_commands_tear_and_restore_route() {
             None,
         )
         .await;
+    assert!(result.success, "Hold must succeed: {:?}", result.message);
     assert!(
-        result.success,
-        "Hold must succeed: {:?}",
-        result.message
-    );
-    assert!(
-        !session
-            .media
-            .bridge
-            .as_ref()
-            .unwrap()
-            .is_bridged(),
+        !session.media.bridge.as_ref().unwrap().is_bridged(),
         "hold must tear the media route"
     );
 
@@ -2452,18 +2460,9 @@ async fn hold_unhold_commands_tear_and_restore_route() {
             None,
         )
         .await;
+    assert!(result.success, "Unhold must succeed: {:?}", result.message);
     assert!(
-        result.success,
-        "Unhold must succeed: {:?}",
-        result.message
-    );
-    assert!(
-        session
-            .media
-            .bridge
-            .as_ref()
-            .unwrap()
-            .is_bridged(),
+        session.media.bridge.as_ref().unwrap().is_bridged(),
         "unhold must restore the media route"
     );
 }
@@ -2482,8 +2481,7 @@ async fn ivr_exec_app_exit_restores_held_route() {
         None,
         true,
     );
-    let (mut session, _handle, mut _cmd_rx) =
-        build_session_with_cmd_rx_on(server, dialplan).await;
+    let (mut session, _handle, mut _cmd_rx) = build_session_with_cmd_rx_on(server, dialplan).await;
     let mut mb = playable_bridge("ivr-exec-restore").await;
     mb.accept(crate::media::media_bridge::LegSide::A).await;
     mb.accept(crate::media::media_bridge::LegSide::B).await;
@@ -2505,14 +2503,13 @@ async fn ivr_exec_app_exit_restores_held_route() {
             None,
         )
         .await;
-    assert!(result.success, "Hold(callee) must succeed: {:?}", result.message);
     assert!(
-        !session
-            .media
-            .bridge
-            .as_ref()
-            .unwrap()
-            .is_bridged(),
+        result.success,
+        "Hold(callee) must succeed: {:?}",
+        result.message
+    );
+    assert!(
+        !session.media.bridge.as_ref().unwrap().is_bridged(),
         "ivr.exec hold must tear the media route"
     );
 
@@ -2537,12 +2534,7 @@ async fn ivr_exec_app_exit_restores_held_route() {
         result.message
     );
     assert!(
-        session
-            .media
-            .bridge
-            .as_ref()
-            .unwrap()
-            .is_bridged(),
+        session.media.bridge.as_ref().unwrap().is_bridged(),
         "AppExited must restore the route held by ivr.exec"
     );
 }
@@ -2830,20 +2822,23 @@ async fn finalize_recording_for_app_shutdown_finalizes_active_recording() {
 async fn record_stopped_event_path_predicts_archived_layout() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (server, _) = create_test_server().await;
-    server.recording_policy.store(Arc::new(Some(
-        crate::config::RecordingPolicy {
+    server
+        .recording_policy
+        .store(Arc::new(Some(crate::config::RecordingPolicy {
             enabled: Some(true),
             recording_type: Some(crate::config::RecordingType::Local),
             path: Some(dir.path().to_string_lossy().into_owned()),
             ..Default::default()
-        },
-    )));
+        })));
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
     let session = build_session_on_server(server, dialplan).await;
 
     let start = chrono::DateTime::parse_from_rfc3339(&session.context.created_at)
         .expect("session created_at is rfc3339");
-    let day = start.with_timezone(&chrono::Utc).format("%Y%m%d").to_string();
+    let day = start
+        .with_timezone(&chrono::Utc)
+        .format("%Y%m%d")
+        .to_string();
 
     // Pipeline artifact (direct child of the recording root) must be
     // advertised at its final dated archive location.
@@ -2866,14 +2861,14 @@ async fn record_stopped_event_path_predicts_archived_layout() {
 async fn record_stopped_event_path_unchanged_for_sipflow_media() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (server, _) = create_test_server().await;
-    server.recording_policy.store(Arc::new(Some(
-        crate::config::RecordingPolicy {
+    server
+        .recording_policy
+        .store(Arc::new(Some(crate::config::RecordingPolicy {
             enabled: Some(true),
             recording_type: Some(crate::config::RecordingType::Sipflow),
             path: Some(dir.path().to_string_lossy().into_owned()),
             ..Default::default()
-        },
-    )));
+        })));
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
     let session = build_session_on_server(server, dialplan).await;
 
@@ -3794,4 +3789,59 @@ async fn ivr_start_failure_with_same_target_does_not_retry() {
         .await
         .expect_err("same-target fallback must not retry");
     assert!(err.to_string().contains("broken-ivr"));
+}
+
+/// A `toivr:` transfer (JumpIvr) must inject the flow origin into the
+/// successor's route-context variables so its step provider can see who
+/// jumped to it: `transferred_from` (feeds the ProviderContext field, see
+/// the executor's variable fallback) plus `source_ivr` / `source_node`
+/// passthrough variables. Without injection the successor is
+/// indistinguishable from a fresh call entry.
+#[tokio::test]
+async fn toivr_transfer_injects_origin_into_route_variables() {
+    use crate::proxy::routing::RouteAction;
+
+    let config = route_point_config(RouteAction {
+        action: Some("application".to_string()),
+        app: Some("ivr".to_string()),
+        ..Default::default()
+    });
+    let mut session = build_session_with_config(route_point_dialplan(), config).await;
+    let runtime = Arc::new(RoutePointRuntime::new(&[]));
+    session.app_runtime = runtime.clone();
+
+    // Simulate the call flowing out of a step IVR: the session remembers
+    // the originating IVR short code and the current node.
+    session.session_ext_set("ivr", "main-ivr");
+    session.session_ext_set("ivr_node", "menu-1");
+
+    let result = execute_route_point_transfer(&mut session).await;
+
+    assert!(
+        result.success,
+        "toivr transfer should succeed: {:?}",
+        result
+    );
+    assert_eq!(
+        runtime
+            .started_apps()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>(),
+        vec!["ivr".to_string()]
+    );
+    let vars = runtime.route_variables();
+    assert_eq!(vars.len(), 1);
+    assert_eq!(
+        vars[0].get("transferred_from").map(String::as_str),
+        Some("ivr")
+    );
+    assert_eq!(
+        vars[0].get("source_ivr").map(String::as_str),
+        Some("main-ivr")
+    );
+    assert_eq!(
+        vars[0].get("source_node").map(String::as_str),
+        Some("menu-1")
+    );
 }

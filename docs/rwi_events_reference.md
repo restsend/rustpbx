@@ -117,7 +117,7 @@ Webhook 处理器运行在专用的 tokio 运行时上,其 HTTP 推送不会与 
   "call_id": "call-abc123",
   "event_type": "call_ringing",
   "event": {
-    /* 与 WS 事件内容完全一致（无 event_type 包裹） */
+    /* 与 WS 事件内容一致，但不含 event_type —— 信封顶层 event_type 是唯一来源 */
   }
 }
 ```
@@ -128,7 +128,7 @@ Webhook 处理器运行在专用的 tokio 运行时上,其 HTTP 推送不会与 
 | `timestamp` | u64 | Unix 时间戳（秒） |
 | `call_id` | string | 呼叫标识（广播事件为空字符串） |
 | `event_type` | string | snake_case 事件类型名 |
-| `event` | object | 事件载荷，字段直接扁平化（无 event_type 包裹） |
+| `event` | object | 事件载荷，字段直接扁平化（**不含 `event_type` 键**，以顶层为准） |
 
 ---
 
@@ -179,7 +179,7 @@ Webhook 处理器运行在专用的 tokio 运行时上,其 HTTP 推送不会与 
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `src_ip` | Option\<String\> | 本节点 cluster 内 IP（来自 `[cluster].peers` 自匹配）。仅在启用 cluster 且匹配到本机 peer 时注入；单机/NAT 不匹配时不出现 |
+| `node_ip` | Option\<String\> | 本节点 cluster 内 IP（来自 `[cluster].peers` 自匹配）。仅在启用 cluster 且匹配到本机 peer 时注入；单机/NAT 不匹配时不出现 |
 | `client_ip` | Option\<String\> | 坐席客户端注册 IP（`Location.destination`，WS/WebRTC 即 cc-phone 源 IP）。仅当事件载荷带 `agent_id` 且该坐席已注册时注入 |
 
 两者都遵循“事件自身字段优先”约定——事件自身携带同名非空字段时不会被覆盖。`client_ip` 在坐席注册/注销时从 locator 捕获，分发时 O(1) 查 registry，无发射时查询。
@@ -687,7 +687,6 @@ RWI WebSocket 帧（payload 平铺，`event_type` 由网关注入）：
     "call_start_time": "2026-09-10T08:54:01.155781+00:00",
     "call_end_time": "2026-09-10T08:54:48.155781+00:00",
     "upload_time": "2026-09-10T08:54:18.157941+00:00",
-    "session_id": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40",
     "segment_id": "9c1f02ab",
     "queue_id": "support",
     "label": "1001",
@@ -701,7 +700,7 @@ RWI WebSocket 帧（payload 平铺，`event_type` 由网关注入）：
 }
 ```
 
-Webhook 投递使用信封（`webhook.rs`：`rwi` / `event_id` 幂等键 / `timestamp` / `event` 内嵌同一 payload）：
+Webhook 投递使用信封（`webhook.rs`：`rwi` / `event_id` 幂等键 / `timestamp` / `event` 内嵌同一 payload，但 `event` 内不含 `event_type`）：
 
 ```json
 {
@@ -722,7 +721,6 @@ Webhook 投递使用信封（`webhook.rs`：`rwi` / `event_id` 幂等键 / `time
       "call_start_time": "2026-09-10T08:54:01.155781+00:00",
       "call_end_time": "2026-09-10T08:54:48.155781+00:00",
       "upload_time": "2026-09-10T08:54:18.157941+00:00",
-      "session_id": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40",
       "segment_id": "9c1f02ab",
       "queue_id": "support",
       "label": "1001",
@@ -738,6 +736,8 @@ Webhook 投递使用信封（`webhook.rs`：`rwi` / `event_id` 幂等键 / `time
 ```
 
 > 上面是坐席段的真实序列化输出（`cargo test segment_metadata_wire_shape -- --nocapture`）：文件名 `filename` 中 seq 为两位零填充（`_02_`）；`extra` 内所有值均为字符串（`seq` 数字同样序列化为 `"2"`）；`extra` 键序不定（HashMap）；typed 字段为 `None` 时整个键不出现（如无主被叫信息时没有 `caller_name`/`callee_name`）。`download_url`：`type=local` 为归档路径（`{path}/{YYYYMMDD}/{filename}`），`type=http`/`s3` 为上传返回/预构造的 URL。addon 透传键（wholesale 的 `switch_flag` 等）原样附加；不存在 `unique_id` typed 字段。无分段录音时（整通话录制 / SipFlow）事件保持原有单条形态，`metadata` 不含 `seq` / `label` / `segment_*` 键。
+>
+> **CDR-only 键不进入事件载荷**：`trace`（console 时间线）、`recording_segments`（完整分段数组，见下）、`media_quality`（RTP 质量统计）、`self_ip`（节点 IP，事件层由 gateway 注入 `node_ip`）、`session_id`（与事件层 `session_id` 上下文字段重复）只保留在 CDR `metadata` 中供 console 使用，`metadata` 透传袋会将其剔除。聚合条事件中的 `recording_segments` 键不受此影响（作为聚合事件的标识保留）。
 
 #### record_end
 
@@ -994,7 +994,19 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 |------|------|------|
 | `call_id` | String | 呼叫标识 |
 | `queue_id` | String | 队列 ID |
-| `reason` | Option\<String\> | 离开原因 |
+| `reason` | Option\<String\> | 离开原因（`connected` / `abandoned` / `timeout` / `fallback` / `overflow` / `system_error`） |
+| `skill_groups` | Option\<Vec\<String\>\> | 该呼叫排过的**全部**技能组（主组在前，溢出阶段按加入顺序）；非技能组路由时省略该字段（向后兼容） |
+| *+ctx* | | 扁平化上下文 |
+
+#### queue_overflow_joined
+
+> 溢出/升级到新技能组时补发的"溢出队列排队"事件。累积（cumulative）/替换（replace）模式下呼叫同时停留在主组与新组；顺序（sequential）模式下表示前一个阶段已以 `queue_left{reason:"overflow"}` 离开、重新排入本组。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫标识 |
+| `queue_id` | String | 原始队列 ID（与 `queue_joined` 同源） |
+| `skill_group` | String | 新排入的溢出技能组 ID |
 | *+ctx* | | 扁平化上下文 |
 
 #### queue_wait_timeout
@@ -1226,6 +1238,7 @@ SIP PUBLISH  presence 状态变化（每个本地 PUBLISH 触发）。
 | `skill_group_id` | String | 技能组 ID |
 | `waited_secs` | u64 | 已等待时长（秒） |
 | `position` | usize | 放弃时位置 |
+| `skill_groups` | Option\<Vec\<String\>\> | 排过的全部技能组（主组+溢出阶段，按加入顺序）；非技能组路由时省略 |
 
 **skill_group_service_unavailable** — 排队呼叫最终无法服务（触发 no-answer 动作链）：
 

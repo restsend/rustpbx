@@ -155,7 +155,7 @@ pub struct QueueOverflowOverrides {
     pub threshold_secs: Option<u64>,
     /// `overflow_wait=` — queue max wait before fallback (seconds).
     pub max_wait_secs: Option<u64>,
-    /// `overflow_mode=` — `replace` or `cumulative`.
+    /// `overflow_mode=` — `replace`, `cumulative` or `sequential`.
     pub mode: Option<crate::call::app::queue::EscalationMode>,
 }
 
@@ -167,11 +167,12 @@ impl QueueOverflowOverrides {
             && self.mode.is_none()
     }
 
-    /// Parse an `overflow_mode=` value (`replace` / `cumulative`).
+    /// Parse an `overflow_mode=` value (`replace` / `cumulative` / `sequential`).
     pub fn parse_escalation_mode(s: &str) -> Option<crate::call::app::queue::EscalationMode> {
         match s.trim().to_ascii_lowercase().as_str() {
             "replace" => Some(crate::call::app::queue::EscalationMode::Replace),
             "cumulative" => Some(crate::call::app::queue::EscalationMode::Cumulative),
+            "sequential" => Some(crate::call::app::queue::EscalationMode::Sequential),
             _ => None,
         }
     }
@@ -411,7 +412,63 @@ mod tests {
             QueueOverflowOverrides::parse_escalation_mode(" Replace "),
             Some(crate::call::app::queue::EscalationMode::Replace)
         );
+        assert_eq!(
+            QueueOverflowOverrides::parse_escalation_mode("sequential"),
+            Some(crate::call::app::queue::EscalationMode::Sequential)
+        );
+        assert_eq!(
+            QueueOverflowOverrides::parse_escalation_mode(" Sequential "),
+            Some(crate::call::app::queue::EscalationMode::Sequential)
+        );
         assert_eq!(QueueOverflowOverrides::parse_escalation_mode("bogus"), None);
+    }
+
+    /// Sequential overflow overrides build a per-stage plan: every step gets
+    /// the stage dwell (threshold) and the plan keeps `Sequential` mode.
+    #[test]
+    fn test_overflow_overrides_apply_sequential_plan() {
+        use crate::call::app::queue::{EscalationMode, EscalationPlan, EscalationStep};
+
+        let mut plan = EscalationPlan {
+            mode: EscalationMode::Replace,
+            steps: vec![EscalationStep {
+                threshold_secs: 90,
+                add_skill_group: "legacy".into(),
+                fair: false,
+            }],
+        };
+        let overrides = QueueOverflowOverrides {
+            groups: vec!["l2".into(), "l3".into()],
+            threshold_secs: Some(60),
+            max_wait_secs: Some(600),
+            mode: Some(EscalationMode::Sequential),
+        };
+        overrides.apply_to_plan(&mut plan);
+
+        assert_eq!(plan.mode, EscalationMode::Sequential);
+        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(plan.steps[0].add_skill_group, "l2");
+        assert_eq!(plan.steps[1].add_skill_group, "l3");
+        assert_eq!(
+            plan.steps[0].threshold_secs, 60,
+            "each sequential stage waits the configured dwell"
+        );
+        assert_eq!(plan.steps[1].threshold_secs, 60);
+    }
+
+    /// EscalationMode serde: snake_case wire names, including "sequential"
+    /// (UI / config payloads).
+    #[test]
+    fn test_escalation_mode_serde_sequential() {
+        assert_eq!(
+            serde_json::from_str::<crate::call::app::queue::EscalationMode>("\"sequential\"")
+                .unwrap(),
+            crate::call::app::queue::EscalationMode::Sequential
+        );
+        assert_eq!(
+            serde_json::to_string(&crate::call::app::queue::EscalationMode::Sequential).unwrap(),
+            "\"sequential\""
+        );
     }
 
     #[test]

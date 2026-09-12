@@ -336,6 +336,9 @@ auto_start_at = "media" # default; use "answer" to wait for 200
 # carries a capture tap, so on-demand recording works even with
 # enabled = false. CDR metadata.recording_segments lists every slice, and a
 # `recording_metadata_available` event is emitted per segment on upload.
+# The event payload stays lean: CDR-only keys (trace, recording_segments,
+# media_quality, self_ip, session_id) remain in the CDR metadata for the
+# console and are not repeated into the event.
 # Prefer record_stop before transfer/REFER.
 #
 # Contact-center agent segments: in cc.toml, `[recording]

@@ -76,7 +76,10 @@ pub struct SessionContext {
     /// The provider receives this and can use it for correlation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_data: Option<serde_json::Value>,
-    /// Whether this session was re-entered from agent/queue (transfer-back).
+    /// Whether this session was re-entered from a transfer (JumpIvr /
+    /// agent / queue transfer-back). Values: `"ivr"`, `"agent"`, `"queue"`.
+    /// When `"ivr"`, the `source_ivr` / `source_node` variables carry the
+    /// originating IVR short code and node id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transferred_from: Option<String>,
 }
@@ -114,8 +117,11 @@ pub struct ProviderContext {
     /// Monotonic step index (0 for SessionStart, incremented thereafter).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub step_index: Option<u32>,
-    /// Whether this session was re-entered from agent/queue.
-    /// Values: `"agent"`, `"queue"`, or `None`.
+    /// Whether this session was re-entered from a transfer (JumpIvr /
+    /// agent / queue transfer-back). Values: `"ivr"`, `"agent"`, `"queue"`,
+    /// or `None` for a fresh entry. When `"ivr"`, the variables map also
+    /// carries `source_ivr` (originating IVR short code) and `source_node`
+    /// (originating node id).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transferred_from: Option<String>,
 }

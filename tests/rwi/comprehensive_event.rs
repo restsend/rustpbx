@@ -270,6 +270,7 @@ async fn test_comprehensive_core_event_structs() {
                 call_id: call_id.into(),
                 queue_id: "support".into(),
                 reason: Some("answered".into()),
+                skill_groups: None,
             },
         );
         gw.fan_out(

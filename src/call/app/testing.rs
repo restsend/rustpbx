@@ -50,6 +50,11 @@ pub struct MockCallStack {
     event_tx: mpsc::UnboundedSender<ControllerEvent>,
     /// Observe [`CallCommand`]s emitted by the app toward the SIP layer.
     cmd_rx: MockCmdRx,
+    /// Queue-meta updates (`CallCommand::UpdateQueueMeta`) recorded here —
+    /// `next_cmd` skips them (fire-and-forget metadata, like `Trace`) so
+    /// existing command-sequence assertions keep working while overflow tests
+    /// can still assert on the recorded sequence.
+    pub queue_meta_updates: std::sync::Mutex<Vec<(Option<String>, Option<String>, Option<String>)>>,
     /// Cancel token wired to the AppEventLoop's child token.
     cancel: CancellationToken,
     /// Background task running the AppEventLoop.
@@ -102,6 +107,7 @@ impl MockCallStack {
         Self {
             event_tx,
             cmd_rx,
+            queue_meta_updates: std::sync::Mutex::new(Vec::new()),
             cancel,
             join_handle,
         }
@@ -185,6 +191,20 @@ impl MockCallStack {
         loop {
             match tokio::time::timeout_at(deadline, self.cmd_rx.recv()).await {
                 Ok(Some(CallCommand::Trace { .. })) => continue,
+                Ok(Some(cmd @ CallCommand::UpdateQueueMeta { .. })) => {
+                    if let CallCommand::UpdateQueueMeta {
+                        queue_name,
+                        queue_label,
+                        skill_group_id,
+                    } = &cmd
+                    {
+                        self.queue_meta_updates
+                            .lock()
+                            .unwrap()
+                            .push((queue_name.clone(), queue_label.clone(), skill_group_id.clone()));
+                    }
+                    continue;
+                }
                 Ok(Some(cmd)) => return Some(cmd),
                 Ok(None) | Err(_) => return None,
             }
@@ -207,10 +227,24 @@ impl MockCallStack {
     }
 
     /// Drain all immediately-available commands without blocking.
+    /// `UpdateQueueMeta` commands are recorded (see [`Self::queue_meta_updates`])
+    /// and skipped, mirroring [`Self::next_cmd`].
     pub fn drain_cmds(&mut self) -> Vec<CallCommand> {
         let mut out = Vec::new();
         while let Ok(cmd) = self.cmd_rx.try_recv() {
-            out.push(cmd);
+            match cmd {
+                CallCommand::UpdateQueueMeta {
+                    queue_name,
+                    queue_label,
+                    skill_group_id,
+                } => {
+                    self.queue_meta_updates
+                        .lock()
+                        .unwrap()
+                        .push((queue_name, queue_label, skill_group_id));
+                }
+                other => out.push(other),
+            }
         }
         out
     }

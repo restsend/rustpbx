@@ -241,7 +241,7 @@ async fn acceptance_queue_waiting_and_abandoned_bridge_metrics_and_db() {
     );
 
     adapter
-        .notify_call_abandoned("call-wait-1", "sg-wait", 9)
+        .notify_call_abandoned("call-wait-1", "sg-wait", 9, &[])
         .await;
     tokio::time::sleep(Duration::from_millis(80)).await;
 
@@ -472,11 +472,11 @@ async fn acceptance_abandon_after_queue_decrements_waiting_exactly_once() {
         .await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     adapter
-        .notify_call_abandoned("call-once", "sg-once", 1)
+        .notify_call_abandoned("call-once", "sg-once", 1, &[])
         .await;
     // Duplicate abandon must not drive waiting negative.
     adapter
-        .notify_call_abandoned("call-once", "sg-once", 1)
+        .notify_call_abandoned("call-once", "sg-once", 1, &[])
         .await;
     tokio::time::sleep(Duration::from_millis(80)).await;
 

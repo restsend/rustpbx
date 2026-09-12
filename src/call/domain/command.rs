@@ -178,6 +178,21 @@ pub enum CallCommand {
     /// survey) suppress surveys on transferred legs.
     MarkTransferred,
 
+    /// Update the queue metadata on the session ("排了哪个队列就设置哪个"):
+    /// after an overflow / escalation stage joins another skill group, the
+    /// queue app pushes the newly-joined group so CDR, agent screen-pop and
+    /// REST context queries reflect the CURRENT queue. Fields absent (None)
+    /// are left unchanged. Existing non-queue context fields (ivr_node_id,
+    /// ticket_id, customer_id) are always preserved.
+    UpdateQueueMeta {
+        /// Machine queue id to set (e.g. the overflow group id).
+        queue_name: Option<String>,
+        /// Display label to set.
+        queue_label: Option<String>,
+        /// Current skill-group id to set.
+        skill_group_id: Option<String>,
+    },
+
     /// Hang up the connected agent leg(s) — every `Connected` leg except
     /// `caller` / `consult`. Consult-transfer completion must BYE the agent
     /// that way because queue-dispatched agent legs carry a generated UUID,
@@ -680,6 +695,7 @@ impl CallCommand {
                 | CallCommand::Hold { music: None, .. }
                 | CallCommand::Unhold { .. }
                 | CallCommand::Trace { .. }
+                | CallCommand::UpdateQueueMeta { .. }
         )
     }
 }
@@ -709,6 +725,20 @@ mod tests {
             leg_id: LegId::new("leg-1"),
         };
         assert!(answer.is_signaling_only());
+
+        // Fire-and-forget metadata updates work in bypass mode too.
+        assert!(CallCommand::UpdateQueueMeta {
+            queue_name: Some("l2".into()),
+            queue_label: None,
+            skill_group_id: Some("l2".into()),
+        }
+        .is_signaling_only());
+        assert!(!CallCommand::UpdateQueueMeta {
+            queue_name: None,
+            queue_label: None,
+            skill_group_id: None,
+        }
+        .requires_media());
 
         let play = CallCommand::Play {
             leg_id: None,

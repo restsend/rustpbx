@@ -15,7 +15,7 @@ mod tests {
         VoicePrompts,
     };
     use rsipstack::sip::Uri;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     /// Build a registered-agent [`Location`] for the given SIP URI.
     fn test_location(uri: &str) -> Location {
@@ -1754,6 +1754,13 @@ mod tests {
     struct HookRecordingRegistry {
         inner: crate::call::app::agent_registry::memory::MemoryRegistry,
         escalation_calls: std::sync::Mutex<Vec<(String, Vec<String>, bool)>>,
+        /// `include_primary` flag of each resolve_escalation_targets call
+        /// (same order as `escalation_calls`).
+        escalation_include_primary: std::sync::Mutex<Vec<bool>>,
+        /// (from_group, to_group) of each notify_group_switch call.
+        group_switches: std::sync::Mutex<Vec<(String, String)>>,
+        /// Every `target_uri` seen by resolve_target_with_policy.
+        resolve_targets: std::sync::Mutex<Vec<String>>,
         /// URIs returned by resolve_escalation_targets (rotated per call so
         /// repeated invocations can be distinguished).
         escalation_uris: Vec<Vec<String>>,
@@ -1771,6 +1778,9 @@ mod tests {
             Self {
                 inner: crate::call::app::agent_registry::memory::MemoryRegistry::new(),
                 escalation_calls: std::sync::Mutex::new(Vec::new()),
+                escalation_include_primary: std::sync::Mutex::new(Vec::new()),
+                group_switches: std::sync::Mutex::new(Vec::new()),
+                resolve_targets: std::sync::Mutex::new(Vec::new()),
                 escalation_uris: Vec::new(),
                 resolve_uris: Vec::new(),
                 resolve_calls: std::sync::Mutex::new(0),
@@ -1875,6 +1885,10 @@ mod tests {
             _policy: Option<&str>,
             _call_id: &str,
         ) -> Vec<String> {
+            self.resolve_targets
+                .lock()
+                .unwrap()
+                .push(target_uri.to_string());
             if let Some(uris) = self.next_resolve_uris() {
                 return uris;
             }
@@ -1896,6 +1910,10 @@ mod tests {
                 add_group_ids.to_vec(),
                 fair,
             ));
+            self.escalation_include_primary
+                .lock()
+                .unwrap()
+                .push(include_primary);
             let calls = self.escalation_calls.lock().unwrap().len();
             self.escalation_uris
                 .get(calls - 1)
@@ -1903,12 +1921,25 @@ mod tests {
                 .unwrap_or_default()
         }
 
-        async fn notify_call_abandoned(&self, call_id: &str, queue_id: &str, waited_secs: u64) {
+        async fn notify_call_abandoned(
+            &self,
+            call_id: &str,
+            queue_id: &str,
+            waited_secs: u64,
+            _skill_groups: &[String],
+        ) {
             self.abandoned.lock().unwrap().push((
                 call_id.to_string(),
                 queue_id.to_string(),
                 waited_secs,
             ));
+        }
+
+        async fn notify_group_switch(&self, _call_id: &str, from_group: &str, to_group: &str) {
+            self.group_switches
+                .lock()
+                .unwrap()
+                .push((from_group.to_string(), to_group.to_string()));
         }
 
         async fn notify_call_timeout(&self, call_id: &str, queue_id: &str, waited_secs: u64) {
@@ -2179,6 +2210,506 @@ mod tests {
             None,
             "no wake-up after every step has triggered"
         );
+    }
+
+    /// Sequential mode measures stage-relative dwell: after a stage switch
+    /// the NEXT threshold is evaluated against `stage_started_at`, not
+    /// `enqueued_at`. The two timings diverge when enqueue is old but the
+    /// stage just reset — entry-relative would fire immediately.
+    #[tokio::test]
+    async fn test_sequential_stage_timer_is_stage_relative() {
+        let mut config = build_simple_queue_config();
+        config.escalation_mode = crate::call::app::queue::EscalationMode::Sequential;
+        config.escalation_timeline = vec![
+            crate::call::app::queue::EscalationStep {
+                threshold_secs: 1,
+                add_skill_group: "stage_b".to_string(),
+                fair: false,
+            },
+            crate::call::app::queue::EscalationStep {
+                threshold_secs: 60,
+                add_skill_group: "stage_c".to_string(),
+                fair: false,
+            },
+        ];
+
+        // Sequential: enqueue happened 120s ago, but stage_c's dwell timer
+        // JUST reset at the switch to stage_b → 60s stage dwell clamps to the
+        // 10s poll (entry-relative would compute 60-120 → fire in 1s).
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config.clone());
+        queue.enqueued_at = Some(Instant::now() - Duration::from_secs(120));
+        queue.stage_started_at = Some(Instant::now());
+        queue.escalated_groups = vec!["stage_b".to_string()];
+        assert_eq!(
+            queue.next_escalation_check_delay(),
+            Some(Duration::from_secs(10)),
+            "stage-relative dwell (60s from reset) clamps to the 10s poll"
+        );
+
+        // Regression guard: Replace keeps ENTRY-relative semantics — the same
+        // 120s-old enqueue must fire the 60s threshold at the 1s floor.
+        let mut replace_config = config.clone();
+        replace_config.escalation_mode = crate::call::app::queue::EscalationMode::Replace;
+        let plan = replace_config.to_plan();
+        let mut queue = QueueApp::new(plan, replace_config);
+        queue.enqueued_at = Some(Instant::now() - Duration::from_secs(120));
+        queue.escalated_groups = vec!["stage_b".to_string()];
+        assert_eq!(
+            queue.next_escalation_check_delay(),
+            Some(Duration::from_secs(1)),
+            "replace mode keeps entry-relative timeline"
+        );
+    }
+
+    /// Sequential overflow: after the stage dwell elapses the call LEAVES the
+    /// current group (queue_left{overflow}) and re-queues into the next one
+    /// (queue_overflow_joined), the dispatcher sees the paired group switch,
+    /// and the session meta moves to the newly joined group
+    /// ("排了哪个队列就设置哪个").
+    #[tokio::test]
+    async fn test_sequential_overflow_switches_stage() {
+        use crate::rwi::auth::RwiIdentity;
+        use std::sync::Arc;
+
+        let mut gw = crate::rwi::gateway::RwiGateway::new();
+        let sid = gw
+            .create_session(RwiIdentity {
+                token: "t".into(),
+                scopes: vec![],
+            })
+            .read()
+            .id
+            .clone();
+        let (gws_tx, mut gws_rx) = tokio::sync::mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, gws_tx);
+        let gw = Arc::new(parking_lot::RwLock::new(gw));
+
+        let mut config = build_simple_queue_config();
+        config.escalation_mode = crate::call::app::queue::EscalationMode::Sequential;
+        config.escalation_timeline = vec![crate::call::app::queue::EscalationStep {
+            threshold_secs: 0,
+            add_skill_group: "support_l2".to_string(),
+            fair: false,
+        }];
+        config.skill_group = Some("support".to_string());
+        config.skill_routing_enabled = true;
+        // No dialable agents → the app enters wait retention and stays there
+        // across the stage switch (the switch itself needs no candidates).
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+
+        let registry = Arc::new(HookRecordingRegistry::new());
+        let plan = config.to_plan();
+        let queue = QueueApp::new(plan, config)
+            .with_agent_registry(registry.clone())
+            .with_call_id("call-seq-1".to_string());
+
+        let mut ctx = crate::call::app::ApplicationContext::new(
+            sea_orm::DatabaseConnection::default(),
+            crate::call::app::CallInfo {
+                session_id: "test-session".into(),
+                caller: "1001".into(),
+                callee: "1002".into(),
+                direction: "inbound".into(),
+                started_at: chrono::Utc::now(),
+                sip_headers: Default::default(),
+                route_name: None,
+            },
+            Arc::new(crate::config::Config::default()),
+            reqwest::Client::new(),
+        );
+        ctx.rwi_gateway = Some(gw);
+
+        let mut stack = MockCallStack::run_with_context(Box::new(queue), ctx);
+        stack.enter().await;
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+
+        // Dwell elapsed → fire the escalation check.
+        stack.timeout("escalation_check");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Consume pending commands (records UpdateQueueMeta, skips it).
+        stack.drain_cmds();
+
+        // Dispatcher saw the paired switch (primary → overflow stage).
+        assert_eq!(
+            registry.group_switches.lock().unwrap().clone(),
+            vec![("support".to_string(), "support_l2".to_string())],
+            "sequential switch must notify the dispatcher (from, to)"
+        );
+        // Resolution dials ONLY the new group — the previous stage is left.
+        assert_eq!(
+            registry.escalation_include_primary.lock().unwrap().clone(),
+            vec![false],
+            "sequential resolve must exclude the primary group"
+        );
+        // Session meta now reports the newly joined group.
+        assert_eq!(
+            stack.queue_meta_updates.lock().unwrap().clone(),
+            vec![(None, None, Some("support_l2".to_string()))],
+            "UpdateQueueMeta must move the session to the overflow group"
+        );
+
+        // RWI event order: queue_left{overflow} THEN queue_overflow_joined.
+        let mut events: Vec<(String, serde_json::Value)> = Vec::new();
+        for _ in 0..40 {
+            while let Ok(v) = gws_rx.try_recv() {
+                let t = v.get("event_type").and_then(|e| e.as_str()).unwrap_or("");
+                if t == "queue_left" || t == "queue_overflow_joined" {
+                    events.push((t.to_string(), v));
+                }
+            }
+            if events.len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            events.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>(),
+            vec!["queue_left", "queue_overflow_joined"],
+            "leave-current then join-overflow, in that order: {events:?}"
+        );
+        assert_eq!(
+            events[0].1["reason"].as_str(),
+            Some("overflow"),
+            "stage switch leaves with reason=overflow"
+        );
+        assert_eq!(
+            events[0].1["skill_groups"],
+            serde_json::json!(["support"]),
+            "the leave event lists groups queued SO FAR (primary only)"
+        );
+        assert_eq!(
+            events[1].1["skill_group"].as_str(),
+            Some("support_l2"),
+            "overflow join announces the newly queued group"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// Sequential stage timer resets at every switch: right after switching
+    /// to stage B (60s dwell), the next check must NOT advance to stage C —
+    /// entry-relative timing would have advanced immediately.
+    #[tokio::test]
+    async fn test_sequential_no_immediate_second_switch() {
+        use std::sync::Arc;
+        let mut config = build_simple_queue_config();
+        config.escalation_mode = crate::call::app::queue::EscalationMode::Sequential;
+        config.escalation_timeline = vec![
+            crate::call::app::queue::EscalationStep {
+                threshold_secs: 0,
+                add_skill_group: "stage_b".to_string(),
+                fair: false,
+            },
+            crate::call::app::queue::EscalationStep {
+                threshold_secs: 60,
+                add_skill_group: "stage_c".to_string(),
+                fair: false,
+            },
+        ];
+        config.skill_group = Some("support".to_string());
+        config.skill_routing_enabled = true;
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+
+        let registry = Arc::new(HookRecordingRegistry::new());
+        let plan = config.to_plan();
+        let queue = QueueApp::new(plan, config)
+            .with_agent_registry(registry.clone())
+            .with_call_id("call-seq-2".to_string());
+
+        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
+        stack.enter().await;
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+
+        stack.timeout("escalation_check");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            registry.group_switches.lock().unwrap().len(),
+            1,
+            "first switch (support → stage_b)"
+        );
+
+        // Fire again IMMEDIATELY: stage_c's 60s dwell just reset, so nothing
+        // may switch. (Entry-relative timing would switch here — that is the
+        // regression this test forbids.)
+        stack.timeout("escalation_check");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            registry.group_switches.lock().unwrap().len(),
+            1,
+            "stage timer reset — no immediate second switch"
+        );
+        // current_group moved to stage_b; wait retention polls resolve THAT.
+        assert_eq!(
+            registry.resolve_targets.lock().unwrap().last().is_none()
+                || registry.resolve_targets.lock().unwrap().is_empty(),
+            true,
+            "precondition: nothing polled yet"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// After sequential switches, a later wait-retention poll must resolve
+    /// the CURRENT stage group (skill-group:stage_b), not the primary.
+    #[tokio::test]
+    async fn test_sequential_wait_retention_polls_current_stage() {
+        use std::sync::Arc;
+        let mut config = build_simple_queue_config();
+        config.escalation_mode = crate::call::app::queue::EscalationMode::Sequential;
+        config.escalation_timeline = vec![crate::call::app::queue::EscalationStep {
+            threshold_secs: 0,
+            add_skill_group: "stage_b".to_string(),
+            fair: false,
+        }];
+        config.skill_group = Some("support".to_string());
+        config.skill_routing_enabled = true;
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+
+        let registry = Arc::new(HookRecordingRegistry::new());
+        let plan = config.to_plan();
+        let queue = QueueApp::new(plan, config)
+            .with_agent_registry(registry.clone())
+            .with_call_id("call-seq-3".to_string());
+
+        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
+        stack.enter().await;
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+
+        // Switch to stage_b.
+        stack.timeout("escalation_check");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Wait-retention poll after the switch.
+        stack.timeout("queue_retry");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let targets = registry.resolve_targets.lock().unwrap().clone();
+        assert!(
+            targets
+                .iter()
+                .any(|t| t == "skill-group:stage_b"),
+            "retention poll must target the CURRENT stage group, got {targets:?}"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// Cumulative escalation announces the overflow-group join
+    /// (queue_overflow_joined + UpdateQueueMeta) while the call STAYS queued
+    /// in the primary group — no queue_left is emitted.
+    #[tokio::test]
+    async fn test_cumulative_escalation_announces_overflow_join() {
+        use crate::rwi::auth::RwiIdentity;
+        use std::sync::Arc;
+
+        let mut gw = crate::rwi::gateway::RwiGateway::new();
+        let sid = gw
+            .create_session(RwiIdentity {
+                token: "t".into(),
+                scopes: vec![],
+            })
+            .read()
+            .id
+            .clone();
+        let (gws_tx, mut gws_rx) = tokio::sync::mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, gws_tx);
+        let gw = Arc::new(parking_lot::RwLock::new(gw));
+
+        let mut config = build_simple_queue_config();
+        config.escalation_mode = crate::call::app::queue::EscalationMode::Cumulative;
+        config.escalation_timeline = vec![crate::call::app::queue::EscalationStep {
+            threshold_secs: 0,
+            add_skill_group: "support_l2".to_string(),
+            fair: true,
+        }];
+        config.skill_group = Some("support".to_string());
+        config.skill_routing_enabled = true;
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+
+        let registry = Arc::new(HookRecordingRegistry::new());
+        let plan = config.to_plan();
+        let queue = QueueApp::new(plan, config)
+            .with_agent_registry(registry.clone())
+            .with_call_id("call-cum-1".to_string());
+
+        let mut ctx = crate::call::app::ApplicationContext::new(
+            sea_orm::DatabaseConnection::default(),
+            crate::call::app::CallInfo {
+                session_id: "test-session".into(),
+                caller: "1001".into(),
+                callee: "1002".into(),
+                direction: "inbound".into(),
+                started_at: chrono::Utc::now(),
+                sip_headers: Default::default(),
+                route_name: None,
+            },
+            Arc::new(crate::config::Config::default()),
+            reqwest::Client::new(),
+        );
+        ctx.rwi_gateway = Some(gw);
+
+        let mut stack = MockCallStack::run_with_context(Box::new(queue), ctx);
+        stack.enter().await;
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+
+        stack.timeout("escalation_check");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        stack.drain_cmds();
+
+        // Meta moved to the overflow group; dispatcher accounting untouched
+        // (cumulative keeps the call queued in the primary group too).
+        assert_eq!(
+            stack.queue_meta_updates.lock().unwrap().clone(),
+            vec![(None, None, Some("support_l2".to_string()))],
+        );
+        assert!(
+            registry.group_switches.lock().unwrap().is_empty(),
+            "cumulative mode never leaves the primary queue"
+        );
+
+        let mut saw_join = false;
+        let mut saw_leave = false;
+        for _ in 0..40 {
+            while let Ok(v) = gws_rx.try_recv() {
+                let t = v.get("event_type").and_then(|e| e.as_str()).unwrap_or("");
+                if t == "queue_overflow_joined"
+                    && v["skill_group"].as_str() == Some("support_l2")
+                {
+                    saw_join = true;
+                }
+                if t == "queue_left" {
+                    saw_leave = true;
+                }
+            }
+            if saw_join {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(saw_join, "cumulative escalation must emit queue_overflow_joined");
+        assert!(!saw_leave, "cumulative escalation must NOT leave the queue");
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// Terminal queue_left after sequential switches carries ALL groups the
+    /// call was queued in (primary + every overflow stage, join order).
+    #[tokio::test]
+    async fn test_sequential_exit_carries_all_skill_groups() {
+        use crate::rwi::auth::RwiIdentity;
+        use std::sync::Arc;
+
+        let mut gw = crate::rwi::gateway::RwiGateway::new();
+        let sid = gw
+            .create_session(RwiIdentity {
+                token: "t".into(),
+                scopes: vec![],
+            })
+            .read()
+            .id
+            .clone();
+        let (gws_tx, mut gws_rx) = tokio::sync::mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, gws_tx);
+        let gw = Arc::new(parking_lot::RwLock::new(gw));
+
+        let mut config = build_simple_queue_config();
+        config.escalation_mode = crate::call::app::queue::EscalationMode::Sequential;
+        config.escalation_timeline = vec![
+            crate::call::app::queue::EscalationStep {
+                threshold_secs: 0,
+                add_skill_group: "stage_b".to_string(),
+                fair: false,
+            },
+            crate::call::app::queue::EscalationStep {
+                threshold_secs: 0,
+                add_skill_group: "stage_c".to_string(),
+                fair: false,
+            },
+        ];
+        config.skill_group = Some("support".to_string());
+        config.skill_routing_enabled = true;
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+
+        let registry = Arc::new(HookRecordingRegistry::new());
+        let plan = config.to_plan();
+        let queue = QueueApp::new(plan, config)
+            .with_agent_registry(registry.clone())
+            .with_call_id("call-seq-4".to_string());
+
+        let mut ctx = crate::call::app::ApplicationContext::new(
+            sea_orm::DatabaseConnection::default(),
+            crate::call::app::CallInfo {
+                session_id: "test-session".into(),
+                caller: "1001".into(),
+                callee: "1002".into(),
+                direction: "inbound".into(),
+                started_at: chrono::Utc::now(),
+                sip_headers: Default::default(),
+                route_name: None,
+            },
+            Arc::new(crate::config::Config::default()),
+            reqwest::Client::new(),
+        );
+        ctx.rwi_gateway = Some(gw);
+
+        let mut stack = MockCallStack::run_with_context(Box::new(queue), ctx);
+        stack.enter().await;
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+
+        // Advance both stages.
+        stack.timeout("escalation_check");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        stack.timeout("escalation_check");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            registry.group_switches.lock().unwrap().len(),
+            2,
+            "both stages switched (support→stage_b→stage_c)"
+        );
+
+        // Caller hangs up → on_exit emits the terminal queue_left.
+        stack.remote_hangup();
+        let mut terminal: Option<serde_json::Value> = None;
+        for _ in 0..40 {
+            while let Ok(v) = gws_rx.try_recv() {
+                let t = v.get("event_type").and_then(|e| e.as_str()).unwrap_or("");
+                if t == "queue_left" && v["reason"].as_str() == Some("abandoned") {
+                    terminal = Some(v);
+                }
+            }
+            if terminal.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let terminal = terminal.expect("terminal queue_left{abandoned} must be emitted");
+        assert_eq!(
+            terminal["skill_groups"],
+            serde_json::json!(["support", "stage_b", "stage_c"]),
+            "terminal queue_left carries the FULL skill-group history"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
     }
 
     /// `agent_availability`: unknown agent → None (legacy dial), own-call

@@ -485,11 +485,31 @@ pub struct QueuePositionChanged {
 }
 rwi_event!(QueuePositionChanged, "queue_position_changed");
 
+/// The call was queued into an overflow (escalation) skill group in addition
+/// to (cumulative/replace modes) or instead of (sequential mode) its original
+/// queue. Emitted by both the core queue app and the ACD engine when an
+/// overflow/escalation step joins a new group.
+#[derive(Debug, Clone, Serialize)]
+pub struct QueueOverflowJoined {
+    pub call_id: String,
+    /// Queue id the call originally joined (`queue_joined` source).
+    pub queue_id: String,
+    /// Overflow / escalation skill group just joined.
+    pub skill_group: String,
+}
+rwi_event!(QueueOverflowJoined, "queue_overflow_joined");
+
 #[derive(Debug, Clone, Serialize)]
 pub struct QueueLeft {
     pub call_id: String,
     pub queue_id: String,
     pub reason: Option<String>,
+    /// All skill groups the call was queued in during this queue entry
+    /// (primary first, overflow/escalation groups in join order). `None`
+    /// (omitted from the payload) when the queue is not skill-group routed —
+    /// keeps the wire format backward compatible.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_groups: Option<Vec<String>>,
 }
 rwi_event!(QueueLeft, "queue_left");
 
@@ -991,5 +1011,59 @@ mod tests {
             payload.get("transfer_source").is_none(),
             "missing transfer_source must be omitted entirely"
         );
+    }
+
+    /// `queue_left` wire compatibility: without skill groups the payload is
+    /// byte-identical to the legacy shape (no `skill_groups` key); with them
+    /// the array rides along. `queue_overflow_joined` carries the newly
+    /// joined overflow group.
+    #[test]
+    fn queue_left_skill_groups_wire_compat() {
+        let plain = to_flat_payload(
+            &QueueLeft {
+                call_id: "call-1".into(),
+                queue_id: "support".into(),
+                reason: Some("abandoned".into()),
+                skill_groups: None,
+            },
+            None,
+        );
+        assert_eq!(plain["reason"], "abandoned");
+        assert!(
+            plain.get("skill_groups").is_none(),
+            "no skill groups → field omitted (legacy wire format)"
+        );
+
+        let grouped = to_flat_payload(
+            &QueueLeft {
+                call_id: "call-1".into(),
+                queue_id: "support".into(),
+                reason: Some("abandoned".into()),
+                skill_groups: Some(vec!["support".into(), "support_l2".into()]),
+            },
+            None,
+        );
+        assert_eq!(
+            grouped["skill_groups"],
+            serde_json::json!(["support", "support_l2"]),
+            "terminal queue_left carries the FULL skill-group history"
+        );
+
+        let joined = to_flat_payload(
+            &QueueOverflowJoined {
+                call_id: "call-1".into(),
+                queue_id: "support".into(),
+                skill_group: "support_l2".into(),
+            },
+            None,
+        );
+        assert_eq!(joined["queue_id"], "support");
+        assert_eq!(joined["skill_group"], "support_l2");
+    }
+
+    #[test]
+    fn queue_overflow_joined_event_type() {
+        assert_eq!(QueueOverflowJoined::TYPE, "queue_overflow_joined");
+        assert_eq!(QueueLeft::TYPE, "queue_left");
     }
 }
