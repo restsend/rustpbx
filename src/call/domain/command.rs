@@ -727,18 +727,22 @@ mod tests {
         assert!(answer.is_signaling_only());
 
         // Fire-and-forget metadata updates work in bypass mode too.
-        assert!(CallCommand::UpdateQueueMeta {
-            queue_name: Some("l2".into()),
-            queue_label: None,
-            skill_group_id: Some("l2".into()),
-        }
-        .is_signaling_only());
-        assert!(!CallCommand::UpdateQueueMeta {
-            queue_name: None,
-            queue_label: None,
-            skill_group_id: None,
-        }
-        .requires_media());
+        assert!(
+            CallCommand::UpdateQueueMeta {
+                queue_name: Some("l2".into()),
+                queue_label: None,
+                skill_group_id: Some("l2".into()),
+            }
+            .is_signaling_only()
+        );
+        assert!(
+            !CallCommand::UpdateQueueMeta {
+                queue_name: None,
+                queue_label: None,
+                skill_group_id: None,
+            }
+            .requires_media()
+        );
 
         let play = CallCommand::Play {
             leg_id: None,

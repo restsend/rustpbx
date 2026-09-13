@@ -11,7 +11,7 @@
 use crate::common::e2e_test_server::{E2eTestServer, E2eTestServerInject};
 use crate::common::test_ua::TestUaEvent;
 use rustpbx::call::user::SipUser;
-use rustpbx::config::{LocatorWebhookConfig, ProxyConfig};
+use rustpbx::config::{LocatorWebhookConfig, MediaProxyMode, ProxyConfig};
 use rustpbx::proxy::routing::{
     MatchConditions, RouteAction, RouteQueueConfig, RouteQueueStrategyConfig,
     RouteQueueTargetConfig, RouteRule,
@@ -189,29 +189,30 @@ async fn test_inbound_refer_success() {
 
     alice_event_handle.abort();
 
-    // Wait for PBX to originate to Charlie
-    let mut found_transfer_call = false;
-    for _ in 0..50 {
-        let calls = server.get_active_calls();
-        let outbound_calls: Vec<_> = calls
-            .iter()
-            .filter(|c| {
-                c.direction == "outbound"
-                    && c.callee
-                        .as_ref()
-                        .map(|s: &String| s.contains("charlie"))
-                        .unwrap_or(false)
-            })
-            .collect();
-        if !outbound_calls.is_empty() {
-            found_transfer_call = true;
-            break;
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
+    // Blind inbound REFERs execute INSIDE the original session by default
+    // (`inbound_refer_in_session`): the B leg is swapped in place — Charlie
+    // answered the originated transfer leg above — and no separate outbound
+    // session is ever created. One logical call stays one session (one CDR).
+    sleep(Duration::from_millis(500)).await;
+    let calls = server.get_active_calls();
     assert!(
-        found_transfer_call,
-        "PBX should originate a call to Charlie after receiving REFER"
+        calls
+            .iter()
+            .all(|c| c.direction != "outbound"),
+        "in-session REFER must not originate a separate outbound call, got {:?}",
+        calls
+            .iter()
+            .map(|c| (c.direction.clone(), c.callee.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        calls.len(),
+        1,
+        "the transferred call must remain a single session, got {:?}",
+        calls
+            .iter()
+            .map(|c| (c.direction.clone(), c.callee.clone()))
+            .collect::<Vec<_>>()
     );
 
     // Cleanup
@@ -302,6 +303,12 @@ async fn test_inbound_refer_to_queue_route() {
             "registrar".to_string(),
             "call".to_string(),
         ]),
+        // Anchored media: the in-session queue hand-off requires the caller
+        // leg to live on a MediaBridge (hold music / agent bridging), which
+        // only exists when the call is media-anchored. Under the default
+        // `Auto` mode a plain alice→bob call is P2P and the queue dial
+        // correctly refuses to run without a bridge.
+        media_proxy: MediaProxyMode::All,
         ..Default::default()
     };
     config.route_originated_calls = true;
@@ -341,7 +348,10 @@ async fn test_inbound_refer_to_queue_route() {
                     SipUser {
                         id: 1,
                         username: "alice".to_string(),
-                        password: Some("password".to_string()),
+                        // Must match the credentials `create_ua` registers
+                        // with (alice → password123, bob → password456,
+                        // everyone else → password).
+                        password: Some("password123".to_string()),
                         enabled: true,
                         realm: Some("127.0.0.1".to_string()),
                         ..Default::default()
@@ -349,7 +359,7 @@ async fn test_inbound_refer_to_queue_route() {
                     SipUser {
                         id: 2,
                         username: "bob".to_string(),
-                        password: Some("password".to_string()),
+                        password: Some("password456".to_string()),
                         enabled: true,
                         realm: Some("127.0.0.1".to_string()),
                         ..Default::default()
@@ -513,23 +523,24 @@ async fn test_inbound_refer_to_queue_route() {
 
     // The in-session hand-off emits call_transferred annotated with the
     // routed target type, and queue_joined proves the QueueApp started in
-    // the original session.
+    // the original session. Webhook payloads nest the event fields under
+    // the envelope's `event` object.
     let transferred = wait_webhook_event(&capture, "call_transferred", Duration::from_secs(5))
         .await
         .expect("webhook must receive call_transferred for the REFER queue hand-off");
-    assert_eq!(transferred["transfer_target_type"], "queue");
+    assert_eq!(transferred["event"]["transfer_target_type"], "queue");
     assert!(
-        transferred["transfer_target"]
+        transferred["event"]["transfer_target"]
             .as_str()
             .is_some_and(|t| t.contains(REFER_NUMBER)),
         "transfer_target must retain the original bare number: {}",
-        transferred["transfer_target"]
+        transferred["event"]["transfer_target"]
     );
 
     let joined = wait_webhook_event(&capture, "queue_joined", Duration::from_secs(5))
         .await
         .expect("webhook must receive queue_joined for the in-session queue start");
-    assert_eq!(joined["queue_id"], QUEUE_NAME);
+    assert_eq!(joined["event"]["queue_id"], QUEUE_NAME);
 
     // No raw originate to the literal number must ever appear.
     sleep(Duration::from_millis(500)).await;

@@ -88,12 +88,8 @@ impl SipSession {
         let conf_id = format!("supervisor-{}-{}", self.id.0, kind);
         self.ensure_conference(&conf_id, Some(3)).await?;
 
-        self.try_start_and_store_bridge(
-            &conf_id,
-            target_leg,
-            "supervisor conference media bridge",
-        )
-        .await?;
+        self.try_start_and_store_bridge(&conf_id, target_leg, "supervisor conference media bridge")
+            .await?;
         self.try_start_and_store_bridge(
             &conf_id,
             supervisor_leg,

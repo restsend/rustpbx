@@ -103,7 +103,10 @@ fn forward_dtmf_with_active_bridge_owns_digit_without_app_injection() {
         &digits,
         "sip:1001@x",
         "sip:2000@x",
-        None,
+        Some(std::collections::HashMap::from([(
+            "X-Business-Type".to_string(),
+            "34".to_string(),
+        )])),
     );
 
     // 1. digit forwarded to the bridge websocket
@@ -127,6 +130,10 @@ fn forward_dtmf_with_active_bridge_owns_digit_without_app_injection() {
     assert_eq!(ev.event.payload["action_type"], "Bridge");
     assert_eq!(ev.event.payload["extra"]["nodetype"], "menu_tts");
     assert_eq!(ev.event.payload["caller"], "sip:1001@x");
+    assert_eq!(
+        ev.event.payload["sip_headers"]["X-Business-Type"], "34",
+        "bridge DTMF trace must carry the call's SIP headers"
+    );
     assert!(ev.event.payload["end_reason"].is_null());
 }
 
@@ -157,6 +164,10 @@ fn suspended_flow_death_emits_compensating_session_end_trace() {
         "sip:2000@x",
         &Some(gw_ref),
         &trace_ctx,
+        Some(std::collections::HashMap::from([(
+            "X-Business-Type".to_string(),
+            "34".to_string(),
+        )])),
         SessionEndTag::UserHangup,
     );
 
@@ -169,6 +180,10 @@ fn suspended_flow_death_emits_compensating_session_end_trace() {
     assert_eq!(ev.event.payload["step_id"], "step-menu-tts");
     assert_eq!(ev.event.payload["action_type"], "Bridge");
     assert_eq!(ev.event.payload["session_id"], "test-session");
+    assert_eq!(
+        ev.event.payload["sip_headers"]["X-Business-Type"], "34",
+        "synthetic trace must carry the call's SIP headers"
+    );
     assert!(
         ev.event.payload["step_start_time"].is_null(),
         "synthetic end trace carries no step start time"
@@ -5385,4 +5400,124 @@ async fn consult_retry_uses_new_sip_call_id() {
             .await;
         assert!(session.legs.get(&LegId::from("consult")).is_none());
     }
+}
+
+/// The CDR snapshot must carry the logical-call correlation fields:
+/// `transferred` (flag + metadata marker) and the recorded leg timeline.
+/// The root session has `root_session_id == None`, which derives the
+/// "primary" CDR role downstream.
+#[tokio::test]
+async fn test_record_snapshot_carries_transferred_and_leg_timeline() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::callrecord::LegTimelineEventType;
+    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server, create_transaction,
+    };
+
+    let (server, _) = create_test_server().await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let original_request = request.clone();
+    let (tx, _) = create_transaction(request).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let server_dialog = server
+        .dialog_layer
+        .get_or_create_server_invite(&tx, state_tx, None, None)
+        .expect("failed to create server dialog");
+
+    let context = CallContext {
+        session_id: "snapshot-session".to_string(),
+        dialplan: Arc::new(Dialplan::new(
+            "snapshot-session".to_string(),
+            original_request,
+            DialDirection::Inbound,
+        )),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".to_string(),
+        original_callee: "sip:bob@rustpbx.com".to_string(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+
+    let caller_peer = Arc::new(MockMediaPeer::new());
+    let callee_peer = Arc::new(MockMediaPeer::new());
+    let (mut session, _handle, _cmd_rx) = SipSession::new(
+        server.clone(),
+        CancellationToken::new(),
+        None,
+        context,
+        server_dialog,
+        false,
+        caller_peer,
+        callee_peer,
+    );
+
+    // Root session: no inherited root id.
+    assert!(session.record_snapshot().root_session_id.is_none());
+
+    session.record_leg_event(
+        "leg-1",
+        LegTimelineEventType::Added,
+        None,
+        Some(serde_json::json!({ "target": "sip:1001@rustpbx.com" })),
+    );
+    session.record_leg_event(
+        "leg-1",
+        LegTimelineEventType::Bridged,
+        Some("caller".into()),
+        None,
+    );
+    session.mark_transferred_with(Some(serde_json::json!({ "kind": "sip" })));
+    session.record_leg_event("leg-1", LegTimelineEventType::Removed, None, None);
+
+    let snapshot = session.record_snapshot();
+    assert!(
+        snapshot.transferred,
+        "mark_transferred_with must set the flag"
+    );
+    assert_eq!(
+        snapshot
+            .metadata
+            .get("transferred")
+            .and_then(|v| v.as_bool()),
+        Some(true),
+        "metadata must carry the transferred marker"
+    );
+    let events = &snapshot.leg_timeline.events;
+    assert_eq!(
+        events.len(),
+        4,
+        "expected added/bridged/transferred/removed: {events:?}"
+    );
+    assert_eq!(events[0].event_type, LegTimelineEventType::Added);
+    assert_eq!(events[0].leg_id, "leg-1");
+    assert_eq!(
+        events[0]
+            .details
+            .as_ref()
+            .and_then(|d| d.get("target"))
+            .and_then(|t| t.as_str()),
+        Some("sip:1001@rustpbx.com")
+    );
+    assert_eq!(events[1].event_type, LegTimelineEventType::Bridged);
+    assert_eq!(events[1].peer_leg_id.as_deref(), Some("caller"));
+    assert_eq!(events[2].event_type, LegTimelineEventType::Transferred);
+    assert_eq!(events[2].leg_id, "caller");
+    assert_eq!(
+        events[2]
+            .details
+            .as_ref()
+            .and_then(|d| d.get("kind"))
+            .and_then(|t| t.as_str()),
+        Some("sip")
+    );
+    assert_eq!(events[3].event_type, LegTimelineEventType::Removed);
 }

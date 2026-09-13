@@ -199,6 +199,15 @@
                                         Transcribed only
                                     </label>
                                 </template>
+                                <template x-if="filter === 'all_legs'">
+                                    <label
+                                        class="inline-flex items-center gap-2 rounded border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
+                                        <input type="checkbox"
+                                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                                            x-model="allLegs">
+                                        All call legs
+                                    </label>
+                                </template>
                                 <template x-if="filter === 'departments'">
                                     <div class="flex max-h-48 flex-col gap-2 overflow-y-auto pr-1">
                                         <template x-if="!filterOptions.departments.length">
@@ -584,6 +593,7 @@
             dateFrom: '',
             dateTo: '',
             onlyTranscribed: false,
+            allLegs: false,
             selectedDepartments: [],
             selectedSipTrunks: [],
             selectedOutboundSipTrunks: [],
@@ -618,6 +628,7 @@
                 // { key: 'direction', labelKey: 'filter_direction' },
                 // { key: 'date_range', labelKey: 'filter_date_range' },
                 { key: 'only_transcribed', labelKey: 'filter_only_transcribed' },
+                { key: 'all_legs', labelKey: 'filter_all_legs' },
                 { key: 'departments', labelKey: 'filter_departments' },
                 { key: 'sip_trunks', labelKey: 'filter_sip_trunks' },
                 { key: 'outbound_sip_trunks', labelKey: 'filter_outbound_sip_trunks' },
@@ -802,6 +813,7 @@
                 this.$watch('dateFrom', immediateWatcher);
                 this.$watch('dateTo', immediateWatcher);
                 this.$watch('onlyTranscribed', immediateWatcher);
+                this.$watch('allLegs', immediateWatcher);
                 this.$watch('selectedDepartments', immediateWatcher);
                 this.$watch('selectedSipTrunks', immediateWatcher);
                 this.$watch('selectedOutboundSipTrunks', immediateWatcher);
@@ -934,6 +946,10 @@
 
                 if (this.onlyTranscribed) {
                     filters.onlyTranscribed = true;
+                }
+
+                if (this.allLegs) {
+                    filters.allLegs = true;
                 }
 
                 const deptIds = (Array.isArray(this.selectedDepartments) ? this.selectedDepartments : [])
@@ -1601,6 +1617,9 @@
                 }
                 if (this.onlyTranscribed || this.persistentFilters.includes('only_transcribed')) {
                     addUnique('only_transcribed');
+                }
+                if (this.allLegs || this.persistentFilters.includes('all_legs')) {
+                    addUnique('all_legs');
                 }
                 if (departmentsSelected || this.persistentFilters.includes('departments')) {
                     addUnique('departments');

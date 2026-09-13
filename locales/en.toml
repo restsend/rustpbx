@@ -1039,6 +1039,7 @@ filter_status = "Status"
 filter_direction = "Direction"
 filter_date_range = "Date range"
 filter_only_transcribed = "Transcribed only"
+filter_all_legs = "All call legs"
 filter_departments = "Departments"
 filter_sip_trunks = "SIP trunks"
 filter_billing_status = "Billing status"
@@ -1127,6 +1128,15 @@ label_ring_duration = "Ring Duration"
 label_answer = "Answer"
 label_end = "End"
 label_duration = "Duration"
+
+# Logical call legs
+section_child_legs = "Call legs"
+section_child_legs_desc = "Sibling CDR legs of this logical call (queue dispatch, transfers, cluster hops)."
+child_leg_from = "From"
+child_leg_to = "To"
+child_leg_status = "Status"
+child_leg_duration = "Duration (s)"
+child_leg_open = "Open"
 
 # Actions
 btn_sip_trace_json = "SIP trace JSON"

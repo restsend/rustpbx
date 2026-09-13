@@ -198,10 +198,11 @@ impl MockCallStack {
                         skill_group_id,
                     } = &cmd
                     {
-                        self.queue_meta_updates
-                            .lock()
-                            .unwrap()
-                            .push((queue_name.clone(), queue_label.clone(), skill_group_id.clone()));
+                        self.queue_meta_updates.lock().unwrap().push((
+                            queue_name.clone(),
+                            queue_label.clone(),
+                            skill_group_id.clone(),
+                        ));
                     }
                     continue;
                 }
@@ -238,10 +239,11 @@ impl MockCallStack {
                     queue_label,
                     skill_group_id,
                 } => {
-                    self.queue_meta_updates
-                        .lock()
-                        .unwrap()
-                        .push((queue_name, queue_label, skill_group_id));
+                    self.queue_meta_updates.lock().unwrap().push((
+                        queue_name,
+                        queue_label,
+                        skill_group_id,
+                    ));
                 }
                 other => out.push(other),
             }

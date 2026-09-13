@@ -254,6 +254,41 @@
                         </template>
                     </div>
                 </div>
+                <template x-if="childLegs && childLegs.length">
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <h2 class="text-base font-semibold text-slate-900">{{ "call_record_detail.section_child_legs" | t }}</h2>
+                        <p class="mt-1 text-xs text-slate-500">{{ "call_record_detail.section_child_legs_desc" | t }}</p>
+                        <div class="mt-4 overflow-x-auto">
+                            <table class="min-w-full text-sm">
+                                <thead>
+                                    <tr class="border-b border-slate-200 text-left text-xs font-semibold uppercase tracking-wide text-slate-400">
+                                        <th class="py-2 pr-4">{{ "call_record_detail.child_leg_from" | t }}</th>
+                                        <th class="py-2 pr-4">{{ "call_record_detail.child_leg_to" | t }}</th>
+                                        <th class="py-2 pr-4">{{ "call_record_detail.child_leg_status" | t }}</th>
+                                        <th class="py-2 pr-4">{{ "call_record_detail.child_leg_duration" | t }}</th>
+                                        <th class="py-2 pr-4">Call-ID</th>
+                                        <th class="py-2"></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <template x-for="leg in childLegs" :key="leg.id">
+                                        <tr class="border-b border-slate-100 text-slate-600">
+                                            <td class="py-2 pr-4 font-medium text-slate-800" x-text="leg.from || '—'"></td>
+                                            <td class="py-2 pr-4" x-text="leg.to || '—'"></td>
+                                            <td class="py-2 pr-4" x-text="leg.status"></td>
+                                            <td class="py-2 pr-4" x-text="leg.duration_secs"></td>
+                                            <td class="py-2 pr-4 font-mono text-xs text-slate-400" x-text="leg.call_id"></td>
+                                            <td class="py-2">
+                                                <a :href="leg.detail_url"
+                                                    class="text-xs font-semibold text-sky-600 hover:text-sky-700">{{ "call_record_detail.child_leg_open" | t }}</a>
+                                            </td>
+                                        </tr>
+                                    </template>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </template>
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <h2 class="text-base font-semibold text-slate-900">{{ "call_record_detail.section_recording" | t }}
                     </h2>
@@ -1013,6 +1048,7 @@
                 this.tagError = '';
                 this.noteError = '';
                 this.participants = Array.isArray(data.participants) ? data.participants : [];
+                this.childLegs = Array.isArray(data.child_legs) ? data.child_legs : [];
                 this.mediaMetrics = Array.isArray(data.media_metrics) ? data.media_metrics : [];
                 this.billing = data.billing || {
                     summary: (this.record && this.record.billing) || {},
@@ -1081,6 +1117,7 @@
             notes: {},
             noteDraft: '',
             participants: [],
+            childLegs: [],
             rewrite: {},
             actions: {},
             backUrl: '/console/call-records',

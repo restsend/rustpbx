@@ -1,6 +1,6 @@
 [package]
 name = "rustpbx-sipflow"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 description = "RustPBX component: sipflow"
 license = "MIT"
@@ -23,9 +23,9 @@ rand = "0.10"
 reqwest = { version = "0.13.4", default-features = false, features = [
     "rustls",
 ] }
-rustpbx-http-util = { path = "../rustpbx-http-util", version = "0.5.0" }
-rustpbx-record-common = { path = "../rustpbx-record-common", version = "0.5.0" }
-rustpbx-storage = { path = "../rustpbx-storage", version = "0.5.0" }
+rustpbx-http-util = { path = "../rustpbx-http-util", version = "0.5.1" }
+rustpbx-record-common = { path = "../rustpbx-record-common", version = "0.5.1" }
+rustpbx-storage = { path = "../rustpbx-storage", version = "0.5.1" }
 ruzstd = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

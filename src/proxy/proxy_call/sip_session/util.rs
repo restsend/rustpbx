@@ -227,6 +227,24 @@ pub(super) fn inject_dtmf_into_app(
     }
 }
 
+/// SIP headers for proxy-emitted `ivr_step_trace` entries (bridge DTMF
+/// reports, compensating session_end) — same source as the step-IVR
+/// executor's own trace entries: the current (or last) app invocation's
+/// headers, falling back to the call-info whitelist.
+pub(super) async fn trace_sip_headers(
+    app_runtime: &Arc<dyn AppRuntime>,
+) -> Option<std::collections::HashMap<String, String>> {
+    app_runtime
+        .current_app_invocation()
+        .await
+        .map(|i| i.sip_headers)
+        .or_else(|| {
+            app_runtime
+                .app_context()
+                .map(|c| c.call_info.sip_headers.clone())
+        })
+}
+
 /// Returns `true` when the digit was accepted by the active bridge or injected
 /// into a running app. Replaying a buffered digit later must use
 /// [`inject_dtmf_into_app`] instead of calling this again.
@@ -312,6 +330,7 @@ pub(super) fn emit_suspended_flow_session_end(
     callee: &str,
     rwi_gateway: &Option<crate::rwi::RwiGatewayRef>,
     bridge_trace_context: &parking_lot::Mutex<Option<super::transfer::BridgeTraceContext>>,
+    sip_headers: Option<std::collections::HashMap<String, String>>,
     end_reason: crate::call::app::ivr::provider::SessionEndTag,
 ) {
     let Some(gw) = rwi_gateway.as_ref() else {
@@ -334,7 +353,7 @@ pub(super) fn emit_suspended_flow_session_end(
         step_start_time: None,
         step_end_time: Some(chrono::Utc::now().to_rfc3339()),
         extra: ctx.as_ref().and_then(|c| c.extra.clone()),
-        sip_headers: None,
+        sip_headers,
         end_reason: Some(end_reason),
         end_detail: None,
     };

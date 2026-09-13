@@ -471,12 +471,7 @@ impl QueueApp {
         if let Some(ref registry) = self.agent_registry {
             let groups = self.all_skill_groups();
             let _ = registry
-                .notify_call_abandoned(
-                    &self.call_id,
-                    self.skill_queue_id(),
-                    wait_secs,
-                    &groups,
-                )
+                .notify_call_abandoned(&self.call_id, self.skill_queue_id(), wait_secs, &groups)
                 .await;
         }
     }
@@ -1404,28 +1399,28 @@ impl QueueApp {
                     skill_group: step.add_skill_group.clone(),
                 });
 
-                    if let Some(ref registry) = self.agent_registry {
-                        let agent_uris = match self.config.skill_group.as_deref() {
-                            Some(sg) => {
-                                // Skill-group queue: resolve the primary group and
-                                // the escalation target as ONE candidate set so the
-                                // addon can order the union fairly (round-robin)
-                                // when the step is marked fair. Replace / Sequential
-                                // modes exclude the primary group entirely (the
-                                // call no longer waits on the previous stage).
-                                let primary = format!("skill-group:{}", sg);
-                                let include_primary =
-                                    matches!(self.config.escalation_mode, EscalationMode::Cumulative);
-                                registry
-                                    .resolve_escalation_targets(
-                                        &primary,
-                                        &[step.add_skill_group.clone()],
-                                        &self.call_id,
-                                        step.fair,
-                                        include_primary,
-                                    )
-                                    .await
-                            }
+                if let Some(ref registry) = self.agent_registry {
+                    let agent_uris = match self.config.skill_group.as_deref() {
+                        Some(sg) => {
+                            // Skill-group queue: resolve the primary group and
+                            // the escalation target as ONE candidate set so the
+                            // addon can order the union fairly (round-robin)
+                            // when the step is marked fair. Replace / Sequential
+                            // modes exclude the primary group entirely (the
+                            // call no longer waits on the previous stage).
+                            let primary = format!("skill-group:{}", sg);
+                            let include_primary =
+                                matches!(self.config.escalation_mode, EscalationMode::Cumulative);
+                            registry
+                                .resolve_escalation_targets(
+                                    &primary,
+                                    &[step.add_skill_group.clone()],
+                                    &self.call_id,
+                                    step.fair,
+                                    include_primary,
+                                )
+                                .await
+                        }
                         None => {
                             let skill_uri = format!("skill-group:{}", step.add_skill_group);
                             registry.resolve_target(&skill_uri).await

@@ -445,10 +445,9 @@ pub fn set_call_userdata_inner(
         Err(e) => {
             drop(gw);
             let (status, message) = match e {
-                SetUserDataError::SessionNotFound => (
-                    StatusCode::NOT_FOUND,
-                    "Call not found".to_string(),
-                ),
+                SetUserDataError::SessionNotFound => {
+                    (StatusCode::NOT_FOUND, "Call not found".to_string())
+                }
                 SetUserDataError::TooLarge { size } => (
                     StatusCode::PAYLOAD_TOO_LARGE,
                     format!(

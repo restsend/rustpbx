@@ -414,13 +414,7 @@ pub trait AgentRegistry: Send + Sync {
     /// escalation skill group to the next (sequential rotation). Implementations
     /// keep waiting-depth accounting paired per group
     /// (dequeue `from_group`, enqueue `to_group`). Default no-op.
-    async fn notify_group_switch(
-        &self,
-        _call_id: &str,
-        _from_group: &str,
-        _to_group: &str,
-    ) {
-    }
+    async fn notify_group_switch(&self, _call_id: &str, _from_group: &str, _to_group: &str) {}
 
     /// Notify the dispatcher that a queued call exceeded its max wait time.
     /// Addon implementations use it to emit `skill_group_service_unavailable`.

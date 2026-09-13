@@ -2555,12 +2555,17 @@ impl CallModule {
         // Map queue/application routes onto the in-session transfer targets
         // (`handle_blind_transfer_inner` vocabulary). Everything else —
         // Forward / NotHandled / None — dials through the raw originate.
+        // The original REFER number rides along as a `refer_to` query param:
+        // the queue/IVR parsers ignore it, while the in-session hand-off's
+        // `call_transferred` event carries the target string verbatim —
+        // keeping the dialed number visible to consumers (docs contract:
+        // "original number kept in transfer_target").
         let handoff_target = match routed {
             Some(crate::config::RouteResult::Queue { queue, .. }) => {
-                format!("queue:{}", queue.queue_name)
+                format!("queue:{}?refer_to={}", queue.queue_name, urlencoding::encode(&user))
             }
             Some(crate::config::RouteResult::Application { .. }) => {
-                format!("toivr:{}", user)
+                format!("toivr:{}?refer_to={}", user, urlencoding::encode(&user))
             }
             _ => return Ok(ReferExecution::FallThrough),
         };

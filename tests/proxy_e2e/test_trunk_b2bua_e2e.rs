@@ -705,25 +705,40 @@ async fn test_trunk_b2bua_basic_call_cdr_roundtrip() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
 
     let server = Arc::new(E2eTestServer::start_with_mode(MediaProxyMode::All).await?);
+
+    // Real media endpoints: the answered-but-silent-leg CDR diagnostic
+    // (`proxy.leg_media_incomplete`) flags answered calls that never carried
+    // a single RTP packet, so this "successful call" test must flow media on
+    // both legs before hanging up.
+    let caller_receiver = RtpReceiver::bind(0).await?;
+    let callee_receiver = RtpReceiver::bind(0).await?;
+    let caller_sender = RtpSender::bind().await?;
+    let callee_sender = RtpSender::bind().await?;
+    let caller_port = caller_receiver.port()?;
+    let callee_port = callee_receiver.port()?;
+
     let alice = Arc::new(server.create_ua("alice").await?);
     let bob = server.create_ua("bob").await?;
 
     sleep(Duration::from_millis(100)).await;
 
-    let sdp = pcmu_sdp("127.0.0.1", 12345);
+    let alice_sdp = pcmu_sdp("127.0.0.1", caller_port);
+    let bob_sdp = pcmu_sdp("127.0.0.1", callee_port);
 
     let alice_clone = alice.clone();
-    let sdp_clone = sdp.clone();
+    let sdp_clone = alice_sdp.clone();
     let caller_handle =
         rustpbx::utils::spawn(async move { alice_clone.make_call("bob", Some(sdp_clone)).await });
 
     let mut bob_dialog_id = None;
+    let mut bob_offer_sdp: Option<String> = None;
     for _ in 0..50 {
         let events = bob.process_dialog_events().await?;
         for event in events {
-            if let TestUaEvent::IncomingCall(id, _) = event {
+            if let TestUaEvent::IncomingCall(id, offer) = event {
                 bob_dialog_id = Some(id.clone());
-                bob.answer_call(&id, Some(sdp.clone())).await?;
+                bob_offer_sdp = offer;
+                bob.answer_call(&id, Some(bob_sdp.clone())).await?;
                 break;
             }
         }
@@ -741,8 +756,30 @@ async fn test_trunk_b2bua_basic_call_cdr_roundtrip() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("join: {}", e))?
         .map_err(|e| anyhow::anyhow!("call: {}", e))?;
 
-    // Keep the call alive briefly then hangup
-    sleep(Duration::from_millis(500)).await;
+    // Exchange RTP briefly through the proxy so both legs carry media
+    let caller_answer = alice
+        .get_negotiated_answer_sdp(&alice_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("No answer SDP"))?;
+    let callee_offer = bob_offer_sdp.ok_or_else(|| anyhow::anyhow!("No callee offer SDP"))?;
+    let caller_target = extract_media_endpoint(&caller_answer)
+        .ok_or_else(|| anyhow::anyhow!("No caller endpoint"))?;
+    let callee_target =
+        extract_media_endpoint(&callee_offer).ok_or_else(|| anyhow::anyhow!("No callee endpoint"))?;
+
+    let (caller_stats, callee_stats) = exchange_rtp(
+        &caller_sender,
+        &callee_sender,
+        &caller_receiver,
+        &callee_receiver,
+        caller_target,
+        callee_target,
+        0,
+        1500,
+    )
+    .await?;
+    assert!(caller_stats.packets_received > 0, "Alice should receive RTP");
+    assert!(callee_stats.packets_received > 0, "Bob should receive RTP");
 
     alice.hangup(&alice_id).await?;
 

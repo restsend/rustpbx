@@ -35,6 +35,11 @@ OUTFILE = f"rwi_events_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.js
 
 
 class RwiEventHandler(BaseHTTPRequestHandler):
+    # HTTP/1.1 + explicit Content-Length lets HTTP clients (reqwest etc.)
+    # reuse the TCP connection across deliveries instead of reconnecting
+    # for every event.
+    protocol_version = "HTTP/1.1"
+
     def do_POST(self):
         body = self._read_body()
         if body is None:
@@ -73,10 +78,12 @@ class RwiEventHandler(BaseHTTPRequestHandler):
             return None
 
     def _send_json(self, status, data):
+        body = json.dumps(data).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(json.dumps(data).encode("utf-8"))
+        self.wfile.write(body)
 
     def log_message(self, format, *args):
         sys.stderr.write(f"[RWI Webhook] {args[0]} {args[1]} {args[2]}\n")

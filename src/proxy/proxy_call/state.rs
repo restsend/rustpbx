@@ -31,6 +31,13 @@ pub struct CallSessionRecordSnapshot {
     /// (`CallMeta::callee_peer`); the A-leg peer rides the transaction cookie
     /// instead (`CallerPeerContext`), so it is not duplicated here.
     pub callee_peer: Option<String>,
+    /// `true` when this session's call was transferred away to another party
+    /// (blind REFER transfer, consultative transfer / bridge transfer).
+    /// Mirrors `CallMeta::transferred` and persisted into CDR metadata.
+    pub transferred: bool,
+    /// Leg lifecycle timeline recorded while the session ran; persisted into
+    /// the call-record `leg_timeline` column.
+    pub leg_timeline: crate::callrecord::LegTimeline,
     pub last_queue_name: Option<String>,
     pub callee_call_ids: Vec<String>,
     pub server_dialog_id: DialogId,

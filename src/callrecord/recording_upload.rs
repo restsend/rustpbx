@@ -410,14 +410,18 @@ impl RecordingRetryWorker {
 
     async fn retry_marker(&self, marker_path: &Path, max_attempts: u32) -> Result<()> {
         let source = source_path_from_marker(marker_path).ok_or_else(|| {
-            anyhow!("cannot derive source path from marker {}", marker_path.display())
+            anyhow!(
+                "cannot derive source path from marker {}",
+                marker_path.display()
+            )
         })?;
         if !source.exists() {
             // Orphan marker — drop it.
             let _ = tokio::fs::remove_file(marker_path).await;
             return Ok(());
         }
-        let marker: UploadFailedMarker = serde_json::from_slice(&tokio::fs::read(marker_path).await?)?;
+        let marker: UploadFailedMarker =
+            serde_json::from_slice(&tokio::fs::read(marker_path).await?)?;
         if marker.attempts >= max_attempts {
             let dest = match self.policy.effective_recording_type() {
                 RecordingType::Http => "http",
@@ -440,7 +444,8 @@ impl RecordingRetryWorker {
         let started = std::time::Instant::now();
         match self.upload_source(&source, marker.call_id.as_deref()).await {
             Ok(()) => {
-                let latency = marker_age_secs(&marker).unwrap_or_else(|| started.elapsed().as_secs_f64());
+                let latency =
+                    marker_age_secs(&marker).unwrap_or_else(|| started.elapsed().as_secs_f64());
                 crate::metrics::recording::upload_success(dest);
                 crate::metrics::recording::upload_latency_seconds(latency, dest);
                 if latency > self.policy.effective_upload_sla_secs() as f64 {
@@ -1119,8 +1124,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let root_session = "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40";
         // Real naming function — zero-pads seq, sanitizes the label.
-        let (seq, path) =
-            crate::callrecord::segmented_wav_path(root.path().to_str().unwrap(), root_session, 2, "1001");
+        let (seq, path) = crate::callrecord::segmented_wav_path(
+            root.path().to_str().unwrap(),
+            root_session,
+            2,
+            "1001",
+        );
         let started = chrono::Utc::now();
         let ended = started + chrono::Duration::seconds(28);
 
@@ -1176,7 +1185,11 @@ mod tests {
 
         let event = crate::rwi::RecordingMetadataAvailable {
             call_id: record.call_id.clone(),
-            metadata: build_segment_recording_metadata(&record, &media, path.to_string_lossy().as_ref()),
+            metadata: build_segment_recording_metadata(
+                &record,
+                &media,
+                path.to_string_lossy().as_ref(),
+            ),
         };
         println!("{}", serde_json::to_string_pretty(&event).unwrap());
 
@@ -1203,7 +1216,13 @@ mod tests {
                 "event metadata must not carry `{excluded}`: {meta}"
             );
         }
-        for expected in ["agent_id", "agent_name", "queue_id", "segment_type", "segment_id"] {
+        for expected in [
+            "agent_id",
+            "agent_name",
+            "queue_id",
+            "segment_type",
+            "segment_id",
+        ] {
             assert!(
                 meta.get(expected).is_some(),
                 "event metadata must keep `{expected}`: {meta}"
@@ -1255,10 +1274,7 @@ mod tests {
         assert_eq!(extra.get("ivr").map(String::as_str), Some("main"));
         assert_eq!(extra.get("seq").map(String::as_str), Some("2"));
         assert_eq!(extra.get("label").map(String::as_str), Some("1001"));
-        assert_eq!(
-            extra.get("segment_type").map(String::as_str),
-            Some("agent")
-        );
+        assert_eq!(extra.get("segment_type").map(String::as_str), Some("agent"));
         assert_eq!(extra.get("started_at").map(String::as_str), Some("t0"));
     }
 

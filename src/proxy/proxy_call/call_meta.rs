@@ -88,6 +88,10 @@ pub struct CallMeta {
     /// CSAT surveys on transferred legs: the survey, if any, belongs to the
     /// final queue that served the customer.
     pub transferred: bool,
+    /// Leg lifecycle timeline (added / bridged / unbridged / transferred /
+    /// removed) recorded while the session runs and persisted into the CDR
+    /// `leg_timeline` column by `record_snapshot`.
+    pub leg_timeline: crate::callrecord::LegTimeline,
     /// Whether a real callee/agent leg ever answered (media path established
     /// to a remote party), even if that leg has since terminated. Never reset.
     /// Lets the queue-abandon detector distinguish "caller hung up while still

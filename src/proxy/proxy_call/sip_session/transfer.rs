@@ -995,7 +995,9 @@ impl SipSession {
                 trace_context,
             } => {
                 info!(session_id = %self.id, %leg_id, endpoint = %endpoint, sample_rate, codec = %codec, ?return_app, ?trace_context, "Handling Bridge transfer");
-                self.meta.transferred = true;
+                self.mark_transferred_with(Some(
+                    serde_json::json!({ "target": endpoint, "kind": "bridge" }),
+                ));
                 let result = self
                     .connect_bridge(
                         leg_id,
@@ -1024,7 +1026,9 @@ impl SipSession {
                 from_user,
             } => {
                 self.meta.transfer_return_app = self.resolve_return_app(return_app).await;
-                self.meta.transferred = true;
+                self.mark_transferred_with(Some(
+                    serde_json::json!({ "target": uri, "kind": "sip" }),
+                ));
 
                 let realm = self.server.proxy_config.load().select_realm("");
                 let normalized = crate::call::build_sip_uri(&uri, &realm);
@@ -1427,6 +1431,12 @@ impl SipSession {
                 if replaced_leg != LegId::from("callee") {
                     self.update_leg_state(&replaced_leg, LegState::Ended);
                 }
+                self.record_leg_event(
+                    &replaced_leg.0,
+                    crate::callrecord::LegTimelineEventType::Removed,
+                    None,
+                    Some(serde_json::json!({ "reason": "replaced_by_blind_transfer" })),
+                );
             }
         }
     }
@@ -1667,6 +1677,7 @@ impl SipSession {
         // agent (B‑leg) hangs up, the session returns the caller to the app
         // instead of tearing down the call.
         self.meta.transfer_return_app = self.resolve_return_app(return_app).await;
+        Self::annotate_queue_return_origin(&mut self.meta.transfer_return_app, queue_name);
         info!(session_id = %self.id, queue = %queue_name, return_app = ?self.meta.transfer_return_app, "Queue transfer completed: queue app started");
         Ok(())
     }
@@ -1700,7 +1711,8 @@ impl SipSession {
                 target = ?spec.target,
                 "Queue failed; returning to app"
             );
-            let resolved = self.resolve_return_app(Some(spec.clone())).await;
+            let mut resolved = self.resolve_return_app(Some(spec.clone())).await;
+            Self::annotate_queue_return_origin(&mut resolved, queue_name);
             if let Some(rspec) = resolved {
                 let result = self
                     .ensure_app_running(
@@ -1937,6 +1949,26 @@ impl SipSession {
                     app_name: spec.app_name,
                     params: serde_json::Value::Object(params),
                 })
+            }
+        }
+    }
+
+    /// Annotate a resolved IVR return spec with the queue origin: the return
+    /// IVR re-enters FROM this queue, so its step provider sees
+    /// `transferred_from="queue"` (feeds the `ProviderContext.transferred_from`
+    /// field) plus `source_queue` as a passthrough variable. Bridge returns
+    /// carry no queue context and stay distinguished by `ivr_resumed` alone.
+    fn annotate_queue_return_origin(spec: &mut Option<ReturnAppSpec>, queue_name: &str) {
+        if let Some(spec) = spec
+            && spec.app_name == "ivr"
+            && let Some(obj) = spec.params.as_object_mut()
+        {
+            let ivp = obj
+                .entry("ivr_params")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(ivp) = ivp.as_object_mut() {
+                ivp.insert("transferred_from".to_string(), serde_json::json!("queue"));
+                ivp.insert("source_queue".to_string(), serde_json::json!(queue_name));
             }
         }
     }
@@ -2928,7 +2960,9 @@ mod tests {
             "queue:support?overflow_group=l2&overflow_group=l3&overflow_after=60&overflow_mode=sequential&overflow_wait=600",
         );
         match t {
-            TransferTarget::Queue { overflow_overrides, .. } => {
+            TransferTarget::Queue {
+                overflow_overrides, ..
+            } => {
                 let o = overflow_overrides.expect("overflow overrides expected");
                 assert_eq!(o.groups, vec!["l2".to_string(), "l3".to_string()]);
                 assert_eq!(o.threshold_secs, Some(60));
@@ -3023,6 +3057,42 @@ mod tests {
                 params: HashMap::new(),
             }
         );
+    }
+
+    #[test]
+    fn test_annotate_queue_return_origin_ivr_spec() {
+        let mut spec = Some(ReturnAppSpec::ivr(
+            "main-menu.toml",
+            HashMap::from([("ivr_resumed".to_string(), "1".to_string())]),
+        ));
+        SipSession::annotate_queue_return_origin(&mut spec, "support");
+        let s = spec.expect("spec stays present");
+        assert_eq!(s.params["ivr_params"]["transferred_from"], "queue");
+        assert_eq!(s.params["ivr_params"]["source_queue"], "support");
+        assert_eq!(s.params["ivr_params"]["ivr_resumed"], "1");
+    }
+
+    #[test]
+    fn test_annotate_queue_return_origin_skips_non_ivr_and_missing_ivr_params() {
+        // Non-IVR return apps are untouched.
+        let mut other = Some(ReturnAppSpec {
+            app_name: "voicemail".to_string(),
+            params: serde_json::json!({}),
+        });
+        SipSession::annotate_queue_return_origin(&mut other, "support");
+        assert_eq!(other.unwrap().params, serde_json::json!({}));
+
+        // IVR spec without ivr_params gets the object created.
+        let mut bare = Some(ReturnAppSpec::ivr("bare.toml", HashMap::new()));
+        SipSession::annotate_queue_return_origin(&mut bare, "sales");
+        let s = bare.unwrap();
+        assert_eq!(s.params["ivr_params"]["transferred_from"], "queue");
+        assert_eq!(s.params["ivr_params"]["source_queue"], "sales");
+
+        // `None` stays `None`.
+        let mut none: Option<ReturnAppSpec> = None;
+        SipSession::annotate_queue_return_origin(&mut none, "support");
+        assert!(none.is_none());
     }
 
     #[test]

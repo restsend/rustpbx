@@ -1,6 +1,6 @@
 [package]
 name = "rustpbx-http-util"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 description = "RustPBX component: http-util"
 license = "MIT"

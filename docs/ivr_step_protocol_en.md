@@ -91,7 +91,7 @@ POST {url}/end            ──→ your provider (session cleanup, fire‑and�
 | `ivr_id` | `string` or `null` | IVR project identifier for tracing |
 | `variables` | `Map<string, string>` | Session variables (see §Variables) |
 | `event` | `ProviderEvent` or `null` | The event that triggered this step |
-| `transferred_from` | `string` or `null` | Whether this session was entered via a transfer: `"ivr"` (JumpIvr / IVR-to-IVR jump), `"agent"`, or `"queue"`; `null` for a fresh entry. When `"ivr"`, `variables` also carries `source_ivr` (originating IVR short code) and `source_node` (originating node ID) |
+| `transferred_from` | `string` or `null` | Whether this session was entered via a transfer: `"ivr"` (JumpIvr / IVR-to-IVR jump), `"agent"`, or `"queue"` (queue return-back); `null` for a fresh entry. When `"ivr"`, `variables` also carries `source_ivr` (originating IVR short code) and `source_node` (originating node ID); when `"queue"`, it carries `source_queue` (queue name) |
 
 ### ProviderEvent types
 
@@ -448,7 +448,7 @@ Any variables returned in `ProviderContext.variables` by the provider are also a
 
 When an IVR is entered via `transfer` (with `target="ivr:other_ivr"`) or `jump_ivr`, any `params` from the source action are merged into session variables before the first `ProviderEvent::SessionStart` is sent. This means the target IVR's provider immediately sees these values in `ProviderContext.variables` and can use `$param_name$` substitution in its responses.
 
-In addition, RustPBX **auto-injects the transfer origin**: for an IVR entered via a jump/transfer, `ProviderContext.transferred_from` is set to `"ivr"` (or `"agent"` / `"queue"`), and `variables` carries `source_ivr` (originating IVR short code) and `source_node` (originating node ID). Providers can use this to distinguish a resumed/jumped-in session from a fresh entry without manual param plumbing.
+In addition, RustPBX **auto-injects the transfer origin**: for an IVR entered via a jump/transfer, `ProviderContext.transferred_from` is set to `"ivr"` (or `"agent"` / `"queue"`), and `variables` carries the matching origin keys — `source_ivr` (originating IVR short code) and `source_node` (originating node ID) for `"ivr"`, `source_queue` (queue name) for `"queue"` (queue return-back). Providers can use this to distinguish a resumed/jumped-in session from a fresh entry without manual param plumbing.
 
 ---
 

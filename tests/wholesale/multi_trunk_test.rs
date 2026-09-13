@@ -226,8 +226,9 @@ async fn test_acl_trunk_context_selects_source_trunk() {
                 name: "Wrong Deck".to_string(),
                 description: None,
                 r#type: "sell".to_string(),
-                rates: vec![RateConfig { id: 8,
-                                        prefix: "234".to_string(),
+                rates: vec![RateConfig {
+                    id: 8,
+                    prefix: "234".to_string(),
                     match_caller_prefix: None,
                     rate: 0.01,
                     min_duration: 60,
@@ -244,8 +245,9 @@ async fn test_acl_trunk_context_selects_source_trunk() {
                 name: "Right Deck".to_string(),
                 description: None,
                 r#type: "sell".to_string(),
-                rates: vec![RateConfig { id: 9,
-                                        prefix: "1234".to_string(),
+                rates: vec![RateConfig {
+                    id: 9,
+                    prefix: "1234".to_string(),
                     match_caller_prefix: None,
                     rate: 0.01,
                     min_duration: 60,
@@ -433,8 +435,9 @@ async fn test_multi_trunk_context_and_stripping() {
                 name: "Test Deck".to_string(),
                 description: None,
                 r#type: "sell".to_string(),
-                rates: vec![RateConfig { id: 10,
-                                        prefix: "0000".to_string(),
+                rates: vec![RateConfig {
+                    id: 10,
+                    prefix: "0000".to_string(),
                     match_caller_prefix: None,
                     rate: 0.01,
                     min_duration: 60,
@@ -565,8 +568,9 @@ async fn test_multi_trunk_context_and_stripping() {
                 name: "Test Deck".to_string(),
                 description: None,
                 r#type: "sell".to_string(),
-                rates: vec![RateConfig { id: 11,
-                                        prefix: "1111".to_string(),
+                rates: vec![RateConfig {
+                    id: 11,
+                    prefix: "1111".to_string(),
                     match_caller_prefix: None,
                     rate: 0.01,
                     min_duration: 60,
@@ -700,8 +704,9 @@ async fn test_single_trunk_returns_forward() {
                 name: "Test Deck".to_string(),
                 description: None,
                 r#type: "sell".to_string(),
-                rates: vec![RateConfig { id: 12,
-                                        prefix: "1".to_string(),
+                rates: vec![RateConfig {
+                    id: 12,
+                    prefix: "1".to_string(),
                     match_caller_prefix: None,
                     rate: 0.01,
                     min_duration: 60,
@@ -923,8 +928,9 @@ async fn test_multiple_trunks_selects_one_carrier() {
                 name: "Test Deck".to_string(),
                 description: None,
                 r#type: "sell".to_string(),
-                rates: vec![RateConfig { id: 13,
-                                        prefix: "1".to_string(),
+                rates: vec![RateConfig {
+                    id: 13,
+                    prefix: "1".to_string(),
                     match_caller_prefix: None,
                     rate: 0.01,
                     min_duration: 60,
@@ -1132,8 +1138,9 @@ async fn test_abort_when_no_trunks_have_valid_rates() {
                 name: "Test Deck".to_string(),
                 description: None,
                 r#type: "sell".to_string(),
-                rates: vec![RateConfig { id: 14,
-                                        prefix: "999".to_string(), // This will match 999xxx but NOT 99xxx
+                rates: vec![RateConfig {
+                    id: 14,
+                    prefix: "999".to_string(), // This will match 999xxx but NOT 99xxx
                     match_caller_prefix: None,
                     rate: 0.01,
                     min_duration: 60,

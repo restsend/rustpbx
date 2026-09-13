@@ -132,7 +132,9 @@ mod tests {
 
         // Queue should start playing hold music
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         stack.cancel();
@@ -155,7 +157,9 @@ mod tests {
         // Queue should NOT answer immediately
         // It should start hold music without answering
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         stack.cancel();
@@ -292,7 +296,9 @@ mod tests {
             .await;
 
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // Remote party hangs up
@@ -323,7 +329,9 @@ mod tests {
             .await;
 
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // Simulate agent connected event
@@ -358,7 +366,9 @@ mod tests {
             .await;
 
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // First agent is busy
@@ -405,7 +415,9 @@ mod tests {
             .await;
 
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // All agents are busy
@@ -565,7 +577,9 @@ mod tests {
 
         // Hold music starts
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // Agent 1 is busy
@@ -653,7 +667,9 @@ mod tests {
 
         // Should start hold music
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // Should originate call to agent
@@ -817,7 +833,9 @@ mod tests {
 
         // Should then execute fallback (hangup)
         stack
-            .assert_cmd(2000, "Hangup-skill", |c| matches!(c, CallCommand::Hangup(_)))
+            .assert_cmd(2000, "Hangup-skill", |c| {
+                matches!(c, CallCommand::Hangup(_))
+            })
             .await;
 
         stack.join().await.expect("should complete successfully");
@@ -872,7 +890,9 @@ mod tests {
             .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // Should originate call
@@ -1116,7 +1136,9 @@ mod tests {
             .await;
 
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         stack.custom(
@@ -1146,7 +1168,9 @@ mod tests {
             .await;
 
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         stack.custom("all_agents_busy", serde_json::json!({}));
@@ -1175,7 +1199,9 @@ mod tests {
             .await;
 
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         stack.custom("agent_busy", serde_json::json!({}));
@@ -1233,7 +1259,9 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // Dialing starts → EN transfer prompt before connect.
@@ -1292,7 +1320,9 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         stack.timeout("max_wait_timeout");
@@ -1327,7 +1357,9 @@ mod tests {
             .await;
 
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // All agents no-answer
@@ -1381,7 +1413,9 @@ mod tests {
             .await;
 
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // Agent 1 busy, Agent 2 no-answer, Agent 3 busy
@@ -1438,7 +1472,9 @@ mod tests {
             .await;
 
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // All agents no-answer, no no_answer_prompt configured -> should go directly to fallback
@@ -1468,7 +1504,9 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // Ring timeout triggers no-answer path (only 1 agent in simple queue)
@@ -1502,7 +1540,9 @@ mod tests {
 
         // Play hold music
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // Should originate calls to ALL agents in parallel
@@ -1575,7 +1615,9 @@ mod tests {
 
         // Play hold music
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // Should originate calls to both agents
@@ -1618,7 +1660,9 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         let first = stack.next_cmd(2000).await.expect("first parallel LegAdd");
@@ -2496,9 +2540,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(150)).await;
         let targets = registry.resolve_targets.lock().unwrap().clone();
         assert!(
-            targets
-                .iter()
-                .any(|t| t == "skill-group:stage_b"),
+            targets.iter().any(|t| t == "skill-group:stage_b"),
             "retention poll must target the CURRENT stage group, got {targets:?}"
         );
 
@@ -2587,9 +2629,7 @@ mod tests {
         for _ in 0..40 {
             while let Ok(v) = gws_rx.try_recv() {
                 let t = v.get("event_type").and_then(|e| e.as_str()).unwrap_or("");
-                if t == "queue_overflow_joined"
-                    && v["skill_group"].as_str() == Some("support_l2")
-                {
+                if t == "queue_overflow_joined" && v["skill_group"].as_str() == Some("support_l2") {
                     saw_join = true;
                 }
                 if t == "queue_left" {
@@ -2601,7 +2641,10 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        assert!(saw_join, "cumulative escalation must emit queue_overflow_joined");
+        assert!(
+            saw_join,
+            "cumulative escalation must emit queue_overflow_joined"
+        );
         assert!(!saw_leave, "cumulative escalation must NOT leave the queue");
 
         stack.cancel();
@@ -3629,7 +3672,9 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         let service_cmd = drive_to_service_prompt(&mut stack).await;
@@ -3671,7 +3716,9 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         let service_cmd = drive_to_service_prompt(&mut stack).await;
@@ -3704,7 +3751,9 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         let service_cmd = drive_to_service_prompt(&mut stack).await;
@@ -3729,7 +3778,9 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         let service_cmd = drive_to_service_prompt(&mut stack).await;
@@ -3764,7 +3815,9 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         stack
@@ -3833,7 +3886,9 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // Agent answers; queue plays the caller-only service prompt and
@@ -3874,7 +3929,9 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         let service_cmd = drive_to_service_prompt(&mut stack).await;
@@ -3944,7 +4001,9 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // Kick off sequential dialing: agent1 is available and gets dialed.
@@ -4024,7 +4083,9 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(2000, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .assert_cmd(2000, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // Only the available agent is dialed.

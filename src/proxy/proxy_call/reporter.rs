@@ -340,7 +340,7 @@ impl CallReporter {
             hangup_messages: hangup_messages.clone(),
             recorder,
             sip_leg_roles,
-            leg_timeline: crate::callrecord::LegTimeline::default(),
+            leg_timeline: snapshot.leg_timeline,
             details,
             extensions: snapshot.extensions,
         };
@@ -758,6 +758,8 @@ mod tests {
             routed_destination: None,
             callee_peer: None,
             last_queue_name: None,
+            transferred: false,
+            leg_timeline: crate::callrecord::LegTimeline::default(),
             callee_call_ids: vec!["callee-call-id".to_string()],
             server_dialog_id: rsipstack::dialog::DialogId {
                 call_id: "caller-call-id".to_string(),
@@ -873,6 +875,8 @@ mod tests {
             routed_destination: None,
             callee_peer: None,
             last_queue_name: None,
+            transferred: false,
+            leg_timeline: crate::callrecord::LegTimeline::default(),
             callee_call_ids: vec![],
             server_dialog_id: rsipstack::dialog::DialogId {
                 call_id: "leg-call".into(),

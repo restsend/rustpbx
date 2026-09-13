@@ -79,7 +79,8 @@ pub struct SessionContext {
     /// Whether this session was re-entered from a transfer (JumpIvr /
     /// agent / queue transfer-back). Values: `"ivr"`, `"agent"`, `"queue"`.
     /// When `"ivr"`, the `source_ivr` / `source_node` variables carry the
-    /// originating IVR short code and node id.
+    /// originating IVR short code and node id; when `"queue"` (queue return),
+    /// `source_queue` carries the queue name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transferred_from: Option<String>,
 }
@@ -121,7 +122,8 @@ pub struct ProviderContext {
     /// agent / queue transfer-back). Values: `"ivr"`, `"agent"`, `"queue"`,
     /// or `None` for a fresh entry. When `"ivr"`, the variables map also
     /// carries `source_ivr` (originating IVR short code) and `source_node`
-    /// (originating node id).
+    /// (originating node id); when `"queue"` (queue return), it carries
+    /// `source_queue` (queue name).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transferred_from: Option<String>,
 }

@@ -141,6 +141,12 @@ pub struct Model {
     pub id: i64,
     #[sea_orm(unique)]
     pub call_id: String,
+    /// Root session id of the whole logical call. Equals `call_id` for the
+    /// root session; every child leg (queue dispatch, REFER transfer, ...)
+    /// inherits it, so logical calls can be aggregated with
+    /// `GROUP BY session_id`. A primary CDR is derived as
+    /// `session_id IS NULL OR session_id = call_id`.
+    pub session_id: Option<String>,
     pub display_id: Option<String>,
     pub direction: String,
     pub status: String,

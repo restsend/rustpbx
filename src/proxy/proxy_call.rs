@@ -246,6 +246,8 @@ impl CallSessionBuilder {
             // reaches the reporter via the CallerPeerContext cookie extension.
             callee_peer: None,
             last_queue_name: None,
+            transferred: false,
+            leg_timeline: crate::callrecord::LegTimeline::default(),
             callee_call_ids: vec![],
             server_dialog_id: rsipstack::dialog::DialogId {
                 call_id: "".into(),

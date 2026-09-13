@@ -12,7 +12,7 @@ members = [
 
 [package]
 name = "rustpbx"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 default-run = "rustpbx"
 authors = ["jinti<shenjind@fourz.cn>"]
@@ -230,11 +230,11 @@ iso_currency = { version = "0.5.3", default-features = false, features = [
     "iterator",
 ], optional = true }
 # Workspace crates
-rustpbx-models = { path = "crates/rustpbx-models", version = "0.5.0" }
-rustpbx-storage = { path = "crates/rustpbx-storage", version = "0.5.0" }
-rustpbx-http-util = { path = "crates/rustpbx-http-util", version = "0.5.0" }
-rustpbx-sipflow = { path = "crates/rustpbx-sipflow", version = "0.5.0" }
-rustpbx-media = { path = "crates/rustpbx-media", version = "0.5.0" }
+rustpbx-models = { path = "crates/rustpbx-models", version = "0.5.1" }
+rustpbx-storage = { path = "crates/rustpbx-storage", version = "0.5.1" }
+rustpbx-http-util = { path = "crates/rustpbx-http-util", version = "0.5.1" }
+rustpbx-sipflow = { path = "crates/rustpbx-sipflow", version = "0.5.1" }
+rustpbx-media = { path = "crates/rustpbx-media", version = "0.5.1" }
 
 
 [dev-dependencies]

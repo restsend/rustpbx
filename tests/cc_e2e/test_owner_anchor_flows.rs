@@ -94,8 +94,13 @@ async fn e2e_blind_transfer_retires_agent_dialog_and_preserves_customer() {
     .await
     .expect("agent receives the original call");
     let customer_dialog = timeout(Duration::from_secs(5), call)
-        .await.unwrap().unwrap().unwrap();
-    let handle = server.registry.get_handle_by_dialog(&agent_dialog.call_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let handle = server
+        .registry
+        .get_handle_by_dialog(&agent_dialog.call_id)
         .expect("CC resolves the agent's SIP Call-ID to its owner session");
 
     // First reject a transfer, then answer a retry. Neither rejection nor
@@ -103,11 +108,13 @@ async fn e2e_blind_transfer_retires_agent_dialog_and_preserves_customer() {
     // should receive the callee slot and trigger the old dialog's BYE.
     let mut target_dialog = None;
     for accept in [false, true] {
-        handle.send_command(CallCommand::Transfer {
-            leg_id: LegId::new("callee"),
-            target: "sip:alice".into(),
-            attended: false,
-        }).unwrap();
+        handle
+            .send_command(CallCommand::Transfer {
+                leg_id: LegId::new("callee"),
+                target: "sip:alice".into(),
+                attended: false,
+            })
+            .unwrap();
         let incoming = timeout(Duration::from_secs(5), async {
             loop {
                 for event in target.process_dialog_events().await.unwrap() {
@@ -122,8 +129,10 @@ async fn e2e_blind_transfer_retires_agent_dialog_and_preserves_customer() {
         .expect("transfer INVITE reaches Alice");
         assert_ne!(incoming.call_id, agent_dialog.call_id);
         if !accept {
-            target.reject_call_with_reason(&incoming, Some(486), None)
-                .await.unwrap();
+            target
+                .reject_call_with_reason(&incoming, Some(486), None)
+                .await
+                .unwrap();
             // Allow the failed INVITE to finish before inspecting the agent
             // and dispatching the next transfer through the same owner.
             sleep(Duration::from_millis(100)).await;
@@ -138,7 +147,10 @@ async fn e2e_blind_transfer_retires_agent_dialog_and_preserves_customer() {
             "agent must stay connected until replacement answers: {agent_events:?}"
         );
         if accept {
-            target.answer_call(&incoming, Some(sdp.clone())).await.unwrap();
+            target
+                .answer_call(&incoming, Some(sdp.clone()))
+                .await
+                .unwrap();
             target_dialog = Some(incoming);
         }
     }
@@ -164,13 +176,20 @@ async fn e2e_blind_transfer_retires_agent_dialog_and_preserves_customer() {
     for ua in [&customer, &target] {
         let events = ua.process_dialog_events().await.unwrap();
         assert!(
-            !events.iter().any(|event| matches!(event, TestUaEvent::CallTerminated(_))),
+            !events
+                .iter()
+                .any(|event| matches!(event, TestUaEvent::CallTerminated(_))),
             "agent teardown must not terminate the customer or Alice: {events:?}"
         );
     }
-    let entry = server.registry.get(handle.session_id()).expect("call remains active");
+    let entry = server
+        .registry
+        .get(handle.session_id())
+        .expect("call remains active");
     assert_eq!(entry.status, ActiveProxyCallStatus::Talking);
-    let target_handle = server.registry.get_handle_by_dialog(&target_dialog.call_id)
+    let target_handle = server
+        .registry
+        .get_handle_by_dialog(&target_dialog.call_id)
         .expect("Alice's new dialog belongs to the surviving session");
     assert_eq!(target_handle.session_id(), handle.session_id());
     target.hangup(&target_dialog).await.unwrap();

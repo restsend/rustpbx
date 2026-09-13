@@ -436,13 +436,18 @@ fn main() -> Result<()> {
         // the user did not provide an explicit RUST_LOG override. rustrtc is
         // pinned to info (not warn) so its media milestone INFO logs — first
         // inbound RTP/RTCP, both-directions confirmed — still surface while
-        // its per-connection DEBUG lifecycle noise is silenced.
-        for noisy in &["hyper_util", "rustls", "sqlx"] {
-            if let Ok(d) = format!("{}=warn", noisy).parse() {
+        // its per-connection DEBUG lifecycle noise is silenced. Targets the
+        // user already named in `log_level` are left untouched: a later
+        // directive would override the user's explicit per-target level.
+        let configured = config.log_level.as_deref().unwrap_or_default();
+        let mut noisy = vec!["hyper_util", "rustls", "sqlx", "rsipstack", "reqwest"];
+        noisy.retain(|t| !configured.contains(t));
+        for target in &noisy {
+            if let Ok(d) = format!("{}=warn", target).parse() {
                 env_filter = env_filter.add_directive(d);
             }
         }
-        if let Ok(d) = "rustrtc=info".parse() {
+        if !configured.contains("rustrtc") && let Ok(d) = "rustrtc=info".parse() {
             env_filter = env_filter.add_directive(d);
         }
 

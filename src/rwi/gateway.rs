@@ -481,7 +481,10 @@ impl RwiGateway {
 
     /// Get the user data object of a session (keyed by session_id).
     /// Returns an empty map when nothing was set.
-    pub fn get_user_data(&self, session_id: &SessionId) -> serde_json::Map<String, serde_json::Value> {
+    pub fn get_user_data(
+        &self,
+        session_id: &SessionId,
+    ) -> serde_json::Map<String, serde_json::Value> {
         self.user_data
             .get(session_id)
             .map(|d| d.clone())
@@ -808,7 +811,10 @@ mod tests {
 
     // ── session user data ──────────────────────────────────────────────────
 
-    fn setup_owned_call(gw: &mut RwiGateway, call_id: &str) -> mpsc::UnboundedReceiver<serde_json::Value> {
+    fn setup_owned_call(
+        gw: &mut RwiGateway,
+        call_id: &str,
+    ) -> mpsc::UnboundedReceiver<serde_json::Value> {
         let sid = gw.create_session(create_identity()).read().id.clone();
         let (tx, rx) = mpsc::unbounded_channel();
         gw.set_session_event_sender(&sid, tx);
@@ -831,7 +837,10 @@ mod tests {
 
         // Stored wholesale, keyed by session_id.
         let stored = gw.get_user_data(&"sess-1".to_string());
-        assert_eq!(stored.get("crm_id").and_then(|v| v.as_str()), Some("C-1001"));
+        assert_eq!(
+            stored.get("crm_id").and_then(|v| v.as_str()),
+            Some("C-1001")
+        );
 
         // Replace-all: the previous object is fully discarded.
         let mut replacement = serde_json::Map::new();
@@ -840,7 +849,10 @@ mod tests {
             .unwrap();
         let stored = gw.get_user_data(&"sess-1".to_string());
         assert!(stored.get("crm_id").is_none(), "old keys must not survive");
-        assert_eq!(stored.get("ticket_id").and_then(|v| v.as_str()), Some("T-9"));
+        assert_eq!(
+            stored.get("ticket_id").and_then(|v| v.as_str()),
+            Some("T-9")
+        );
 
         // Both updates announced with the full new value.
         let first = rx.recv().await.unwrap();

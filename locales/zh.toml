@@ -1039,6 +1039,7 @@ filter_status = "状态"
 filter_direction = "方向"
 filter_date_range = "日期范围"
 filter_only_transcribed = "仅已转录"
+filter_all_legs = "显示全部腿"
 filter_departments = "部门"
 filter_sip_trunks = "SIP 中继"
 filter_billing_status = "计费状态"
@@ -1126,6 +1127,15 @@ label_ring_duration = "振铃时长"
 label_answer = "接听"
 label_end = "结束"
 label_duration = "通话时长"
+
+# 逻辑呼叫子腿
+section_child_legs = "呼叫腿"
+section_child_legs_desc = "同一逻辑呼叫的其他 CDR 腿(排队派发、转接、集群跳转)。"
+child_leg_from = "主叫"
+child_leg_to = "被叫"
+child_leg_status = "状态"
+child_leg_duration = "时长(秒)"
+child_leg_open = "打开"
 # Actions
 btn_sip_trace_json = "SIP 跟踪 JSON"
 # Tabs

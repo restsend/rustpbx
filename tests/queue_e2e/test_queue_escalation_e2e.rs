@@ -397,8 +397,7 @@ mod escalation_e2e {
         sleep(Duration::from_millis(400)).await;
         for ua in [&mut agent1, &mut agent2, &mut agent3] {
             loop {
-                match wait_for_event(ua, Instant::now(), Duration::from_millis(200), |_| true)
-                    .await
+                match wait_for_event(ua, Instant::now(), Duration::from_millis(200), |_| true).await
                 {
                     Some(_) => continue,
                     None => break,
@@ -430,9 +429,7 @@ mod escalation_e2e {
             matches!(e, TestUaEvent::IncomingCall(_, _))
         })
         .await
-        .expect(
-            "agent2 must be the head of call 2 (fair rotation across calls)",
-        );
+        .expect("agent2 must be the head of call 2 (fair rotation across calls)");
         // NOTE: the widened phase still adds the union tail (agent1) after
         // the threshold — the rotation contract is about the HEAD, asserted
         // above (call 1 head=agent1, call 2 head=agent2).

@@ -157,8 +157,7 @@ impl E2eTestServer {
                 Err(e) if attempt < 5 && e.to_string().contains("Address already in use") => {
                     warn!(
                         port,
-                        attempt,
-                        "ephemeral port sniped by a concurrent server, retrying"
+                        attempt, "ephemeral port sniped by a concurrent server, retrying"
                     );
                     continue;
                 }
@@ -242,8 +241,7 @@ impl E2eTestServer {
                 Err(e) if attempt < 5 && e.to_string().contains("Address already in use") => {
                     warn!(
                         port,
-                        attempt,
-                        "ephemeral port sniped by a concurrent server, retrying"
+                        attempt, "ephemeral port sniped by a concurrent server, retrying"
                     );
                     continue;
                 }

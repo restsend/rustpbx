@@ -33,14 +33,17 @@ async fn test_agent_state_change_reaches_webhook() {
 
     let capture = WebhookCapture::start().await;
 
-    let webhook_tx = start_rwi_webhook_handler(LocatorWebhookConfig {
-        url: capture.url.clone(),
-        events: vec![],
-        headers: None,
-        timeout_ms: Some(5000),
+    let webhook_tx = start_rwi_webhook_handler(
+        LocatorWebhookConfig {
+            url: capture.url.clone(),
+            events: vec![],
+            headers: None,
+            timeout_ms: Some(5000),
             retries: None,
             track_queue_latency: None,
-    }, rustpbx::rwi::webhook::WEBHOOK_CHANNEL_SIZE);
+        },
+        rustpbx::rwi::webhook::WEBHOOK_CHANNEL_SIZE,
+    );
 
     let gateway: RwiGatewayRef = Arc::new(parking_lot::RwLock::new({
         let mut gw = RwiGateway::new();
@@ -127,14 +130,17 @@ async fn test_recording_metadata_webhook_carries_agent_context() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let capture = WebhookCapture::start().await;
-    let webhook_tx = start_rwi_webhook_handler(LocatorWebhookConfig {
-        url: capture.url.clone(),
-        events: vec![],
-        headers: None,
-        timeout_ms: Some(5000),
+    let webhook_tx = start_rwi_webhook_handler(
+        LocatorWebhookConfig {
+            url: capture.url.clone(),
+            events: vec![],
+            headers: None,
+            timeout_ms: Some(5000),
             retries: None,
             track_queue_latency: None,
-    }, rustpbx::rwi::webhook::WEBHOOK_CHANNEL_SIZE);
+        },
+        rustpbx::rwi::webhook::WEBHOOK_CHANNEL_SIZE,
+    );
 
     let gateway: RwiGatewayRef = Arc::new(parking_lot::RwLock::new({
         let mut gw = RwiGateway::new();
@@ -218,14 +224,17 @@ async fn test_cc_call_event_webhook_carries_context() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let capture = WebhookCapture::start().await;
-    let webhook_tx = start_rwi_webhook_handler(LocatorWebhookConfig {
-        url: capture.url.clone(),
-        events: vec![],
-        headers: None,
-        timeout_ms: Some(5000),
+    let webhook_tx = start_rwi_webhook_handler(
+        LocatorWebhookConfig {
+            url: capture.url.clone(),
+            events: vec![],
+            headers: None,
+            timeout_ms: Some(5000),
             retries: None,
             track_queue_latency: None,
-    }, rustpbx::rwi::webhook::WEBHOOK_CHANNEL_SIZE);
+        },
+        rustpbx::rwi::webhook::WEBHOOK_CHANNEL_SIZE,
+    );
 
     let gateway: RwiGatewayRef = Arc::new(parking_lot::RwLock::new({
         let mut gw = RwiGateway::new();
@@ -261,11 +270,9 @@ async fn test_cc_call_event_webhook_carries_context() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Emit the unified core call_answered for the agent call.
-    gateway
-        .read()
-        .send_to_owner(&rustpbx::rwi::CallAnswered {
-            call_id: "call-cc-1".to_string(),
-        });
+    gateway.read().send_to_owner(&rustpbx::rwi::CallAnswered {
+        call_id: "call-cc-1".to_string(),
+    });
 
     tokio::time::sleep(Duration::from_millis(800)).await;
 

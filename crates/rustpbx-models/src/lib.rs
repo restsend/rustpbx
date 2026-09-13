@@ -17,6 +17,7 @@ pub mod call_record_dashboard_index;
 pub mod call_record_from_number_index;
 pub mod call_record_indices;
 pub mod call_record_optimization_indices;
+pub mod call_record_session_id_column;
 pub mod cluster_session;
 pub mod config_entry;
 pub mod department;

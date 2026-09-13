@@ -120,6 +120,7 @@ embedded `event_type` key identifying the event:
   "timestamp": 1716212345,
   "call_id": "call-abc123",
   "event_type": "call_ringing",
+  "event_id": "0b8dfa2e-6f6a-4c72-9d1e-3a4d1f9e7b55",
   "event": {
     /* same as the WS event content, minus event_type —
        the envelope's top-level event_type is the single source of truth */
@@ -132,6 +133,7 @@ embedded `event_type` key identifying the event:
 | `timestamp` | u64 | Unix epoch seconds |
 | `call_id` | string | Call identifier (empty string for broadcast-only events) |
 | `event_type` | string | snake_case event type name |
+| `event_id` | string | UUID v4 idempotency key: stable across redelivery/retry of the same event, so receivers can dedupe |
 | `event` | object | Event payload with fields flattened directly (**no `event_type` key** — the top-level one governs) |
 
 ---

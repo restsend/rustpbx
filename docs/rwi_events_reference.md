@@ -116,6 +116,7 @@ Webhook 处理器运行在专用的 tokio 运行时上,其 HTTP 推送不会与 
   "timestamp": 1716212345,
   "call_id": "call-abc123",
   "event_type": "call_ringing",
+  "event_id": "0b8dfa2e-6f6a-4c72-9d1e-3a4d1f9e7b55",
   "event": {
     /* 与 WS 事件内容一致，但不含 event_type —— 信封顶层 event_type 是唯一来源 */
   }
@@ -128,6 +129,7 @@ Webhook 处理器运行在专用的 tokio 运行时上,其 HTTP 推送不会与 
 | `timestamp` | u64 | Unix 时间戳（秒） |
 | `call_id` | string | 呼叫标识（广播事件为空字符串） |
 | `event_type` | string | snake_case 事件类型名 |
+| `event_id` | string | UUID v4 幂等键：同一次事件的多次投递（重试/重发）该值不变，接收方据此去重 |
 | `event` | object | 事件载荷，字段直接扁平化（**不含 `event_type` 键**，以顶层为准） |
 
 ---

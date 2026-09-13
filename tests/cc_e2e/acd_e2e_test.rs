@@ -162,7 +162,8 @@ mod acd_e2e_test {
             value: Some(120),
             action: rustpbx::addons::cc::acd::config::OverflowAction::Overflow,
         }];
-        support.overflow.chain = vec![rustpbx::addons::cc::acd::config::OverflowTargetConfig::Voicemail];
+        support.overflow.chain =
+            vec![rustpbx::addons::cc::acd::config::OverflowTargetConfig::Voicemail];
         cc_state.acd_engine.replace_config(cfg);
 
         // Create call already past the 120s overflow timeout
@@ -316,9 +317,7 @@ mod acd_e2e_test {
             holidays: Default::default(),
             night_mode: None,
         };
-        acd_config
-            .policies
-            .insert("default".to_string(), policy);
+        acd_config.policies.insert("default".to_string(), policy);
         acd_config.default_policy = "default".to_string();
         cc_state.acd_engine.replace_config(acd_config);
 

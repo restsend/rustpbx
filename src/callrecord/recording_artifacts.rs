@@ -330,10 +330,7 @@ mod tests {
     #[test]
     fn direct_child_matches_archiver_predicate() {
         assert!(is_direct_child_of_root("/rec", Path::new("/rec/a.wav")));
-        assert!(is_direct_child_of_root(
-            "./rec",
-            Path::new("./rec/a.wav")
-        ));
+        assert!(is_direct_child_of_root("./rec", Path::new("./rec/a.wav")));
         assert!(!is_direct_child_of_root(
             "/rec",
             Path::new("/rec/20260907/a.wav")

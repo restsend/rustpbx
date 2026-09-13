@@ -88,13 +88,10 @@ async fn inbound_refer_in_session_falls_through_for_unknown_dialog() {
     ))
     .expect("dialog id must parse");
 
-    let dispatched = CallModule::execute_inbound_refer_in_session(
-        &handle,
-        &unknown,
-        "sip:2001@rustpbx.com",
-    )
-    .await
-    .expect("fallthrough must not error");
+    let dispatched =
+        CallModule::execute_inbound_refer_in_session(&handle, &unknown, "sip:2001@rustpbx.com")
+            .await
+            .expect("fallthrough must not error");
     assert!(
         !dispatched,
         "unknown dialog must fall through to the raw originate"

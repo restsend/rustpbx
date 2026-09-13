@@ -61,16 +61,44 @@ UUI 丢失不影响事件链路的 session_id 关联。
 
 ## CDR
 
-`rustpbx_call_records` 表新增 `session_id` 列(索引,非唯一):
+`rustpbx_call_records` 表有 `session_id` 列(VARCHAR(120),索引
+`idx_rustpbx_call_records_session_id`,非唯一;迁移
+`call_record_session_id_column`):
 
 - `call_id` 保持唯一索引(每腿一条记录)
-- `session_id` 用于按逻辑呼叫聚合查询,替代已退役的 `root_call_id` 机制
+- `session_id` 用于按逻辑呼叫聚合查询(`GROUP BY session_id`),替代已退役的
+  `root_call_id` 机制;它是唯一事实源——**不再写入 `metadata` JSON**
+- **主/子 CDR 派生**:根会话的记录(`session_id` 为 NULL 的旧行,或
+  `session_id == call_id`)为 primary;派生腿(queue 派发、转接跳转、
+  集群跨节点腿)为 child
+- `leg_timeline` 列记录腿生命周期事件(added / bridged / unbridged /
+  transferred / removed,上限 128 条),盲转、queue 派发、桥接均会写入
+- `metadata.transferred = true` 标记本腿被转接过(CSAT 抑制同样依赖
+  `CallMeta.transferred`)
 - 录音/sipflow 制品命名优先使用根 `session_id`(全通 `{session_id}.wav`,
   片段 `{session_id}_{timestamp}_{type}_{id}.wav`; 信令旁路
   `{session_id}.jsonl` / `{session_id}_{call_id}.jsonl`),腿级 `call_id`
   仍写入 CDR/`extra` 以防碰撞
-- Console/API:`GET /call-records/by-session/{session_id}/artifacts` 按
-  `session_id` 聚合各腿录音片段与 sipflow jsonl
+
+### 查询与消费
+
+- Console 呼叫记录列表**默认只显示 primary**(每通一条);"All call legs"
+  过滤器(`filters.allLegs`)展开全部腿
+- Console 详情页展示同一逻辑呼叫的子腿列表(`child_legs`)
+- `GET /call-records/by-session/{session_id}/artifacts` 按 `session_id`
+  列(回退 `call_id`)聚合各腿录音片段与 sipflow jsonl,legs 带
+  `leg_role`(primary/child)
+- CC CDR webhook / OpenAPI 的 `CdrWebhookPayload` 带 `legRole` 字段
+- SQL 直查:主 CDR 过滤条件
+  `session_id IS NULL OR session_id = call_id`;聚合键
+  `COALESCE(session_id, call_id)`
+
+### 自定义表 / 日轮转
+
+raw-SQL saver(自定义表名、SQLite 日轮转)同步写入 `session_id` 列并在建表
+DDL 中包含该列;对升级前已存在的表,启动时 `ensure_session_id_column` 会
+尽力补列(幂等)。外部自建表需自行保证列存在。CSV 导出会自动多出
+`session_id` 列。
 
 ## 迁移说明
 

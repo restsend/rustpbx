@@ -142,10 +142,9 @@ mod tests {
 
     #[test]
     fn resolve_prefers_session_id_header_local_uuid() {
-        let local = rsipstack::sip::headers::SessionId::normalize(
-            "aabbccddeeff00112233445566778899",
-        )
-        .unwrap();
+        let local =
+            rsipstack::sip::headers::SessionId::normalize("aabbccddeeff00112233445566778899")
+                .unwrap();
         let mut headers = rsipstack::sip::Headers::default();
         headers.push(
             rsipstack::sip::headers::SessionId::from_local(&local)
@@ -161,7 +160,10 @@ mod tests {
     #[test]
     fn resolve_falls_back_to_uuid_like_call_id() {
         assert_eq!(
-            resolve_incoming(&invite(rsipstack::sip::Headers::default()), "0b9e6c1e-1b40-4e8f-9c21-2f5a8d3e7b61"),
+            resolve_incoming(
+                &invite(rsipstack::sip::Headers::default()),
+                "0b9e6c1e-1b40-4e8f-9c21-2f5a8d3e7b61"
+            ),
             "0b9e6c1e1b404e8f9c212f5a8d3e7b61"
         );
     }

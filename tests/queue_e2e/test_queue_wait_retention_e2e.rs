@@ -160,18 +160,21 @@ async fn start_harness(
     // Production drain: SkillGroupEvent → translate → gateway → webhook,
     // mirroring CcAddon's adapter bridge. Also mirror to `mirror_rx` for
     // direct SkillGroupEvent assertions.
-    let webhook_tx = start_rwi_webhook_handler(LocatorWebhookConfig {
-        url: capture.url.clone(),
-        events: vec![
-            "skill_group_call_queued".to_string(),
-            "skill_group_call_abandoned".to_string(),
-            "skill_group_agent_assigned".to_string(),
-        ],
-        headers: None,
-        timeout_ms: Some(5000),
+    let webhook_tx = start_rwi_webhook_handler(
+        LocatorWebhookConfig {
+            url: capture.url.clone(),
+            events: vec![
+                "skill_group_call_queued".to_string(),
+                "skill_group_call_abandoned".to_string(),
+                "skill_group_agent_assigned".to_string(),
+            ],
+            headers: None,
+            timeout_ms: Some(5000),
             retries: None,
             track_queue_latency: None,
-    }, rustpbx::rwi::webhook::WEBHOOK_CHANNEL_SIZE);
+        },
+        rustpbx::rwi::webhook::WEBHOOK_CHANNEL_SIZE,
+    );
     let gateway: RwiGatewayRef = Arc::new(parking_lot::RwLock::new({
         let mut gw = RwiGateway::new();
         gw.set_webhook_tx(webhook_tx);

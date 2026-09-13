@@ -1993,7 +1993,6 @@ impl SipSession {
         let bridge_dtmf_digits = self.bridge_dtmf_digits.clone();
         let original_caller = self.context.original_caller.clone();
         let original_callee = self.context.original_callee.clone();
-        let routing_metadata = self.context.metadata.clone();
         let session_id = self.context.session_id.clone();
         // App flows start asynchronously AFTER the answer (the IVR/queue step
         // provider may involve external HTTP roundtrips). Digits pressed in
@@ -2021,6 +2020,11 @@ impl SipSession {
                                 crate::media::media_bridge::LegSide::A => "caller",
                                 crate::media::media_bridge::LegSide::B => "callee",
                             };
+                            // Same SIP-header source as the executor's own
+                            // trace entries (invocation → call-info fallback);
+                            // routing metadata is NOT the INVITE header map.
+                            let sip_headers =
+                                super::util::trace_sip_headers(&app_runtime).await;
                             let injected = forward_dtmf_event(
                                 ev.digit,
                                 leg_id,
@@ -2032,7 +2036,7 @@ impl SipSession {
                                 &bridge_dtmf_digits,
                                 &original_caller,
                                 &original_callee,
-                                routing_metadata.clone(),
+                                sip_headers,
                             );
                             if !injected && app_expected {
                                 pending.push_back((ev.digit, leg_id, std::time::Instant::now()));
@@ -3386,7 +3390,7 @@ impl SipSession {
                     &self.bridge_dtmf_digits,
                     &self.context.original_caller,
                     &self.context.original_callee,
-                    self.context.metadata.clone(),
+                    super::util::trace_sip_headers(&self.app_runtime).await,
                 );
             }
             // Forward DTMF INFO to the peer dialog
@@ -8815,6 +8819,33 @@ impl SipSession {
         );
     }
 
+    /// Record a leg lifecycle event into the CDR leg timeline (bounded —
+    /// see [`LegTimeline::MAX_EVENTS`]).
+    pub(crate) fn record_leg_event(
+        &mut self,
+        leg_id: &str,
+        event_type: crate::callrecord::LegTimelineEventType,
+        peer_leg_id: Option<String>,
+        details: Option<serde_json::Value>,
+    ) {
+        self.meta
+            .leg_timeline
+            .add_event(leg_id.to_string(), event_type, peer_leg_id, details);
+    }
+
+    /// Mark the call as transferred away and stamp the timeline. Sticky —
+    /// repeats (e.g. blind transfer then consult merge) append events but
+    /// never reset the flag.
+    pub(crate) fn mark_transferred_with(&mut self, details: Option<serde_json::Value>) {
+        self.meta.transferred = true;
+        self.record_leg_event(
+            "caller",
+            crate::callrecord::LegTimelineEventType::Transferred,
+            None,
+            details,
+        );
+    }
+
     pub fn record_snapshot(&self) -> CallSessionRecordSnapshot {
         // Merge agent + routing data into a JSON map so the reporter picks it up.
         // Agent info was written into session extensions by CcCallSessionHook
@@ -9036,6 +9067,11 @@ impl SipSession {
                     meta.insert("trace".to_string(), arr);
                 }
             }
+            // Transfer marker: lets consumers (CSAT suppression, reports)
+            // spot transferred calls without parsing the leg timeline.
+            if self.meta.transferred {
+                meta.insert("transferred".to_string(), serde_json::Value::Bool(true));
+            }
             // Who hung up + the normalized hangup reason, so the CC call-history
             // UI can display and filter by them.
             match self.meta.hangup_reason.as_ref() {
@@ -9099,6 +9135,8 @@ impl SipSession {
             last_queue_name: self.meta.queue_name.clone(),
             callee_call_ids: self.meta.callee_call_ids.iter().cloned().collect(),
             server_dialog_id: self.caller_dialog_id(),
+            transferred: self.meta.transferred,
+            leg_timeline: self.meta.leg_timeline.clone(),
             metadata,
             media_quality,
             recording_segments: self.completed_recording_segments.clone(),
@@ -9243,7 +9281,7 @@ impl SipSession {
                         "Call marked as transferred (post-call survey suppressed)"
                     );
                 }
-                self.meta.transferred = true;
+                self.mark_transferred_with(None);
                 CommandResult::success()
             }
 
@@ -9402,13 +9440,12 @@ impl SipSession {
                     self.recording_seq = self.recording_seq.saturating_add(1);
                     let mut seq = self.recording_seq;
                     let path = if config.path.trim().is_empty() {
-                        let (resolved_seq, resolved_path) =
-                            crate::callrecord::segmented_wav_path(
-                                &self.recording_root_dir(),
-                                &self.root_session_id_str(),
-                                seq,
-                                &label,
-                            );
+                        let (resolved_seq, resolved_path) = crate::callrecord::segmented_wav_path(
+                            &self.recording_root_dir(),
+                            &self.root_session_id_str(),
+                            seq,
+                            &label,
+                        );
                         seq = resolved_seq;
                         self.recording_seq = resolved_seq;
                         resolved_path.to_string_lossy().into_owned()
@@ -9954,7 +9991,8 @@ impl SipSession {
                     // Without this, a caller hangup after a dynamic-leg
                     // dispatch was misclassified as a queue abandon.
                     self.meta.ever_connected_callee = true;
-                    if let Some(endpoint) = self.legs.get(&leg_id).and_then(|l| l.endpoint.clone()) {
+                    if let Some(endpoint) = self.legs.get(&leg_id).and_then(|l| l.endpoint.clone())
+                    {
                         self.meta.connected_callee = Some(endpoint);
                     }
 
@@ -10252,7 +10290,8 @@ impl SipSession {
                 self.meta.ivr_flow_suspended = false;
                 self.emit_suspended_flow_session_end(
                     crate::call::app::ivr::provider::SessionEndTag::UserHangup,
-                );
+                )
+                .await;
             }
             self.meta.pending_transfer_outcome = None;
             return CommandResult::success();
@@ -10340,7 +10379,7 @@ impl SipSession {
     /// still see exactly one session_end per logical flow — carrying the
     /// REAL end reason instead of a premature `transfer`. Node context comes
     /// from the bridge trace context when the suspension was a voip_bridge.
-    pub(crate) fn emit_suspended_flow_session_end(
+    pub(crate) async fn emit_suspended_flow_session_end(
         &self,
         end_reason: crate::call::app::ivr::provider::SessionEndTag,
     ) {
@@ -10350,6 +10389,7 @@ impl SipSession {
             &self.context.original_callee,
             &self.server.rwi_gateway,
             &self.bridge_trace_context,
+            super::util::trace_sip_headers(&self.app_runtime).await,
             end_reason,
         );
     }
@@ -10536,7 +10576,8 @@ impl SipSession {
             self.meta.ivr_flow_suspended = false;
             self.emit_suspended_flow_session_end(
                 crate::call::app::ivr::provider::SessionEndTag::UserHangup,
-            );
+            )
+            .await;
         }
 
         if self.app_runtime.is_running() {
@@ -10857,6 +10898,12 @@ impl SipSession {
         let leg = crate::call::domain::Leg::new(new_leg_id.clone()).with_endpoint(target.clone());
         self.legs.insert(new_leg_id.clone(), leg);
         self.update_leg_state(&new_leg_id, LegState::Initializing);
+        self.record_leg_event(
+            &new_leg_id.0,
+            crate::callrecord::LegTimelineEventType::Added,
+            None,
+            Some(serde_json::json!({ "target": target })),
+        );
 
         // Create peer and initiate INVITE in background
         if let Err(e) = self.initiate_sip_leg(&new_leg_id, location).await {
@@ -10866,6 +10913,12 @@ impl SipSession {
                 "Failed to initiate SIP leg, cleaning up"
             );
             self.legs.remove(&new_leg_id);
+            self.record_leg_event(
+                &new_leg_id.0,
+                crate::callrecord::LegTimelineEventType::Removed,
+                None,
+                Some(serde_json::json!({ "reason": "invite_failed", "error": e.to_string() })),
+            );
             return Err(e);
         }
 
@@ -10905,6 +10958,12 @@ impl SipSession {
         }
         if self.legs.remove(&leg_id).is_some() {
             info!(session_id = %self.id, %leg_id, "Leg removed");
+            self.record_leg_event(
+                &leg_id.0,
+                crate::callrecord::LegTimelineEventType::Removed,
+                None,
+                None,
+            );
         }
 
         self.update_media_path().await;
@@ -11394,6 +11453,18 @@ impl SipSession {
             return false;
         }
         self.bridge = BridgeConfig::bridge(leg_a.clone(), leg_b.clone());
+        self.record_leg_event(
+            &leg_a.0,
+            crate::callrecord::LegTimelineEventType::Bridged,
+            Some(leg_b.0.clone()),
+            None,
+        );
+        self.record_leg_event(
+            &leg_b.0,
+            crate::callrecord::LegTimelineEventType::Bridged,
+            Some(leg_a.0.clone()),
+            None,
+        );
 
         // A leg with its own peer outside caller/callee needs the private mixer.
         let a_needs_mixer =
@@ -11472,6 +11543,15 @@ impl SipSession {
     }
 
     async fn clear_bridge(&mut self) {
+        let bridged: Vec<LegId> = self.bridge.legs.clone();
+        for leg_id in &bridged {
+            self.record_leg_event(
+                &leg_id.0,
+                crate::callrecord::LegTimelineEventType::Unbridged,
+                None,
+                None,
+            );
+        }
         self.bridge.clear();
         if self.media.bridge.is_some()
             && let Some(mb) = self.bridge_mut()

@@ -600,8 +600,9 @@ async fn test_rebill_logic_with_prefixes() {
 
     assert_eq!(rated_callee_for_sell, "8613800000000");
 
-    let sell_rates = RateMatcher::from(vec![RateConfig { id: 7,
-                prefix: "86138".to_string(),
+    let sell_rates = RateMatcher::from(vec![RateConfig {
+        id: 7,
+        prefix: "86138".to_string(),
         match_caller_prefix: None,
         rate: 0.45,
         min_duration: 60,

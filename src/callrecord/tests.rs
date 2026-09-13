@@ -1502,3 +1502,306 @@ async fn test_recording_metadata_file_size_uses_stashed_sipflow_size() {
     }
     assert!(saw_metadata, "recording_metadata_available never emitted");
 }
+
+// ── session_id column (logical-call correlation) ─────────────────────────────
+
+#[test]
+fn test_call_record_row_carries_session_id() {
+    let mut record = make_record();
+    record.session_id = Some("test-call-id".to_string());
+    record.leg_timeline.add_event(
+        "callee".to_string(),
+        crate::callrecord::LegTimelineEventType::Bridged,
+        Some("caller".to_string()),
+        None,
+    );
+
+    let row = CallRecordRow::from_record(&record);
+
+    assert_eq!(row.session_id.as_deref(), Some("test-call-id"));
+    // The column is the single source of truth — no metadata JSON duplicate.
+    let has_session_in_metadata = row
+        .metadata
+        .as_ref()
+        .map(|metadata| metadata.get("session_id").is_some())
+        .unwrap_or(false);
+    assert!(
+        !has_session_in_metadata,
+        "session_id must not be duplicated into metadata JSON"
+    );
+    // Leg timeline flows through the row.
+    assert!(
+        row.leg_timeline.is_some(),
+        "leg_timeline must be serialized"
+    );
+}
+
+#[tokio::test]
+async fn test_persist_call_records_writes_session_id_column() {
+    use rustpbx_models::call_record::Column;
+    use sea_orm::{ColumnTrait, QueryFilter};
+
+    let db = rustpbx_models::create_db("sqlite::memory:", None)
+        .await
+        .expect("migrated in-memory db");
+
+    let mut record = make_record();
+    record.session_id = Some("root-of-call".to_string());
+    crate::callrecord::database::persist_call_records(&db, std::slice::from_ref(&record))
+        .await
+        .expect("persist");
+
+    let row = <rustpbx_models::call_record::Entity as sea_orm::EntityTrait>::find()
+        .filter(Column::CallId.eq(&record.call_id))
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("row exists");
+    assert_eq!(
+        row.session_id.as_deref(),
+        Some("root-of-call"),
+        "session_id must land in its dedicated column"
+    );
+    let metadata_has_session = row
+        .metadata
+        .as_ref()
+        .map(|metadata| metadata.get("session_id").is_some())
+        .unwrap_or(false);
+    assert!(!metadata_has_session, "metadata must not carry session_id");
+}
+
+/// Cluster-shaped logical call: one root session (IVR → queue → agent) plus
+/// two child legs (agent leg and transfer-target leg, each an independent
+/// session on a peer node). All three CDRs share the root `session_id`;
+/// exactly one of them is the primary.
+#[tokio::test]
+async fn test_three_leg_logical_call_shares_session_id() {
+    use rustpbx_models::call_record::{Column, Entity as CallRecordEntity};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let db = rustpbx_models::create_db("sqlite::memory:", None)
+        .await
+        .expect("migrated in-memory db");
+
+    let root = {
+        let mut r = make_record();
+        r.call_id = "root-s1".to_string();
+        r.session_id = Some("root-s1".to_string());
+        r
+    };
+    let agent_leg = {
+        let mut r = make_record();
+        r.call_id = "agent-leg-s2".to_string();
+        r.session_id = Some("root-s1".to_string());
+        r
+    };
+    let transfer_leg = {
+        let mut r = make_record();
+        r.call_id = "transfer-leg-s3".to_string();
+        r.session_id = Some("root-s1".to_string());
+        r
+    };
+    crate::callrecord::database::persist_call_records(&db, &[root, agent_leg, transfer_leg])
+        .await
+        .expect("persist 3 legs");
+
+    // Aggregation: every leg of the logical call resolves by session_id.
+    let legs = CallRecordEntity::find()
+        .filter(Column::SessionId.eq("root-s1"))
+        .all(&db)
+        .await
+        .unwrap();
+    assert_eq!(legs.len(), 3, "all three legs share the root session_id");
+
+    // Primary/child derivation: session_id == call_id marks the root row.
+    let primaries: Vec<_> = legs
+        .iter()
+        .filter(|row| row.session_id.as_deref() == Some(row.call_id.as_str()))
+        .collect();
+    let children: Vec<_> = legs
+        .iter()
+        .filter(|row| row.session_id.as_deref() != Some(row.call_id.as_str()))
+        .collect();
+    assert_eq!(
+        primaries.len(),
+        1,
+        "exactly one primary CDR per logical call"
+    );
+    assert_eq!(children.len(), 2, "agent + transfer legs are child CDRs");
+    assert_eq!(primaries[0].call_id, "root-s1");
+}
+
+#[tokio::test]
+async fn test_persist_call_records_writes_leg_timeline() {
+    use rustpbx_models::call_record::{Column, Entity as CallRecordEntity};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let db = rustpbx_models::create_db("sqlite::memory:", None)
+        .await
+        .expect("migrated in-memory db");
+
+    let mut record = make_record();
+    record.leg_timeline.add_event(
+        "leg-1".to_string(),
+        crate::callrecord::LegTimelineEventType::Added,
+        None,
+        Some(serde_json::json!({ "target": "sip:1001@example.com" })),
+    );
+    record.leg_timeline.add_event(
+        "leg-1".to_string(),
+        crate::callrecord::LegTimelineEventType::Bridged,
+        Some("caller".to_string()),
+        None,
+    );
+    record.leg_timeline.add_event(
+        "caller".to_string(),
+        crate::callrecord::LegTimelineEventType::Transferred,
+        None,
+        Some(serde_json::json!({ "target": "sip:1002@example.com", "kind": "sip" })),
+    );
+
+    crate::callrecord::database::persist_call_records(&db, std::slice::from_ref(&record))
+        .await
+        .expect("persist");
+
+    let row = CallRecordEntity::find()
+        .filter(Column::CallId.eq(&record.call_id))
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("row exists");
+    let timeline = row.leg_timeline.expect("leg_timeline persisted");
+    let events = timeline
+        .get("events")
+        .and_then(|v| v.as_array())
+        .expect("events array");
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0]["eventType"], "added");
+    assert_eq!(events[0]["details"]["target"], "sip:1001@example.com");
+    assert_eq!(events[1]["eventType"], "bridged");
+    assert_eq!(events[1]["peerLegId"], "caller");
+    assert_eq!(events[2]["eventType"], "transferred");
+}
+
+#[test]
+fn test_leg_timeline_is_bounded() {
+    use crate::callrecord::LegTimeline;
+
+    let mut timeline = LegTimeline::new();
+    for _ in 0..(LegTimeline::MAX_EVENTS + 50) {
+        timeline.add_event(
+            "leg".to_string(),
+            crate::callrecord::LegTimelineEventType::Added,
+            None,
+            None,
+        );
+    }
+    assert_eq!(
+        timeline.events.len(),
+        LegTimeline::MAX_EVENTS,
+        "timeline must stop growing at MAX_EVENTS"
+    );
+}
+
+#[tokio::test]
+async fn test_custom_saver_writes_session_id() {
+    let db = in_memory_db().await;
+    let table = "session_cdrs";
+    create_call_record_table(&db, table).await.unwrap();
+    let saver = crate::callrecord::CustomDatabaseSaver {
+        db: db.clone(),
+        table_name: table.to_string(),
+    };
+
+    let mut record = make_record();
+    record.session_id = Some("root-x".to_string());
+    saver.save(std::slice::from_ref(&record)).await.unwrap();
+
+    use sea_orm::{ConnectionTrait, Statement};
+    let rows = db
+        .query_all_raw(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            &format!("SELECT session_id FROM {table} WHERE call_id = 'test-call-id'"),
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    let session_id = rows
+        .first()
+        .and_then(|r| r.try_get::<Option<String>>("", "session_id").ok())
+        .flatten();
+    assert_eq!(
+        session_id.as_deref(),
+        Some("root-x"),
+        "raw-SQL saver must write the session_id column"
+    );
+}
+
+/// A custom (or rotation-day) table created before the session_id column
+/// existed must be patched up by `ensure_session_id_column`, otherwise every
+/// raw-SQL insert would fail.
+#[tokio::test]
+async fn test_ensure_session_id_column_patches_legacy_table() {
+    let db = in_memory_db().await;
+    let table = "legacy_cdrs";
+    // Legacy schema: no session_id column at all.
+    db.execute_raw(sea_orm::Statement::from_string(
+        db.get_database_backend(),
+        format!(
+            "CREATE TABLE {table} (\
+                id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                call_id VARCHAR(255) NOT NULL, \
+                display_id VARCHAR(255), \
+                direction VARCHAR(32) NOT NULL, \
+                status VARCHAR(32) NOT NULL, \
+                started_at TIMESTAMP NOT NULL, \
+                ended_at TIMESTAMP, \
+                duration_secs INTEGER NOT NULL, \
+                from_number VARCHAR(128), \
+                to_number VARCHAR(128), \
+                caller_name VARCHAR(255), \
+                agent_name VARCHAR(255), \
+                queue VARCHAR(255), \
+                department_id BIGINT, \
+                extension_id BIGINT, \
+                sip_trunk_id BIGINT, \
+                outbound_sip_trunk_id BIGINT, \
+                route_id BIGINT, \
+                sip_gateway VARCHAR(255), \
+                rewrite_original_from VARCHAR(255), \
+                rewrite_original_to VARCHAR(255), \
+                caller_uri VARCHAR(255), \
+                callee_uri VARCHAR(255), \
+                recording_url VARCHAR(1024), \
+                recording_duration_secs INTEGER, \
+                has_transcript BOOLEAN NOT NULL, \
+                transcript_status VARCHAR(64) NOT NULL, \
+                transcript_language VARCHAR(64), \
+                tags JSON, \
+                leg_timeline JSON, \
+                metadata JSON, \
+                created_at TIMESTAMP NOT NULL, \
+                updated_at TIMESTAMP NOT NULL, \
+                archived_at TIMESTAMP\
+            )"
+        ),
+    ))
+    .await
+    .unwrap();
+
+    crate::callrecord::ensure_session_id_column(&db, table).await;
+
+    let saver = crate::callrecord::CustomDatabaseSaver {
+        db: db.clone(),
+        table_name: table.to_string(),
+    };
+    let mut record = make_record();
+    record.session_id = Some("legacy-root".to_string());
+    let result = saver.save(std::slice::from_ref(&record)).await;
+    assert!(
+        result.is_ok(),
+        "save must succeed after ensure_session_id_column: {:?}",
+        result.err()
+    );
+    assert_eq!(count_rows(&db, table).await, 1);
+}

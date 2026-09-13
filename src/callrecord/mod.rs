@@ -44,9 +44,10 @@ pub mod storage;
 mod tests;
 
 pub use recording_artifacts::{
-    ActiveRecording, RecordingSegment, RecordingSubdir, UploadFailedMarker, is_direct_child_of_root,
-    local_archive_path, preview_archive_path, segment_wav_path, segmented_wav_path,
-    upload_failed_marker_path, write_upload_failed_marker, write_upload_failed_marker_ex,
+    ActiveRecording, RecordingSegment, RecordingSubdir, UploadFailedMarker,
+    is_direct_child_of_root, local_archive_path, preview_archive_path, segment_wav_path,
+    segmented_wav_path, upload_failed_marker_path, write_upload_failed_marker,
+    write_upload_failed_marker_ex,
 };
 
 const CALL_RECORD_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -306,6 +307,10 @@ pub struct LegTimeline {
 }
 
 impl LegTimeline {
+    /// Upper bound on retained events so a pathological re-dial loop cannot
+    /// bloat the call record.
+    pub const MAX_EVENTS: usize = 128;
+
     pub fn new() -> Self {
         Self { events: Vec::new() }
     }
@@ -317,6 +322,9 @@ impl LegTimeline {
         peer_leg_id: Option<String>,
         details: Option<Value>,
     ) {
+        if self.events.len() >= Self::MAX_EVENTS {
+            return;
+        }
         self.events.push(LegTimelineEvent {
             timestamp: chrono::Utc::now(),
             leg_id,
@@ -696,6 +704,8 @@ impl CallRecordManagerBuilder {
                     if !skip_create_table {
                         create_call_record_table(&db, &table_name).await?;
                     }
+                    // The current day's file may predate the upgrade.
+                    ensure_session_id_column(&db, &table_name).await;
                     let base_url = database_url.unwrap_or_else(|| "sqlite:memory:".to_string());
                     Box::new(RotatingSqliteSaver {
                         base_url,
@@ -715,6 +725,8 @@ impl CallRecordManagerBuilder {
                     if !skip_create_table {
                         create_call_record_table(&db, &table_name).await?;
                     }
+                    // A pre-existing custom table may lack the column.
+                    ensure_session_id_column(&db, &table_name).await;
                     Box::new(CustomDatabaseSaver { db, table_name })
                 }
             }
@@ -916,6 +928,7 @@ impl CallRecordSaver for S3CallRecordSaver {
 /// Column order shared by the SeaORM persistence path and raw-SQL savers.
 pub(crate) struct CallRecordRow {
     pub call_id: String,
+    pub session_id: Option<String>,
     pub direction: String,
     pub status: String,
     pub started_at: DateTimeUtc,
@@ -985,14 +998,6 @@ impl CallRecordRow {
         };
 
         let mut metadata_map = details.metadata.clone().unwrap_or_default();
-        // Global session id (RFC 7989): stored inside the existing metadata
-        // JSON column to avoid a schema migration (same pattern as cdr_path).
-        if let Some(session_id) = &record.session_id {
-            metadata_map.insert(
-                "session_id".to_string(),
-                serde_json::Value::String(session_id.clone()),
-            );
-        }
         if !record.sip_leg_roles.is_empty() {
             let json = serde_json::to_string(&record.sip_leg_roles).unwrap_or_default();
             metadata_map.insert("sip_leg_roles".to_string(), serde_json::Value::String(json));
@@ -1016,6 +1021,7 @@ impl CallRecordRow {
 
         Self {
             call_id: record.call_id.clone(),
+            session_id: record.session_id.clone(),
             direction,
             status,
             started_at: record.start_time,
@@ -1155,6 +1161,7 @@ impl CallRecordSaver for RotatingSqliteSaver {
 fn call_record_columns() -> Vec<Alias> {
     vec![
         Alias::new("call_id"),
+        Alias::new("session_id"),
         Alias::new("display_id"),
         Alias::new("direction"),
         Alias::new("status"),
@@ -1198,6 +1205,7 @@ fn build_call_record_values(row: &CallRecordRow) -> Vec<sea_orm::sea_query::Simp
     let ended_at: Option<String> = row.ended_at.map(|dt| dt.to_rfc3339());
     vec![
         row.call_id.clone().into(),
+        row.session_id.clone().into(),
         None::<String>.into(),
         row.direction.clone().into(),
         row.status.clone().into(),
@@ -1233,7 +1241,7 @@ fn build_call_record_values(row: &CallRecordRow) -> Vec<sea_orm::sea_query::Simp
     ]
 }
 
-/// Create the full 34-column call record table (plus auto-increment `id` PK
+/// Create the full 35-column call record table (plus auto-increment `id` PK
 /// and basic indexes) if it does not already exist.
 pub(crate) async fn create_call_record_table(
     db: &DatabaseConnection,
@@ -1253,6 +1261,7 @@ pub(crate) async fn create_call_record_table(
                 .auto_increment(),
         )
         .col(string_len(Alias::new("call_id"), 255).not_null())
+        .col(string_len_null(Alias::new("session_id"), 255))
         .col(string_len_null(Alias::new("display_id"), 255))
         .col(string_len(Alias::new("direction"), 32).not_null())
         .col(string_len(Alias::new("status"), 32).not_null())
@@ -1300,6 +1309,11 @@ pub(crate) async fn create_call_record_table(
             .to_owned(),
         Index::create()
             .table(Alias::new(table_name))
+            .name(format!("idx_{}_session_id", table_name))
+            .col(Alias::new("session_id"))
+            .to_owned(),
+        Index::create()
+            .table(Alias::new(table_name))
             .name(format!("idx_{}_started_at", table_name))
             .col(Alias::new("started_at"))
             .to_owned(),
@@ -1317,6 +1331,34 @@ pub(crate) async fn create_call_record_table(
     }
     info!(table = %table_name, "call record table created");
     Ok(())
+}
+
+/// Best-effort addition of the `session_id` column to an already-existing
+/// custom call record table (created by a previous version, or the current
+/// day's rotation file that predates the upgrade). The raw-SQL savers insert
+/// `session_id` unconditionally, so a table without the column would fail
+/// every CDR write; the ALTER is idempotent in effect — an error (typically
+/// "duplicate column") is logged and ignored.
+pub(crate) async fn ensure_session_id_column(db: &DatabaseConnection, table_name: &str) {
+    use sea_orm::sea_query::{ColumnDef, Table};
+    let alter = Table::alter()
+        .table(Alias::new(table_name))
+        .add_column(
+            ColumnDef::new(Alias::new("session_id"))
+                .string_len(255)
+                .null(),
+        )
+        .to_owned();
+    if let Err(e) = db
+        .execute_raw(db.get_database_backend().build(&alter))
+        .await
+    {
+        tracing::debug!(
+            table = %table_name,
+            error = %e,
+            "session_id column already present on call record table (or ALTER unsupported)"
+        );
+    }
 }
 
 /// Current local date as `YYYYMMDD` string.

@@ -99,6 +99,7 @@ async fn build_active_model(
 
     let active = ActiveModel {
         call_id: Set(record.call_id.clone()),
+        session_id: Set(record.session_id.clone()),
         display_id: Set(None),
         direction: Set(direction.clone()),
         status: Set(status.clone()),
@@ -129,16 +130,6 @@ async fn build_active_model(
         leg_timeline: Set(leg_timeline_json),
         metadata: Set({
             let mut m = details.metadata.clone().unwrap_or_default();
-            // Global session id (RFC 7989): stored inside the existing
-            // metadata JSON column to avoid a schema migration (same pattern
-            // as cdr_path). Correlates every leg of one logical call
-            // (queue dispatch, transfers, cluster hops).
-            if let Some(session_id) = &record.session_id {
-                m.insert(
-                    "session_id".to_string(),
-                    serde_json::Value::String(session_id.clone()),
-                );
-            }
             if !record.sip_leg_roles.is_empty() {
                 let json = serde_json::to_string(&record.sip_leg_roles).unwrap_or_default();
                 m.insert("sip_leg_roles".to_string(), serde_json::Value::String(json));
@@ -199,6 +190,7 @@ pub(crate) async fn persist_call_records(
         .on_conflict(
             sea_orm::sea_query::OnConflict::column(Column::CallId)
                 .update_columns([
+                    Column::SessionId,
                     Column::DisplayId,
                     Column::Direction,
                     Column::Status,

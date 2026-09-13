@@ -100,6 +100,10 @@ struct QueryCallRecordFilters {
     caller: Option<String>,
     #[serde(default)]
     callee: Option<String>,
+    /// `false` (default): only primary CDRs — one row per logical call.
+    /// `true`: include every child leg (queue dispatch, REFER transfer).
+    #[serde(default)]
+    all_legs: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -231,15 +235,20 @@ async fn resolve_call_record_by_id_or_call_id(
 }
 
 /// List recording + signaling artifacts for every CDR leg under a logical
-/// `session_id` (root Call-ID).
+/// `session_id` (root session id). Matches rows whose `session_id` column
+/// equals the given id, plus the root row itself (whose `session_id` is
+/// NULL or equal to its `call_id` — legacy rows predate the column).
 async fn list_session_artifacts(
     AxumPath(session_id): AxumPath<String>,
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let db = state.db();
+    let mut session_match = Condition::any();
+    session_match = session_match.add(CallRecordColumn::SessionId.eq(session_id.clone()));
+    session_match = session_match.add(CallRecordColumn::CallId.eq(session_id.clone()));
     let records = match CallRecordEntity::find()
-        .filter(CallRecordColumn::CallId.eq(session_id.clone()))
+        .filter(session_match)
         .order_by_asc(CallRecordColumn::StartedAt)
         .all(db)
         .await
@@ -295,6 +304,7 @@ fn session_leg_artifacts(record: &CallRecordModel) -> Value {
     json!({
         "id": record.id,
         "call_id": record.call_id,
+        "leg_role": leg_role(record),
         "direction": record.direction,
         "status": record.status,
         "started_at": record.started_at,
@@ -305,6 +315,22 @@ fn session_leg_artifacts(record: &CallRecordModel) -> Value {
         "download_recording": format!("/call-records/{}/recording", record.id),
         "download_sip_flow": format!("/call-records/{}/sip-flow", record.id),
     })
+}
+
+/// Derive the logical-call role of a CDR row: the root session's own record
+/// (`session_id` NULL or equal to its `call_id`) is the primary; every child
+/// leg (queue dispatch, REFER transfer, cluster hop) is a child.
+fn leg_role(record: &CallRecordModel) -> &'static str {
+    match record.session_id.as_deref() {
+        None => "primary",
+        Some(session_id) => {
+            if session_id == record.call_id {
+                "primary"
+            } else {
+                "child"
+            }
+        }
+    }
 }
 
 /// Render an uploaded or local signaling-sidecar JSONL file in the same
@@ -1093,7 +1119,35 @@ async fn page_call_record_detail(
     };
 
     let cdr_data = load_cdr_data(&state, &model).await;
-    let payload = build_detail_payload(&model, &related, &state, cdr_data.as_ref()).await;
+
+    // Sibling CDR legs of the same logical call: everything whose
+    // `session_id` matches this record's logical call, excluding the record
+    // itself. Resolving by `session_id` (falling back to `call_id` for root
+    // rows) keeps queue-dispatch / REFER-transfer / cluster-hop legs visible
+    // on the detail page of the primary CDR.
+    let session_key = model
+        .session_id
+        .clone()
+        .unwrap_or_else(|| model.call_id.clone());
+    let child_legs = match CallRecordEntity::find()
+        .filter(CallRecordColumn::SessionId.eq(session_key.clone()))
+        .filter(CallRecordColumn::CallId.ne(model.call_id.clone()))
+        .order_by_asc(CallRecordColumn::StartedAt)
+        .all(db)
+        .await
+    {
+        Ok(legs) => legs,
+        Err(err) => {
+            warn!(
+                "failed to load child legs for call record '{}': {}",
+                id_param, err
+            );
+            Vec::new()
+        }
+    };
+
+    let payload =
+        build_detail_payload(&model, &related, &state, cdr_data.as_ref(), &child_legs).await;
     let current_user = state.build_current_user_ctx(&user).await;
 
     state.render_with_headers(
@@ -1282,7 +1336,22 @@ async fn load_filters(db: &DatabaseConnection) -> Result<Value, DbErr> {
 }
 
 fn build_condition(filters: &Option<QueryCallRecordFilters>) -> Condition {
+    use sea_orm::sea_query::{Expr, ExprTrait};
     let mut condition = Condition::all();
+
+    // Logical-call view (default): only root-session CDRs, so a transferred
+    // call lists once. `all_legs` opts into per-leg rows. `session_id` equals
+    // `call_id` on the root row and is NULL on legacy rows.
+    let include_all_legs = filters.as_ref().and_then(|f| f.all_legs).unwrap_or(false);
+    if !include_all_legs {
+        let mut primary_only = Condition::any();
+        primary_only = primary_only.add(CallRecordColumn::SessionId.is_null());
+        primary_only = primary_only.add(
+            Expr::col((CallRecordEntity, CallRecordColumn::SessionId))
+                .equals((CallRecordEntity, CallRecordColumn::CallId)),
+        );
+        condition = condition.add(primary_only);
+    }
 
     if let Some(filters) = filters {
         if let Some(q_raw) = filters.q.as_ref() {
@@ -1567,6 +1636,8 @@ async fn build_record_payload(
     json!({
         "id": record.id,
         "call_id": record.call_id,
+        "session_id": record.session_id,
+        "leg_role": leg_role(record),
         "display_id": record.display_id,
         "direction": record.direction,
         "status": record.status,
@@ -2028,6 +2099,7 @@ async fn build_detail_payload(
     related: &RelatedContext,
     state: &ConsoleState,
     cdr: Option<&CdrData>,
+    child_legs: &[CallRecordModel],
 ) -> Value {
     let inline_recording_url = select_recording_path(record, cdr)
         .map(|_| state.url_for(&format!("/call-records/{}/recording", record.id)));
@@ -2104,6 +2176,27 @@ async fn build_detail_payload(
         "participants": participants,
         "signaling": signaling,
         "rewrite": rewrite,
+        // Sibling CDR legs of the same logical call (queue dispatch, REFER
+        // transfer, cluster hops). Empty for single-leg calls.
+        "child_legs": child_legs
+            .iter()
+            .map(|leg| {
+                json!({
+                    "id": leg.id,
+                    "call_id": leg.call_id,
+                    "leg_role": leg_role(leg),
+                    "direction": leg.direction,
+                    "status": leg.status,
+                    "from": leg.from_number,
+                    "to": leg.to_number,
+                    "agent": leg.agent_name,
+                    "queue": leg.queue,
+                    "duration_secs": leg.duration_secs,
+                    "started_at": leg.started_at.to_rfc3339(),
+                    "detail_url": state.url_for(&format!("/call-records/{}", leg.id)),
+                })
+            })
+            .collect::<Vec<_>>(),
         "actions": json!({
             "download_recording": download_recording,
             "download_sip_flow": sip_flow_download,
@@ -3406,6 +3499,177 @@ mod tests {
             resolved.as_deref(),
             Some(archived.to_string_lossy().as_ref()),
             "stale pre-archive recording_url must resolve into the daily subdir"
+        );
+    }
+
+    // ── session_id primary/child predicates ─────────────────────────────────────
+
+    fn render_condition_sql(filters: Option<QueryCallRecordFilters>) -> String {
+        use sea_orm::sea_query::SqliteQueryBuilder;
+        let condition = build_condition(&filters);
+        let mut stmt = sea_orm::sea_query::SelectStatement::new();
+        stmt.from(CallRecordEntity).cond_where(condition);
+        stmt.to_string(SqliteQueryBuilder)
+    }
+
+    #[test]
+    fn build_condition_defaults_to_primary_legs_only() {
+        let sql = render_condition_sql(Some(QueryCallRecordFilters::default()));
+        assert!(
+            sql.contains(r#""session_id" IS NULL"#),
+            "default condition must exclude child legs: {sql}"
+        );
+        assert!(
+            sql.contains(r#""session_id" = "rustpbx_call_records"."call_id""#),
+            "default condition must keep legacy root rows via session_id = call_id: {sql}"
+        );
+    }
+
+    #[test]
+    fn build_condition_all_legs_includes_child_legs() {
+        let sql = render_condition_sql(Some(QueryCallRecordFilters {
+            all_legs: Some(true),
+            ..Default::default()
+        }));
+        assert!(
+            !sql.contains("session_id"),
+            "all_legs must not filter by session_id: {sql}"
+        );
+    }
+
+    /// Logical-call list view: default filters collapse a 3-leg call (root +
+    /// agent leg + transfer leg) to a single primary row; `allLegs` reveals
+    /// every leg.
+    #[tokio::test]
+    async fn query_call_records_defaults_to_one_row_per_logical_call() {
+        let db = setup_db().await;
+        let state = create_console_state(db.clone()).await;
+
+        let now = Utc::now();
+        for (call_id, session_id) in [
+            ("root-s1", Some("root-s1".to_string())),
+            ("agent-leg-s2", Some("root-s1".to_string())),
+            ("transfer-leg-s3", Some("root-s1".to_string())),
+        ] {
+            call_record::ActiveModel {
+                call_id: Set(call_id.into()),
+                session_id: Set(session_id),
+                direction: Set("inbound".into()),
+                status: Set("completed".into()),
+                started_at: Set(now),
+                duration_secs: Set(30),
+                has_transcript: Set(false),
+                transcript_status: Set("none".into()),
+                created_at: Set(now),
+                updated_at: Set(now),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .expect("insert leg");
+        }
+
+        // Default: one row per logical call — the primary only.
+        let response = query_call_records(
+            State(state.clone()),
+            AuthRequired(superuser()),
+            Json(forms::ListQuery::<QueryCallRecordFilters> {
+                filters: Some(QueryCallRecordFilters::default()),
+                ..Default::default()
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            payload["total_items"].as_i64(),
+            Some(1),
+            "default list must show only the primary CDR: {payload}"
+        );
+        assert_eq!(payload["items"][0]["call_id"], "root-s1");
+        assert_eq!(payload["items"][0]["leg_role"], "primary");
+        assert_eq!(payload["items"][0]["session_id"], "root-s1");
+
+        // allLegs: every leg of the logical call.
+        let response = query_call_records(
+            State(state),
+            AuthRequired(superuser()),
+            Json(forms::ListQuery::<QueryCallRecordFilters> {
+                filters: Some(QueryCallRecordFilters {
+                    all_legs: Some(true),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            payload["total_items"].as_i64(),
+            Some(3),
+            "all_legs must reveal every CDR leg: {payload}"
+        );
+    }
+
+    /// by-session artifacts must return the root row plus every child leg of the
+    /// logical call (legacy behavior only ever matched the root row itself).
+    #[tokio::test]
+    async fn list_session_artifacts_returns_all_legs() {
+        let db = setup_db().await;
+        let state = create_console_state(db.clone()).await;
+
+        let now = Utc::now();
+        for (call_id, session_id) in [
+            ("root-art", Some("root-art".to_string())),
+            ("agent-art", Some("root-art".to_string())),
+            ("transfer-art", Some("root-art".to_string())),
+        ] {
+            call_record::ActiveModel {
+                call_id: Set(call_id.into()),
+                session_id: Set(session_id),
+                direction: Set("inbound".into()),
+                status: Set("completed".into()),
+                started_at: Set(now),
+                duration_secs: Set(5),
+                has_transcript: Set(false),
+                transcript_status: Set("none".into()),
+                created_at: Set(now),
+                updated_at: Set(now),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .expect("insert leg");
+        }
+
+        let response = list_session_artifacts(
+            AxumPath("root-art".to_string()),
+            State(state),
+            AuthRequired(superuser()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let legs = payload["legs"].as_array().expect("legs array");
+        assert_eq!(legs.len(), 3, "artifacts must list every leg: {payload}");
+        let roles: Vec<&str> = legs
+            .iter()
+            .filter_map(|leg| leg["leg_role"].as_str())
+            .collect();
+        assert_eq!(
+            roles,
+            vec!["primary", "child", "child"],
+            "legs must carry primary/child roles ordered by start time"
         );
     }
 }

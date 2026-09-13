@@ -216,14 +216,17 @@ async fn start_harness(port: u16, capture: &WebhookCapture) -> Result<FullChainH
     // handler forwards everything the harness subscribed to.
     let gateway: RwiGatewayRef = Arc::new(parking_lot::RwLock::new({
         let mut gw = RwiGateway::new();
-        gw.set_webhook_tx(start_rwi_webhook_handler(LocatorWebhookConfig {
-            url: capture.url.clone(),
-            events: WEBHOOK_EVENTS.iter().map(|s| s.to_string()).collect(),
-            headers: None,
-            timeout_ms: Some(5000),
-            retries: None,
-            track_queue_latency: None,
-        }, rustpbx::rwi::webhook::WEBHOOK_CHANNEL_SIZE));
+        gw.set_webhook_tx(start_rwi_webhook_handler(
+            LocatorWebhookConfig {
+                url: capture.url.clone(),
+                events: WEBHOOK_EVENTS.iter().map(|s| s.to_string()).collect(),
+                headers: None,
+                timeout_ms: Some(5000),
+                retries: None,
+                track_queue_latency: None,
+            },
+            rustpbx::rwi::webhook::WEBHOOK_CHANNEL_SIZE,
+        ));
         gw
     }));
 

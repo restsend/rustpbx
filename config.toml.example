@@ -4,7 +4,10 @@
 
 http_addr = "0.0.0.0:8080"
 # http_gzip = true
-log_level = "debug"
+# Plain level ("info"/"debug") or an EnvFilter directive with per-target
+# overrides, e.g. "info,rsipstack=debug". Third-party chatter (hyper_util,
+# rustls, sqlx, rsipstack, reqwest) is pinned to warn unless named here.
+log_level = "info"
 #log_file = "/tmp/rustpbx.log"
 # Local stats log (one JSON line per stats_interval seconds, system+PBX summary
 # for loss/load diagnostics without Prometheus). Empty/unset disables.

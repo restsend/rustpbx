@@ -7,7 +7,9 @@
 //! SIP-level wait-retention coverage lives in
 //! `tests/queue_e2e/test_queue_wait_retention_e2e.rs`.
 
-use rustpbx::addons::cc::acd::{AcdConfig, AcdEngine, AcdPolicy, PresenceStateKind, StrategyConfig};
+use rustpbx::addons::cc::acd::{
+    AcdConfig, AcdEngine, AcdPolicy, PresenceStateKind, StrategyConfig,
+};
 use rustpbx::addons::cc::agent::{AgentRegistry, AgentStatus};
 use rustpbx::addons::cc::agent_registry_adapter::CcAgentRegistryAdapter;
 use rustpbx::addons::cc::metrics::MetricsCollector;
@@ -110,7 +112,11 @@ async fn acceptance_partial_skill_match_dials_when_require_exact_false() {
         .await
         .unwrap();
 
-    let adapter = CcAgentRegistryAdapter::new(registry.clone(), engine_with_policies(policies, "any-skill"), "localhost");
+    let adapter = CcAgentRegistryAdapter::new(
+        registry.clone(),
+        engine_with_policies(policies, "any-skill"),
+        "localhost",
+    );
     let uris = adapter
         .resolve_target_with_policy("skill-group:sg-any", None, "call-any")
         .await;
@@ -170,8 +176,11 @@ async fn acceptance_away_agent_reserved_when_available_states_include_away() {
         .await
         .unwrap();
 
-    let adapter =
-        CcAgentRegistryAdapter::new(registry.clone(), engine_with_policies(policies, "force-away"), "localhost");
+    let adapter = CcAgentRegistryAdapter::new(
+        registry.clone(),
+        engine_with_policies(policies, "force-away"),
+        "localhost",
+    );
     let uris = adapter
         .resolve_target_with_policy("skill-group:sg-away", None, "call-away")
         .await;
@@ -434,10 +443,7 @@ async fn acceptance_expire_wrapup_does_not_idle_new_ringing() {
         .unwrap();
     assert!(registry.try_reserve_agent("wex", "c-new".into()).await);
 
-    let expired = registry
-        .expire_wrapup("wex", Some("c-old"))
-        .await
-        .unwrap();
+    let expired = registry.expire_wrapup("wex", Some("c-old")).await.unwrap();
     assert!(!expired, "expire_wrapup for old call must be a no-op");
     let agent = registry.get_agent("wex").await.unwrap();
     assert!(
