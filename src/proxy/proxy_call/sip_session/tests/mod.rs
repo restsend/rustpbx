@@ -700,7 +700,7 @@ async fn test_target_invite_call_ids_resolve_before_dialing() {
     // No INVITE has been sent and no LegConnected notification has occurred.
     for leg_id in [None, Some("fork-1")] {
         let (invite, _, call_id) = session
-            .build_target_invite_option(&target, leg_id)
+            .build_target_invite_option(&target, leg_id, None)
             .await
             .unwrap();
         assert_eq!(invite.call_id.as_deref(), Some(call_id.as_str()));
@@ -713,6 +713,50 @@ async fn test_target_invite_call_ids_resolve_before_dialing() {
     }
     assert_ne!(call_ids[0], call_ids[1]);
     assert!(registry.get_handle(&session_id).is_some());
+    let transfer_headers = HashMap::from([
+        (
+            "X-Route-Metadata".to_string(),
+            "workflow=example,variant=one".to_string(),
+        ),
+        ("X-Correlation-Id".to_string(), session_id.clone()),
+    ]);
+    let (invite, _, _) = session
+        .build_target_invite_option(&target, None, Some(&transfer_headers))
+        .await
+        .unwrap();
+    let rendered_headers = invite
+        .headers
+        .expect("outbound INVITE headers must be present")
+        .into_iter()
+        .map(|header| (header.name().to_string(), header.value().to_string()))
+        .collect::<HashMap<_, _>>();
+    assert_eq!(
+        rendered_headers["X-Route-Metadata"],
+        "workflow=example,variant=one"
+    );
+    assert_eq!(rendered_headers["X-Correlation-Id"], session_id);
+
+    for invalid_headers in [
+        HashMap::from([("Via".to_string(), "SIP/2.0/UDP attacker".to_string())]),
+        HashMap::from([("Content-Length".to_string(), "0".to_string())]),
+        HashMap::from([("Session-Expires".to_string(), "1800".to_string())]),
+        HashMap::from([(
+            "X-Route-Metadata".to_string(),
+            "workflow=example\r\nVia: attacker".to_string(),
+        )]),
+        HashMap::from([("Invalid Header".to_string(), "value".to_string())]),
+        HashMap::from([
+            ("X-Duplicate".to_string(), "first".to_string()),
+            ("x-duplicate".to_string(), "second".to_string()),
+        ]),
+    ] {
+        assert!(
+            session
+                .build_target_invite_option(&target, None, Some(&invalid_headers))
+                .await
+                .is_err()
+        );
+    }
     for call_id in &call_ids {
         assert!(registry.get_handle_by_dialog(call_id).is_some());
     }
@@ -1248,6 +1292,7 @@ async fn rwi_bridge_setup_results_reach_listener_before_call_ends() {
             target.into(),
             transfer::TransferDisposition::Detach,
             &mut callee_rx,
+            HashMap::new(),
         ),
     )
     .await
@@ -1460,6 +1505,7 @@ async fn test_handle_blind_transfer_queue_prefix() {
             "queue:test-queue".to_string(),
             transfer::TransferDisposition::Detach,
             &mut callee_rx,
+            HashMap::new(),
         )
         .await;
 
@@ -1532,6 +1578,7 @@ async fn test_handle_blind_transfer_queue_not_found() {
             "queue:nonexistent".to_string(),
             transfer::TransferDisposition::Detach,
             &mut callee_rx,
+            HashMap::new(),
         )
         .await;
 
@@ -1650,6 +1697,7 @@ async fn test_blind_transfer_queue_prefix_emits_transferred_with_source() {
             "queue:test-queue".to_string(),
             transfer::TransferDisposition::Detach,
             &mut callee_rx,
+            HashMap::new(),
         )
         .await;
     assert!(
@@ -1765,6 +1813,7 @@ async fn test_blind_transfer_reports_queue_flow_source() {
             "queue:test-queue".to_string(),
             transfer::TransferDisposition::Detach,
             &mut callee_rx,
+            HashMap::new(),
         )
         .await;
     assert!(
@@ -1908,6 +1957,7 @@ async fn test_blind_transfer_bare_number_routes_to_queue() {
             "8000".to_string(),
             transfer::TransferDisposition::Detach,
             &mut callee_rx,
+            HashMap::new(),
         )
         .await;
     assert!(

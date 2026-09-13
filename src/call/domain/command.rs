@@ -147,6 +147,7 @@ pub enum CallCommand {
     TransferAwaitResult {
         leg_id: LegId,
         target: String,
+        headers: HashMap<String, String>,
     },
 
     /// Complete an attended transfer
