@@ -4,7 +4,7 @@ use crate::callrecord::CallRecordHangupReason;
 use crate::proxy::proxy_call::sip_session::SipSessionHandle;
 use dashmap::DashMap;
 use parking_lot::Mutex;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -194,11 +194,13 @@ impl CallController {
     pub(crate) async fn transfer_await_result(
         &self,
         target: impl Into<String>,
+        headers: HashMap<String, String>,
     ) -> anyhow::Result<()> {
         self.session
             .send_command(CallCommand::TransferAwaitResult {
                 leg_id: LegId::from("caller"),
                 target: target.into(),
+                headers,
             })?;
         Ok(())
     }

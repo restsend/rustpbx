@@ -253,6 +253,7 @@ pub async fn execute_action(
     match action {
         EntryAction::Transfer {
             target,
+            headers,
             params,
             return_app,
             return_target,
@@ -271,8 +272,13 @@ pub async fn execute_action(
                 t.push_str(&query);
             }
             if wait_for_result {
-                ctrl.transfer_await_result(t).await?;
+                ctrl.transfer_await_result(t, headers.clone()).await?;
                 return Ok(ActionResult::WaitFor(WaitEvent::TransferResult));
+            }
+            if !headers.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "transfer headers require wait_for_result=true"
+                ));
             }
             Ok(ActionResult::Terminal(TerminalAction::Transfer(t)))
         }

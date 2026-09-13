@@ -540,6 +540,7 @@ impl IvrApp {
                 params,
                 return_app,
                 return_target,
+                ..
             } => {
                 let mut t = target.clone();
                 let mut query = String::new();
@@ -1935,6 +1936,7 @@ mod tests {
                 label: Some("agent".into()),
                 action: EntryAction::Transfer {
                     target: "2001".into(),
+                    headers: HashMap::new(),
                     params: HashMap::new(),
                     return_app: None,
                     return_target: None,
@@ -2018,6 +2020,7 @@ mod tests {
                 label: Some("agent".into()),
                 action: EntryAction::Transfer {
                     target: "2001".into(),
+                    headers: HashMap::new(),
                     params: HashMap::new(),
                     return_app: None,
                     return_target: None,
@@ -2094,6 +2097,7 @@ mod tests {
             max_retries: 1,
             timeout_action: Some(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -2163,6 +2167,7 @@ mod tests {
             max_retries: 0,
             timeout_action: Some(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,

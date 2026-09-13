@@ -2894,6 +2894,7 @@ impl SipSession {
         &mut self,
         target: &crate::call::Location,
         leg_id_override: Option<&str>,
+        transfer_headers: Option<&HashMap<String, String>>,
     ) -> Result<
         (
             rsipstack::dialog::invitation::InviteOption,
@@ -2908,6 +2909,19 @@ impl SipSession {
                 Some("No caller in dialplan".to_string()),
             )
         })?;
+        let validated_transfer_headers = transfer_headers
+            .map(Self::validate_transfer_headers)
+            .transpose()
+            .map_err(|reason| {
+                warn!(
+                    session_id = %self.context.session_id,
+                    header_count = transfer_headers.map_or(0, HashMap::len),
+                    reason = %reason,
+                    "Rejected transfer headers"
+                );
+                into_callee_err(&rsipstack::sip::StatusCode::BadRequest, Some(reason))
+            })?
+            .unwrap_or_default();
 
         let cluster_enabled = !self.server.cluster_peer_ips.is_empty();
         let self_ident = self.self_ident_addr();
@@ -3002,6 +3016,17 @@ impl SipSession {
                 rule,
             );
             headers.extend(selected);
+        }
+        if !validated_transfer_headers.is_empty() {
+            info!(
+                session_id = %self.context.session_id,
+                header_count = validated_transfer_headers.len(),
+                "Applying transfer headers to outbound INVITE"
+            );
+            for (name, value) in validated_transfer_headers {
+                headers.retain(|header| !header.name().eq_ignore_ascii_case(&name));
+                headers.push(rsipstack::sip::Header::Other(name, value));
+            }
         }
 
         let callee_is_webrtc = Self::callee_supports_webrtc(target);
@@ -4622,7 +4647,7 @@ impl SipSession {
             info!(index = idx, target = %target.aor, "Trying sequential target");
 
             match self
-                .try_single_target(target, callee_state_rx, None, None, None)
+                .try_single_target(target, callee_state_rx, None, None, None, None)
                 .await
             {
                 Ok(()) => {
@@ -4736,7 +4761,7 @@ impl SipSession {
 
             let leg_id_str = format!("fork-{idx}");
             let (invite_option, callee_uri, _callee_call_id) = match self
-                .build_target_invite_option(target, Some(&leg_id_str))
+                .build_target_invite_option(target, Some(&leg_id_str), None)
                 .await
             {
                 Ok(res) => res,
@@ -5493,6 +5518,7 @@ impl SipSession {
         stop_playback_on_answer: Option<&str>,
         no_trying_timeout: Option<std::time::Duration>,
         caller: Option<rsipstack::sip::Uri>,
+        transfer_headers: Option<&HashMap<String, String>>,
     ) -> Result<(), CalleeError> {
         use rsipstack::dialog::dialog::DialogState;
 
@@ -5518,8 +5544,9 @@ impl SipSession {
             self.caller_transport_mode(),
         );
 
-        let (mut invite_option, callee_uri, callee_call_id) =
-            self.build_target_invite_option(target, None).await?;
+        let (mut invite_option, callee_uri, callee_call_id) = self
+            .build_target_invite_option(target, None, transfer_headers)
+            .await?;
         if let Some(caller) = caller {
             invite_option.caller = caller;
         }
@@ -9624,12 +9651,17 @@ impl SipSession {
                         attended,
                         transfer::TransferDisposition::Detach,
                         callee_state_rx,
+                        HashMap::new(),
                     )
                     .await,
                 )
             }
 
-            CallCommand::TransferAwaitResult { leg_id, target } => {
+            CallCommand::TransferAwaitResult {
+                leg_id,
+                target,
+                headers,
+            } => {
                 let Some(callee_state_rx) = callee_state_rx.as_deref_mut() else {
                     self.meta.pending_transfer_outcome =
                         Some(crate::call::domain::TransferOutcome::NotConnected);
@@ -9645,6 +9677,7 @@ impl SipSession {
                         false,
                         transfer::TransferDisposition::AwaitResult,
                         callee_state_rx,
+                        headers,
                     )
                     .await;
                 Self::ok_or_failure(result)
@@ -10728,10 +10761,20 @@ impl SipSession {
         "Max-Forwards",
         "Session-Expires",
         "Min-SE",
+        "Session-ID",
+        // Compact forms of stack-managed SIP headers.
+        "v",
+        "f",
+        "t",
+        "i",
+        "m",
+        "l",
+        "c",
+        "e",
+        "k",
     ];
 
-    fn is_leg_invite_header_allowed(header: &rsipstack::sip::Header) -> bool {
-        let name = header.name();
+    fn is_leg_invite_header_name_allowed(name: &str) -> bool {
         if name
             .get(..8)
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("Content-"))
@@ -10741,6 +10784,49 @@ impl SipSession {
         !Self::LEG_INVITE_BLOCKED_HEADERS
             .iter()
             .any(|excluded| name.eq_ignore_ascii_case(excluded))
+    }
+
+    fn is_leg_invite_header_allowed(header: &rsipstack::sip::Header) -> bool {
+        Self::is_leg_invite_header_name_allowed(header.name())
+    }
+
+    fn validate_transfer_headers(
+        headers: &HashMap<String, String>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let mut validated = Vec::with_capacity(headers.len());
+        let mut seen = HashSet::with_capacity(headers.len());
+        for (name, value) in headers {
+            if !Self::is_sip_token(name) {
+                return Err("invalid SIP header name".to_string());
+            }
+            if !Self::is_leg_invite_header_name_allowed(name) {
+                return Err("SIP stack-managed header is not allowed".to_string());
+            }
+            if value.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0)) {
+                return Err("invalid control character in SIP header value".to_string());
+            }
+            if !seen.insert(name.to_ascii_lowercase()) {
+                return Err("duplicate SIP header name".to_string());
+            }
+            validated.push((name.clone(), value.clone()));
+        }
+        validated.sort_by(|left, right| {
+            left.0
+                .to_ascii_lowercase()
+                .cmp(&right.0.to_ascii_lowercase())
+        });
+        Ok(validated)
+    }
+
+    fn is_sip_token(value: &str) -> bool {
+        !value.is_empty()
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(
+                        byte,
+                        b'-' | b'.' | b'!' | b'%' | b'*' | b'_' | b'+' | b'`' | b'\'' | b'~'
+                    )
+            })
     }
 
     /// Merge caller-supplied INVITE headers over location-derived headers

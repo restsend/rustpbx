@@ -172,6 +172,8 @@ pub struct MenuEntry {
 pub enum EntryAction {
     Transfer {
         target: String,
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        headers: HashMap<String, String>,
         #[serde(default)]
         params: HashMap<String, String>,
         #[serde(default)]
@@ -479,6 +481,7 @@ impl EntryAction {
     pub fn transfer(target: impl Into<String>) -> Self {
         EntryAction::Transfer {
             target: target.into(),
+            headers: HashMap::new(),
             params: HashMap::new(),
             return_app: None,
             return_target: None,
@@ -604,6 +607,7 @@ impl WebhookResponse {
                 return_target,
             } => EntryAction::Transfer {
                 target,
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app,
                 return_target,
@@ -1046,6 +1050,7 @@ entries = []
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -1068,7 +1073,10 @@ entries = []
             "interruptible": true,
             "next": {
                 "type": "transfer",
-                "target": "2001"
+                "target": "2001",
+                "headers": {
+                    "X-Route-Metadata": "workflow=example"
+                }
             }
         });
         let node: ActionNode = serde_json::from_value(json).unwrap();
@@ -1085,7 +1093,12 @@ entries = []
         }
         let next = node.next.expect("expected next");
         match &next.action {
-            EntryAction::Transfer { target, .. } => assert_eq!(target, "2001"),
+            EntryAction::Transfer {
+                target, headers, ..
+            } => {
+                assert_eq!(target, "2001");
+                assert_eq!(headers["X-Route-Metadata"], "workflow=example");
+            }
             _ => panic!("expected Transfer"),
         }
     }
@@ -1120,6 +1133,7 @@ entries = []
                     "1".into(),
                     ActionNode::new(EntryAction::Transfer {
                         target: "2001".into(),
+                        headers: HashMap::new(),
                         params: HashMap::new(),
                         return_app: None,
                         return_target: None,
@@ -1519,6 +1533,7 @@ action = { type = "prompt", file = "hello.wav" }
         assert_eq!(play.delay_after_ms(), 700);
         let transfer = EntryAction::Transfer {
             target: "2000".into(),
+            headers: HashMap::new(),
             params: HashMap::new(),
             return_app: None,
             return_target: None,

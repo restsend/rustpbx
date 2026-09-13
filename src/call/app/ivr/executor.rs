@@ -985,6 +985,7 @@ impl StepIvrApp {
         params.insert(IVR_FALLBACK_USED_KEY.into(), "1".into());
         ActionNode::new(EntryAction::Transfer {
             target: format!("ivr:{target}"),
+            headers: HashMap::new(),
             params,
             return_app: None,
             return_target: None,
@@ -2357,6 +2358,7 @@ mod tests {
         let provider = Arc::new(MockProvider::new(vec![ActionNode::new(
             EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -2413,6 +2415,7 @@ mod tests {
             self.release_next.notified().await;
             Ok(ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -2443,6 +2446,7 @@ mod tests {
         let mut stack = MockCallStack::run(
             Box::new(mock_app(vec![ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -2463,6 +2467,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn non_await_transfer_rejects_headers_instead_of_silently_dropping_them() {
+        let mut stack = MockCallStack::run(
+            Box::new(mock_app(vec![ActionNode::new(EntryAction::Transfer {
+                target: "2001".into(),
+                headers: HashMap::from([("X-Route-Metadata".into(), "workflow=example".into())]),
+                params: HashMap::new(),
+                return_app: None,
+                return_target: None,
+            })])),
+            "1001",
+            "2000",
+        );
+        stack
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(2000, "reject-transfer-headers", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path },
+                        ..
+                    } if path == "sounds/error.wav"
+                )
+            })
+            .await;
+        stack.cancel();
+        stack.join().await.expect("cancel should stop app");
+    }
+
+    #[tokio::test]
     async fn transfer_result_finalizes_pending_trace_with_original_trigger() {
         use crate::call::app::ControllerEvent;
         use crate::call::domain::TransferOutcome;
@@ -2470,11 +2505,15 @@ mod tests {
 
         let mut transfer = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            headers: HashMap::new(),
             params: HashMap::new(),
             return_app: None,
             return_target: None,
         });
         transfer.wait_for_result = true;
+        if let EntryAction::Transfer { headers, .. } = &mut transfer.action {
+            headers.insert("X-Route-Metadata".into(), "workflow=example".into());
+        }
         transfer.step_id = Some("transfer-step".into());
         transfer.extra = Some(serde_json::json!({"nodetype": "transfer"}));
         let hangup = ActionNode::new(EntryAction::Hangup {
@@ -2496,7 +2535,10 @@ mod tests {
             .await;
         stack
             .assert_cmd(2000, "transfer", |c| {
-                matches!(c, CallCommand::TransferAwaitResult { target, .. } if target == "2001")
+                matches!(c, CallCommand::TransferAwaitResult { target, headers, .. }
+                    if target == "2001"
+                        && headers.get("X-Route-Metadata").map(String::as_str)
+                            == Some("workflow=example"))
             })
             .await;
         stack
@@ -2541,6 +2583,7 @@ mod tests {
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -2591,6 +2634,7 @@ mod tests {
         prompt.step_id = Some("prompt-step".into());
         let mut transfer = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            headers: HashMap::new(),
             params: HashMap::new(),
             return_app: None,
             return_target: None,
@@ -2648,6 +2692,7 @@ mod tests {
         .expect("provider-shaped empty Prompt must deserialize");
         let mut transfer = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            headers: HashMap::new(),
             params: HashMap::new(),
             return_app: None,
             return_target: None,
@@ -2696,6 +2741,7 @@ mod tests {
         .expect("provider-shaped Prompt without media must deserialize");
         let mut transfer = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            headers: HashMap::new(),
             params: HashMap::new(),
             return_app: None,
             return_target: None,
@@ -2731,6 +2777,7 @@ mod tests {
             "1".into(),
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -2834,6 +2881,7 @@ mod tests {
             self.captured_events.lock().unwrap().push(ctx.event.clone());
             Ok(ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -2911,6 +2959,7 @@ mod tests {
             if matches!(&ctx.event, Some(ProviderEvent::Dtmf { .. })) {
                 return Ok(ActionNode::new(EntryAction::Transfer {
                     target: "2001".into(),
+                    headers: HashMap::new(),
                     params: HashMap::new(),
                     return_app: None,
                     return_target: None,
@@ -3060,6 +3109,7 @@ mod tests {
             if matches!(&ctx.event, Some(ProviderEvent::Dtmf { .. })) {
                 return Ok(ActionNode::new(EntryAction::Transfer {
                     target: "2001".into(),
+                    headers: HashMap::new(),
                     params: HashMap::new(),
                     return_app: None,
                     return_target: None,
@@ -3180,6 +3230,7 @@ mod tests {
             "1".into(),
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -3364,6 +3415,7 @@ mod tests {
             "1".into(),
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -3510,6 +3562,7 @@ mod tests {
             }),
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -3729,6 +3782,7 @@ mod tests {
             menu_node,
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -3830,6 +3884,7 @@ mod tests {
     async fn test_bridge_return_replays_first_digit_as_dtmf_trigger() {
         let provider = MockProvider::new(vec![ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            headers: HashMap::new(),
             params: HashMap::new(),
             return_app: None,
             return_target: None,
@@ -3899,6 +3954,7 @@ mod tests {
             }),
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -3940,6 +3996,7 @@ mod tests {
         // at the true first entry (exactly-once contract).
         let provider = MockProvider::new(vec![ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            headers: HashMap::new(),
             params: HashMap::new(),
             return_app: None,
             return_target: None,
@@ -4020,6 +4077,7 @@ mod tests {
                 }
                 _ => Ok(ActionNode::new(EntryAction::Transfer {
                     target: "2001".into(),
+                    headers: HashMap::new(),
                     params: HashMap::new(),
                     return_app: None,
                     return_target: None,
@@ -4301,6 +4359,7 @@ mod tests {
         // return_app, not an IVR jump) is a true flow end — session_end stays.
         let mut app = mock_app(vec![ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            headers: HashMap::new(),
             params: HashMap::new(),
             return_app: None,
             return_target: None,
@@ -4369,6 +4428,7 @@ mod tests {
             StepIvrApp::with_provider(Box::new(MockProvider::new(vec![ActionNode::new(
                 EntryAction::Transfer {
                     target: "2001".into(),
+                    headers: HashMap::new(),
                     params: HashMap::new(),
                     return_app: None,
                     return_target: None,
@@ -4432,6 +4492,7 @@ mod tests {
         let trace = IvrTraceCollector::new();
         let mut app = mock_app(vec![ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            headers: HashMap::new(),
             params: HashMap::new(),
             return_app: None,
             return_target: None,
@@ -4503,6 +4564,7 @@ mod tests {
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -4828,6 +4890,7 @@ mod tests {
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -4873,6 +4936,7 @@ mod tests {
             "1".into(),
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -4950,6 +5014,7 @@ mod tests {
         });
         let transfer_resp = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            headers: HashMap::new(),
             params: HashMap::new(),
             return_app: None,
             return_target: None,
@@ -5021,6 +5086,7 @@ mod tests {
         });
         let transfer = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            headers: HashMap::new(),
             params: HashMap::new(),
             return_app: None,
             return_target: None,
@@ -5087,6 +5153,7 @@ mod tests {
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "3003".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -5136,6 +5203,7 @@ mod tests {
             "1".into(),
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -5221,6 +5289,7 @@ mod tests {
                 },
                 ActionNode::new(EntryAction::Transfer {
                     target: "2001".into(),
+                    headers: HashMap::new(),
                     params: HashMap::new(),
                     return_app: None,
                     return_target: None,
@@ -5311,6 +5380,7 @@ mod tests {
             "1".into(),
             ActionNode::new(EntryAction::Transfer {
                 target: "2002".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -5327,6 +5397,7 @@ mod tests {
             entries,
             timeout_action: Some(Box::new(ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -5398,6 +5469,7 @@ mod tests {
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -5471,6 +5543,7 @@ mod tests {
             "1".into(),
             ActionNode::new(EntryAction::Transfer {
                 target: "2002".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -5539,6 +5612,7 @@ mod tests {
             "1".into(),
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -5628,6 +5702,7 @@ mod tests {
             "1".into(),
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -5718,6 +5793,7 @@ mod tests {
         });
         let transfer = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            headers: HashMap::new(),
             params: HashMap::new(),
             return_app: None,
             return_target: None,
@@ -5936,6 +6012,7 @@ mod tests {
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -6043,6 +6120,7 @@ mod tests {
         let provider = Arc::new(MockProvider::new(vec![ActionNode::new(
             EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -6053,6 +6131,7 @@ mod tests {
         app.ivr_name = Some("test-ivr".to_string());
         let mut current_node = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            headers: HashMap::new(),
             params: HashMap::new(),
             return_app: None,
             return_target: None,
@@ -6174,6 +6253,7 @@ mod tests {
             "1".into(),
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -6435,6 +6515,7 @@ mod tests {
         let provider = Arc::new(MockProvider::new(vec![ActionNode::new(
             EntryAction::Transfer {
                 target: "2001".into(),
+                headers: HashMap::new(),
                 params: HashMap::new(),
                 return_app: None,
                 return_target: None,
@@ -6444,6 +6525,7 @@ mod tests {
         app.ivr_name = Some("test-ivr".to_string());
         app.current_node = Some(ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            headers: HashMap::new(),
             params: HashMap::new(),
             return_app: None,
             return_target: None,
@@ -6609,6 +6691,7 @@ mod tests {
             Json(
                 serde_json::to_value(ActionNode::new(EntryAction::Transfer {
                     target: "2001".into(),
+                    headers: HashMap::new(),
                     params: HashMap::new(),
                     return_app: None,
                     return_target: None,
@@ -6698,6 +6781,7 @@ mod tests {
         });
         let followup = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            headers: HashMap::new(),
             params: HashMap::new(),
             return_app: None,
             return_target: None,
@@ -6742,6 +6826,7 @@ mod tests {
         input_phone.step_id = Some("input-phone-step".into());
         let followup = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            headers: HashMap::new(),
             params: HashMap::new(),
             return_app: None,
             return_target: None,
@@ -6837,6 +6922,7 @@ mod tests {
         });
         let followup = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            headers: HashMap::new(),
             params: HashMap::new(),
             return_app: None,
             return_target: None,
@@ -6892,6 +6978,7 @@ mod tests {
         });
         let followup = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
+            headers: HashMap::new(),
             params: HashMap::new(),
             return_app: None,
             return_target: None,
@@ -7291,6 +7378,7 @@ mod tests {
                 Some(ProviderEvent::Dtmf { digit }) if digit == "2" => {
                     Ok(ActionNode::new(EntryAction::Transfer {
                         target: "2001".into(),
+                        headers: HashMap::new(),
                         params: HashMap::new(),
                         return_app: None,
                         return_target: None,

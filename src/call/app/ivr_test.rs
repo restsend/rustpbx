@@ -46,6 +46,7 @@ mod tests {
                         label: Some("Sales".to_string()),
                         action: EntryAction::Transfer {
                             target: "2001".to_string(),
+                            headers: HashMap::new(),
                             params: HashMap::new(),
                             return_app: None,
                             return_target: None,
@@ -101,12 +102,14 @@ mod tests {
                         invalid_prompt: None,
                         timeout_action: Some(EntryAction::Transfer {
                             target: "3000".to_string(),
+                            headers: HashMap::new(),
                             params: HashMap::new(),
                             return_app: None,
                             return_target: None,
                         }),
                         max_retries_action: Some(EntryAction::Transfer {
                             target: "3000".to_string(),
+                            headers: HashMap::new(),
                             params: HashMap::new(),
                             return_app: None,
                             return_target: None,
@@ -117,6 +120,7 @@ mod tests {
                                 label: Some("Billing".to_string()),
                                 action: EntryAction::Transfer {
                                     target: "3001".to_string(),
+                                    headers: HashMap::new(),
                                     params: HashMap::new(),
                                     return_app: None,
                                     return_target: None,
@@ -1503,6 +1507,7 @@ action = { type = "transfer", target = "100" }
                     label: Some("Billing".to_string()),
                     action: EntryAction::Transfer {
                         target: "3001".to_string(),
+                        headers: HashMap::new(),
                         params: HashMap::new(),
                         return_app: None,
                         return_target: None,
@@ -2131,6 +2136,7 @@ action = { type = "transfer", target = "100" }
                     label: Some("Transfer".to_string()),
                     action: EntryAction::Transfer {
                         target: "2001".to_string(),
+                        headers: HashMap::new(),
                         params: HashMap::new(),
                         return_app: None,
                         return_target: None,
@@ -2251,6 +2257,7 @@ action = { type = "transfer", target = "100" }
                             label: Some("Billing".to_string()),
                             action: EntryAction::Transfer {
                                 target: "3001".to_string(),
+                                headers: HashMap::new(),
                                 params: HashMap::new(),
                                 return_app: None,
                                 return_target: None,
@@ -2429,6 +2436,7 @@ action = { type = "transfer", target = "100" }
                     label: Some("Sales".to_string()),
                     action: EntryAction::Transfer {
                         target: "2001".to_string(),
+                        headers: HashMap::new(),
                         params: HashMap::new(),
                         return_app: None,
                         return_target: None,
@@ -2531,6 +2539,7 @@ action = { type = "transfer", target = "100" }
                         label: Some("Sales".to_string()),
                         action: EntryAction::Transfer {
                             target: "2001".to_string(),
+                            headers: HashMap::new(),
                             params: HashMap::new(),
                             return_app: None,
                             return_target: None,
@@ -2622,6 +2631,7 @@ action = { type = "transfer", target = "100" }
                     label: Some("Sales".to_string()),
                     action: EntryAction::Transfer {
                         target: "2001".to_string(),
+                        headers: HashMap::new(),
                         params: HashMap::new(),
                         return_app: None,
                         return_target: None,
@@ -2702,6 +2712,7 @@ action = { type = "transfer", target = "100" }
                     label: Some("Sales".to_string()),
                     action: EntryAction::Transfer {
                         target: "2001".to_string(),
+                        headers: HashMap::new(),
                         params: HashMap::new(),
                         return_app: None,
                         return_target: None,
@@ -2982,6 +2993,7 @@ action = { type = "transfer", target = "100" }
                     label: Some("Sales".to_string()),
                     action: EntryAction::Transfer {
                         target: "2001".to_string(),
+                        headers: HashMap::new(),
                         params: HashMap::new(),
                         return_app: None,
                         return_target: None,
@@ -3048,6 +3060,7 @@ action = { type = "transfer", target = "100" }
                     label: Some("Sales".to_string()),
                     action: EntryAction::Transfer {
                         target: "2001".to_string(),
+                        headers: HashMap::new(),
                         params: HashMap::new(),
                         return_app: None,
                         return_target: None,

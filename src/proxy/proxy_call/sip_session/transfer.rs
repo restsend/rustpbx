@@ -661,6 +661,7 @@ impl SipSession {
         attended: bool,
         disposition: TransferDisposition,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
+        headers: HashMap<String, String>,
     ) -> Result<()> {
         if disposition == TransferDisposition::AwaitResult {
             self.meta.pending_transfer_outcome =
@@ -668,7 +669,14 @@ impl SipSession {
         }
 
         let result = self
-            .handle_transfer_inner(leg_id, target, attended, disposition, callee_state_rx)
+            .handle_transfer_inner(
+                leg_id,
+                target,
+                attended,
+                disposition,
+                callee_state_rx,
+                headers,
+            )
             .await;
         if disposition == TransferDisposition::AwaitResult {
             if result.is_err() {
@@ -732,6 +740,7 @@ impl SipSession {
         attended: bool,
         disposition: TransferDisposition,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
+        headers: HashMap<String, String>,
     ) -> Result<()> {
         let leg_id = self.resolve_transfer_leg(leg_id);
         let leg = self.require_leg(&leg_id)?;
@@ -754,7 +763,7 @@ impl SipSession {
                 );
             }
         } else {
-            self.handle_blind_transfer(leg_id, target, disposition, callee_state_rx)
+            self.handle_blind_transfer(leg_id, target, disposition, callee_state_rx, headers)
                 .await?;
         }
 
@@ -778,6 +787,7 @@ impl SipSession {
         target: String,
         disposition: TransferDisposition,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
+        headers: HashMap<String, String>,
     ) -> Result<()> {
         self.meta.transfer_in_progress = true;
         self.sync_rtp_timeout_pause();
@@ -802,7 +812,7 @@ impl SipSession {
         let target_for_event = target.clone();
 
         let result = self
-            .handle_blind_transfer_inner(leg_id, target, disposition, callee_state_rx)
+            .handle_blind_transfer_inner(leg_id, target, disposition, callee_state_rx, headers)
             .await;
 
         if result.is_err() {
@@ -907,6 +917,7 @@ impl SipSession {
         target: String,
         disposition: TransferDisposition,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
+        headers: HashMap<String, String>,
     ) -> Result<()> {
         let target = parse_transfer_target(&target);
         if disposition == TransferDisposition::AwaitResult
@@ -1047,6 +1058,7 @@ impl SipSession {
                             from_user,
                             callee_state_rx,
                             disposition != TransferDisposition::AwaitResult,
+                            &headers,
                         )
                         .await;
                 }
@@ -1064,7 +1076,7 @@ impl SipSession {
                     .clone()
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| format!("sip:{}@localhost", self.server.contact_username));
-                let headers = vec![rsipstack::sip::Header::Other(
+                let refer_headers = vec![rsipstack::sip::Header::Other(
                     "Referred-By".to_string(),
                     format!("<{}>", referred_by),
                 )];
@@ -1078,7 +1090,7 @@ impl SipSession {
                     ));
                 };
                 match server_dialog
-                    .refer(refer_to_uri.clone(), Some(headers), None)
+                    .refer(refer_to_uri.clone(), Some(refer_headers), None)
                     .await
                 {
                     Ok(Some(response)) => {
@@ -1112,6 +1124,7 @@ impl SipSession {
                                         from_user,
                                         callee_state_rx,
                                         disposition != TransferDisposition::AwaitResult,
+                                        &headers,
                                     )
                                     .await;
                             }
@@ -1190,6 +1203,7 @@ impl SipSession {
         from_user: Option<String>,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
         allow_app_route: bool,
+        headers: &HashMap<String, String>,
     ) -> Result<()> {
         info!(session_id = %self.id, %leg_id, target = %uri, return_app = ?self.meta.transfer_return_app, "Blind transfer via B-leg INVITE (B2BUA)");
         // `callee` is a reusable slot: finalizing the target replaces its
@@ -1303,7 +1317,14 @@ impl SipSession {
             }
         }
         let result = self
-            .try_single_target(&location, callee_state_rx, None, None, caller)
+            .try_single_target(
+                &location,
+                callee_state_rx,
+                None,
+                None,
+                caller,
+                Some(headers),
+            )
             .await;
         if result.is_ok() {
             self.retire_replaced_blind_transfer_leg(replaced_leg, replaced_dialog_id);
@@ -2532,6 +2553,7 @@ impl SipSession {
             refer_target,
             TransferDisposition::Detach,
             callee_state_rx,
+            HashMap::new(),
         )
         .await
     }
