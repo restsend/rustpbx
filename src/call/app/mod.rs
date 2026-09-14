@@ -90,6 +90,7 @@ pub mod error_catalog;
 pub mod ivr;
 pub mod ivr_config;
 pub mod queue;
+pub mod realtime;
 pub mod voicemail;
 
 /// Test helpers: build a mock call stack without a real SIP session.
@@ -129,6 +130,8 @@ pub enum CallAppType {
     Conference,
     Queue,
     Fax,
+    /// Realtime (AI voice) WebSocket bridge.
+    Realtime,
     Custom,
 }
 
@@ -140,6 +143,7 @@ impl fmt::Display for CallAppType {
             CallAppType::Conference => write!(f, "conference"),
             CallAppType::Queue => write!(f, "queue"),
             CallAppType::Fax => write!(f, "fax"),
+            CallAppType::Realtime => write!(f, "realtime"),
             CallAppType::Custom => write!(f, "custom"),
         }
     }

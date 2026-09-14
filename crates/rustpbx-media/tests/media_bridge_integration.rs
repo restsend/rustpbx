@@ -322,6 +322,61 @@ async fn play_file_fires_on_end() {
     mb.close();
 }
 
+/// `bridge_play_pcm` — the raw-PCM streaming inject used by `voip_bridge` and
+/// the realtime app — must pace written frames out the leg egress and resolve
+/// the `on_end` callback when the writer drops the channel (natural end).
+/// Guard test: any regression in `ChannelAudioSource` pacing/EOF semantics
+/// breaks both consumers, so it is pinned here at the integration level.
+#[tokio::test]
+async fn bridge_play_pcm_streams_and_fires_on_end() {
+    let mut mb = MediaBridge::new("it-pcm-stream");
+    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
+    let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
+    mb.replace_leg(LegSide::A, a).await;
+    mb.replace_leg(LegSide::B, b).await;
+    let la = mb.leg(LegSide::A).unwrap();
+    let lb = mb.leg(LegSide::B).unwrap();
+    let offer = la.create_offer().await.expect("offer");
+    let answer = lb.answer(&offer).await.expect("answer");
+    la.apply_sdp(&answer, rustrtc::SdpType::Answer)
+        .await
+        .expect("apply answer");
+
+    let (end_tx, end_rx) = tokio::sync::oneshot::channel::<bool>();
+    let end_slot = std::sync::Mutex::new(Some(end_tx));
+    let on_end: rustpbx_media::egress::EgressEndCallback = std::sync::Arc::new(move |interrupted| {
+        if let Ok(mut slot) = end_slot.lock() {
+            if let Some(tx) = slot.take() {
+                let _ = tx.send(interrupted);
+            }
+        }
+    });
+
+    // 20ms @ 8kHz = 160 samples per frame; stream 10 frames (200ms) then drop.
+    let mut tx = mb
+        .bridge_play_pcm(LegSide::A, 8000, Some(on_end))
+        .await
+        .expect("bridge_play_pcm");
+    let frame = vec![1000i16; 160];
+    for _ in 0..10 {
+        tx.send(frame.clone())
+            .await
+            .expect("pcm channel must accept frames while streaming");
+    }
+    drop(tx);
+
+    let interrupted = tokio::time::timeout(std::time::Duration::from_secs(3), end_rx)
+        .await
+        .expect("bridge_play_pcm must fire on_end after writer drop")
+        .expect("on_end channel must resolve");
+    assert!(
+        !interrupted,
+        "writer drop is a natural end — must not be flagged interrupted"
+    );
+
+    mb.close();
+}
+
 /// MediaBridge::hold breaks the route, then MediaBridge::resume re-arms it.
 #[tokio::test]
 async fn mediabridge_hold_resume_preserves_route() {
@@ -1127,7 +1182,10 @@ async fn play_file_both_handles_complete_and_resume_rebridges() {
 
     // ~300ms file.
     let wav = tempfile_wav_silence(8000, 1, 2400);
-    let mut handles = mb.play_file_both(&wav, false).await.expect("play_file_both");
+    let mut handles = mb
+        .play_file_both(&wav, false)
+        .await
+        .expect("play_file_both");
     assert_eq!(handles.len(), 2, "both legs exist → both must play");
     assert!(!mb.is_bridged(), "play_file_both must break the route");
 

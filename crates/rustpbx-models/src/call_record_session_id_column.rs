@@ -55,7 +55,10 @@ impl MigrationTrait for Migration {
         let table = super::call_record::Entity;
 
         if manager
-            .has_index("rustpbx_call_records", "idx_rustpbx_call_records_session_id")
+            .has_index(
+                "rustpbx_call_records",
+                "idx_rustpbx_call_records_session_id",
+            )
             .await?
         {
             manager
@@ -68,7 +71,10 @@ impl MigrationTrait for Migration {
                 .await?;
         }
 
-        if manager.has_column("rustpbx_call_records", "session_id").await? {
+        if manager
+            .has_column("rustpbx_call_records", "session_id")
+            .await?
+        {
             manager
                 .alter_table(
                     Table::alter()

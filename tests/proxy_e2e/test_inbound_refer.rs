@@ -196,9 +196,7 @@ async fn test_inbound_refer_success() {
     sleep(Duration::from_millis(500)).await;
     let calls = server.get_active_calls();
     assert!(
-        calls
-            .iter()
-            .all(|c| c.direction != "outbound"),
+        calls.iter().all(|c| c.direction != "outbound"),
         "in-session REFER must not originate a separate outbound call, got {:?}",
         calls
             .iter()

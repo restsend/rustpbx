@@ -1390,6 +1390,33 @@ SIP PUBLISH  presence 状态变化（每个本地 PUBLISH 触发）。
 
 > 不存在 `call_ownership_changed` 事件（文档早先版本有误）；呼叫所有权/接管通过 supervisor 命令与其 `supervisor_*_started` 事件表达。
 
+### 6.12 实时语音 AI（realtime）事件
+
+#### realtime_event
+
+分发：broadcast
+
+> 通话中插入 realtime（AI 语音）WebSocket 桥时的透传事件流——核心只做传输，工具执行与业务逻辑由订阅方处理。桥的启动见 `call.app_start`（`app_name = "realtime"`）；`hangup_on_disconnect` 默认为 true，端点断开会挂断通话。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫标识 |
+| `kind` | String | 事件种类，见下表 |
+| `data` | object | 按 kind 变化的负载 |
+| *+ctx* | | 扁平化上下文 |
+
+| `kind` | `data` 负载 | 说明 |
+|--------|-------------|------|
+| `connected` | `{protocol, sample_rate}` | WS 连接建立、握手完成 |
+| `session_ready` | `{}` | 端点会话就绪（OpenAI `session.created`） |
+| `transcript_delta` | `{text}` | AI 语音转写增量（`response.audio_transcript.delta`） |
+| `transcript_final` | `{text}` | 来话人语音转写终稿（`input_audio_transcription.completed`） |
+| `function_call` | `{name, arguments, call_id}` | 模型请求工具调用——**透传**，执行与否由业务方决定 |
+| `speech_started` / `speech_stopped` | `{}` | 服务端 VAD 检测到来话人说话开始/结束 |
+| `barge_in` | `{reason:"speech_started"}` | 打断：播放静音 + 已发送 `response.cancel`，缓冲音频全部丢弃 |
+| `error` | `{message}` | 端点报错 |
+| `disconnected` | `{reason}` | WS 断开（`WsClosed`/`WsError`/`Cancelled`） |
+
 #### session.resume / call.resume（命令结果，非事件）
 
 | 字段 | 类型 | 说明 |
@@ -1443,6 +1470,7 @@ SIP PUBLISH  presence 状态变化（每个本地 PUBLISH 触发）。
 | `queue_agent_connected` | broadcast | ✅ | +ctx |
 | `queue_left` | broadcast | ✅ | +ctx |
 | `queue_wait_timeout` | broadcast | ✅ | +ctx |
+| `realtime_event` | broadcast | ✅ | +ctx（kind/data 透传，见 6.12） |
 | `queue_candidates_found` | broadcast | ✅ | +ctx |
 | `queue_agent_offered` | broadcast | ✅ | +ctx |
 | `queue_agent_no_answer` | broadcast | ✅ | +ctx |

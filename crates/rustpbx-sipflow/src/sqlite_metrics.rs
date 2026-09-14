@@ -6,9 +6,9 @@
 //! metric carries a `database` label; sipflow always reports `sipflow`.
 //! Statement-level only: multi-row/batched operations, never per-row.
 
+use sqlx::{Connection, SqliteConnection};
 use std::path::Path;
 use std::time::{Duration, Instant};
-use sqlx::{Connection, SqliteConnection};
 
 pub const DATABASE: &str = "sipflow";
 
@@ -68,12 +68,14 @@ impl Drop for ConnectionGuard {
 
 fn error_class(err: &sqlx::Error) -> &'static str {
     match err {
-        sqlx::Error::Database(db) => match db.code().and_then(|c| c.parse::<i32>().ok()).unwrap_or(0) {
-            5 => "busy",
-            6 => "locked",
-            19 | 2067 => "constraint",
-            _ => "other",
-        },
+        sqlx::Error::Database(db) => {
+            match db.code().and_then(|c| c.parse::<i32>().ok()).unwrap_or(0) {
+                5 => "busy",
+                6 => "locked",
+                19 | 2067 => "constraint",
+                _ => "other",
+            }
+        }
         _ => "other",
     }
 }
@@ -83,12 +85,7 @@ pub fn record_error(kind: &'static str, err: &sqlx::Error) {
         .increment(1);
 }
 
-pub fn record_statement(
-    kind: &'static str,
-    rows_read: u64,
-    rows_written: u64,
-    elapsed: Duration,
-) {
+pub fn record_statement(kind: &'static str, rows_read: u64, rows_written: u64, elapsed: Duration) {
     metrics::counter!("sqlite_statements_total", "database" => DATABASE, "kind" => kind)
         .increment(1);
     if rows_read > 0 {

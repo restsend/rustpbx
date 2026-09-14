@@ -1444,6 +1444,32 @@ Dispatch: broadcast
 
 ### 6.11 Session System Events
 
+#### realtime_event
+
+Dispatch: broadcast
+
+> Passthrough event stream from a realtime (AI voice) WebSocket bridge. The core is transport-only — tool execution and business logic belong to subscribers. Start the bridge via `call.app_start` (`app_name = "realtime"`); with `hangup_on_disconnect` (default true) an endpoint close hangs the call up.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `call_id` | String | Call id |
+| `kind` | String | See table |
+| `data` | object | Kind-specific payload |
+| *+ctx* | | flattened context |
+
+| `kind` | `data` | Notes |
+|--------|--------|-------|
+| `connected` | `{protocol, sample_rate}` | WS connected, handshake done |
+| `session_ready` | `{}` | Endpoint session ready (OpenAI `session.created`) |
+| `transcript_delta` | `{text}` | AI speech transcript delta |
+| `transcript_final` | `{text}` | Caller speech transcript final |
+| `function_call` | `{name, arguments, call_id}` | Model tool call — **passthrough only** |
+| `speech_started` / `speech_stopped` | `{}` | Server VAD on caller speech |
+| `barge_in` | `{reason:"speech_started"}` | Playout muted + `response.cancel` sent; buffered audio discarded |
+| `error` | `{message}` | Endpoint error |
+| `disconnected` | `{reason}` | WS closed (`WsClosed`/`WsError`/`Cancelled`) |
+
+
 > No `call_ownership_changed` event exists (earlier revisions of this document
 > were incorrect); call ownership / takeover is expressed through supervisor
 > commands and their `supervisor_*_started` events.
@@ -1503,6 +1529,7 @@ Dispatch: broadcast
 | `queue_agent_connected` | broadcast | yes | +ctx |
 | `queue_left` | broadcast | yes | +ctx |
 | `queue_wait_timeout` | broadcast | yes | +ctx |
+| `realtime_event` | broadcast | yes | +ctx (kind/data passthrough, see 6.11) |
 | `queue_candidates_found` | broadcast | yes | +ctx |
 | `queue_agent_offered` | broadcast | yes | +ctx |
 | `queue_agent_no_answer` | broadcast | yes | +ctx |

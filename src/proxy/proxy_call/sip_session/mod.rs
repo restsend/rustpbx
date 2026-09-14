@@ -4,6 +4,7 @@ mod prelude;
 
 mod builtin_app_factory;
 mod peer_audio;
+mod realtime_bridge;
 mod session;
 mod util;
 

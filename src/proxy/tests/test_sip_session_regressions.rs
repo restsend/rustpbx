@@ -2952,7 +2952,8 @@ async fn record_stopped_event_carries_recording_unique_id() {
 }
 
 #[tokio::test]
-async fn record_stopped_event_path_predicts_archived_layout() {    let dir = tempfile::tempdir().expect("tempdir");
+async fn record_stopped_event_path_predicts_archived_layout() {
+    let dir = tempfile::tempdir().expect("tempdir");
     let (server, _) = create_test_server().await;
     server
         .recording_policy
