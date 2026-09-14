@@ -2170,12 +2170,7 @@ impl CallApp for QueueApp {
                         && let Some(ref registry) = self.agent_registry
                     {
                         let _ = registry
-                            .update_presence(
-                                agent_id,
-                                PresenceState::Busy {
-                                    call_id: Some(self.call_id.clone()),
-                                },
-                            )
+                            .release_call(agent_id, &self.call_id)
                             .await;
                     }
                     self.handle_agent_unavailable(
@@ -2195,7 +2190,7 @@ impl CallApp for QueueApp {
                         && let Some(ref registry) = self.agent_registry
                     {
                         let _ = registry
-                            .update_presence(agent_id, PresenceState::Idle)
+                            .release_call(agent_id, &self.call_id)
                             .await;
                     }
                     self.handle_agent_unavailable(

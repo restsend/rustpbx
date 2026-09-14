@@ -1469,6 +1469,25 @@ async fn test_queue_transfer_return_to_ivr_starts_queue_app_and_sets_meta() {
 
 // ─── accept_call connected_callee regression tests ───────────────────────────
 
+#[tokio::test]
+async fn test_accept_call_fires_connected_hook_only_for_callee_answer() {
+    for application in [None, Some("queue"), Some("ivr")] {
+        let mut dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+        if let Some(app) = application {
+            dialplan = dialplan.with_application(app.to_string(), None, true);
+        }
+        let (mut server, _) = create_test_server().await;
+        let (hook, _, _, connected) = RingingRecordingHook::new();
+        Arc::get_mut(&mut server).unwrap().session_hooks = Arc::new(vec![Arc::new(hook)]);
+        let mut session = build_session_on_server(server, dialplan).await;
+        session.accept_call(None, None).await.unwrap();
+        session.accept_call(None, None).await.unwrap();
+        assert_eq!(connected.load(Ordering::SeqCst), 0, "caller-only answer: {application:?}");
+        session.accept_call(Some("sip:agent@rustpbx.com".into()), None).await.unwrap();
+        assert_eq!(connected.load(Ordering::SeqCst), 1, "callee answer: {application:?}");
+    }
+}
+
 /// accept_call must set connected_callee for a plain P2P (Targets, no bridge) call.
 ///
 /// Regression: the fix must not prevent connected_callee from being assigned.
@@ -2623,7 +2642,10 @@ async fn queue_agent_connect_activates_media_bridge() {
         queue_name: "support".to_string(),
         ..Default::default()
     });
-    let mut session = build_session(dialplan).await;
+    let (mut server, _) = create_test_server().await;
+    let (hook, _, _, connected) = RingingRecordingHook::new();
+    Arc::get_mut(&mut server).unwrap().session_hooks = Arc::new(vec![Arc::new(hook)]);
+    let mut session = build_session_on_server(server, dialplan).await;
 
     // Caller side: a valid PCMU offer as the inbound INVITE body.
     let caller_offer = crate::proxy::tests::test_helpers::pcmu_sdp("127.0.0.1", 10001);
@@ -2668,6 +2690,8 @@ async fn queue_agent_connect_activates_media_bridge() {
             None,
         )
         .await;
+
+    assert_eq!(connected.load(Ordering::SeqCst), 1, "agent answer must fire connected hook");
 
     // The media bridge must now be active (both legs accepted + relay armed).
     let mb = session.media.bridge.as_ref().expect("media bridge present");
