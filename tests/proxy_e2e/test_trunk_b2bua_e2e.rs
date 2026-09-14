@@ -764,8 +764,8 @@ async fn test_trunk_b2bua_basic_call_cdr_roundtrip() -> Result<()> {
     let callee_offer = bob_offer_sdp.ok_or_else(|| anyhow::anyhow!("No callee offer SDP"))?;
     let caller_target = extract_media_endpoint(&caller_answer)
         .ok_or_else(|| anyhow::anyhow!("No caller endpoint"))?;
-    let callee_target =
-        extract_media_endpoint(&callee_offer).ok_or_else(|| anyhow::anyhow!("No callee endpoint"))?;
+    let callee_target = extract_media_endpoint(&callee_offer)
+        .ok_or_else(|| anyhow::anyhow!("No callee endpoint"))?;
 
     let (caller_stats, callee_stats) = exchange_rtp(
         &caller_sender,
@@ -778,7 +778,10 @@ async fn test_trunk_b2bua_basic_call_cdr_roundtrip() -> Result<()> {
         1500,
     )
     .await?;
-    assert!(caller_stats.packets_received > 0, "Alice should receive RTP");
+    assert!(
+        caller_stats.packets_received > 0,
+        "Alice should receive RTP"
+    );
     assert!(callee_stats.packets_received > 0, "Bob should receive RTP");
 
     alice.hangup(&alice_id).await?;

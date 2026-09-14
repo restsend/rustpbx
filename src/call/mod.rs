@@ -588,10 +588,8 @@ impl QueuePlan {
                 // Numeric is canonical; tolerate numeric strings too — some
                 // producers stringify app params into maps before sending
                 // (`"priority": "3"`), which must not silently drop the value.
-                v.as_u64().or_else(|| {
-                    v.as_str()
-                        .and_then(|s| s.trim().parse::<u64>().ok())
-                })
+                v.as_u64()
+                    .or_else(|| v.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
             })
             .and_then(|v| u32::try_from(v).ok());
         let plan = Self {
@@ -1502,10 +1500,14 @@ mod tests {
 
     #[test]
     fn queue_plan_from_app_params_ignores_out_of_range_priority() {
-        let (_, priority) =
-            QueuePlan::from_app_params(&serde_json::json!({"queue": "sg", "priority": 1_000_000_000_000_u64}))
-                .expect("must parse despite oversized priority");
-        assert_eq!(priority, None, "priority beyond u32 must be dropped, not fatal");
+        let (_, priority) = QueuePlan::from_app_params(
+            &serde_json::json!({"queue": "sg", "priority": 1_000_000_000_000_u64}),
+        )
+        .expect("must parse despite oversized priority");
+        assert_eq!(
+            priority, None,
+            "priority beyond u32 must be dropped, not fatal"
+        );
     }
 
     #[test]
@@ -1528,7 +1530,10 @@ mod tests {
             "queue": "sg", "priority": "high"
         }))
         .expect("must parse despite non-numeric priority");
-        assert_eq!(garbage, None, "non-numeric priority must be dropped, not fatal");
+        assert_eq!(
+            garbage, None,
+            "non-numeric priority must be dropped, not fatal"
+        );
     }
 
     #[test]

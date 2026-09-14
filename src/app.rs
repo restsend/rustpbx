@@ -640,9 +640,11 @@ impl AppStateBuilder {
             console: console_state,
             tls_reloader: Arc::new(RwLock::new(Some(Arc::new(TlsReloaderRegistry::new())))),
             cluster_config: std::sync::RwLock::new(config.cluster.clone()),
-            outbound_limiter: config.outbound.as_ref().filter(|c| c.enabled).map(|c| {
-                Arc::new(tokio::sync::Semaphore::new(c.max_concurrent.max(1)))
-            }),
+            outbound_limiter: config
+                .outbound
+                .as_ref()
+                .filter(|c| c.enabled)
+                .map(|c| Arc::new(tokio::sync::Semaphore::new(c.max_concurrent.max(1)))),
         });
 
         // Register SIP TLS reloader if TLS is enabled

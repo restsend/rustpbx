@@ -2590,7 +2590,11 @@ impl CallModule {
         // "original number kept in transfer_target").
         let handoff_target = match routed {
             Some(crate::config::RouteResult::Queue { queue, .. }) => {
-                format!("queue:{}?refer_to={}", queue.queue_name, urlencoding::encode(&user))
+                format!(
+                    "queue:{}?refer_to={}",
+                    queue.queue_name,
+                    urlencoding::encode(&user)
+                )
             }
             Some(crate::config::RouteResult::Application { .. }) => {
                 format!("toivr:{}?refer_to={}", user, urlencoding::encode(&user))

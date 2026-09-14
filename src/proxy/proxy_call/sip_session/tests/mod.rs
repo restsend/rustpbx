@@ -131,18 +131,15 @@ fn forward_dtmf_with_active_bridge_owns_digit_without_app_injection() {
     assert_eq!(ev.event.payload["action_type"], "Bridge");
     assert_eq!(ev.event.payload["extra"]["nodetype"], "menu_tts");
     assert_eq!(
-        ev.event.payload["step_start_time"],
-        "2026-01-01T00:00:00+00:00",
+        ev.event.payload["step_start_time"], "2026-01-01T00:00:00+00:00",
         "bridge DTMF trace must carry the executor-stamped step start time"
     );
-    let start: chrono::DateTime<chrono::FixedOffset> = chrono::DateTime::parse_from_rfc3339(
-        ev.event.payload["step_start_time"].as_str().unwrap(),
-    )
-    .expect("step_start_time must be RFC3339");
-    let end: chrono::DateTime<chrono::FixedOffset> = chrono::DateTime::parse_from_rfc3339(
-        ev.event.payload["step_end_time"].as_str().unwrap(),
-    )
-    .expect("step_end_time must be RFC3339");
+    let start: chrono::DateTime<chrono::FixedOffset> =
+        chrono::DateTime::parse_from_rfc3339(ev.event.payload["step_start_time"].as_str().unwrap())
+            .expect("step_start_time must be RFC3339");
+    let end: chrono::DateTime<chrono::FixedOffset> =
+        chrono::DateTime::parse_from_rfc3339(ev.event.payload["step_end_time"].as_str().unwrap())
+            .expect("step_end_time must be RFC3339");
     assert!(
         end >= start,
         "consumer-derived duration would be negative if end < start"
@@ -209,14 +206,12 @@ fn suspended_flow_death_emits_compensating_session_end_trace() {
          event timestamp - step_start_time, and a null start would force an envelope-timestamp \
          fallback that orders end < start"
     );
-    let start: chrono::DateTime<chrono::FixedOffset> = chrono::DateTime::parse_from_rfc3339(
-        ev.event.payload["step_start_time"].as_str().unwrap(),
-    )
-    .expect("step_start_time must be RFC3339");
-    let end: chrono::DateTime<chrono::FixedOffset> = chrono::DateTime::parse_from_rfc3339(
-        ev.event.payload["step_end_time"].as_str().unwrap(),
-    )
-    .expect("step_end_time must be RFC3339");
+    let start: chrono::DateTime<chrono::FixedOffset> =
+        chrono::DateTime::parse_from_rfc3339(ev.event.payload["step_start_time"].as_str().unwrap())
+            .expect("step_start_time must be RFC3339");
+    let end: chrono::DateTime<chrono::FixedOffset> =
+        chrono::DateTime::parse_from_rfc3339(ev.event.payload["step_end_time"].as_str().unwrap())
+            .expect("step_end_time must be RFC3339");
     assert!(
         end >= start,
         "consumer-derived duration would be negative if end < start"
@@ -5211,10 +5206,7 @@ async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
                     .unwrap();
                 for name in ["callee", "consult"] {
                     session
-                        .handle_join_mixer_leg(
-                            "consult-consult-media".into(),
-                            LegId::from(name),
-                        )
+                        .handle_join_mixer_leg("consult-consult-media".into(), LegId::from(name))
                         .await
                         .unwrap();
                 }

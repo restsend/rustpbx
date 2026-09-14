@@ -117,9 +117,8 @@ async fn test_callee_hangup_after_call() -> Result<()> {
 async fn test_outbound_enqueue_starts_queue_and_rings_agent() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
 
-    let gateway: rustpbx::rwi::RwiGatewayRef = Arc::new(parking_lot::RwLock::new(
-        rustpbx::rwi::RwiGateway::new(),
-    ));
+    let gateway: rustpbx::rwi::RwiGatewayRef =
+        Arc::new(parking_lot::RwLock::new(rustpbx::rwi::RwiGateway::new()));
     let mut cfg = test_proxy_config(15060);
     cfg.media_proxy = MediaProxyMode::All;
     let server = Arc::new(
@@ -173,9 +172,7 @@ async fn test_outbound_enqueue_starts_queue_and_rings_agent() -> Result<()> {
         },
     )
     .await
-    .map_err(|(status, body)| {
-        anyhow::anyhow!("dial rejected: {status} {body:?}")
-    })?;
+    .map_err(|(status, body)| anyhow::anyhow!("dial rejected: {status} {body:?}"))?;
 
     // ── Bob (customer) answers the outbound call ──────────────────────────
     let bob_receiver = RtpReceiver::bind(0).await?;
@@ -214,7 +211,9 @@ async fn test_outbound_enqueue_starts_queue_and_rings_agent() -> Result<()> {
         sleep(Duration::from_millis(100)).await;
     }
     let agent_dialog = agent_rang.expect("queue app must dial the agent target after enqueue");
-    charlie.answer_call(&agent_dialog, Some(charlie_sdp)).await?;
+    charlie
+        .answer_call(&agent_dialog, Some(charlie_sdp))
+        .await?;
 
     // ── The SSE stream must have carried `queue_joined` for this call ─────
     let mut saw_queue_joined = false;

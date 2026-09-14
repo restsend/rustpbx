@@ -97,15 +97,19 @@ pub async fn execute_dial_core(
     // (minutes), so when `[outbound] max_concurrent` dials are outstanding a
     // queued awaiter would hang the HTTP request indefinitely — the client
     // gets an immediate 429 to retry later instead.
-    let permit = ctx.concurrency_limiter.clone().try_acquire_owned().map_err(|_| {
-        (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(serde_json::json!({
-                "call_id": call_id,
-                "error": "outbound concurrency limit reached",
-            })),
-        )
-    })?;
+    let permit = ctx
+        .concurrency_limiter
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "call_id": call_id,
+                    "error": "outbound concurrency limit reached",
+                })),
+            )
+        })?;
 
     let originate_req = OriginateRequest {
         call_id: call_id.clone(),

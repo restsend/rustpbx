@@ -9426,10 +9426,7 @@ impl SipSession {
                 // them through the shared queue-start path so these legs get
                 // the full ACD behavior (agent resolution, `queue_joined`,
                 // escalation), not just the static dial strategy.
-                if app_name == "queue"
-                    && params
-                        .as_ref()
-                        .is_some_and(|p| p.get("queue").is_some())
+                if app_name == "queue" && params.as_ref().is_some_and(|p| p.get("queue").is_some())
                 {
                     match self.start_queue_app_from_params(params.as_ref()).await {
                         Ok(()) => {
