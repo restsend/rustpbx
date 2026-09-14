@@ -491,6 +491,16 @@ default('RustPBX') }}{% endblock %}
                             </select>
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            {{ "sip_trunk_detail.field_ice_lite" | t }}
+                            <select x-model="form.ice_lite"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="">Default</option>
+                                <option value="true">Enabled</option>
+                                <option value="false">Disabled</option>
+                            </select>
+                            <span class="text-xs font-normal text-slate-400">{{ "sip_trunk_detail.field_ice_lite_hint" | t }}</span>
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_audio_codecs" | t }}
                             <textarea rows="3" x-model="form.audio_codecs"
                                 class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
@@ -633,6 +643,7 @@ default('RustPBX') }}{% endblock %}
                 register_expires: '',
                 register_extra_headers: '',
                 recording_enabled: '',
+                ice_lite: '',
                 network_profile: '',
                 external_ip_override: '',
                 bind_ip_override: '',
@@ -717,6 +728,7 @@ default('RustPBX') }}{% endblock %}
                     const meta = typeof model.metadata === 'string' ? JSON.parse(model.metadata) : (model.metadata || {});
                     const sbc = meta.sbc || {};
                     this.form.recording_enabled = typeof sbc.recording_enabled === 'boolean' ? String(sbc.recording_enabled) : '';
+                    this.form.ice_lite = typeof sbc.ice_lite === 'boolean' ? String(sbc.ice_lite) : '';
                     this.form.network_profile = typeof sbc.profile === 'string' ? sbc.profile : '';
                     this.form.external_ip_override = typeof sbc.external_ip === 'string' ? sbc.external_ip : '';
                     this.form.bind_ip_override = typeof sbc.bind_ip === 'string' ? sbc.bind_ip : '';
@@ -935,6 +947,13 @@ default('RustPBX') }}{% endblock %}
                         meta.sbc.recording_enabled = false;
                     } else {
                         delete meta.sbc.recording_enabled;
+                    }
+                    if (this.form.ice_lite === 'true') {
+                        meta.sbc.ice_lite = true;
+                    } else if (this.form.ice_lite === 'false') {
+                        meta.sbc.ice_lite = false;
+                    } else {
+                        delete meta.sbc.ice_lite;
                     }
                     if (this.form.media_mode) {
                         meta.sbc.media_mode = this.form.media_mode;

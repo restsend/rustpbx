@@ -713,6 +713,15 @@ fn build_segment_recording_metadata(
         .map(|f| f.to_string_lossy().into_owned())
         .unwrap_or_else(|| format!("{}.wav", record.call_id));
     RecordingMetadata {
+        // Minted by the reporter for every persisted media entry; the
+        // fallback only covers exotic paths (external URLs, legacy CDRs) so
+        // the vendor-required `unique_id` field is always present.
+        unique_id: Some(
+            media
+                .unique_id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        ),
         filename,
         file_size: media.size,
         download_url: Some(url.to_string()),
@@ -1026,6 +1035,17 @@ impl CallRecordHook for RecordingUploadHook {
                         }
                     }
                     let metadata = RecordingMetadata {
+                        // Mirror the file selection below (first non-signaling
+                        // artifact) so this summary id matches the per-segment
+                        // events when the call has exactly one recording.
+                        unique_id: Some(
+                            record
+                                .recorder
+                                .iter()
+                                .find(|m| m.track_id != "signaling")
+                                .and_then(|m| m.unique_id.clone())
+                                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                        ),
                         filename: recording_filename(record, url),
                         file_size: recording_file_size(record),
                         download_url: Some(url.to_string()),
@@ -1159,6 +1179,7 @@ mod tests {
 
         // CallRecordMedia.extra exactly as reporter::collect_recording_artifacts writes it.
         let media = CallRecordMedia {
+            unique_id: None,
             track_id: format!("segment:agent:{seq}"),
             path: path.to_string_lossy().into_owned(),
             size: 153_344,
@@ -1255,6 +1276,7 @@ mod tests {
         seg_extra.insert("started_at".to_string(), json!("t0"));
         seg_extra.insert("ended_at".to_string(), json!("t1"));
         let media = CallRecordMedia {
+            unique_id: None,
             track_id: "segment:agent:ab12".into(),
             path: "/recorders/call-1_02_1001.wav".into(),
             size: 4096,
@@ -1278,6 +1300,73 @@ mod tests {
         assert_eq!(extra.get("started_at").map(String::as_str), Some("t0"));
     }
 
+    /// The vendor acceptance sheet requires `event.metadata.unique_id` (录音
+    /// 唯一标识): the per-segment metadata event must carry the recording's
+    /// unique id — the same id `record_started` / `record_stopped` use.
+    #[test]
+    fn segment_metadata_carries_recording_unique_id() {
+        let now = chrono::Utc::now();
+        let record = CallRecord {
+            call_id: "call-uid".into(),
+            start_time: now,
+            end_time: now + chrono::Duration::seconds(10),
+            recorder: vec![],
+            details: CallDetails::default(),
+            ..Default::default()
+        };
+        let media = CallRecordMedia {
+            unique_id: Some("0e1c8a52-6f1e-4c8d-9a52-6ff5b0f5f9b1".into()),
+            track_id: "segment:ivr:1".into(),
+            path: "/recorders/call-uid_01_main.wav".into(),
+            size: 1024,
+            extra: None,
+        };
+        let meta =
+            build_segment_recording_metadata(&record, &media, "https://up/call-uid_01_main.wav");
+        assert_eq!(
+            meta.unique_id.as_deref(),
+            Some("0e1c8a52-6f1e-4c8d-9a52-6ff5b0f5f9b1"),
+            "metadata.unique_id must mirror the media entry's id, not be minted fresh"
+        );
+
+        // Serialized payload exposes the snake_case key the consumer reads.
+        let value = serde_json::to_value(&crate::rwi::RecordingMetadataAvailable {
+            call_id: record.call_id.clone(),
+            metadata: meta,
+        })
+        .unwrap();
+        assert_eq!(
+            value["metadata"]["unique_id"].as_str(),
+            Some("0e1c8a52-6f1e-4c8d-9a52-6ff5b0f5f9b1")
+        );
+    }
+
+    /// Legacy/external media entries without a persisted id still get a
+    /// `unique_id` minted (fallback), so the acceptance field is always
+    /// present on the event.
+    #[test]
+    fn segment_metadata_mints_unique_id_when_media_lacks_one() {
+        let now = chrono::Utc::now();
+        let record = CallRecord {
+            call_id: "call-uid-legacy".into(),
+            start_time: now,
+            end_time: now + chrono::Duration::seconds(10),
+            recorder: vec![],
+            details: CallDetails::default(),
+            ..Default::default()
+        };
+        let media = CallRecordMedia {
+            unique_id: None,
+            track_id: "mixed".into(),
+            path: "/recorders/legacy.wav".into(),
+            size: 1024,
+            extra: None,
+        };
+        let meta = build_segment_recording_metadata(&record, &media, "https://up/legacy.wav");
+        let unique_id = meta.unique_id.expect("unique_id must be present");
+        assert_eq!(unique_id.len(), 36, "fallback must be a UUID v4 string");
+    }
+
     #[tokio::test]
     async fn aliyun_empty_bucket_and_region_initialize_recording_hook() {
         let policy = RecordingPolicy {
@@ -1294,6 +1383,7 @@ mod tests {
         let (hook, _, _) = RecordingUploadHook::new(policy).unwrap();
         let mut record = CallRecord {
             recorder: vec![CallRecordMedia {
+                unique_id: None,
                 track_id: "mixed".into(),
                 path: "call.wav".into(),
                 size: 44,
@@ -1340,6 +1430,7 @@ mod tests {
             start_time: now,
             end_time: now + chrono::Duration::seconds(60),
             recorder: vec![CallRecordMedia {
+                unique_id: None,
                 track_id: "mixed".into(),
                 path: recording.to_string_lossy().into_owned(),
                 size: 3,
@@ -1463,6 +1554,7 @@ mod tests {
             answer_time: None,
             end_time: now,
             recorder: vec![CallRecordMedia {
+                unique_id: None,
                 track_id: "mixed".to_string(),
                 path: path.clone(),
                 size: 20,
@@ -1523,6 +1615,7 @@ mod tests {
             answer_time: Some(now - chrono::Duration::seconds(4)),
             end_time: now,
             recorder: vec![CallRecordMedia {
+                unique_id: None,
                 track_id: "mixed".to_string(),
                 path: path_str.clone(),
                 size: 9,
@@ -1644,6 +1737,7 @@ mod tests {
             answer_time: Some(now),
             end_time: now,
             recorder: vec![CallRecordMedia {
+                unique_id: None,
                 track_id: "mixed".into(),
                 path: path_str,
                 size: 3,
@@ -1686,6 +1780,7 @@ mod tests {
             answer_time: Some(now),
             end_time: now,
             recorder: vec![CallRecordMedia {
+                unique_id: None,
                 track_id: "mixed".into(),
                 path: path_str,
                 size: 3,
@@ -1748,12 +1843,14 @@ mod tests {
             end_time: now,
             recorder: vec![
                 CallRecordMedia {
+                    unique_id: None,
                     track_id: "segment:ivr:1".into(),
                     path: wav_s.clone(),
                     size: 3,
                     extra: None,
                 },
                 CallRecordMedia {
+                    unique_id: None,
                     track_id: "signaling".into(),
                     path: jsonl_s.clone(),
                     size: 3,
@@ -1813,12 +1910,14 @@ mod tests {
             end_time: now,
             recorder: vec![
                 CallRecordMedia {
+                    unique_id: None,
                     track_id: "segment:full:1".into(),
                     path: wav_s,
                     size: 3,
                     extra: None,
                 },
                 CallRecordMedia {
+                    unique_id: None,
                     track_id: "signaling".into(),
                     path: jsonl_s,
                     size: 2,
@@ -1914,6 +2013,7 @@ mod tests {
             answer_time: Some(now),
             end_time: now,
             recorder: vec![CallRecordMedia {
+                unique_id: None,
                 track_id: "mixed".into(),
                 path: wav.to_string_lossy().into_owned(),
                 size: 3,

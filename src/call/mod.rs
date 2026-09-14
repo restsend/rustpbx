@@ -552,6 +552,59 @@ impl QueuePlan {
         self.label = Some(label.into());
         self
     }
+
+    /// Build a single-target plan from `StartApp("queue", params)` app params.
+    ///
+    /// Used by the command-path queue start (RWI `app.start`, outbound
+    /// `on_answer: enqueue`) where no dialplan-resolved `PendingQueuePlan`
+    /// exists. `params.queue` accepts:
+    ///
+    /// - `skill-group:<id>` — passed through; the session resolves candidates
+    ///   via the agent registry (`resolve_custom_targets`)
+    /// - a SIP URI (`sip:…`/`sips:…`) — dialed directly (resolved through the
+    ///   locator when the agent is registered)
+    /// - a bare name — mapped to `skill-group:<name>`
+    ///
+    /// Returns the plan plus the optional ACD priority (kept separately — the
+    /// session stores it as a session extension for ACD consumers).
+    pub fn from_app_params(params: &serde_json::Value) -> Result<(Self, Option<u32>)> {
+        let queue = params
+            .get("queue")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("queue app params require a non-empty `queue`"))?;
+        let target = if queue.starts_with("skill-group:") || queue.starts_with("sip:") {
+            queue.to_string()
+        } else {
+            format!("skill-group:{queue}")
+        };
+        let aor: rsipstack::sip::Uri = target
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid queue target '{target}': {e:?}"))?;
+        let priority = params
+            .get("priority")
+            .and_then(|v| {
+                // Numeric is canonical; tolerate numeric strings too — some
+                // producers stringify app params into maps before sending
+                // (`"priority": "3"`), which must not silently drop the value.
+                v.as_u64().or_else(|| {
+                    v.as_str()
+                        .and_then(|s| s.trim().parse::<u64>().ok())
+                })
+            })
+            .and_then(|v| u32::try_from(v).ok());
+        let plan = Self {
+            dial_strategy: Some(DialStrategy::Sequential(vec![Location {
+                aor,
+                contact_raw: Some(target),
+                ..Default::default()
+            }])),
+            queue_name: queue.to_string(),
+            ..Default::default()
+        };
+        Ok((plan, priority))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -786,6 +839,15 @@ pub struct MediaConfig {
     /// sustain the DTLS handshake. Defaults to false.
     #[serde(default)]
     pub relay_only: bool,
+    /// Advertise `a=ice-lite` in the SDP of this call's plain-RTP legs (see
+    /// `crate::media::leg::LegConfig::enable_ice_lite`). Answering as an
+    /// ICE-lite agent lets strict full-ICE peers (e.g. Teams Direct Routing
+    /// SBCs) that never fall back to plain RTP establish connectivity via
+    /// their own STUN checks. WebRTC legs are unaffected — they always run
+    /// full ICE. Session-wide: precedence is global `[media] ice_lite` < per-extension
+    /// detection < per-trunk override. Defaults to false.
+    #[serde(default)]
+    pub ice_lite: bool,
 }
 
 impl Default for MediaConfig {
@@ -812,6 +874,7 @@ impl MediaConfig {
             comfort_noise_level_db: -35.0,
             sip_contact: None,
             relay_only: false,
+            ice_lite: false,
         }
     }
 
@@ -847,6 +910,11 @@ impl MediaConfig {
 
     pub fn with_ice_servers(mut self, servers: Option<Vec<IceServer>>) -> Self {
         self.ice_servers = servers;
+        self
+    }
+
+    pub fn with_ice_lite(mut self, enable: bool) -> Self {
+        self.ice_lite = enable;
         self
     }
 
@@ -1370,6 +1438,97 @@ mod tests {
         let endpoint = TransferEndpoint::parse("toivr:39230").expect("route point must parse");
 
         assert_eq!(endpoint.to_string(), "toivr:39230");
+    }
+
+    // ── QueuePlan::from_app_params ─────────────────────────────────────────
+
+    #[test]
+    fn queue_plan_from_app_params_skill_group_passthrough() {
+        let (plan, priority) = QueuePlan::from_app_params(&serde_json::json!({
+            "queue": "skill-group:42",
+            "priority": 5,
+        }))
+        .expect("skill-group target must parse");
+
+        assert_eq!(priority, Some(5));
+        assert_eq!(plan.queue_name, "skill-group:42");
+        let Some(DialStrategy::Sequential(agents)) = plan.dial_strategy else {
+            panic!("expected sequential strategy");
+        };
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].aor.to_string(), "skill-group:42");
+        assert_eq!(agents[0].contact_raw.as_deref(), Some("skill-group:42"));
+    }
+
+    #[test]
+    fn queue_plan_from_app_params_sip_uri_passthrough() {
+        let (plan, priority) = QueuePlan::from_app_params(&serde_json::json!({
+            "queue": "sip:1001@pbx.local"
+        }))
+        .expect("sip target must parse");
+
+        assert_eq!(priority, None);
+        assert_eq!(plan.queue_name, "sip:1001@pbx.local");
+        let Some(DialStrategy::Sequential(agents)) = plan.dial_strategy else {
+            panic!("expected sequential strategy");
+        };
+        assert_eq!(agents[0].aor.to_string(), "sip:1001@pbx.local");
+    }
+
+    #[test]
+    fn queue_plan_from_app_params_bare_name_maps_to_skill_group() {
+        let (plan, _) = QueuePlan::from_app_params(&serde_json::json!({
+            "queue": "sales"
+        }))
+        .expect("bare name must parse");
+
+        // queue_name keeps the caller-supplied id; the dial target widens to
+        // the skill-group scheme.
+        assert_eq!(plan.queue_name, "sales");
+        let Some(DialStrategy::Sequential(agents)) = plan.dial_strategy else {
+            panic!("expected sequential strategy");
+        };
+        assert_eq!(agents[0].aor.to_string(), "skill-group:sales");
+    }
+
+    #[test]
+    fn queue_plan_from_app_params_rejects_missing_queue() {
+        let err = QueuePlan::from_app_params(&serde_json::json!({})).unwrap_err();
+        assert!(err.to_string().contains("queue"), "got: {err}");
+
+        let err = QueuePlan::from_app_params(&serde_json::json!({"queue": "  " })).unwrap_err();
+        assert!(err.to_string().contains("queue"), "got: {err}");
+    }
+
+    #[test]
+    fn queue_plan_from_app_params_ignores_out_of_range_priority() {
+        let (_, priority) =
+            QueuePlan::from_app_params(&serde_json::json!({"queue": "sg", "priority": 1_000_000_000_000_u64}))
+                .expect("must parse despite oversized priority");
+        assert_eq!(priority, None, "priority beyond u32 must be dropped, not fatal");
+    }
+
+    #[test]
+    fn queue_plan_from_app_params_accepts_numeric_and_string_priority() {
+        let (_, numeric) = QueuePlan::from_app_params(&serde_json::json!({
+            "queue": "sg", "priority": 3
+        }))
+        .expect("numeric priority must parse");
+        assert_eq!(numeric, Some(3));
+
+        // Producers that stringify app params (HashMap<String, String>) send
+        // `"priority": "3"` — the value must survive, not silently drop.
+        let (_, stringified) = QueuePlan::from_app_params(&serde_json::json!({
+            "queue": "sg", "priority": "3"
+        }))
+        .expect("stringified priority must parse");
+        assert_eq!(stringified, Some(3));
+
+        let (_, garbage) = QueuePlan::from_app_params(&serde_json::json!({
+            "queue": "sg", "priority": "high"
+        }))
+        .expect("must parse despite non-numeric priority");
+        assert_eq!(garbage, None, "non-numeric priority must be dropped, not fatal");
     }
 
     #[test]

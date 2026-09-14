@@ -674,6 +674,7 @@ pub async fn execute_action(
                 ("_bridge_step_id", "_rst_step_id"),
                 ("_bridge_step_name", "_rst_step_name"),
                 ("_bridge_extra", "_rst_extra"),
+                ("_bridge_step_start_time", "_rst_step_start_time"),
             ] {
                 if let Some(v) = sess.variables.remove(var) {
                     if !v.is_empty() {

@@ -84,6 +84,9 @@ pub struct SipTrunkForm {
     pub tags: Option<String>,
     pub incoming_from_user_prefix: Option<String>,
     pub incoming_to_user_prefix: Option<String>,
+    /// ICE-lite switch persisted into `metadata.sbc.ice_lite`. `None` leaves
+    /// the stored value untouched.
+    pub ice_lite: Option<bool>,
     pub metadata: Option<String>,
     pub is_active: Option<bool>,
     pub register_enabled: Option<bool>,

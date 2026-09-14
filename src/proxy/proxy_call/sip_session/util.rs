@@ -89,24 +89,12 @@ pub(crate) async fn route_leg(
 
     let route_invite: Box<dyn RouteInvite> = {
         let routing_state = server.routing_state.read().clone();
-        let mut fns = server.create_route_invites.iter();
-        if let Some(f) = fns.next() {
-            match f(
-                server.clone(),
-                server.proxy_config.load_full(),
-                routing_state,
-            ) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to create RouteInvite for originated leg");
-                    return Ok(None);
-                }
+        match crate::proxy::call::compose_route_invites(server, routing_state) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to create RouteInvite for originated leg");
+                return Ok(None);
             }
-        } else {
-            Box::new(crate::proxy::call::DefaultRouteInvite {
-                routing_state,
-                data_context: server.data_context.clone(),
-            })
         }
     };
 
@@ -253,7 +241,11 @@ pub(super) async fn trace_sip_headers(
 /// 1. buffered for the return-app IVR (`bridge_dtmf_digits`), and
 /// 2. reported as an `ivr_step_trace` with the originating node context
 ///    (`bridge_trace_context`) so consumers see `trigger.detail.digit` for
-///    menu/TTS nodes executed via a bridge (consumer contract).
+///    menu/TTS nodes executed via a bridge (consumer contract). The trace
+///    carries `step_start_time` (executor-stamped via `_rst_step_start_time`,
+///    falling back to the emission instant) alongside `step_end_time` —
+///    consumers derive duration as `event timestamp - step_start_time`, so
+///    an end without a start would order end < start.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn forward_dtmf_event(
     digit: char,
@@ -284,6 +276,12 @@ pub(super) fn forward_dtmf_event(
         if let Some(gw) = rwi_gateway.as_ref()
             && let Some(ctx) = ctx
         {
+            // Single clock capture: RFC3339 carries nanosecond precision, so
+            // two Utc::now() calls would differ and could order end < start.
+            // The executor-stamped start time (via `_rst_step_start_time`)
+            // keeps `step_end_time >= step_start_time` meaningful; `now` is
+            // only the fallback for bridges without node context.
+            let now = chrono::Utc::now().to_rfc3339();
             let ev = crate::rwi::IvrStepTrace {
                 call_id: session_id.to_string(),
                 session_id: session_id.to_string(),
@@ -300,8 +298,8 @@ pub(super) fn forward_dtmf_event(
                 error: None,
                 step_id: ctx.step_id,
                 step_name: ctx.step_name,
-                step_start_time: None,
-                step_end_time: Some(chrono::Utc::now().to_rfc3339()),
+                step_start_time: Some(ctx.step_start_time.unwrap_or_else(|| now.clone())),
+                step_end_time: Some(now),
                 extra: ctx.extra,
                 sip_headers,
                 end_reason: None,
@@ -337,6 +335,10 @@ pub(super) fn emit_suspended_flow_session_end(
         return;
     };
     let ctx = bridge_trace_context.lock().clone();
+    // Single clock capture (see forward_dtmf_event): one `now` serves as the
+    // end stamp and as the start fallback so `end >= start` always holds.
+    // The executor-stamped `_rst_step_start_time` provides the real start.
+    let now = chrono::Utc::now().to_rfc3339();
     let ev = crate::rwi::IvrStepTrace {
         call_id: session_id.to_string(),
         session_id: session_id.to_string(),
@@ -350,8 +352,12 @@ pub(super) fn emit_suspended_flow_session_end(
         error: None,
         step_id: ctx.as_ref().and_then(|c| c.step_id.clone()),
         step_name: ctx.as_ref().and_then(|c| c.step_name.clone()),
-        step_start_time: None,
-        step_end_time: Some(chrono::Utc::now().to_rfc3339()),
+        step_start_time: Some(
+            ctx.as_ref()
+                .and_then(|c| c.step_start_time.clone())
+                .unwrap_or_else(|| now.clone()),
+        ),
+        step_end_time: Some(now),
         extra: ctx.as_ref().and_then(|c| c.extra.clone()),
         sip_headers,
         end_reason: Some(end_reason),

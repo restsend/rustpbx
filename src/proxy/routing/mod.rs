@@ -151,6 +151,15 @@ pub struct TrunkConfig {
     /// Per-trunk override for the local IP RTP sockets bind to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_ip: Option<String>,
+    /// Per-trunk ICE-lite override. When set, this trunk's legs answer/offer
+    /// SDP with `a=ice-lite` (or explicitly not, `false`) regardless of the
+    /// global `[media] ice_lite` setting. Enable for strict full-ICE peers that
+    /// never fall back to plain RTP (e.g. Microsoft Teams Direct Routing).
+    /// WebRTC legs are unaffected; endpoints without ICE support ignore the
+    /// attribute. Takes precedence over the per-extension detection and the
+    /// global default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ice_lite: Option<bool>,
     /// Network profile id from `[[network_profile]]` in the main config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
@@ -471,6 +480,7 @@ impl Default for TrunkConfig {
             video_policy: None,
             external_ip: None,
             bind_ip: None,
+            ice_lite: None,
             profile: None,
             did_numbers: Vec::new(),
             ringback: None,

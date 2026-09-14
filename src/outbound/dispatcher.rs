@@ -9,7 +9,7 @@
 use crate::outbound::request::{FallbackAction, OnAnswer, WebhookAction};
 use crate::outbound::webhook::{WebhookActionType, WebhookPayload, call_sync_webhook};
 use crate::rwi::processor::RwiCommandProcessor;
-use crate::rwi::session::{QueueEnqueueRequest, RwiCommandPayload};
+use crate::rwi::session::RwiCommandPayload;
 use tracing::warn;
 
 /// Outcome of dispatching the post-answer action.
@@ -155,6 +155,15 @@ async fn dispatch_app(
     } else {
         Some(serde_json::to_value(app_params).unwrap_or_default())
     };
+    dispatch_app_value(processor, call_id, app_name, params).await
+}
+
+async fn dispatch_app_value(
+    processor: &RwiCommandProcessor,
+    call_id: &str,
+    app_name: &str,
+    params: Option<serde_json::Value>,
+) -> DispatchOutcome {
     let cmd = RwiCommandPayload::AppStart {
         call_id: call_id.to_string(),
         app_name: app_name.to_string(),
@@ -199,33 +208,33 @@ async fn dispatch_bridge(
     }
 }
 
+/// Queue-app params for `OnAnswer::Enqueue`. JSON-native (NOT a stringified
+/// map): the priority must stay a JSON number or `QueuePlan::from_app_params`
+/// would drop it.
+fn enqueue_app_params(queue: &str, priority: Option<u32>) -> Option<serde_json::Value> {
+    let mut params = serde_json::Map::new();
+    params.insert(
+        "queue".to_string(),
+        serde_json::Value::String(queue.to_string()),
+    );
+    if let Some(priority) = priority {
+        params.insert("priority".to_string(), serde_json::Value::from(priority));
+    }
+    (!params.is_empty()).then(|| serde_json::Value::Object(params))
+}
+
 async fn dispatch_enqueue(
     processor: &RwiCommandProcessor,
     call_id: &str,
     queue: &str,
     priority: Option<u32>,
 ) -> DispatchOutcome {
-    let req = QueueEnqueueRequest {
-        call_id: call_id.to_string(),
-        queue_id: queue.to_string(),
-        priority,
-    };
-    match processor
-        .process_command(RwiCommandPayload::QueueEnqueue(req))
-        .await
-    {
-        Ok(_) => DispatchOutcome {
-            success: true,
-            detail: format!("enqueued to {}", queue),
-        },
-        Err(e) => {
-            warn!(%call_id, %queue, error = %e, "enqueue failed");
-            DispatchOutcome {
-                success: false,
-                detail: format!("enqueue failed: {}", e),
-            }
-        }
-    }
+    // Enqueue is implemented as `AppStart("queue", {queue, priority})`: the
+    // session-side queue start resolves skill-groups / registered agents and
+    // launches the queue app with real agent ringing (the bare `QueueEnqueue`
+    // command is bookkeeping-only — it never starts the app).
+    let params = enqueue_app_params(queue, priority);
+    dispatch_app_value(processor, call_id, "queue", params).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -338,5 +347,33 @@ fn resolve_fallback(fallback: &FallbackAction) -> Option<OnAnswer> {
             queue: queue.clone(),
             priority: None,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enqueue_params_keep_priority_numeric() {
+        let params = enqueue_app_params("sales", Some(3)).expect("params present");
+        assert_eq!(
+            params,
+            serde_json::json!({"queue": "sales", "priority": 3}),
+            "priority must be a JSON number — stringifying drops it in QueuePlan::from_app_params"
+        );
+        // Round-trip through the session-side parser (string map path).
+        let stringified = serde_json::json!({"queue": "sales", "priority": "3"});
+        assert_eq!(
+            stringified.get("priority").and_then(|v| v.as_u64()),
+            None,
+            "documents the regression: as_u64() on a JSON string is None"
+        );
+    }
+
+    #[test]
+    fn enqueue_params_without_priority_only_carry_queue() {
+        let params = enqueue_app_params("sales", None).expect("params present");
+        assert_eq!(params, serde_json::json!({"queue": "sales"}));
     }
 }

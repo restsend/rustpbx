@@ -1061,6 +1061,11 @@ impl RwiCommandProcessor {
                                     track_id: "mixed".to_string(),
                                     path,
                                     size,
+                                    // Originate-option recordings have no in-session
+                                    // segment bookkeeping; mint the id here so the
+                                    // CDR entry and `recording_metadata_available`
+                                    // still carry a `unique_id`.
+                                    unique_id: Some(uuid::Uuid::new_v4().to_string()),
                                     extra: None,
                                 }
                             })
@@ -1232,6 +1237,7 @@ impl RwiCommandProcessor {
                     rec.storage.path.clone()
                 };
                 let config = crate::call::domain::RecordConfig {
+                    unique_id: None,
                     path: path.clone(),
                     max_duration_secs: rec.max_duration_secs,
                     beep: rec.beep.unwrap_or(false),
@@ -1413,9 +1419,16 @@ impl RwiCommandProcessor {
                                                             if result.success {
                                                                 record_files.insert(call_id.clone(), path.clone());
                                                                 originate_recording_started = true;
+                                                                let unique_id = result
+                                                                    .data
+                                                                    .as_ref()
+                                                                    .and_then(|d| d.get("unique_id"))
+                                                                    .and_then(|v| v.as_str())
+                                                                    .map(str::to_string);
                                                                 gateway.read().send_to_owner(
                                                                     &crate::rwi::RecordStarted {
                                                                         call_id: call_id.clone(),
+                                                                        unique_id,
                                                                     },
                                                                 );
                                                             } else {
@@ -1584,8 +1597,15 @@ impl RwiCommandProcessor {
                                 .await;
                             if result.success {
                                 record_files.insert(call_id.clone(), path.clone());
+                                let unique_id = result
+                                    .data
+                                    .as_ref()
+                                    .and_then(|d| d.get("unique_id"))
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string);
                                 gateway.read().send_to_owner(&crate::rwi::RecordStarted {
                                     call_id: call_id.clone(),
+                                    unique_id,
                                 });
                             } else {
                                 tracing::warn!(
@@ -2284,6 +2304,11 @@ impl RwiCommandProcessor {
 
         let path = req.storage.path.clone();
         let channels = req.channels().map_err(CommandError::CommandFailed)?;
+        // Mint the recording id here: the command channel is fire-and-forget,
+        // so the reply cannot carry the session-generated id back. The session
+        // honors `config.unique_id`, keeping `record_started`,
+        // `record_stopped` and `recording_metadata_available` consistent.
+        let unique_id = uuid::Uuid::new_v4().to_string();
         handle
             .send_command(CallCommand::StartRecording {
                 config: RecordConfig {
@@ -2297,6 +2322,7 @@ impl RwiCommandProcessor {
                     segment_id: req.id.clone(),
                     label: req.label.clone(),
                     notify_app: Some(false),
+                    unique_id: Some(unique_id.clone()),
                 },
             })
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
@@ -2314,6 +2340,7 @@ impl RwiCommandProcessor {
         let gw = self.gateway.read();
         gw.send_to_owner(&crate::rwi::RecordStarted {
             call_id: req.call_id.clone(),
+            unique_id: Some(unique_id),
         });
         Ok(CommandResult::Success)
     }

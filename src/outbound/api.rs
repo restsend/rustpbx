@@ -23,6 +23,13 @@ use tokio::sync::mpsc;
 /// on the pump task instead of buffering unboundedly (memory growth / DoS risk).
 const SSE_EVENT_QUEUE_CAPACITY: usize = 128;
 
+/// Post-dispatch grace window. `AppStart`/`Bridge` only enqueue the command —
+/// the session executes it asynchronously, so events produced by the
+/// post-answer action (`queue_joined`, early queue lifecycle, `call_bridged`)
+/// land a few milliseconds after `call_answered`. The pump keeps forwarding
+/// for this window before closing the stream.
+const POST_DISPATCH_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Core entry point — builds the SSE stream from a context + request.
 pub async fn execute_dial_response(ctx: OutboundContext, req: DialRequest) -> Response {
     match execute_dial_core(ctx, req).await {
@@ -81,6 +88,25 @@ pub async fn execute_dial_core(
         Some(format!("sip:outbound@{}", realm))
     });
 
+    // Concurrency permit — acquired BEFORE originating. Held for the whole
+    // dial pipeline: released when the SSE pump terminates (answer+dispatch,
+    // failure, timeout, consumer disconnect) or, if the originate is rejected
+    // below, immediately on drop.
+    //
+    // Fast-fail instead of awaiting: a permit is held for the *entire* call
+    // (minutes), so when `[outbound] max_concurrent` dials are outstanding a
+    // queued awaiter would hang the HTTP request indefinitely — the client
+    // gets an immediate 429 to retry later instead.
+    let permit = ctx.concurrency_limiter.clone().try_acquire_owned().map_err(|_| {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "call_id": call_id,
+                "error": "outbound concurrency limit reached",
+            })),
+        )
+    })?;
+
     let originate_req = OriginateRequest {
         call_id: call_id.clone(),
         destination,
@@ -119,6 +145,9 @@ pub async fn execute_dial_core(
     let dispatch_processor = processor.clone();
 
     crate::utils::spawn(async move {
+        // Move the concurrency permit into the pump task — the dial slot is
+        // released when this loop exits, not when the HTTP handler returns.
+        let _permit = permit;
         let deadline = tokio::time::Instant::now() + answer_timeout;
 
         loop {
@@ -178,15 +207,48 @@ pub async fn execute_dial_core(
                                     );
                                 }
 
-                                // Non-blocking drain: collect any RWI events
-                                // produced by the dispatcher (call_bridged,
-                                // queue_joined, etc.) that are already in the
-                                // broadcast channel buffer.
+                                // Non-blocking drain: forward RWI events
+                                // already produced by the dispatcher
+                                // (call_bridged, queue_joined, ...).
                                 while let Ok(entry) = event_rx.try_recv() {
                                     if entry.call_id == call_id
                                         && tx.send(encode_rwi_event(&entry)).await.is_err()
                                     {
                                         break;
+                                    }
+                                }
+
+                                // Grace window: keep forwarding events the
+                                // session emits while executing the dispatched
+                                // action (queue start dials agents
+                                // asynchronously) until the window closes.
+                                let grace = tokio::time::Instant::now()
+                                    + POST_DISPATCH_GRACE;
+                                loop {
+                                    tokio::select! {
+                                        _ = tokio::time::sleep_until(grace) => break,
+                                        recv = event_rx.recv() => {
+                                            match recv {
+                                                Ok(entry) => {
+                                                    if entry.call_id != call_id {
+                                                        continue;
+                                                    }
+                                                    if tx
+                                                        .send(encode_rwi_event(&entry))
+                                                        .await
+                                                        .is_err()
+                                                    {
+                                                        break;
+                                                    }
+                                                }
+                                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                                    continue;
+                                                }
+                                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                                    break;
+                                                }
+                                            }
+                                        }
                                     }
                                 }
 

@@ -452,6 +452,10 @@ impl SipSession {
             cname: Some(self.server.rtc_cname.clone()),
             comfort_noise: self.context.dialplan.media.comfort_noise,
             comfort_noise_level_db: self.context.dialplan.media.comfort_noise_level_db,
+            // ICE-lite only ever applies to plain-RTP legs (`LegConfig` forces
+            // it off for WebRTC/Srtp), so pass the dialplan flag through
+            // unconditionally — WebRTC callers are unaffected.
+            enable_ice_lite: self.context.dialplan.media.ice_lite,
         }
     }
 
@@ -528,6 +532,7 @@ impl SipSession {
                 label: "full".to_string(),
                 started_at: chrono::Utc::now(),
                 notify_app: false,
+                unique_id: uuid::Uuid::new_v4().to_string(),
             });
             debug!(session_id = %self.id, backend = "file", "auto recorder installed");
             return Ok(());
@@ -585,12 +590,19 @@ impl SipSession {
             .unwrap_or_else(|| segment_type.to_string())
     }
 
+    /// Close out the active recording segment bookkeeping: move
+    /// [`crate::callrecord::ActiveRecording`] state into a completed
+    /// [`crate::callrecord::RecordingSegment`]. Returns `(notify_app,
+    /// unique_id)` — the recording-level identifier to carry on RWI
+    /// `record_stopped` (and to reconcile with the later
+    /// `recording_metadata_available`), plus whether the running CallApp
+    /// should be notified.
     fn finalize_active_recording_segment(
         &mut self,
         result: &crate::media::media_recorder::RecordingResult,
-    ) -> bool {
+    ) -> (bool, Option<String>) {
         let ended_at = chrono::Utc::now();
-        let (segment_type, segment_id, seq, label, started_at, notify_app) =
+        let (segment_type, segment_id, seq, label, started_at, unique_id, notify_app) =
             if let Some(active) = self.active_recording.take() {
                 (
                     active.segment_type,
@@ -598,6 +610,7 @@ impl SipSession {
                     active.seq,
                     active.label,
                     Some(active.started_at.to_rfc3339()),
+                    Some(active.unique_id),
                     active.notify_app,
                 )
             } else {
@@ -607,6 +620,7 @@ impl SipSession {
                     0,
                     "full".to_string(),
                     None,
+                    Some(uuid::Uuid::new_v4().to_string()),
                     false,
                 )
             };
@@ -621,8 +635,9 @@ impl SipSession {
                 started_at,
                 ended_at: Some(ended_at.to_rfc3339()),
                 duration_secs: result.duration_secs,
+                unique_id: unique_id.clone(),
             });
-        notify_app
+        (notify_app, unique_id)
     }
 
     /// Put a leg on hold playing a file as hold music (looping).
@@ -3137,6 +3152,11 @@ impl SipSession {
         if let Some(ref bind_ip) = self.context.dialplan.media.bind_ip {
             builder = builder.with_bind_ip(bind_ip.clone());
         }
+        // ICE-lite is an RTP-mode-only feature; `with_ice_lite` keeps WebRTC
+        // legs on full ICE regardless of this flag.
+        if !is_webrtc && self.context.dialplan.media.ice_lite {
+            builder = builder.with_ice_lite(true);
+        }
 
         // SDES-SRTP shares the plain-RTP port range; only WebRTC uses the
         // dedicated WebRTC range.
@@ -3553,6 +3573,7 @@ impl SipSession {
             }),
             "record.start" => Some(CallCommand::StartRecording {
                 config: crate::call::domain::RecordConfig {
+                    unique_id: None,
                     path: params
                         .and_then(|p| p.get("path"))
                         .and_then(|v| v.as_str())
@@ -4432,6 +4453,25 @@ impl SipSession {
         }
 
         Ok(())
+    }
+
+    /// Start the queue app from `CallCommand::StartApp("queue", params)` app
+    /// params — see [`crate::call::QueuePlan::from_app_params`] for the
+    /// accepted target forms. The optional ACD `priority` is stored as a
+    /// session extension (`queue_priority`) for ACD/pacing consumers; the
+    /// plan itself carries the dial target only.
+    async fn start_queue_app_from_params(
+        &mut self,
+        params: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        let Some(params) = params else {
+            anyhow::bail!("queue app requires params with a `queue` target");
+        };
+        let (plan, priority) = crate::call::QueuePlan::from_app_params(params)?;
+        if let Some(priority) = priority {
+            self.session_ext_set("queue_priority", priority.to_string());
+        }
+        self.start_queue_app(plan, None).await
     }
 
     fn execute_flow<'a>(
@@ -7853,11 +7893,11 @@ impl SipSession {
         &mut self,
         result: crate::media::media_recorder::RecordingResult,
     ) {
-        let notify_app = self.finalize_active_recording_segment(&result);
+        let (notify_app, unique_id) = self.finalize_active_recording_segment(&result);
         let path = result.path;
         let duration = Duration::from_secs_f64(result.duration_secs);
         let file_size = result.file_size;
-        info!(session_id = %self.id, path = %path, duration = ?duration, file_size, "Recording stopped");
+        info!(session_id = %self.id, path = %path, unique_id = ?unique_id, duration = ?duration, file_size, "Recording stopped");
         let info = crate::call::app::RecordingInfo {
             path,
             duration,
@@ -7880,7 +7920,7 @@ impl SipSession {
                 call_id: call_id.clone(),
                 duration_secs: Some(info.duration.as_secs()),
                 filename: Some(reported_path.clone()),
-                unique_id: Some(call_id),
+                unique_id,
                 file_size: Some(info.size_bytes),
                 download_url: Some(reported_path),
                 caller_name,
@@ -9379,16 +9419,37 @@ impl SipSession {
                 params,
                 auto_answer,
             } => {
-                match self
-                    .app_runtime
-                    .start_app(&app_name, params, auto_answer)
-                    .await
+                // Command-path queue start: RWI `app.start` / outbound
+                // `on_answer: enqueue` carry the queue target in params
+                // (`{"queue": "skill-group:<id>" | "sip:…", "priority": n}`)
+                // instead of a dialplan-resolved `PendingQueuePlan`. Route
+                // them through the shared queue-start path so these legs get
+                // the full ACD behavior (agent resolution, `queue_joined`,
+                // escalation), not just the static dial strategy.
+                if app_name == "queue"
+                    && params
+                        .as_ref()
+                        .is_some_and(|p| p.get("queue").is_some())
                 {
-                    Ok(()) => {
-                        self.sync_rtp_timeout_pause();
-                        CommandResult::success()
+                    match self.start_queue_app_from_params(params.as_ref()).await {
+                        Ok(()) => {
+                            self.sync_rtp_timeout_pause();
+                            CommandResult::success()
+                        }
+                        Err(e) => CommandResult::failure(e.to_string()),
                     }
-                    Err(e) => CommandResult::failure(e.to_string()),
+                } else {
+                    match self
+                        .app_runtime
+                        .start_app(&app_name, params, auto_answer)
+                        .await
+                    {
+                        Ok(()) => {
+                            self.sync_rtp_timeout_pause();
+                            CommandResult::success()
+                        }
+                        Err(e) => CommandResult::failure(e.to_string()),
+                    }
                 }
             }
 
@@ -9483,6 +9544,13 @@ impl SipSession {
                         let _ = tokio::fs::create_dir_all(parent).await;
                     }
                     let notify_app = config.notify_app.unwrap_or(true);
+                    // Honor a caller-minted id (RWI `record.start` replies with
+                    // it immediately) or mint one here for the auto paths.
+                    let unique_id = config
+                        .unique_id
+                        .clone()
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                     let bridge = self
                         .bridge_mut()
                         .ok_or_else(|| anyhow!("Recording requires MediaBridge"))?;
@@ -9504,6 +9572,7 @@ impl SipSession {
                         label,
                         started_at: chrono::Utc::now(),
                         notify_app,
+                        unique_id: unique_id.clone(),
                     });
                     if config.beep {
                         self.handle_play(
@@ -9513,10 +9582,19 @@ impl SipSession {
                         )
                         .await?;
                     }
-                    Ok(())
+                    Ok(unique_id)
                 }
                 .await;
-                Self::ok_or_failure(result)
+                let result: anyhow::Result<String> = result;
+                match result {
+                    Ok(unique_id) => CommandResult {
+                        success: true,
+                        message: None,
+                        affected_leg: None,
+                        data: Some(serde_json::json!({ "unique_id": unique_id })),
+                    },
+                    Err(e) => CommandResult::failure(e.to_string()),
+                }
             }
 
             CallCommand::StopRecording => {

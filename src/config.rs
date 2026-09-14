@@ -919,6 +919,17 @@ pub struct RtpConfig {
     /// Comfort-noise level in dBFS (default -35.0).
     #[serde(default = "default_comfort_noise_level_db")]
     pub comfort_noise_level_db: f32,
+    /// Answer/offer SDP on plain-RTP legs advertises `a=ice-lite` (RFC 8445
+    /// section 2.4). The PBX runs as a Controlled ICE-lite agent: it starts
+    /// no connectivity checks and lets the remote full-ICE peer drive them.
+    /// Required by strict full-ICE endpoints that never fall back to plain
+    /// RTP (e.g. Microsoft Teams Direct Routing). Harmless for SIP endpoints
+    /// without ICE support — they ignore the ICE attributes and keep using
+    /// symmetric RTP. WebRTC legs always run full ICE regardless of this
+    /// flag. Per-trunk (`[proxy.trunks.<name>] ice_lite`) and per-extension
+    /// (`;+sip.ice` registration detection) override this global default.
+    #[serde(default)]
+    pub ice_lite: bool,
 }
 
 fn default_comfort_noise() -> bool {
@@ -938,6 +949,10 @@ pub struct MediaSection {
     /// Comfort-noise level in dBFS (default -35.0).
     #[serde(default = "default_comfort_noise_level_db")]
     pub comfort_noise_level_db: f32,
+    /// Advertise `a=ice-lite` on plain-RTP legs (see `RtpConfig::ice_lite`).
+    /// Defaults to false.
+    #[serde(default)]
+    pub ice_lite: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1487,6 +1502,10 @@ pub struct DialplanHints {
     pub external_ip: Option<String>,
     /// Per-trunk override for the local bind IP.
     pub bind_ip: Option<String>,
+    /// Per-trunk ICE-lite override (from `[proxy.trunks.<name>] ice_lite` or the
+    /// console `metadata.sbc.ice_lite`). `Some(true)` forces `a=ice-lite` on
+    /// this session's plain-RTP legs; `Some(false)` explicitly disables it.
+    pub ice_lite: Option<bool>,
     /// Resolved network profile id stamped during routing (from trunk.profile).
     pub network_profile_id: Option<String>,
     /// Per-trunk ringback/early-media audio configuration
@@ -1511,6 +1530,9 @@ impl std::fmt::Debug for DialplanHints {
             .field("disable_ice_servers", &self.disable_ice_servers)
             .field("media_mode", &self.media_mode)
             .field("video_policy", &self.video_policy)
+            .field("external_ip", &self.external_ip)
+            .field("bind_ip", &self.bind_ip)
+            .field("ice_lite", &self.ice_lite)
             .finish()
     }
 }
@@ -2026,6 +2048,7 @@ impl Config {
             comfort_noise_level_db: media
                 .map(|m| m.comfort_noise_level_db)
                 .unwrap_or_else(default_comfort_noise_level_db),
+            ice_lite: media.map(|m| m.ice_lite).unwrap_or(false),
         }
     }
 
@@ -2640,6 +2663,49 @@ mod tests {
 
         assert_eq!(rtp_config.bind_ip.as_deref(), Some("120.228.209.243"));
         assert_eq!(rtp_config.external_ip.as_deref(), Some("203.0.113.10"));
+    }
+
+    /// `[media] ice_lite` is the global ICE-lite knob: absent → false
+    /// (legacy behavior), `true` flows into the runtime RtpConfig that the
+    /// proxy server consumes.
+    #[test]
+    fn test_media_ice_lite_flows_into_rtp_config() {
+        let config: Config = toml::from_str(r#"proxy = { addr = "127.0.0.1" }"#).unwrap();
+        assert!(!config.rtp_config().ice_lite, "default must stay off");
+
+        let config: Config = toml::from_str(
+            r#"
+            proxy = { addr = "127.0.0.1" }
+            [media]
+            ice_lite = true
+        "#,
+        )
+        .unwrap();
+        assert!(config.rtp_config().ice_lite);
+    }
+
+    /// Trunk-level override parsing: `ice_lite` is optional per trunk and
+    /// serializes compactly (skipped) when absent.
+    #[test]
+    fn test_trunk_ice_lite_parsing() {
+        let raw = r#"
+            [teams]
+            dest = "sip:pstn.teams.microsoft.com:5061"
+            ice_lite = true
+            [plain]
+            dest = "sip:carrier.example.com"
+        "#;
+        let trunks: HashMap<String, crate::proxy::routing::TrunkConfig> =
+            toml::from_str(raw).unwrap();
+        let teams = trunks.get("teams").expect("teams trunk");
+        assert_eq!(teams.ice_lite, Some(true));
+        let plain = trunks.get("plain").expect("plain trunk");
+        assert_eq!(plain.ice_lite, None);
+        let serialized = toml::to_string(plain).unwrap();
+        assert!(
+            !serialized.contains("ice_lite"),
+            "absent override must not serialize:\n{serialized}"
+        );
     }
 
     #[test]

@@ -1882,6 +1882,7 @@ mod tests {
         let cfg = LegConfig {
             ice_servers: Vec::new(),
             relay_only: false,
+            enable_ice_lite: false,
             transport: rustrtc::TransportMode::WebRtc,
             codecs: vec![CodecInfo {
                 payload_type: 111,
@@ -1941,6 +1942,7 @@ mod tests {
         let cfg = LegConfig {
             ice_servers: Vec::new(),
             relay_only: false,
+            enable_ice_lite: false,
             transport: rustrtc::TransportMode::WebRtc,
             codecs: vec![CodecInfo {
                 payload_type: 111,
@@ -2000,6 +2002,7 @@ mod tests {
         let webrtc_cfg = LegConfig {
             ice_servers: Vec::new(),
             relay_only: false,
+            enable_ice_lite: false,
             transport: rustrtc::TransportMode::WebRtc,
             codecs: vec![CodecInfo {
                 payload_type: 111,
@@ -2081,6 +2084,7 @@ mod tests {
                     let webrtc_cfg = LegConfig {
                         ice_servers: Vec::new(),
                         relay_only: false,
+                        enable_ice_lite: false,
                         transport: rustrtc::TransportMode::WebRtc,
                         codecs: vec![CodecInfo {
                             payload_type: 111,
@@ -2100,6 +2104,7 @@ mod tests {
                     let rtp_opus_cfg = LegConfig {
                         ice_servers: Vec::new(),
                         relay_only: false,
+                        enable_ice_lite: false,
                         transport: rustrtc::TransportMode::Rtp,
                         codecs: vec![CodecInfo {
                             payload_type: 111,
@@ -2175,6 +2180,7 @@ mod tests {
         let webrtc_cfg = LegConfig {
             ice_servers: Vec::new(),
             relay_only: false,
+            enable_ice_lite: false,
             transport: rustrtc::TransportMode::WebRtc,
             codecs: vec![CodecInfo {
                 payload_type: 0,
@@ -2194,6 +2200,7 @@ mod tests {
         let rtp_pcmu_cfg = LegConfig {
             ice_servers: Vec::new(),
             relay_only: false,
+            enable_ice_lite: false,
             transport: rustrtc::TransportMode::Rtp,
             codecs: vec![CodecInfo {
                 payload_type: 0,

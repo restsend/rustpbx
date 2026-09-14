@@ -237,6 +237,7 @@ pub fn rwi_to_call_command(
             let channels = req.channels().map_err(anyhow::Error::msg)?;
             Ok(CallCommand::StartRecording {
                 config: RecordConfig {
+                    unique_id: None,
                     path: req.storage.path,
                     max_duration_secs: req.max_duration_secs,
                     beep: req.beep.unwrap_or(false),

@@ -231,6 +231,11 @@ pub struct CallRecordMedia {
     pub track_id: String,
     pub path: String,
     pub size: u64,
+    /// Recording-level unique identifier (UUID v4). Mirrors the id carried by
+    /// the RWI `record_started` / `record_stopped` events and surfaced as
+    /// `unique_id` on `recording_metadata_available`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unique_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra: Option<HashMap<String, serde_json::Value>>,
 }

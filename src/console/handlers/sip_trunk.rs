@@ -7,7 +7,7 @@ use crate::{
     models::routing::{Entity as RoutingEntity, Model as RoutingModel},
     models::sip_trunk::{
         ActiveModel as SipTrunkActiveModel, Column as SipTrunkColumn, Entity as SipTrunkEntity,
-        SipTransport, SipTrunkDirection, SipTrunkStatus,
+        Model as SipTrunkModel, SipTransport, SipTrunkDirection, SipTrunkStatus,
     },
     proxy::routing::ConfigOrigin,
 };
@@ -21,7 +21,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use sea_orm::sea_query::Order;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, EntityTrait, Iterable,
+    ActiveModelTrait, ActiveValue, ActiveValue::Set, ColumnTrait, Condition, EntityTrait, Iterable,
     PaginatorTrait, QueryFilter, QueryOrder,
 };
 use serde::Deserialize;
@@ -695,7 +695,31 @@ fn apply_form_to_active_model(
             &form.incoming_to_user_prefix,
         ));
     }
-    if !is_update || form.metadata.is_some() {
+    // Merge the structured ICE-lite switch into `metadata.sbc.ice_lite`
+    // before the raw metadata JSON is persisted. `Some(true)`/`Some(false)`
+    // write the flag explicitly; when the form omits `ice_lite` the stored
+    // metadata is left untouched (key absent = inherit the global default).
+    let metadata = match form.ice_lite {
+        Some(ice_lite) => {
+            let mut base = match metadata {
+                Some(value) => value,
+                None => existing_metadata_value(&active.metadata).unwrap_or(Value::Null),
+            };
+            if !base.is_object() {
+                base = json!({});
+            }
+            let base_obj = base.as_object_mut().expect("base checked as object");
+            let sbc = base_obj
+                .entry("sbc")
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if let Some(sbc_obj) = sbc.as_object_mut() {
+                sbc_obj.insert("ice_lite".to_string(), Value::Bool(ice_lite));
+            }
+            Some(base)
+        }
+        None => metadata,
+    };
+    if !is_update || form.metadata.is_some() || form.ice_lite.is_some() {
         active.metadata = Set(metadata);
     }
 
@@ -835,6 +859,17 @@ fn parse_json_field(value: &Option<String>, field: &str) -> Result<Option<Value>
         .map_err(|err| bad_request(format!("{} must be valid JSON: {}", field, err)))
 }
 
+/// Read the metadata currently held by the active model (the value loaded
+/// from the database on the update path, `ActiveValue::Unchanged`) so
+/// structured form fields like `ice_lite` can merge into it without the
+/// caller re-sending the whole JSON blob.
+fn existing_metadata_value(value: &ActiveValue<Option<Value>>) -> Option<Value> {
+    match value {
+        ActiveValue::Set(existing) | ActiveValue::Unchanged(existing) => existing.clone(),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::console::handlers::test_helpers::{setup_state, superuser, unprivileged_user};
@@ -884,5 +919,65 @@ mod tests {
         form.sip_server = Some("sip.example.com".into());
         let resp = create_sip_trunk(State(state), AuthRequired(user), axum::Json(form)).await;
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ── ICE-lite switch → metadata.sbc.ice_lite merge ──────────────────────
+
+    #[test]
+    fn ice_lite_true_merges_into_empty_metadata_on_create() {
+        let mut form = SipTrunkForm::default();
+        form.name = Some("teams".into());
+        form.sip_server = Some("sip.example.com".into());
+        form.ice_lite = Some(true);
+        let mut active: SipTrunkActiveModel = Default::default();
+        apply_form_to_active_model(&mut active, &form, Utc::now(), false).expect("apply");
+        let metadata = active.metadata.unwrap().expect("metadata must be set");
+        assert_eq!(
+            metadata.get("sbc").and_then(|s| s.get("ice_lite")),
+            Some(&Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn ice_lite_false_merges_into_existing_metadata_on_update() {
+        let model = SipTrunkModel {
+            id: 7,
+            name: "teams".to_string(),
+            sip_server: Some("sip.example.com".to_string()),
+            metadata: Some(json!({
+                "sbc": {"media_mode": "bypass", "ice_lite": true}
+            })),
+            ..Default::default()
+        };
+        let mut active: SipTrunkActiveModel = model.into();
+        let mut form = SipTrunkForm::default();
+        form.ice_lite = Some(false);
+        apply_form_to_active_model(&mut active, &form, Utc::now(), true).expect("apply");
+        let metadata = active.metadata.unwrap().expect("metadata must be set");
+        let sbc = metadata.get("sbc").expect("sbc preserved");
+        assert_eq!(sbc.get("ice_lite"), Some(&Value::Bool(false)));
+        // Existing sibling SBC fields survive the merge.
+        assert_eq!(sbc.get("media_mode"), Some(&Value::String("bypass".into())));
+    }
+
+    #[test]
+    fn ice_lite_absent_leaves_metadata_untouched_on_update() {
+        let model = SipTrunkModel {
+            id: 7,
+            name: "teams".to_string(),
+            sip_server: Some("sip.example.com".to_string()),
+            metadata: Some(json!({"sbc": {"ice_lite": true}})),
+            ..Default::default()
+        };
+        let mut active: SipTrunkActiveModel = model.into();
+        let mut form = SipTrunkForm::default();
+        form.display_name = Some("renamed".into());
+        apply_form_to_active_model(&mut active, &form, Utc::now(), true).expect("apply");
+        // Neither metadata nor ice_lite touched: ActiveValue stays Unchanged,
+        // so the UPDATE statement won't rewrite the column at all.
+        assert!(
+            matches!(active.metadata, ActiveValue::Unchanged(_)),
+            "metadata must remain unchanged when neither metadata nor ice_lite set"
+        );
     }
 }

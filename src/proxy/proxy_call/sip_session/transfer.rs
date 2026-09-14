@@ -296,17 +296,25 @@ impl ReturnTargetSpec {
 /// Node identity attached by the step-IVR executor to a `bridge:` target (via
 /// `_rst_*` query params) so DTMF pressed during the WebSocket bridge can be
 /// reported as an `ivr_step_trace` carrying the originating node context.
-/// Consumer contract: menu nodes must surface `trigger.detail.digit`.
+/// Consumer contract: menu nodes must surface `trigger.detail.digit`, and any
+/// trace carrying `step_end_time` must also carry `step_start_time` (the
+/// executor stamps it here) — consumers derive duration as
+/// `event timestamp - step_start_time` and fall back to the envelope
+/// timestamp otherwise, which would yield end < start.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct BridgeTraceContext {
     pub step_id: Option<String>,
     pub step_name: Option<String>,
     pub extra: Option<serde_json::Value>,
+    pub step_start_time: Option<String>,
 }
 
 impl BridgeTraceContext {
     fn is_empty(&self) -> bool {
-        self.step_id.is_none() && self.step_name.is_none() && self.extra.is_none()
+        self.step_id.is_none()
+            && self.step_name.is_none()
+            && self.extra.is_none()
+            && self.step_start_time.is_none()
     }
 }
 
@@ -447,6 +455,9 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                             // bridge endpoint.
                             "_rst_step_id" => trace_context.step_id = Some(decoded_val),
                             "_rst_step_name" => trace_context.step_name = Some(decoded_val),
+                            "_rst_step_start_time" => {
+                                trace_context.step_start_time = Some(decoded_val)
+                            }
                             "_rst_extra" => {
                                 trace_context.extra = serde_json::from_str(&decoded_val).ok()
                             }
@@ -3341,10 +3352,11 @@ mod tests {
             "nodename": "测试啊，按1转人工，按2挂机",
         });
         let target = format!(
-            "bridge:wss://facade.example.com/ivr/tts/bridge/RI_x?samplerate=8000&timeout_ms=30000&return_app=ivr&return_target=lf-step-ivr&_rst_step_id={}&_rst_step_name={}&_rst_extra={}",
+            "bridge:wss://facade.example.com/ivr/tts/bridge/RI_x?samplerate=8000&timeout_ms=30000&return_app=ivr&return_target=lf-step-ivr&_rst_step_id={}&_rst_step_name={}&_rst_extra={}&_rst_step_start_time={}",
             encode("step-1"),
             encode("菜单"),
             encode(&extra.to_string()),
+            encode("2026-01-01T00:00:00.123456789+00:00"),
         );
         let parsed = super::parse_transfer_target(&target);
         match parsed {
@@ -3361,6 +3373,11 @@ mod tests {
                 assert_eq!(ctx.step_id.as_deref(), Some("step-1"));
                 assert_eq!(ctx.step_name.as_deref(), Some("菜单"));
                 assert_eq!(ctx.extra, Some(extra));
+                assert_eq!(
+                    ctx.step_start_time.as_deref(),
+                    Some("2026-01-01T00:00:00.123456789+00:00"),
+                    "step start time must round-trip through the URI (RFC3339 with '+' and ':' encoded)"
+                );
             }
             other => panic!("expected Bridge, got {other:?}"),
         }

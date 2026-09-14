@@ -54,6 +54,12 @@ pub struct RecordingSegment {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<String>,
     pub duration_secs: f64,
+    /// Recording-level unique identifier (UUID v4) generated when the segment
+    /// started. Shared by `record_started` / `record_stopped` /
+    /// `recording_metadata_available` so consumers can reconcile the same
+    /// artifact across real-time and CDR-pipeline events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unique_id: Option<String>,
 }
 
 /// In-flight recording bookkeeping owned by `SipSession`.
@@ -66,6 +72,9 @@ pub struct ActiveRecording {
     pub seq: u32,
     pub label: String,
     pub started_at: DateTime<Utc>,
+    /// Recording-level unique identifier generated at start time; flows into
+    /// the completed [`RecordingSegment`] and every RWI recording event.
+    pub unique_id: String,
     /// When true, `RecordingComplete` is delivered to the running CallApp
     /// (voicemail / IVR `torecord`). Mid-call `record_start` segments set
     /// this to false so a later `record_stop` does not hijack the IVR flow.

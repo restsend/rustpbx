@@ -412,6 +412,41 @@ impl RouteInvite for ChainedRouteInvite {
     }
 }
 
+/// Compose every registered [`FnCreateRouteInvite`] factory into one
+/// `RouteInvite` chain, with the PBX [`DefaultRouteInvite`] as the final
+/// fallback. Factories contribute nodes in registration order; each node is
+/// consulted only when the previous one returns `NotHandled`.
+///
+/// Replaces the previous "first factory wins" behaviour so multiple addons
+/// (e.g. wholesale + cc) can each contribute a node to the chain.
+pub fn compose_route_invites(
+    server: &SipServerRef,
+    routing_state: Arc<RoutingState>,
+) -> Result<Box<dyn RouteInvite>> {
+    let mut chain: Option<Box<dyn RouteInvite>> = None;
+    for factory in server.create_route_invites.iter() {
+        let invite = factory(
+            server.clone(),
+            server.proxy_config.load_full(),
+            routing_state.clone(),
+        )?;
+        chain = Some(match chain {
+            Some(existing) => {
+                Box::new(ChainedRouteInvite::new(existing, invite)) as Box<dyn RouteInvite>
+            }
+            None => invite,
+        });
+    }
+    let default = Box::new(DefaultRouteInvite {
+        routing_state,
+        data_context: server.data_context.clone(),
+    }) as Box<dyn RouteInvite>;
+    Ok(match chain {
+        Some(existing) => Box::new(ChainedRouteInvite::new(existing, default)),
+        None => default,
+    })
+}
+
 impl DefaultRouteInvite {
     fn build_context(
         &self,
@@ -619,6 +654,7 @@ impl CallModule {
                         .latching_probation_max_packets,
                 )
                 .with_comfort_noise(rtp.comfort_noise, rtp.comfort_noise_level_db)
+                .with_ice_lite(rtp.ice_lite || caller.ice_lite)
         };
 
         let caller_is_same_realm = self
@@ -1159,6 +1195,12 @@ impl CallModule {
             if let Some(bind_ip) = hints.bind_ip.take() {
                 dialplan.media.bind_ip = Some(bind_ip);
             }
+            // Per-trunk ice_lite: Some(true)/Some(false) override both the
+            // global default and the per-extension `;+sip.ice` detection
+            // (applied earlier, before this hints block).
+            if let Some(ice_lite) = hints.ice_lite.take() {
+                dialplan.media.ice_lite = ice_lite;
+            }
             if let Some(max_duration) = hints.max_duration {
                 dialplan.max_call_duration = Some(max_duration);
             }
@@ -1624,31 +1666,17 @@ impl CallModule {
         cookie: TransactionCookie,
         caller: &SipUser,
     ) -> Result<Dialplan, RouteError> {
-        let route_invite: Box<dyn RouteInvite> = {
-            let mut fns = self.inner.server.create_route_invites.iter();
-            if let Some(f) = fns.next() {
-                // First custom RouteInvite is used; the chain is:
-                // custom wraps default via its own logic
-                f(
-                    self.inner.server.clone(),
-                    self.inner.server.proxy_config.load_full(),
-                    self.inner.routing_state.clone(),
-                )
-                .map_err(|e| {
+        let route_invite: Box<dyn RouteInvite> =
+            compose_route_invites(&self.inner.server, self.inner.routing_state.clone()).map_err(
+                |e| {
                     RouteError {
                         error: e,
                         status: None,
                         extensions: None,
                     }
                     .with_code(&crate::proxy::error_catalog::CREATE_ROUTE_INVITE_FAILED)
-                })?
-            } else {
-                Box::new(DefaultRouteInvite {
-                    routing_state: self.inner.routing_state.clone(),
-                    data_context: self.inner.server.data_context.clone(),
-                })
-            }
-        };
+                },
+            )?;
 
         let dialplan = if let Some(resolver) = self.inner.server.call_router.as_ref() {
             resolver
@@ -2735,6 +2763,9 @@ impl CallModule {
                 .with_enable_latching(media.enable_latching)
                 .with_probation_max_packets(media.probation_max_packets)
                 .with_external_ip(external_ip)
+                // Plain-RTP builder (default mode): honor the global ICE-lite
+                // knob; WebRTC is not involved on this path.
+                .with_ice_lite(media.ice_lite)
                 .with_cname(server.rtc_cname.clone());
         let media_track = if let Some(bind_ip) = media.bind_ip.clone() {
             media_track.with_bind_ip(bind_ip)
@@ -3301,6 +3332,27 @@ mod tests {
         }
     }
 
+    /// Emits a per-trunk ICE-lite override, as `merge_trunk_media_hints`
+    /// would for `[trunk.<name>] ice_lite`.
+    struct IceLiteHintsRouteInvite {
+        ice_lite: Option<bool>,
+    }
+
+    #[async_trait]
+    impl RouteInvite for IceLiteHintsRouteInvite {
+        async fn route_invite(
+            &self,
+            option: InviteOption,
+            _origin: &rsipstack::sip::Request,
+            _direction: &DialDirection,
+            _cookie: &TransactionCookie,
+        ) -> Result<RouteResult> {
+            let mut hints = crate::config::DialplanHints::default();
+            hints.ice_lite = self.ice_lite;
+            Ok(RouteResult::Forward(option, Some(hints)))
+        }
+    }
+
     fn replace_to_header(request: &mut rsipstack::sip::Request, to_uri: rsipstack::sip::Uri) {
         request
             .headers
@@ -3408,6 +3460,111 @@ mod tests {
                 .as_deref(),
             Some("sip:001234@carrier.example.com:5060")
         );
+    }
+
+    /// Per-extension ICE-lite detection: a caller whose registration declared
+    /// `;+sip.ice` flips `dialplan.media.ice_lite`, which the session applies
+    /// to its plain-RTP legs (a=ice-lite answers). Default stays off.
+    #[tokio::test]
+    async fn default_resolve_caller_ice_lite_sets_media_flag() {
+        let (server, config) = create_test_server().await;
+        let module = CallModule::new(config, server);
+        let request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite,
+            "original-caller",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let caller = SipUser {
+            username: "original-caller".to_string(),
+            realm: Some("rustpbx.com".to_string()),
+            ice_lite: true,
+            ..Default::default()
+        };
+
+        let dialplan = module
+            .default_resolve(
+                &request,
+                Box::new(RewrittenForwardRouteInvite),
+                &caller,
+                &TransactionCookie::default(),
+            )
+            .await
+            .expect("dialplan");
+        assert!(
+            dialplan.media.ice_lite,
+            "caller with ;+sip.ice must enable ice_lite on the session media"
+        );
+
+        let plain_caller = SipUser {
+            username: "original-caller".to_string(),
+            realm: Some("rustpbx.com".to_string()),
+            ..Default::default()
+        };
+        let dialplan = module
+            .default_resolve(
+                &request,
+                Box::new(RewrittenForwardRouteInvite),
+                &plain_caller,
+                &TransactionCookie::default(),
+            )
+            .await
+            .expect("dialplan");
+        assert!(
+            !dialplan.media.ice_lite,
+            "callers without the detection must keep ice_lite off"
+        );
+    }
+
+    /// Trunk override wins over the per-extension detection: an explicit
+    /// `ice_lite = false` on the trunk downgrades an ice-detected caller.
+    #[tokio::test]
+    async fn default_resolve_trunk_ice_lite_hint_overrides_caller_detection() {
+        let (server, config) = create_test_server().await;
+        let module = CallModule::new(config, server);
+        let request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite,
+            "original-caller",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let caller = SipUser {
+            username: "original-caller".to_string(),
+            realm: Some("rustpbx.com".to_string()),
+            ice_lite: true,
+            ..Default::default()
+        };
+
+        let dialplan = module
+            .default_resolve(
+                &request,
+                Box::new(IceLiteHintsRouteInvite {
+                    ice_lite: Some(false),
+                }),
+                &caller,
+                &TransactionCookie::default(),
+            )
+            .await
+            .expect("dialplan");
+        assert!(
+            !dialplan.media.ice_lite,
+            "explicit trunk override must beat the caller detection"
+        );
+
+        let dialplan = module
+            .default_resolve(
+                &request,
+                Box::new(IceLiteHintsRouteInvite {
+                    ice_lite: Some(true),
+                }),
+                &caller,
+                &TransactionCookie::default(),
+            )
+            .await
+            .expect("dialplan");
+        assert!(dialplan.media.ice_lite);
     }
 
     // ---------------------------------------------------------------------------

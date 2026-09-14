@@ -51,6 +51,13 @@ pub struct SipUser {
     pub destination: Option<SipAddr>,
     #[serde(default = "default_is_support_webrtc")]
     pub is_support_webrtc: bool,
+    /// The endpoint declared ICE support at registration (RFC 5768
+    /// `;+sip.ice` on a non-WebSocket contact). rustpbx answers such legs
+    /// with `a=ice-lite` so full-ICE endpoints can run their connectivity
+    /// checks. Websocket/WebRTC endpoints are excluded — they always run
+    /// full ICE. See `dialplan.media.ice_lite`.
+    #[serde(default)]
+    pub ice_lite: bool,
 }
 
 impl std::fmt::Display for SipUser {
@@ -84,6 +91,7 @@ impl Default for SipUser {
             from: None,
             destination: None,
             is_support_webrtc: false,
+            ice_lite: false,
             departments: None,
             display_name: None,
             email: None,
@@ -147,6 +155,9 @@ impl SipUser {
         }
         if !self.is_support_webrtc {
             self.is_support_webrtc = other.is_support_webrtc;
+        }
+        if !self.ice_lite {
+            self.ice_lite = other.ice_lite;
         }
     }
 
@@ -304,6 +315,12 @@ impl TryFrom<&Transaction> for SipUser {
         });
         let is_support_webrtc =
             matches!(via_transport, Transport::Wss | Transport::Ws) || contact_declares_ice;
+        // RFC 5768 `;+sip.ice` on a non-WebSocket contact marks a full-ICE
+        // endpoint on a plain SIP transport. Answer such legs as ICE-lite so
+        // the remote agent can drive connectivity checks. WebSocket contacts
+        // are excluded: they negotiate WebRTC (full ICE + DTLS) regardless.
+        let ice_lite =
+            contact_declares_ice && !matches!(via_transport, Transport::Wss | Transport::Ws);
 
         let mut u = SipUser {
             id: 0,
@@ -316,6 +333,7 @@ impl TryFrom<&Transaction> for SipUser {
             from: Some(from_uri),
             destination: Some(destination),
             is_support_webrtc,
+            ice_lite,
             call_forwarding_mode: None,
             call_forwarding_destination: None,
             call_forwarding_timeout: None,
@@ -450,6 +468,38 @@ mod tests {
         };
         primary.merge_with(&secondary);
         assert!(!primary.voicemail_disabled);
+    }
+
+    // ── SipUser::ice_lite (RFC 5768 `;+sip.ice` detection) ─────────────────
+
+    #[test]
+    fn ice_lite_default_is_false() {
+        let user = SipUser::default();
+        assert!(!user.ice_lite, "default must keep the legacy no-ICE answer");
+    }
+
+    #[test]
+    fn merge_with_propagates_ice_lite_when_not_yet_set() {
+        // A DB/config user record without the flag merged with a request
+        // derived record that detected `;+sip.ice` must adopt it.
+        let mut primary = SipUser::default();
+        let secondary = SipUser {
+            ice_lite: true,
+            ..Default::default()
+        };
+        primary.merge_with(&secondary);
+        assert!(primary.ice_lite);
+    }
+
+    #[test]
+    fn merge_with_keeps_existing_ice_lite() {
+        let mut primary = SipUser {
+            ice_lite: true,
+            ..Default::default()
+        };
+        let secondary = SipUser::default();
+        primary.merge_with(&secondary);
+        assert!(primary.ice_lite);
     }
 
     fn via_derived_destination(via: &str) -> SipAddr {

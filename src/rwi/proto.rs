@@ -157,6 +157,11 @@ impl CallMetaStore {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RecordingMetadata {
+    /// Recording-level unique identifier (UUID v4). Same id as the matching
+    /// `record_started` / `record_stopped` events; lets consumers reconcile
+    /// the metadata payload with its real-time counterparts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unique_id: Option<String>,
     pub filename: String,
     pub file_size: u64,
     #[serde(skip_serializing_if = "Option::is_none")]

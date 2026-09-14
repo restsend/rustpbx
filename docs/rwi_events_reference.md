@@ -589,6 +589,7 @@ CC addon 的独立呼叫生命周期事件已移除。坐席归因改由核心�
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `call_id` | String | 呼叫标识 |
+| `unique_id` | Option\<String\> | 录音唯一标识（UUID v4，仅 `record_started` 携带；与后续 `record_stopped` / `recording_metadata_available` 一致，可用于对账同一份录音） |
 | *+ctx* | | 扁平化上下文 |
 
 #### record_stopped（增强版）
@@ -602,7 +603,7 @@ CC addon 的独立呼叫生命周期事件已移除。坐席归因改由核心�
 | `call_id` | String | 呼叫标识 |
 | `duration_secs` | Option\<u64\> | 录音时长（秒） |
 | `filename` | Option\<String\> | 录音文件名 |
-| `unique_id` | Option\<String\> | 录音 UUID |
+| `unique_id` | Option\<String\> | 录音唯一标识（UUID v4，**每段录音独立生成**，非 `call_id`；与 `record_started` / `recording_metadata_available` 携带的一致） |
 | `file_size` | Option\<u64\> | 文件大小（字节） |
 | `download_url` | Option\<String\> | 下载地址 |
 | `caller_name` | Option\<String\> | 主叫号码 |
@@ -618,6 +619,10 @@ CC addon 的独立呼叫生命周期事件已移除。坐席归因改由核心�
 | `session_id` | Option\<String\> | enrichment：逻辑呼叫根 session_id |
 
 > 注意：`record_stopped` 不携带完整扁平化上下文的 typed 字段，但 `enrich()` 会从 CallMetaStore 补充 `session_id` 等缺失键。旧字段 `root_call_id` 已移除。
+>
+> **版本兼容**：≤ 0.5.0 的版本中 `unique_id` 误填为 `call_id`；自 0.5.1 起 `unique_id`
+> 为**每段录音独立生成的 UUID**（与 `record_started` / `recording_metadata_available`
+> 一致，用于对账）。下游若曾按 `unique_id == call_id` 关联，请改用 `call_id` 字段本身。
 
 ```json
 {
@@ -626,7 +631,7 @@ CC addon 的独立呼叫生命周期事件已移除。坐席归因改由核心�
     "call_id": "call-abc",
     "duration_secs": 51,
     "filename": "uuid_2026-05-14_08-11-49.mp3",
-    "unique_id": "uuid-abc-123",
+    "unique_id": "0e1c8a52-6f1e-4c8d-9a52-6ff5b0f5f9b1",
     "file_size": 149517,
     "download_url": "https://storage.example.com/rec.mp3",
     "caller_name": "330909",
@@ -663,6 +668,7 @@ CC addon 的独立呼叫生命周期事件已移除。坐席归因改由核心�
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
+| `unique_id` | Option\<String\> | 录音唯一标识（UUID v4，验收字段 `uniqId`；与同一段录音的 `record_started` / `record_stopped` 一致） |
 | `filename` | String | 录音文件名 |
 | `file_size` | u64 | 文件大小（字节） |
 | `download_url` | Option\<String\> | 下载地址 |
@@ -671,7 +677,7 @@ CC addon 的独立呼叫生命周期事件已移除。坐席归因改由核心�
 | `call_start_time` / `call_end_time` / `upload_time` | Option\<String\> | 通话开始 / 结束 / 上传完成时间 |
 | *(其他任意键)* | String | `extra` 透传袋（`#[serde(flatten)]`）：addon 写入的扁平字符串键（如 `agent_id`、`queue_id`、`tenant_id`、`switch_flag`）原样透传，核心不命名 |
 
-> 注意：不存在 `unique_id` typed 字段；`agent_id` 等业务字段依赖 addon 是否写入 `extra`。
+> 注意：`unique_id` 为 typed 字段，每段录音上传事件各自携带该段的唯一标识；`agent_id` 等业务字段依赖 addon 是否写入 `extra`。
 
 RWI WebSocket 帧（payload 平铺，`event_type` 由网关注入）：
 
@@ -682,6 +688,7 @@ RWI WebSocket 帧（payload 平铺，`event_type` 由网关注入）：
   "metadata": {
     "filename": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40_02_1001.wav",
     "file_size": 153344,
+    "unique_id": "0e1c8a52-6f1e-4c8d-9a52-6ff5b0f5f9b1",
     "download_url": "./config/recorders/20260910/0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40_02_1001.wav",
     "caller_name": "330909",
     "callee_name": "1001",
@@ -716,6 +723,7 @@ Webhook 投递使用信封（`webhook.rs`：`rwi` / `event_id` 幂等键 / `time
     "metadata": {
       "filename": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40_02_1001.wav",
       "file_size": 153344,
+      "unique_id": "0e1c8a52-6f1e-4c8d-9a52-6ff5b0f5f9b1",
       "download_url": "./config/recorders/20260910/0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40_02_1001.wav",
       "caller_name": "330909",
       "callee_name": "1001",
@@ -914,7 +922,7 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 | `error` | Option\<String\> | 错误信息 |
 | `step_id` | Option\<String\> | 当前节点 ID，由 Provider 通过 ActionNode.step_id 返回 |
 | `step_name` | Option\<String\> | 当前节点名称，由 Provider 通过 ActionNode.step_name 返回 |
-| `step_start_time` | Option\<String\> | 当前步骤开始时间（ISO UTC）。常规步骤有值；`session_end`、fallback、bridge 按键等派生条目为 null |
+| `step_start_time` | Option\<String\> | 当前步骤开始时间（ISO UTC），始终有值。常规步骤由执行器在动作下发时打点（通过 bridge URI 的 `_rst_step_start_time` 透传）；bridge 按键、`session_end` 等派生条目在事件发出时以单一时钟采样补齐（同时充当 start 与 end），保证 `step_end_time >= step_start_time` 恒成立 |
 | `step_end_time` | Option\<String\> | 当前步骤结束时间（ISO UTC），始终有值 —— 它是该步骤完成（事件已发出）的标记 |
 | `extra` | Option\<JSON Object\> | Provider 透传的额外数据。Provider 在每次响应的 ActionNode.extra 中返回完整对象，RustPBX 透传存储并原样输出 |
 | `sip_headers` | Option\<Map\<String, String\>\> | 呼叫的白名单 SIP 头 |

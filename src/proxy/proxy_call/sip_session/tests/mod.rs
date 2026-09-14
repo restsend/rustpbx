@@ -89,6 +89,7 @@ fn forward_dtmf_with_active_bridge_owns_digit_without_app_injection() {
         step_id: Some("step-menu-tts".to_string()),
         step_name: Some("菜单".to_string()),
         extra: Some(serde_json::json!({"nodetype": "menu_tts", "businessnodeid": "42"})),
+        step_start_time: Some("2026-01-01T00:00:00+00:00".to_string()),
     })));
     let digits = Arc::new(parking_lot::Mutex::new(Vec::new()));
 
@@ -129,6 +130,23 @@ fn forward_dtmf_with_active_bridge_owns_digit_without_app_injection() {
     assert_eq!(ev.event.payload["step_id"], "step-menu-tts");
     assert_eq!(ev.event.payload["action_type"], "Bridge");
     assert_eq!(ev.event.payload["extra"]["nodetype"], "menu_tts");
+    assert_eq!(
+        ev.event.payload["step_start_time"],
+        "2026-01-01T00:00:00+00:00",
+        "bridge DTMF trace must carry the executor-stamped step start time"
+    );
+    let start: chrono::DateTime<chrono::FixedOffset> = chrono::DateTime::parse_from_rfc3339(
+        ev.event.payload["step_start_time"].as_str().unwrap(),
+    )
+    .expect("step_start_time must be RFC3339");
+    let end: chrono::DateTime<chrono::FixedOffset> = chrono::DateTime::parse_from_rfc3339(
+        ev.event.payload["step_end_time"].as_str().unwrap(),
+    )
+    .expect("step_end_time must be RFC3339");
+    assert!(
+        end >= start,
+        "consumer-derived duration would be negative if end < start"
+    );
     assert_eq!(ev.event.payload["caller"], "sip:1001@x");
     assert_eq!(
         ev.event.payload["sip_headers"]["X-Business-Type"], "34",
@@ -156,6 +174,7 @@ fn suspended_flow_death_emits_compensating_session_end_trace() {
         step_id: Some("step-menu-tts".to_string()),
         step_name: Some("菜单".to_string()),
         extra: Some(serde_json::json!({"nodetype": "menu_tts"})),
+        step_start_time: Some("2026-01-01T00:00:00+00:00".to_string()),
     })));
 
     emit_suspended_flow_session_end(
@@ -185,10 +204,23 @@ fn suspended_flow_death_emits_compensating_session_end_trace() {
         "synthetic trace must carry the call's SIP headers"
     );
     assert!(
-        ev.event.payload["step_start_time"].is_null(),
-        "synthetic end trace carries no step start time"
+        ev.event.payload["step_start_time"].is_string(),
+        "synthetic end trace must carry a step start time — consumers derive duration as \
+         event timestamp - step_start_time, and a null start would force an envelope-timestamp \
+         fallback that orders end < start"
     );
-    // No node context → generic Transfer label, still a valid end marker.
+    let start: chrono::DateTime<chrono::FixedOffset> = chrono::DateTime::parse_from_rfc3339(
+        ev.event.payload["step_start_time"].as_str().unwrap(),
+    )
+    .expect("step_start_time must be RFC3339");
+    let end: chrono::DateTime<chrono::FixedOffset> = chrono::DateTime::parse_from_rfc3339(
+        ev.event.payload["step_end_time"].as_str().unwrap(),
+    )
+    .expect("step_end_time must be RFC3339");
+    assert!(
+        end >= start,
+        "consumer-derived duration would be negative if end < start"
+    );
 }
 
 // ── parse_dial_target ─────────────────────────────────────────────────
@@ -5149,10 +5181,58 @@ async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
             }
         }
         #[cfg(not(feature = "addon-cc"))]
-        session
-            .handle_join_mixer_leg("consult-consult-media".into(), LegId::from("caller"))
-            .await
-            .unwrap();
+        {
+            if scenario == "switch_then_merge" {
+                // LeaveMixer above dropped the last conference participants,
+                // which spawns an *async* destroy that removes the mixer
+                // before the room. Joining while that task is mid-flight
+                // fails with "Audio mixer not found" (torn window) or
+                // "Conference not found" (fully torn down). Wait for the
+                // teardown to settle, recreate the room and restore all
+                // three legs — mirroring the create-if-missing self-heal the
+                // addon-cc merge path (`merge_to_conference`) applies.
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while server
+                        .conference_server
+                        .get_conference(&crate::call::runtime::ConferenceId::from(
+                            "consult-consult-media",
+                        ))
+                        .await
+                        .is_some()
+                    {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("consult conference teardown must settle");
+                session
+                    .ensure_conference("consult-consult-media", None)
+                    .await
+                    .unwrap();
+                for name in ["callee", "consult"] {
+                    session
+                        .handle_join_mixer_leg(
+                            "consult-consult-media".into(),
+                            LegId::from(name),
+                        )
+                        .await
+                        .unwrap();
+                }
+                private_tokens.clear();
+                for name in ["callee", "consult"] {
+                    let id = LegId::from(name);
+                    let handle = session
+                        .legs
+                        .conference_bridge_handle(&id)
+                        .expect("restored consultation bridge");
+                    private_tokens.push(handle.cancel_token.clone());
+                }
+            }
+            session
+                .handle_join_mixer_leg("consult-consult-media".into(), LegId::from("caller"))
+                .await
+                .unwrap();
+        }
         assert!(private_tokens.iter().all(|token| !token.is_cancelled()));
         assert_eq!(
             server

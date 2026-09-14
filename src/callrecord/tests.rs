@@ -706,6 +706,7 @@ async fn test_save_with_http_with_media() {
     temp_file.flush().unwrap();
 
     let media = CallRecordMedia {
+        unique_id: None,
         track_id: "track_001".to_string(),
         path: temp_file.path().to_string_lossy().to_string(),
         size: test_content.len() as u64,
@@ -835,6 +836,7 @@ async fn test_save_with_s3_like_with_media() {
     temp_file.flush().unwrap();
 
     let media = CallRecordMedia {
+        unique_id: None,
         track_id: "s3_track_001".to_string(),
         path: temp_file.path().to_string_lossy().to_string(),
         size: test_content.len() as u64,

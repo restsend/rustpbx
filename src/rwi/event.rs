@@ -270,6 +270,11 @@ rwi_event!(CallTransferFailed, "call_transfer_failed");
 #[derive(Debug, Clone, Serialize)]
 pub struct RecordStarted {
     pub call_id: String,
+    /// Recording-level unique identifier (UUID v4). Shared with the matching
+    /// `record_stopped` and `recording_metadata_available` events so
+    /// consumers can reconcile one recording across events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unique_id: Option<String>,
 }
 rwi_event!(RecordStarted, "record_started");
 

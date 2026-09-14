@@ -1514,6 +1514,7 @@ pub(crate) fn merge_trunk_media_hints(hints: &mut Option<DialplanHints>, trunk: 
         && trunk.max_ring_time.is_none()
         && trunk.external_ip.is_none()
         && trunk.bind_ip.is_none()
+        && trunk.ice_lite.is_none()
         && trunk.profile.is_none()
     {
         return;
@@ -1548,6 +1549,9 @@ pub(crate) fn merge_trunk_media_hints(hints: &mut Option<DialplanHints>, trunk: 
     if let Some(bind_ip) = trunk.bind_ip.clone() {
         hints.bind_ip = Some(bind_ip);
     }
+    if let Some(ice_lite) = trunk.ice_lite {
+        hints.ice_lite = Some(ice_lite);
+    }
 }
 
 fn trunk_media_mode_to_proxy_mode(mode: MediaMode) -> MediaProxyMode {
@@ -1556,5 +1560,62 @@ fn trunk_media_mode_to_proxy_mode(mode: MediaMode) -> MediaProxyMode {
         MediaMode::Bypass => MediaProxyMode::Bypass,
         MediaMode::Auto => MediaProxyMode::Auto,
         MediaMode::ForceTranscode => MediaProxyMode::All,
+    }
+}
+
+#[cfg(test)]
+mod ice_lite_hint_tests {
+    use super::*;
+
+    fn trunk_with(ice_lite: Option<bool>) -> TrunkConfig {
+        TrunkConfig {
+            dest: "sip:carrier.example.com".to_string(),
+            ice_lite,
+            ..Default::default()
+        }
+    }
+
+    /// A per-trunk `ice_lite` override must ride the routing hints so the
+    /// session applies it to `dialplan.media.ice_lite`.
+    #[test]
+    fn trunk_ice_lite_true_propagates_to_hints() {
+        let mut hints = None;
+        merge_trunk_media_hints(&mut hints, &trunk_with(Some(true)));
+        assert_eq!(hints.as_ref().and_then(|h| h.ice_lite), Some(true));
+    }
+
+    #[test]
+    fn trunk_ice_lite_false_propagates_to_hints() {
+        let mut hints = None;
+        merge_trunk_media_hints(&mut hints, &trunk_with(Some(false)));
+        assert_eq!(hints.as_ref().and_then(|h| h.ice_lite), Some(false));
+    }
+
+    /// Absent per-trunk flag: no hint is produced, so the global default and
+    /// the per-extension detection stay in effect.
+    #[test]
+    fn trunk_without_ice_lite_leaves_hints_untouched() {
+        let mut hints = None;
+        merge_trunk_media_hints(&mut hints, &trunk_with(None));
+        assert!(
+            hints.is_none(),
+            "no other media fields set: hints stay None"
+        );
+    }
+
+    /// Destination trunk merges after the source trunk, so an explicit
+    /// destination override wins; an absent destination value preserves the
+    /// source trunk's override.
+    #[test]
+    fn destination_trunk_overrides_source_trunk_ice_lite() {
+        let mut hints = None;
+        merge_trunk_media_hints(&mut hints, &trunk_with(Some(true)));
+        merge_trunk_media_hints(&mut hints, &trunk_with(Some(false)));
+        assert_eq!(hints.as_ref().and_then(|h| h.ice_lite), Some(false));
+
+        let mut hints = None;
+        merge_trunk_media_hints(&mut hints, &trunk_with(Some(true)));
+        merge_trunk_media_hints(&mut hints, &trunk_with(None));
+        assert_eq!(hints.as_ref().and_then(|h| h.ice_lite), Some(true));
     }
 }

@@ -81,6 +81,48 @@ latching_probation_max_packets = 6
 enable_latching = false
 ```
 
+### ICE-Lite（`ice_lite`）
+
+开启后，**普通 RTP 腿**的应答/提供 SDP 携带 `a=ice-lite`（RFC 8445 §2.4）。此时 PBX 以 *受控 ICE-lite* 代理运行：自身不发起连通性检查，而是应答对端全量 ICE 代理发起的检查（目标为 SDP 中公布的候选地址）。
+
+**适用场景：**
+
+- 严格的全量 ICE 对端：应答缺少 ICE 属性时**不会回退纯 RTP** —— 典型是 **Microsoft Teams Direct Routing**（微软明确要求 SBC 侧以 ICE-lite 应答）。
+- PBX 部署在 NAT 之后时，由对端全量 ICE 通过检查发现正确的回流路径，不依赖 SDP 地址。
+
+**行为与安全性：**
+
+- **不支持 ICE 的端点**会完全忽略 ICE 属性，继续直连 RTP + 对称源地址学习 —— 开启该开关不会影响普通话机。
+- **WebRTC 腿不受影响**：浏览器始终运行全量 ICE + DTLS，该标志对 WebRTC 腿（以及 SDES/Srtp 腿）强制关闭。
+- 对端在检查完成前直接发送 RTP 时媒体照常流动；PBX 接受来自对端信令地址的 RTP 并进行源地址学习。
+
+**服务器级默认（`[media]`）：**
+
+```toml
+[media]
+ice_lite = false
+```
+
+**中继级覆盖** —— 优先级高于全局默认和分机自动探测：
+
+```toml
+[proxy.trunks.teams]
+dest = "sip:pstn.teams.microsoft.com:5061"
+ice_lite = true   # false = 显式关闭；不设置 = 继承全局
+```
+
+Console 入口：*中继 → 媒体选项 → ICE-Lite*（存储为 `metadata.sbc.ice_lite`）。
+
+**分机级（自动探测，免配置）**：分机注册时 Contact 带 RFC 5768 `;+sip.ice` 参数且走非 WebSocket 传输的，rustpbx 自动以 ICE-lite 应答；WebSocket/WebRTC 端点排除（始终全量 ICE）。
+
+| 场景 | 全局 `[media] ice_lite` | 中继 `ice_lite` | 主叫注册带 `;+sip.ice` | 会话 RTP 腿 |
+|------|--------------------------|------------------|--------------------------|--------------|
+| 普通运营商中继 | 关（默认） | — | — | 无 ICE 属性（保持旧行为） |
+| Teams Direct Routing 中继 | 关 | `true` | — | 该中继腿带 `a=ice-lite` |
+| 支持 ICE 的分机（UDP/TCP） | 关 | — | 是 | 应答带 `a=ice-lite` |
+| 对已探测主叫 opt-out | 关 | `false` | 是 | 关闭（中继优先） |
+| 全局开启 | `true` | — | — | 所有 RTP 腿带 `a=ice-lite` |
+
 ### 选择合适的组合（Bug 1 + 2 场景）
 
 | 场景 | 服务器 `media_proxy` | 中继 `media_mode` | 中继 `external_ip` | 结果 |

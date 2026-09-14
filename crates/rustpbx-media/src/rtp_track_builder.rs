@@ -21,6 +21,10 @@ pub struct RtpTrackBuilder {
     enable_latching: bool,
     probation_max_packets: Option<u8>,
     ice_servers: Vec<IceServer>,
+    /// Answer/offer SDP advertises `a=ice-lite` (rustrtc `enable_ice_lite`).
+    /// Only meaningful in Rtp mode — WebRTC legs always run full ICE and the
+    /// flag is ignored there (forced off in `build`).
+    enable_ice_lite: bool,
     cname: Option<String>,
 }
 
@@ -37,6 +41,7 @@ impl RtpTrackBuilder {
             enable_latching: false,
             probation_max_packets: None,
             ice_servers: Vec::new(),
+            enable_ice_lite: false,
             rtp_map: vec![
                 CodecType::Opus,
                 CodecType::G729,
@@ -106,6 +111,13 @@ impl RtpTrackBuilder {
         self
     }
 
+    /// Advertise `a=ice-lite` in the generated offer/answer SDP (Rtp mode
+    /// only). See the field docs for the WebRTC exclusion.
+    pub fn with_ice_lite(mut self, enable: bool) -> Self {
+        self.enable_ice_lite = enable;
+        self
+    }
+
     pub fn with_video_capabilities(mut self, caps: Vec<VideoCapability>) -> Self {
         self.video_capabilities = caps;
         self
@@ -162,7 +174,11 @@ impl RtpTrackBuilder {
             } else {
                 IceTransportPolicy::All
             },
-            transport_mode: self.mode,
+            transport_mode: self.mode.clone(),
+            // ICE-lite is an RTP-mode-only feature in rustrtc; WebRTC legs must
+            // keep full ICE (browsers require connectivity checks + DTLS), so
+            // the flag is forced off for that mode here.
+            enable_ice_lite: self.mode == TransportMode::Rtp && self.enable_ice_lite,
             rtp_start_port: self.rtp_start_port,
             rtp_end_port: self.rtp_end_port,
             external_ip: self.external_ip,

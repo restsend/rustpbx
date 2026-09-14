@@ -314,6 +314,7 @@ impl CallRouter for HttpCallRouter {
                 dialplan.media.ice_servers = rtp_cfg.ice_servers.clone();
                 dialplan.media.enable_latching = self.enable_latching;
                 dialplan.media.probation_max_packets = self.probation_max_packets;
+                dialplan.media.ice_lite = rtp_cfg.ice_lite;
 
                 if let Some(from) = caller.from.as_ref() {
                     dialplan = dialplan.with_caller(from.clone());

@@ -630,6 +630,12 @@ pub struct RecordConfig {
     /// the step provider.
     #[serde(default)]
     pub notify_app: Option<bool>,
+    /// Recording-level unique identifier (UUID v4) minted by the caller so
+    /// the `record_started` reply can reference the same id the session will
+    /// carry on `record_stopped` / `recording_metadata_available`. When
+    /// `None` the session generates one.
+    #[serde(default)]
+    pub unique_id: Option<String>,
 }
 
 impl Default for RecordConfig {
@@ -645,6 +651,7 @@ impl Default for RecordConfig {
             segment_id: None,
             label: None,
             notify_app: None,
+            unique_id: None,
         }
     }
 }

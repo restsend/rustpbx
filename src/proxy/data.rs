@@ -1298,6 +1298,7 @@ pub fn sbc_config_from_metadata(meta: &serde_json::Value) -> TrunkConfig {
         profile: from_str(sbc.and_then(|s| s.get("profile"))),
         external_ip: from_str(sbc.and_then(|s| s.get("external_ip"))),
         bind_ip: from_str(sbc.and_then(|s| s.get("bind_ip"))),
+        ice_lite: from_bool(sbc.and_then(|s| s.get("ice_lite"))),
         codec: codecs,
         recording: if recording.is_some() { recording } else { None },
         ..Default::default()
@@ -1421,6 +1422,9 @@ pub(crate) fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkCon
             }
             if sbc.bind_ip.is_some() {
                 trunk.bind_ip = sbc.bind_ip;
+            }
+            if sbc.ice_lite.is_some() {
+                trunk.ice_lite = sbc.ice_lite;
             }
         }
     }
@@ -2432,6 +2436,31 @@ file = "db://ivr/lf-step-ivr.generated.toml"
         let rb = trunk.ringback.as_ref().expect("ringback should be merged");
         assert_eq!(rb.offline, Some("/sounds/offline.wav".to_string()));
         assert_eq!(rb.notfound, Some("/sounds/notfound.wav".to_string()));
+    }
+
+    /// Console-managed trunks store the ICE-lite switch in
+    /// `metadata.sbc.ice_lite` (no dedicated column): the parsed value must
+    /// surface on the trunk config, absent → None (inherit global).
+    #[test]
+    fn convert_trunk_merges_sbc_ice_lite() {
+        let model = sip_trunk::Model {
+            id: 1,
+            name: "teams".to_string(),
+            sip_server: Some("sip:1.2.3.4:5060".to_string()),
+            metadata: Some(serde_json::json!({"sbc": {"ice_lite": true}})),
+            ..Default::default()
+        };
+        let (_, trunk) = convert_trunk(model).expect("should convert");
+        assert_eq!(trunk.ice_lite, Some(true));
+
+        let model = sip_trunk::Model {
+            id: 2,
+            name: "plain".to_string(),
+            sip_server: Some("sip:1.2.3.4:5060".to_string()),
+            ..Default::default()
+        };
+        let (_, trunk) = convert_trunk(model).expect("should convert");
+        assert_eq!(trunk.ice_lite, None);
     }
 
     #[test]

@@ -747,6 +747,7 @@ async fn rtp_timeout_fires_on_inactive_webrtc_leg() {
     let cfg = LegConfig {
         ice_servers: Vec::new(),
         relay_only: false,
+        enable_ice_lite: false,
         transport: TransportMode::WebRtc,
         codecs: vec![rustpbx_media::negotiate::CodecInfo {
             payload_type: 111,

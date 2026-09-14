@@ -82,6 +82,60 @@ latching_probation_max_packets = 6
 enable_latching = false
 ```
 
+### ICE-lite (`ice_lite`)
+
+Answer/offer SDP on **plain-RTP legs** advertises `a=ice-lite` (RFC 8445 §2.4).
+The PBX then runs as a *Controlled ICE-lite* agent: it starts no connectivity
+checks and answers the remote full-ICE peer's checks against the candidates in
+its SDP.
+
+**When to use it:**
+
+- Strict full-ICE endpoints that never fall back to plain RTP when the answer
+  lacks ICE attributes — most notably **Microsoft Teams Direct Routing**, which
+  requires the SBC side to answer as ICE-lite.
+- PBX deployments behind NAT where the peer's full ICE agent should discover
+  the correct return path via checks instead of relying on the SDP address.
+
+**Behavior and safety:**
+
+- Endpoints **without** ICE support ignore the ICE attributes entirely and keep
+  using direct RTP + symmetric latching — enabling the flag does not break
+  plain SIP phones.
+- **WebRTC legs are unaffected**: browsers always run full ICE + DTLS, and the
+  flag is forced off for them (and for SDES/Srtp legs) regardless of config.
+- A non-ICE peer sending RTP before checks complete keeps media flowing; the
+  PBX's ICE-lite answerer accepts RTP from the peer's signaling address and
+  latches.
+
+**Server-level default (`[media]`):**
+```toml
+[media]
+ice_lite = false
+```
+
+**Per-trunk override** — wins over the global default and the per-extension
+detection:
+```toml
+[proxy.trunks.teams]
+dest = "sip:pstn.teams.microsoft.com:5061"
+ice_lite = true   # false = explicitly off; unset = inherit global
+```
+Console: *Trunk → Media Options → ICE-Lite* (persisted as `metadata.sbc.ice_lite`).
+
+**Per-extension (automatic):** extensions that registered with the RFC 5768
+`;+sip.ice` Contact parameter on a non-WebSocket transport are answered as
+ICE-lite automatically — no configuration needed. WebSocket/WebRTC endpoints
+are excluded since they always negotiate full ICE.
+
+| Scenario | Global `[media] ice_lite` | Trunk `ice_lite` | Caller registered `;+sip.ice` | Session RTP legs |
+|----------|---------------------------|------------------|-------------------------------|------------------|
+| Plain carrier trunk | off (default) | — | — | no ICE attributes (legacy) |
+| Teams Direct Routing trunk | off | `true` | — | `a=ice-lite` on this trunk's legs |
+| ICE-capable extension (UDP/TCP) | off | — | yes | `a=ice-lite` answers |
+| Trunk opt-out for detected caller | off | `false` | yes | off (trunk wins) |
+| Global rollout | `true` | — | — | `a=ice-lite` everywhere (RTP legs) |
+
 ### Choosing the right combination (Bug 1 + 2 scenarios)
 
 | Scenario | Server `media_proxy` | Trunk `media_mode` | Trunk `external_ip` | Result |

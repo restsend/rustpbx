@@ -627,6 +627,7 @@ Dispatch: call_owner
 | Field | Type | Description |
 |-------|------|-------------|
 | `call_id` | String | Call identifier |
+| `unique_id` | Option\<String\> | Recording unique identifier (UUID v4, `record_started` only; identical to the id later carried by `record_stopped` / `recording_metadata_available`, for reconciliation) |
 | *+ctx* | | Flat context fields |
 
 #### record_stopped (Enhanced)
@@ -638,7 +639,7 @@ Dispatch: call_owner
 | `call_id` | String | Call identifier |
 | `duration_secs` | Option\<u64\> | Recording duration in seconds |
 | `filename` | Option\<String\> | Recording filename |
-| `unique_id` | Option\<String\> | Recording UUID |
+| `unique_id` | Option\<String\> | Recording unique identifier (UUID v4, **generated per recording segment**, not the `call_id`; identical across `record_started` / `recording_metadata_available` for the same recording) |
 | `file_size` | Option\<u64\> | File size in bytes |
 | `download_url` | Option\<String\> | Download URL |
 | `caller_name` | Option\<String\> | Calling party number |
@@ -655,6 +656,12 @@ Dispatch: call_owner
 > Note: `record_stopped` does not carry full typed flat context; CallMetaStore
 > enrichment still injects `session_id` (and other missing keys). Former field
 > `root_call_id` was removed.
+>
+> **Version compatibility**: in ≤ 0.5.0 `unique_id` was (incorrectly) filled
+> with the `call_id`; since 0.5.1 `unique_id` is a **UUID generated per
+> recording segment** (consistent across `record_started` /
+> `recording_metadata_available`, for reconciliation). Consumers that used to
+> correlate via `unique_id == call_id` must use the `call_id` field instead.
 
 ```json
 {
@@ -663,7 +670,7 @@ Dispatch: call_owner
     "call_id": "call-abc",
     "duration_secs": 51,
     "filename": "uuid_2026-05-14_08-11-49.mp3",
-    "unique_id": "uuid-abc-123",
+    "unique_id": "0e1c8a52-6f1e-4c8d-9a52-6ff5b0f5f9b1",
     "file_size": 149517,
     "download_url": "https://storage.example.com/rec.mp3",
     "caller_name": "330909",
@@ -712,6 +719,7 @@ Triggered when the recording file upload completes, containing full metadata.
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `unique_id` | Option\<String\> | Recording unique identifier (UUID v4, the `uniqId` acceptance field; identical to the id carried by the segment's `record_started` / `record_stopped`) |
 | `filename` | String | Recording filename |
 | `file_size` | u64 | File size in bytes |
 | `download_url` | Option\<String\> | Download URL |
@@ -720,8 +728,9 @@ Triggered when the recording file upload completes, containing full metadata.
 | `call_start_time` / `call_end_time` / `upload_time` | Option\<String\> | Call start / end / upload time |
 | *(any other key)* | String | `extra` pass-through bag (`#[serde(flatten)]`): flat string keys written by addons (`agent_id`, `queue_id`, `tenant_id`, `switch_flag`, ...) are forwarded verbatim; the core does not name them |
 
-> Note: there is no typed `unique_id` field; business fields like `agent_id`
-> depend on the addon writing them into `extra`.
+> Note: `unique_id` is a typed field; each per-segment upload event carries
+> that segment's own id. Business fields like `agent_id` depend on the addon
+> writing them into `extra`.
 
 > `agent_id` / `agent_name` are populated from the session extensions when the
 > call was routed to a CC agent (`agent_id` is the canonical agent id resolved
@@ -737,6 +746,7 @@ RWI WebSocket frame (flat payload, `event_type` injected by the gateway):
   "metadata": {
     "filename": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40_02_1001.wav",
     "file_size": 153344,
+    "unique_id": "0e1c8a52-6f1e-4c8d-9a52-6ff5b0f5f9b1",
     "download_url": "./config/recorders/20260910/0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40_02_1001.wav",
     "caller_name": "330909",
     "callee_name": "1001",
@@ -949,7 +959,7 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 | `error` | Option\<String\> | Error message |
 | `step_id` | Option\<String\> | Current node ID, returned by provider via ActionNode.step_id |
 | `step_name` | Option\<String\> | Current node name, returned by provider via ActionNode.step_name |
-| `step_start_time` | Option\<String\> | Current step start time (ISO UTC). Present on regular steps; null on derived entries (`session_end`, fallback, bridge DTMF) |
+| `step_start_time` | Option\<String\> | Current step start time (ISO UTC), always present. Regular steps are stamped by the executor when the action is dispatched (forwarded via the bridge URI's `_rst_step_start_time`); derived entries (bridge DTMF, `session_end`, …) fall back to a single clock capture at emission (serving as both start and end) so `step_end_time >= step_start_time` always holds |
 | `step_end_time` | Option\<String\> | Current step end time (ISO UTC), always present — it marks step completion (i.e. the event has been emitted) |
 | `extra` | Option\<JSON Object\> | Transparent passthrough data from provider. Provider returns the complete object in ActionNode.extra each time; RustPBX stores and outputs it as-is |
 | `sip_headers` | Option\<Map\<String, String\>\> | Whitelisted SIP headers of the call |

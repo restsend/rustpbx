@@ -72,6 +72,14 @@ pub struct LegConfig {
     /// STUN binding on its host candidate but cannot sustain the DTLS
     /// handshake (see `dialplan.media.relay_only`). Defaults to false.
     pub relay_only: bool,
+    /// Advertise `a=ice-lite` in this leg's offer/answer SDP (rustrtc
+    /// `enable_ice_lite`). The leg runs as a Controlled ICE-lite agent:
+    /// it starts no connectivity checks and answers the remote full-ICE
+    /// peer's checks. Only applied in `TransportMode::Rtp` — WebRTC legs
+    /// always run full ICE and Srtp legs ignore the flag (rustrtc
+    /// limitation), so `build_rtc_config` forces it off for those modes.
+    /// Defaults to false.
+    pub enable_ice_lite: bool,
 }
 
 impl LegConfig {
@@ -95,6 +103,7 @@ impl LegConfig {
             comfort_noise_level_db: -35.0,
             ice_servers: Vec::new(),
             relay_only: false,
+            enable_ice_lite: false,
         }
     }
 }
@@ -1167,6 +1176,10 @@ fn build_rtc_config(cfg: &LegConfig) -> RtcConfiguration {
         .unwrap_or((None, None));
     RtcConfiguration {
         transport_mode: cfg.transport.clone(),
+        // ICE-lite only applies to plain-RTP legs; WebRTC must keep full ICE
+        // (browsers require connectivity checks + DTLS) and rustrtc only
+        // honors the flag on the Rtp path, so force it off for other modes.
+        enable_ice_lite: cfg.transport == TransportMode::Rtp && cfg.enable_ice_lite,
         rtp_start_port,
         rtp_end_port,
         external_ip: cfg.external_ip.clone(),
@@ -1342,6 +1355,7 @@ mod relay_policy_tests {
             comfort_noise_level_db: -35.0,
             ice_servers,
             relay_only,
+            enable_ice_lite: false,
         }
     }
 
@@ -1584,6 +1598,7 @@ mod tests {
         let cfg = LegConfig {
             ice_servers: Vec::new(),
             relay_only: false,
+            enable_ice_lite: false,
             transport: TransportMode::WebRtc,
             codecs: vec![CodecInfo {
                 payload_type: 111,
@@ -1663,6 +1678,7 @@ mod tests {
         let cfg = LegConfig {
             ice_servers: Vec::new(),
             relay_only: false,
+            enable_ice_lite: false,
             transport: TransportMode::WebRtc,
             codecs: vec![CodecInfo {
                 payload_type: 111,
@@ -1719,6 +1735,7 @@ mod tests {
         let cfg = LegConfig {
             ice_servers: Vec::new(),
             relay_only: false,
+            enable_ice_lite: false,
             transport: TransportMode::WebRtc,
             codecs: vec![CodecInfo {
                 payload_type: 111,
@@ -1817,6 +1834,7 @@ mod tests {
         let cfg = LegConfig {
             ice_servers: Vec::new(),
             relay_only: false,
+            enable_ice_lite: false,
             transport: TransportMode::Rtp,
             codecs: vec![
                 CodecInfo {
@@ -1925,6 +1943,7 @@ mod p24_uac_test {
         let cfg = LegConfig {
             ice_servers: Vec::new(),
             relay_only: false,
+            enable_ice_lite: false,
             transport: TransportMode::Rtp,
             codecs: vec![CodecInfo {
                 payload_type: 0,
@@ -1976,5 +1995,138 @@ mod p24_uac_test {
             "audio/video must use distinct ports:\n{offer}"
         );
         leg.stop();
+    }
+}
+
+#[cfg(test)]
+mod ice_lite_tests {
+    use super::*;
+
+    fn rtp_cfg(enable_ice_lite: bool) -> LegConfig {
+        LegConfig {
+            enable_ice_lite,
+            ..LegConfig::rtp_pcmu()
+        }
+    }
+
+    /// ICE-lite answering: a plain-RTP leg configured with `enable_ice_lite`
+    /// must answer a remote offer with a session-level `a=ice-lite` plus the
+    /// ICE credentials/candidates a full-ICE peer needs to run its checks
+    /// against us (the Teams Direct Routing / strict-SBC scenario).
+    #[tokio::test]
+    async fn rtp_leg_answers_with_ice_lite_attributes() {
+        let leg = LegInner::new("ice-lite-leg", &rtp_cfg(true), None).expect("leg");
+        let remote_offer = "v=0\r\n\
+            o=- 1 2 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            c=IN IP4 127.0.0.1\r\n\
+            t=0 0\r\n\
+            m=audio 4000 RTP/AVP 0 101\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=rtpmap:101 telephone-event/8000\r\n\
+            a=sendrecv\r\n";
+        let answer = leg
+            .apply_sdp(remote_offer, SdpType::Offer)
+            .await
+            .expect("apply offer");
+        assert!(
+            answer.contains("a=ice-lite"),
+            "answer must advertise a=ice-lite:\n{answer}"
+        );
+        assert!(
+            answer.contains("a=ice-ufrag"),
+            "ice-lite answer must carry ICE credentials:\n{answer}"
+        );
+        assert!(
+            answer.contains("a=ice-pwd"),
+            "ice-lite answer must carry ICE credentials:\n{answer}"
+        );
+        assert!(
+            answer.contains("a=candidate"),
+            "ice-lite answer must carry candidates for the remote checks:\n{answer}"
+        );
+        leg.stop();
+    }
+
+    /// The offer path carries the same attributes — outbound trunk legs with
+    /// the flag on behave as ICE-lite toward their peer too.
+    #[tokio::test]
+    async fn rtp_leg_offers_with_ice_lite_attributes() {
+        let leg = LegInner::new("ice-lite-uac", &rtp_cfg(true), None).expect("leg");
+        let offer = leg.create_offer().await.expect("offer");
+        assert!(
+            offer.contains("a=ice-lite"),
+            "offer must advertise a=ice-lite:\n{offer}"
+        );
+        assert!(
+            offer.contains("a=ice-ufrag") && offer.contains("a=candidate"),
+            "ice-lite offer must carry credentials and candidates:\n{offer}"
+        );
+        leg.stop();
+    }
+
+    /// Default (flag off) keeps the legacy plain-RTP answer: no ICE
+    /// attributes at all — existing deployments must be unaffected.
+    #[tokio::test]
+    async fn rtp_leg_default_answer_has_no_ice_attributes() {
+        let leg = LegInner::new("plain-leg", &rtp_cfg(false), None).expect("leg");
+        let remote_offer = "v=0\r\n\
+            o=- 1 2 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            c=IN IP4 127.0.0.1\r\n\
+            t=0 0\r\n\
+            m=audio 4000 RTP/AVP 0 101\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=sendrecv\r\n";
+        let answer = leg
+            .apply_sdp(remote_offer, SdpType::Offer)
+            .await
+            .expect("apply offer");
+        assert!(
+            !answer.contains("a=ice-lite")
+                && !answer.contains("a=ice-ufrag")
+                && !answer.contains("a=candidate"),
+            "default answer must not contain ICE attributes:\n{answer}"
+        );
+        leg.stop();
+    }
+
+    /// WebRTC legs must be unaffected by the flag: `build_rtc_config` forces
+    /// it off because browsers require full ICE + DTLS.
+    #[tokio::test]
+    async fn build_rtc_config_forces_ice_lite_off_for_webrtc() {
+        let cfg = LegConfig {
+            transport: TransportMode::WebRtc,
+            enable_ice_lite: true,
+            ..LegConfig::rtp_pcmu()
+        };
+        let rtc = build_rtc_config(&cfg);
+        assert!(
+            !rtc.enable_ice_lite,
+            "WebRTC legs must keep full ICE regardless of the flag"
+        );
+        let rtc_rtp = build_rtc_config(&rtp_cfg(true));
+        assert!(rtc_rtp.enable_ice_lite, "RTP legs honor the flag");
+        let rtc_srtp = build_rtc_config(&LegConfig {
+            transport: TransportMode::Srtp,
+            enable_ice_lite: true,
+            ..LegConfig::rtp_pcmu()
+        });
+        assert!(
+            !rtc_srtp.enable_ice_lite,
+            "SDES/Srtp legs are outside the ICE-lite path (rustrtc Rtp-only)"
+        );
+    }
+
+    /// The `RtpTrackBuilder` path (used for callee legs and REFER offers)
+    /// mirrors the same mode guard.
+    #[tokio::test]
+    async fn rtp_track_builder_forces_ice_lite_off_for_webrtc() {
+        let track = crate::RtpTrackBuilder::new("probe".to_string())
+            .with_mode(TransportMode::WebRtc)
+            .with_ice_lite(true)
+            .build();
+        let pc = track.get_peer_connection().await.expect("pc");
+        assert!(!pc.config().enable_ice_lite);
     }
 }

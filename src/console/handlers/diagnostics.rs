@@ -722,6 +722,12 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
         video_policy: None,
         external_ip: None,
         bind_ip: None,
+        ice_lite: model
+            .metadata
+            .as_ref()
+            .and_then(|meta| meta.get("sbc"))
+            .and_then(|sbc| sbc.get("ice_lite"))
+            .and_then(|v| v.as_bool()),
         profile: None,
         did_numbers: vec![],
         ringback: None,

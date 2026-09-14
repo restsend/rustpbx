@@ -457,6 +457,7 @@ fn collect_recording_artifacts(
                 track_id: format!("segment:{}:{}", seg.segment_type, seg.segment_id),
                 path: seg.path.clone(),
                 size,
+                unique_id: seg.unique_id.clone(),
                 extra: Some(extra),
             });
         }
@@ -471,6 +472,11 @@ fn collect_recording_artifacts(
             track_id: "mixed".to_string(),
             path: recorder_file.to_string(),
             size: metadata.len(),
+            // Dialplan-level recordings have no in-session segment bookkeeping
+            // (and therefore no real-time `record_stopped`), so the recording
+            // identifier is minted here. Every CDR media entry still carries a
+            // `unique_id`, matching the vendor acceptance requirement.
+            unique_id: Some(uuid::Uuid::new_v4().to_string()),
             extra: None,
         });
     }
@@ -898,6 +904,7 @@ mod tests {
 
         let mut snapshot = empty_snapshot();
         snapshot.recording_segments = vec![crate::callrecord::RecordingSegment {
+            unique_id: None,
             path: wav.to_string_lossy().into_owned(),
             size: 7,
             segment_type: "ivr".into(),
@@ -958,6 +965,7 @@ mod tests {
     fn collect_recording_artifacts_skips_zero_size_segments() {
         let mut snapshot = empty_snapshot();
         snapshot.recording_segments = vec![crate::callrecord::RecordingSegment {
+            unique_id: None,
             path: "/tmp/missing-segment.wav".into(),
             size: 0,
             segment_type: "ivr".into(),

@@ -2818,9 +2818,75 @@ async fn finalize_recording_for_app_shutdown_finalizes_active_recording() {
     );
 }
 
+/// `record_stopped` must carry a recording-level `unique_id` (UUID v4) that
+/// differs from the call id — the vendor acceptance sheet requires a per-
+/// recording identifier, and the same id must land in the session's
+/// completed-segment bookkeeping (→ CDR `uniqueId`, →
+/// `recording_metadata_available`).
 #[tokio::test]
-async fn record_stopped_event_path_predicts_archived_layout() {
+async fn record_stopped_event_carries_recording_unique_id() {
+    use crate::rwi::gateway::RwiGateway;
+    use parking_lot::RwLock as PlRwLock;
+
+    let gateway = Arc::new(PlRwLock::new(RwiGateway::new()));
+    let mut events = gateway.write().subscribe_events();
+    let (server, _) =
+        create_test_server_with_rwi_gateway(ProxyConfig::default(), gateway.clone()).await;
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let mut session = build_session_on_server(server, dialplan).await;
+
     let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir
+        .path()
+        .join("unique-id.wav")
+        .to_string_lossy()
+        .into_owned();
+    let mut bridge = playable_bridge("unique-id-recording").await;
+    bridge
+        .start_recording(path, 1, true, None)
+        .await
+        .expect("start recording");
+    session.media.bridge = Some(bridge);
+
+    session.finalize_recording_for_app_shutdown().await;
+
+    let entry = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let entry = events.recv().await.expect("event stream open");
+            if entry.event.event_type == "record_stopped" {
+                break entry;
+            }
+        }
+    })
+    .await
+    .expect("record_stopped within timeout");
+
+    let call_id = entry.call_id.clone();
+    let unique_id = entry.event.payload["unique_id"]
+        .as_str()
+        .expect("record_stopped must carry unique_id")
+        .to_string();
+    assert!(
+        !unique_id.is_empty() && unique_id.len() == 36 && unique_id.contains('-'),
+        "unique_id must be a UUID v4 string, got {unique_id:?}"
+    );
+    assert_ne!(
+        unique_id, call_id,
+        "unique_id must identify the recording, not duplicate the call id"
+    );
+    assert_eq!(
+        entry.event.payload["call_id"].as_str(),
+        Some(call_id.as_str())
+    );
+    assert!(
+        entry.event.payload["filename"].as_str().is_some(),
+        "record_stopped payload shape must stay intact: {}",
+        entry.event.payload
+    );
+}
+
+#[tokio::test]
+async fn record_stopped_event_path_predicts_archived_layout() {    let dir = tempfile::tempdir().expect("tempdir");
     let (server, _) = create_test_server().await;
     server
         .recording_policy

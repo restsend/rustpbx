@@ -47,6 +47,24 @@ database_url = "sqlite://rustpbx.sqlite3"
 # webrtc_port_start = 30000
 # webrtc_port_end = 40000
 
+# ── Media server settings ────────────────────────────────────────────────────
+# [media]
+# Emit comfort noise instead of digital silence when a leg's egress has no
+# source (default true).
+# comfort_noise = true
+# comfort_noise_level_db = -35.0
+# Answer/offer SDP on plain-RTP legs advertises `a=ice-lite` (RFC 8445 §2.4).
+# rustpbx then runs as a Controlled ICE-lite agent: it starts no connectivity
+# checks and answers the remote full-ICE peer's checks. Required by strict
+# full-ICE endpoints that never fall back to plain RTP (e.g. Microsoft Teams
+# Direct Routing). Harmless for SIP endpoints without ICE support — they
+# ignore the ICE attributes and keep using symmetric RTP. WebRTC legs always
+# run full ICE regardless of this flag. Defaults to false.
+# Per-trunk override: [proxy.trunks.<name>] ice_lite = true|false
+# (Console: Trunk → Media Options → ICE-Lite). Per-extension: endpoints that
+# registered with `;+sip.ice` are answered as ICE-lite automatically.
+# ice_lite = false
+
 # SIP Contact — host in Contact for dialogs (BYE, re-INVITE). Unset → follow external_ip.
 # sip_external_ip = "203.0.113.10"
 # auto_sip_external_ip = "http://ifconfig.me"
@@ -502,6 +520,10 @@ subdirs = "daily"  # "none" | "daily" | "hourly"
 # profile = "wan"                       # [[network_profile]] id (Console: Media → Network profile)
 # external_ip = "100.64.0.5"            # optional per-trunk RTP/SDP override (wins over profile)
 # bind_ip = "100.64.0.5"                # optional per-trunk RTP bind override
+# ice_lite = true                       # per-trunk ICE-lite override (wins over [media] ice_lite;
+#                                       # Console: Media Options → ICE-Lite). For strict full-ICE
+#                                       # peers (Teams Direct Routing) that never fall back to
+#                                       # plain RTP. false = explicitly off; unset = inherit global.
 # # Forward original custom headers to this trunk's outgoing INVITE.
 # # Unset (default) -> forward nothing; internal destinations forward everything.
 # # Applies to all callee legs (direct dial, fork, queue agents, transfers,

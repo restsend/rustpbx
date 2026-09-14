@@ -1874,6 +1874,7 @@ impl SipServerInner {
             .with_enable_latching(proxy_config.enable_latching)
             .with_probation_max_packets(proxy_config.latching_probation_max_packets)
             .with_comfort_noise(rtp.comfort_noise, rtp.comfort_noise_level_db)
+            .with_ice_lite(rtp.ice_lite)
     }
 
     /// Hot-reload the full `[proxy]` section plus related platform settings

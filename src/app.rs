@@ -88,6 +88,11 @@ pub struct AppStateInner {
     pub tls_reloader: Arc<RwLock<Option<Arc<TlsReloaderRegistry>>>>,
     /// Cluster config with RwLock for live updates (written on save, read by UI).
     pub cluster_config: std::sync::RwLock<Option<ClusterConfig>>,
+    /// Shared outbound dial concurrency limiter (`[outbound] max_concurrent`).
+    /// Every `/ami/v1/outbound/dial` holds a permit from originate until its
+    /// SSE pipeline terminates. `None` when the outbound module is disabled.
+    /// Created once at startup — changing `max_concurrent` requires a restart.
+    pub outbound_limiter: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 pub type AppState = Arc<AppStateInner>;
@@ -635,6 +640,9 @@ impl AppStateBuilder {
             console: console_state,
             tls_reloader: Arc::new(RwLock::new(Some(Arc::new(TlsReloaderRegistry::new())))),
             cluster_config: std::sync::RwLock::new(config.cluster.clone()),
+            outbound_limiter: config.outbound.as_ref().filter(|c| c.enabled).map(|c| {
+                Arc::new(tokio::sync::Semaphore::new(c.max_concurrent.max(1)))
+            }),
         });
 
         // Register SIP TLS reloader if TLS is enabled

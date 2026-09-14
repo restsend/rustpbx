@@ -1298,7 +1298,11 @@ impl StepIvrApp {
         // keys. Stash the node identity: common.rs appends it to the bridge
         // URI (`_rst_*` params) and the proxy reports bridge DTMF as
         // `ivr_step_trace` events for THIS node (contract: menu nodes carry
-        // `trigger.detail.digit`).
+        // `trigger.detail.digit`). The step start time is stashed too —
+        // proxy-emitted traces carry `step_end_time` and consumers derive
+        // duration as `event timestamp - step_start_time`; without the real
+        // start they fall back to the envelope timestamp (stamped after the
+        // end) which yields end < start.
         if matches!(node.action, EntryAction::Bridge { .. }) {
             self.sess.variables.insert(
                 "_bridge_step_id".into(),
@@ -1322,6 +1326,12 @@ impl StepIvrApp {
             {
                 self.sess.variables.insert("_bridge_extra".into(), ex);
             }
+            self.sess.variables.insert(
+                "_bridge_step_start_time".into(),
+                self.current_step_start_time
+                    .clone()
+                    .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+            );
         }
         let result = common::execute_action(
             &node.action,
@@ -4222,7 +4232,12 @@ mod tests {
         stack
             .assert_cmd(2000, "transfer", |c| {
                 matches!(c, CallCommand::Transfer { target, .. }
-                    if target == "bridge:https://voip.example.com/rooms")
+                    if target.starts_with("bridge:https://voip.example.com/rooms?_rst_step_start_time=")
+                        && chrono::DateTime::parse_from_rfc3339(
+                            &urlencoding::decode(target.rsplit('=').next().unwrap_or_default())
+                                .unwrap_or_default(),
+                        )
+                        .is_ok())
             })
             .await;
     }
@@ -4256,7 +4271,7 @@ mod tests {
         stack
             .assert_cmd(2000, "transfer", |c| {
                 matches!(c, CallCommand::Transfer { target, .. }
-                    if target == "bridge:wss://voip.example.com/room1?return_app=ivr&return_target=main&return_ivr_resume=1")
+                    if target.starts_with("bridge:wss://voip.example.com/room1?return_app=ivr&return_target=main&return_ivr_resume=1&_rst_step_start_time="))
             })
             .await;
     }

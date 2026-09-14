@@ -229,6 +229,7 @@ impl UserBackend for DbBackend {
             from: None,
             destination: None,
             is_support_webrtc: false,
+            ice_lite: false,
             call_forwarding_mode: None,
             call_forwarding_destination: None,
             call_forwarding_timeout: None,

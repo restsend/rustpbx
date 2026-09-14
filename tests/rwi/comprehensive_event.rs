@@ -234,6 +234,7 @@ async fn test_comprehensive_core_event_structs() {
             "default",
             &rustpbx::rwi::RecordStarted {
                 call_id: call_id.into(),
+                unique_id: Some("rec-core-001".into()),
             },
         );
         gw.fan_out(
