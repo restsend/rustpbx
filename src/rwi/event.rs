@@ -518,6 +518,25 @@ pub struct QueueLeft {
 }
 rwi_event!(QueueLeft, "queue_left");
 
+/// An event from a realtime (AI voice) WebSocket bridge — transcripts,
+/// function calls, barge-in and lifecycle signals (`realtime_event`).
+///
+/// The core is a transport: `kind`/`data` passthrough for the business side;
+/// credentials and prompts never appear here.
+#[derive(Debug, Clone, Serialize)]
+pub struct RealtimeEvent {
+    pub call_id: String,
+    /// Event kind: `connected` / `session_ready` / `speech_started` /
+    /// `speech_stopped` / `barge_in` / `transcript_delta` / `transcript_final` /
+    /// `function_call` / `error` / `disconnected`.
+    pub kind: String,
+    /// Kind-specific payload (e.g. `{"text": …}` for transcripts,
+    /// `{"name": …, "arguments": …}` for function calls).
+    #[serde(default)]
+    pub data: serde_json::Value,
+}
+rwi_event!(RealtimeEvent, "realtime_event");
+
 #[derive(Debug, Clone, Serialize)]
 pub struct QueueWaitTimeout {
     pub call_id: String,

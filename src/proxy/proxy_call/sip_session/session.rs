@@ -122,6 +122,10 @@ pub struct SipSession {
     /// return-app IVR params when the bridge disconnects.
     pub(crate) bridge_dtmf_digits: Arc<parking_lot::Mutex<Vec<String>>>,
 
+    /// Active realtime (AI voice) WS bridge handle — set by
+    /// `CallCommand::RealtimeStart`, cleared by `RealtimeStop` / teardown.
+    pub(crate) realtime_bridge: Option<super::realtime_bridge::RealtimeBridgeHandle>,
+
     pub cmd_tx: Option<mpsc::Sender<CallCommand>>,
 
     /// Cluster session-registry RAII guard: registers this session's owning
@@ -1101,6 +1105,7 @@ impl SipSession {
             bridge_dtmf_tx: Arc::new(parking_lot::RwLock::new(None)),
             bridge_trace_context: Arc::new(parking_lot::Mutex::new(None)),
             bridge_dtmf_digits: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            realtime_bridge: None,
             cmd_tx: Some(cmd_tx.clone()),
             handle: sip_handle.clone(),
             session_registry_guard: None,
@@ -9419,6 +9424,9 @@ impl SipSession {
                 params,
                 auto_answer,
             } => {
+                // A new app replaces any active realtime bridge (one
+                // media-driving app per session).
+                self.teardown_realtime_bridge("app replaced");
                 // Command-path queue start: RWI `app.start` / outbound
                 // `on_answer: enqueue` carry the queue target in params
                 // (`{"queue": "skill-group:<id>" | "sip:…", "priority": n}`)
@@ -9450,13 +9458,24 @@ impl SipSession {
                 }
             }
 
-            CallCommand::StopApp { reason } => match self.app_runtime.stop_app(reason).await {
+            CallCommand::StopApp { reason } => {
+                self.teardown_realtime_bridge("app stopped");
+                match self.app_runtime.stop_app(reason).await {
                 Ok(()) => {
                     self.sync_rtp_timeout_pause();
                     CommandResult::success()
                 }
                 Err(e) => CommandResult::failure(e.to_string()),
+                }
             },
+
+            CallCommand::RealtimeStart { params } => Self::ok_or_failure(
+                self.handle_realtime_start(params).await,
+            ),
+
+            CallCommand::RealtimeStop { reason } => Self::ok_or_failure(
+                self.handle_realtime_stop(reason).await,
+            ),
 
             CallCommand::InjectAppEvent { event } => {
                 let event_value = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
@@ -9610,10 +9629,12 @@ impl SipSession {
             }
 
             CallCommand::QueryRecorderStatus { reply } => {
+                tracing::debug!(session_id = %self.id, "QueryRecorderStatus: handler entered");
                 let result = match self.bridge() {
                     Some(bridge) => bridge.recorder_status().await,
                     None => Err(anyhow!("Recording requires MediaBridge")),
                 };
+                tracing::debug!(session_id = %self.id, ok = ?result.as_ref().map(|s| s.active), "QueryRecorderStatus: handler done");
                 let command_result = match &result {
                     Ok(_) => CommandResult::success(),
                     Err(error) => CommandResult::failure(error.to_string()),
@@ -10578,6 +10599,9 @@ impl SipSession {
 
     pub(super) async fn handle_hangup(&mut self, cmd: &HangupCommand) -> CommandResult {
         self.meta.pending_transfer_outcome = None;
+        // Kill any realtime (AI voice) bridge — media tasks must not outlive
+        // the call.
+        self.teardown_realtime_bridge("call hangup");
         let cascade = &cmd.cascade;
 
         // Record the system hangup reason (e.g. RtpTimeout from the RTP

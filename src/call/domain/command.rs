@@ -338,6 +338,24 @@ pub enum CallCommand {
         supervisor_leg: LegId,
     },
 
+    /// Start a realtime (AI voice) WebSocket bridge on the caller leg.
+    ///
+    /// The session connects to the endpoint (upgrade headers carry the
+    /// credential — never the URL), taps the caller's decoded PCM via the
+    /// MediaBridge and injects endpoint audio back. Transcripts / function
+    /// calls / barge-in are surfaced as RWI `realtime_event`s. See
+    /// `crate::call::realtime`.
+    RealtimeStart {
+        /// Fully resolved connection parameters (preset merged).
+        params: crate::call::realtime::RealtimeParams,
+    },
+
+    /// Stop the active realtime bridge (app exit / replacement).
+    RealtimeStop {
+        /// Why the bridge is stopping (trace + event payload).
+        reason: Option<String>,
+    },
+
     /// Start an application (IVR, Voicemail, etc.)
     StartApp {
         /// Application name

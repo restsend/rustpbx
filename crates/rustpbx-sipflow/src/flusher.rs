@@ -384,7 +384,9 @@ async fn open_db_with_pragmas(db_path: &PathBuf) -> SqliteConnection {
     ] {
         let start = Instant::now();
         match sqlx::query(pragma).execute(&mut conn).await {
-            Ok(r) => sqlite_metrics::record_statement("pragma", 0, r.rows_affected(), start.elapsed()),
+            Ok(r) => {
+                sqlite_metrics::record_statement("pragma", 0, r.rows_affected(), start.elapsed())
+            }
             Err(e) => {
                 sqlite_metrics::record_error("pragma", &e);
                 tracing::warn!("sipflow flusher: PRAGMA failed: {e}");

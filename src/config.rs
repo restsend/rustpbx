@@ -431,6 +431,11 @@ pub struct Config {
     pub cluster: Option<ClusterConfig>,
     #[serde(default)]
     pub outbound: Option<OutboundConfig>,
+    /// Realtime (AI voice) endpoint presets — `[[realtime]]`. Referenced by
+    /// name from the `realtime` call app; credentials never leave this
+    /// section (see `RealtimePreset`).
+    #[serde(default)]
+    pub realtime: Option<Vec<RealtimePreset>>,
     /// Graceful shutdown (drain) tuning — see `GracefulShutdownConfig`.
     #[serde(default)]
     pub graceful_shutdown: Option<GracefulShutdownConfig>,
@@ -1641,6 +1646,46 @@ fn default_outbound_webhook_timeout() -> u64 {
     5
 }
 
+/// One configured realtime (AI voice) endpoint — `[[realtime]]`.
+///
+/// Presets let dialplans / app params reference an endpoint by `name`
+/// without ever carrying the credential: the `api_key` lives here (or in
+/// the `OPENAI_API_KEY` / `REALTIME_API_KEY` env fallback) and travels only
+/// in the WebSocket upgrade headers, never in URLs, logs or CDRs.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RealtimePreset {
+    /// Preset name referenced by app params (`{"preset": "support-bot"}`).
+    pub name: String,
+    /// WebSocket endpoint (`ws://` / `wss://`).
+    pub url: String,
+    /// Wire protocol: `openai` (default) or `pcm` (raw PCM16 + DTMF JSON,
+    /// same format as `voip_bridge:`).
+    #[serde(default)]
+    pub protocol: Option<String>,
+    /// Credential for the upgrade `Authorization` header. Config/env only —
+    /// never settable from app params.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Provider model id (OpenAI: `?model=` query).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Provider voice id (OpenAI `session.update`).
+    #[serde(default)]
+    pub voice: Option<String>,
+    /// System prompt (OpenAI `session.update` instructions).
+    #[serde(default)]
+    pub instructions: Option<String>,
+    /// WebSocket-side PCM sample rate in Hz (openai default 24000, pcm 8000).
+    #[serde(default)]
+    pub sample_rate: Option<u32>,
+    /// WebSocket connect timeout in milliseconds.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// Hang the call up when the realtime WebSocket closes (default true).
+    #[serde(default)]
+    pub hangup_on_disconnect: Option<bool>,
+}
+
 impl AmiConfig {
     pub fn is_allowed(&self, addr: &str) -> bool {
         if let Some(allows) = &self.allows {
@@ -1970,6 +2015,7 @@ impl Default for Config {
             rwi_webhook: None,
             cluster: None,
             outbound: None,
+            realtime: None,
             max_audio_download_bytes: default_max_audio_download_bytes(),
         }
     }

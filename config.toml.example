@@ -601,3 +601,28 @@ subdirs = "daily"  # "none" | "daily" | "hourly"
 # [licenses.keys]
 # enterprise = "LICENSE-KEY-XXXX-XXXX-XXXX"
 # basic      = "LICENSE-KEY-YYYY-YYYY-YYYY"
+
+# ── Realtime (AI voice) endpoint presets ──────────────────────────────────────
+# Referenced from the `realtime` call app by name: app params carry
+# {"preset": "<name>"} and NEVER the credential. The api_key travels only in
+# the WebSocket upgrade headers (Authorization: Bearer), never in URLs, logs
+# or CDRs. Env fallbacks: OPENAI_API_KEY / REALTIME_API_KEY.
+#
+# [[realtime]]
+# name = "support-bot"
+# url = "wss://api.openai.com/v1/realtime"
+# protocol = "openai"                  # "openai" (default) or "pcm" (raw PCM16 + DTMF JSON, same wire format as voip_bridge:)
+# api_key = "sk-..."
+# model = "gpt-4o-realtime-preview"
+# voice = "alloy"
+# instructions = "You are a phone support agent. Keep replies short."
+# sample_rate = 24000                  # openai default 24000, pcm default 8000
+# timeout_ms = 5000                    # WS connect timeout
+# hangup_on_disconnect = true          # endpoint close hangs the call up
+#
+# Self-hosted realtime server (same wire format as the voip_bridge: transfer):
+# [[realtime]]
+# name = "local-bot"
+# url = "ws://127.0.0.1:9100"
+# protocol = "pcm"
+# sample_rate = 8000

@@ -142,6 +142,28 @@ impl CallController {
         Ok(())
     }
 
+    /// Start a realtime (AI voice) WebSocket bridge on the caller leg.
+    ///
+    /// The session connects to the endpoint (credentials ride the upgrade
+    /// headers), taps caller audio and plays endpoint audio back. Transcripts
+    /// / function calls / barge-in surface as RWI `realtime_event`s.
+    /// Fire-and-forget like `answer` — lifecycle ends via `stop_realtime`
+    /// (app exit) or an endpoint disconnect.
+    pub fn start_realtime(
+        &self,
+        params: crate::call::realtime::RealtimeParams,
+    ) -> anyhow::Result<()> {
+        self.session
+            .send_command(CallCommand::RealtimeStart { params })
+    }
+
+    /// Stop the active realtime bridge (clean app exit — no hangup).
+    pub fn stop_realtime(&self) -> anyhow::Result<()> {
+        self.session.send_command(CallCommand::RealtimeStop {
+            reason: None,
+        })
+    }
+
     /// Append an event to the session's call trace timeline.
     ///
     /// Allows call applications (voicemail, IVR, ...) to contribute entries

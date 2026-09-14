@@ -23,6 +23,7 @@ markers = [
     "media: RWI media.play/media.stop and comfort-noise tests",
     "trunk_ringback: per-trunk ringback/busy/reject/offline/notfound tone tests",
     "reinvite: mid-call re-INVITE hold/resume renegotiation tests",
+    "realtime: realtime (AI voice) WebSocket bridge app tests",
     "slow: tests taking >30s",
 ]
 log_cli = true

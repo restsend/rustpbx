@@ -30,6 +30,7 @@ pub mod cps_limiter;
 pub mod domain;
 pub mod policy;
 pub mod queue_config;
+pub mod realtime;
 pub mod runtime;
 pub mod session_id;
 pub mod sip;

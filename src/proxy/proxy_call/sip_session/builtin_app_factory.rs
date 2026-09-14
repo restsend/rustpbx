@@ -112,6 +112,19 @@ impl BuiltinAppFactory {
             }
         }
         match app_name {
+            "realtime" => {
+                // Realtime (AI voice) bridge — presets resolve from
+                // [[realtime]] config; the api_key never rides app params.
+                let app = crate::call::app::realtime::RealtimeApp::from_params(
+                    params.as_ref(),
+                    context.config.realtime.as_deref(),
+                )
+                .map_err(|e| {
+                    *diagnostic = Some(format!("realtime app: {e}"));
+                })
+                .ok()?;
+                Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
+            }
             "ivr" => {
                 // First check if params has inline step mode config (legacy/debug routes)
                 let mode = params

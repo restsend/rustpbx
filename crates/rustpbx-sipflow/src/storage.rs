@@ -11,10 +11,10 @@ use chrono::{DateTime, Datelike, Local, Timelike};
 use futures::TryStreamExt;
 use sqlx::SqliteConnection;
 use std::io::{Read, SeekFrom, Write};
-use std::time::Instant;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -1769,9 +1769,10 @@ mod tests {
 
         let db_path = dir.path().join("sipflow.db");
         let raw_path = dir.path().join("data.raw");
-        let mut conn = <SqliteConnection as sqlx::Connection>::connect(
-            &format!("sqlite:{}", db_path.display()),
-        )
+        let mut conn = <SqliteConnection as sqlx::Connection>::connect(&format!(
+            "sqlite:{}",
+            db_path.display()
+        ))
         .await
         .expect("open sipflow.db");
         let rows = sqlx::query_as::<_, (i32, i64, i64, i64)>(
