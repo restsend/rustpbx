@@ -1459,6 +1459,13 @@ impl SipSession {
             let mut uri = registered_aor.clone();
             if let Some(home_proxy) = target.home_proxy.as_ref() {
                 uri.host_with_port = home_proxy.addr.clone();
+                // The cluster hop uses the home proxy's transport, not the
+                // endpoint transport carried by the registered AoR.
+                uri.params
+                    .retain(|param| !matches!(param, rsipstack::sip::Param::Transport(_)));
+                if let Some(transport) = home_proxy.r#type {
+                    uri.params.push(rsipstack::sip::Param::Transport(transport));
+                }
             }
             return uri;
         }
