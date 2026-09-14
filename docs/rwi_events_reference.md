@@ -1403,7 +1403,7 @@ SIP PUBLISH  presence 状态变化（每个本地 PUBLISH 触发）。
 
 | 事件类型 | 分发 | call_id | 上下文 |
 |----------|------|---------|--------|
-| `call_created` | owner | ✅ | 自有字段（入呼 INVITE 与外呼 originate） |
+| `call_created` | 入呼 INVITE 按 context fan-out；外呼 originate 发给 owner | ✅ | 自有字段；入呼 context 为 `default`，通过 `session.attach_call` 获取所有权 |
 | `call_ringing` | owner | ✅ | +ctx +`early_media`（每条 provisional 一条事件；涉及坐席时 +ctx 含 agent_id） |
 | `call_answered` | owner | ✅ | +ctx（涉及坐席时含 agent_id） |
 | `call_held` | owner | ✅ | +ctx（涉及坐席时含 agent_id） |

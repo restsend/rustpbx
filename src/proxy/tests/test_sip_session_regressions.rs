@@ -391,6 +391,72 @@ impl AppRuntime for NameCapturingRuntime {
     }
 }
 
+#[tokio::test]
+async fn incoming_call_created_reaches_context_subscribers_before_attach() {
+    use crate::rwi::{RwiGateway, RwiIdentity};
+
+    let gateway = Arc::new(parking_lot::RwLock::new(RwiGateway::new()));
+    let mut subscribers = Vec::new();
+    let mut other_context;
+    {
+        let mut gw = gateway.write();
+        for context in ["default", "default", "other"] {
+            let sid = gw.create_session(RwiIdentity {
+                token: "test".into(),
+                scopes: vec!["call.control".into()],
+            }).read().id.clone();
+            let (tx, rx) = mpsc::unbounded_channel();
+            gw.set_session_event_sender(&sid, tx);
+            gw.subscribe(&sid, vec![context.into()], None);
+            subscribers.push(rx);
+        }
+        other_context = subscribers.pop().unwrap();
+    }
+    let (server, _) =
+        create_test_server_with_rwi_gateway(ProxyConfig::default(), gateway.clone()).await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None,
+    );
+    let (mut tx, _transport) = create_transaction(request).await;
+    let context = CallContext {
+        session_id: "incoming-fanout".into(),
+        dialplan: Arc::new(build_dialplan_with_mode(MediaProxyMode::None)),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".into(),
+        original_callee: "sip:ivr@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let cancel = CancellationToken::new();
+    let _guard = cancel.clone().drop_guard();
+    // Exercise real incoming-session creation, without claiming any owner or
+    // injecting a synthetic event directly into the gateway.
+    let serving_cancel = cancel.clone();
+    let serving = tokio::spawn(async move {
+        let _transport = _transport;
+        SipSession::serve(server, context, &mut tx, serving_cancel, None).await
+    });
+    for rx in &mut subscribers {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let event = rx.recv().await.expect("subscriber channel open");
+                if event["event_type"] == "call_created" {
+                    break event;
+                }
+            }
+        }).await.expect("incoming event must reach subscribers before attach");
+        assert_eq!(event["call_id"], "incoming-fanout");
+        assert_eq!(event["context"], "default");
+        assert_eq!(event["caller"], "sip:alice@rustpbx.com");
+    }
+    assert!(other_context.try_recv().is_err(), "other contexts must not receive the event");
+    cancel.cancel();
+    serving.abort();
+    let _ = serving.await;
+}
+
 async fn build_session(dialplan: Dialplan) -> SipSession {
     let (server, _) = create_test_server().await;
     build_session_on_server(server, dialplan).await

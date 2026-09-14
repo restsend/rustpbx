@@ -1309,7 +1309,9 @@ impl SipSession {
             let gw = gw.clone();
             crate::utils::spawn(async move {
                 let g = gw.read();
-                g.send_to_owner(&ev);
+                // Incoming calls have no RWI owner yet. Notify subscribers so
+                // a client can discover the call and explicitly attach to it.
+                g.fan_out(&ev.context, &ev);
             });
         }
 
