@@ -900,7 +900,15 @@ impl QueueApp {
             .map(|a| a.agent_id.clone())
             .or_else(|| extract_sip_username(uri))?;
         let agent = registry.get_agent(&agent_id).await?;
-        if agent.has_capacity() {
+        // Schedulable = capacity AND actually Idle. The queue's sequential
+        // target list is a snapshot resolved at dispatch start; an agent that
+        // moved to Wrapup (no-answer cooldown / just finished), Away, Dnd or
+        // Offline since then must NOT be re-dialled from the stale list —
+        // presence changed, the resolve-time Idle filter no longer holds.
+        // (Ringing reserved for OUR call = our own in-flight reservation.)
+        if agent.has_capacity()
+            && matches!(agent.presence, PresenceState::Idle)
+        {
             return Some(true);
         }
         if matches!(
