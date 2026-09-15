@@ -463,11 +463,14 @@ impl ProxyModule for AuthModule {
                         .await
                     {
                         Ok(Some(_)) => {}
+                        Ok(Some(_)) => {}
                         _ => {
                             info!(
                                 from = %from_uri,
                                 %source,
-                                "User not found, don't send authentication challenge"
+                                "INVITE from unknown user silently dropped (ensure_user=true): \
+                                 caller will time out with no response — add the user to \
+                                 proxy.user_backends or disable ensure_user to accept guest calls"
                             );
                             cookie.mark_as_spam(SpamResult::Spam);
                             return Ok(ProxyAction::Abort);
