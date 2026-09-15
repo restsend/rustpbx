@@ -687,6 +687,13 @@ RWI supports multiple clients connecting simultaneously. Each connection is inde
 
 ### 8.2 Call Dispatch Flow
 
+Current implementation: incoming SIP calls emit `call_created` to clients
+subscribed to the `default` context. Receive the event, then send
+`session.attach_call` with its `call_id` and `mode: "control"` before controlling
+the call. Subscription does not claim ownership or hold the call; the configured
+dialplan continues to run. The `RwiApp` / first-answer-claims flow below describes
+the original design, not the current implementation.
+
 ```
 1. SIP INVITE → RustPBX proxy
 2. Dialplan routing resolves: app=rwi, context="ivr_bot"

@@ -1314,7 +1314,9 @@ impl SipSession {
             let gw = gw.clone();
             crate::utils::spawn(async move {
                 let g = gw.read();
-                g.send_to_owner(&ev);
+                // Incoming calls have no RWI owner yet. Notify subscribers so
+                // a client can discover the call and explicitly attach to it.
+                g.fan_out(&ev.context, &ev);
             });
         }
 
@@ -1457,6 +1459,13 @@ impl SipSession {
             let mut uri = registered_aor.clone();
             if let Some(home_proxy) = target.home_proxy.as_ref() {
                 uri.host_with_port = home_proxy.addr.clone();
+                // The cluster hop uses the home proxy's transport, not the
+                // endpoint transport carried by the registered AoR.
+                uri.params
+                    .retain(|param| !matches!(param, rsipstack::sip::Param::Transport(_)));
+                if let Some(transport) = home_proxy.r#type {
+                    uri.params.push(rsipstack::sip::Param::Transport(transport));
+                }
             }
             return uri;
         }
@@ -6977,15 +6986,11 @@ impl SipSession {
                 }
             });
 
-        // Fire session lifecycle hooks first (the CC addon resolves + publishes
-        // the agent attribution), then emit the core `call_answered` —
-        // enriched with the agent context. Gated to sessions without a
-        // running app: queue/IVR calls answer the caller leg under the app
-        // and the agent-side `call_answered` fires at LegConnected instead.
-        // The one-shot latch keeps the two paths mutually exclusive (an
-        // app-startup race can reach here after the queue app already
-        // answered).
-        if !self.server.session_hooks.is_empty() {
+        // A caller-only answer (queue/IVR hold media) is not a two-leg
+        // connection. Dynamic agent legs fire this hook at LegConnected.
+        // Check the connected callee rather than app runtime state, which
+        // can race with app startup and says nothing about agent answer.
+        if self.meta.connected_callee.is_some() && !self.server.session_hooks.is_empty() {
             let ctx = self.session_hook_ctx();
             for hook in self.server.session_hooks.iter() {
                 hook.on_call_connected(&ctx).await;

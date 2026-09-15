@@ -391,6 +391,72 @@ impl AppRuntime for NameCapturingRuntime {
     }
 }
 
+#[tokio::test]
+async fn incoming_call_created_reaches_context_subscribers_before_attach() {
+    use crate::rwi::{RwiGateway, RwiIdentity};
+
+    let gateway = Arc::new(parking_lot::RwLock::new(RwiGateway::new()));
+    let mut subscribers = Vec::new();
+    let mut other_context;
+    {
+        let mut gw = gateway.write();
+        for context in ["default", "default", "other"] {
+            let sid = gw.create_session(RwiIdentity {
+                token: "test".into(),
+                scopes: vec!["call.control".into()],
+            }).read().id.clone();
+            let (tx, rx) = mpsc::unbounded_channel();
+            gw.set_session_event_sender(&sid, tx);
+            gw.subscribe(&sid, vec![context.into()], None);
+            subscribers.push(rx);
+        }
+        other_context = subscribers.pop().unwrap();
+    }
+    let (server, _) =
+        create_test_server_with_rwi_gateway(ProxyConfig::default(), gateway.clone()).await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None,
+    );
+    let (mut tx, _transport) = create_transaction(request).await;
+    let context = CallContext {
+        session_id: "incoming-fanout".into(),
+        dialplan: Arc::new(build_dialplan_with_mode(MediaProxyMode::None)),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".into(),
+        original_callee: "sip:ivr@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let cancel = CancellationToken::new();
+    let _guard = cancel.clone().drop_guard();
+    // Exercise real incoming-session creation, without claiming any owner or
+    // injecting a synthetic event directly into the gateway.
+    let serving_cancel = cancel.clone();
+    let serving = tokio::spawn(async move {
+        let _transport = _transport;
+        SipSession::serve(server, context, &mut tx, serving_cancel, None).await
+    });
+    for rx in &mut subscribers {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let event = rx.recv().await.expect("subscriber channel open");
+                if event["event_type"] == "call_created" {
+                    break event;
+                }
+            }
+        }).await.expect("incoming event must reach subscribers before attach");
+        assert_eq!(event["call_id"], "incoming-fanout");
+        assert_eq!(event["context"], "default");
+        assert_eq!(event["caller"], "sip:alice@rustpbx.com");
+    }
+    assert!(other_context.try_recv().is_err(), "other contexts must not receive the event");
+    cancel.cancel();
+    serving.abort();
+    let _ = serving.await;
+}
+
 async fn build_session(dialplan: Dialplan) -> SipSession {
     let (server, _) = create_test_server().await;
     build_session_on_server(server, dialplan).await
@@ -1402,6 +1468,25 @@ async fn test_queue_transfer_return_to_ivr_starts_queue_app_and_sets_meta() {
 }
 
 // ─── accept_call connected_callee regression tests ───────────────────────────
+
+#[tokio::test]
+async fn test_accept_call_fires_connected_hook_only_for_callee_answer() {
+    for application in [None, Some("queue"), Some("ivr")] {
+        let mut dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+        if let Some(app) = application {
+            dialplan = dialplan.with_application(app.to_string(), None, true);
+        }
+        let (mut server, _) = create_test_server().await;
+        let (hook, _, _, connected) = RingingRecordingHook::new();
+        Arc::get_mut(&mut server).unwrap().session_hooks = Arc::new(vec![Arc::new(hook)]);
+        let mut session = build_session_on_server(server, dialplan).await;
+        session.accept_call(None, None).await.unwrap();
+        session.accept_call(None, None).await.unwrap();
+        assert_eq!(connected.load(Ordering::SeqCst), 0, "caller-only answer: {application:?}");
+        session.accept_call(Some("sip:agent@rustpbx.com".into()), None).await.unwrap();
+        assert_eq!(connected.load(Ordering::SeqCst), 1, "callee answer: {application:?}");
+    }
+}
 
 /// accept_call must set connected_callee for a plain P2P (Targets, no bridge) call.
 ///
@@ -2557,7 +2642,10 @@ async fn queue_agent_connect_activates_media_bridge() {
         queue_name: "support".to_string(),
         ..Default::default()
     });
-    let mut session = build_session(dialplan).await;
+    let (mut server, _) = create_test_server().await;
+    let (hook, _, _, connected) = RingingRecordingHook::new();
+    Arc::get_mut(&mut server).unwrap().session_hooks = Arc::new(vec![Arc::new(hook)]);
+    let mut session = build_session_on_server(server, dialplan).await;
 
     // Caller side: a valid PCMU offer as the inbound INVITE body.
     let caller_offer = crate::proxy::tests::test_helpers::pcmu_sdp("127.0.0.1", 10001);
@@ -2602,6 +2690,8 @@ async fn queue_agent_connect_activates_media_bridge() {
             None,
         )
         .await;
+
+    assert_eq!(connected.load(Ordering::SeqCst), 1, "agent answer must fire connected hook");
 
     // The media bridge must now be active (both legs accepted + relay armed).
     let mb = session.media.bridge.as_ref().expect("media bridge present");

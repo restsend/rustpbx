@@ -1487,7 +1487,7 @@ Dispatch: broadcast
 
 | Event Type | Dispatch | call_id | Context |
 |------------|----------|---------|---------|
-| `call_created` | owner | yes | own fields (inbound INVITE & originate) |
+| `call_created` | context fan-out for inbound INVITE; owner for originate | yes | own fields; inbound context is `default`; use `session.attach_call` to claim ownership |
 | `call_ringing` | owner | yes | +ctx (+`early_media`; one event per provisional response; carries agent_id when an agent is involved — there is no separate `call_early_media` event) |
 | `call_answered` | owner | yes | +ctx |
 | `call_bridged` | owner | leg_a | — |

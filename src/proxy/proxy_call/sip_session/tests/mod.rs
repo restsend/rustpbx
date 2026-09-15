@@ -618,13 +618,15 @@ fn test_callee_supports_webrtc_fallbacks() {
 #[test]
 fn test_resolve_outbound_callee_uri_prefers_registered_aor_via_home_proxy() {
     let contact_uri =
-        rsipstack::sip::Uri::try_from("sip:lp@172.25.52.29:63647;transport=UDP").unwrap();
-    let registered_aor = rsipstack::sip::Uri::try_from("sip:lp@rustpbx.com").unwrap();
+        rsipstack::sip::Uri::try_from("sip:lp@172.25.52.29:63647;transport=WSS").unwrap();
+    let registered_aor =
+        rsipstack::sip::Uri::try_from("sip:lp@rustpbx.com:443;transport=WSS").unwrap();
     let home_proxy = SipAddr {
         r#type: Some(rsipstack::sip::Transport::Udp),
         addr: rsipstack::sip::HostWithPort::try_from("10.0.0.2:5070").unwrap(),
     };
-    let expected = rsipstack::sip::Uri::try_from("sip:lp@10.0.0.2:5070").unwrap();
+    let expected =
+        rsipstack::sip::Uri::try_from("sip:lp@10.0.0.2:5070;transport=UDP").unwrap();
 
     let target = Location {
         aor: contact_uri,
