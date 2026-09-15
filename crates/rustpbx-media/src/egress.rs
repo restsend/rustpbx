@@ -401,7 +401,16 @@ impl EgressTask {
                         // PCM sample rate (samplerate), NOT the RTP clock_rate —
                         // G.722 has clock_rate 8000 but samplerate 16000; using
                         // clock_rate skips the resampler and doubles the pitch.
-                        if let EgressSource::TranscodePeer { src_sample_rate, .. } = &s {
+                        if let EgressSource::TranscodePeer { peer, src_sample_rate, .. } = &s {
+                            // IVR/hold can leave incoming audio queued without a
+                            // consumer. Start this live route at current audio,
+                            // not at the oldest frame retained by the receiver.
+                            // Drain here, between ticks, before this task starts
+                            // consuming the new source; never wait for input.
+                            std::future::poll_fn(|cx| {
+                                while let std::task::Poll::Ready(Ok(_)) = peer.recv().as_mut().poll(cx) {}
+                                std::task::Poll::Ready(())
+                            }).await;
                             let dst_sample_rate = self.codec.codec.samplerate();
                             if *src_sample_rate != dst_sample_rate {
                                 self.resampler = Some(
@@ -1385,6 +1394,54 @@ mod tests {
             "PCMU silence must encode to non-empty bytes"
         );
         assert_eq!(task.sequence_number, 1);
+    }
+
+    #[tokio::test]
+    async fn starting_transcode_discards_ivr_backlog_and_forwards_live_audio() {
+        let (peer_sender, peer_track, _) = sample_track(MediaKind::Audio, 64);
+        let (sender, output_track, _) = sample_track(MediaKind::Audio, 64);
+        let mut opus_encoder = create_egress_encoder(CodecType::Opus);
+        let old_audio = opus_encoder.encode(&vec![0i16; 960]);
+        for i in 0..64 {
+            peer_sender.try_send(MediaSample::Audio(AudioFrame {
+                data: Bytes::from(old_audio.clone()),
+                payload_type: Some(111),
+                rtp_timestamp: i * 960,
+                clock_rate: 48_000,
+                ..Default::default()
+            })).unwrap();
+        }
+        let pipeline = EgressPipeline::start_with_gate(
+            sender, pcmu_codec(), EgressSource::Silence, Some(20),
+            Some(Arc::new(AtomicBool::new(true))),
+        );
+        pipeline.set_source(EgressSource::TranscodePeer {
+            peer: peer_track,
+            decoder: audio_codec::create_decoder(CodecType::Opus),
+            source_audio_payload_type: 111,
+            src_sample_rate: 48_000,
+            primed: false,
+        }).await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(100), output_track.recv()).await.is_err(),
+            "pre-connection audio must not be replayed to the newly connected peer");
+
+        let pcm: Vec<i16> = (0..960).map(|i| {
+            ((i as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 8000.0) as i16
+        }).collect();
+        peer_sender.try_send(MediaSample::Audio(AudioFrame {
+            data: Bytes::from(opus_encoder.encode(&pcm)),
+            payload_type: Some(111),
+            rtp_timestamp: 64 * 960,
+            clock_rate: 48_000,
+            ..Default::default()
+        })).unwrap();
+        let MediaSample::Audio(frame) = tokio::time::timeout(Duration::from_millis(500), output_track.recv())
+            .await.expect("new speech must be forwarded without the queued 1.28-second delay").unwrap()
+        else { panic!("expected audio"); };
+        assert_eq!(frame.payload_type, Some(0));
+        let pcm = audio_codec::create_decoder(CodecType::PCMU).decode(&frame.data);
+        assert!(pcm.iter().any(|s| s.unsigned_abs() > 100), "fresh speech must survive transcoding");
+        pipeline.cancel.cancel();
     }
 
     #[tokio::test]
