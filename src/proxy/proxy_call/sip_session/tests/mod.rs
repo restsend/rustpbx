@@ -6022,3 +6022,56 @@ async fn test_record_snapshot_carries_transferred_and_leg_timeline() {
     );
     assert_eq!(events[3].event_type, LegTimelineEventType::Removed);
 }
+
+
+#[tokio::test]
+async fn reinvite_hold_resume_restores_both_relay_directions() {
+    use crate::call::{DialDirection, Dialplan, MediaConfig};
+    use crate::config::MediaProxyMode;
+    use crate::media::leg::{LegConfig, LegInner};
+    use crate::proxy::tests::common::create_test_request;
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx;
+
+    for side in [DialogSide::Caller, DialogSide::Callee] {
+        let request = create_test_request(rsipstack::sip::Method::Invite, "caller", None, "rustpbx.com", None);
+        let dialplan = Dialplan::new("hold-resume".into(), request, DialDirection::Inbound)
+            .with_media(MediaConfig::new().with_proxy_mode(MediaProxyMode::All));
+        let (mut session, _handle, _commands) = build_session_with_cmd_rx(dialplan).await;
+        let _guard = session.cancel_token.clone().drop_guard();
+        let mut remotes = Vec::new();
+        for name in ["caller", "callee"] {
+            let local = LegInner::new(name, &LegConfig::rtp_pcmu(), None).unwrap();
+            let remote = LegInner::new(format!("remote-{name}"), &LegConfig::rtp_pcmu(), None).unwrap();
+            let offer = remote.create_offer().await.unwrap();
+            let answer = local.apply_sdp(&offer, rustrtc::SdpType::Offer).await.unwrap();
+            remote.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
+            local.accept();
+            remote.accept();
+            session.legs.set_media_leg(&LegId::from(name), local);
+            session.update_leg_state(&LegId::from(name), LegState::Connected);
+            remotes.push(remote);
+        }
+        assert!(session.setup_bridge(LegId::from("caller"), LegId::from("callee")).await);
+        let remote = &remotes[if matches!(side, DialogSide::Caller) { 0 } else { 1 }];
+        // Exercise the same negotiation -> hold transition sequence as an
+        // incoming re-INVITE, twice to catch stale route state after resume.
+        for _ in 0..2 {
+            for direction in ["sendonly", "sendrecv"] {
+                let offer = remote.create_offer().await.unwrap();
+                let offer = rustrtc::modify_sdp_direction(&offer, direction);
+                let parsed = rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, &offer).unwrap();
+                let answer = session.build_local_dialog_answer(side, rsipstack::sip::Method::Invite, &offer).await.unwrap();
+                remote.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
+                session.apply_reinvite_hold_transition(side, &parsed, &[]).await;
+                let resumed = direction == "sendrecv";
+                assert_eq!(session.bridge().unwrap().is_bridged(), resumed);
+                if resumed {
+                    for name in ["caller", "callee"] {
+                        assert!(session.media_leg(&LegId::from(name)).unwrap().egress_is_relay(),
+                            "{side:?} resume must restore {name} relay, not merely mark the bridge active");
+                    }
+                }
+            }
+        }
+    }
+}

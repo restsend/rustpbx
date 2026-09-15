@@ -3203,6 +3203,15 @@ impl SipSession {
                             self.apply_reinvite_hold_transition(side, offer, &request.headers.0)
                                 .await;
                         }
+                        // Negotiation updates the peers; only the session decides
+                        // whether they should be connected. Refresh codec/video
+                        // routing after hold state has been applied, so a held
+                        // pair cannot be reconnected by an SDP update.
+                        if !self.bypasses_local_media()
+                            && self.bridge().is_some_and(|bridge| bridge.is_bridged())
+                        {
+                            self.update_media_path().await;
+                        }
                     }
                     if let Some(answer_sdp) = answer_sdp {
                         headers.push(rsipstack::sip::Header::ContentType(
@@ -6755,39 +6764,6 @@ impl SipSession {
             .ok_or_else(|| anyhow!("PeerConnection has no local description after re-INVITE"))
     }
 
-    async fn update_anchored_forwarding_from_sdp(
-        &mut self,
-        side: DialogSide,
-        changed_leg_sdp: &str,
-    ) -> Result<()> {
-        if self.media_profile.path != MediaPathMode::Anchored {
-            return Ok(());
-        }
-
-        // Re-read both legs' negotiated profiles and re-select fast-path vs
-        // transcoding. Adding video changes the bridge key from no video to a
-        // negotiated codec, so `bridge()` installs the new video routes while
-        // same-profile direction updates keep the existing bidirectional route.
-        if self.media.bridge.is_some() {
-            if let Some(mb) = self.bridge_mut() {
-                if let Err(e) = mb.bridge().await {
-                    warn!(session_id = %self.context.session_id, error = %e, "re-bridge after SDP change failed");
-                }
-            }
-            return Ok(());
-        }
-
-        // Legacy anchored (no MediaBridge): the ForwardingTrack path was
-        // removed; nothing to update here.
-        debug!(session_id = %self.id,
-            session_id = %self.context.session_id,
-            side = ?side,
-            _changed_leg_sdp = changed_leg_sdp,
-            "Anchored forwarding update is a no-op without MediaBridge"
-        );
-        Ok(())
-    }
-
     /// Returns `true` when the connection C-line value represents a "zero" address,
     /// commonly used to signal media hold per RFC 4317.
     fn is_zero_connection(c: &str) -> bool {
@@ -7016,9 +6992,9 @@ impl SipSession {
         // Align answer direction with offer per RFC 3264 §5.1
         answer_sdp = Self::align_answer_direction_with_offer(offer_sdp, &answer_sdp);
 
-        // Refresh the bridge leg's negotiated profile from the re-INVITE answer
-        // so `update_anchored_forwarding_from_sdp` → `mb.bridge()` re-evaluates
-        // with the renegotiated codec instead of the stale call-setup profile.
+        // Refresh the peer's negotiated profile from the re-INVITE answer.
+        // The session updates routing after applying the hold transition,
+        // using the renegotiated codec instead of the call-setup profile.
         // Otherwise relay rules / RTCP relay generation can stay wrong (and
         // re-accumulate) after a mid-call codec change.
         if self.media.bridge.is_some() {
@@ -7048,9 +7024,6 @@ impl SipSession {
                 self.media.callee_answer_sdp = Some(answer_sdp.clone());
             }
         }
-        self.update_anchored_forwarding_from_sdp(side, &answer_sdp)
-            .await?;
-
         self.update_snapshot_cache();
         Ok(answer_sdp)
     }
@@ -7144,7 +7117,8 @@ impl SipSession {
         info!(session_id = %self.id, %leg_key, "Propagating unhold");
         self.update_leg_state(&LegId::from(leg_key), LegState::Connected);
         if let Some(peer) = self.media_leg(&LegId::from(leg_key)) {
-            peer.stop_playback().await?;
+            // Restoring the route replaces hold playback with live media.
+            // A separate stop could silence a relay that is already active.
             peer.resume_rtp_timeout();
             self.update_media_path().await;
         } else {
