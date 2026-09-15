@@ -227,6 +227,7 @@ impl Drop for TestPeer {
 /// B2BUA test harness: two legs in a MediaBridge, each faced by a TestPeer.
 struct TestMediaHarness {
     mb: MediaBridge,
+    recording: rustpbx_media::media_recorder::RecordingSession,
     test_a: TestPeer,
     test_b: TestPeer,
     /// Whether send_and_receive / send_b_to_a_receive may periodically re-run
@@ -336,8 +337,9 @@ impl TestMediaHarness {
         let codec_a = MediaNegotiator::codec_info_for_type(codec_a);
         let codec_b = MediaNegotiator::codec_info_for_type(codec_b);
         let mut mb = MediaBridge::new("rtp-test");
+        let mut recording = rustpbx_media::media_recorder::RecordingSession::default();
         let recorder_sender = if recorder.is_some() {
-            Some(mb.setup_recorder_task().unwrap())
+            Some(recording.setup_recorder_task().unwrap())
         } else {
             None
         };
@@ -386,11 +388,12 @@ impl TestMediaHarness {
         mb.replace_leg(LegSide::A, leg_a.clone()).await;
         mb.replace_leg(LegSide::B, leg_b.clone()).await;
         if let Some(recorder) = recorder {
-            mb.set_recorder(recorder, None).await.unwrap();
+            recording.set_recorder(recorder, None).await.unwrap();
         }
 
         Self {
             mb,
+            recording,
             test_a,
             test_b,
             auto_rebridge: true,
@@ -400,6 +403,7 @@ impl TestMediaHarness {
     /// Explicitly tear down the bridge (stops legs + PCs) before the test ends.
     fn close(&mut self) {
         self.mb.close();
+        self.recording = Default::default();
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if tokio::runtime::Handle::try_current().is_ok() {
                 self.test_a.pc.close();

@@ -15,6 +15,7 @@ pub struct MediaState {
     pub early_media_sent: bool,
     pub callee_answer_sdp: Option<String>,
     pub bridge: Option<MediaBridge>,
+    pub recording: crate::media::media_recorder::RecordingSession,
 }
 
 impl MediaState {
@@ -28,6 +29,7 @@ impl MediaState {
             early_media_sent: false,
             callee_answer_sdp: None,
             bridge: None,
+            recording: Default::default(),
         }
     }
 }

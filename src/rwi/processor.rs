@@ -1126,21 +1126,6 @@ impl RwiCommandProcessor {
                     }
                 };
 
-            // These peers are logical registry anchors. The first outbound
-            // SIP/RTP connection is owned by MediaBridge A below; no duplicate
-            // RtcTrack is attached to either peer.
-            let caller_media_builder = crate::media::MediaStreamBuilder::new()
-                .with_id(format!("{}-caller", call_id))
-                .with_cancel_token(cancel_token.clone());
-            let caller_peer: Arc<dyn crate::proxy::proxy_call::media_peer::MediaPeer> =
-                Arc::new(caller_media_builder.build());
-
-            let callee_media_builder = crate::media::MediaStreamBuilder::new()
-                .with_id(format!("{}-callee", call_id))
-                .with_cancel_token(cancel_token.clone());
-            let callee_peer: Arc<dyn crate::proxy::proxy_call::media_peer::MediaPeer> =
-                Arc::new(callee_media_builder.build());
-
             // Construct a UAC SipSession. The first answered outbound INVITE
             // becomes the caller/A dialog; the callee channel is reserved for
             // dialogs added later through call.leg_add.
@@ -1224,8 +1209,6 @@ impl RwiCommandProcessor {
                 cdr_sender.clone(),
                 context,
                 use_media_proxy,
-                caller_peer.clone(),
-                callee_peer.clone(),
             );
 
             // Build the real A leg first and send its exact local description
@@ -1412,15 +1395,7 @@ impl RwiCommandProcessor {
                                             if sdp.contains("v=0")
                                                 && caller_early_sdp.as_deref() != Some(sdp.as_str())
                                             {
-                                                let early_media = match session
-                                                    .media
-                                                    .bridge
-                                                    .as_ref()
-                                                    .and_then(|bridge| {
-                                                        bridge.leg(
-                                                            crate::media::media_bridge::LegSide::A,
-                                                        )
-                                                    })
+                                                let early_media = match session.media.bridge.as_ref().and_then(|bridge| bridge.leg(crate::media::media_bridge::LegSide::A))
                                                 {
                                                     Some(leg) => leg
                                                         .apply_sdp(
@@ -1536,7 +1511,7 @@ impl RwiCommandProcessor {
                                 pending_commands.push_back(command);
                             }
                             recording_result = SipSession::recv_recorder_finished(
-                                &mut session.media.bridge,
+                                &mut session.media.recording,
                             ), if originate_recording_started => {
                                 originate_recording_started = false;
                                 match recording_result {

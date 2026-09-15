@@ -17,16 +17,12 @@ pub(crate) mod dtmf;
 pub(crate) mod error_catalog;
 pub(crate) mod ivr_exec_hook;
 pub(crate) mod leg_registry;
-pub(crate) mod media_peer;
 pub(crate) mod media_state;
 pub(crate) mod reporter;
 pub mod session_hooks;
 pub(crate) mod session_timer;
 pub mod sip_session;
 pub(crate) mod state;
-
-#[cfg(test)]
-pub(crate) mod test_util;
 
 /// Build a [`CallContext`] shared by both the live session path and the
 /// early-failure (`report_failure`) path so the derived fields (session id,

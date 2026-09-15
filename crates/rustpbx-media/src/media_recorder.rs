@@ -1,6 +1,6 @@
 //! One call-scoped recording task for caller-facing RTP capture.
 //!
-//! The caller leg owns a lightweight [`RecorderSender`]. [`MediaBridge`]
+//! The caller leg owns a lightweight [`RecorderSender`]. [`RecordingSession`]
 //! owns the task control handle and installs one [`MediaRecorder`] backend at
 //! a time. File and Sipflow recording therefore share the same RTP queue and
 //! task lifecycle without exposing recorder mutation on the RTP hot path.
@@ -254,7 +254,7 @@ enum RecorderCommand {
     },
 }
 
-/// Control handle owned by [`crate::media_bridge::MediaBridge`].
+/// Control handle owned by [`RecordingSession`].
 pub(crate) struct RecorderHandle {
     tx: mpsc::UnboundedSender<RecorderCommand>,
 }
@@ -871,5 +871,102 @@ mod tests {
         assert_eq!(direction_to_leg(PacketDirection::Egress), Leg::B);
         assert_eq!(direction_to_leg_id(PacketDirection::Ingress), 0);
         assert_eq!(direction_to_leg_id(PacketDirection::Egress), 1);
+    }
+}
+
+/// Session-owned recording control, independent of a selected media pair.
+#[derive(Default)]
+pub struct RecordingSession {
+    recorder_handle: Option<RecorderHandle>,
+    recorder_finished_rx: Option<mpsc::UnboundedReceiver<RecordingCompletion>>,
+}
+
+impl RecordingSession {
+    pub fn setup_recorder_task(&mut self) -> Result<RecorderSender> {
+        if self.recorder_handle.is_some() {
+            return Err(anyhow!("recording task is already started"));
+        }
+        let (handle, sender, recorder_finished_rx) = RecorderHandle::new();
+        self.recorder_handle = Some(handle);
+        self.recorder_finished_rx = Some(recorder_finished_rx);
+        Ok(sender)
+    }
+
+    /// Start file recording from caller leg A. The task initializes the file
+    /// backend asynchronously before this resolves.
+    pub async fn start_recording(
+        &mut self,
+        caller_profile: NegotiatedLegProfile,
+        path: String,
+        channels: u16,
+        mono_caller_only: bool,
+        max_duration: Option<Duration>,
+    ) -> Result<()> {
+        let recorder = FileRecorder::new(path, caller_profile, channels, mono_caller_only);
+        self.set_recorder(Box::new(recorder), max_duration).await
+    }
+
+    /// Install and initialize the selected recorder implementation in the
+    /// capture task that was prepared before caller-leg construction.
+    pub async fn set_recorder(
+        &mut self,
+        recorder: Box<dyn MediaRecorder>,
+        max_duration: Option<Duration>,
+    ) -> Result<()> {
+        self.recorder_handle
+            .as_ref()
+            .ok_or_else(|| anyhow!("recording task is unavailable"))?
+            .set_recorder(recorder, max_duration)
+            .await
+    }
+
+    pub fn has_recorder_task(&self) -> bool {
+        self.recorder_handle.is_some()
+    }
+
+    /// Whether the recording task currently owns an initialized recorder
+    /// implementation.
+    pub async fn has_recorder(&self) -> bool {
+        self.recorder_status()
+            .await
+            .is_ok_and(|status| status.active)
+    }
+
+    pub async fn recorder_status(&self) -> Result<RecorderStatus> {
+        self.recorder_handle
+            .as_ref()
+            .ok_or_else(|| anyhow!("recording task is unavailable"))?
+            .status()
+            .await
+    }
+
+    pub fn pause_recording(&self) -> Result<()> {
+        self.recorder_handle
+            .as_ref()
+            .ok_or_else(|| anyhow!("recording task is unavailable"))?
+            .pause()
+    }
+
+    pub fn resume_recording(&self) -> Result<()> {
+        self.recorder_handle
+            .as_ref()
+            .ok_or_else(|| anyhow!("recording task is unavailable"))?
+            .resume()
+    }
+
+    /// Finalize only the current recorder. The call-scoped capture task stays
+    /// alive and can accept another recorder later.
+    pub async fn stop_recording(&mut self) -> RecordingCompletion {
+        self.recorder_handle
+            .as_ref()
+            .ok_or_else(|| anyhow!("recording task is unavailable"))?
+            .stop_recorder()
+            .await
+    }
+
+    /// Wait for a recorder completion reported independently of a control
+    /// command, such as max-duration expiry.
+    pub async fn recv_recorder_finished(&mut self) -> Option<RecordingCompletion> {
+        self.recorder_finished_rx.as_mut()?.recv().await
     }
 }

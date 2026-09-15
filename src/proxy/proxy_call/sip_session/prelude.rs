@@ -9,18 +9,16 @@ pub use crate::call::domain::{Leg, SessionState};
 pub use crate::call::runtime::BridgeConfig;
 pub use crate::call::runtime::{
     AppFactory, AppRuntime, AppRuntimeConfig, CommandResult, DefaultAppRuntime, ExecutionContext,
-    MediaCapabilityCheck, MediaPathDecision, SessionId,
+    MediaCapabilityCheck, SessionId,
 };
 pub use crate::call::sip::{ClientDialogGuard, ServerDialogGuard};
 pub use crate::call::{DialStrategy, Location};
 pub use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason, CallRecordSender};
 pub use crate::config::MediaProxyMode;
-pub use crate::media::RtpTrackBuilder;
-pub use crate::media::media_bridge::MediaBridge;
+pub use crate::media::media_bridge::{LegSide, MediaBridge};
 pub use crate::media::negotiate::MediaNegotiator;
 pub use crate::models::call_record::extract_sip_username;
 pub use crate::proxy::proxy_call::{
-    media_peer::MediaPeer,
     reporter::CallReporter,
     session_timer::{
         DEFAULT_SESSION_EXPIRES, HEADER_MIN_SE, HEADER_SESSION_EXPIRES, HEADER_SUPPORTED,

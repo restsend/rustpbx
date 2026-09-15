@@ -14,7 +14,6 @@ use crate::config::{MediaProxyMode, ProxyConfig};
 use crate::proxy::proxy_call::session_hooks::CallSessionContext;
 use crate::proxy::proxy_call::sip_session::SipSession;
 use crate::proxy::proxy_call::state::CallContext;
-use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
 use crate::proxy::routing::{
     RouteQueueConfig, RouteQueueFallbackConfig, RouteQueueStrategyConfig, RouteQueueTargetConfig,
 };
@@ -510,8 +509,7 @@ async fn build_session_on_server(
         metadata: None,
     };
 
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
+
     let use_media_proxy =
         SipSession::check_media_proxy(&context, &context.dialplan.media.proxy_mode);
     let (session, _handle, _cmd_rx) = SipSession::new(
@@ -521,8 +519,6 @@ async fn build_session_on_server(
         context,
         server_dialog,
         use_media_proxy,
-        caller_peer,
-        callee_peer,
     );
     session
 }
@@ -686,8 +682,7 @@ async fn test_connected_dynamic_leg_failure_returns_to_ivr_when_set() {
 
 #[tokio::test]
 async fn bridge_rtp_dtmf_reaches_return_app_once_without_stale_app_injection() {
-    use crate::media::leg::{LegConfig, LegInner};
-    use crate::media::media_bridge::LegSide;
+
     use rustrtc::peer_connection::RtpObserver;
 
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
@@ -706,15 +701,12 @@ async fn bridge_rtp_dtmf_reaches_return_app_once_without_stale_app_injection() {
         params: serde_json::json!({"file": "main-menu"}),
     });
 
-    let caller_leg = LegInner::new("caller", &LegConfig::rtp_pcmu(), None).unwrap();
+    session.prepare_originate_caller_leg(vec![
+        crate::media::negotiate::MediaNegotiator::codec_info_for_type(audio_codec::CodecType::PCMU),
+    ]).await.unwrap();
+    let caller_leg = session.legs.media_leg(&LegId::from("caller")).unwrap();
     caller_leg.ingress_tap().set_dtmf_payload_types(vec![101]);
-    session
-        .media
-        .bridge
-        .as_mut()
-        .expect("anchored media bridge")
-        .replace_leg(LegSide::A, caller_leg.clone())
-        .await;
+    assert!(session.media.bridge.is_none());
 
     let packet = rustrtc::rtp::RtpPacket::new(
         rustrtc::rtp::RtpHeader::new(101, 1, 160, 1234),
@@ -773,13 +765,13 @@ async fn recording_disabled_still_arms_capture_and_allows_on_demand_start() {
     setup_recording_test_media(&mut session).await;
 
     {
-        let bridge = session.media.bridge.as_ref().expect("media bridge");
+        let recording = &session.media.recording;
         assert!(
-            bridge.has_recorder_task(),
+            recording.has_recorder_task(),
             "capture sender/task must be armed even with recording disabled"
         );
         assert!(
-            !bridge.has_recorder().await,
+            !recording.has_recorder().await,
             "no recorder backend may be installed until recording starts"
         );
     }
@@ -802,18 +794,18 @@ async fn recording_disabled_still_arms_capture_and_allows_on_demand_start() {
         "on-demand start must succeed with recording disabled: {result:?}"
     );
     {
-        let bridge = session.media.bridge.as_ref().expect("media bridge");
+        let recording = &session.media.recording;
         assert!(
-            bridge.has_recorder().await,
+            recording.has_recorder().await,
             "recorder must be installed by the on-demand start"
         );
     }
-    if let Some(mut bridge) = session.media.bridge.take() {
-        bridge
+    {
+        let recording = &mut session.media.recording;
+        recording
             .stop_recording()
             .await
             .expect("stop on-demand recorder");
-        bridge.close();
     }
 }
 
@@ -837,21 +829,16 @@ async fn recording_enabled_manual_start_creates_idle_capture_task() {
     setup_recording_test_media(&mut session).await;
 
     assert!(
-        session
-            .media
-            .bridge
-            .as_ref()
-            .expect("media bridge")
-            .has_recorder_task(),
+        session.media.recording.has_recorder_task(),
         "enabled recording must prepare the capture sender/task"
     );
     assert!(
         !std::path::Path::new(&path).exists(),
         "auto_start=false must leave the recorder backend idle"
     );
-    if let Some(mut bridge) = session.media.bridge.take() {
-        bridge.stop_recording().await.expect("stop idle recorder");
-        bridge.close();
+    {
+        let recording = &mut session.media.recording;
+        recording.stop_recording().await.expect("stop idle recorder");
     }
 }
 
@@ -874,12 +861,7 @@ async fn file_recording_default_starts_at_media_setup() {
 
     setup_recording_test_media(&mut session).await;
     assert!(
-        session
-            .media
-            .bridge
-            .as_ref()
-            .expect("media bridge")
-            .has_recorder()
+        session.media.recording.has_recorder()
             .await,
         "caller media setup must install the recorder implementation"
     );
@@ -888,16 +870,16 @@ async fn file_recording_default_starts_at_media_setup() {
         std::path::Path::new(&path).exists(),
         "media timing must initialize the file recorder during caller media setup"
     );
-    if let Some(mut bridge) = session.media.bridge.take() {
+    {
+        let recording = &mut session.media.recording;
         assert!(
-            bridge
+            recording
                 .stop_recording()
                 .await
                 .expect("stop file recorder")
                 .is_some(),
             "active file recorder must return a finalized result"
         );
-        bridge.close();
     }
 }
 
@@ -928,12 +910,7 @@ async fn file_recording_answer_timing_waits_after_media_setup() {
         "answer timing must not install the recorder during caller media setup"
     );
     assert!(
-        !session
-            .media
-            .bridge
-            .as_ref()
-            .expect("media bridge")
-            .has_recorder()
+        !session.media.recording.has_recorder()
             .await,
         "the recording task must remain implementation-free until answer"
     );
@@ -943,12 +920,7 @@ async fn file_recording_answer_timing_waits_after_media_setup() {
         .await
         .expect("start recorder at final answer");
     assert!(
-        session
-            .media
-            .bridge
-            .as_ref()
-            .expect("media bridge")
-            .has_recorder()
+        session.media.recording.has_recorder()
             .await,
         "the recording task must report the final-answer implementation"
     );
@@ -956,9 +928,9 @@ async fn file_recording_answer_timing_waits_after_media_setup() {
         std::path::Path::new(&path).exists(),
         "answer timing must install the recorder at the final answer"
     );
-    if let Some(mut bridge) = session.media.bridge.take() {
-        bridge.stop_recording().await.expect("stop file recorder");
-        bridge.close();
+    {
+        let recording = &mut session.media.recording;
+        recording.stop_recording().await.expect("stop file recorder");
     }
 }
 
@@ -992,12 +964,7 @@ async fn sipflow_recording_default_starts_at_media_setup() {
         rustrtc::rtp::RtpHeader::new(0, 1, 160, 1234),
         vec![0xff; 160],
     );
-    session
-        .media
-        .bridge
-        .as_ref()
-        .expect("media bridge")
-        .leg(crate::media::media_bridge::LegSide::A)
+    session.legs.media_leg(&LegId::from("caller"))
         .expect("caller leg")
         .ingress_tap()
         .on_ingress(&packet, "127.0.0.1:40000".parse().unwrap());
@@ -1010,12 +977,12 @@ async fn sipflow_recording_default_starts_at_media_setup() {
     .await
     .expect("SipFlow recorder did not receive RTP after media setup");
 
-    if let Some(mut bridge) = session.media.bridge.take() {
-        bridge
+    {
+        let recording = &mut session.media.recording;
+        recording
             .stop_recording()
             .await
             .expect("stop SipFlow recorder");
-        bridge.close();
     }
 }
 
@@ -1045,17 +1012,16 @@ async fn sipflow_recording_auto_start_false_keeps_backend_idle() {
     let mut session = build_session_on_server(server, dialplan).await;
 
     setup_recording_test_media(&mut session).await;
-    let bridge = session.media.bridge.as_ref().expect("media bridge");
+    let recording = &session.media.recording;
     assert!(
-        bridge.has_recorder_task(),
+        recording.has_recorder_task(),
         "enabled manual recording must prepare the capture sender/task"
     );
     let packet = rustrtc::rtp::RtpPacket::new(
         rustrtc::rtp::RtpHeader::new(0, 1, 160, 1234),
         vec![0xff; 160],
     );
-    bridge
-        .leg(crate::media::media_bridge::LegSide::A)
+    session.legs.media_leg(&LegId::from("caller"))
         .expect("caller leg")
         .ingress_tap()
         .on_ingress(&packet, "127.0.0.1:40000".parse().unwrap());
@@ -1066,9 +1032,9 @@ async fn sipflow_recording_auto_start_false_keeps_backend_idle() {
         "auto_start=false must not activate the SipFlow backend"
     );
 
-    if let Some(mut bridge) = session.media.bridge.take() {
-        bridge.stop_recording().await.expect("stop idle recorder");
-        bridge.close();
+    {
+        let recording = &mut session.media.recording;
+        recording.stop_recording().await.expect("stop idle recorder");
     }
 }
 
@@ -1220,13 +1186,13 @@ async fn test_record_snapshot_flags_silent_legs_only_when_answered() {
 
     // Once caller media flows, only the callee leg remains flagged.
     use rustrtc::peer_connection::RtpObserver;
-    if let Some(bridge) = session.media.bridge.as_ref() {
+    {
         let packet = rustrtc::rtp::RtpPacket::new(
             rustrtc::rtp::RtpHeader::new(0, 2, 160, 1234),
             vec![0xff; 160],
         );
-        bridge
-            .leg(crate::media::media_bridge::LegSide::A)
+        session.legs
+            .media_leg(&LegId::from("caller"))
             .expect("caller leg")
             .ingress_tap()
             .on_ingress(&packet, "127.0.0.1:40000".parse().unwrap());
@@ -1241,13 +1207,13 @@ async fn test_record_snapshot_flags_silent_legs_only_when_answered() {
     );
 
     // All legs with media → not flagged at all.
-    if let Some(bridge) = session.media.bridge.as_ref() {
+    {
         let packet = rustrtc::rtp::RtpPacket::new(
             rustrtc::rtp::RtpHeader::new(0, 3, 160, 4321),
             vec![0xff; 160],
         );
-        bridge
-            .leg(crate::media::media_bridge::LegSide::B)
+        session.legs
+            .media_leg(&LegId::from("callee"))
             .expect("callee leg")
             .ingress_tap()
             .on_ingress(&packet, "127.0.0.1:40001".parse().unwrap());
@@ -2201,15 +2167,14 @@ fn write_silence_wav(
 /// Build a real, single-leg-A negotiated MediaBridge suitable for `play_file`.
 async fn playable_bridge(session_id: &str) -> crate::media::media_bridge::MediaBridge {
     use crate::media::leg::{LegConfig, LegInner};
-    use crate::media::media_bridge::{LegSide, MediaBridge};
+    use crate::media::media_bridge::MediaBridge;
     let mut mb = MediaBridge::new(session_id);
-    let recorder_sender = mb.setup_recorder_task().expect("recording task");
-    let a = LegInner::new("a", &LegConfig::rtp_pcmu(), Some(recorder_sender)).expect("leg a");
-    let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).expect("leg b");
-    mb.replace_leg(LegSide::A, a).await;
-    mb.replace_leg(LegSide::B, b).await;
-    let la = mb.leg(LegSide::A).unwrap();
-    let lb = mb.leg(LegSide::B).unwrap();
+    let a = LegInner::new("caller", &LegConfig::rtp_pcmu(), None).expect("leg a");
+    let b = LegInner::new("callee", &LegConfig::rtp_pcmu(), None).expect("leg b");
+    mb.replace_leg(crate::media::media_bridge::LegSide::A, a).await;
+    mb.replace_leg(crate::media::media_bridge::LegSide::B, b).await;
+    let la = mb.leg_for_id(&crate::media::leg_id::LegId::from("caller")).unwrap();
+    let lb = mb.leg_for_id(&crate::media::leg_id::LegId::from("callee")).unwrap();
     let offer = la.create_offer().await.expect("offer");
     let answer = lb.answer(&offer).await.expect("answer");
     la.apply_sdp(&answer, rustrtc::SdpType::Answer)
@@ -2230,7 +2195,8 @@ async fn handle_play_awaits_completion_when_requested() {
         true,
     );
     let mut session = build_session(dialplan).await;
-    session.media.bridge = Some(playable_bridge("await-true").await);
+    setup_recording_test_media(&mut session).await;
+    assert!(session.media.bridge.is_none(), "playback must not require a bridge");
 
     let start = Instant::now();
     session
@@ -2274,7 +2240,8 @@ async fn handle_play_returns_immediately_when_not_awaited() {
         true,
     );
     let mut session = build_session(dialplan).await;
-    session.media.bridge = Some(playable_bridge("await-false").await);
+    setup_recording_test_media(&mut session).await;
+    assert!(session.media.bridge.is_none(), "playback must not require a bridge");
 
     let start = Instant::now();
     session
@@ -2359,8 +2326,7 @@ async fn build_session_with_cmd_rx_on(
         metadata: None,
     };
 
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
+
     let use_media_proxy =
         SipSession::check_media_proxy(&context, &context.dialplan.media.proxy_mode);
     let (session, handle, cmd_rx) = SipSession::new(
@@ -2370,8 +2336,6 @@ async fn build_session_with_cmd_rx_on(
         context,
         server_dialog,
         use_media_proxy,
-        caller_peer,
-        callee_peer,
     );
     (session, handle, cmd_rx)
 }
@@ -2423,6 +2387,11 @@ async fn bridged_session_for_play_test(
         mb.is_bridged(),
         "route should be active before playback starts"
     );
+    for (id, side) in [("caller", "caller"), ("callee", "callee")] {
+        let id = LegId::from(id);
+        session.legs.set_media_leg(&id, mb.leg_for_id(&crate::media::leg_id::LegId::from(side)).unwrap());
+        session.update_leg_state(&id, LegState::Connected);
+    }
     session.media.bridge = Some(mb);
     (session, cmd_rx)
 }
@@ -2601,6 +2570,12 @@ async fn ivr_exec_app_exit_restores_held_route() {
         .legs
         .insert(LegId::from("callee"), Leg::new(LegId::from("callee")));
 
+    for (side, id) in [(crate::media::media_bridge::LegSide::A, "caller"), (crate::media::media_bridge::LegSide::B, "callee")] {
+        let peer = session.media.bridge.as_ref().unwrap().leg(side).unwrap();
+        session.legs.set_media_leg(&LegId::from(id), peer);
+        session.update_leg_state(&LegId::from(id), LegState::Connected);
+    }
+
     // ivr.exec entry: the callee leg is held (no SIP dialog → the re-INVITE
     // is a no-op; the media-side hold is what matters).
     let result = session
@@ -2673,18 +2648,16 @@ async fn queue_agent_connect_activates_media_bridge() {
 
     // Caller side: a valid PCMU offer as the inbound INVITE body.
     let caller_offer = crate::proxy::tests::test_helpers::pcmu_sdp("127.0.0.1", 10001);
+    let caller_peer = LegInner::new("caller", &LegConfig::rtp_pcmu(), None).unwrap();
+    caller_peer.answer(&caller_offer).await.unwrap();
     session.media.caller_offer = Some(caller_offer);
+    session.legs.set_media_leg(&LegId::from("caller"), caller_peer.clone());
+    assert!(session.media.bridge.is_none(), "caller media is independent of bridge selection");
 
-    // `create_callee_track` builds the B leg on the MediaBridge and returns the
-    // agent-offer SDP that would be sent in the queue agent INVITE.
-    let agent_offer = session
-        .create_callee_track(false)
-        .await
-        .expect("create callee track");
-    assert!(
-        agent_offer.contains("m=audio"),
-        "agent offer must carry audio m-line"
-    );
+    // A queue dial creates an independent peer with the queue leg's identity.
+    let agent_leg = LegId::from("queue-agent-1");
+    let peer = LegInner::new(agent_leg.as_str(), &LegConfig::rtp_pcmu(), None).unwrap();
+    let agent_offer = peer.create_offer().await.unwrap();
 
     // Simulate the agent answering: build a scratch RTP/PCMU leg to answer the
     // offer, yielding the agent's answer SDP.
@@ -2699,11 +2672,12 @@ async fn queue_agent_connect_activates_media_bridge() {
     );
 
     // Register the dynamic queue-agent leg, then feed LegConnected.
-    let agent_leg = LegId::from("queue-agent-1");
     session.legs.insert(
         agent_leg.clone(),
         Leg::new(agent_leg.clone()).with_endpoint("sip:1002@127.0.0.1"),
     );
+    session.legs.set_media_leg(&agent_leg, peer);
+    session.update_leg_state(&LegId::from("caller"), LegState::Connected);
     session
         .execute_command(
             CallCommand::LegConnected {
@@ -2918,12 +2892,11 @@ async fn finalize_recording_for_app_shutdown_finalizes_active_recording() {
         .join("voicemail.wav")
         .to_string_lossy()
         .into_owned();
-    let mut bridge = playable_bridge("shutdown-recording").await;
-    bridge
-        .start_recording(path, 1, true, None)
-        .await
-        .expect("start recording");
-    session.media.bridge = Some(bridge);
+    session.media_profile.path = MediaPathMode::Anchored;
+    setup_recording_test_media(&mut session).await;
+    let profile = session.legs.media_leg(&LegId::from("caller")).unwrap().negotiated().unwrap();
+    session.media.recording.start_recording(profile, path, 1, true, None).await.unwrap();
+    assert!(session.media.bridge.is_none());
 
     session.finalize_recording_for_app_shutdown().await;
 
@@ -2959,12 +2932,11 @@ async fn record_stopped_event_carries_recording_unique_id() {
         .join("unique-id.wav")
         .to_string_lossy()
         .into_owned();
-    let mut bridge = playable_bridge("unique-id-recording").await;
-    bridge
-        .start_recording(path, 1, true, None)
-        .await
-        .expect("start recording");
-    session.media.bridge = Some(bridge);
+    session.media_profile.path = MediaPathMode::Anchored;
+    setup_recording_test_media(&mut session).await;
+    let profile = session.legs.media_leg(&LegId::from("caller")).unwrap().negotiated().unwrap();
+    session.media.recording.start_recording(profile, path, 1, true, None).await.unwrap();
+    assert!(session.media.bridge.is_none());
 
     session.finalize_recording_for_app_shutdown().await;
 
@@ -3083,7 +3055,13 @@ async fn finalize_recording_for_app_shutdown_noop_when_idle() {
         true,
     );
     let mut session = build_session(dialplan).await;
-    session.media.bridge = Some(playable_bridge("shutdown-idle").await);
+    let bridge = playable_bridge("shutdown-idle").await;
+    for id in ["caller", "callee"] {
+        if let Some(peer) = bridge.leg_for_id(&crate::media::leg_id::LegId::from(id)) {
+            session.legs.set_media_leg(&LegId::from(id), peer);
+        }
+    }
+    session.media.bridge = Some(bridge);
     // No file recorder is active; Stop is answered directly by the task.
     let start = Instant::now();
     session.finalize_recording_for_app_shutdown().await;

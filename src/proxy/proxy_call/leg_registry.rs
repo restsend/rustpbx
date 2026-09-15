@@ -1,6 +1,5 @@
 use crate::call::domain::{Leg, LegId};
 use crate::call::runtime::conference_media_bridge::ConferenceBridgeHandle;
-use crate::proxy::proxy_call::media_peer::MediaPeer;
 use rsipstack::dialog::dialog::Dialog;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,8 +10,7 @@ use tokio::task::JoinHandle;
 struct LegData {
     leg: Leg,
     dialog: Option<Dialog>,
-    /// `None` when the leg exists (via `insert`) but no peer has been set yet.
-    peer: Option<Arc<dyn MediaPeer>>,
+    media_leg: Option<crate::media::leg::Leg>,
     transport: Option<rustrtc::TransportMode>,
     answer: Option<String>,
     has_video: bool,
@@ -35,7 +33,6 @@ impl LegRegistry {
         &mut self,
         id: LegId,
         state: Leg,
-        peer: Arc<dyn MediaPeer>,
         dialog: Option<Dialog>,
     ) {
         self.legs.insert(
@@ -43,7 +40,7 @@ impl LegRegistry {
             LegData {
                 leg: state,
                 dialog,
-                peer: Some(peer),
+                media_leg: None,
                 transport: None,
                 answer: None,
                 has_video: false,
@@ -55,6 +52,7 @@ impl LegRegistry {
 
     pub fn remove(&mut self, id: &LegId) -> Option<Leg> {
         let data = self.legs.remove(id)?;
+        if let Some(peer) = data.media_leg.as_ref() { peer.stop(); }
         if let Some(handle) = data.conference_bridge {
             handle.stop();
         }
@@ -84,32 +82,16 @@ impl LegRegistry {
         }
     }
 
-    pub fn get_peer(&self, id: &LegId) -> Option<&Arc<dyn MediaPeer>> {
-        self.legs.get(id).and_then(|d| d.peer.as_ref())
+    pub fn media_leg(&self, id: &LegId) -> Option<crate::media::leg::Leg> {
+        self.legs.get(id).and_then(|data| data.media_leg.clone())
     }
 
-    pub fn set_peer(&mut self, id: LegId, peer: Arc<dyn MediaPeer>) {
-        self.legs
-            .entry(id)
-            .or_insert_with(|| LegData {
-                leg: Leg::new(LegId::new("")),
-                dialog: None,
-                peer: None,
-                transport: None,
-                answer: None,
-                has_video: false,
-                tasks: Vec::new(),
-                conference_bridge: None,
-            })
-            .peer = Some(peer);
-    }
-
-    pub fn caller_peer(&self) -> Option<&Arc<dyn MediaPeer>> {
-        self.get_peer(&LegId::new("caller"))
-    }
-
-    pub fn callee_peer(&self) -> Option<&Arc<dyn MediaPeer>> {
-        self.get_peer(&LegId::new("callee"))
+    pub fn set_media_leg(&mut self, id: &LegId, peer: crate::media::leg::Leg) {
+        if let Some(data) = self.legs.get_mut(id) {
+            if let Some(old) = data.media_leg.replace(peer.clone()) {
+                if !Arc::ptr_eq(&old, &peer) { old.stop(); }
+            }
+        }
     }
 
     pub fn get_transport(&self, id: &LegId) -> Option<rustrtc::TransportMode> {
@@ -247,7 +229,7 @@ impl LegRegistry {
                 LegData {
                     leg: state,
                     dialog: None,
-                    peer: None,
+                    media_leg: None,
                     transport: None,
                     answer: None,
                     has_video: false,
@@ -268,6 +250,7 @@ impl Default for LegRegistry {
 impl Drop for LegRegistry {
     fn drop(&mut self) {
         for data in self.legs.values() {
+            if let Some(peer) = data.media_leg.as_ref() { peer.stop(); }
             for handle in &data.tasks {
                 handle.abort();
             }

@@ -9,7 +9,7 @@ use rustpbx_media::audio_source::FileAudioSource;
 use rustpbx_media::ingress_tap::PacketDirection;
 use rustpbx_media::leg::{LegConfig, LegInner};
 use rustpbx_media::media_bridge::{LegSide, MediaBridge};
-use rustpbx_media::media_recorder::{MediaRecorder, SipflowRecorder};
+use rustpbx_media::media_recorder::{MediaRecorder, RecordingSession, SipflowRecorder};
 use rustpbx_media::negotiate;
 use rustpbx_sipflow::{SipFlowBackend, SipFlowItem, SipFlowMediaStats};
 
@@ -176,10 +176,11 @@ async fn recorder_sender_receives_ingress_via_tap() {
     let (recorder, mut rx) = recorder_capture("it-rec");
 
     let mut mb = MediaBridge::new("it-rec");
-    let recorder_sender = mb.setup_recorder_task().unwrap();
+    let mut recording = RecordingSession::default();
+    let recorder_sender = recording.setup_recorder_task().unwrap();
     let a = LegInner::new("a", &LegConfig::rtp_pcmu(), Some(recorder_sender)).unwrap();
     mb.replace_leg(LegSide::A, a).await;
-    mb.set_recorder(recorder, None).await.unwrap();
+    recording.set_recorder(recorder, None).await.unwrap();
 
     // Synthesize an ingress packet by calling the tap directly (the real RTP
     // path is covered by the transport tests).
@@ -210,10 +211,11 @@ async fn recorder_sender_captures_dtmf_rtp_packets() {
     let (recorder, mut rx) = recorder_capture("it-dtmf-rec");
 
     let mut mb = MediaBridge::new("it-dtmf-rec");
-    let recorder_sender = mb.setup_recorder_task().unwrap();
+    let mut recording = RecordingSession::default();
+    let recorder_sender = recording.setup_recorder_task().unwrap();
     let a = LegInner::new("a", &LegConfig::rtp_pcmu(), Some(recorder_sender)).unwrap();
     mb.replace_leg(LegSide::A, a).await;
-    mb.set_recorder(recorder, None).await.unwrap();
+    recording.set_recorder(recorder, None).await.unwrap();
     let leg_a = mb.leg(LegSide::A).unwrap();
     let tap = leg_a.ingress_tap();
     tap.set_dtmf_payload_types(vec![101]);
@@ -265,7 +267,7 @@ async fn dtmf_bus_fans_out_digit() {
         .await
         .expect("timed out")
         .expect("no event");
-    assert_eq!(side, LegSide::A);
+    assert_eq!(side.as_str(), "a");
     assert_eq!(ev.digit, '1');
 
     mb.close();
@@ -464,10 +466,11 @@ async fn file_recorder_writes_wav() {
     let path = tmp.to_string_lossy().to_string();
 
     let mut mb = MediaBridge::new("it-rec-file");
-    let recorder_sender = mb.setup_recorder_task().unwrap();
+    let mut recording = RecordingSession::default();
+    let recorder_sender = recording.setup_recorder_task().unwrap();
 
     // Create the caller and its recording task together, then install the
-    // file backend through the bridge's control handle.
+    // file backend through the independent recording session.
     let a = LegInner::new("a", &LegConfig::rtp_pcmu(), Some(recorder_sender)).unwrap();
     let b = LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap();
     mb.replace_leg(LegSide::A, a).await;
@@ -479,7 +482,7 @@ async fn file_recorder_writes_wav() {
     la.apply_sdp(&answer, rustrtc::SdpType::Answer)
         .await
         .expect("apply answer");
-    mb.start_recording(path.clone(), 2, false, None)
+    recording.start_recording(la.negotiated().unwrap(), path.clone(), 2, false, None)
         .await
         .expect("file output start");
 
@@ -497,13 +500,14 @@ async fn file_recorder_writes_wav() {
         la.ingress_tap().on_ingress(&pkt, addr);
     }
 
-    let result = mb
+    // Closing the media connection must not destroy recording control.
+    mb.close();
+    let result = recording
         .stop_recording()
         .await
         .expect("file recording finalize")
         .expect("file recording result");
     assert_eq!(result.path, path);
-    mb.close();
 
     let bytes = std::fs::read(&path).unwrap_or_else(|_| panic!("recorder must create: {path}"));
     assert!(
@@ -656,15 +660,16 @@ async fn rtp_timeout_app_paused_suppresses_even_when_rearmed() {
 /// for ~500ms against a 300ms timeout and assert the receiver stays pending.
 #[tokio::test]
 async fn rtp_timeout_does_not_fire_on_active_rtp() {
-    use rustrtc::peer_connection::RtpObserver;
     use rustrtc::rtp::{RtpHeader, RtpPacket};
-    use std::net::SocketAddr;
 
     let mut mb = MediaBridge::new("it-rtp-active");
     let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap();
+    let remote = LegInner::new("remote", &LegConfig::rtp_pcmu(), None).unwrap();
+    let offer = a.create_offer().await.unwrap();
+    let answer = remote.answer(&offer).await.unwrap();
+    a.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
+    remote.pc().wait_for_rtp_transport_ready(std::time::Duration::from_secs(2)).await.unwrap();
     mb.replace_leg(LegSide::A, a).await;
-    let tap = mb.leg(LegSide::A).unwrap().ingress_tap().clone();
-    let addr: SocketAddr = "127.0.0.1:5000".parse().unwrap();
 
     let mut rx = mb
         .arm_rtp_timeout(LegSide::A, std::time::Duration::from_millis(300))
@@ -678,7 +683,7 @@ async fn rtp_timeout_does_not_fire_on_active_rtp() {
             RtpHeader::new(0, seq, 160 * seq as u32, 1234),
             vec![0x00u8; 160],
         );
-        tap.on_ingress(&pkt, addr);
+        remote.pc().send_raw_rtp(pkt).await.unwrap();
         seq = seq.wrapping_add(1);
         // Give the monitor tick a chance to observe the new counter.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -694,6 +699,7 @@ async fn rtp_timeout_does_not_fire_on_active_rtp() {
         .expect("timeout must fire after traffic stops");
     assert!(res.is_ok(), "RTP timeout must fire once traffic stops");
 
+    remote.stop();
     mb.close();
 }
 
@@ -1239,11 +1245,9 @@ async fn play_file_both_degrades_to_single_leg_without_b() {
     mb.close();
 }
 
-/// Contract: `stop_play` on a leg that is NOT actively playing (e.g. hold
-/// music installed via `hold_file`, which never registers in `active_play`)
-/// is a guarded no-op — it must neither error nor switch the egress source.
+/// Stopping held peers sets silence and leaves the bridge resumable.
 #[tokio::test]
-async fn stop_play_is_noop_when_not_playing() {
+async fn stop_play_on_held_peers_allows_resume() {
     let mut mb = MediaBridge::new("it-stop-noop");
     mb.replace_leg(
         LegSide::A,
@@ -1266,17 +1270,16 @@ async fn stop_play_is_noop_when_not_playing() {
     mb.accept(LegSide::B).await;
     assert!(mb.is_bridged());
 
-    // Hold music on A (not in active_play).
+    // Hold music on A.
     let wav = tempfile_wav_silence(8000, 1, 800);
     mb.hold_file(LegSide::A, wav).await.expect("hold_file");
 
-    // stop_play on a non-playing leg: no error, and the hold state survives
-    // (route stays torn down; egress not switched by the no-op).
-    mb.stop_play(LegSide::A).await.expect("stop_play no-op");
-    assert!(!mb.is_bridged(), "no-op stop must not re-bridge");
-    mb.stop_play(LegSide::B).await.expect("stop_play no-op");
+    // Stop both sources without reconnecting the pair.
+    mb.stop_play(LegSide::A).await.expect("stop_play");
+    assert!(!mb.is_bridged(), "stop must not re-bridge");
+    mb.stop_play(LegSide::B).await.expect("stop_play");
 
-    // The bridge must still be resumable after the no-op stops.
+    // The bridge must still be resumable after stopping both sources.
     mb.resume().await.expect("resume");
     assert!(mb.is_bridged());
     mb.unbridge().await.unwrap();
@@ -1415,4 +1418,101 @@ fn tempfile_wav_silence(sample_rate: u32, channels: u16, frames: u32) -> String 
     f.write_all(&data_len.to_le_bytes()).unwrap();
     f.write_all(&vec![0u8; data_len as usize]).unwrap();
     path.to_string_lossy().to_string()
+}
+
+/// An IVR peer can play, observe input, and record without a bridge.
+#[tokio::test]
+async fn standalone_peer_playback_input_and_recording() {
+    use std::time::Duration;
+    use rustpbx_media::audio_source::ToneAudioSource;
+    use rustpbx_media::media_recorder::RecordingSession;
+    use rustrtc::rtp::{RtpHeader, RtpPacket};
+
+    let mut recording = RecordingSession::default();
+    let capture = recording.setup_recorder_task().unwrap();
+    let mut cfg = LegConfig::rtp_pcmu();
+    cfg.codecs.push(negotiate::CodecInfo {
+        payload_type: 101, codec: audio_codec::CodecType::TelephoneEvent,
+        clock_rate: 8000, channels: 1, fmtp: Some("0-16".into()),
+    });
+    let peer = LegInner::new("ivr", &cfg, Some(capture)).unwrap();
+    let remote = LegInner::new("phone", &cfg, None).unwrap();
+    let offer = peer.create_offer().await.unwrap();
+    let answer = remote.answer(&offer).await.unwrap();
+    peer.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
+    peer.accept();
+    remote.accept();
+    let (recorder, mut captured) = recorder_capture("single-peer");
+    recording.set_recorder(recorder, None).await.unwrap();
+    let mut digits = peer.subscribe_dtmf();
+    let mut pcm = peer.pcm_stream(tokio_util::sync::CancellationToken::new()).unwrap();
+    let first = peer.play_media(Box::new(ToneAudioSource::new(440, Duration::from_secs(1), 8000).unwrap()), true).await.unwrap();
+    let second = peer.play_media(Box::new(ToneAudioSource::new(600, Duration::from_secs(1), 8000).unwrap()), true).await.unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(2), first.done).await.unwrap().unwrap().interrupted);
+    remote.play_media(Box::new(ToneAudioSource::new(800, Duration::from_secs(1), 8000).unwrap()), true).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while pcm.recv().await.unwrap().silence {}
+        while remote.pc().received_rtp_packets() == 0 { tokio::task::yield_now().await; }
+    }).await.expect("independent incoming and outgoing audio");
+    remote.pc().send_raw_rtp(RtpPacket::new(RtpHeader::new(101, 500, 8000, 1234), vec![5, 0x80, 0, 160])).await.unwrap();
+    assert_eq!(tokio::time::timeout(Duration::from_secs(2), digits.recv()).await.unwrap().unwrap().digit, '5');
+    tokio::time::timeout(Duration::from_secs(2), captured.recv()).await.unwrap().unwrap();
+    peer.stop_playback().await.unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(2), second.done).await.unwrap().unwrap().interrupted,
+        "completion of old playback must not prevent stopping its replacement");
+    recording.stop_recording().await.unwrap();
+    remote.stop();
+    peer.stop();
+}
+
+#[tokio::test]
+async fn bridge_rtp_timeout_tracks_fast_path_ingress() {
+    use std::time::Duration;
+    use rustpbx_media::audio_source::ToneAudioSource;
+    let mut peers = Vec::new();
+    let mut phones = Vec::new();
+    for id in ["a", "b"] {
+        let peer = LegInner::new(id, &LegConfig::rtp_pcmu(), None).unwrap();
+        let phone = LegInner::new(format!("phone-{id}"), &LegConfig::rtp_pcmu(), None).unwrap();
+        let offer = peer.create_offer().await.unwrap();
+        let answer = phone.answer(&offer).await.unwrap();
+        peer.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
+        peer.accept();
+        phone.accept();
+        peers.push(peer);
+        phones.push(phone);
+    }
+    let mut bridge = MediaBridge::new("fast-path-timeout");
+    bridge.select_pair(peers[0].clone(), peers[1].clone()).await.unwrap();
+    bridge.bridge().await.unwrap();
+    assert!(peers[0].egress_is_relay());
+    assert!(peers[1].egress_is_relay());
+    let mut timeout = bridge.arm_rtp_timeout(LegSide::A, Duration::from_millis(500)).unwrap();
+    phones[0].play_media(Box::new(ToneAudioSource::new(440, Duration::from_secs(1), 8000).unwrap()), true).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert!(peers[0].pc().received_rtp_packets() > 0);
+    assert!(phones[1].pc().received_rtp_packets() > 0, "fast path must forward the input");
+    assert!(matches!(timeout.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)),
+        "incoming fast-path RTP must keep the watchdog alive");
+    phones[0].stop();
+    tokio::time::timeout(Duration::from_secs(2), timeout).await.unwrap().unwrap();
+    phones[1].stop();
+    bridge.close();
+}
+
+#[tokio::test]
+async fn caller_dtmf_subscription_closes_when_peer_drops() {
+    let caller = LegInner::new("caller", &LegConfig::rtp_pcmu(), None).unwrap();
+    let remote = LegInner::new("remote", &LegConfig::rtp_pcmu(), None).unwrap();
+    let offer = caller.create_offer().await.unwrap();
+    let answer = remote.answer(&offer).await.unwrap();
+    caller.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
+    caller.pc().wait_for_rtp_transport_ready(std::time::Duration::from_secs(2)).await.unwrap();
+    let mut rx = caller.subscribe_dtmf();
+    drop(caller);
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await.unwrap(),
+        Err(tokio::sync::broadcast::error::RecvError::Closed)
+    ));
+    remote.stop();
 }

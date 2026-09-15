@@ -88,16 +88,16 @@ impl SipSession {
             remote.language = Some(language);
         }
 
-        let bridge = self
-            .bridge()
-            .ok_or_else(|| anyhow!("transcription requires MediaBridge"))?;
-
         // Attach both legs; tolerate a missing side (single-leg calls).
         let mut sides = Vec::new();
         let mut stream_a = None;
         let mut stream_b = None;
         for leg_side in [LegSide::A, LegSide::B] {
-            match bridge.leg_pcm_stream(leg_side) {
+            let id = match leg_side { LegSide::A => "caller", LegSide::B => "callee" };
+            let stream = self.media_leg(&crate::call::domain::LegId::from(id))
+                .ok_or_else(|| anyhow!("No media peer for {}", id))
+                .and_then(|peer| peer.pcm_stream(self.cancel_token.child_token()));
+            match stream {
                 Ok(stream) => {
                     sides.push(TranscriptSide::from_leg_side(leg_side));
                     match leg_side {

@@ -8,9 +8,6 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
 
-// Re-export for peer access
-use rustrtc::PeerConnection;
-use rustrtc::media::SampleStreamSource;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -70,17 +67,6 @@ async fn wait_for_bridge_disconnect(
     !session_cancel.is_cancelled()
 }
 
-/// Unified forward sink for the bridge: WS PCM16 → call. Two backing paths:
-/// - [`BridgeForwardSink::Track`]: a `VoiceEnginePeer` track sender (non-app
-///   B2BUA path).
-/// - [`BridgeForwardSink::Pcm`]: a raw-PCM channel into the MediaBridge A leg's
-///   egress pipeline (app-anchored flow, e.g. IVR bridge). The egress encoder
-///   handles PCM→codec conversion — same "filetrack" mode as `play_file`.
-enum BridgeForwardSink {
-    Track(SampleStreamSource),
-    Pcm(tokio::sync::mpsc::Sender<Vec<i16>>),
-}
-
 fn take_bridge_pcm_frame(
     buffered: &mut Vec<i16>,
     samples_per_frame: usize,
@@ -106,39 +92,19 @@ fn take_bridge_pcm_frame(
 /// exercised at its real boundary by tests.
 async fn bridge_forward_loop<S>(
     mut ws_read: S,
-    forward_sink: BridgeForwardSink,
+    forward_sink: tokio::sync::mpsc::Sender<Vec<i16>>,
     forward_cancel: tokio_util::sync::CancellationToken,
     cmd_tx_for_fwd: Option<mpsc::Sender<CallCommand>>,
     leg_id: LegId,
     session_id: String,
-    codec_type: audio_codec::CodecType,
-    payload_type: u8,
     ws_sample_rate: u32,
 ) where
     S: futures::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
         + Unpin
         + Send,
 {
-    use audio_codec::create_encoder;
-    use rustrtc::media::{AudioFrame as RtcAudioFrame, MediaSample};
-
     let samples_per_frame = (ws_sample_rate * 20 / 1000) as usize;
     let mut buffered = Vec::new();
-
-    // Track path: encoder + RTP state. Pcm path: none needed.
-    let mut encoder = if let BridgeForwardSink::Track(..) = &forward_sink {
-        Some(create_encoder(codec_type))
-    } else {
-        None
-    };
-    let enc_sample_rate = encoder
-        .as_ref()
-        .map(|e| e.sample_rate())
-        .unwrap_or(ws_sample_rate);
-    let clock_rate = codec_type.clock_rate() as u32;
-    let rtp_ticks_per_frame = clock_rate * 20 / 1000;
-    let mut rtp_ts: u32 = rand::random();
-    let mut seq: u16 = rand::random();
 
     loop {
         tokio::select! {
@@ -198,44 +164,11 @@ async fn bridge_forward_loop<S>(
                     samples_per_frame,
                     stream_closed,
                 ) {
-                    if let BridgeForwardSink::Pcm(tx) = &forward_sink {
-                        tokio::select! {
-                            biased;
-                            _ = forward_cancel.cancelled() => return,
-                            result = tx.send(chunk) => {
-                                if result.is_err() {
-                                    info!(%session_id, %leg_id, "Bridge forward: PCM channel closed");
-                                    return;
-                                }
-                            }
-                        }
-                    } else if let BridgeForwardSink::Track(sender) = &forward_sink {
-                        let chunk = if ws_sample_rate != enc_sample_rate {
-                            crate::call::runtime::conference_media_bridge::resample_linear(
-                                &chunk, ws_sample_rate, enc_sample_rate,
-                            )
-                        } else {
-                            chunk
-                        };
-                        if let Some(ref mut enc) = encoder {
-                            let encoded = enc.encode(&chunk);
-                            let frame = RtcAudioFrame {
-                                rtp_timestamp: rtp_ts,
-                                clock_rate,
-                                data: encoded.into(),
-                                sequence_number: Some(seq),
-                                payload_type: Some(payload_type),
-                                marker: false,
-                                header_extension: None,
-                                raw_packet: None,
-                                source_addr: None,
-                            };
-                            if sender.send(MediaSample::Audio(frame)).is_err() {
-                                warn!(%session_id, %leg_id, "Bridge forward: track sender closed");
-                                return;
-                            }
-                            rtp_ts = rtp_ts.wrapping_add(rtp_ticks_per_frame);
-                            seq = seq.wrapping_add(1);
+                    tokio::select! {
+                        biased;
+                        _ = forward_cancel.cancelled() => return,
+                        result = forward_sink.send(chunk) => {
+                            if result.is_err() { return; }
                         }
                     }
                 }
@@ -718,7 +651,7 @@ impl SipSession {
     /// dialog UUID while the literal `callee` entry is a placeholder that
     /// never leaves `Initializing` — resolve `callee` to the single
     /// connected non-caller leg so the transfer reaches the real agent leg.
-    fn resolve_transfer_leg(&self, leg_id: LegId) -> LegId {
+    pub(super) fn resolve_transfer_leg(&self, leg_id: LegId) -> LegId {
         if leg_id.as_str() != "callee" {
             return leg_id;
         }
@@ -733,7 +666,7 @@ impl SipSession {
             .legs
             .iter()
             .filter(|(id, leg)| {
-                id.as_str() != "caller" && matches!(leg.state, LegState::Connected | LegState::Hold)
+                !matches!(id.as_str(), "caller" | "consult") && matches!(leg.state, LegState::Connected | LegState::Hold)
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -2244,92 +2177,26 @@ impl SipSession {
         info!(session_id = %self.id, endpoint = %endpoint, "Bridge WebSocket connected");
         let (mut ws_write, ws_read) = ws_stream.split();
 
-        // ── 2. Obtain the leg's audio sender (forward) & PeerConnection (reverse).
-        let mut forward_sink: Option<BridgeForwardSink> = None;
-        let mut pc: Option<PeerConnection> = None;
-
-        // Fallback: leg's VoiceEnginePeer tracks (non-app B2BUA path).
-        if forward_sink.is_none() || pc.is_none() {
-            let peer = self
-                .legs
-                .get_peer(&leg_id)
-                .cloned()
-                .or_else(|| self.caller_peer().cloned())
-                .ok_or_else(|| anyhow!("No media peer available"))?;
-
-            let tracks = peer.get_tracks().await;
-            for t in &tracks {
-                if forward_sink.is_none() {
-                    if let Some(sender) = t.get_sender() {
-                        forward_sink = Some(BridgeForwardSink::Track(sender));
-                    }
-                }
-                if pc.is_none() {
-                    pc = t.get_peer_connection().await;
-                }
-            }
-        }
-
-        // App-anchored flow (IVR / queue / voicemail): caller media lives on
-        // the MediaBridge A leg, not on VoiceEnginePeer tracks. Use a raw-PCM
-        // channel source — the leg's egress pipeline encodes to the negotiated
-        // codec (same "filetrack" mode as play_file).
+        // Read and write the requested leg's own connection, regardless of
+        // whether that endpoint is currently selected in a two-party bridge.
+        let leg = self.media_leg(&leg_id).ok_or_else(|| anyhow!("No media endpoint for {}", leg_id))?;
+        let pc = leg.pc().clone();
         let ws_sample_rate = if sample_rate == 0 { 8000 } else { sample_rate };
-        let mut pcm_ended_rx: Option<tokio::sync::oneshot::Receiver<()>> = None;
-        if forward_sink.is_none() || pc.is_none() {
-            if let Some(mb) = self.media.bridge.as_ref()
-                && let Some(leg) = mb.leg(crate::media::media_bridge::LegSide::A)
-            {
-                info!(session_id = %self.id, %leg_id, rate = ws_sample_rate,
-                    "Bridge sourcing caller media from MediaBridge A leg (raw PCM channel)");
-                if forward_sink.is_none() {
-                    let (end_tx, end_rx) = tokio::sync::oneshot::channel();
-                    let end_tx = std::sync::Mutex::new(Some(end_tx));
-                    let on_end: crate::media::egress::EgressEndCallback =
-                        std::sync::Arc::new(move |_interrupted| {
-                            if let Ok(mut slot) = end_tx.lock() {
-                                if let Some(tx) = slot.take() {
-                                    let _ = tx.send(());
-                                }
-                            }
-                        });
-                    match mb
-                        .bridge_play_pcm(
-                            crate::media::media_bridge::LegSide::A,
-                            ws_sample_rate,
-                            Some(on_end),
-                        )
-                        .await
-                    {
-                        Ok(tx) => {
-                            forward_sink = Some(BridgeForwardSink::Pcm(tx));
-                            pcm_ended_rx = Some(end_rx);
-                        }
-                        Err(e) => warn!(session_id = %self.id, %leg_id, error = %e,
-                            "Failed to set up raw PCM channel for bridge forward"),
-                    }
-                }
-                if pc.is_none() {
-                    pc = Some(leg.pc().clone());
-                }
-            }
-        }
-
-        let forward_sink = forward_sink.ok_or_else(|| anyhow!("No forward sink for Bridge"))?;
-        let pc = pc.ok_or_else(|| anyhow!("No PeerConnection for Bridge"))?;
+        let (end_tx, end_rx) = tokio::sync::oneshot::channel();
+        let end_tx = std::sync::Mutex::new(Some(end_tx));
+        let on_end: crate::media::egress::EgressEndCallback = std::sync::Arc::new(move |_| {
+            if let Some(tx) = end_tx.lock().unwrap().take() { let _ = tx.send(()); }
+        });
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        leg.play(Box::new(crate::media::audio_source::ChannelAudioSource::new(rx, ws_sample_rate)),
+            false, Some(on_end)).await?;
+        let forward_sink = tx;
+        let pcm_ended_rx = Some(end_rx);
 
         // MediaBridge legs are authoritative for app-anchored calls because
         // apply_sdp() stores the actual negotiated codec/PT/DTMF profile there.
         // Keep the session SDP caches as a fallback for legacy peer paths.
-        let negotiated_profile = self
-            .media_side_for_leg(&leg_id)
-            .and_then(|side| {
-                self.media
-                    .bridge
-                    .as_ref()
-                    .and_then(|bridge| bridge.leg(side))
-                    .and_then(|leg| leg.negotiated())
-            })
+        let negotiated_profile = leg.negotiated()
             .or_else(|| {
                 self.legs
                     .get_answer(&leg_id)
@@ -2356,7 +2223,7 @@ impl SipSession {
         // negotiated at 96, or a PCMU caller bridged with codec=opus), the
         // forward frames carry a PT the caller never offered, which on the same
         // SSRC as the IVR greeting shows up as a PT 0↔96/111 toggle.
-        let (codec_type, payload_type) = if let Some(audio) = negotiated_profile
+        let codec_type = if let Some(audio) = negotiated_profile
             .as_ref()
             .and_then(|profile| profile.audio.as_ref())
         {
@@ -2368,7 +2235,7 @@ impl SipSession {
                 bridge_codec = %codec,
                 "voip_bridge using leg-negotiated codec/PT"
             );
-            (audio.codec, audio.payload_type)
+            audio.codec
         } else {
             let fallback = match codec.as_str() {
                 "pcm" | "pcmu" => audio_codec::CodecType::PCMU,
@@ -2377,7 +2244,7 @@ impl SipSession {
                 "g722" => audio_codec::CodecType::G722,
                 _ => self.leg_negotiated_codec(&leg_id),
             };
-            (fallback, fallback.payload_type())
+            fallback
         };
 
         // Decode the reverse RTP stream with the same codec selected for this
@@ -2406,10 +2273,7 @@ impl SipSession {
         let cmd_tx_for_fwd = self.cmd_tx.clone();
 
         // ── 6. Forward loop: WS raw PCM16 → call ─────────────────────
-        // Two paths:
-        //   Track (B2BUA): encode → push pre-encoded AudioFrame to PC track
-        //   Pcm   (app):   send raw PCM16 chunks to the leg's egress pipeline,
-        //                   which encodes to the negotiated codec (filetrack mode)
+        // The endpoint egress pipeline encodes PCM using its negotiated codec.
         let forward_cancel = cancel_token.child_token();
         let forward_handle = {
             let leg_id = leg_id.clone();
@@ -2422,8 +2286,6 @@ impl SipSession {
                     cmd_tx_for_fwd,
                     leg_id,
                     session_id,
-                    codec_type,
-                    payload_type,
                     ws_sample_rate,
                 )
                 .await
@@ -2635,40 +2497,33 @@ impl SipSession {
     }
 
     pub(super) async fn handle_transfer_complete(&mut self, consult_leg: LegId) -> Result<()> {
-        info!(session_id = %self.id, %consult_leg, "Completing attended transfer");
-
-        self.require_leg(&consult_leg)?;
-
-        let original_leg = self
-            .legs
-            .iter()
-            .find(|(_, leg)| leg.state == LegState::Hold)
-            .map(|(id, _)| id.clone());
-
-        if let Some(original_leg) = original_leg {
-            if self
-                .setup_bridge(original_leg.clone(), consult_leg.clone())
-                .await
-            {
-                self.update_leg_state(&original_leg, LegState::Connected);
-                self.update_leg_state(&consult_leg, LegState::Connected);
-                let _ = self.handle_unhold(original_leg.clone()).await;
-                info!(session_id = %self.id, "Attended transfer completed successfully");
-                self.record_trace(
-                    crate::call_errors::TraceEvent::new(
-                        crate::call_errors::TraceKind::Transfer,
-                        "Attended transfer completed",
-                    )
-                    .severity(crate::call_errors::ErrSeverity::Info),
-                );
-                info!("Attended transfer completed successfully");
-            } else {
-                return Err(anyhow!("Failed to setup bridge for transfer completion"));
-            }
-        } else {
-            return Err(anyhow!("No leg on hold found for transfer completion"));
+        let caller = LegId::from("caller");
+        if !matches!(self.require_leg(&consult_leg)?.state, LegState::Connected | LegState::Hold) {
+            return Err(anyhow!("Consult leg has not answered"));
         }
-
+        self.require_leg(&caller)?;
+        let agent = self.resolve_transfer_leg(LegId::from("callee"));
+        self.require_leg(&agent)?;
+        // Validate peers before changing any routing or releasing the agent.
+        for id in [&caller, &consult_leg] {
+            if self.media_leg(id).and_then(|peer| peer.negotiated()).is_none() {
+                return Err(anyhow!("Leg {} has no negotiated media", id));
+            }
+        }
+        self.handle_leave_mixer().await?;
+        // Reserve A-C before unhold, so automatic routing cannot resume A-B.
+        self.bridge = crate::call::runtime::BridgeConfig::bridge(caller.clone(), consult_leg.clone());
+        self.handle_unhold(caller.clone()).await?;
+        self.handle_unhold(consult_leg.clone()).await?;
+        if !self.setup_bridge(caller, consult_leg).await {
+            return Err(anyhow!("Failed to connect transfer target"));
+        }
+        if let Some(dialog) = self.legs.get_dialog(&agent) {
+            self.pending_hangup.insert(dialog.id());
+        }
+        self.update_leg_state(&agent, LegState::Ended);
+        self.handle_remove_leg(agent).await?;
+        self.mark_transferred_with(None);
         Ok(())
     }
 
@@ -3516,13 +3371,11 @@ mod tests {
             Duration::from_secs(5),
             bridge_forward_loop(
                 futures::stream::iter(messages),
-                BridgeForwardSink::Pcm(pcm_tx),
+                pcm_tx,
                 tokio_util::sync::CancellationToken::new(),
                 None,
                 LegId::new("caller"),
                 "test-session".to_string(),
-                audio_codec::CodecType::PCMU,
-                0,
                 8000,
             ),
         )

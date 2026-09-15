@@ -2,8 +2,8 @@
 //! [`IngressTap`] (plaintext bidirectional observation) and an
 //! [`EgressPipeline`] (ptime-paced outbound frames).
 //!
-//! A [`Leg`] is the atomic unit owned by a `MediaBridge`. Its lifetime equals
-//! the session's: re-INVITEs update SDP / codec in place (never recreate the
+//! A [`Leg`] is an independent media endpoint owned by the session. Its lifetime
+//! is independent of bridge membership: re-INVITEs update SDP / codec in place (never recreate the
 //! PC), which is the root fix for the "restart loses wiring" bug class.
 //!
 //! [`Leg`] is `Arc<LegInner>` — cheaply cloneable, so callers never hold
@@ -39,6 +39,37 @@ use crate::leg_id::LegId;
 use crate::leg_stats::{LegRtcpStats, SrTimeTracker, spawn_rtcp_listener};
 use crate::media_recorder::RecorderSender;
 use crate::negotiate::{self, CodecInfo, NegotiatedLegProfile};
+
+/// Outcome of a [`PlaybackHandle`]'s play.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaybackResult {
+    /// `false` = natural EOF, `true` = interrupted (stop_play / source switch).
+    pub interrupted: bool,
+}
+
+impl PlaybackResult {
+    pub fn completed() -> Self {
+        Self { interrupted: false }
+    }
+
+    pub fn interrupted() -> Self {
+        Self { interrupted: true }
+    }
+}
+
+/// Handle to playback on an independent media peer
+/// on a leg. `done` resolves when playback stops (natural EOF or interrupted).
+#[derive(Debug)]
+pub struct PlaybackHandle {
+    pub done: oneshot::Receiver<PlaybackResult>,
+}
+
+impl PlaybackHandle {
+    fn new() -> (Self, oneshot::Sender<PlaybackResult>) {
+        let (done, rx) = oneshot::channel();
+        (Self { done: rx }, done)
+    }
+}
 
 /// RFC 4733 telephone-event duration for a 20 ms event at the given clock
 /// rate (e.g. 160 @ 8 kHz, 960 @ 48 kHz).
@@ -134,8 +165,7 @@ pub struct LegInner {
     /// Gate: before the remote peer answers (200 OK), relay must not forward.
     /// Set true on construction, flipped to false by [`LegInner::accept`].
     gated: Arc<AtomicBool>,
-    /// RTP inactivity timeout state — armed by the session, monitored by the
-    /// per-leg DTMF forward task (no dedicated spawn).
+    /// RTP inactivity timeout state, monitored by the selected media bridge.
     rtp_timeout: Arc<RtpTimeoutState>,
     /// True once the ingress tap has been attached to the (now-created) RTP
     /// transport. The transport does not exist at construction, so the tap is
@@ -476,7 +506,7 @@ impl LegInner {
         Arc::clone(&self.rtcp_stats)
     }
 
-    pub(crate) fn subscribe_dtmf(&self) -> broadcast::Receiver<DtmfEvent> {
+    pub fn subscribe_dtmf(&self) -> broadcast::Receiver<DtmfEvent> {
         self.tap.subscribe_dtmf()
     }
 
@@ -801,6 +831,28 @@ impl LegInner {
         self.egress.set_source(source).await
     }
 
+    /// Subscribe to decoded ingress audio without depending on bridge slots.
+    pub fn pcm_stream(&self, cancel: tokio_util::sync::CancellationToken) -> Result<crate::app_ingress::LegPcmStream> {
+        let profile = self.negotiated().ok_or_else(|| anyhow!("Leg {} has no negotiated profile", self.id))?;
+        crate::app_ingress::LegPcmStream::attach(self.pc(), profile, self.id.clone(), cancel)
+    }
+
+    /// Snapshot endpoint quality independently of bridge membership.
+    pub fn quality_report(&self, side: &'static str) -> crate::leg_stats::LegQualityReport {
+        let tap = self.stats();
+        let rtcp = self.rtcp_stats().snapshot();
+        crate::leg_stats::LegQualityReport {
+            side,
+            codec: self.negotiated().and_then(|p| p.audio.map(|c| format!("{:?}", c.codec))),
+            ingress_packets: tap.ingress_packets,
+            egress_packets: tap.egress_packets,
+            transport_rx_packets: self.pc().received_rtp_packets(),
+            jitter_us: rtcp.jitter_us,
+            rtt_us: rtcp.rtt_us,
+            loss_pct: rtcp.loss_pct(),
+        }
+    }
+
     /// Play a media source (IVR greeting / hold music / announcement).
     /// `on_end` fires when playback stops: `false` on natural EOF (after a
     /// short silence tail that lets in-flight frames reach the remote), `true`
@@ -817,6 +869,33 @@ impl LegInner {
             on_end,
         })
         .await
+    }
+
+    /// Play independently of bridge membership, with completion notification.
+    pub async fn play_media(
+        self: &Arc<Self>,
+        audio: Box<dyn crate::audio_source::AudioSource>,
+        loop_playback: bool,
+    ) -> Result<PlaybackHandle> {
+        self.pause_rtp_timeout();
+        let peer = Arc::downgrade(self);
+        let (handle, done_tx) = PlaybackHandle::new();
+        let done_tx = Mutex::new(Some(done_tx));
+        let on_end = Arc::new(move |interrupted| {
+            if let Some(peer) = peer.upgrade() { peer.resume_rtp_timeout(); }
+            if let Some(tx) = done_tx.lock().take() {
+                let _ = tx.send(PlaybackResult { interrupted });
+            }
+        });
+        if let Err(error) = self.play(audio, loop_playback, Some(on_end.clone())).await {
+            on_end(true);
+            return Err(error);
+        }
+        Ok(handle)
+    }
+
+    pub async fn stop_playback(&self) -> Result<()> {
+        self.set_egress_source(EgressSource::Silence).await
     }
 
     /// Put the leg on hold: play hold music (looping) or silence.
@@ -877,8 +956,7 @@ impl LegInner {
 
     // ── RTP inactivity timeout ────────────────────────────────────────────
 
-    /// The shared timeout state, read by the per-leg DTMF forward task which
-    /// monitors it (no dedicated spawn).
+    /// Shared timeout state for media monitoring and diagnostics.
     pub fn rtp_timeout_state(&self) -> Arc<RtpTimeoutState> {
         self.rtp_timeout.clone()
     }
@@ -932,21 +1010,19 @@ impl LegInner {
         *state.fire_tx.lock() = None;
     }
 
-    /// Fire the timeout if armed (called by the monitor task when no packets
-    /// have arrived within the duration). Consumes the sender.
+    /// Report expiry from the bridge's RTP monitor.
     pub(crate) fn fire_rtp_timeout(&self) {
         let state = &self.rtp_timeout;
         state.active.store(false, Ordering::Release);
-        if let Some(tx) = state.fire_tx.lock().take() {
-            debug!(leg = %self.id, "RTP inactivity timeout fired (no ingress packets)");
-            let _ = tx.send(());
-        }
+        *state.armed_at.lock() = None;
+        if let Some(tx) = state.fire_tx.lock().take() { let _ = tx.send(()); }
     }
 
     /// Stop the leg: cancel the egress pipeline and close the PeerConnection.
     /// Synchronous — safe to call from `Drop` (rustrtc close path has no
     /// tokio::spawn).
     pub fn stop(&self) {
+        self.disarm_rtp_timeout();
         self.egress.stop();
         if let Some(handle) = self.observer_task.lock().take() {
             handle.abort();

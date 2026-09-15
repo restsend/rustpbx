@@ -1,9 +1,6 @@
 use super::SipSession;
 use crate::call::domain::LegId;
-use crate::proxy::proxy_call::media_peer::MediaPeer;
 use anyhow::{Result, anyhow};
-use audio_codec::CodecType;
-use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 impl SipSession {
@@ -71,73 +68,11 @@ impl SipSession {
         }
     }
 
-    pub(super) async fn start_conference_media_bridge_for_peer(
-        &mut self,
-        conf_id: &str,
-        leg_id: &LegId,
-        peer: &Arc<dyn MediaPeer>,
-        fallback_pc: Option<rustrtc::PeerConnection>,
-        fallback_sender: Option<rustrtc::media::SampleStreamSource>,
-    ) -> Result<crate::call::runtime::ConferenceBridgeHandle> {
-        use rustrtc::media::MediaSample;
-
-        let tracks = peer.get_tracks().await;
-        let mut audio_sender = None;
-        for t in &tracks {
-            if let Some(sender) = t.get_sender() {
-                audio_sender = Some(sender);
-                break;
-            }
-        }
-
-        if audio_sender.is_none() {
-            audio_sender = fallback_sender;
-        }
-
-        let (tx, rx) = tokio::sync::mpsc::channel::<MediaSample>(100);
-
-        if let Some(sender) = audio_sender {
-            info!(session_id = %self.id,
-                conf_id = %conf_id,
-                leg_id = %leg_id,
-                "Using existing track sender for conference media bridge"
-            );
-
-            let cancel = self.cancel_token.child_token();
-            self.spawn_forwarder(leg_id, cancel, sender, rx);
-        } else {
-            warn!(session_id = %self.id,
-                conf_id = %conf_id,
-                leg_id = %leg_id,
-                "No track sender found, conference audio will not be sent to this leg"
-            );
-        }
-
-        let audio_receiver = self
-            .create_audio_receiver_from_peer(peer, fallback_pc)
-            .await
-            .map_err(|e| anyhow!("Failed to create audio receiver for dynamic leg: {}", e))?;
-
-        let bridge = crate::call::runtime::ConferenceMediaBridge::new(
-            self.server.conference_server.manager_raw().clone(),
-        );
-        let leg_codec = self.leg_negotiated_codec(leg_id);
-        bridge
-            .start_bridge_full_duplex(conf_id, leg_id, tx, audio_receiver, leg_codec)
-            .await
-            .map_err(|e| anyhow!("Failed to start conference media bridge: {}", e))
-    }
-
     pub(super) async fn start_conference_media_bridge(
         &mut self,
         conf_id: &str,
         leg_id: &LegId,
     ) -> Result<crate::call::runtime::ConferenceBridgeHandle> {
-        use rustrtc::RtpCodecParameters;
-        use rustrtc::media::MediaKind;
-        use rustrtc::media::MediaSample;
-        use rustrtc::media::track::sample_track;
-
         let prefix = format!("{}-", self.id);
         let local_leg = LegId::from(
             leg_id
@@ -145,177 +80,24 @@ impl SipSession {
                 .strip_prefix(&prefix)
                 .unwrap_or(leg_id.as_str()),
         );
-        if self.media_side_for_leg(&local_leg).is_none() {
-            let peer = self
-                .legs
-                .get_peer(&local_leg)
-                .cloned()
-                .ok_or_else(|| anyhow!("Missing media peer for {}", local_leg))?;
-            return self
-                .start_conference_media_bridge_for_peer(conf_id, leg_id, &peer, None, None)
-                .await;
-        }
-        let is_callee = leg_id.0.ends_with("-callee") || leg_id.0 == "callee";
-        let (peer, track_id) = if is_callee {
-            (
-                self.callee_peer()
-                    .cloned()
-                    .ok_or_else(|| anyhow!("Missing callee peer"))?,
-                Self::CALLEE_TRACK_ID,
-            )
-        } else {
-            (
-                self.caller_peer()
-                    .cloned()
-                    .ok_or_else(|| anyhow!("Missing caller peer"))?,
-                Self::CALLER_TRACK_ID,
-            )
-        };
-
-        // ── Output side: how mixed conference audio reaches this leg ──────
-        // Preferred (P2.4): the MediaBridge leg itself, via its Inject egress
-        // source. This is the same leg that carries the call's media, so the
-        // conference output and the leg's other egress (playback/hold) share
-        // one transport. Fall back to the legacy "sample track on the
-        // independent VoiceEnginePeer PC" path when no bridge side exists.
-        let side = if is_callee {
-            crate::media::media_bridge::LegSide::B
-        } else {
-            crate::media::media_bridge::LegSide::A
-        };
-        let injected: Option<tokio::sync::mpsc::Sender<MediaSample>> = match self
-            .bridge()
-            .and_then(|mb| mb.leg(side).is_some().then(|| mb))
-        {
-            Some(mb) => match mb.inject(side) {
-                Ok(tx) => {
-                    info!(session_id = %self.id,
-                        conf_id = %conf_id,
-                        leg_id = %leg_id,
-                        side = ?side,
-                        "Conference output via MediaBridge leg Inject (P2.4)"
-                    );
-                    Some(tx)
-                }
-                Err(e) => {
-                    warn!(session_id = %self.id,
-                        conf_id = %conf_id,
-                        leg_id = %leg_id,
-                        error = %e,
-                        "MediaBridge inject unavailable; falling back to legacy track"
-                    );
-                    None
-                }
-            },
-            None => None,
-        };
-
-        let tx = if let Some(tx) = injected {
-            tx
-        } else {
-            // Legacy output: add a sample track to the independent peer PC.
-            let (audio_sender, track, _feedback_rx) = sample_track(MediaKind::Audio, 100);
-
-            // Prefer the wanted track's PC, fall back to any track's PC
-            // (see wait_for_peer_connection).
-            let pc = Self::wait_for_peer_connection(&peer, 150, Some(track_id))
-                .await
-                .ok_or_else(|| {
-                    anyhow!(
-                        "No peer connection found for conference audio injection (leg={}, track={}, session={})",
-                        leg_id,
-                        track_id,
-                        self.id
-                    )
-                })?;
-
-            let params = RtpCodecParameters {
-                payload_type: 0,
-                name: "PCMU".to_string(),
-                clock_rate: 8000,
-                channels: 1,
-            };
-
-            pc.add_track(track, params)
-                .map_err(|e| anyhow!("Failed to add conference track to peer connection: {}", e))?;
-
-            info!(session_id = %self.id,
-                conf_id = %conf_id,
-                leg_id = %leg_id,
-                "Conference sample track added to existing peer connection"
+        if let Some(peer) = self.media_leg(&local_leg) {
+            let audio = crate::media::app_ingress::LegPcmStream::attach(
+                peer.pc(), peer.negotiated().ok_or_else(|| anyhow!("Leg is not negotiated"))?,
+                local_leg.clone(), self.cancel_token.child_token(),
+            )?;
+            let (tx, rx) = tokio::sync::mpsc::channel(64);
+            peer.set_egress_source(crate::media::egress::EgressSource::Inject {
+                rx: parking_lot::Mutex::new(rx),
+            }).await?;
+            let bridge = crate::call::runtime::ConferenceMediaBridge::new(
+                self.server.conference_server.manager_raw().clone(),
             );
-
-            let (tx, rx) = tokio::sync::mpsc::channel::<MediaSample>(100);
-            let cancel = self.cancel_token.child_token();
-            self.spawn_forwarder(leg_id, cancel, audio_sender, rx);
-            tx
-        };
-
-        // Prefer the MediaBridge leg as the conference data source (P2.4); fall
-        // back to the independent peer PC for legs without a bridge side.
-        let audio_receiver = match self.create_audio_receiver(leg_id).await {
-            Ok(rx) => Ok(rx),
-            Err(_) if is_callee => self.create_audio_receiver_from_peer(&peer, None).await,
-            Err(_) => {
-                // Non-callee fallback: read from the caller peer PC directly.
-                let Some(caller_peer) = self.caller_peer().cloned() else {
-                    return Err(anyhow!("No caller peer for conference input"));
-                };
-                let pc = Self::wait_for_peer_connection(&caller_peer, 100, None)
-                    .await
-                    .ok_or_else(|| anyhow!("No peer connection found for conference input"))?;
-                self.build_audio_receiver(pc)
-            }
+            return bridge.start_bridge_full_duplex(
+                conf_id, leg_id, tx, Box::new(MediaBridgeLegAudioReceiver::new(audio)),
+                self.leg_negotiated_codec(leg_id),
+            ).await;
         }
-        .map_err(|e| anyhow!("Failed to create audio receiver: {}", e))?;
-
-        let bridge = crate::call::runtime::ConferenceMediaBridge::new(
-            self.server.conference_server.manager_raw().clone(),
-        );
-        let leg_codec = self.leg_negotiated_codec(leg_id);
-        bridge
-            .start_bridge_full_duplex(conf_id, leg_id, tx, audio_receiver, leg_codec)
-            .await
-            .map_err(|e| anyhow!("Failed to start conference media bridge: {}", e))
-    }
-
-    pub(super) async fn create_audio_receiver(
-        &mut self,
-        leg_id: &LegId,
-    ) -> Result<Box<dyn crate::call::runtime::conference_media_bridge::AudioReceiver>> {
-        let prefix = format!("{}-", self.id);
-        let local_leg = LegId::from(
-            leg_id
-                .as_str()
-                .strip_prefix(&prefix)
-                .unwrap_or(leg_id.as_str()),
-        );
-        self.require_leg(&local_leg)?;
-        if let Some(side) = self.media_side_for_leg(&local_leg)
-            && let Some(mb) = self.bridge()
-            && mb.leg(side).is_some()
-        {
-            return Ok(Box::new(MediaBridgeLegAudioReceiver::new(
-                mb.leg_pcm_stream(side)?,
-            )));
-        }
-        let peer = self
-            .legs
-            .get_peer(&local_leg)
-            .ok_or_else(|| anyhow!("No media peer for conference leg {}", local_leg))?;
-        self.create_audio_receiver_from_peer(peer, None).await
-    }
-
-    pub(super) async fn create_audio_receiver_from_peer(
-        &self,
-        peer: &Arc<dyn MediaPeer>,
-        fallback_pc: Option<rustrtc::PeerConnection>,
-    ) -> Result<Box<dyn crate::call::runtime::conference_media_bridge::AudioReceiver>> {
-        let pc = Self::wait_for_peer_connection(peer, 150, None)
-            .await
-            .or(fallback_pc)
-            .ok_or_else(|| anyhow!("No peer connection found for conference input"))?;
-        self.build_audio_receiver(pc)
+        Err(anyhow!("Missing media endpoint for {}", local_leg))
     }
 
     pub(super) fn leg_negotiated_codec(&self, leg_id: &LegId) -> audio_codec::CodecType {
@@ -356,29 +138,6 @@ impl SipSession {
                 audio_codec::CodecType::PCMU
             }
         }
-    }
-
-    pub(super) fn create_audio_decoder(&self) -> Option<Box<dyn audio_codec::Decoder>> {
-        use crate::media::negotiate::MediaNegotiator;
-        use audio_codec::create_decoder;
-
-        let codec = if let Some(ref answer_sdp) = self.media.answer {
-            let profile = MediaNegotiator::extract_leg_profile(answer_sdp);
-            if let Some(audio) = profile.audio {
-                info!(session_id = %self.id,
-                    codec = ?audio.codec,
-                    payload_type = audio.payload_type,
-                    "Using negotiated codec for conference decoder"
-                );
-                audio.codec
-            } else {
-                CodecType::PCMU
-            }
-        } else {
-            CodecType::PCMU
-        };
-
-        Some(create_decoder(codec))
     }
 
     pub(super) async fn handle_join_mixer(&mut self, mixer_id: String) -> Result<()> {

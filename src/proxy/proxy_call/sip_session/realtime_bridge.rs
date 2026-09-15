@@ -132,17 +132,9 @@ impl SipSession {
             params.api_key = params.effective_api_key();
         }
 
-        // MediaBridge is mandatory: the realtime app is app-anchored, so the
-        // caller leg's decoded PCM and egress live there.
-        let bridge = self
-            .bridge()
-            .ok_or_else(|| anyhow::anyhow!("realtime bridge requires MediaBridge"))?
-            .leg(crate::media::media_bridge::LegSide::A)
-            .ok_or_else(|| anyhow::anyhow!("realtime bridge: no caller leg"))?;
-        let uplink_stream = self
-            .bridge()
-            .ok_or_else(|| anyhow::anyhow!("realtime bridge requires MediaBridge"))?
-            .leg_pcm_stream(crate::media::media_bridge::LegSide::A)?;
+        let bridge = self.media_leg(&crate::call::domain::LegId::from("caller"))
+            .ok_or_else(|| anyhow::anyhow!("realtime: no caller media peer"))?;
+        let uplink_stream = bridge.pcm_stream(self.cancel_token.child_token())?;
 
         let ws = connect_realtime_ws(protocol.as_ref(), &params).await?;
         let (ws_write, ws_read) = ws.split();

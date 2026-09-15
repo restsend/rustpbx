@@ -732,7 +732,6 @@ fn test_resolve_outbound_callee_uri_uses_contact_when_not_via_home_proxy() {
 #[tokio::test]
 async fn test_target_invite_call_ids_resolve_before_dialing() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::tests::common::{
         create_test_request, create_test_server, create_transaction,
     };
@@ -774,8 +773,6 @@ async fn test_target_invite_call_ids_resolve_before_dialing() {
         context,
         server_dialog,
         false,
-        Arc::new(MockMediaPeer::new()),
-        Arc::new(MockMediaPeer::new()),
     );
     let registry = &server.active_call_registry;
     registry.register_handle(session_id.clone(), handle);
@@ -859,7 +856,6 @@ async fn test_target_invite_call_ids_resolve_before_dialing() {
 #[tokio::test]
 async fn test_init_callee_timer_disabled_without_session_expires() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::tests::common::{
         create_test_request, create_test_server, create_transaction,
     };
@@ -896,8 +892,7 @@ async fn test_init_callee_timer_disabled_without_session_expires() {
         metadata: None,
     };
 
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
+
     let (mut session, _handle, _cmd_rx) = SipSession::new(
         server.clone(),
         CancellationToken::new(),
@@ -905,8 +900,6 @@ async fn test_init_callee_timer_disabled_without_session_expires() {
         context,
         server_dialog,
         false,
-        caller_peer,
-        callee_peer,
     );
 
     let dialog_id = DialogId {
@@ -1063,7 +1056,6 @@ async fn test_callee_event_channel_closed() {
 #[tokio::test]
 async fn test_process_uac_handles_first_invite_termination_as_caller_state() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::tests::common::{create_test_request, create_test_server};
 
     let (server, _) = create_test_server().await;
@@ -1096,8 +1088,6 @@ async fn test_process_uac_handles_first_invite_termination_as_caller_state() {
         None,
         context,
         false,
-        Arc::new(MockMediaPeer::new()),
-        Arc::new(MockMediaPeer::new()),
     );
     let (caller_tx, caller_rx) = mpsc::unbounded_channel();
     let (_callee_tx, callee_rx) = mpsc::unbounded_channel();
@@ -1133,7 +1123,6 @@ async fn test_process_uac_handles_first_invite_termination_as_caller_state() {
 async fn rwi_originate_uses_prepared_caller_leg_for_invite_answer() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::media::leg::{LegConfig, LegInner};
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::tests::common::{create_test_request, create_test_server};
 
     let (server, _) = create_test_server().await;
@@ -1168,8 +1157,6 @@ async fn rwi_originate_uses_prepared_caller_leg_for_invite_answer() {
         None,
         context,
         true,
-        Arc::new(MockMediaPeer::new()),
-        Arc::new(MockMediaPeer::new()),
     );
     let codecs = vec![MediaNegotiator::codec_info_for_type(CodecType::PCMU)];
 
@@ -1182,37 +1169,26 @@ async fn rwi_originate_uses_prepared_caller_leg_for_invite_answer() {
         (39000..=39010).contains(&offered_port),
         "originate offer port {offered_port} must honor the configured RTP range"
     );
-    let caller_leg_before = session
-        .bridge()
-        .and_then(|bridge| bridge.leg(crate::media::media_bridge::LegSide::A))
+    let caller_leg_before = session.media_leg(&LegId::from("caller"))
         .expect("prepared caller A leg");
     assert!(
-        session
-            .bridge()
-            .and_then(|bridge| bridge.leg(crate::media::media_bridge::LegSide::B))
+        session.media_leg(&LegId::from("callee"))
             .is_none(),
         "one-target originate must not synthesize a B leg"
     );
 
     let remote = LegInner::new("rwi-remote", &LegConfig::rtp_pcmu(), None).expect("remote RTP leg");
     let answer = remote.answer(&offer).await.expect("remote SDP answer");
-    let caller_leg = session
-        .bridge()
-        .and_then(|bridge| bridge.leg(crate::media::media_bridge::LegSide::A))
+    let caller_leg = session.media_leg(&LegId::from("caller"))
         .expect("prepared caller A leg");
     caller_leg
         .apply_sdp(&answer, rustrtc::SdpType::Answer)
         .await
         .expect("answer must apply to prepared A leg");
-    session
-        .bridge_mut()
-        .expect("originate MediaBridge")
-        .accept(crate::media::media_bridge::LegSide::A)
-        .await;
+    caller_leg.accept();
+    assert!(session.media.bridge.is_none(), "a single peer does not need a bridge");
 
-    let caller_leg_after = session
-        .bridge()
-        .and_then(|bridge| bridge.leg(crate::media::media_bridge::LegSide::A))
+    let caller_leg_after = session.media_leg(&LegId::from("caller"))
         .expect("completed caller A leg");
     assert!(
         Arc::ptr_eq(&caller_leg_before, &caller_leg_after),
@@ -1221,9 +1197,7 @@ async fn rwi_originate_uses_prepared_caller_leg_for_invite_answer() {
     assert!(caller_leg_after.negotiated().is_some());
     assert!(!caller_leg_after.is_gated());
     assert!(
-        session
-            .bridge()
-            .and_then(|bridge| bridge.leg(crate::media::media_bridge::LegSide::B))
+        session.media_leg(&LegId::from("callee"))
             .is_none(),
         "answering the first target must still leave B empty"
     );
@@ -1235,9 +1209,8 @@ async fn rwi_originate_uses_prepared_caller_leg_for_invite_answer() {
 async fn rwi_bridge_setup_results_reach_listener_before_call_ends() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::media::leg::{LegConfig, LegInner};
-    use crate::media::media_bridge::LegSide;
+
     use crate::proxy::active_call_registry::{ActiveProxyCallEntry, ActiveProxyCallStatus};
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::tests::common::{create_test_request, create_test_server};
     use crate::rwi::gateway::RwiGateway;
     use crate::rwi::processor::RwiCommandProcessor;
@@ -1273,8 +1246,6 @@ async fn rwi_bridge_setup_results_reach_listener_before_call_ends() {
         None,
         context,
         true,
-        Arc::new(MockMediaPeer::new()),
-        Arc::new(MockMediaPeer::new()),
     );
     let offer = session
         .prepare_originate_caller_leg(vec![MediaNegotiator::codec_info_for_type(CodecType::PCMU)])
@@ -1282,12 +1253,12 @@ async fn rwi_bridge_setup_results_reach_listener_before_call_ends() {
         .unwrap();
     let remote = LegInner::new("bridge-remote", &LegConfig::rtp_pcmu(), None).unwrap();
     let answer = remote.answer(&offer).await.unwrap();
-    let caller = session.bridge().unwrap().leg(LegSide::A).unwrap();
+    let caller = session.media_leg(&LegId::from("caller")).unwrap();
     caller
         .apply_sdp(&answer, rustrtc::SdpType::Answer)
         .await
         .unwrap();
-    session.bridge_mut().unwrap().accept(LegSide::A).await;
+    session.media_leg(&LegId::from("caller")).unwrap().accept();
     session.update_leg_state(&LegId::from("caller"), LegState::Connected);
     server.active_call_registry.upsert(
         ActiveProxyCallEntry {
@@ -1526,7 +1497,6 @@ async fn test_unmute_track_command() {
 async fn test_handle_blind_transfer_queue_prefix() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::config::ProxyConfig;
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::routing::RouteQueueConfig;
     use crate::proxy::tests::common::{
         create_test_request, create_test_server_with_config, create_transaction,
@@ -1573,8 +1543,7 @@ async fn test_handle_blind_transfer_queue_prefix() {
         metadata: None,
     };
 
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
+
     let (mut session, _handle, _cmd_rx) = SipSession::new(
         server.clone(),
         CancellationToken::new(),
@@ -1582,8 +1551,6 @@ async fn test_handle_blind_transfer_queue_prefix() {
         context,
         server_dialog,
         false,
-        caller_peer,
-        callee_peer,
     );
     let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
     session.callee_event_tx = Some(callee_tx);
@@ -1609,7 +1576,6 @@ async fn test_handle_blind_transfer_queue_prefix() {
 async fn test_handle_blind_transfer_queue_not_found() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::call_errors::TraceKind;
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::tests::common::{
         create_test_request, create_test_server, create_transaction,
     };
@@ -1646,8 +1612,7 @@ async fn test_handle_blind_transfer_queue_not_found() {
         metadata: None,
     };
 
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
+
     let (mut session, _handle, _cmd_rx) = SipSession::new(
         server.clone(),
         CancellationToken::new(),
@@ -1655,8 +1620,6 @@ async fn test_handle_blind_transfer_queue_not_found() {
         context,
         server_dialog,
         false,
-        caller_peer,
-        callee_peer,
     );
     let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
     session.callee_event_tx = Some(callee_tx);
@@ -1707,7 +1670,6 @@ async fn test_handle_blind_transfer_queue_not_found() {
 async fn test_blind_transfer_queue_prefix_emits_transferred_with_source() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::config::ProxyConfig;
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::routing::RouteQueueConfig;
     use crate::proxy::tests::common::{
         create_test_request, create_test_server_with_rwi_gateway, create_transaction,
@@ -1760,8 +1722,7 @@ async fn test_blind_transfer_queue_prefix_emits_transferred_with_source() {
         metadata: None,
     };
 
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
+
     let (mut session, _handle, _cmd_rx) = SipSession::new(
         server.clone(),
         CancellationToken::new(),
@@ -1769,8 +1730,6 @@ async fn test_blind_transfer_queue_prefix_emits_transferred_with_source() {
         context,
         server_dialog,
         false,
-        caller_peer,
-        callee_peer,
     );
     let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
     session.callee_event_tx = Some(callee_tx);
@@ -1823,7 +1782,6 @@ async fn test_blind_transfer_queue_prefix_emits_transferred_with_source() {
 async fn test_blind_transfer_reports_queue_flow_source() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::config::ProxyConfig;
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::routing::RouteQueueConfig;
     use crate::proxy::tests::common::{
         create_test_request, create_test_server_with_rwi_gateway, create_transaction,
@@ -1876,8 +1834,7 @@ async fn test_blind_transfer_reports_queue_flow_source() {
         metadata: None,
     };
 
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
+
     let (mut session, _handle, _cmd_rx) = SipSession::new(
         server.clone(),
         CancellationToken::new(),
@@ -1885,8 +1842,6 @@ async fn test_blind_transfer_reports_queue_flow_source() {
         context,
         server_dialog,
         false,
-        caller_peer,
-        callee_peer,
     );
     let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
     session.callee_event_tx = Some(callee_tx);
@@ -2188,7 +2143,6 @@ async fn test_blind_transfer_agent_name_requires_resolved_id() {
 async fn test_blind_transfer_bare_number_routes_to_queue() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::config::ProxyConfig;
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::routing::{MatchConditions, RouteAction, RouteQueueConfig, RouteRule};
     use crate::proxy::tests::common::{
         create_test_request, create_test_server_with_rwi_gateway, create_transaction,
@@ -2273,8 +2227,7 @@ async fn test_blind_transfer_bare_number_routes_to_queue() {
         metadata: None,
     };
 
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
+
     let (mut session, _handle, _cmd_rx) = SipSession::new(
         server.clone(),
         CancellationToken::new(),
@@ -2282,8 +2235,6 @@ async fn test_blind_transfer_bare_number_routes_to_queue() {
         context,
         server_dialog,
         false,
-        caller_peer,
-        callee_peer,
     );
     let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
     session.callee_event_tx = Some(callee_tx);
@@ -2329,7 +2280,6 @@ async fn test_blind_transfer_bare_number_routes_to_queue() {
 #[tokio::test]
 async fn test_leg_id_for_dialog_resolves_caller_leg() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::tests::common::{
         create_test_request, create_test_server, create_transaction,
     };
@@ -2367,8 +2317,7 @@ async fn test_leg_id_for_dialog_resolves_caller_leg() {
         metadata: None,
     };
 
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
+
     let (session, _handle, _cmd_rx) = SipSession::new(
         server.clone(),
         CancellationToken::new(),
@@ -2376,8 +2325,6 @@ async fn test_leg_id_for_dialog_resolves_caller_leg() {
         context,
         server_dialog,
         false,
-        caller_peer,
-        callee_peer,
     );
 
     assert_eq!(
@@ -2924,7 +2871,6 @@ a=rtcp:42001\r\n";
 #[tokio::test]
 async fn ensure_caller_leg_answers_offer_with_video_ssrc() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::tests::common::{
         create_test_request, create_test_server, create_transaction,
     };
@@ -2963,8 +2909,7 @@ async fn ensure_caller_leg_answers_offer_with_video_ssrc() {
         metadata: None,
     };
 
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
+
     // `use_media_proxy = true` eagerly creates the MediaBridge.
     let (mut session, _handle, _cmd_rx) = SipSession::new(
         server.clone(),
@@ -2973,8 +2918,6 @@ async fn ensure_caller_leg_answers_offer_with_video_ssrc() {
         context,
         server_dialog,
         true,
-        caller_peer,
-        callee_peer,
     );
 
     let caller_offer = "v=0\r\n\
@@ -3041,7 +2984,6 @@ a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5
 #[tokio::test]
 async fn video_strip_policy_omits_video_mline() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::tests::common::{
         create_test_request, create_test_server, create_transaction,
     };
@@ -3077,8 +3019,7 @@ async fn video_strip_policy_omits_video_mline() {
         metadata: None,
     };
 
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
+
     let (mut session, _handle, _cmd_rx) = SipSession::new(
         server.clone(),
         CancellationToken::new(),
@@ -3086,8 +3027,6 @@ async fn video_strip_policy_omits_video_mline() {
         context,
         server_dialog,
         true,
-        caller_peer,
-        callee_peer,
     );
 
     let caller_offer = "v=0\r\n\
@@ -3303,7 +3242,6 @@ fn test_parse_defaults_to_file() {
 async fn media_bridge_caller_answer_follows_callee_answer_codec() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::media::leg::{LegConfig, LegInner};
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::tests::common::{
         create_test_request, create_test_server, create_transaction,
     };
@@ -3342,8 +3280,7 @@ async fn media_bridge_caller_answer_follows_callee_answer_codec() {
         metadata: None,
     };
 
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
+
     let (mut session, _handle, _cmd_rx) = SipSession::new(
         server,
         CancellationToken::new(),
@@ -3351,8 +3288,6 @@ async fn media_bridge_caller_answer_follows_callee_answer_codec() {
         context,
         server_dialog,
         true,
-        caller_peer,
-        callee_peer,
     );
     session.media.caller_offer = Some(
         concat!(
@@ -3401,9 +3336,7 @@ async fn media_bridge_caller_answer_follows_callee_answer_codec() {
         Some(CodecType::PCMU),
         "caller answer must follow the codec selected in the callee answer"
     );
-    let caller_leg_profile = session
-        .bridge()
-        .and_then(|bridge| bridge.leg(crate::media::media_bridge::LegSide::A))
+    let caller_leg_profile = session.media_leg(&LegId::from("caller"))
         .and_then(|leg| leg.negotiated())
         .expect("caller leg profile");
     assert_eq!(
@@ -3431,7 +3364,6 @@ async fn test_parallel_fork_callee_offer_caches_same_transport_port() {
     // (cached callee offer). Without the Bug 3 fix, each fork created a
     // separate callee track with a different bound port.
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::tests::common::{
         create_test_request, create_test_server, create_transaction,
     };
@@ -3471,8 +3403,7 @@ async fn test_parallel_fork_callee_offer_caches_same_transport_port() {
         metadata: None,
     };
 
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
+
     let (mut session, _handle, _cmd_rx) = SipSession::new(
         server.clone(),
         CancellationToken::new(),
@@ -3480,8 +3411,6 @@ async fn test_parallel_fork_callee_offer_caches_same_transport_port() {
         context,
         server_dialog,
         true,
-        caller_peer,
-        callee_peer,
     );
 
     session.media.caller_offer = Some(
@@ -3546,7 +3475,6 @@ async fn test_parallel_fork_callee_offer_regenerates_for_different_transport() {
     // callee offer must NOT be reused from the cache — each transport
     // produces a different SDP.
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::tests::common::{
         create_test_request, create_test_server, create_transaction,
     };
@@ -3586,8 +3514,7 @@ async fn test_parallel_fork_callee_offer_regenerates_for_different_transport() {
         metadata: None,
     };
 
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
+
     let (mut session, _handle, _cmd_rx) = SipSession::new(
         server.clone(),
         CancellationToken::new(),
@@ -3595,8 +3522,6 @@ async fn test_parallel_fork_callee_offer_regenerates_for_different_transport() {
         context,
         server_dialog,
         true,
-        caller_peer,
-        callee_peer,
     );
 
     session.media.caller_offer = Some(
@@ -3679,7 +3604,6 @@ async fn test_parallel_fork_callee_offer_regenerates_for_different_transport() {
 #[tokio::test]
 async fn test_hold_sdp_contains_sendonly() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::tests::common::{
         create_test_request, create_test_server, create_transaction,
     };
@@ -3698,8 +3622,8 @@ async fn test_hold_sdp_contains_sendonly() {
         .dialog_layer
         .get_or_create_server_invite(&tx, state_tx, None, None)
         .unwrap();
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
+
+
     let (mut session, _h, _rx) = SipSession::new(
         server,
         CancellationToken::new(),
@@ -3721,8 +3645,6 @@ async fn test_hold_sdp_contains_sendonly() {
         },
         server_dialog,
         false,
-        caller_peer,
-        callee_peer,
     );
 
     // Hold SDP: sendrecv → sendonly
@@ -4263,17 +4185,13 @@ async fn test_default_queue_prompts_resolve_and_are_playable() {
 #[tokio::test]
 async fn arm_bridged_rtp_timeouts_sends_hangup_on_inactivity() {
     use crate::media::leg::{LegConfig, LegInner};
-    use crate::media::media_bridge::LegSide;
+
 
     let mut mb = crate::media::media_bridge::MediaBridge::new("rtp-timeout-session-test");
-    mb.replace_leg(
-        LegSide::A,
-        LegInner::new("a", &LegConfig::rtp_pcmu(), None).unwrap(),
+    mb.replace_leg(LegSide::A, LegInner::new("caller", &LegConfig::rtp_pcmu(), None).unwrap(),
     )
     .await;
-    mb.replace_leg(
-        LegSide::B,
-        LegInner::new("b", &LegConfig::rtp_pcmu(), None).unwrap(),
+    mb.replace_leg(LegSide::B, LegInner::new("callee", &LegConfig::rtp_pcmu(), None).unwrap(),
     )
     .await;
 
@@ -4512,7 +4430,6 @@ async fn route_outbound_leg_applies_forward_trunk() {
 async fn route_originated_leg_disabled_returns_location_unchanged() {
     use crate::call::{DialDirection, Dialplan, Location, TransactionCookie};
     use crate::config::ProxyConfig;
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::tests::common::{
         create_test_request, create_test_server_with_config, create_transaction,
     };
@@ -4550,8 +4467,8 @@ async fn route_originated_leg_disabled_returns_location_unchanged() {
         created_at: chrono::Utc::now().to_rfc3339(),
         metadata: None,
     };
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
+
+
     let (session, _handle, _cmd_rx) = SipSession::new(
         server.clone(),
         CancellationToken::new(),
@@ -4559,8 +4476,6 @@ async fn route_originated_leg_disabled_returns_location_unchanged() {
         context,
         server_dialog,
         false,
-        caller_peer,
-        callee_peer,
     );
 
     let loc = Location {
@@ -4585,7 +4500,6 @@ async fn route_originated_leg_disabled_returns_location_unchanged() {
 #[tokio::test]
 async fn route_originated_leg_applies_forward_to_location() {
     use crate::call::{DialDirection, Dialplan, Location, TransactionCookie};
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::tests::common::{
         create_test_request, create_test_server_with_config, create_transaction,
     };
@@ -4619,8 +4533,8 @@ async fn route_originated_leg_applies_forward_to_location() {
         created_at: chrono::Utc::now().to_rfc3339(),
         metadata: None,
     };
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
+
+
     let (session, _handle, _cmd_rx) = SipSession::new(
         server.clone(),
         CancellationToken::new(),
@@ -4628,8 +4542,6 @@ async fn route_originated_leg_applies_forward_to_location() {
         context,
         server_dialog,
         false,
-        caller_peer,
-        callee_peer,
     );
 
     let loc = Location {
@@ -4656,7 +4568,6 @@ async fn route_originated_leg_applies_forward_to_location() {
 async fn route_originated_leg_session_flag_overrides_global() {
     use crate::call::{DialDirection, Dialplan, Location, TransactionCookie};
     use crate::config::ProxyConfig;
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::tests::common::{
         create_test_request, create_test_server_with_config, create_transaction,
     };
@@ -4696,8 +4607,8 @@ async fn route_originated_leg_session_flag_overrides_global() {
         created_at: chrono::Utc::now().to_rfc3339(),
         metadata: None,
     };
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
+
+
     let (session, _handle, _cmd_rx) = SipSession::new(
         server.clone(),
         CancellationToken::new(),
@@ -4705,8 +4616,6 @@ async fn route_originated_leg_session_flag_overrides_global() {
         context,
         server_dialog,
         false,
-        caller_peer,
-        callee_peer,
     );
 
     assert!(
@@ -4732,7 +4641,6 @@ async fn route_originated_leg_session_flag_overrides_global() {
 async fn track_routed_leg_hints_stores_lease_and_holds() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::config::ProxyConfig;
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::tests::common::{
         create_test_request, create_test_server_with_config, create_transaction,
     };
@@ -4766,8 +4674,8 @@ async fn track_routed_leg_hints_stores_lease_and_holds() {
         created_at: chrono::Utc::now().to_rfc3339(),
         metadata: None,
     };
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
+
+
     let (mut session, _handle, _cmd_rx) = SipSession::new(
         server.clone(),
         CancellationToken::new(),
@@ -4775,8 +4683,6 @@ async fn track_routed_leg_hints_stores_lease_and_holds() {
         context,
         server_dialog,
         false,
-        caller_peer,
-        callee_peer,
     );
 
     // Empty hints → no tracked lease. Await a (disabled) route first so the
@@ -4813,7 +4719,6 @@ async fn track_routed_leg_hints_stores_lease_and_holds() {
 #[tokio::test]
 async fn resolve_custom_targets_skips_only_unregistered_same_realm_queue_targets() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::tests::common::{
         create_test_request, create_test_server, create_transaction,
     };
@@ -4899,8 +4804,8 @@ async fn resolve_custom_targets_skips_only_unregistered_same_realm_queue_targets
         created_at: chrono::Utc::now().to_rfc3339(),
         metadata: None,
     };
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
+
+
     let (mut session, _handle, _cmd_rx) = SipSession::new(
         server,
         CancellationToken::new(),
@@ -4908,8 +4813,6 @@ async fn resolve_custom_targets_skips_only_unregistered_same_realm_queue_targets
         context,
         server_dialog,
         false,
-        caller_peer,
-        callee_peer,
     );
 
     let targets = vec![
@@ -5025,18 +4928,184 @@ async fn effective_ring_timeout_precedence_and_disabled() {
 }
 
 #[tokio::test]
-async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
+async fn added_second_leg_relays_audio_and_dtmf_without_mixer() {
+    use crate::call::{DialDirection, Dialplan, MediaConfig, TransactionCookie};
+    use crate::config::{MediaProxyMode, ProxyConfig};
+    use crate::media::leg::{LegConfig, LegInner};
+    use crate::media::media_bridge::MediaBridge;
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
+    use crate::rwi::RwiGateway;
+
+    let gateway = Arc::new(parking_lot::RwLock::new(RwiGateway::new()));
+    let (server, _) = create_test_server_with_rwi_gateway(ProxyConfig::default(), gateway.clone()).await;
+    let request = create_test_request(rsipstack::sip::Method::Invite, "caller", None, "rustpbx.com", None);
+    let context = CallContext {
+        session_id: "added-media".into(),
+        dialplan: Arc::new(Dialplan::new("added-media".into(), request, DialDirection::Inbound)
+            .with_media(MediaConfig::new().with_proxy_mode(MediaProxyMode::All))),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:caller@rustpbx.com".into(),
+        original_callee: "sip:1101@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let cancel = CancellationToken::new();
+    let _guard = cancel.clone().drop_guard();
+    let (mut session, _handle, _commands) = SipSession::new_uac(
+        server.clone(), cancel, None, context, true,
+    );
+    let mut cfg = LegConfig::rtp_pcmu();
+    cfg.codecs.push(crate::media::negotiate::CodecInfo {
+        payload_type: 101, codec: audio_codec::CodecType::TelephoneEvent,
+        clock_rate: 8000, channels: 1, fmtp: Some("0-16".into()),
+    });
+    let caller = LegInner::new("remote-caller", &cfg, None).unwrap();
+    let local = LegInner::new("caller", &cfg, None).unwrap();
+    let offer = caller.create_offer().await.unwrap();
+    let answer = local.apply_sdp(&offer, rustrtc::SdpType::Offer).await.unwrap();
+    caller.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
+    session.media.caller_offer = Some(offer);
+    session.media.answer = Some(answer);
+    session.legs.set_media_leg(&LegId::from("caller"), local.clone());
+    session.media_leg(&LegId::from("caller")).unwrap().accept();
+    session.update_leg_state(&LegId::from("caller"), LegState::Connected);
+
+    // Exercise leg_add itself, including its actual media-offer selection.
+    // Supply the remote answer through the same LegConnected command the SIP
+    // response task uses; no mixer/peer setup is injected by the test.
+    let alice_id = session.handle_add_leg_inner(
+        "sip:alice@127.0.0.1:5099".into(), Some(LegId::from("alice-test")), vec![],
+    ).await.unwrap();
+    assert_eq!(session.bridge().and_then(|bridge| bridge.leg_for_id(&crate::media::leg_id::LegId::from(alice_id.as_str()))).map(|p| p.id().to_string()), None);
+    assert!(session.legs.media_leg(&alice_id).is_some());
+    let alice = LegInner::new("remote-alice", &cfg, None).unwrap();
+    let answer = alice.apply_sdp(&session.legs.media_leg(&alice_id).unwrap().pc().local_description().unwrap().to_sdp_string(), rustrtc::SdpType::Offer)
+        .await.unwrap();
+    session.execute_command(CallCommand::LegConnected {
+        leg_id: alice_id.clone(), answer_sdp: Some(answer), dialog_id: None,
+    }, None).await;
+    assert!(session.bridge().unwrap().is_bridged());
+    for side in [LegSide::A, LegSide::B] {
+        assert!(session.bridge().unwrap().leg(side).unwrap().egress_is_relay());
+    }
+    assert!(server.conference_server.get_conference(
+        &crate::call::runtime::ConferenceId::from("consult-added-media")
+    ).await.is_none());
+
+    let mut remotes = Vec::new();
+    for remote in [&caller, &alice] {
+        let mut bridge = MediaBridge::new("remote-observer");
+        bridge.replace_leg(LegSide::A, (*remote).clone()).await;
+        bridge.accept(LegSide::A).await;
+        remotes.push(bridge);
+    }
+    // Check actual RTP audio and telephone-events in both directions.
+    for (source, destination, destination_bridge, digit) in [
+        (&caller, &alice, &remotes[1], "2"),
+        (&alice, &caller, &remotes[0], "5"),
+    ] {
+        let mut audio = crate::media::app_ingress::LegPcmStream::attach(
+            destination.pc(), destination.negotiated().unwrap(),
+            LegId::from("observer"), session.cancel_token.child_token(),
+        ).unwrap();
+        source.set_egress_source(crate::media::egress::EgressSource::Media {
+            audio: Box::new(crate::media::audio_source::ToneAudioSource::new(
+                660, Duration::from_secs(1), 8000,
+            ).unwrap()), loop_playback: false, on_end: None,
+        }).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let frame = audio.recv().await.unwrap();
+                if !frame.silence && frame.frame.samples.iter().any(|s| s.abs() > 100) {
+                    break;
+                }
+            }
+        }).await.expect("opposite endpoint must receive audio");
+        let mut received_digits = destination_bridge.dtmf_bus();
+        source.send_dtmf(digit).await.unwrap();
+        let (_, received) = tokio::time::timeout(Duration::from_secs(3), received_digits.recv())
+            .await.expect("DTMF must cross the relay").unwrap();
+        assert_eq!(received.digit.to_string(), digit);
+    }
+    // A subsequent add must not replace the connected Alice transport.
+    let first_b = session.bridge().unwrap().leg_for_id(&crate::media::leg_id::LegId::from(alice_id.as_str())).unwrap().clone();
+    let another = session.handle_add_leg_inner(
+        "sip:other@127.0.0.1:5098".into(), Some(LegId::from("another")), vec![],
+    ).await.unwrap();
+    assert!(Arc::ptr_eq(&first_b, &session.bridge().unwrap().leg_for_id(&crate::media::leg_id::LegId::from(alice_id.as_str())).unwrap()));
+    assert!(session.legs.media_leg(&another).is_some());
+    let third = LegInner::new("remote-third", &cfg, None).unwrap();
+    let third_peer = session.legs.media_leg(&another).unwrap();
+    let answer = third.answer(&third_peer.pc().local_description().unwrap().to_sdp_string()).await.unwrap();
+    session.execute_command(CallCommand::LegConnected {
+        leg_id: another.clone(), answer_sdp: Some(answer), dialog_id: None,
+    }, None).await;
+    // A third answer must not change the existing pair or start a mixer.
+    assert!(Arc::ptr_eq(&first_b, &session.bridge().unwrap().leg_for_id(&crate::media::leg_id::LegId::from(alice_id.as_str())).unwrap()));
+    assert!(session.conference_bridge.conf_id.is_none());
+    session.execute_command(CallCommand::Bridge {
+        leg_a: alice_id.clone(), leg_b: another.clone(), mode: crate::call::domain::P2PMode::Audio,
+    }, None).await;
+    assert!(Arc::ptr_eq(&first_b, &session.bridge().unwrap().leg_for_id(&crate::media::leg_id::LegId::from(alice_id.as_str())).unwrap()));
+    assert!(Arc::ptr_eq(&third_peer, &session.bridge().unwrap().leg_for_id(&crate::media::leg_id::LegId::from(another.as_str())).unwrap()));
+    // Signaling and media operations resolve by leg identity even when the
+    // caller is no longer selected in either bridge slot.
+    assert!(Arc::ptr_eq(&local, &session.media_leg(&LegId::from("caller")).unwrap()));
+    let caller_pc = session.get_local_reinvite_pc(DialogSide::Caller).await.unwrap();
+    assert_eq!(caller_pc.local_description().unwrap().to_sdp_string(),
+        local.pc().local_description().unwrap().to_sdp_string());
+    let mut third_observer = MediaBridge::new("third-observer");
+    third_observer.replace_leg(LegSide::A, third.clone()).await;
+    third_observer.accept(LegSide::A).await;
+    let mut digits = third_observer.dtmf_bus();
+    alice.send_dtmf("8").await.unwrap();
+    let (_, digit) = tokio::time::timeout(Duration::from_secs(3), digits.recv()).await.unwrap().unwrap();
+    assert_eq!(digit.digit, '8');
+    third_observer.close();
+    session.clear_bridge().await;
+    assert!(session.setup_bridge(LegId::from("caller"), alice_id.clone()).await);
+    // Switching away and back must preserve the original PeerConnections.
+    assert!(Arc::ptr_eq(&first_b, &session.bridge().unwrap().leg_for_id(&crate::media::leg_id::LegId::from(alice_id.as_str())).unwrap()));
+    let mut audio = crate::media::app_ingress::LegPcmStream::attach(
+        alice.pc(), alice.negotiated().unwrap(), LegId::from("restored"), session.cancel_token.child_token(),
+    ).unwrap();
+    caller.set_egress_source(crate::media::egress::EgressSource::Media {
+        audio: Box::new(crate::media::audio_source::ToneAudioSource::new(660, Duration::from_secs(1), 8000).unwrap()),
+        loop_playback: false, on_end: None,
+    }).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let frame = audio.recv().await.unwrap();
+            if frame.frame.samples.iter().any(|s| s.abs() > 100) { break; }
+        }
+    }).await.expect("restored peer must still carry audio");
+    session.handle_remove_leg(another).await.unwrap();
+    session.handle_remove_leg(alice_id).await.unwrap();
+    let retry = session.handle_add_leg_inner(
+        "sip:alice@127.0.0.1:5099".into(), Some(LegId::from("alice-retry")), vec![],
+    ).await.unwrap();
+    assert!(!Arc::ptr_eq(&first_b, &session.legs.media_leg(&retry).unwrap()));
+    third.stop();
+    session.bridge_mut().unwrap().close();
+    for bridge in &mut remotes { bridge.close(); }
+}
+
+#[tokio::test]
+async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::config::ProxyConfig;
     use crate::media::leg::{LegConfig, LegInner};
-    use crate::media::media_bridge::{LegSide, MediaBridge};
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+    use crate::media::media_bridge::MediaBridge;
     use crate::proxy::tests::common::{create_test_request, create_test_server_with_config};
 
     for scenario in [
         "reject",
         "timeout",
         "private_hangup",
+        "complete",
+        "complete_from_customer",
         "merged",
         "switch_then_merge",
         "supervisor_switch",
@@ -5070,8 +5139,6 @@ async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
             None,
             context,
             true,
-            Arc::new(MockMediaPeer::new()),
-            Arc::new(MockMediaPeer::new()),
         );
         let mut bridge = MediaBridge::new("consult-media");
         let mut remote_legs = Vec::new();
@@ -5096,6 +5163,7 @@ async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
             session.update_leg_state(&LegId::from(name), LegState::Connected);
             local.accept();
             remote.accept();
+            session.legs.set_media_leg(&LegId::from(name), local.clone());
             bridge.replace_leg(side, local).await;
             remote_legs.push(remote);
         }
@@ -5104,7 +5172,7 @@ async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
         let agent_pc = session
             .bridge()
             .unwrap()
-            .leg(LegSide::B)
+            .leg_for_id(&crate::media::leg_id::LegId::from("callee"))
             .unwrap()
             .pc()
             .clone();
@@ -5117,19 +5185,12 @@ async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
             .create_leg_peer(&consult, rustrtc::TransportMode::Rtp)
             .await
             .unwrap();
-        session.legs.set_peer(consult.clone(), peer.clone());
+        session.legs.set_media_leg(&consult, peer.clone());
         let remote = LegInner::new("remote-consult", &LegConfig::rtp_pcmu(), None).unwrap();
         let answer = remote
             .apply_sdp(&offer, rustrtc::SdpType::Offer)
             .await
             .unwrap();
-        peer.update_remote_description(
-            "leg-consult-media-consult",
-            &answer,
-            rustrtc::SdpType::Answer,
-        )
-        .await
-        .unwrap();
 
         session
             .execute_command(
@@ -5168,11 +5229,11 @@ async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
             );
             assert!(session.conference_bridge.conf_id.is_none());
             tokio::time::timeout(Duration::from_secs(2), async {
-                while ![LegSide::A, LegSide::B].iter().all(|side| {
+                while !["caller", "callee"].iter().all(|side| {
                     session
                         .bridge()
                         .unwrap()
-                        .leg(*side)
+                        .leg_for_id(&crate::media::leg_id::LegId::from(*side))
                         .unwrap()
                         .egress_is_relay()
                 }) {
@@ -5184,6 +5245,17 @@ async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
             assert!(!session.cancel_token.is_cancelled());
             continue;
         }
+        // The INVITE task applies provisional SDP before notifying the session.
+        session.media_leg(&consult).unwrap().apply_sdp(&answer, rustrtc::SdpType::Pranswer)
+            .await.unwrap();
+        // Provisional media may connect the requested B-C pair before final answer.
+        let provisional = session.execute_command(CallCommand::LegRinging {
+            leg_id: consult.clone(),
+        }, None).await;
+        assert!(provisional.success);
+        assert_eq!(session.legs.get(&consult).unwrap().state, LegState::EarlyMedia);
+        assert!(session.bridge().unwrap().is_bridged());
+        assert_eq!(session.legs.get(&LegId::from("caller")).unwrap().state, LegState::Hold);
         session
             .execute_command(
                 CallCommand::LegConnected {
@@ -5198,31 +5270,53 @@ async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
             format!("{:?}", agent_pc.remote_description()),
             format!("{:?}", agent_sdp)
         );
-        assert_eq!(
-            session.conference_bridge.conf_id.as_deref(),
-            Some("consult-consult-media")
-        );
+        assert!(session.conference_bridge.conf_id.is_none());
+        assert!(session.bridge().unwrap().is_bridged());
         assert_eq!(
             session.legs.get(&LegId::from("caller")).unwrap().state,
             LegState::Hold
         );
-        let mut private_tokens = Vec::new();
-        for name in ["callee", "consult"] {
-            let id = LegId::from(name);
-            let handle = session
-                .legs
-                .remove_conference_bridge_handle(&id)
-                .expect("private bridge");
-            assert!(!handle.cancel_token.is_cancelled());
-            private_tokens.push(handle.cancel_token.clone());
-            session.legs.set_conference_bridge_handle(id, handle);
+        if scenario == "complete" || scenario == "complete_from_customer" {
+            if scenario == "complete_from_customer" {
+                session.handle_hold(consult.clone(), None).await.unwrap();
+                session.handle_unhold(LegId::from("caller")).await.unwrap();
+                assert!(session.bridge.contains_leg(&LegId::from("caller")));
+            }
+            let caller_peer = session.media_leg(&LegId::from("caller")).unwrap();
+            let consult_peer = session.media_leg(&consult).unwrap();
+            let result = session.execute_command(CallCommand::TransferComplete {
+                consult_leg: consult.clone(),
+            }, None).await;
+            assert!(result.success, "{:?}", result.message);
+            assert!(session.legs.get(&LegId::from("callee")).is_none());
+            assert!(session.conference_bridge.conf_id.is_none());
+            assert!(session.bridge().unwrap().is_bridged());
+            assert!(Arc::ptr_eq(&caller_peer, &session.media_leg(&LegId::from("caller")).unwrap()));
+            assert!(Arc::ptr_eq(&consult_peer, &session.media_leg(&consult).unwrap()));
+            assert!(session.bridge.contains_leg(&LegId::from("caller")));
+            assert!(session.bridge.contains_leg(&consult));
+            let mut audio = crate::media::app_ingress::LegPcmStream::attach(
+                remote.pc(), remote.negotiated().unwrap(),
+                crate::media::leg_id::LegId::from("complete-observer"), CancellationToken::new(),
+            ).unwrap();
+            remote_legs[0].play(Box::new(crate::media::audio_source::ToneAudioSource::new(
+                660, Duration::from_secs(2), 8000,
+            ).unwrap()), false, None).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let frame = audio.recv().await.unwrap();
+                    if frame.frame.samples.iter().any(|s| s.abs() > 100) { break; }
+                }
+            }).await.expect("A must reach C after direct completion");
+            for remote in remote_legs { remote.stop(); }
+            continue;
         }
+        let mut private_tokens: Vec<CancellationToken> = Vec::new();
         if scenario == "supervisor_switch" {
             session
                 .handle_supervisor_listen(consult.clone(), LegId::from("callee"), None)
                 .await
                 .unwrap();
-            assert!(private_tokens.iter().all(|token| token.is_cancelled()));
             let listen_token = session
                 .legs
                 .conference_bridge_handle(&consult)
@@ -5270,13 +5364,12 @@ async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
                 LegState::Connected
             );
             assert!(session.conference_bridge.conf_id.is_none());
-            assert!(private_tokens.iter().all(|token| token.is_cancelled()));
             tokio::time::timeout(Duration::from_secs(2), async {
-                while ![LegSide::A, LegSide::B].iter().all(|side| {
+                while !["caller", "callee"].iter().all(|side| {
                     session
                         .bridge()
                         .unwrap()
-                        .leg(*side)
+                        .leg_for_id(&crate::media::leg_id::LegId::from(*side))
                         .unwrap()
                         .egress_is_relay()
                 }) {
@@ -5432,19 +5525,7 @@ async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
                         None,
                     )
                     .await;
-                assert_eq!(
-                    session.conference_bridge.conf_id.as_deref(),
-                    Some("consult-consult-media")
-                );
-                private_tokens.clear();
-                for name in ["callee", "consult"] {
-                    let id = LegId::from(name);
-                    let handle = session
-                        .legs
-                        .conference_bridge_handle(&id)
-                        .expect("restored consultation bridge");
-                    private_tokens.push(handle.cancel_token.clone());
-                }
+                assert!(session.bridge().unwrap().is_bridged());
             }
             let room = transfers
                 .merge_to_conference("transfer-media")
@@ -5480,14 +5561,16 @@ async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
                 "merge must only attach A/B/C + MarkTransferred"
             );
             session.execute_command(command, None).await;
-            if scenario == "switch_then_merge" {
-                session.execute_command(cmd_b, None).await;
-                session.execute_command(cmd_c, None).await;
+            session.execute_command(cmd_b, None).await;
+            session.execute_command(cmd_c, None).await;
+            for name in ["callee", "consult"] {
+                private_tokens.push(session.legs.conference_bridge_handle(&LegId::from(name))
+                    .unwrap().cancel_token.clone());
             }
         }
         #[cfg(not(feature = "addon-cc"))]
         {
-            if scenario == "switch_then_merge" {
+            {
                 // LeaveMixer above dropped the last conference participants,
                 // which spawns an *async* destroy that removes the mixer
                 // before the room. Joining while that task is mid-flight
@@ -5547,18 +5630,11 @@ async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
                 .participant_count(),
             3
         );
-        if scenario != "switch_then_merge" {
-            for side in [LegSide::A, LegSide::B] {
-                assert!(
-                    !session
-                        .bridge()
-                        .unwrap()
-                        .leg(side)
-                        .unwrap()
-                        .egress_is_relay(),
-                    "unhold must preserve mixer output"
-                );
-            }
+        for id in ["caller", "callee", "consult"] {
+            assert!(
+                !session.media_leg(&LegId::from(id)).unwrap().egress_is_relay(),
+                "merged participants must preserve mixer output"
+            );
         }
         assert_eq!(
             session.legs.get(&LegId::from("caller")).unwrap().state,
@@ -5731,7 +5807,6 @@ async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
 async fn consult_retry_uses_new_sip_call_id() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::config::ProxyConfig;
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::tests::common::{create_test_request, create_test_server_with_config};
 
     let (server, _) = create_test_server_with_config(ProxyConfig::default()).await;
@@ -5763,8 +5838,6 @@ async fn consult_retry_uses_new_sip_call_id() {
         None,
         context,
         true,
-        Arc::new(MockMediaPeer::new()),
-        Arc::new(MockMediaPeer::new()),
     );
 
     let (_input_tx, input_rx) = mpsc::unbounded_channel();
@@ -5842,7 +5915,6 @@ async fn consult_retry_uses_new_sip_call_id() {
 async fn test_record_snapshot_carries_transferred_and_leg_timeline() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::callrecord::LegTimelineEventType;
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::tests::common::{
         create_test_request, create_test_server, create_transaction,
     };
@@ -5879,8 +5951,7 @@ async fn test_record_snapshot_carries_transferred_and_leg_timeline() {
         metadata: None,
     };
 
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
+
     let (mut session, _handle, _cmd_rx) = SipSession::new(
         server.clone(),
         CancellationToken::new(),
@@ -5888,8 +5959,6 @@ async fn test_record_snapshot_carries_transferred_and_leg_timeline() {
         context,
         server_dialog,
         false,
-        caller_peer,
-        callee_peer,
     );
 
     // Root session: no inherited root id.
