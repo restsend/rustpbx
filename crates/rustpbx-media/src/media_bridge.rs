@@ -409,11 +409,7 @@ impl MediaBridge {
             // negotiated SSRC / PT, and strip WebRTC extension headers when the
             // destination is plain RTP.
             //
-            // Use the destination leg's outbound audio SSRC:
-            // - WebRTC → paced sender / SDP `a=ssrc` (IVR + relay share it so
-            //   browsers hear both local playback and bridged audio)
-            // - plain RTP → distinct relay SSRC (isolates later local playback;
-            //   RTP peers do not bind to SDP a=ssrc)
+            // All output paths share the destination sender's SSRC and sequence.
             let a_playback_ssrc = crate::leg::sender_ssrc_for_kind(la.pc(), MediaKind::Audio);
             let b_playback_ssrc = crate::leg::sender_ssrc_for_kind(lb.pc(), MediaKind::Audio);
             let a_out_ssrc = la.outbound_audio_ssrc();
