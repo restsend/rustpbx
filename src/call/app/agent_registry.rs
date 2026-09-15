@@ -361,6 +361,43 @@ pub trait AgentRegistry: Send + Sync {
         None
     }
 
+    // ── Cross-node strict-FIFO dispatch gate ────────────────────────────
+    //
+    // The shared queue table (CC addon: `cc_acd_queue`) is the single
+    // serialization point for dispatch order. A call may start dialing only
+    // when no strictly-earlier UNCLAIMED waiter exists in the same skill
+    // group. Claimed rows mean "dispatching" (ringing an agent) and do not
+    // block later calls — this prevents head-of-line blocking when several
+    // agents are idle at once. All four hooks default to pass-through so
+    // non-CC registries keep today's behavior.
+
+    /// Synchronously record the call as waiting in `queue_id` (the skill
+    /// group id). MUST be idempotent (upsert). Called when the call enters
+    /// wait retention so the gate is visible to every node before the first
+    /// poll — the async event tap alone is lossy under backpressure.
+    async fn fifo_register_wait(&self, _queue_id: &str, _call_id: &str, _caller: &str, _priority: i32) {
+    }
+
+    /// FIFO gate. Auto-detects the caller's mode from the shared queue:
+    /// the call's OWN waiting row present → peer mode (yield only to
+    /// strictly-earlier waiters); absent → newcomer mode (yield to ANY
+    /// unclaimed waiter, i.e. a brand-new call never jumps the queue).
+    /// Fails OPEN on DB errors / unregistered calls — ordering is
+    /// best-effort fairness, never a dispatch blocker.
+    async fn fifo_allows_dispatch(&self, _queue_id: &str, _call_id: &str) -> bool {
+        true
+    }
+
+    /// Mark the call as "dispatching" (starts ringing an agent). Claimed
+    /// rows stop counting as waiters so later calls can take other idle
+    /// agents. Best-effort: failure only costs ordering precision.
+    async fn fifo_begin_dispatch(&self, _call_id: &str) {}
+
+    /// Return to "waiting" after the dial episode failed (all agents rang
+    /// without answer) — the row keeps its original `enqueued_at`, so the
+    /// call keeps its queue position.
+    async fn fifo_release_dispatch(&self, _call_id: &str) {}
+
     /// Resolve the escalation dial targets.
     ///
     /// - `include_primary = true` (Cumulative widening): the union of the

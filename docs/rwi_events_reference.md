@@ -260,8 +260,10 @@ Webhook 使用 `(call_id, timestamp)` 元组去重，环形缓冲区容量 4096 
 | `routing_path` | Option\<Vec\<String\>\> | 路由路径 |
 | `session_id` | Option\<String\> | enrichment：逻辑呼叫根 session_id |
 | `direction` | Option\<String\> | enrichment：`inbound` / `outbound` / `internal` |
+| `agent_id` | Option\<String\> | enrichment：发起呼叫的坐席 ID —— **仅当呼叫由已注册 CC 坐席发起时**出现（CTI 点击外呼 / 坐席发起的咨询转 C 腿等；在 `call_created` 发出前即写入，不依赖 ringing 阶段的 hook） |
+| `agent_name` | Option\<String\> | enrichment：发起呼叫的坐席显示名（与 `agent_id` 同条件） |
 
-> **注意**：所有 call 事件统一使用上下文注入的 `direction` 字段（由 `CallMetaStore` enrichment 注入）。跨腿关联请用 enrichment 注入的 `session_id`。
+> **注意**：所有 call 事件统一使用上下文注入的 `direction` 字段（由 `CallMetaStore` enrichment 注入）。跨腿关联请用 enrichment 注入的 `session_id`。坐席发起的外呼（invite）从 `call_created` 起即携带发起坐席（`agent_id` / `agent_name`）。
 
 ```json
 {
@@ -447,9 +449,10 @@ CC addon 的独立呼叫生命周期事件已移除。坐席归因改由核心�
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `source_type` | String | `ivr`（从运行中的 IVR 流程转出）\| `queue`（由排队呼叫的坐席发起）\| `agent`（归因到已知坐席腿的转接）。当前代码仅产生这三个值 |
-| `name` | Option\<String\> | 来源 IVR 名称（如 `main-ivr`）或队列名（如 `sales`） |
+| `name` | Option\<String\> | 来源 IVR 名称（如 `main-ivr`）或队列名（如 `sales`）；`agent` 分支不使用（看 `agent_name`） |
 | `ivr_node_id` | Option\<String\> | 转接发生时呼叫所在的 IVR 节点 |
 | `agent_id` | Option\<String\> | 发起转接的坐席（已知时） |
+| `agent_name` | Option\<String\> | 发起转接的坐席显示名 —— 仅当 `agent_id` 来自 CC hook 解析（与 `agent_name` 配对发布）时携带；来源腿兜底解析出的 id 不带名字 |
 
 示例 — 从 IVR 节点盲转到队列：
 
@@ -467,6 +470,22 @@ CC addon 的独立呼叫生命周期事件已移除。坐席归因改由核心�
 }
 ```
 
+示例 — 坐席直接发起转接（无 IVR/队列上下文）：
+
+```json
+{
+  "event_type": "call_transferred",
+  "call_id": "a1b2c3",
+  "transfer_target": "sip:1003@rustpbx.com",
+  "transfer_target_type": "sip",
+  "transfer_source": {
+    "source_type": "agent",
+    "agent_id": "1002",
+    "agent_name": "Bob"
+  }
+}
+```
+
 说明：
 
 - 盲转到会话内应用目标（`queue:` / `ivr:` / `toivr:` / `voicemail:` /
@@ -476,6 +495,11 @@ CC addon 的独立呼叫生命周期事件已移除。坐席归因改由核心�
   流程（`transfer_target_type` 为 `queue` / `ivr`，`transfer_target`
   保留原始号码）。CTI/API 转接与话机 REFER 均受
   `proxy.route_originated_calls` 门控。
+- CC 咨询转完成（`/consult/{tid}/complete`）发出的 `call_transferred`
+  同样以 `transfer_source.source_type = "agent"` 归因到发起咨询转的坐席。
+- 盲转 REFER 产生的新腿（转接目标腿）不发 `call_created`，但会继承
+  发起转接坐席的 `agent_id` / `agent_name`，其后续事件
+  （`call_answered` / `call_hangup` 等）继续携带坐席上下文。
 
 #### call_transfer_failed
 
@@ -919,7 +943,8 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 > **生命周期 exactly-once 契约**：一个逻辑 IVR 流程（含 voip_bridge 往返、队列 return、JumpIvr 跳转）中，`trigger.type="session_start"` 与 `trigger.type="session_end"` 各**只出现一次**：
 > - `session_start` 仅在流程真正首次进入时的首个节点跟踪事件上出现；
 > - bridge / queue / JumpIvr 等可恢复交接**不会**触发 `session_end`（流程并未结束）；
-> - 可恢复交接时挂机或后继应用启动失败，由 proxy 合成补发唯一的 `session_end`（`end_reason=user_hangup` / `error`，节点上下文取自 bridge trace context）；
+> - 可恢复交接的原因由**交接节点自身的完成条目**携带：其 `end_reason` 填 `transfer` / `transfer_to_queue` / `transfer_to_ivr`，`end_detail` 填交接目标（如 `toivr:39230?...`）。消费方据此可区分"IVR 因跳转而结束"与"IVR 最终挂断"——最终结束原因仍以全流程唯一的 `session_end` 为准；
+> - 可恢复交接期间挂机或后继应用启动失败，由 proxy 合成补发唯一的 `session_end`（主叫挂机 `user_hangup`、RTP 超时 `timeout`、系统挂断 `hangup`、启动失败 `error`；节点上下文取自 bridge trace context）；
 > - 挂起期间返回的流程，恢复后首个节点的触发类型为 `resume`（无缓冲按键）或 `dtmf`（有缓冲按键），不会再次出现 `session_start`。
 
 | 字段 | 类型 | 说明 |
@@ -928,7 +953,6 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 | `session_id` | String | 会话 ID |
 | `caller` | String | 主叫 |
 | `callee` | String | 被叫 |
-| `step_index` | u32 | 步骤序号 |
 | `trigger` | Object | 触发该步骤的结构化信息，见下方说明 |
 | `action_type` | String | 动作类型（如 `Transfer`、`Prompt`、`DtmfMenu`） |
 | `action_json` | Option\<String\> | 动作详情 JSON |
@@ -940,7 +964,7 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 | `step_end_time` | Option\<String\> | 当前步骤结束时间（ISO UTC），始终有值 —— 它是该步骤完成（事件已发出）的标记 |
 | `extra` | Option\<JSON Object\> | Provider 透传的额外数据。Provider 在每次响应的 ActionNode.extra 中返回完整对象，RustPBX 透传存储并原样输出 |
 | `sip_headers` | Option\<Map\<String, String\>\> | 呼叫的白名单 SIP 头 |
-| `end_reason` | Option\<String\> | 仅会话终止（`session_end`）条目有值，标识整个 IVR 会话如何结束（`normal`、`transfer`、`transfer_to_queue`、`hangup`、`user_hangup`、`timeout`、`error` 等） |
+| `end_reason` | Option\<String\> | 仅两类条目有值：① `session_end` 条目——整个 IVR 会话的最终结束原因（`normal`、`transfer`、`transfer_to_queue`、`hangup`、`user_hangup`、`timeout`、`error` 等）；② 可恢复交接的终端步骤条目（bridge/queue 带 return_app、JumpIvr）——`transfer` / `transfer_to_queue` / `transfer_to_ivr` + `end_detail` 携带交接目标（该交接不产生 `session_end`，见上方 exactly-once 契约） |
 | `end_detail` | Option\<String\> | 与 `end_reason` 配套的详情（如转接目标、错误信息） |
 
 > **`trigger` 字段说明**：

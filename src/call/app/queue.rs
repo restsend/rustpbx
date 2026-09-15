@@ -658,6 +658,25 @@ impl QueueApp {
             ctrl.answer().await?;
             self.answered = true;
         }
+        // ── FIFO gate bookkeeping ────────────────────────────────────────
+        // Release a leftover "dispatching" claim (dial round exhausted);
+        // then synchronously (re-)register the waiting row so every node's
+        // gate sees this call BEFORE its first poll — the async event tap
+        // alone is lossy under backpressure. Both are idempotent: an
+        // existing row keeps its original enqueued_at → queue position is
+        // preserved across dial-fail round-trips.
+        if let Some(ref registry) = self.agent_registry {
+            registry.fifo_release_dispatch(&self.call_id).await;
+            let gate_group = self
+                .current_group
+                .clone()
+                .or_else(|| self.config.skill_group.clone());
+            if let Some(gate_group) = gate_group {
+                registry
+                    .fifo_register_wait(&gate_group, &self.call_id, "", 0)
+                    .await;
+            }
+        }
         self.state = QueueState::WaitingForAgent;
         self.start_hold_music(ctrl).await?;
         if self.config.announce_position {
@@ -1249,6 +1268,13 @@ impl QueueApp {
         // Contact header value (a `contact-addr` with `<...>` and contact-params)
         // and is not valid as a dial target; `aor` is the registered URI.
         let uri = agents[self.current_agent_idx].aor.to_string();
+        // Mark "dispatching" in the shared queue: claimed rows stop counting
+        // as waiters, so later calls can take OTHER idle agents (no
+        // head-of-line blocking). Idempotent across the dial episode; an
+        // exhausted round releases the claim when it re-enters wait retention.
+        if let Some(ref registry) = self.agent_registry {
+            registry.fifo_begin_dispatch(&self.call_id).await;
+        }
         let leg_headers = agents[self.current_agent_idx]
             .headers
             .clone()

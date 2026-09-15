@@ -15,6 +15,23 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
+// ── Broadcast etags / AMI route segments ────────────────────────────────────
+//
+// Single source of truth for the cluster event URL segment: the broadcast
+// side (`ClusterSync::broadcast` etag) and the receiver side (AMI route
+// registered in `handler::ami`) MUST derive from the same constant.
+//
+// Regression note: queue events were broadcast as `queue_event` while the
+// AMI route was `queue` — every POST 404'd and `cluster_sync` treated the
+// completed response as success, silently dropping ALL queue-event sync
+// (remote ACD double-assign protection + console monitor call linkage).
+pub mod event_etags {
+    pub const PRESENCE: &str = "presence";
+    pub const LOCATOR: &str = "locator";
+    pub const AGENT_STATUS: &str = "agent_status";
+    pub const QUEUE: &str = "queue";
+}
+
 // ── Event source ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
@@ -409,21 +426,21 @@ impl ClusterEventHub {
     async fn send_locator_to_peers(&self, event: &LocatorEvent) {
         let msg = ClusterLocatorMessage::from(event);
         if let Some(ref sync) = *self.cluster_sync.read() {
-            sync.broadcast("locator", msg.aor(), &msg);
+            sync.broadcast(event_etags::LOCATOR, msg.aor(), &msg);
         }
     }
 
     /// Broadcast an agent status change to all cluster peers.
     pub async fn send_agent_status_to_peers(&self, msg: &ClusterAgentStatusMessage) {
         if let Some(ref sync) = *self.cluster_sync.read() {
-            sync.broadcast("agent_status", &msg.agent_id, msg);
+            sync.broadcast(event_etags::AGENT_STATUS, &msg.agent_id, msg);
         }
     }
 
-    /// Broadcast a queue event (enqueue / dequeue / assign) to all peers.
+    /// Broadcast a queue event (enqueue / dequeue / assign / ringing) to all peers.
     pub async fn send_queue_event_to_peers(&self, msg: &ClusterQueueEventMessage) {
         if let Some(ref sync) = *self.cluster_sync.read() {
-            sync.broadcast("queue_event", &msg.call_id, msg);
+            sync.broadcast(event_etags::QUEUE, &msg.call_id, msg);
         }
     }
 
@@ -1379,5 +1396,84 @@ mod tests {
             json
         );
         assert!(json.contains("\"agent_id\":\"agent-007\""));
+    }
+
+    /// REGRESSION: the URL that `ClusterSync::broadcast` produces for a queue
+    /// event (`AmiPeer::ami_url` + the etag used by
+    /// `send_queue_event_to_peers`) must match a route registered on the
+    /// peer's AMI router (`handler::ami`), or the POST 404s and
+    /// `cluster_sync` silently drops it (`Ok(_) => {}` treats any completed
+    /// response — including 404 — as success).
+    ///
+    /// Both sides derive from [`event_etags`]; this test pins the full
+    /// URL → route → handler chain (it FAILED with 404 before the fix: the
+    /// broadcast etag was `queue_event` while the route was `queue`).
+    #[tokio::test]
+    async fn queue_event_broadcast_url_reaches_ami_route() {
+        use axum::extract::State;
+        use axum::http::StatusCode;
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use tower::ServiceExt;
+
+        // ── Production broadcast side ───────────────────────────────────
+        // The etag `send_queue_event_to_peers` passes to ClusterSync.
+        let broadcast_etag = event_etags::QUEUE;
+        let peer = crate::proxy::cluster_sync::AmiPeer {
+            addr: "10.0.0.9".to_string(),
+            ami_port: 8081,
+            ami_path: String::new(),
+            sip_addr: "10.0.0.9".to_string(),
+        };
+        let url = peer.ami_url(broadcast_etag);
+        // "http://host/cluster/event/<etag>" → "/cluster/event/<etag>"
+        let url_path = format!("/{}", url.splitn(4, '/').nth(3).unwrap().to_string());
+
+        // ── Production receiver side (route as registered in ami.rs) ────
+        let route_path = format!("/cluster/event/{}", event_etags::QUEUE);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        async fn spy_handler(
+            State(tx): State<tokio::sync::mpsc::UnboundedSender<ClusterQueueEventMessage>>,
+            Json(msg): Json<ClusterQueueEventMessage>,
+        ) -> StatusCode {
+            let _ = tx.send(msg);
+            StatusCode::OK
+        }
+        let app: Router = Router::new()
+            .route(&route_path, post(spy_handler))
+            .with_state(tx);
+
+        let msg = ClusterQueueEventMessage {
+            action: "ringing".to_string(),
+            call_id: "sess-r1".to_string(),
+            queue_id: "support".to_string(),
+            trace_id: "trace-r1".to_string(),
+            agent_id: Some("bob".to_string()),
+            required_skills: vec![],
+            priority: 0,
+        };
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(&url_path)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&msg).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "broadcast URL must hit the AMI route — a 404 here means the peer \
+             silently drops the event (handler never runs)"
+        );
+        let received = rx.recv().await.expect("handler must deliver the event");
+        assert_eq!(received.action, "ringing");
+        assert_eq!(received.call_id, "sess-r1");
+        assert_eq!(received.agent_id.as_deref(), Some("bob"));
     }
 }

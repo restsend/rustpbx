@@ -8,13 +8,35 @@ use crate::rwi::TriggerInfo;
 
 use super::provider::SessionEndTag;
 
+/// Derive `duration_ms` from RFC3339 stamps: `end - start`, in whole
+/// milliseconds.
+///
+/// Server-side contract for `ivr_step_trace`: every event that carries
+/// `step_start_time` + `step_end_time` must also carry
+/// `duration_ms == end - start`, so consumers can use the field directly
+/// instead of re-deriving it. Returns `0` when `start` is `None`, either
+/// stamp fails to parse, or the difference is negative (clock skew) —
+/// mirroring the "unknown / instant" semantics of the previous hardcoded
+/// zeros.
+pub fn duration_ms_between(start: Option<&str>, end: &str) -> u64 {
+    let Some(start) = start else {
+        return 0;
+    };
+    let (Ok(s), Ok(e)) = (
+        chrono::DateTime::parse_from_rfc3339(start),
+        chrono::DateTime::parse_from_rfc3339(end),
+    ) else {
+        return 0;
+    };
+    (e - s).num_milliseconds().max(0) as u64
+}
+
 /// A single step trace entry for IVR step mode execution.
 #[derive(Debug, Clone, Serialize)]
 pub struct IvrTraceEntry {
     pub session_id: String,
     pub caller: String,
     pub callee: String,
-    pub step_index: u32,
     pub trigger: TriggerInfo,
     pub provider_url: Option<String>,
     pub action_type: String,
@@ -137,19 +159,45 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
+    #[test]
+    fn test_duration_ms_between() {
+        let start = "2026-09-14T04:13:30.100Z";
+        let end = "2026-09-14T04:13:30.750Z";
+        assert_eq!(duration_ms_between(Some(start), end), 650);
+
+        // Mixed offsets parse to the same instants.
+        assert_eq!(
+            duration_ms_between(Some("2026-09-14T12:13:30.100+08:00"), end),
+            650
+        );
+
+        // Missing / unparsable start → unknown, 0.
+        assert_eq!(duration_ms_between(None, end), 0);
+        assert_eq!(duration_ms_between(Some("not-a-timestamp"), end), 0);
+        assert_eq!(duration_ms_between(Some(start), "also-bad"), 0);
+
+        // Negative difference (clock skew) clamps to 0.
+        assert_eq!(duration_ms_between(Some(end), start), 0);
+
+        // Sub-millisecond windows truncate to 0 (instant steps).
+        assert_eq!(
+            duration_ms_between(Some("2026-09-14T04:13:30.766221Z"), "2026-09-14T04:13:30.766382Z"),
+            0
+        );
+    }
+
     fn mk_entry(session_id: &str, step: u32) -> IvrTraceEntry {
         IvrTraceEntry {
             session_id: session_id.to_string(),
             caller: "1001".to_string(),
             callee: "2000".to_string(),
-            step_index: step,
             trigger: TriggerInfo::new("test"),
             provider_url: None,
             action_type: "Transfer".to_string(),
             action_json: None,
             duration_ms: 0,
             error: None,
-            step_id: None,
+            step_id: Some(step.to_string()),
             step_name: None,
             step_start_time: None,
             step_end_time: None,
@@ -182,8 +230,8 @@ mod tests {
 
         let entries_001 = collector.query_by_session("call_001").await;
         assert_eq!(entries_001.len(), 2);
-        assert_eq!(entries_001[0].step_index, 0);
-        assert_eq!(entries_001[1].step_index, 1);
+        assert_eq!(entries_001[0].step_id.as_deref(), Some("0"));
+        assert_eq!(entries_001[1].step_id.as_deref(), Some("1"));
 
         let entries_002 = collector.query_by_session("call_002").await;
         assert_eq!(entries_002.len(), 1);
@@ -252,8 +300,8 @@ mod tests {
         }
         let entries = collector.query_by_session("call_001").await;
         assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].step_index, 2);
-        assert_eq!(entries[2].step_index, 4);
+        assert_eq!(entries[0].step_id.as_deref(), Some("2"));
+        assert_eq!(entries[2].step_id.as_deref(), Some("4"));
     }
 
     #[tokio::test]

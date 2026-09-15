@@ -782,6 +782,98 @@ mod tests {
         assert!(v.to_string().contains("call_answered"));
     }
 
+    /// Agent-initiated originates seed `CallMeta` with the originating agent
+    /// before `call_created` is sent (the CC hook only publishes agent context
+    /// at ringing — too late for `call_created`). The enrichment must flatten
+    /// the agent attribution into the event payload.
+    #[tokio::test]
+    async fn test_call_created_enriched_with_originating_agent() {
+        let mut gw = RwiGateway::new();
+        let sid = gw.create_session(create_identity()).read().id.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, tx);
+        gw.claim_call_ownership(&sid, "cti-1".into(), OwnershipMode::Control)
+            .unwrap();
+        gw.meta_store.insert(
+            "cti-1".into(),
+            crate::rwi::proto::CallMeta {
+                direction: Some("outbound".into()),
+                agent_id: Some("1001".into()),
+                agent_name: Some("Alice".into()),
+                ..Default::default()
+            },
+        );
+
+        gw.send_to_owner(&crate::rwi::CallCreated {
+            call_id: "cti-1".into(),
+            context: "default".into(),
+            caller: "sip:1001@rustpbx.com".into(),
+            callee: "sip:10086@carrier".into(),
+            trunk: None,
+            sip_headers: Default::default(),
+            caller_name: None,
+            callee_name: None,
+            called_phone: None,
+            app_id: None,
+            routing_target: None,
+            uuid: None,
+            routing_path: None,
+        });
+
+        let v = rx.recv().await.unwrap();
+        assert_eq!(v["event_type"], "call_created");
+        assert_eq!(v["direction"], "outbound");
+        assert_eq!(v["agent_id"], "1001");
+        assert_eq!(v["agent_name"], "Alice");
+    }
+
+    /// Transfers attributed to an agent keep the nested `transfer_source`
+    /// object intact through enrichment — the flat agent context must not
+    /// shadow or overwrite the nested attribution.
+    #[tokio::test]
+    async fn test_call_transferred_enrichment_keeps_transfer_source() {
+        let mut gw = RwiGateway::new();
+        let sid = gw.create_session(create_identity()).read().id.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, tx);
+        gw.claim_call_ownership(&sid, "c1".into(), OwnershipMode::Control)
+            .unwrap();
+        gw.meta_store.insert(
+            "c1".into(),
+            crate::rwi::proto::CallMeta {
+                agent_id: Some("2002".into()),
+                transfer_source: Some(crate::rwi::TransferSource {
+                    source_type: "agent".into(),
+                    name: None,
+                    ivr_node_id: None,
+                    agent_id: Some("2002".into()),
+                    agent_name: Some("Bob".into()),
+                }),
+                ..Default::default()
+            },
+        );
+
+        gw.send_to_owner(&crate::rwi::CallTransferred {
+            call_id: "c1".into(),
+            transfer_target: Some("sip:1003@rustpbx.com".into()),
+            transfer_target_type: Some("sip".into()),
+            transfer_source: Some(crate::rwi::TransferSource {
+                source_type: "agent".into(),
+                name: None,
+                ivr_node_id: None,
+                agent_id: Some("2002".into()),
+                agent_name: Some("Bob".into()),
+            }),
+        });
+
+        let v = rx.recv().await.unwrap();
+        assert_eq!(v["event_type"], "call_transferred");
+        assert_eq!(v["agent_id"], "2002");
+        assert_eq!(v["transfer_source"]["source_type"], "agent");
+        assert_eq!(v["transfer_source"]["agent_id"], "2002");
+        assert_eq!(v["transfer_source"]["agent_name"], "Bob");
+    }
+
     #[tokio::test]
     async fn test_call_finished_releases_both_ownership_indexes() {
         let mut gw = RwiGateway::new();

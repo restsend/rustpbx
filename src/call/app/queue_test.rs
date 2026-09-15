@@ -1815,6 +1815,10 @@ mod tests {
         abandoned: std::sync::Mutex<Vec<(String, String, u64)>>,
         timeouts: std::sync::Mutex<Vec<(String, String, u64)>>,
         fallbacks: std::sync::Mutex<Vec<(String, String, String, String)>>,
+        /// strict-FIFO gate hook counters (register/begin/release call ids).
+        fifo_registers: std::sync::Mutex<Vec<(String, String)>>,
+        fifo_begins: std::sync::Mutex<Vec<String>>,
+        fifo_releases: std::sync::Mutex<Vec<String>>,
     }
 
     impl HookRecordingRegistry {
@@ -1831,6 +1835,9 @@ mod tests {
                 abandoned: std::sync::Mutex::new(Vec::new()),
                 timeouts: std::sync::Mutex::new(Vec::new()),
                 fallbacks: std::sync::Mutex::new(Vec::new()),
+                fifo_registers: std::sync::Mutex::new(Vec::new()),
+                fifo_begins: std::sync::Mutex::new(Vec::new()),
+                fifo_releases: std::sync::Mutex::new(Vec::new()),
             }
         }
 
@@ -1963,6 +1970,21 @@ mod tests {
                 .get(calls - 1)
                 .cloned()
                 .unwrap_or_default()
+        }
+
+        async fn fifo_register_wait(&self, queue_id: &str, call_id: &str, _caller: &str, _priority: i32) {
+            self.fifo_registers
+                .lock()
+                .unwrap()
+                .push((queue_id.to_string(), call_id.to_string()));
+        }
+
+        async fn fifo_begin_dispatch(&self, call_id: &str) {
+            self.fifo_begins.lock().unwrap().push(call_id.to_string());
+        }
+
+        async fn fifo_release_dispatch(&self, call_id: &str) {
+            self.fifo_releases.lock().unwrap().push(call_id.to_string());
         }
 
         async fn notify_call_abandoned(
@@ -3248,6 +3270,114 @@ mod tests {
                 "empty poll must keep the call waiting, got {cmd:?}"
             );
         }
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// strict-FIFO hook timing: entering wait retention registers the shared
+    /// row (and releases any stale claim), starting a dial episode claims it,
+    /// and an exhausted dial round back in wait retention releases the claim —
+    /// preserving the call's original queue position.
+    #[tokio::test]
+    async fn test_fifo_gate_hooks_fire_on_dial_and_return_to_wait() {
+        use std::sync::Arc;
+        let registry = Arc::new(HookRecordingRegistry::new().with_resolve_uris(vec![
+            vec!["sip:agent-001@localhost".to_string()],
+            vec![],
+        ]));
+        registry
+            .inner
+            .register(
+                "agent-001".to_string(),
+                "Alice".to_string(),
+                "sip:agent-001@localhost".to_string(),
+                vec!["support".to_string()],
+                1,
+            )
+            .await
+            .unwrap();
+        registry
+            .inner
+            .update_presence(
+                "agent-001",
+                crate::call::app::agent_registry::PresenceState::Idle,
+            )
+            .await
+            .unwrap();
+
+        let mut config = build_simple_queue_config();
+        config.skill_routing_enabled = false;
+        config.skill_group = Some("support".to_string());
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.hold = Some(QueueHoldConfig {
+            audio_file: Some("sounds/hold_music.wav".to_string()),
+            loop_playback: true,
+        });
+        config.retry_interval_secs = 1;
+        config.max_wait_secs = 300;
+        config.accept_immediately = true;
+        config.ring_timeout = Some(Duration::from_secs(5));
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(registry.clone());
+        queue = queue.with_call_id("call-fifo-1".to_string());
+        queue = queue.with_skill_group("support".to_string());
+
+        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        let _hold = stack.next_cmd(2000).await.expect("hold while waiting");
+
+        // Wait entry registered the row under the skill group. The entry
+        // path also emits an idempotent release (clearing stale claims) —
+        // at most one so far.
+        let registers = registry.fifo_registers.lock().unwrap().clone();
+        assert!(
+            registers.contains(&("support".to_string(), "call-fifo-1".to_string())),
+            "wait entry must fifo_register_wait, got {registers:?}"
+        );
+        assert!(
+            registry.fifo_releases.lock().unwrap().len() <= 1,
+            "entry release must be a single idempotent call"
+        );
+
+        // Poll dials the agent → dial episode claims the call.
+        stack.timeout("queue_retry");
+        let mut saw_dial = false;
+        for _ in 0..10 {
+            if let Some(cmd) = stack.next_cmd(300).await {
+                if matches!(cmd, CallCommand::LegAdd { .. }) {
+                    saw_dial = true;
+                    break;
+                }
+            }
+        }
+        assert!(saw_dial, "poll must dial the resolved agent");
+        assert_eq!(
+            registry.fifo_begins.lock().unwrap().as_slice(),
+            ["call-fifo-1"],
+            "dial start must fifo_begin_dispatch"
+        );
+
+        // Agent never answers → round exhausted → back to wait retention
+        // with the claim released.
+        stack.timeout("agent_ring_timeout");
+        let mut hold_restarted = false;
+        for _ in 0..10 {
+            if let Some(CallCommand::Play { .. }) = stack.next_cmd(300).await {
+                hold_restarted = true;
+                break;
+            }
+        }
+        assert!(hold_restarted, "must return to wait retention");
+        assert!(
+            registry.fifo_releases.lock().unwrap().contains(&"call-fifo-1".to_string()),
+            "return to wait retention must fifo_release_dispatch"
+        );
 
         stack.cancel();
         let _ = stack.join().await;

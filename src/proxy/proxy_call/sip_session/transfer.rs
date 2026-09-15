@@ -856,8 +856,17 @@ impl SipSession {
         &self,
         transferor_leg: &LegId,
     ) -> Option<crate::rwi::TransferSource> {
-        let agent_id = self
-            .session_ext_get("resolved_agent_id")
+        // Prefer the CC-hook-resolved id: when present, the hook has also
+        // published the paired `agent_name`, so both can be attributed
+        // together. The id fallbacks (transferor leg endpoint / connected
+        // callee) cannot be paired with a name, so they stay name-less.
+        let resolved_agent_id = self.session_ext_get("resolved_agent_id");
+        let agent_name = if resolved_agent_id.is_some() {
+            self.session_ext_get("agent_name")
+        } else {
+            None
+        };
+        let agent_id = resolved_agent_id
             .or_else(|| {
                 self.legs
                     .get(transferor_leg)
@@ -881,6 +890,7 @@ impl SipSession {
                 name: ivr_name,
                 ivr_node_id: self.session_ext_get("ivr_node"),
                 agent_id,
+                agent_name,
             });
         }
 
@@ -891,6 +901,7 @@ impl SipSession {
                 name: Some(queue_name),
                 ivr_node_id: None,
                 agent_id,
+                agent_name,
             });
         }
 
@@ -901,6 +912,7 @@ impl SipSession {
                 name: None,
                 ivr_node_id: None,
                 agent_id: Some(agent),
+                agent_name,
             });
         }
         None
@@ -982,6 +994,24 @@ impl SipSession {
                 let result = self.start_ivr_app(&name, params).await;
                 if result.is_ok() && resumed {
                     self.meta.ivr_flow_suspended = false;
+                } else if result.is_err() && self.meta.ivr_flow_suspended {
+                    // JumpIvr target (and its fallback) failed to start — the
+                    // logical flow died here. Emit the compensating
+                    // session_end NOW with the real cause instead of letting
+                    // it surface as a misleading user_hangup at teardown.
+                    self.meta.ivr_flow_suspended = false;
+                    let err = result
+                        .as_ref()
+                        .err()
+                        .map(ToString::to_string)
+                        .unwrap_or_default();
+                    self.emit_suspended_flow_session_end(
+                        crate::call::app::ivr::provider::SessionEndReason {
+                            reason: crate::call::app::ivr::provider::SessionEndTag::Error,
+                            detail: Some(format!("JumpIvr target '{name}' failed to start: {err}")),
+                        },
+                    )
+                    .await;
                 }
                 result
             }
@@ -996,6 +1026,23 @@ impl SipSession {
                 let result = self.start_route_point_app(&name, params).await;
                 if result.is_ok() {
                     self.meta.ivr_flow_suspended = false;
+                } else if self.meta.ivr_flow_suspended {
+                    // Route-point successor failed to start — the logical
+                    // flow died here. Emit the compensating session_end NOW
+                    // with the real cause (see the JumpIvr arm above).
+                    self.meta.ivr_flow_suspended = false;
+                    let err = result
+                        .as_ref()
+                        .err()
+                        .map(ToString::to_string)
+                        .unwrap_or_default();
+                    self.emit_suspended_flow_session_end(
+                        crate::call::app::ivr::provider::SessionEndReason {
+                            reason: crate::call::app::ivr::provider::SessionEndTag::Error,
+                            detail: Some(format!("RoutePoint '{name}' failed to start: {err}")),
+                        },
+                    )
+                    .await;
                 }
                 result
             }

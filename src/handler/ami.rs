@@ -86,19 +86,35 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
             )
             .route("/cluster/list_calls", get(cluster_list_calls_handler))
             .route("/cluster/logs/recent", get(cluster_logs_recent_handler))
-            .route("/cluster/logs/follow", get(cluster_logs_follow_handler))
-            // Cluster event sync endpoints (AMI HTTP replaces old SIP MESSAGE)
-            .route("/cluster/event/presence", post(cluster_event_presence))
-            .route("/cluster/event/locator", post(cluster_event_locator))
-            .route(
-                "/cluster/event/agent_status",
-                post(cluster_event_agent_status),
-            )
-            .route("/cluster/event/queue", post(cluster_event_queue));
+            .route("/cluster/logs/follow", get(cluster_logs_follow_handler));
         // Addon-owned AMI routes (e.g. CC `/cluster/cc_owner_op`) — core stays
         // free of addon path knowledge.
         r.merge(app_state.addon_registry.get_ami_routes(app_state.clone()))
     };
+
+    // Cluster event sync endpoints (AMI HTTP replaces old SIP MESSAGE).
+    // NOT commerce-gated: the broadcast side initializes for ANY build with
+    // `[cluster].peers` set, so every cluster node must be able to receive.
+    // Paths derive from the same `event_etags` constants the broadcast side
+    // uses — the URL/route pairing cannot silently drift again.
+    use crate::proxy::cluster_event::event_etags;
+    let r = r
+        .route(
+            &format!("/cluster/event/{}", event_etags::PRESENCE),
+            post(cluster_event_presence),
+        )
+        .route(
+            &format!("/cluster/event/{}", event_etags::LOCATOR),
+            post(cluster_event_locator),
+        )
+        .route(
+            &format!("/cluster/event/{}", event_etags::AGENT_STATUS),
+            post(cluster_event_agent_status),
+        )
+        .route(
+            &format!("/cluster/event/{}", event_etags::QUEUE),
+            post(cluster_event_queue),
+        );
 
     let r = r.layer(middleware::from_fn_with_state(
         app_state.clone(),
@@ -2327,13 +2343,9 @@ async fn cluster_logs_follow_handler(
 
 // ── AMI cluster event receivers (replace old SIP MESSAGE handlers) ────────
 
-#[cfg(feature = "commerce")]
-use crate::handler::middleware::clientaddr::ClientAddr as AmiClientAddr;
-
-#[cfg(feature = "commerce")]
 async fn cluster_event_presence(
     State(state): State<AppState>,
-    client: AmiClientAddr,
+    client: ClientAddr,
     Json(msg): Json<crate::proxy::cluster_event::ClusterPresenceMessage>,
 ) -> Response {
     if let Some(ref hub) = state.sip_server().inner.cluster_event_hub {
@@ -2348,10 +2360,9 @@ async fn cluster_event_presence(
     StatusCode::OK.into_response()
 }
 
-#[cfg(feature = "commerce")]
 async fn cluster_event_locator(
     State(state): State<AppState>,
-    client: AmiClientAddr,
+    client: ClientAddr,
     Json(msg): Json<crate::proxy::cluster_event::ClusterLocatorMessage>,
 ) -> Response {
     if let Some(ref hub) = state.sip_server().inner.cluster_event_hub {
@@ -2365,10 +2376,9 @@ async fn cluster_event_locator(
     StatusCode::OK.into_response()
 }
 
-#[cfg(feature = "commerce")]
 async fn cluster_event_agent_status(
     State(state): State<AppState>,
-    client: AmiClientAddr,
+    client: ClientAddr,
     Json(msg): Json<crate::proxy::cluster_event::ClusterAgentStatusMessage>,
 ) -> Response {
     if let Some(ref hub) = state.sip_server().inner.cluster_event_hub {
@@ -2381,10 +2391,9 @@ async fn cluster_event_agent_status(
     StatusCode::OK.into_response()
 }
 
-#[cfg(feature = "commerce")]
 async fn cluster_event_queue(
     State(state): State<AppState>,
-    client: AmiClientAddr,
+    client: ClientAddr,
     Json(msg): Json<crate::proxy::cluster_event::ClusterQueueEventMessage>,
 ) -> Response {
     if let Some(ref hub) = state.sip_server().inner.cluster_event_hub {

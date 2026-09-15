@@ -93,6 +93,7 @@ fn forward_dtmf_with_active_bridge_owns_digit_without_app_injection() {
     })));
     let digits = Arc::new(parking_lot::Mutex::new(Vec::new()));
 
+
     forward_dtmf_event(
         '1',
         "caller",
@@ -144,6 +145,21 @@ fn forward_dtmf_with_active_bridge_owns_digit_without_app_injection() {
         end >= start,
         "consumer-derived duration would be negative if end < start"
     );
+    // Contract: duration_ms is derived from the stamps (end - start), not a
+    // hardcoded 0. The executor-stamped start is a fixed past date, so the
+    // window is large and strictly positive.
+    let duration = ev.event.payload["duration_ms"]
+        .as_u64()
+        .expect("bridge DTMF trace must carry duration_ms");
+    assert_eq!(
+        duration,
+        (end - start).num_milliseconds().max(0) as u64,
+        "bridge DTMF duration_ms must equal step_end_time - step_start_time"
+    );
+    assert!(
+        duration > 0,
+        "bridge DTMF duration must be derived from its stamps, got 0"
+    );
     assert_eq!(ev.event.payload["caller"], "sip:1001@x");
     assert_eq!(
         ev.event.payload["sip_headers"]["X-Business-Type"], "34",
@@ -158,7 +174,7 @@ fn forward_dtmf_with_active_bridge_owns_digit_without_app_injection() {
 /// real end reason and the originating node context (exactly-once contract).
 #[test]
 fn suspended_flow_death_emits_compensating_session_end_trace() {
-    use crate::call::app::ivr::provider::SessionEndTag;
+    use crate::call::app::ivr::provider::{SessionEndReason, SessionEndTag};
     use crate::proxy::proxy_call::sip_session::transfer::BridgeTraceContext;
     use crate::proxy::proxy_call::sip_session::util::emit_suspended_flow_session_end;
     use crate::rwi::gateway::RwiGateway;
@@ -184,7 +200,10 @@ fn suspended_flow_death_emits_compensating_session_end_trace() {
             "X-Business-Type".to_string(),
             "34".to_string(),
         )])),
-        SessionEndTag::UserHangup,
+        SessionEndReason {
+            reason: SessionEndTag::UserHangup,
+            detail: None,
+        },
     );
 
     let ev = events
@@ -216,6 +235,49 @@ fn suspended_flow_death_emits_compensating_session_end_trace() {
         end >= start,
         "consumer-derived duration would be negative if end < start"
     );
+    // Contract: duration_ms is derived from the stamps (end - start), not a
+    // hardcoded 0. The executor-stamped start is a fixed past date, so the
+    // window is large and strictly positive.
+    let duration = ev.event.payload["duration_ms"]
+        .as_u64()
+        .expect("synthetic session_end trace must carry duration_ms");
+    assert_eq!(
+        duration,
+        (end - start).num_milliseconds().max(0) as u64,
+        "synthetic session_end duration_ms must equal step_end_time - step_start_time"
+    );
+    assert!(
+        duration > 0,
+        "synthetic session_end duration must be derived from its stamps, got 0"
+    );
+}
+
+/// The compensating `session_end` tag must reflect the actual teardown cause
+/// (exactly-once contract, "REAL end reason" clause) instead of hardcoding
+/// `user_hangup`.
+#[test]
+fn suspended_flow_end_reason_maps_hangup_cause() {
+    use crate::call::app::ivr::provider::SessionEndTag;
+    use crate::callrecord::CallRecordHangupReason as R;
+    use crate::proxy::proxy_call::sip_session::util::map_suspended_flow_end;
+
+    // Caller-side death stays user_hangup.
+    for reason in [R::ByCaller, R::Canceled, R::Abandoned, R::NoAnswer] {
+        let end = map_suspended_flow_end(Some(&reason));
+        assert_eq!(end.reason, SessionEndTag::UserHangup, "cause {reason:?}");
+        assert_eq!(end.detail, None);
+    }
+    // RTP watchdog refines to timeout.
+    let end = map_suspended_flow_end(Some(&R::RtpTimeout));
+    assert_eq!(end.reason, SessionEndTag::Timeout);
+    // System teardown keeps hangup with the CDR reason as detail.
+    let end = map_suspended_flow_end(Some(&R::BySystem));
+    assert_eq!(end.reason, SessionEndTag::Hangup);
+    assert_eq!(end.detail.as_deref(), Some("BySystem"));
+    // No recorded cause — plain hangup.
+    let end = map_suspended_flow_end(None);
+    assert_eq!(end.reason, SessionEndTag::Hangup);
+    assert_eq!(end.detail, None);
 }
 
 // ── parse_dial_target ─────────────────────────────────────────────────
@@ -1832,9 +1894,11 @@ async fn test_blind_transfer_reports_queue_flow_source() {
     session.callee_event_tx = Some(callee_tx);
 
     // Simulate a queue-served call: the customer was talking to agent 2002
-    // of queue sales when the agent blind-transferred them onward.
+    // of queue sales when the agent blind-transferred them onward. The CC
+    // hook publishes the paired display name next to the resolved id.
     session.meta.queue_name = Some("sales".to_string());
     session.session_ext_set("resolved_agent_id", "2002");
+    session.session_ext_set("agent_name", "Alice");
 
     let result = session
         .handle_blind_transfer(
@@ -1869,6 +1933,248 @@ async fn test_blind_transfer_reports_queue_flow_source() {
     );
     assert_eq!(entry.event.payload["transfer_source"]["name"], "sales");
     assert_eq!(entry.event.payload["transfer_source"]["agent_id"], "2002");
+    assert_eq!(entry.event.payload["transfer_source"]["agent_name"], "Alice");
+}
+
+/// A bare (non-IVR, non-queue) call blind-transferred by an agent attributes
+/// the transfer to that agent, carrying both the id and the hook-published
+/// display name. The `name` field stays unset on the agent branch (use
+/// `agent_name`).
+#[tokio::test]
+async fn test_blind_transfer_reports_agent_flow_source_with_name() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::config::ProxyConfig;
+    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+    use crate::proxy::routing::RouteQueueConfig;
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server_with_rwi_gateway, create_transaction,
+    };
+    use crate::rwi::gateway::RwiGateway;
+
+    let mut config = ProxyConfig::default();
+    config.queues.insert(
+        "test-queue".to_string(),
+        RouteQueueConfig {
+            name: Some("test-queue".to_string()),
+            ..Default::default()
+        },
+    );
+
+    let gateway = RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let (server, _) =
+        create_test_server_with_rwi_gateway(config, Arc::new(parking_lot::RwLock::new(gateway)))
+            .await;
+
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let original_request = request.clone();
+    let (tx, _) = create_transaction(request).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let server_dialog = server
+        .dialog_layer
+        .get_or_create_server_invite(&tx, state_tx, None, None)
+        .expect("failed to create server dialog");
+
+    let context = CallContext {
+        session_id: "test-session".to_string(),
+        dialplan: Arc::new(Dialplan::new(
+            "test-session".to_string(),
+            original_request,
+            DialDirection::Inbound,
+        )),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".to_string(),
+        original_callee: "sip:bob@rustpbx.com".to_string(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+
+    let caller_peer = Arc::new(MockMediaPeer::new());
+    let callee_peer = Arc::new(MockMediaPeer::new());
+    let (mut session, _handle, _cmd_rx) = SipSession::new(
+        server.clone(),
+        CancellationToken::new(),
+        None,
+        context,
+        server_dialog,
+        false,
+        caller_peer,
+        callee_peer,
+    );
+    let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
+    session.callee_event_tx = Some(callee_tx);
+
+    // No IVR and no queue context: the transferring agent is the flow origin.
+    session.session_ext_set("resolved_agent_id", "2002");
+    session.session_ext_set("agent_name", "Alice");
+
+    let result = session
+        .handle_blind_transfer(
+            LegId::from("caller"),
+            "queue:test-queue".to_string(),
+            transfer::TransferDisposition::Detach,
+            &mut callee_rx,
+            HashMap::new(),
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "queue transfer should succeed: {:?}",
+        result
+    );
+
+    let entry = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let entry = events.recv().await.expect("event tap must stay open");
+            if entry.event.event_type == "call_transferred" {
+                return entry;
+            }
+        }
+    })
+    .await
+    .expect("call_transferred must be emitted for queue-target blind transfer");
+
+    assert_eq!(entry.event.payload["transfer_target_type"], "queue");
+    assert_eq!(
+        entry.event.payload["transfer_source"]["source_type"],
+        "agent"
+    );
+    assert_eq!(entry.event.payload["transfer_source"]["agent_id"], "2002");
+    assert_eq!(entry.event.payload["transfer_source"]["agent_name"], "Alice");
+    assert!(
+        entry.event.payload["transfer_source"].get("name").is_none(),
+        "agent branch keeps `name` unset"
+    );
+}
+
+/// When the transferring agent id is only known through the session fallbacks
+/// (transferor leg endpoint / connected callee — no CC-hook resolution), the
+/// snapshot must NOT pair it with an unrelated `agent_name` extension: the
+/// name is omitted.
+#[tokio::test]
+async fn test_blind_transfer_agent_name_requires_resolved_id() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::config::ProxyConfig;
+    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+    use crate::proxy::routing::RouteQueueConfig;
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server_with_rwi_gateway, create_transaction,
+    };
+    use crate::rwi::gateway::RwiGateway;
+
+    let mut config = ProxyConfig::default();
+    config.queues.insert(
+        "test-queue".to_string(),
+        RouteQueueConfig {
+            name: Some("test-queue".to_string()),
+            ..Default::default()
+        },
+    );
+
+    let gateway = RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let (server, _) =
+        create_test_server_with_rwi_gateway(config, Arc::new(parking_lot::RwLock::new(gateway)))
+            .await;
+
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let original_request = request.clone();
+    let (tx, _) = create_transaction(request).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let server_dialog = server
+        .dialog_layer
+        .get_or_create_server_invite(&tx, state_tx, None, None)
+        .expect("failed to create server dialog");
+
+    let context = CallContext {
+        session_id: "test-session".to_string(),
+        dialplan: Arc::new(Dialplan::new(
+            "test-session".to_string(),
+            original_request,
+            DialDirection::Inbound,
+        )),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".to_string(),
+        original_callee: "sip:bob@rustpbx.com".to_string(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+
+    let caller_peer = Arc::new(MockMediaPeer::new());
+    let callee_peer = Arc::new(MockMediaPeer::new());
+    let (mut session, _handle, _cmd_rx) = SipSession::new(
+        server.clone(),
+        CancellationToken::new(),
+        None,
+        context,
+        server_dialog,
+        false,
+        caller_peer,
+        callee_peer,
+    );
+    let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
+    session.callee_event_tx = Some(callee_tx);
+
+    // agent_id falls back to the connected callee user-part; a stale
+    // `agent_name` extension must not be attached to it.
+    session.meta.connected_callee = Some("sip:2002@rustpbx.com".to_string());
+    session.session_ext_set("agent_name", "Alice");
+
+    let result = session
+        .handle_blind_transfer(
+            LegId::from("caller"),
+            "queue:test-queue".to_string(),
+            transfer::TransferDisposition::Detach,
+            &mut callee_rx,
+            HashMap::new(),
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "queue transfer should succeed: {:?}",
+        result
+    );
+
+    let entry = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let entry = events.recv().await.expect("event tap must stay open");
+            if entry.event.event_type == "call_transferred" {
+                return entry;
+            }
+        }
+    })
+    .await
+    .expect("call_transferred must be emitted for queue-target blind transfer");
+
+    assert_eq!(
+        entry.event.payload["transfer_source"]["source_type"],
+        "agent"
+    );
+    assert_eq!(entry.event.payload["transfer_source"]["agent_id"], "2002");
+    assert!(
+        entry
+            .event
+            .payload["transfer_source"]
+            .get("agent_name")
+            .is_none(),
+        "agent_name must be omitted when the id did not come from the CC hook"
+    );
 }
 
 /// A blind transfer to a bare number that is NOT a registered contact but

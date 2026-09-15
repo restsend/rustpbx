@@ -282,23 +282,25 @@ pub(super) fn forward_dtmf_event(
             // keeps `step_end_time >= step_start_time` meaningful; `now` is
             // only the fallback for bridges without node context.
             let now = chrono::Utc::now().to_rfc3339();
+            let step_start = ctx.step_start_time.clone().unwrap_or_else(|| now.clone());
+            let duration_ms =
+                crate::call::app::ivr::trace::duration_ms_between(Some(&step_start), &now);
             let ev = crate::rwi::IvrStepTrace {
                 call_id: session_id.to_string(),
                 session_id: session_id.to_string(),
                 caller: caller.to_string(),
                 callee: callee.to_string(),
-                step_index: 0,
                 trigger: crate::rwi::TriggerInfo::with_detail(
                     "dtmf",
                     serde_json::json!({ "digit": digit_str }),
                 ),
                 action_type: "Bridge".to_string(),
                 action_json: None,
-                duration_ms: 0,
+                duration_ms,
                 error: None,
                 step_id: ctx.step_id,
                 step_name: ctx.step_name,
-                step_start_time: Some(ctx.step_start_time.unwrap_or_else(|| now.clone())),
+                step_start_time: Some(step_start),
                 step_end_time: Some(now),
                 extra: ctx.extra,
                 sip_headers,
@@ -312,6 +314,38 @@ pub(super) fn forward_dtmf_event(
         return true;
     }
     inject_dtmf_into_app(digit, leg_id, session_id, app_runtime, rwi_gateway)
+}
+
+/// Map the session teardown cause to the compensating `session_end` reason
+/// for an IVR flow that died while suspended on a resumable hand-off.
+/// Caller-side death stays `user_hangup`; the RTP watchdog refines to
+/// `timeout`; everything else is a system teardown (`hangup`) with the CDR
+/// hangup reason as detail.
+pub(super) fn map_suspended_flow_end(
+    reason: Option<&CallRecordHangupReason>,
+) -> crate::call::app::ivr::provider::SessionEndReason {
+    use crate::call::app::ivr::provider::{SessionEndReason, SessionEndTag};
+    use CallRecordHangupReason as R;
+    match reason {
+        Some(R::ByCaller) | Some(R::Canceled) | Some(R::Abandoned) | Some(R::NoAnswer) => {
+            SessionEndReason {
+                reason: SessionEndTag::UserHangup,
+                detail: None,
+            }
+        }
+        Some(R::RtpTimeout) => SessionEndReason {
+            reason: SessionEndTag::Timeout,
+            detail: None,
+        },
+        Some(other) => SessionEndReason {
+            reason: SessionEndTag::Hangup,
+            detail: Some(format!("{other:?}")),
+        },
+        None => SessionEndReason {
+            reason: SessionEndTag::Hangup,
+            detail: None,
+        },
+    }
 }
 
 /// Emit the compensating `session_end` `ivr_step_trace` for an IVR flow that
@@ -329,7 +363,7 @@ pub(super) fn emit_suspended_flow_session_end(
     rwi_gateway: &Option<crate::rwi::RwiGatewayRef>,
     bridge_trace_context: &parking_lot::Mutex<Option<super::transfer::BridgeTraceContext>>,
     sip_headers: Option<std::collections::HashMap<String, String>>,
-    end_reason: crate::call::app::ivr::provider::SessionEndTag,
+    end_reason: crate::call::app::ivr::provider::SessionEndReason,
 ) {
     let Some(gw) = rwi_gateway.as_ref() else {
         return;
@@ -339,29 +373,29 @@ pub(super) fn emit_suspended_flow_session_end(
     // end stamp and as the start fallback so `end >= start` always holds.
     // The executor-stamped `_rst_step_start_time` provides the real start.
     let now = chrono::Utc::now().to_rfc3339();
+    let step_start = ctx
+        .as_ref()
+        .and_then(|c| c.step_start_time.clone())
+        .unwrap_or_else(|| now.clone());
+    let duration_ms = crate::call::app::ivr::trace::duration_ms_between(Some(&step_start), &now);
     let ev = crate::rwi::IvrStepTrace {
         call_id: session_id.to_string(),
         session_id: session_id.to_string(),
         caller: caller.to_string(),
         callee: callee.to_string(),
-        step_index: 0,
         trigger: crate::rwi::TriggerInfo::new("session_end"),
         action_type: if ctx.is_some() { "Bridge" } else { "Transfer" }.to_string(),
         action_json: None,
-        duration_ms: 0,
+        duration_ms,
         error: None,
         step_id: ctx.as_ref().and_then(|c| c.step_id.clone()),
         step_name: ctx.as_ref().and_then(|c| c.step_name.clone()),
-        step_start_time: Some(
-            ctx.as_ref()
-                .and_then(|c| c.step_start_time.clone())
-                .unwrap_or_else(|| now.clone()),
-        ),
+        step_start_time: Some(step_start),
         step_end_time: Some(now),
         extra: ctx.as_ref().and_then(|c| c.extra.clone()),
         sip_headers,
-        end_reason: Some(end_reason),
-        end_detail: None,
+        end_reason: Some(end_reason.reason),
+        end_detail: end_reason.detail,
     };
     gw.read().fan_out(session_id, &ev);
 }

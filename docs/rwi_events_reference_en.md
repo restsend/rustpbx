@@ -282,10 +282,13 @@ First event in any call flow.
 | `routing_path` | Option\<Vec\<String\>\> | Routing path |
 | `session_id` | Option\<String\> | Enrichment: logical-call root session id |
 | `direction` | Option\<String\> | Enrichment: `inbound` / `outbound` / `internal` |
+| `agent_id` | Option\<String\> | Enrichment: originating agent ID — **only when the call was initiated by a registered CC agent** (CTI click-to-call, agent-initiated consult legs, ...). Written before `call_created` is emitted, so it does not depend on the ringing-stage hook |
+| `agent_name` | Option\<String\> | Enrichment: originating agent display name (same condition as `agent_id`) |
 
 > **Note**: all call-scoped events carry the same `direction` context field
 > (injected by `CallMetaStore` enrichment). Use enrichment `session_id` for
-> multi-leg correlation.
+> multi-leg correlation. Agent-initiated outbound calls (invites) carry the
+> originating agent (`agent_id` / `agent_name`) starting from `call_created`.
 
 ```json
 {
@@ -482,9 +485,10 @@ Dispatch: call_owner
 | Field | Type | Description |
 |-------|------|-------------|
 | `source_type` | String | `ivr` (transfer out of a running IVR flow) \| `queue` (transfer by a queue-served agent) \| `agent` (transfer attributed to a known agent leg). Only these three values are produced today. |
-| `name` | Option\<String\> | Source IVR name (e.g. `main-ivr`) or queue name (e.g. `sales`) |
+| `name` | Option\<String\> | Source IVR name (e.g. `main-ivr`) or queue name (e.g. `sales`); unused on the `agent` branch (see `agent_name`) |
 | `ivr_node_id` | Option\<String\> | IVR node the call was at when transferred |
 | `agent_id` | Option\<String\> | Agent that initiated the transfer, when known |
+| `agent_name` | Option\<String\> | Display name of the transferring agent — present only when `agent_id` came from the CC-hook resolution (id and name are published as a pair); fallback-derived ids (leg endpoint / connected callee) carry no name |
 
 Example — blind transfer from an IVR node into a queue:
 
@@ -502,6 +506,22 @@ Example — blind transfer from an IVR node into a queue:
 }
 ```
 
+Example — transfer initiated directly by an agent (no IVR/queue context):
+
+```json
+{
+  "event_type": "call_transferred",
+  "call_id": "a1b2c3",
+  "transfer_target": "sip:1003@rustpbx.com",
+  "transfer_target_type": "sip",
+  "transfer_source": {
+    "source_type": "agent",
+    "agent_id": "1002",
+    "agent_name": "Bob"
+  }
+}
+```
+
 Notes:
 
 - Blind transfers to in-session application targets (`queue:` / `ivr:` /
@@ -511,6 +531,13 @@ Notes:
   or application starts that flow in-session (target type `queue` / `ivr`,
   original number kept in `transfer_target`). Gated by
   `proxy.route_originated_calls` for both CTI/API transfers and phone REFERs.
+- CC consult completion (`/consult/{tid}/complete`) attributes its
+  `call_transferred` to the initiating agent the same way
+  (`transfer_source.source_type = "agent"`).
+- The REFER target leg created by a blind transfer never emits a
+  `call_created` of its own, but it inherits the transferring agent's
+  `agent_id` / `agent_name`, so its later events (`call_answered`,
+  `call_hangup`, ...) keep the agent context.
 
 #### call_transfer_failed
 
@@ -942,7 +969,8 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 > **Exactly-once lifecycle contract**: within one logical IVR flow (including voip_bridge round-trips, queue returns, and JumpIvr jumps), `trigger.type="session_start"` and `trigger.type="session_end"` each appear **exactly once**:
 > - `session_start` only on the first node's trace entry at the flow's true first entry;
 > - resumable hand-offs (voip_bridge, queue return, JumpIvr) do **not** trigger `session_end` (the flow has not ended);
-> - if the caller hangs up or the successor fails to start while the flow is suspended, the proxy synthesizes the single compensating `session_end` (`end_reason=user_hangup` / `error`; node context from the bridge trace context);
+> - the hand-off reason travels on the **hand-off node's own completion entry** instead: its `end_reason` is `transfer` / `transfer_to_queue` / `transfer_to_ivr` and `end_detail` carries the hand-off target (e.g. `toivr:39230?...`). Consumers can thus tell "the IVR segment ended because it jumped" apart from the final outcome — the terminal reason remains the flow's single `session_end`;
+> - if the caller hangs up, the RTP watchdog fires, or the successor fails to start while the flow is suspended, the proxy synthesizes the single compensating `session_end` (`user_hangup` on caller hangup, `timeout` on RTP inactivity, `hangup` on system teardown, `error` on start failure; node context from the bridge trace context);
 > - when the flow resumes after suspension, the resumed first node carries a `resume` trigger (no buffered digits) or `dtmf` (buffered digits) — never a second `session_start`.
 
 | Field | Type | Description |
@@ -951,7 +979,6 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 | `session_id` | String | Session ID |
 | `caller` | String | Caller |
 | `callee` | String | Callee |
-| `step_index` | u32 | Step index |
 | `trigger` | Object | Structured trigger info for this step, see below |
 | `action_type` | String | Action type (e.g., `Transfer`, `Prompt`, `DtmfMenu`) |
 | `action_json` | Option\<String\> | Action details JSON |
@@ -963,7 +990,7 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 | `step_end_time` | Option\<String\> | Current step end time (ISO UTC), always present — it marks step completion (i.e. the event has been emitted) |
 | `extra` | Option\<JSON Object\> | Transparent passthrough data from provider. Provider returns the complete object in ActionNode.extra each time; RustPBX stores and outputs it as-is |
 | `sip_headers` | Option\<Map\<String, String\>\> | Whitelisted SIP headers of the call |
-| `end_reason` | Option\<String\> | Present only on the session-end (`session_end`) entry; identifies how the whole IVR session ended (`normal`, `transfer`, `transfer_to_queue`, `hangup`, `user_hangup`, `timeout`, `error`, etc.) |
+| `end_reason` | Option\<String\> | Present on two entry kinds only: ① the `session_end` entry — the flow's final end reason (`normal`, `transfer`, `transfer_to_queue`, `hangup`, `user_hangup`, `timeout`, `error`, etc.); ② the terminal step entry of a resumable hand-off (bridge/queue with return_app, JumpIvr) — `transfer` / `transfer_to_queue` / `transfer_to_ivr` with `end_detail` carrying the hand-off target (that hand-off produces no `session_end`, see the exactly-once contract above) |
 | `end_detail` | Option\<String\> | Companion detail for `end_reason` (e.g. transfer target, error message) |
 
 > **`trigger` field**:

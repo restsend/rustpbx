@@ -48,7 +48,9 @@ pub struct StepIvrApp {
     awaiting_dtmf: bool,
     tts_service: Option<Arc<crate::tts::TtsService>>,
     trace: Option<Arc<IvrTraceCollector>>,
-    step_index: u32,
+    /// Whether at least one provider /step round-trip has completed. Used
+    /// only to classify startup failures vs mid-flow provider failures.
+    has_fetched_step: bool,
     ivr_name: Option<String>,
     rwi_gateway: Option<crate::rwi::RwiGatewayRef>,
     /// Name of the route that dispatched this call into the IVR.
@@ -139,7 +141,7 @@ impl StepIvrApp {
             awaiting_dtmf: false,
             tts_service: None,
             trace: None,
-            step_index: 0,
+            has_fetched_step: false,
             ivr_name: None,
             rwi_gateway: None,
             route_name: None,
@@ -183,7 +185,7 @@ impl StepIvrApp {
             awaiting_dtmf: false,
             tts_service: None,
             trace: None,
-            step_index: 0,
+            has_fetched_step: false,
             ivr_name: None,
             rwi_gateway: None,
             route_name: None,
@@ -291,7 +293,10 @@ impl StepIvrApp {
     /// `duration_ms`, then emit ONE `ivr_step_trace` keeping the step's
     /// original trigger (e.g. `phone_collected`, `dtmf`) with its detail.
     /// Completion is observable via `step_end_time`; `session_end` stays
-    /// reserved for on_exit, the only entry carrying end_reason.
+    /// reserved for on_exit — with one exception: resumable hand-offs
+    /// (bridge/queue with return app, JumpIvr) suppress their session_end
+    /// entry, so the terminal step's completion entry carries the end_reason
+    /// instead (see the Terminal arm of `__exec_node`).
     fn record_pending_session_end(&mut self) {
         let Some(pending) = self.pending_take() else {
             return;
@@ -321,7 +326,6 @@ impl StepIvrApp {
                 session_id: entry.session_id.clone(),
                 caller: entry.caller.clone(),
                 callee: entry.callee.clone(),
-                step_index: entry.step_index,
                 trigger: entry.trigger.clone(),
                 action_type: entry.action_type.clone(),
                 action_json: entry.action_json.clone(),
@@ -444,15 +448,71 @@ impl StepIvrApp {
         }
     }
 
-    fn end_reason_label(reason: &crate::call::app::ExitReason) -> &'static str {
+    fn end_reason_label(
+        reason: &crate::call::app::ExitReason,
+        transfer_target: Option<&str>,
+    ) -> &'static str {
         match reason {
             crate::call::app::ExitReason::Normal => "normal",
             crate::call::app::ExitReason::Hangup => "hangup",
             crate::call::app::ExitReason::RemoteHangup(_) => "remote_hangup",
-            crate::call::app::ExitReason::Transferred => "transferred",
+            crate::call::app::ExitReason::Transferred => match transfer_target {
+                Some(t) => Self::transfer_reason_label(t),
+                None => "transferred",
+            },
             crate::call::app::ExitReason::Error(_) => "error",
             crate::call::app::ExitReason::Cancelled => "cancelled",
             crate::call::app::ExitReason::Chained => "chained",
+        }
+    }
+
+    /// Coarse label for a transfer target — mirrors
+    /// [`Self::classify_transfer_target`] so the `ivr_end_reason` /
+    /// `ivr_status` variables agree with the structured `SessionEndTag`.
+    fn transfer_reason_label(target: &str) -> &'static str {
+        match Self::classify_transfer_target(target) {
+            SessionEndTag::TransferToQueue => "transfer_to_queue",
+            SessionEndTag::TransferToIvr => "transfer_to_ivr",
+            _ => "transfer",
+        }
+    }
+
+    /// Classify a transfer target into the session-level end tag.
+    ///
+    /// Shared by `on_exit` (SessionEndReason construction) and the terminal
+    /// step trace (resumable hand-off entries carrying the end reason inline,
+    /// see `terminal_handoff_end`).
+    fn classify_transfer_target(target: &str) -> SessionEndTag {
+        if target.starts_with("queue:") {
+            SessionEndTag::TransferToQueue
+        } else if target.starts_with("toivr:") || target.starts_with("ivr:") {
+            SessionEndTag::TransferToIvr
+        } else {
+            SessionEndTag::Transfer
+        }
+    }
+
+    /// Whether a terminal transfer from `node` resumes the same logical flow
+    /// (bridge/queue with a return app, or a JumpIvr) — the exact condition
+    /// under which `on_exit` suppresses its `session_end` entry.
+    fn is_resumable_handoff(node: &ActionNode, target: &str) -> bool {
+        match &node.action {
+            EntryAction::Bridge {
+                return_app: Some(_),
+                ..
+            }
+            | EntryAction::Transfer {
+                return_app: Some(_),
+                ..
+            }
+            | EntryAction::Queue {
+                return_app: Some(_),
+                ..
+            } => true,
+            _ => matches!(
+                Self::classify_transfer_target(target),
+                SessionEndTag::TransferToIvr
+            ),
         }
     }
 
@@ -525,7 +585,15 @@ impl StepIvrApp {
 
         let node_type_str = Self::action_type_label(&node.action).to_string();
         let action_json = serde_json::to_string(&node).ok();
+        // Stamp THIS node's start here — not only in `request_next` — so
+        // chained nodes (`node.next`, which skip `request_next`) don't inherit
+        // the previous step's start. Every node's trace must bracket its own
+        // execution: `step_start_time` and the duration instant are captured
+        // together, keeping `duration_ms == step_end_time - step_start_time`
+        // meaningful for consumers.
         let start = std::time::Instant::now();
+        self.current_step_start_time = Some(chrono::Utc::now().to_rfc3339());
+        self.step_start_instant = Some(start);
         let result = self.execute_node(&node, ctrl, ctx).await;
         let elapsed_ms = start.elapsed().as_millis() as u64;
         let step_end = chrono::Utc::now().to_rfc3339();
@@ -570,13 +638,27 @@ impl StepIvrApp {
                 }
                 let app_action = match action_result {
                     ActionResult::Terminal(terminal) => {
-                        self.step_index += 1;
                         self.increment_total_steps();
+                        // Lifecycle exactly-once: resumable hand-offs (bridge/
+                        // queue with a return app, JumpIvr) suppress the
+                        // executor's `session_end` entry — the flow continues
+                        // in the successor. Surface the hand-off reason on
+                        // THIS step's completion entry so consumers still
+                        // observe why the IVR segment ended (and where it
+                        // went). Plain terminal transfers keep end_reason
+                        // unset — on_exit's session_end carries it.
+                        let handoff_end = match &terminal {
+                            TerminalAction::Transfer(target) => {
+                                Self::is_resumable_handoff(&node, target).then(|| {
+                                    (Self::classify_transfer_target(target), target.clone())
+                                })
+                            }
+                            _ => None,
+                        };
                         self.record_trace(IvrTraceEntry {
                             session_id: session_id.clone(),
                             caller: caller.clone(),
                             callee: callee.clone(),
-                            step_index: self.step_index,
                             trigger: trigger.clone(),
                             provider_url: None,
                             action_type: node_type_str,
@@ -588,8 +670,8 @@ impl StepIvrApp {
                             step_end_time: Some(step_end),
                             duration_ms: elapsed_ms,
                             extra: self.extra.clone(),
-                            end_reason: None,
-                            end_detail: None,
+                            end_reason: handoff_end.as_ref().map(|(tag, _)| tag.clone()),
+                            end_detail: handoff_end.map(|(_, target)| target),
                         });
                         match terminal {
                             TerminalAction::Transfer(target) => {
@@ -609,7 +691,6 @@ impl StepIvrApp {
                             session_id: session_id.clone(),
                             caller: caller.clone(),
                             callee: callee.clone(),
-                            step_index: self.step_index,
                             trigger: trigger.clone(),
                             provider_url: None,
                             action_type: node_type_str,
@@ -638,7 +719,6 @@ impl StepIvrApp {
                         return Box::pin(self.__exec_node(ctrl, ctx)).await;
                     }
                     ActionResult::StartSubApp(sub_app) => {
-                        self.step_index += 1;
                         self.increment_total_steps();
                         return Ok(AppAction::Chain(sub_app));
                     }
@@ -674,7 +754,6 @@ impl StepIvrApp {
                                 session_id: session_id.clone(),
                                 caller: caller.clone(),
                                 callee: callee.clone(),
-                                step_index: self.step_index,
                                 trigger: step_trigger,
                                 provider_url: None,
                                 action_type: node_type_str,
@@ -715,13 +794,11 @@ impl StepIvrApp {
                                 _ => ProviderEvent::RecordingStopped { reason: None },
                             };
                             let _ = started;
-                            self.step_index += 1;
                             self.increment_total_steps();
                             self.record_trace(IvrTraceEntry {
                                 session_id: session_id.clone(),
                                 caller: caller.clone(),
                                 callee: callee.clone(),
-                                step_index: self.step_index,
                                 trigger: trigger.clone(),
                                 provider_url: None,
                                 action_type: node_type_str,
@@ -764,7 +841,6 @@ impl StepIvrApp {
                             session_id: session_id.clone(),
                             caller: caller.clone(),
                             callee: callee.clone(),
-                            step_index: self.step_index,
                             trigger: step_trigger,
                             provider_url: None,
                             action_type: node_type_str,
@@ -789,7 +865,6 @@ impl StepIvrApp {
                     session_id,
                     caller,
                     callee,
-                    step_index: self.step_index,
                     trigger,
                     provider_url: None,
                     action_type: node_type_str,
@@ -911,11 +986,12 @@ impl StepIvrApp {
         let caller = provider_session.caller;
         let callee = provider_session.callee;
         let now = chrono::Utc::now().to_rfc3339();
+        let duration_ms =
+            super::trace::duration_ms_between(self.current_step_start_time.as_deref(), &now);
         self.record_trace(IvrTraceEntry {
             session_id,
             caller,
             callee,
-            step_index: self.step_index,
             trigger: crate::rwi::TriggerInfo::with_detail(
                 "ivr_fallback",
                 serde_json::json!({
@@ -926,7 +1002,7 @@ impl StepIvrApp {
             provider_url: None,
             action_type: "ivr_fallback".to_string(),
             action_json: None,
-            duration_ms: 0,
+            duration_ms,
             error: Some(reason.to_string()),
             step_id: self.current_step_id.clone(),
             step_name: self.current_step_name.clone(),
@@ -1023,7 +1099,6 @@ impl StepIvrApp {
             } else {
                 None
             },
-            step_index: Some(self.step_index),
             transferred_from: self.transferred_from.clone(),
         }
     }
@@ -1137,7 +1212,6 @@ impl StepIvrApp {
             } else {
                 None
             },
-            step_index: Some(self.step_index),
             transferred_from: self.transferred_from.clone(),
         };
 
@@ -1163,7 +1237,6 @@ impl StepIvrApp {
         // Save step timing for the next ProviderContext.
         self.step_prev_start_time = Some(now_rfc3339);
         self.step_prev_duration_ms = elapsed_ms;
-        self.step_index += 1;
 
         // Extract transparent passthrough data from provider response.
         if let Ok(ref node) = result {
@@ -1271,12 +1344,14 @@ impl StepIvrApp {
         });
 
         // Fallback on provider error instead of propagating
+        let first_step = !self.has_fetched_step;
+        self.has_fetched_step = true;
         match result {
             Ok(node) => Ok(node),
             Err(e) => {
                 tracing::warn!(error = %e, "StepIvrApp: provider /step failed, using IVR fallback");
                 let error_text = e.to_string();
-                if self.step_index <= 1 {
+                if first_step {
                     self.set_runtime_status_shared("startup_error");
                 } else {
                     self.set_runtime_status_shared("provider_error");
@@ -1775,11 +1850,11 @@ impl CallApp for StepIvrApp {
             // Surface the rejected key: consumers key invalid-input analytics
             // (G-system `dtmferror`) off this event. Menu state is unchanged.
             let provider_session = self.provider_session_context();
+            let end = chrono::Utc::now().to_rfc3339();
             self.record_trace(IvrTraceEntry {
                 session_id: provider_session.session_id,
                 caller: provider_session.caller,
                 callee: provider_session.callee,
-                step_index: self.step_index,
                 trigger: crate::rwi::TriggerInfo::with_detail(
                     "dtmf_menu_invalid",
                     serde_json::json!({ "digit": digit }),
@@ -1791,8 +1866,11 @@ impl CallApp for StepIvrApp {
                 step_id: self.current_step_id.clone(),
                 step_name: self.current_step_name.clone(),
                 step_start_time: self.current_step_start_time.clone(),
-                step_end_time: Some(chrono::Utc::now().to_rfc3339()),
-                duration_ms: 0,
+                step_end_time: Some(end.clone()),
+                duration_ms: super::trace::duration_ms_between(
+                    self.current_step_start_time.as_deref(),
+                    &end,
+                ),
                 extra: self.extra.clone(),
                 end_reason: None,
                 end_detail: None,
@@ -2025,7 +2103,8 @@ impl CallApp for StepIvrApp {
             });
         }
 
-        let mut end_reason_label = Self::end_reason_label(&reason).to_string();
+        let mut end_reason_label =
+            Self::end_reason_label(&reason, self.last_transfer_target.as_deref()).to_string();
         let skip_provider_end = matches!(
             reason,
             crate::call::app::ExitReason::RemoteHangup(_) | crate::call::app::ExitReason::Cancelled
@@ -2046,21 +2125,9 @@ impl CallApp for StepIvrApp {
             crate::call::app::ExitReason::Transferred => {
                 // Determine transfer target type from the last action.
                 let target = self.last_transfer_target.clone().unwrap_or_default();
-                if target.starts_with("queue:") {
-                    SessionEndReason {
-                        reason: SessionEndTag::TransferToQueue,
-                        detail: Some(target),
-                    }
-                } else if target.starts_with("toivr:") || target.starts_with("ivr:") {
-                    SessionEndReason {
-                        reason: SessionEndTag::TransferToIvr,
-                        detail: Some(target),
-                    }
-                } else {
-                    SessionEndReason {
-                        reason: SessionEndTag::Transfer,
-                        detail: Some(target),
-                    }
+                SessionEndReason {
+                    reason: Self::classify_transfer_target(&target),
+                    detail: Some(target),
                 }
             }
             crate::call::app::ExitReason::Error(e) => SessionEndReason {
@@ -2122,29 +2189,17 @@ impl CallApp for StepIvrApp {
         // trace lifecycle changes here: provider /end hooks and shared
         // ivr_status/ivr_end_reason variables behave exactly as before.
         let resumable_handoff = match &self.current_node {
-            Some(node) => match &node.action {
-                EntryAction::Bridge {
-                    return_app: Some(_),
-                    ..
-                }
-                | EntryAction::Transfer {
-                    return_app: Some(_),
-                    ..
-                }
-                | EntryAction::Queue {
-                    return_app: Some(_),
-                    ..
-                } => true,
-                _ => matches!(&end_reason.reason, SessionEndTag::TransferToIvr),
-            },
+            Some(node) => {
+                Self::is_resumable_handoff(node, self.last_transfer_target.as_deref().unwrap_or(""))
+            }
             None => false,
         };
         if !resumable_handoff {
+            let end = chrono::Utc::now().to_rfc3339();
             self.record_trace(IvrTraceEntry {
                 session_id: session_id.clone(),
                 caller,
                 callee,
-                step_index: self.step_index,
                 trigger: crate::rwi::TriggerInfo::new("session_end"),
                 provider_url: None,
                 action_type: last_action_type,
@@ -2153,8 +2208,11 @@ impl CallApp for StepIvrApp {
                 step_id: last_step_id,
                 step_name: last_step_name,
                 step_start_time: self.current_step_start_time.clone(),
-                step_end_time: Some(chrono::Utc::now().to_rfc3339()),
-                duration_ms: 0,
+                step_end_time: Some(end.clone()),
+                duration_ms: super::trace::duration_ms_between(
+                    self.current_step_start_time.as_deref(),
+                    &end,
+                ),
                 extra: last_extra,
                 end_reason: Some(end_sr.reason.clone()),
                 end_detail: end_sr.detail.clone(),
@@ -2361,6 +2419,38 @@ mod tests {
             Arc::new(Config::default()),
             reqwest::Client::new(),
         )
+    }
+
+    /// Consumer contract for `ivr_step_trace`: `duration_ms` must equal
+    /// `step_end_time - step_start_time`. The executor measures with a
+    /// monotonic Instant while the stamps are wall clock — both captured at
+    /// the same execution points, so ±25ms absorbs scheduling jitter.
+    /// Returns the asserted duration for further window assertions.
+    fn assert_trace_duration_matches_stamps(payload: &serde_json::Value) -> u64 {
+        let start = payload["step_start_time"]
+            .as_str()
+            .expect("step_start_time must be present");
+        let end = payload["step_end_time"]
+            .as_str()
+            .expect("step_end_time must be present");
+        let expected = crate::call::app::ivr::trace::duration_ms_between(Some(start), end);
+        let duration = payload["duration_ms"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("duration_ms must be present, got {payload}"));
+        assert!(
+            (duration as i64 - expected as i64).abs() <= 25,
+            "duration_ms ({duration}ms) must equal step_end_time - step_start_time \
+             ({expected}ms, ±25ms scheduling tolerance)"
+        );
+        duration
+    }
+
+    fn parse_stamp(payload: &serde_json::Value, field: &str) -> chrono::DateTime<chrono::Utc> {
+        payload[field]
+            .as_str()
+            .unwrap_or_else(|| panic!("{field} must be present"))
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .expect("trace stamps must be RFC3339")
     }
 
     #[tokio::test]
@@ -2687,6 +2777,281 @@ mod tests {
             "session_start"
         );
         assert_eq!(transfer_trace.event.payload["step_id"], "transfer-step");
+    }
+
+    // ── Step duration contract: duration_ms == step_end_time - step_start_time ──
+    //
+    // 播报+等待输入 nodes (prompt playback, menu key wait) are what consumers
+    // build nodeDuration analytics from. The executor measures these waits
+    // with a monotonic Instant; the emitted event must carry a duration that
+    // reflects the real wait window AND agrees with its own RFC3339 stamps.
+
+    /// A prompt step waiting for playback completion must report the real
+    /// wait window — not 0 — and the duration must equal its own stamps.
+    #[tokio::test]
+    async fn test_prompt_wait_duration_matches_stamps() {
+        use crate::rwi::gateway::RwiGateway;
+
+        let mut prompt = ActionNode::new(EntryAction::Prompt {
+            file: Some("hello.wav".into()),
+            tts_text: None,
+            tts_voice: None,
+            record_name_list: None,
+            interruptible: false,
+            tts_api_url: None,
+
+            delay_before_ms: 0,
+            delay_after_ms: 0,
+        });
+        prompt.step_id = Some("prompt-step".into());
+        let transfer = ActionNode::new(EntryAction::Transfer {
+            target: "2001".into(),
+            headers: HashMap::new(),
+            params: HashMap::new(),
+            return_app: None,
+            return_target: None,
+        });
+
+        let gateway = RwiGateway::new();
+        let mut events = gateway.subscribe_events();
+        let mut app = mock_app(vec![prompt, transfer]);
+        app.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gateway)));
+
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+        stack
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(2000, "play", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path },
+                        ..
+                    } if path == "hello.wav"
+                )
+            })
+            .await;
+
+        // Simulated playback + listener dwell: the WaitFor prompt step must
+        // measure this window (finalize happens when audio_complete arrives).
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        stack.audio_complete("ivr_prompt");
+
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        let prompt_trace = events.try_recv().expect("prompt trace must be enqueued");
+        let payload = &prompt_trace.event.payload;
+        assert_eq!(payload["step_id"], "prompt-step");
+        let duration = assert_trace_duration_matches_stamps(payload);
+        assert!(
+            duration >= 50,
+            "prompt wait duration must reflect the real wait window (~80ms), got {duration}ms"
+        );
+    }
+
+    /// A menu step waiting for a key press (greeting dwell + input window)
+    /// must report the accumulated wait — not 0 — matching its own stamps.
+    #[tokio::test]
+    async fn test_menu_key_wait_duration_matches_stamps() {
+        use crate::rwi::gateway::RwiGateway;
+
+        let mut menu = ActionNode::new(EntryAction::DtmfMenu {
+            greeting: Some("menu.wav".into()),
+            greeting_text: None,
+            greeting_record_list: None,
+            greeting_voice: None,
+            timeout_ms: 5000,
+            max_retries: 3,
+            entries: HashMap::new(),
+            timeout_action: None,
+            invalid_action: None,
+            greeting_api_url: None,
+        });
+        menu.step_id = Some("menu-step".into());
+        let transfer = ActionNode::new(EntryAction::Transfer {
+            target: "2001".into(),
+            headers: HashMap::new(),
+            params: HashMap::new(),
+            return_app: None,
+            return_target: None,
+        });
+
+        let gateway = RwiGateway::new();
+        let mut events = gateway.subscribe_events();
+        let mut app = mock_app(vec![menu, transfer]);
+        app.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gateway)));
+
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+        stack
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(2000, "play", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path },
+                        ..
+                    } if path == "menu.wav"
+                )
+            })
+            .await;
+
+        // Greeting dwell + key-wait window — the menu step must measure it all.
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        stack.audio_complete("ivr_menu_greeting");
+        let _ = stack.drain_cmds();
+        stack.dtmf("1");
+
+        // DTMF barge-in stops playback before the next step's transfer.
+        stack
+            .assert_cmd(2000, "stop", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        let menu_trace = events.try_recv().expect("menu trace must be enqueued");
+        let payload = &menu_trace.event.payload;
+        assert_eq!(payload["step_id"], "menu-step");
+        assert_eq!(payload["trigger"]["type"], "dtmf");
+        assert_eq!(payload["trigger"]["detail"]["digit"], "1");
+        let duration = assert_trace_duration_matches_stamps(payload);
+        assert!(
+            duration >= 50,
+            "menu key-wait duration must reflect the real wait window (~80ms), got {duration}ms"
+        );
+    }
+
+    /// A chained node (`node.next` — skips `request_next`) must re-stamp its
+    /// own start; inheriting the previous step's start would inflate its
+    /// duration by the whole previous step's window.
+    #[tokio::test]
+    async fn test_chained_node_gets_fresh_step_start() {
+        use crate::rwi::gateway::RwiGateway;
+
+        let mut node_a = ActionNode::with_next(
+            EntryAction::Prompt {
+                file: Some("hello.wav".into()),
+                tts_text: None,
+                tts_voice: None,
+                record_name_list: None,
+                interruptible: false,
+                tts_api_url: None,
+
+                delay_before_ms: 0,
+                delay_after_ms: 0,
+            },
+            {
+                let mut b = ActionNode::new(EntryAction::Prompt {
+                    file: Some("world.wav".into()),
+                    tts_text: None,
+                    tts_voice: None,
+                    record_name_list: None,
+                    interruptible: false,
+                    tts_api_url: None,
+
+                    delay_before_ms: 0,
+                    delay_after_ms: 0,
+                });
+                b.step_id = Some("step-b".into());
+                b
+            },
+        );
+        node_a.step_id = Some("step-a".into());
+        let transfer = ActionNode::new(EntryAction::Transfer {
+            target: "2001".into(),
+            headers: HashMap::new(),
+            params: HashMap::new(),
+            return_app: None,
+            return_target: None,
+        });
+
+        let gateway = RwiGateway::new();
+        let mut events = gateway.subscribe_events();
+        let mut app = mock_app(vec![node_a, transfer]);
+        app.rwi_gateway = Some(Arc::new(parking_lot::RwLock::new(gateway)));
+
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+        stack
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(2000, "play", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path },
+                        ..
+                    } if path == "hello.wav"
+                )
+            })
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        stack.audio_complete("ivr_prompt");
+
+        // Chained step B executes without a provider round-trip.
+        stack
+            .assert_cmd(2000, "play", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: crate::call::domain::MediaSource::File { path },
+                        ..
+                    } if path == "world.wav"
+                )
+            })
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        stack.audio_complete("ivr_prompt");
+
+        stack
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        let trace_a = events.try_recv().expect("step A trace must be enqueued");
+        let trace_b = events.try_recv().expect("chained step B trace must be enqueued");
+        let _transfer_trace = events.try_recv().expect("transfer trace must be enqueued");
+
+        assert_eq!(trace_a.event.payload["step_id"], "step-a");
+        assert_eq!(trace_b.event.payload["step_id"], "step-b");
+
+        let dur_a = assert_trace_duration_matches_stamps(&trace_a.event.payload);
+        let dur_b = assert_trace_duration_matches_stamps(&trace_b.event.payload);
+        assert!(
+            dur_a >= 40,
+            "step A duration must reflect its own window (~60ms), got {dur_a}ms"
+        );
+        assert!(
+            dur_b >= 40,
+            "chained step B duration must reflect its own window (~60ms), got {dur_b}ms"
+        );
+
+        let start_a = parse_stamp(&trace_a.event.payload, "step_start_time");
+        let start_b = parse_stamp(&trace_b.event.payload, "step_start_time");
+        let gap = (start_b - start_a).num_milliseconds();
+        assert!(
+            gap >= 40,
+            "chained node must re-stamp its own start (gap {gap}ms) — \
+             inheriting step A's start inflates step B's duration"
+        );
     }
 
     #[tokio::test]
@@ -3483,6 +3848,26 @@ mod tests {
             "dtmf_menu_invalid trace must carry the rejected digit"
         );
         assert_eq!(invalid.action_type, "DtmfMenu");
+
+        // Contract: the rejected-key event carries the menu step's elapsed
+        // time (start → key press), not a hardcoded 0.
+        let invalid_duration = crate::call::app::ivr::trace::duration_ms_between(
+            invalid.step_start_time.as_deref(),
+            invalid
+                .step_end_time
+                .as_deref()
+                .expect("invalid trace must carry step_end_time"),
+        );
+        assert_eq!(
+            invalid.duration_ms, invalid_duration,
+            "dtmf_menu_invalid duration_ms must equal step_end_time - step_start_time"
+        );
+        assert!(
+            invalid.duration_ms >= 40,
+            "dtmf_menu_invalid duration must reflect the menu's elapsed window (≥50ms sleep), \
+             got {}ms",
+            invalid.duration_ms
+        );
 
         // The menu is still waiting: a subsequent valid key must resolve.
         stack.dtmf("1");
@@ -4315,10 +4700,24 @@ mod tests {
                 .map(|e| e.trigger.r#type.clone())
                 .collect::<Vec<_>>()
         );
-        // The node's own execution trace is still recorded.
+        // The node's own execution trace is still recorded — and because the
+        // session_end is suppressed, the hand-off reason lives on it.
+        let bridge = entries
+            .iter()
+            .find(|e| e.action_type == "Bridge")
+            .expect("the Bridge node's execution trace must remain");
+        assert_eq!(
+            bridge.end_reason,
+            Some(crate::call::app::ivr::provider::SessionEndTag::Transfer),
+            "suspended bridge entry must carry the hand-off end reason"
+        );
         assert!(
-            entries.iter().any(|e| e.action_type == "Bridge"),
-            "the Bridge node's execution trace must remain"
+            bridge
+                .end_detail
+                .as_deref()
+                .is_some_and(|d| d.starts_with("bridge:")),
+            "bridge entry detail must carry the bridge target, got {:?}",
+            bridge.end_detail
         );
         // The collector session row stays open until the flow truly ends.
         assert_eq!(
@@ -4364,6 +4763,24 @@ mod tests {
             sess.status, "active",
             "jump must not close the collector session row"
         );
+        // The suppressed session_end's reason lives on the jump node's own
+        // completion entry instead.
+        let jump = entries
+            .iter()
+            .find(|e| e.action_type == "JumpIvr")
+            .expect("JumpIvr node trace must exist");
+        assert_eq!(
+            jump.end_reason,
+            Some(crate::call::app::ivr::provider::SessionEndTag::TransferToIvr),
+            "jump entry must carry the hand-off end reason"
+        );
+        assert!(
+            jump.end_detail
+                .as_deref()
+                .is_some_and(|d| d.starts_with("toivr:39290")),
+            "jump entry detail must carry the toivr target, got {:?}",
+            jump.end_detail
+        );
     }
 
     #[tokio::test]
@@ -4406,6 +4823,14 @@ mod tests {
             session_end.end_reason,
             Some(crate::call::app::ivr::provider::SessionEndTag::Transfer)
         );
+        // A plain transfer is NOT a resumable hand-off: its node entry stays
+        // reason-free — the session_end above is the only end-reason carrier.
+        let node_entry = entries
+            .iter()
+            .find(|e| e.trigger.r#type != "session_end")
+            .expect("transfer node trace must exist");
+        assert_eq!(node_entry.end_reason, None);
+        assert_eq!(node_entry.end_detail, None);
     }
 
     #[tokio::test]
@@ -6176,6 +6601,20 @@ mod tests {
             Some("2026-01-01T00:00:00+00:00"),
             "session_end trace must carry the in-flight step's start time (duration_ms contract)"
         );
+        // Contract: duration_ms is derived from the stamps, not hardcoded 0.
+        // The start is a fixed past date, so the derived window is large.
+        let expected = crate::call::app::ivr::trace::duration_ms_between(
+            session_end.step_start_time.as_deref(),
+            session_end.step_end_time.as_deref().expect("session_end must carry step_end_time"),
+        );
+        assert_eq!(
+            session_end.duration_ms, expected,
+            "session_end duration_ms must equal step_end_time - step_start_time"
+        );
+        assert!(
+            session_end.duration_ms > 0,
+            "session_end duration must be derived from its stamps, got 0"
+        );
         assert_eq!(
             session_end.step_id.as_deref(),
             Some("step-7"),
@@ -6217,7 +6656,6 @@ mod tests {
             session_id: "test-session".into(),
             caller: "1001".into(),
             callee: "2000".into(),
-            step_index: 1,
             trigger,
             provider_url: None,
             action_type: "Prompt".into(),
@@ -6422,6 +6860,19 @@ mod tests {
         assert!(
             fallback.step_end_time.is_some(),
             "ivr_fallback trace must carry step_end_time"
+        );
+        // Contract: duration_ms is derived from the stamps, not hardcoded 0.
+        let expected = crate::call::app::ivr::trace::duration_ms_between(
+            fallback.step_start_time.as_deref(),
+            fallback.step_end_time.as_deref().expect("fallback must carry step_end_time"),
+        );
+        assert_eq!(
+            fallback.duration_ms, expected,
+            "ivr_fallback duration_ms must equal step_end_time - step_start_time"
+        );
+        assert!(
+            fallback.duration_ms > 0,
+            "ivr_fallback duration must be derived from its stamps, got 0"
         );
     }
 
@@ -7252,7 +7703,6 @@ mod tests {
             step_start_time: None,
             step_end_time: None,
             step_duration_ms: None,
-            step_index: None,
             transferred_from: None,
         };
         let prompt = step_provider.next_action(ctx).await.unwrap();
@@ -7282,7 +7732,6 @@ mod tests {
                 step_start_time: None,
                 step_end_time: None,
                 step_duration_ms: None,
-                step_index: None,
                 transferred_from: None,
             }
         };

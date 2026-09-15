@@ -207,6 +207,10 @@ pub struct TransferSource {
     pub ivr_node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    /// Display name of the attributed agent, when known (CC-registered
+    /// agents only — captured from the session's agent context).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -904,7 +908,6 @@ pub struct IvrStepTrace {
     pub session_id: String,
     pub caller: String,
     pub callee: String,
-    pub step_index: u32,
     pub trigger: TriggerInfo,
     pub action_type: String,
     pub action_json: Option<String>,
@@ -1022,6 +1025,7 @@ mod tests {
                     name: Some("main-ivr".into()),
                     ivr_node_id: Some("menu-2".into()),
                     agent_id: None,
+                    agent_name: None,
                 }),
             },
             None,
@@ -1034,6 +1038,37 @@ mod tests {
         assert!(
             payload["transfer_source"].get("agent_id").is_none(),
             "None source fields must be omitted entirely"
+        );
+        assert!(
+            payload["transfer_source"].get("agent_name").is_none(),
+            "None agent_name must be omitted entirely"
+        );
+    }
+
+    #[test]
+    fn transfer_source_serializes_agent_id_and_name() {
+        let payload = to_flat_payload(
+            &CallTransferred {
+                call_id: "call-1".into(),
+                transfer_target: Some("sip:1002@rustpbx.com".into()),
+                transfer_target_type: Some("sip".into()),
+                transfer_source: Some(TransferSource {
+                    source_type: "agent".into(),
+                    name: None,
+                    ivr_node_id: None,
+                    agent_id: Some("1001".into()),
+                    agent_name: Some("Alice".into()),
+                }),
+            },
+            None,
+        );
+
+        assert_eq!(payload["transfer_source"]["source_type"], "agent");
+        assert_eq!(payload["transfer_source"]["agent_id"], "1001");
+        assert_eq!(payload["transfer_source"]["agent_name"], "Alice");
+        assert!(
+            payload["transfer_source"].get("name").is_none(),
+            "agent branch keeps `name` unset (use agent_name)"
         );
     }
 

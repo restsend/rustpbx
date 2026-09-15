@@ -3,7 +3,7 @@ use crate::call::Location;
 use crate::call::TransactionCookie;
 use crate::config::ProxyConfig;
 use crate::models::presence;
-use crate::proxy::cluster_event::EventSource;
+use crate::proxy::cluster_event::{EventSource, event_etags};
 use crate::proxy::cluster_sync::ClusterSync;
 use crate::proxy::locator::LocatorEvent;
 use anyhow::{Result, anyhow};
@@ -351,7 +351,7 @@ impl PresenceManager {
             // Cluster sync first (parallel fire-and-forget) — no partial borrow issues
             let msg = crate::proxy::cluster_event::ClusterPresenceMessage::from((identity, &state));
             if let Some(ref sync) = *self.cluster_sync.read() {
-                sync.broadcast("presence", identity, &msg);
+                sync.broadcast(event_etags::PRESENCE, identity, &msg);
             }
 
             // Persist to DB

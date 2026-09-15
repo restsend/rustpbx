@@ -2878,13 +2878,24 @@ impl CallModule {
                 // its events/CDR stay correlated with the logical call
                 // (root = original session's root).
                 if let Some(ref gw) = server.rwi_gateway {
+                    let gw = gw.read();
                     let mut meta = gw
-                        .read()
                         .meta_store
                         .get_sync(&new_call_id)
                         .unwrap_or_default();
                     meta.session_id = Some(root_session_id.clone());
-                    gw.read().meta_store.insert(new_call_id.clone(), meta);
+                    // Carry the transferring agent onto the target leg so its
+                    // events (call_answered, call_hangup, ...) keep the agent
+                    // context — this leg never emits a `call_created` of its
+                    // own. `queue_id` is deliberately NOT inherited (the leg
+                    // has left queue service).
+                    if meta.agent_id.is_none()
+                        && let Some(original_meta) = gw.meta_store.get_sync(&original_session_id)
+                    {
+                        meta.agent_id = original_meta.agent_id;
+                        meta.agent_name = original_meta.agent_name;
+                    }
+                    gw.meta_store.insert(new_call_id.clone(), meta);
                 }
 
                 // Bridge original call with new call

@@ -10463,7 +10463,10 @@ impl SipSession {
             if self.meta.ivr_flow_suspended {
                 self.meta.ivr_flow_suspended = false;
                 self.emit_suspended_flow_session_end(
-                    crate::call::app::ivr::provider::SessionEndTag::UserHangup,
+                    crate::call::app::ivr::provider::SessionEndReason {
+                        reason: crate::call::app::ivr::provider::SessionEndTag::UserHangup,
+                        detail: None,
+                    },
                 )
                 .await;
             }
@@ -10546,7 +10549,7 @@ impl SipSession {
 
     /// Emit the compensating `session_end` `ivr_step_trace` for an IVR flow
     /// that died while suspended (caller hangup during a bridge/queue
-    /// hand-off, or a JumpIvr target that failed to start).
+    /// hand-off, a JumpIvr target that failed to start, or session teardown).
     ///
     /// The step-IVR executor suppresses its own session_end trace for
     /// resumable hand-offs, so this synthetic event guarantees consumers
@@ -10555,7 +10558,7 @@ impl SipSession {
     /// from the bridge trace context when the suspension was a voip_bridge.
     pub(crate) async fn emit_suspended_flow_session_end(
         &self,
-        end_reason: crate::call::app::ivr::provider::SessionEndTag,
+        end_reason: crate::call::app::ivr::provider::SessionEndReason,
     ) {
         super::util::emit_suspended_flow_session_end(
             &self.context.session_id,
@@ -10751,9 +10754,9 @@ impl SipSession {
         // session_end trace its executor suppressed (exactly-once contract).
         if self.meta.ivr_flow_suspended {
             self.meta.ivr_flow_suspended = false;
-            self.emit_suspended_flow_session_end(
-                crate::call::app::ivr::provider::SessionEndTag::UserHangup,
-            )
+            self.emit_suspended_flow_session_end(super::util::map_suspended_flow_end(
+                cmd.reason.as_ref(),
+            ))
             .await;
         }
 

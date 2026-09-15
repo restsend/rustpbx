@@ -1147,16 +1147,22 @@ impl RwiCommandProcessor {
             // `resolved_agent_id` first (priority 1), which fires the full
             // cc_* webhook chain and keeps agent context through transfers.
             //
-            // Scope: only for true agent→customer dials — the caller user part
-            // IS a registered agent AND the destination is NOT one. When both
-            // parties are agents (internal assist/agent-to-agent), leave
-            // attribution to the existing callee-based heuristics (CDR expects
-            // the callee there).
+            // The `resolved_agent_id` metadata keeps its original scope: only
+            // for true agent→customer dials — when both parties are agents
+            // (internal assist/agent-to-agent), attribution is left to the
+            // existing callee-based heuristics (CDR expects the callee there).
+            //
+            // RWI event enrichment is broader: the CallMeta attribution below
+            // fires whenever the CALLER is a registered agent, regardless of
+            // the destination, so `call_created` (emitted before any session
+            // hook runs) already carries the originating agent.
+            let mut originating_agent: Option<(String, String)> = None;
             if let Some(user) = caller_uri.user()
                 && !user.is_empty()
                 && let Some(registry) = server.agent_registry.as_ref()
-                && registry.get_agent(user).await.is_some()
+                && let Some(agent) = registry.get_agent(user).await
             {
+                originating_agent = Some((user.to_string(), agent.display_name.clone()));
                 let dest_user = destination_uri.user().unwrap_or_default().to_string();
                 let dest_is_agent =
                     !dest_user.is_empty() && registry.get_agent(&dest_user).await.is_some();
@@ -1280,6 +1286,12 @@ impl RwiCommandProcessor {
                     caller: Some(caller_display.clone()),
                     callee: Some(callee_display.clone()),
                     direction: Some("outbound".to_string()),
+                    // Agent-initiated originates (CTI invite, agent-bridged
+                    // consult legs) carry the originating agent from the very
+                    // first event — the CC hook only publishes agent context
+                    // at ringing, which would be too late for `call_created`.
+                    agent_id: originating_agent.as_ref().map(|(id, _)| id.clone()),
+                    agent_name: originating_agent.map(|(_, name)| name),
                     ..Default::default()
                 },
             );

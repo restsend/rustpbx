@@ -54,7 +54,6 @@ impl ThirdPartyTree {
 struct ProviderState {
     current_node_id: Option<String>,
     awaiting_dtmf_menu_children: Option<HashMap<String, String>>,
-    step_index: u32,
 }
 
 pub struct ThirdPartyTreeProvider {
@@ -416,7 +415,6 @@ impl ActionProvider for ThirdPartyTreeProvider {
 
     async fn next_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode> {
         let mut state = self.state.lock();
-        state.step_index += 1;
 
         match ctx.event {
             Some(ProviderEvent::SessionStart) => {
@@ -917,7 +915,6 @@ mod tests {
             step_start_time: None,
             step_end_time: None,
             step_duration_ms: None,
-            step_index: None,
             transferred_from: None,
         }
     }
