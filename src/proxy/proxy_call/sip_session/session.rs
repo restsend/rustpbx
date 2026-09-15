@@ -505,6 +505,43 @@ impl SipSession {
         Ok(Some(sender))
     }
 
+    /// Auto-start live transcription when `[proxy.transcript.remote]
+    /// auto_start = true`. Best-effort: failures (unconfigured, bypass mode,
+    /// provider errors) are logged and never fatal to the call. Holds one
+    /// transcription reference for the rest of the call.
+    ///
+    /// Re-entry safe: `accept_call` / `attach_caller_dialog` can run more
+    /// than once per session (callee re-attach, API `Answer`, queue
+    /// playback). Unlike the `StartTranscription` command (whose executor
+    /// ref-counts), a direct re-run here would silently REPLACE the running
+    /// provider and reset the reference count — so a running transcription
+    /// is never touched.
+    async fn maybe_autostart_live_transcription(&mut self, at: &'static str) {
+        if self.live_transcription.is_some() {
+            return;
+        }
+        let enabled = self
+            .server
+            .proxy_config
+            .load()
+            .transcript
+            .as_ref()
+            .and_then(|t| t.remote.as_ref())
+            .and_then(|r| r.auto_start)
+            .unwrap_or(false);
+        if !enabled {
+            return;
+        }
+        if let Err(error) = self.start_live_transcription(None).await {
+            warn!(
+                session_id = %self.id,
+                at,
+                %error,
+                "Auto start live transcription failed"
+            );
+        }
+    }
+
     /// Install the recorder implementation selected for this call. Signaling
     /// call sites decide when automatic installation is allowed.
     pub(crate) async fn set_auto_recorder(&mut self) -> Result<()> {
@@ -2231,6 +2268,8 @@ impl SipSession {
         if auto_start_on_answer && let Err(error) = self.set_auto_recorder().await {
             warn!(session_id = %self.id, %error, "Auto recorder installation at final answer failed");
         }
+        self.maybe_autostart_live_transcription("originate_answer")
+            .await;
         // The caller dialog is already answered when it is attached. Its
         // Confirmed state may have been consumed by the originate setup loop
         // or may still be queued for process_uac, so mark it Connected here;
@@ -6869,6 +6908,7 @@ impl SipSession {
         if auto_start_on_answer && let Err(error) = self.set_auto_recorder().await {
             warn!(session_id = %self.id, %error, "Auto recorder installation at final answer failed");
         }
+        self.maybe_autostart_live_transcription("call_answer").await;
 
         if let Some(answer_sdp) = answer_sdp {
             let mut headers = Self::sdp_headers();

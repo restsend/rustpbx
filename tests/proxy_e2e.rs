@@ -36,6 +36,9 @@ mod test_media_proxy;
 #[path = "proxy_e2e/test_session_hook_e2e.rs"]
 mod test_session_hook_e2e;
 
+#[path = "proxy_e2e/live_transcript_e2e.rs"]
+mod live_transcript_e2e;
+
 #[path = "proxy_e2e/test_cluster_home_proxy_e2e.rs"]
 mod test_cluster_home_proxy_e2e;
 

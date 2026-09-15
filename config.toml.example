@@ -406,6 +406,22 @@ auto_start_at = "media" # default; use "answer" to wait for 200
 # # language = "multi"        # BCP-47 tag, or "multi"
 # # interim_results = true    # stream partial hypotheses
 # # punctuate = true
+# # Provider factory name — the built-in "deepgram" implements the
+# # Deepgram-compatible protocol above; custom protocols register a
+# # TranscriptionProviderFactory via
+# # rustpbx::call::transcription::register_transcription_provider().
+# # provider = "deepgram"
+# # Auto-start transcription when the call is answered (otherwise start via
+# # the SSE endpoint or the REST start_transcription command).
+# # auto_start = false
+#
+# To receive every finalized utterance as a webhook ("one POST per spoken
+# sentence"), subscribe the [rwi_webhook] pipeline to the transcript_final
+# event (retry/dedup/headers are handled there):
+#
+# [rwi_webhook]
+# url = "https://your-service.example.com/hook"
+# events = ["transcript_final"]
 
 # ── CDR (Call Detail Records) ─────────────────────────────────────────────────
 # Call records are persisted to the `rustpbx_call_records` table in the primary

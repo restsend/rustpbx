@@ -173,6 +173,7 @@ async fn test_recording_metadata_webhook_carries_agent_context() {
             call_id: "call-200".to_string(),
             metadata: RecordingMetadata {
                 filename: "rec-200.wav".to_string(),
+                unique_id: None,
                 file_size: 8192,
                 download_url: Some("https://cdn.example.com/rec-200.wav".to_string()),
                 caller_name: Some("1001".to_string()),

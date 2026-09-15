@@ -285,6 +285,15 @@ pub trait AgentRegistry: Send + Sync {
     /// Find available agents matching criteria
     async fn find_available_agents(&self, required_skills: &[String]) -> Vec<AgentRecord>;
 
+    /// Agents currently holding a dispatch reservation for `call_id`
+    /// (Ringing{call_id}). Used by the queue app at `on_enter` to ADOPT
+    /// reservations made before the app started — without adoption, a caller
+    /// abandoning before the first dial would leave the reserved agent
+    /// stuck Ringing until the DB stale sweep (90s–1h) recovers it.
+    async fn agents_ringing_for_call(&self, _call_id: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Select best agent using specified strategy
     async fn select_agent(
         &self,

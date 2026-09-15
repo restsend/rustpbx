@@ -15,12 +15,13 @@ use anyhow::{Result, anyhow};
 use tokio_util::sync::CancellationToken;
 
 use super::SipSession;
-use crate::call::transcription::remote::RemoteStreamingProvider;
 use crate::call::transcription::{
     SidePcmFrame, TranscriptSide, TranscriptionEvent, TranscriptionProvider,
 };
 use crate::media::media_bridge::LegSide;
-use crate::rwi::{TranscriptEnded, TranscriptError, TranscriptSegmentEvent, TranscriptStarted};
+use crate::rwi::{
+    TranscriptEnded, TranscriptError, TranscriptFinal, TranscriptSegmentEvent, TranscriptStarted,
+};
 
 /// Session-held live-transcription state.
 pub(crate) struct LiveTranscription {
@@ -74,11 +75,14 @@ impl SipSession {
             .ok_or_else(|| {
                 anyhow!("live transcription not configured ([proxy.transcript.remote])")
             })?;
-        if !remote.is_runnable() {
-            return Err(anyhow!(
-                "live transcription missing api_key (config or DEEPGRAM_API_KEY env)"
-            ));
-        }
+
+        // Resolve the provider factory by configured name (default:
+        // "deepgram"). The factory owns provider-specific pre-flight checks
+        // (e.g. the Deepgram api_key requirement).
+        let provider_name = remote.provider_name().to_string();
+        let factory = crate::call::transcription::resolve_transcription_provider(&provider_name)
+            .ok_or_else(|| anyhow!("unknown transcription provider '{provider_name}'"))?;
+
         let mut remote = remote;
         if let Some(language) = language {
             remote.language = Some(language);
@@ -118,7 +122,7 @@ impl SipSession {
         let call_id = self.context.session_id.clone();
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<TranscriptionEvent>();
         let provider: std::sync::Arc<dyn TranscriptionProvider> =
-            std::sync::Arc::new(RemoteStreamingProvider::new(remote, &sides, event_tx));
+            factory.create(&sides, event_tx, &serde_json::to_value(&remote)?)?;
 
         // PCM pump: one task per side, forwarding non-silence frames.
         let cancel = CancellationToken::new();
@@ -145,6 +149,7 @@ impl SipSession {
         {
             let gateway = self.server.rwi_gateway.clone();
             let call_id = call_id.clone();
+            let provider_name = provider_name.clone();
             tokio::spawn(async move {
                 while let Some(event) = event_rx.recv().await {
                     let Some(gateway) = gateway.as_ref() else {
@@ -155,12 +160,27 @@ impl SipSession {
                             gateway.read().send_to_owner(&TranscriptSegmentEvent {
                                 call_id: call_id.clone(),
                                 side: seg.side.as_str().to_string(),
-                                text: seg.text,
+                                text: seg.text.clone(),
                                 partial: seg.partial,
                                 start_ms: seg.start_ms,
                                 end_ms: seg.end_ms,
-                                lang: seg.lang,
+                                lang: seg.lang.clone(),
                             });
+                            // Finalized utterances are additionally published
+                            // as `transcript_final` so `[rwi_webhook]`
+                            // consumers can subscribe to finals only without
+                            // receiving partials.
+                            if !seg.partial {
+                                gateway.read().send_to_owner(&TranscriptFinal {
+                                    call_id: call_id.clone(),
+                                    side: seg.side.as_str().to_string(),
+                                    text: seg.text,
+                                    start_ms: seg.start_ms,
+                                    end_ms: seg.end_ms,
+                                    lang: seg.lang,
+                                    provider: Some(provider_name.clone()),
+                                });
+                            }
                         }
                         TranscriptionEvent::Failed { side, error } => {
                             tracing::warn!(
@@ -189,7 +209,7 @@ impl SipSession {
         self.emit_typed_rwi_event(&TranscriptStarted {
             call_id,
             sides: sides.iter().map(|s| s.as_str().to_string()).collect(),
-            provider: Some("deepgram".to_string()),
+            provider: Some(provider_name),
         });
         Ok(sides)
     }

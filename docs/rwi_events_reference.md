@@ -808,6 +808,20 @@ Webhook 投递使用信封（`webhook.rs`：`rwi` / `event_id` 幂等键 / `time
 | `call_id` | String | 呼叫标识 |
 | `reason` | String | `"stopped"`（订阅者全部断开）/ `"call_ended"` 等 |
 
+**transcript_final**
+
+> 每一句**最终识别结果**的独立事件：在对应 `transcript_segment`（`partial=false`）之外额外发布，字段一致并增加 `provider`。`[rwi_webhook]` 配置 `events = ["transcript_final"]` 即可只订阅每句终稿、不收中间假设（"说完一句发一个 webhook"）。注意与 `realtime_event`（AI 语音桥）内部的 `transcript_final` kind 无关——那是 realtime 桥的透传负载。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫标识 |
+| `side` | String | `"caller"` / `"callee"` |
+| `text` | String | 最终识别文本 |
+| `start_ms` | u64 | 相对转录起点偏移（毫秒） |
+| `end_ms` | u64 | 相对转录起点偏移（毫秒） |
+| `lang` | Option\<String\> | 语言 |
+| `provider` | Option\<String\> | provider 标识（如 `"deepgram"`） |
+
 ---
 
 ### 6.5 IVR 事件
@@ -1455,6 +1469,7 @@ SIP PUBLISH  presence 状态变化（每个本地 PUBLISH 触发）。
 | `recording_metadata_available` | owner | ✅ | 自有字段+enrich（分段录音每段一条 + 每呼叫一条聚合，聚合条 extra 含 `recording_segments` JSON 字符串） |
 | `transcript_started` | owner | ✅ | 自有字段 |
 | `transcript_segment` | owner | ✅ | 自有字段+enrich |
+| `transcript_final` | owner | ✅ | 自有字段（每句终稿，webhook 过滤用） |
 | `transcript_error` | owner | ✅ | 自有字段+enrich |
 | `transcript_ended` | owner | ✅ | 自有字段 |
 | `dtmf` | owner | ✅ | +ctx |

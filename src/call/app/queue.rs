@@ -1359,6 +1359,21 @@ impl QueueApp {
         if self.config.escalation_timeline.is_empty() {
             return Ok(());
         }
+        // Only escalate while actually parked in the queue's waiting states.
+        // After max_wait/abandon the call is owned by the fallback path (or
+        // gone entirely) — originating escalation legs there produces ghost
+        // rings nobody collects.
+        if !matches!(
+            self.state,
+            QueueState::WaitingForAgent
+                | QueueState::PlayingHold { .. }
+                | QueueState::PlayingComfortPrompt
+                | QueueState::DialingAgents { .. }
+                | QueueState::PlayingTransferPrompt { connected_agent: None }
+        ) {
+            debug!(state = ?self.state, "Queue: escalation check skipped — not waiting");
+            return Ok(());
+        }
         let wait_secs = self.stage_wait_secs();
 
         for step in self.config.escalation_timeline.clone() {
@@ -1511,6 +1526,10 @@ impl QueueApp {
             ctrl.remove_legs(&old_legs);
             self.pending_agents.clear();
         }
+        // The ring timeout armed for the OLD group's dial must die with the
+        // legs — a stale fire after the group switch drains the NEW group's
+        // freshly dialed legs as bogus no-answers.
+        ctrl.cancel_timeout("agent_ring_timeout");
         // Also reset dynamic agents for the new skill group
         self.dynamic_agents = None;
         self.current_agent_idx = 0;
@@ -1541,6 +1560,7 @@ impl QueueApp {
         success_log: &str,
         failure_log: &str,
     ) {
+        let mut originated = false;
         for uri in uris {
             let agent_id = self.agent_id_for_uri(uri).await;
             self.record_attempted_agent(agent_id);
@@ -1548,11 +1568,18 @@ impl QueueApp {
                 Ok(call_id) => {
                     info!(agent = %uri, call_id = %call_id, "{success_log}");
                     self.pending_agents.push((uri.clone(), call_id));
+                    originated = true;
                 }
                 Err(e) => {
                     warn!(agent = %uri, error = %e, "{failure_log}");
                 }
             }
+        }
+        // Legs that neither answer nor reject must not hang until max_wait:
+        // arm the ring timeout for this dial batch too (escalation-originated
+        // legs previously had none at all).
+        if originated {
+            self.arm_ring_timeout(ctrl);
         }
     }
 
@@ -1718,6 +1745,23 @@ impl CallApp for QueueApp {
         // is no longer `Idle`) and break the deterministic dial order.
         if self.config.skill_routing_enabled && self.get_agents().is_empty() {
             self.resolve_agents().await;
+        }
+
+        // ADOPT pre-app reservations: the skill-group resolve above reserved
+        // the primary agent (Ringing{our call_id}) before this app started.
+        // Until the first dial records it in `attempted_agents`, an early
+        // caller abandon would find the release sweep empty and strand the
+        // agent in Ringing until the DB stale sweep. Record every agent
+        // reserved for this call NOW so `release_phantom_agents` (on_exit /
+        // connect) always covers them.
+        if let Some(ref registry) = self.agent_registry {
+            for agent_id in registry.agents_ringing_for_call(&self.call_id).await {
+                info!(
+                    agent = %agent_id,
+                    "Queue: adopting pre-app reservation into attempted set"
+                );
+                self.record_attempted_agent(agent_id);
+            }
         }
 
         // Check if we have agents configured
@@ -2293,6 +2337,11 @@ impl CallApp for QueueApp {
             "max_wait_timeout" => {
                 info!("Queue: max wait timeout, executing fallback");
                 ctrl.cancel_timeout("queue_retry");
+                // The wait is over — the fallback path owns the call now.
+                // Without this cancel a same-tick escalation_check could
+                // originate agent legs for an already-abandoned call (ghost
+                // rings / orphan legs on Transfer-style fallbacks).
+                ctrl.cancel_timeout("escalation_check");
 
                 // Notify queue timeout
                 ctrl.notify_event(

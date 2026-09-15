@@ -38,6 +38,16 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(8);
 /// Remote streaming ASR configuration (`[proxy.transcript.remote]`).
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct RemoteTranscriptConfig {
+    /// Provider factory name (see `TranscriptionProviderFactory`). Default:
+    /// `deepgram`. Third parties register their own factories via
+    /// `crate::call::transcription::register_transcription_provider`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Auto-start live transcription when the call is answered. Default:
+    /// `false` (start via SSE subscribe or the REST `start_transcription`
+    /// command).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_start: Option<bool>,
     /// ASR WebSocket base URL. Default: `wss://api.deepgram.com`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -98,6 +108,40 @@ impl RemoteTranscriptConfig {
     /// config or env, and a URL — defaults apply for the rest).
     pub fn is_runnable(&self) -> bool {
         self.effective_api_key().is_some()
+    }
+
+    /// Registered factory name for this configuration (default `deepgram`).
+    pub fn provider_name(&self) -> &str {
+        self.provider.as_deref().unwrap_or("deepgram")
+    }
+}
+
+/// Built-in provider factory: Deepgram-compatible raw-PCM WebSocket ASR
+/// (`RemoteStreamingProvider`). Registered under the name `"deepgram"`.
+///
+/// Pre-flight validation lives here (not in the session orchestration) so
+/// third-party providers can define their own requirements: this factory
+/// requires an API key from config or `DEEPGRAM_API_KEY`.
+pub struct DeepgramFactory;
+
+impl super::TranscriptionProviderFactory for DeepgramFactory {
+    fn name(&self) -> &str {
+        "deepgram"
+    }
+
+    fn create(
+        &self,
+        sides: &[TranscriptSide],
+        events: mpsc::UnboundedSender<TranscriptionEvent>,
+        params: &serde_json::Value,
+    ) -> anyhow::Result<Arc<dyn TranscriptionProvider>> {
+        let config: RemoteTranscriptConfig = serde_json::from_value(params.clone())?;
+        if !config.is_runnable() {
+            anyhow::bail!("live transcription missing api_key (config or DEEPGRAM_API_KEY env)");
+        }
+        Ok(Arc::new(RemoteStreamingProvider::new(
+            config, sides, events,
+        )))
     }
 }
 
@@ -443,7 +487,7 @@ mod tests {
         );
     }
 
-    /// `is_runnable` is the exact gate `start_live_transcription` checks
+    /// `is_runnable` is the exact gate the Deepgram factory checks
     /// before failing with "missing api_key" (surfaced to subscribers as a
     /// TranscriptError / SSE 503): a configured key makes it runnable.
     #[test]
@@ -455,5 +499,33 @@ mod tests {
         assert!(cfg.is_runnable());
         // The key the provider will use is the configured one, not the env.
         assert_eq!(cfg.effective_api_key().as_deref(), Some("cfg-key"));
+    }
+
+    #[test]
+    fn provider_name_defaults_to_deepgram() {
+        assert_eq!(
+            RemoteTranscriptConfig::default().provider_name(),
+            "deepgram"
+        );
+        let cfg = RemoteTranscriptConfig {
+            provider: Some("my-proprietary".into()),
+            ..Default::default()
+        };
+        assert_eq!(cfg.provider_name(), "my-proprietary");
+    }
+
+    #[test]
+    fn parses_provider_and_auto_start_fields() {
+        let value = serde_json::json!({
+            "provider": "custom-asr",
+            "auto_start": true,
+            "api_key": "k",
+            // Unknown vendor-specific keys must not break parsing.
+            "vendor_specific_field": 42,
+        });
+        let cfg: RemoteTranscriptConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(cfg.provider_name(), "custom-asr");
+        assert_eq!(cfg.auto_start, Some(true));
+        assert_eq!(cfg.api_key.as_deref(), Some("k"));
     }
 }

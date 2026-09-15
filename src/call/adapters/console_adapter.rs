@@ -126,6 +126,10 @@ pub fn console_to_call_command(
         CallCommandPayload::StopRecording => Ok(CallCommand::StopRecording),
         CallCommandPayload::PauseRecording => Ok(CallCommand::PauseRecording),
         CallCommandPayload::ResumeRecording => Ok(CallCommand::ResumeRecording),
+        CallCommandPayload::StartTranscription { language } => {
+            Ok(CallCommand::StartTranscription { language })
+        }
+        CallCommandPayload::StopTranscription => Ok(CallCommand::StopTranscription),
     }
 }
 
@@ -381,5 +385,39 @@ mod tests {
         } else {
             panic!("Expected StopPlayback command");
         }
+    }
+
+    #[test]
+    fn test_start_transcription_conversion() {
+        let payload = CallCommandPayload::StartTranscription {
+            language: Some("zh".to_string()),
+        };
+        let cmd = console_to_call_command(payload, "session-123").unwrap();
+        match cmd {
+            CallCommand::StartTranscription { language } => {
+                assert_eq!(language.as_deref(), Some("zh"));
+            }
+            _ => panic!("Expected StartTranscription command"),
+        }
+
+        // Language is optional.
+        let cmd = console_to_call_command(
+            CallCommandPayload::StartTranscription { language: None },
+            "session-123",
+        )
+        .unwrap();
+        match cmd {
+            CallCommand::StartTranscription { language } => {
+                assert!(language.is_none());
+            }
+            _ => panic!("Expected StartTranscription command"),
+        }
+    }
+
+    #[test]
+    fn test_stop_transcription_conversion() {
+        let cmd =
+            console_to_call_command(CallCommandPayload::StopTranscription, "session-123").unwrap();
+        assert!(matches!(cmd, CallCommand::StopTranscription));
     }
 }
