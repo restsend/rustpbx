@@ -1,132 +1,133 @@
 """Per-agent outbound policy (outbound_policy.rs) — REST e2e.
 
-Policy semantics (grant-union): a named policy constrains allowed routes /
-trunks / caller-ids; attached to an agent via the `outbound_policy` extra.
-The desk-lines delivered through `GET /api/cc/agents/{id}/config` must be
-filtered by that policy: lines whose caller-id is not whitelisted never
-reach the agent.
+Storage note: desk lines / policies live in `cc_entity_extras` of the APP
+database. With the default `sqlite::memory:` the console connection and the
+addon connection see different databases, so these tests boot a file-backed
+DB (mirroring production) before creating resources.
 
-Strict: disallowed line absent, allowed line present with exact fields,
-policy round-trips through create/get.
+Strict: policy create/get round-trip; desk lines management list; delivery
+filtering via `GET /api/cc/agents/{id}/config` — non-whitelisted caller-id
+lines must never reach the agent; no policy reference = unconstrained.
 """
 
 from __future__ import annotations
 
 import pytest
+import pytest_asyncio
 
-pytestmark = [pytest.mark.tier3, pytest.mark.acd]
+import helpers as h
+from helpers import assertions as A
+
+pytestmark = [pytest.mark.tier3]
 
 POLICY = "pol-e2e-caller"
+API_BASE = "/api/cc"
 
 
-async def _first_agent(api) -> dict:
-    listing = await api.get("/api/cc/agents")
-    items = listing.get("data") if isinstance(listing, dict) else listing
-    assert items, f"no seeded agents found: {str(listing)[:300]}"
-    return items[0]
+@pytest_asyncio.fixture
+async def cc_api(pbx, webhook_server):
+    """CC session with a FILE database so entity-extras writes are shared
+    between the console and the addon connections."""
+    pbx.config_builder.database_url = f"sqlite://{pbx.work_dir}/cc-policy-e2e.db?mode=rwc"
+    h.boot_pbx(pbx, webhook_url=webhook_server.url)
+
+    import aiohttp
+    from helpers.pbx_server import PbxApiClient
+
+    session = aiohttp.ClientSession()
+    client = PbxApiClient(session, pbx.http_url, pbx.rwi_token)
+    assert await client.ensure_console_auth(), "console superuser auth failed"
+    seed = await client.seed_default_agents()
+    assert seed.get("agents", 0) >= 1, f"agent seeding failed: {seed}"
+    yield client
+    await session.close()
 
 
-async def test_outbound_policy_filters_desk_lines(pbx, api, evidence):
-    agent = await _first_agent(api)
-    agent_id = agent["agent_id"]
-    evidence.log_metric("agent_under_test", agent_id)
+def _unwrap(item):
+    return item.get("line") if isinstance(item, dict) and isinstance(item.get("line"), dict) else (item or {})
 
-    # 1) create a caller-id-constrained policy
-    created = await api.post("/api/cc/outbound-policies", {
+
+async def test_outbound_policy_filters_desk_lines(cc_api, evidence):
+    agent_id = "1001"
+    # 0) baseline: clean slate for our line ids
+    for lid in ("line-ok", "line-bad"):
+        try:
+            await cc_api.delete(f"{API_BASE}/desk/lines/{lid}")
+        except Exception:
+            pass
+
+    # 1) create a caller-id-constrained policy (round-trip strict)
+    created = await cc_api.post(f"{API_BASE}/outbound-policies", {
         "name": POLICY,
-        "policy": {
-            "enabled": True,
-            "allowed_routes": [],
-            "allowed_trunks": [],
-            "allowed_caller_ids": [agent_id],
-        },
+        "policy": {"enabled": True, "allowed_caller_ids": [agent_id]},
     })
     assert created.get("success") is True, f"policy create failed: {created}"
-    got = await api.get(f"/api/cc/outbound-policies/{POLICY}")
-    policy_body = got.get("policy") or got
-    assert policy_body.get("allowed_caller_ids") == [agent_id], (
+    got = await cc_api.get(f"{API_BASE}/outbound-policies/{POLICY}")
+    body = got.get("policy") or got
+    assert (body.get("allowed_caller_ids") or []) == [agent_id], (
         f"policy round-trip mismatch: {str(got)[:300]}"
     )
 
-    # 2) two desk lines: one the agent may use, one outside the whitelist
-    line_ok = {"id": "line-ok", "label": "allowed", "caller": agent_id, "enabled": True}
-    line_bad = {"id": "line-bad", "label": "forbidden", "caller": "ghost-caller", "enabled": True}
-    for line in (line_ok, line_bad):
-        resp = await api.post("/api/cc/desk/lines", {"line": line})
-        print("CREATE_RESP:", str(resp)[:200])
-        assert resp.get("success", True) is not False, f"line create failed: {resp}"
+    # 2) two desk lines: whitelisted caller vs outside the whitelist
+    for line in ({"id": "line-ok", "label": "allowed", "caller": agent_id, "enabled": True},
+                 {"id": "line-bad", "label": "forbidden", "caller": "ghost-caller", "enabled": True}):
+        resp = await cc_api.post(f"{API_BASE}/desk/lines", {"line": line})
+        assert resp.get("success") is True, f"line create failed: {resp}"
 
+    # 3) management plane: both lines listed (strict)
+    listing = await cc_api.get(f"{API_BASE}/desk/lines")
+    listed = listing.get("data") if isinstance(listing, dict) else listing
+    listed_ids = [_unwrap(l).get("id") for l in (listed or [])]
+    assert {"line-ok", "line-bad"} <= set(listed_ids), f"management list incomplete: {listed_ids}"
 
-    # 3) attach the policy to the agent (extras key outbound_policy)
-    updated = await api.put(f"/api/cc/agents/{agent_id}", {
+    # 4) attach the policy to the agent
+    agent = await cc_api.get(f"{API_BASE}/agents/{agent_id}")
+    await cc_api.put(f"{API_BASE}/agents/{agent_id}", {
         "display_name": agent.get("display_name") or agent_id,
-        "skills": agent.get("skills") or [],
+        "skills": ["support"],
         "extra": {"outbound_policy": {"type": "text", "value": POLICY}},
     })
-    assert isinstance(updated, dict), f"agent update failed: {str(updated)[:200]}"
 
-    # 4a) management plane: both lines exist (strict)
-    listing = await api.get("/api/cc/desk/lines")
-    listed = listing.get("data") if isinstance(listing, dict) else listing
-    listed_ids = [_unwrap_line(l).get("id") for l in (listed or [])]
-    assert "line-ok" in listed_ids and "line-bad" in listed_ids, (
-        f"desk lines management list incomplete: {listed_ids}"
-    )
-    # 4b) delivery plane (N5 known gap): get_agent_config reads desk-profile
-    # lines, a different store from create_desk_line entities — filtering
-    # cannot be observed until the stores are unified. Surface as xfail.
-    config = await api.get(f"/api/cc/agents/{agent_id}/config")
+    # 5) delivery: config.lines carries ONLY the whitelisted line
+    config = await cc_api.get(f"{API_BASE}/agents/{agent_id}/config")
     assert isinstance(config, dict), f"config must be an object: {str(config)[:200]}"
-    lines = config.get("lines")
-    if lines is None:
-        evidence.log_metric(
-            "known_gap",
-            "N5: desk lines created via POST /cc/desk/lines are stored separately "
-            "from load_agent_profile desk.lines — delivery filtering unobservable",
-        )
-        pytest.xfail("known product gap (N5): desk-line delivery store not unified with line entities")
+    desk_obj = config.get("desk") if isinstance(config.get("desk"), dict) else {}
+    lines = config.get("lines") or desk_obj.get("lines")
+    assert isinstance(lines, list), (
+        f"N5 regression: config.lines missing — delivery store still not unified? "
+        f"config keys: {sorted(config.keys())}"
+    )
     ids = [l.get("id") for l in lines]
     assert "line-ok" in ids, f"allowed line filtered out: {ids}"
     assert "line-bad" not in ids, (
-        f"SECURITY/POLICY: non-whitelisted caller-id line delivered to agent: {ids}"
+        f"POLICY: non-whitelisted caller-id line delivered to constrained agent: {ids}"
     )
     evidence.log_metric("policy_lines", ids)
 
-    # 5) cleanup: detach policy, remove lines, delete policy
-    await api.put(f"/api/cc/agents/{agent_id}", {
+    # 6) cleanup
+    await cc_api.put(f"{API_BASE}/agents/{agent_id}", {
         "display_name": agent.get("display_name") or agent_id,
-        "skills": agent.get("skills") or [],
+        "skills": ["support"],
         "extra": {},
     })
-    for line_id in ("line-ok", "line-bad"):
-        await api.delete(f"/api/cc/desk/lines/{line_id}")
-    await api.delete(f"/api/cc/outbound-policies/{POLICY}")
+    for lid in ("line-ok", "line-bad"):
+        await cc_api.delete(f"{API_BASE}/desk/lines/{lid}")
+    await cc_api.delete(f"{API_BASE}/outbound-policies/{POLICY}")
 
 
-def _unwrap_line(l):
-    return l.get("line") if isinstance(l, dict) and isinstance(l.get("line"), dict) else l
-
-
-async def test_outbound_policy_unconstrained_without_reference(pbx, api, evidence):
-    """未引用任何策略的坐席 = 无约束（向后兼容语义）：line-bad 也必须可达。"""
-    agent = await _first_agent(api)
-    agent_id = agent["agent_id"]
+async def test_outbound_policy_unconstrained_without_reference(cc_api, evidence):
+    """未引用策略的坐席 = 无约束（向后兼容）：任何 caller-id 的线路都可达。"""
+    agent_id = "1002"
     line_open = {"id": "line-open", "label": "open", "caller": "anyone", "enabled": True}
-    resp = await api.post("/api/cc/desk/lines", {"line": line_open})
-    assert resp.get("success", True) is not False, f"line create failed: {resp}"
-    # 管理面：创建的线路必须可列出（严格）
-    listing = await api.get("/api/cc/desk/lines")
-    listed = listing.get("data") if isinstance(listing, dict) else listing
-    listed_ids = [_unwrap_line(l).get("id") for l in (listed or [])]
-    assert "line-open" in listed_ids, f"created line missing in management list: {listed_ids}"
+    resp = await cc_api.post(f"{API_BASE}/desk/lines", {"line": line_open})
+    assert resp.get("success") is True, f"line create failed: {resp}"
     try:
-        config = await api.get(f"/api/cc/agents/{agent_id}/config")
-        lines = config.get("lines")
-        if lines is None:
-            evidence.log_metric("known_gap", "N5: delivery store not unified (unconstrained probe)")
-            pytest.xfail("known product gap (N5): delivery store not unified with line entities")
+        config = await cc_api.get(f"{API_BASE}/agents/{agent_id}/config")
+        desk_obj = config.get("desk") if isinstance(config.get("desk"), dict) else {}
+        lines = config.get("lines") or desk_obj.get("lines")
+        assert isinstance(lines, list), "N5 regression: config.lines missing"
         ids = [l.get("id") for l in lines]
-        assert "line-open" in ids, f"unconstrained agent must receive every enabled line: {ids}"
+        assert "line-open" in ids, f"unconstrained agent must receive all lines: {ids}"
         evidence.log_metric("unconstrained_lines", ids)
     finally:
-        await api.delete("/api/cc/desk/lines/line-open")
+        await cc_api.delete(f"{API_BASE}/desk/lines/line-open")
