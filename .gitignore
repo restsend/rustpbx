@@ -81,3 +81,6 @@ src/addons/cc/acceptance-e2e/
 
 # Playwright platform-specific visual baselines (machine-local)
 *-snapshots/
+
+# cc 套件运行时报告产物（regression 树内）
+regression/suites/addons/cc/report/
