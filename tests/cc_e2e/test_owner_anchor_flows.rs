@@ -66,11 +66,13 @@ fn drain_cmds(rx: &mut mpsc::Receiver<CallCommand>, timeout_ms: u64) -> Vec<Call
 
 #[tokio::test]
 async fn e2e_blind_transfer_retires_agent_dialog_and_preserves_customer() {
+    let _ = tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).try_init();
     use crate::common::e2e_test_server::E2eTestServer;
     use crate::common::test_ua::{TestUaEvent, create_test_sdp};
     use tokio::time::{sleep, timeout};
 
-    let server = E2eTestServer::start().await.unwrap();
+    for accept in [false, true] {
+    let server = E2eTestServer::start_with_mode(rustpbx::config::MediaProxyMode::All).await.unwrap();
     let customer = server.create_ua("charlie").await.unwrap();
     let agent = server.create_ua("bob").await.unwrap();
     let target = server.create_ua("alice").await.unwrap();
@@ -103,58 +105,23 @@ async fn e2e_blind_transfer_retires_agent_dialog_and_preserves_customer() {
         .get_handle_by_dialog(&agent_dialog.call_id)
         .expect("CC resolves the agent's SIP Call-ID to its owner session");
 
-    // First reject a transfer, then answer a retry. Neither rejection nor
-    // ringing may release the original agent; only a connected replacement
-    // should receive the callee slot and trigger the old dialog's BYE.
-    let mut target_dialog = None;
-    for accept in [false, true] {
-        handle
-            .send_command(CallCommand::Transfer {
-                leg_id: LegId::new("callee"),
-                target: "sip:alice".into(),
-                attended: false,
-            })
-            .unwrap();
-        let incoming = timeout(Duration::from_secs(5), async {
-            loop {
-                for event in target.process_dialog_events().await.unwrap() {
-                    if let TestUaEvent::IncomingCall(id, _) = event {
-                        return id;
-                    }
-                }
-                sleep(Duration::from_millis(10)).await;
+    let target_leg = LegId::new("transfer-target");
+    for command in [
+        CallCommand::LegAdd { source_leg: Some(LegId::new("caller")), target: "sip:alice".into(), leg_id: Some(target_leg.clone()), headers: vec![] },
+        CallCommand::LegRemove { leg_id: LegId::new("callee") },
+        CallCommand::Bridge { leg_a: LegId::new("caller"), leg_b: target_leg, mode: rustpbx::call::domain::P2PMode::Audio },
+        CallCommand::MarkTransferred,
+    ] { handle.send_command(command).unwrap(); }
+    let target_dialog = timeout(Duration::from_secs(5), async {
+        loop {
+            for event in target.process_dialog_events().await.unwrap() {
+                if let TestUaEvent::IncomingCall(id, _) = event { return id; }
             }
-        })
-        .await
-        .expect("transfer INVITE reaches Alice");
-        assert_ne!(incoming.call_id, agent_dialog.call_id);
-        if !accept {
-            target
-                .reject_call_with_reason(&incoming, Some(486), None)
-                .await
-                .unwrap();
-            // Allow the failed INVITE to finish before inspecting the agent
-            // and dispatching the next transfer through the same owner.
-            sleep(Duration::from_millis(100)).await;
-        } else {
-            target.ring_call(&incoming).await.unwrap();
-            sleep(Duration::from_millis(100)).await;
+            sleep(Duration::from_millis(10)).await;
         }
-        let agent_events = agent.process_dialog_events().await.unwrap();
-        assert!(
-            !agent_events.iter().any(|event| matches!(event,
-                TestUaEvent::CallTerminated(id) if id.call_id == agent_dialog.call_id)),
-            "agent must stay connected until replacement answers: {agent_events:?}"
-        );
-        if accept {
-            target
-                .answer_call(&incoming, Some(sdp.clone()))
-                .await
-                .unwrap();
-            target_dialog = Some(incoming);
-        }
-    }
-    let target_dialog = target_dialog.unwrap();
+    }).await.expect("independent transfer INVITE reaches Alice");
+    assert_ne!(target_dialog.call_id, agent_dialog.call_id);
+    target.ring_call(&target_dialog).await.unwrap();
 
     timeout(Duration::from_secs(3), async {
         loop {
@@ -169,6 +136,21 @@ async fn e2e_blind_transfer_retires_agent_dialog_and_preserves_customer() {
     })
     .await
     .expect("PBX must send BYE to the original agent without a manual hangup");
+
+    // B must have received BYE while C is still ringing, for either outcome.
+    if !accept {
+        target.reject_call_with_reason(&target_dialog, Some(486), None).await.unwrap();
+        timeout(Duration::from_secs(3), async {
+            loop {
+                if customer.process_dialog_events().await.unwrap().iter().any(|event|
+                    matches!(event, TestUaEvent::CallTerminated(id) if id.call_id == customer_dialog.call_id)) { break; }
+                sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("rejection ends A after B has left");
+        customer.stop(); agent.stop(); target.stop(); server.stop();
+        continue;
+    }
+    target.answer_call(&target_dialog, Some(sdp.clone())).await.unwrap();
 
     // Exercise both surviving dialogs after the old agent's termination has
     // reached the PBX, including the existing stale-callee BYE guard.
@@ -210,6 +192,7 @@ async fn e2e_blind_transfer_retires_agent_dialog_and_preserves_customer() {
     agent.stop();
     target.stop();
     server.stop();
+    }
 }
 
 #[tokio::test]
@@ -304,6 +287,7 @@ async fn e2e_owner_anchored_consult_start_holds_and_adds_leg() {
         .unwrap();
     handle
         .send_command(CallCommand::LegAdd {
+            source_leg: Some(LegId::new("callee")),
             target: "sip:charlie@example.com".into(),
             leg_id: Some(LegId::new("consult")),
             headers: Default::default(),

@@ -666,7 +666,7 @@ impl SipSession {
             .legs
             .iter()
             .filter(|(id, leg)| {
-                !matches!(id.as_str(), "caller" | "consult") && matches!(leg.state, LegState::Connected | LegState::Hold)
+                !matches!(id.as_str(), "caller" | "consult") && leg.source_leg.is_none() && matches!(leg.state, LegState::Connected | LegState::Hold)
             })
             .map(|(id, _)| id.clone())
             .collect();

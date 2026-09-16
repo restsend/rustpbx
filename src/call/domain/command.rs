@@ -194,11 +194,8 @@ pub enum CallCommand {
         skill_group_id: Option<String>,
     },
 
-    /// Hang up the connected agent leg(s) — every `Connected` leg except
-    /// `caller` / `consult`. Consult-transfer completion must BYE the agent
-    /// that way because queue-dispatched agent legs carry a generated UUID,
-    /// not the literal `callee` id (removing `callee` detaches a placeholder
-    /// and leaves the real agent leg bridged to the wrong media path).
+    /// Hang up the original direct/queue agent, resolving the legacy callee alias.
+    /// Used when the agent leaves an existing conference after transfer.
     HangupAgentLeg,
 
     /// Place a leg on hold
@@ -453,6 +450,9 @@ pub enum CallCommand {
 
     /// Add a new SIP leg to the session
     LegAdd {
+        /// Existing leg whose identity/codecs are used for this independent dial.
+        #[serde(default)]
+        source_leg: Option<LegId>,
         /// SIP URI target
         target: String,
         /// Optional leg ID (auto-generated if not provided)

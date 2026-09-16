@@ -51,6 +51,9 @@ pub struct Leg {
     pub state: LegState,
     /// SIP URI or endpoint identifier
     pub endpoint: Option<String>,
+    /// Originating peer for an explicitly composed dial; not bridge membership.
+    #[serde(default)]
+    pub source_leg: Option<LegId>,
 }
 
 impl Leg {
@@ -59,6 +62,7 @@ impl Leg {
             id,
             state: LegState::default(),
             endpoint: None,
+            source_leg: None,
         }
     }
 

@@ -1900,7 +1900,6 @@ async fn test_blind_transfer_reports_queue_flow_source() {
 async fn test_blind_transfer_reports_agent_flow_source_with_name() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::config::ProxyConfig;
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::routing::RouteQueueConfig;
     use crate::proxy::tests::common::{
         create_test_request, create_test_server_with_rwi_gateway, create_transaction,
@@ -1953,8 +1952,6 @@ async fn test_blind_transfer_reports_agent_flow_source_with_name() {
         metadata: None,
     };
 
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
     let (mut session, _handle, _cmd_rx) = SipSession::new(
         server.clone(),
         CancellationToken::new(),
@@ -1962,8 +1959,6 @@ async fn test_blind_transfer_reports_agent_flow_source_with_name() {
         context,
         server_dialog,
         false,
-        caller_peer,
-        callee_peer,
     );
     let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
     session.callee_event_tx = Some(callee_tx);
@@ -2022,7 +2017,6 @@ async fn test_blind_transfer_reports_agent_flow_source_with_name() {
 async fn test_blind_transfer_agent_name_requires_resolved_id() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::config::ProxyConfig;
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
     use crate::proxy::routing::RouteQueueConfig;
     use crate::proxy::tests::common::{
         create_test_request, create_test_server_with_rwi_gateway, create_transaction,
@@ -2075,8 +2069,6 @@ async fn test_blind_transfer_agent_name_requires_resolved_id() {
         metadata: None,
     };
 
-    let caller_peer = Arc::new(MockMediaPeer::new());
-    let callee_peer = Arc::new(MockMediaPeer::new());
     let (mut session, _handle, _cmd_rx) = SipSession::new(
         server.clone(),
         CancellationToken::new(),
@@ -2084,8 +2076,6 @@ async fn test_blind_transfer_agent_name_requires_resolved_id() {
         context,
         server_dialog,
         false,
-        caller_peer,
-        callee_peer,
     );
     let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
     session.callee_event_tx = Some(callee_tx);
@@ -4976,8 +4966,7 @@ async fn added_second_leg_relays_audio_and_dtmf_without_mixer() {
     // Supply the remote answer through the same LegConnected command the SIP
     // response task uses; no mixer/peer setup is injected by the test.
     let alice_id = session.handle_add_leg_inner(
-        "sip:alice@127.0.0.1:5099".into(), Some(LegId::from("alice-test")), vec![],
-    ).await.unwrap();
+        "sip:alice@127.0.0.1:5099".into(), Some(LegId::from("alice-test")), vec![], None).await.unwrap();
     assert_eq!(session.bridge().and_then(|bridge| bridge.leg_for_id(&crate::media::leg_id::LegId::from(alice_id.as_str()))).map(|p| p.id().to_string()), None);
     assert!(session.legs.media_leg(&alice_id).is_some());
     let alice = LegInner::new("remote-alice", &cfg, None).unwrap();
@@ -5032,8 +5021,7 @@ async fn added_second_leg_relays_audio_and_dtmf_without_mixer() {
     // A subsequent add must not replace the connected Alice transport.
     let first_b = session.bridge().unwrap().leg_for_id(&crate::media::leg_id::LegId::from(alice_id.as_str())).unwrap().clone();
     let another = session.handle_add_leg_inner(
-        "sip:other@127.0.0.1:5098".into(), Some(LegId::from("another")), vec![],
-    ).await.unwrap();
+        "sip:other@127.0.0.1:5098".into(), Some(LegId::from("another")), vec![], None).await.unwrap();
     assert!(Arc::ptr_eq(&first_b, &session.bridge().unwrap().leg_for_id(&crate::media::leg_id::LegId::from(alice_id.as_str())).unwrap()));
     assert!(session.legs.media_leg(&another).is_some());
     let third = LegInner::new("remote-third", &cfg, None).unwrap();
@@ -5084,8 +5072,7 @@ async fn added_second_leg_relays_audio_and_dtmf_without_mixer() {
     session.handle_remove_leg(another).await.unwrap();
     session.handle_remove_leg(alice_id).await.unwrap();
     let retry = session.handle_add_leg_inner(
-        "sip:alice@127.0.0.1:5099".into(), Some(LegId::from("alice-retry")), vec![],
-    ).await.unwrap();
+        "sip:alice@127.0.0.1:5099".into(), Some(LegId::from("alice-retry")), vec![], None).await.unwrap();
     assert!(!Arc::ptr_eq(&first_b, &session.legs.media_leg(&retry).unwrap()));
     third.stop();
     session.bridge_mut().unwrap().close();
@@ -5098,11 +5085,15 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
     use crate::config::ProxyConfig;
     use crate::media::leg::{LegConfig, LegInner};
     use crate::media::media_bridge::MediaBridge;
-    use crate::proxy::tests::common::{create_test_request, create_test_server_with_config};
+    use crate::proxy::tests::common::create_test_request;
+    #[cfg(not(feature = "addon-cc"))]
+    use crate::proxy::tests::common::create_test_server_with_config;
 
     for scenario in [
         "reject",
         "timeout",
+        "cancel_ringing",
+        "cancel_answered",
         "private_hangup",
         "complete",
         "complete_from_customer",
@@ -5110,6 +5101,18 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
         "switch_then_merge",
         "supervisor_switch",
     ] {
+        #[cfg(feature = "addon-cc")]
+        let transfer_container = Arc::new(tokio::sync::RwLock::new(None));
+        #[cfg(feature = "addon-cc")]
+        let call_container = Arc::new(tokio::sync::RwLock::new(None));
+        #[cfg(feature = "addon-cc")]
+        let (server, _) = crate::proxy::tests::common::create_test_server_with_session_hooks(
+            ProxyConfig::default(), vec![Arc::new(crate::addons::cc::cc_call_session_hook::CcCallSessionHook::new(
+                Arc::new(crate::addons::cc::agent::AgentRegistry::new()),
+                Arc::new(crate::addons::cc::metrics::MetricsCollector::new()),
+            ).with_transfer_manager_shared(transfer_container.clone()).with_call_registry_shared(call_container.clone()))],
+        ).await;
+        #[cfg(not(feature = "addon-cc"))]
         let (server, _) = create_test_server_with_config(ProxyConfig::default()).await;
         let request = create_test_request(
             rsipstack::sip::Method::Invite,
@@ -5140,6 +5143,18 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
             context,
             true,
         );
+        #[cfg(feature = "addon-cc")]
+        let transfer_manager = {
+            server.active_call_registry.register_handle(session.id.to_string(), _handle.clone());
+            *call_container.write().await = Some(server.active_call_registry.clone());
+            let manager = Arc::new(crate::addons::cc::transfer::ConsultTransferManager::new(
+                server.conference_server.manager_raw().clone(),
+            ).with_call_registry(server.active_call_registry.clone()));
+            manager.initiate("transfer-media".into(), session.id.to_string(), "agent".into(), "alice".into());
+            manager.mark_connected_pending_answer("transfer-media", session.id.to_string()).unwrap();
+            *transfer_container.write().await = Some(manager.clone());
+            manager
+        };
         let mut bridge = MediaBridge::new("consult-media");
         let mut remote_legs = Vec::new();
         for (side, name) in [(LegSide::A, "caller"), (LegSide::B, "callee")] {
@@ -5177,10 +5192,10 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
             .pc()
             .clone();
         let agent_sdp = agent_pc.remote_description();
-        let consult = LegId::from("consult");
-        session
-            .legs
-            .insert(consult.clone(), Leg::new(consult.clone()));
+        let consult = LegId::from("consult-transfer-media");
+        let mut consult_info = Leg::new(consult.clone());
+        consult_info.source_leg = Some(LegId::from("callee"));
+        session.legs.insert(consult.clone(), consult_info);
         let (peer, offer) = session
             .create_leg_peer(&consult, rustrtc::TransportMode::Rtp)
             .await
@@ -5207,10 +5222,10 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
             LegState::Connected
         );
         assert!(session.conference_bridge.conf_id.is_none());
-        if matches!(scenario, "reject" | "timeout") {
+        if matches!(scenario, "reject" | "timeout" | "cancel_ringing") {
             session
                 .execute_command(
-                    CallCommand::LegFailed {
+                    if scenario.starts_with("cancel_") { CallCommand::LegRemove { leg_id: consult.clone() } } else { CallCommand::LegFailed {
                         leg_id: consult.clone(),
                         reason: if scenario == "reject" {
                             "Rejected with 603"
@@ -5218,11 +5233,33 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
                             "Timeout"
                         }
                         .into(),
-                    },
+                    } },
                     None,
                 )
                 .await;
+            // Recovery belongs to the CC owner, not generic leg removal.
+            assert_eq!(session.legs.get(&LegId::from("caller")).unwrap().state, LegState::Hold);
+            #[cfg(feature = "addon-cc")]
+            if !scenario.starts_with("cancel_") {
+                assert!(matches!(transfer_manager.get_state("transfer-media"),
+                    Some(crate::addons::cc::transfer::TransferState::Failed { .. })));
+                while let Ok(command) = _commands.try_recv() { session.execute_command(command, None).await; }
+            }
+            if !cfg!(feature = "addon-cc") || scenario.starts_with("cancel_") {
+            for command in [
+                CallCommand::LeaveMixer,
+                CallCommand::LegRemove { leg_id: consult.clone() },
+                CallCommand::Bridge { leg_a: LegId::from("caller"), leg_b: LegId::from("callee"), mode: crate::call::domain::P2PMode::Audio },
+                CallCommand::Unhold { leg_id: LegId::from("caller") },
+                CallCommand::Unhold { leg_id: LegId::from("callee") },
+            ] { assert!(session.execute_command(command, None).await.success); }
+            }
             assert!(session.legs.get(&consult).is_none());
+            // An already queued answer must not resurrect a cancelled/failed C.
+            assert!(session.execute_command(CallCommand::LegConnected {
+                leg_id: consult.clone(), answer_sdp: None, dialog_id: None,
+            }, None).await.success);
+            assert!(!session.legs.contains_key(&consult));
             assert_eq!(
                 session.legs.get(&LegId::from("caller")).unwrap().state,
                 LegState::Connected
@@ -5284,10 +5321,17 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
             }
             let caller_peer = session.media_leg(&LegId::from("caller")).unwrap();
             let consult_peer = session.media_leg(&consult).unwrap();
-            let result = session.execute_command(CallCommand::TransferComplete {
-                consult_leg: consult.clone(),
-            }, None).await;
-            assert!(result.success, "{:?}", result.message);
+            for command in [
+                CallCommand::LeaveMixer,
+                CallCommand::Bridge { leg_a: LegId::from("caller"), leg_b: consult.clone(), mode: crate::call::domain::P2PMode::Audio },
+                CallCommand::Unhold { leg_id: LegId::from("caller") },
+                CallCommand::Unhold { leg_id: consult.clone() },
+                CallCommand::LegRemove { leg_id: LegId::from("callee") },
+                CallCommand::MarkTransferred,
+            ] {
+                let result = session.execute_command(command, None).await;
+                assert!(result.success, "{:?}", result.message);
+            }
             assert!(session.legs.get(&LegId::from("callee")).is_none());
             assert!(session.conference_bridge.conf_id.is_none());
             assert!(session.bridge().unwrap().is_bridged());
@@ -5328,7 +5372,7 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
                 .await
                 .unwrap();
             assert!(listen_token.is_cancelled());
-            for name in ["caller", "callee", "consult"] {
+            for name in ["caller", "callee", "consult-transfer-media"] {
                 let leg = LegId::from(name);
                 let room = server
                     .conference_server
@@ -5348,17 +5392,39 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
             session.handle_leave_mixer().await.unwrap();
             continue;
         }
-        if scenario == "private_hangup" {
+        if matches!(scenario, "private_hangup" | "cancel_answered") {
             session
                 .execute_command(
-                    CallCommand::LegFailed {
+                    if scenario.starts_with("cancel_") { CallCommand::LegRemove { leg_id: consult.clone() } } else { CallCommand::LegFailed {
                         leg_id: consult.clone(),
                         reason: "Remote hung up".into(),
-                    },
+                    } },
                     None,
                 )
                 .await;
+            // Recovery belongs to the CC owner, not generic leg removal.
+            assert_eq!(session.legs.get(&LegId::from("caller")).unwrap().state, LegState::Hold);
+            #[cfg(feature = "addon-cc")]
+            if !scenario.starts_with("cancel_") {
+                assert!(matches!(transfer_manager.get_state("transfer-media"),
+                    Some(crate::addons::cc::transfer::TransferState::Failed { .. })));
+                while let Ok(command) = _commands.try_recv() { session.execute_command(command, None).await; }
+            }
+            if !cfg!(feature = "addon-cc") || scenario.starts_with("cancel_") {
+            for command in [
+                CallCommand::LeaveMixer,
+                CallCommand::LegRemove { leg_id: consult.clone() },
+                CallCommand::Bridge { leg_a: LegId::from("caller"), leg_b: LegId::from("callee"), mode: crate::call::domain::P2PMode::Audio },
+                CallCommand::Unhold { leg_id: LegId::from("caller") },
+                CallCommand::Unhold { leg_id: LegId::from("callee") },
+            ] { assert!(session.execute_command(command, None).await.success); }
+            }
             assert!(session.legs.get(&consult).is_none());
+            // An already queued answer must not resurrect a cancelled/failed C.
+            assert!(session.execute_command(CallCommand::LegConnected {
+                leg_id: consult.clone(), answer_sdp: None, dialog_id: None,
+            }, None).await.success);
+            assert!(!session.legs.contains_key(&consult));
             assert_eq!(
                 session.legs.get(&LegId::from("caller")).unwrap().state,
                 LegState::Connected
@@ -5480,10 +5546,7 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
             server
                 .active_call_registry
                 .register_handle(session.id.to_string(), _handle.clone());
-            let transfers = crate::addons::cc::transfer::ConsultTransferManager::new(
-                server.conference_server.manager_raw().clone(),
-            )
-            .with_call_registry(server.active_call_registry.clone());
+            let transfers = &transfer_manager;
             transfers.initiate(
                 "transfer-media".into(),
                 session.id.to_string(),
@@ -5550,7 +5613,7 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
             let cmd_c = _commands.try_recv().unwrap();
             assert!(
                 matches!(&cmd_c, CallCommand::JoinMixerLeg { mixer_id, leg_id }
-            if mixer_id == &room && leg_id == &LegId::from("consult"))
+            if mixer_id == &room && leg_id == &LegId::from("consult-transfer-media"))
             );
             assert!(
                 matches!(_commands.try_recv().unwrap(), CallCommand::MarkTransferred),
@@ -5563,7 +5626,7 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
             session.execute_command(command, None).await;
             session.execute_command(cmd_b, None).await;
             session.execute_command(cmd_c, None).await;
-            for name in ["callee", "consult"] {
+            for name in ["callee", "consult-transfer-media"] {
                 private_tokens.push(session.legs.conference_bridge_handle(&LegId::from(name))
                     .unwrap().cancel_token.clone());
             }
@@ -5597,14 +5660,14 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
                     .ensure_conference("consult-consult-media", None)
                     .await
                     .unwrap();
-                for name in ["callee", "consult"] {
+                for name in ["callee", "consult-transfer-media"] {
                     session
                         .handle_join_mixer_leg("consult-consult-media".into(), LegId::from(name))
                         .await
                         .unwrap();
                 }
                 private_tokens.clear();
-                for name in ["callee", "consult"] {
+                for name in ["callee", "consult-transfer-media"] {
                     let id = LegId::from(name);
                     let handle = session
                         .legs
@@ -5630,7 +5693,7 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
                 .participant_count(),
             3
         );
-        for id in ["caller", "callee", "consult"] {
+        for id in ["caller", "callee", "consult-transfer-media"] {
             assert!(
                 !session.media_leg(&LegId::from(id)).unwrap().egress_is_relay(),
                 "merged participants must preserve mixer output"
@@ -5675,7 +5738,7 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
         .await
         .expect("consult must hear customer RTP after merge");
         let mut bridge_tokens = Vec::new();
-        for name in ["caller", "callee", "consult"] {
+        for name in ["caller", "callee", "consult-transfer-media"] {
             let id = LegId::from(name);
             let handle = session
                 .legs
@@ -5791,7 +5854,7 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
         session.handle_leave_mixer().await.unwrap();
         assert!(bridge_tokens.iter().all(|token| token.is_cancelled()));
         assert!(session.conference_bridge.conf_id.is_none());
-        for name in ["caller", "callee", "consult"] {
+        for name in ["caller", "callee", "consult-transfer-media"] {
             assert!(
                 server
                     .conference_server
@@ -5867,8 +5930,7 @@ async fn consult_retry_uses_new_sip_call_id() {
             .handle_add_leg_inner(
                 "sip:alice@127.0.0.1:5099".into(),
                 Some(LegId::from("consult")),
-                vec![],
-            )
+                vec![], None)
             .await
             .unwrap();
         let message = tokio::time::timeout(Duration::from_secs(2), async {
@@ -6073,5 +6135,276 @@ async fn reinvite_hold_resume_restores_both_relay_directions() {
                 }
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn blind_transfer_detaches_agent_before_independent_target_answers() {
+    use crate::call::{DialDirection, Dialplan, MediaConfig, TransactionCookie};
+    use crate::config::{MediaProxyMode, ProxyConfig};
+    use crate::media::leg::{LegConfig, LegInner};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_config, create_transaction};
+
+    for outcome in ["answer", "early_media", "reject", "timeout"] {
+        let mut config = ProxyConfig::default();
+        config.blind_transfer_use_refer = false;
+        let (server, _) = create_test_server_with_config(config).await;
+        let request = create_test_request(rsipstack::sip::Method::Invite, "caller", None, "rustpbx.com", None);
+        let (tx, _) = create_transaction(request.clone()).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let dialog = server.dialog_layer.get_or_create_server_invite(&tx, state_tx, None, None).unwrap();
+        let context = CallContext {
+            session_id: format!("blind-{outcome}"),
+            dialplan: Arc::new(Dialplan::new(format!("blind-{outcome}"), request, DialDirection::Inbound)
+                .with_media(MediaConfig::new().with_proxy_mode(MediaProxyMode::All))),
+            cookie: TransactionCookie::default(), start_time: Instant::now(),
+            original_caller: "sip:caller@rustpbx.com".into(),
+            original_callee: "sip:agent@rustpbx.com".into(), max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(), metadata: None,
+        };
+        let cancel = CancellationToken::new();
+        let _guard = cancel.clone().drop_guard();
+        let (mut session, _handle, _commands) = SipSession::new(server, cancel, None, context, dialog, true);
+        let agent = LegId::new(uuid::Uuid::new_v4().to_string());
+        session.legs.insert(agent.clone(), crate::call::domain::Leg::new(agent.clone()));
+        let mut remotes = Vec::new();
+        for name in ["caller", agent.as_str()] {
+            let local = LegInner::new(name, &LegConfig::rtp_pcmu(), None).unwrap();
+            let remote = LegInner::new(format!("remote-{name}"), &LegConfig::rtp_pcmu(), None).unwrap();
+            let offer = remote.create_offer().await.unwrap();
+            let answer = local.apply_sdp(&offer, rustrtc::SdpType::Offer).await.unwrap();
+            remote.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
+            if name == "caller" {
+                session.media.caller_offer = Some(offer);
+                session.media.answer = Some(answer);
+            }
+            local.accept(); remote.accept();
+            session.legs.set_media_leg(&LegId::from(name), local);
+            session.update_leg_state(&LegId::from(name), LegState::Connected);
+            remotes.push(remote);
+        }
+        assert!(session.setup_bridge(LegId::from("caller"), agent.clone()).await);
+        let old_peer = session.media_leg(&agent.clone()).unwrap();
+        let caller_peer = session.media_leg(&LegId::from("caller")).unwrap();
+        let old_dialog = rsipstack::dialog::DialogId {
+            call_id: "original-agent".into(), local_tag: "local".into(), remote_tag: "remote".into(),
+        };
+        session.meta.connected_callee_dialog_id = Some(old_dialog.clone());
+        session.callee_dialogs.insert(old_dialog.clone(), ());
+        let target = LegId::new(format!("transfer-{}", uuid::Uuid::new_v4()));
+        for command in [
+            CallCommand::LegAdd { source_leg: Some(LegId::from("caller")), target: "sip:alice@127.0.0.1:5099".into(), leg_id: Some(target.clone()), headers: vec![] },
+            CallCommand::LegRemove { leg_id: LegId::from("callee") },
+            CallCommand::Bridge { leg_a: LegId::from("caller"), leg_b: target.clone(), mode: crate::call::domain::P2PMode::Audio },
+            CallCommand::MarkTransferred,
+        ] {
+            let adding = matches!(&command, CallCommand::LegAdd { .. });
+            let result = tokio::time::timeout(Duration::from_secs(1), session.execute_command(command, None)).await
+                .expect("owner operation must not await target answer");
+            assert!(result.success, "{:?}", result.message);
+            if adding {
+                // A normal proxy route may exist only in MediaBridge. Leg
+                // removal must detach its actual peer even without this intent.
+                session.bridge.clear();
+            }
+        }
+        assert_ne!(target.as_str(), "callee");
+        let target_peer = session.media_leg(&target).unwrap();
+        assert!(!Arc::ptr_eq(&old_peer, &target_peer));
+        assert!(Arc::ptr_eq(&caller_peer, &session.media_leg(&LegId::from("caller")).unwrap()));
+        assert!(session.pending_hangup.contains(&old_dialog), "agent BYE must be scheduled before C answers");
+        assert!(!session.legs.contains_key(&agent.clone()));
+        assert!(!session.bridge().unwrap().is_bridged(), "unanswered C must not enter the media bridge");
+        assert!(target_peer.negotiated().is_none());
+        assert!(session.meta.transferred);
+        // Retired B's termination must not cascade into a caller BYE.
+        session.handle_callee_state(DialogState::Terminated(old_dialog,
+            rsipstack::dialog::dialog::TerminatedReason::UacBye)).await.unwrap();
+        assert!(!session.pending_hangup.contains(&session.caller_dialog_id()));
+        assert!(!session.cancel_token.is_cancelled());
+
+        if matches!(outcome, "reject" | "timeout") {
+            let result = session.execute_command(CallCommand::LegFailed {
+                leg_id: target.clone(), reason: if outcome == "reject" { "Rejected with 486" } else { "Ring timeout" }.into(),
+            }, None).await;
+            assert!(!result.success);
+            assert!(session.pending_hangup.contains(&session.caller_dialog_id()), "no agent remains to restore on failure");
+            assert!(session.media_leg(&target).is_none());
+            assert!(!session.meta.transfer_in_progress);
+        } else {
+            let remote = LegInner::new("alice", &LegConfig::rtp_pcmu(), None).unwrap();
+            let offer = target_peer.pc().local_description().unwrap().to_sdp_string();
+            let answer = remote.apply_sdp(&offer, rustrtc::SdpType::Offer).await.unwrap();
+            remote.accept();
+            if outcome == "early_media" {
+                target_peer.apply_sdp(&answer, rustrtc::SdpType::Pranswer).await.unwrap();
+                assert!(session.execute_command(CallCommand::LegRinging { leg_id: target.clone() }, None).await.success);
+                assert!(session.bridge().unwrap().is_bridged(), "usable early media connects A-C");
+            }
+            let connected = session.execute_command(CallCommand::LegConnected {
+                leg_id: target.clone(), answer_sdp: Some(answer), dialog_id: None,
+            }, None).await;
+            assert!(connected.success, "{:?}", connected.message);
+            assert!(!session.meta.transfer_in_progress);
+            assert!(session.bridge().unwrap().is_bridged());
+            assert!(Arc::ptr_eq(&target_peer, &session.bridge().unwrap().leg(LegSide::B).unwrap()));
+            assert!(session.pending_hangup.is_empty());
+            let mut audio = crate::media::app_ingress::LegPcmStream::attach(
+                remotes[0].pc(), remotes[0].negotiated().unwrap(),
+                crate::media::leg_id::LegId::from("caller-observer"), CancellationToken::new(),
+            ).unwrap();
+            remote.play_media(Box::new(crate::media::audio_source::ToneAudioSource::new(
+                660, Duration::from_secs(1), 8000,
+            ).unwrap()), true).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let frame = audio.recv().await.unwrap();
+                    if frame.frame.samples.iter().any(|sample| sample.abs() > 100) { break; }
+                }
+            }).await.expect("caller must receive Alice audio after transfer");
+            if outcome == "answer" {
+                let ended = session.execute_command(CallCommand::LegFailed {
+                    leg_id: target, reason: "Remote hung up".into(),
+                }, None).await;
+                assert!(!ended.success);
+                assert!(session.pending_hangup.contains(&session.caller_dialog_id()));
+            }
+            remote.stop();
+        }
+        session.bridge_mut().unwrap().close();
+        for remote in remotes { remote.stop(); }
+    }
+}
+
+#[tokio::test]
+async fn cancel_before_queued_answer_sends_bye_to_late_dialog() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{create_test_request, create_test_server};
+    use rsipstack::sip::{Header, Method, SipMessage, StatusCode};
+    use rsipstack::sip::prelude::HeadersExt;
+    use rsipstack::transport::SipAddr;
+    use rsipstack::transport::udp::UdpConnection;
+    use tokio::time::timeout;
+
+    for (ignore_late_answer, teardown_before_drain) in [(true, false), (false, false), (false, true)] {
+        let (server, _) = create_test_server().await;
+        let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let local: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        server.endpoint.inner.transport_layer.del_transport(&SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Udp), addr: "127.0.0.1:5060".try_into().unwrap(),
+        });
+        let transport = UdpConnection::create_connection(local, None, None).await.unwrap();
+        server.endpoint.inner.transport_layer.add_transport(transport.into());
+        let endpoint = server.endpoint.inner.clone();
+        let serving = tokio::spawn(async move { endpoint.serve().await.unwrap(); });
+        let request = create_test_request(Method::Invite, "bob", None, "rustpbx.com", None);
+        let context = CallContext {
+            session_id: "late-answer".into(),
+            dialplan: Arc::new(Dialplan::new("late-answer".into(), request, DialDirection::Outbound)),
+            cookie: TransactionCookie::default(), start_time: Instant::now(),
+            original_caller: "sip:bob@rustpbx.com".into(), original_callee: "sip:alice@rustpbx.com".into(),
+            max_forwards: 70, created_at: chrono::Utc::now().to_rfc3339(), metadata: None,
+        };
+        let cancel = CancellationToken::new();
+        let _cancel_on_exit = cancel.clone().drop_guard();
+        let (mut session, handle, mut commands) = SipSession::new_uac(server.clone(), cancel.clone(), None, context, true);
+        let leg_id = LegId::from("late-target");
+        let added = session.execute_command(CallCommand::LegAdd {
+            source_leg: None, target: format!("sip:alice@{target_addr}"), leg_id: Some(leg_id.clone()), headers: vec![],
+        }, None).await;
+        assert!(added.success, "{:?}", added.message);
+        let mut buffer = [0u8; 65536];
+        let (size, pbx_addr) = timeout(Duration::from_secs(3), target.recv_from(&mut buffer)).await.unwrap().unwrap();
+        let SipMessage::Request(invite) = SipMessage::try_from(std::str::from_utf8(&buffer[..size]).unwrap()).unwrap() else {
+            panic!("expected INVITE");
+        };
+        assert_eq!(invite.method, Method::Invite);
+        let call_id = invite.call_id_header().unwrap().value().to_string();
+
+        // Hold command processing: removal is queued before the real SIP 200
+        // causes the dial task to append LegConnected to the same channel.
+        handle.send_command(CallCommand::LegRemove { leg_id: leg_id.clone() }).unwrap();
+        let mut answer = server.endpoint.inner.make_response(&invite, StatusCode::OK, Some(invite.body.clone()));
+        answer.headers.retain(|header| !matches!(header, Header::To(_)));
+        answer.headers.push(Header::To(format!("<sip:alice@{target_addr}>;tag=late-peer").into()));
+        answer.headers.push(Header::Contact(format!("<sip:alice@{target_addr}>").into()));
+        answer.headers.push(Header::ContentType("application/sdp".into()));
+        target.send_to(answer.to_string().as_bytes(), pbx_addr).await.unwrap();
+        let queued = timeout(Duration::from_secs(3), async {
+            let mut queued = Vec::new();
+            loop {
+                let command = commands.recv().await.expect("dial task notification");
+                let answered = matches!(&command, CallCommand::LegConnected { leg_id: id, dialog_id: Some(dialog), .. }
+                    if id == &leg_id && dialog == &call_id);
+                queued.push(command);
+                if answered { return queued; }
+            }
+        }).await.expect("real 200 OK produces LegConnected");
+        let removed_at = queued.iter().position(|cmd| matches!(cmd, CallCommand::LegRemove { .. })).unwrap();
+        let answered_at = queued.iter().position(|cmd| matches!(cmd, CallCommand::LegConnected { .. })).unwrap();
+        assert!(removed_at < answered_at);
+        let dialogs = server.dialog_layer.get_client_dialog_by_call_id(&call_id);
+        assert_eq!(dialogs.len(), 1);
+        let confirmed_id = dialogs[0].id();
+        assert!(!dialogs[0].state().is_terminated());
+        for command in queued {
+            if matches!(&command, CallCommand::LegConnected { .. }) {
+                assert!(!session.legs.contains_key(&leg_id));
+                assert!(session.pending_hangup.is_empty(), "removal did not yet know the answered dialog");
+                // Negative control: model simply ignoring a removed leg's
+                // late answer, without registering its dialog for cleanup.
+                if ignore_late_answer { continue; }
+            }
+            let result = session.execute_command(command, None).await;
+            assert!(result.success, "{:?}", result.message);
+        }
+        assert!(!session.legs.contains_key(&leg_id), "late answer must not recreate C");
+        if ignore_late_answer {
+            assert!(session.pending_hangup.is_empty());
+            assert!(!session.callee_guards.iter().any(|guard| guard.id() == &confirmed_id));
+            let unexpected_bye = timeout(Duration::from_millis(200), async {
+                loop {
+                    let (size, _) = target.recv_from(&mut buffer).await.unwrap();
+                    if let SipMessage::Request(request) = SipMessage::try_from(std::str::from_utf8(&buffer[..size]).unwrap()).unwrap() {
+                        if request.method == Method::Bye { return; }
+                    }
+                }
+            }).await;
+            assert!(unexpected_bye.is_err(), "ignoring the answer leaves no BYE cleanup");
+            assert!(!dialogs[0].state().is_terminated(), "the answered dialog remains alive");
+            // Clean up the negative control through the normal hangup drain.
+            session.pending_hangup.insert(confirmed_id.clone());
+        } else {
+            assert!(session.pending_hangup.contains(&confirmed_id), "late dialog must receive BYE");
+            assert!(session.callee_guards.iter().any(|guard| guard.id() == &confirmed_id));
+        }
+
+        let runner = if teardown_before_drain {
+            // Isolate the retained guard: no command loop or hangup drain.
+            session.pending_hangup.clear();
+            drop(session);
+            None
+        } else {
+            let (_callee_tx, callee_rx) = mpsc::unbounded_channel();
+            Some(tokio::spawn(async move { session.run_main_loop(None, callee_rx, commands).await }))
+        };
+        let bye = timeout(Duration::from_secs(3), async {
+            loop {
+                let (size, _) = target.recv_from(&mut buffer).await.unwrap();
+                if let SipMessage::Request(request) = SipMessage::try_from(std::str::from_utf8(&buffer[..size]).unwrap()).unwrap() {
+                    if request.method == Method::Bye { return request; }
+                }
+            }
+        }).await.expect("target receives BYE over UDP for its late answer");
+        assert_eq!(bye.call_id_header().unwrap().value(), call_id);
+        let response = server.endpoint.inner.make_response(&bye, StatusCode::OK, None);
+        target.send_to(response.to_string().as_bytes(), pbx_addr).await.unwrap();
+        cancel.cancel();
+        if let Some(runner) = runner {
+            timeout(Duration::from_secs(3), runner).await.unwrap().unwrap().unwrap();
+        }
+        server.endpoint.shutdown();
+        serving.await.unwrap();
     }
 }

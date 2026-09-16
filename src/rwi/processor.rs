@@ -1864,6 +1864,7 @@ impl RwiCommandProcessor {
 
         handle
             .send_command(CallCommand::LegAdd {
+                source_leg: None,
                 target: target.to_string(),
                 leg_id: leg_id_opt,
                 headers: Vec::new(),

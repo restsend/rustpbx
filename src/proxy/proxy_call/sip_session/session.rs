@@ -1494,10 +1494,14 @@ impl SipSession {
     /// re-armed when the new leg answers or the bridge is established.
     ///
     /// Hold is handled separately via `pause_rtp_timeout` on the held leg, so
-    /// it never clashes with this `set_app_paused` flag.
+    /// it never clashes with this `set_app_paused` flag. A composed bridge also
+    /// pauses its watchdog while its newly dialed peer is still ringing.
     pub(crate) fn sync_rtp_timeout_pause(&self) {
+        let waiting_for_peer = self.bridge.active && self.bridge.legs.iter().any(|id|
+            self.legs.get(id).is_some_and(|leg| leg.source_leg.is_some()
+                && matches!(leg.state, LegState::Initializing | LegState::Ringing)));
         for id in self.legs.keys() {
-            if let Some(peer) = self.media_leg(id) { peer.set_app_paused(self.meta.transfer_in_progress); }
+            if let Some(peer) = self.media_leg(id) { peer.set_app_paused(self.meta.transfer_in_progress || waiting_for_peer); }
         }
     }
 
@@ -5215,10 +5219,8 @@ impl SipSession {
                     session_id = %self.context.session_id,
                     "busy_wait budget expired; rejecting with the last busy status"
                 );
-                if let Some(mb) = self.bridge_mut() {
-                    mb.stop_play(crate::media::media_bridge::LegSide::A)
-                        .await
-                        .ok();
+                if let Some(peer) = self.media_leg(&LegId::from("caller")) {
+                    peer.stop_playback().await.ok();
                 }
                 return Err(last_busy);
             }
@@ -5243,10 +5245,8 @@ impl SipSession {
                             error = ?other,
                             "Non-busy failure during busy_wait; giving up"
                         );
-                        if let Some(mb) = self.bridge_mut() {
-                            mb.stop_play(crate::media::media_bridge::LegSide::A)
-                                .await
-                                .ok();
+                        if let Some(peer) = self.media_leg(&LegId::from("caller")) {
+                            peer.stop_playback().await.ok();
                         }
                         return Err(other);
                     }
@@ -8894,7 +8894,7 @@ impl SipSession {
 
     pub async fn execute_command(
         &mut self,
-        command: CallCommand,
+        mut command: CallCommand,
         callee_state_rx: Option<&mut mpsc::UnboundedReceiver<DialogState>>,
     ) -> CommandResult {
         let capability_check = self.check_capability(&command);
@@ -8908,6 +8908,19 @@ impl SipSession {
                 warn!(session_id = %self.id, reason = %reason, "Executing in degraded mode");
             }
             MediaCapabilityCheck::Allowed => {}
+        }
+
+        match &mut command {
+            CallCommand::Bridge { leg_a, leg_b, .. } => {
+                *leg_a = self.resolve_transfer_leg(leg_a.clone());
+                *leg_b = self.resolve_transfer_leg(leg_b.clone());
+            }
+            CallCommand::Play { leg_id: Some(id), .. }
+            | CallCommand::StopPlayback { leg_id: Some(id) }
+            | CallCommand::Hold { leg_id: id, .. }
+            | CallCommand::Unhold { leg_id: id }
+            | CallCommand::LegRemove { leg_id: id } => *id = self.resolve_transfer_leg(id.clone()),
+            _ => {}
         }
 
         self.process_command(command, callee_state_rx).await
@@ -8976,33 +8989,9 @@ impl SipSession {
             }
 
             CallCommand::HangupAgentLeg => {
-                // BYE every connected leg that is neither the caller nor the
-                // consult leg — i.e. the agent the queue dispatched (whose
-                // leg id is a generated UUID, not the literal `callee`).
-                let agent_legs: Vec<LegId> = self
-                    .legs
-                    .iter()
-                    .filter(|(id, leg)| leg.is_active() && id.0 != "caller" && id.0 != "consult")
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                if agent_legs.is_empty() {
-                    warn!(session_id = %self.id, "HangupAgentLeg: no connected agent leg found");
-                    return CommandResult::success();
-                }
-                for leg_id in &agent_legs {
-                    info!(session_id = %self.id, %leg_id, "HangupAgentLeg: hanging up agent leg");
-                    // Mark Ended + queue the BYE so the agent UA leaves
-                    // immediately, then detach the leg (which re-runs
-                    // update_media_path and re-bridges caller↔consult).
-                    if let Some(leg) = self.legs.get_mut(leg_id) {
-                        leg.state = LegState::Ended;
-                    }
-                    if let Some(dialog) = self.legs.get_dialog(leg_id) {
-                        self.pending_hangup.insert(dialog.id());
-                    }
-                    let _ = self.handle_remove_leg(leg_id.clone()).await;
-                }
-                CommandResult::success()
+                // Resolve the original queue/direct agent, excluding added dial targets.
+                let agent = self.resolve_transfer_leg(LegId::from("callee"));
+                Self::ok_or_failure(self.handle_remove_leg(agent).await)
             }
 
             CallCommand::ResumeMedia => {
@@ -9516,6 +9505,7 @@ impl SipSession {
             CallCommand::LeaveMixer => Self::ok_or_failure(self.handle_leave_mixer().await),
 
             CallCommand::LegAdd {
+                source_leg,
                 target,
                 leg_id,
                 headers,
@@ -9524,7 +9514,8 @@ impl SipSession {
                     .into_iter()
                     .map(|(name, value)| rsipstack::sip::headers::make_header(&name, value))
                     .collect();
-                match self.handle_add_leg(target, leg_id, headers).await {
+                let source_leg = source_leg.map(|id| self.resolve_transfer_leg(id));
+                match self.handle_add_leg(target, leg_id, headers, source_leg).await {
                     Ok(new_leg_id) => CommandResult::success_with_leg(new_leg_id),
                     Err(e) => CommandResult::failure(e.to_string()),
                 }
@@ -9541,27 +9532,32 @@ impl SipSession {
                 // → Ringing) before the enriched `call_ringing` is emitted.
                 let early_media = self.media_leg(&leg_id).is_some_and(|peer| peer.negotiated().is_some());
                 self.update_leg_state(&leg_id, if early_media { LegState::EarlyMedia } else { LegState::Ringing });
-                if leg_id.as_str() == "consult" {
+                if !self.legs.contains_key(&leg_id) { return CommandResult::success(); }
+                let dial_source = self.legs.get(&leg_id).and_then(|leg| leg.source_leg.clone());
+                if dial_source.is_some() || leg_id.as_str() == "consult" {
                     if early_media {
                         self.update_media_path().await;
                     } else {
-                        let agent = self.resolve_transfer_leg(LegId::from("callee"));
-                        if let Some(peer) = self.media_leg(&agent) {
+                        let recipient = dial_source.unwrap_or_else(|| self.resolve_transfer_leg(LegId::from("callee")));
+                        if let Some(peer) = self.media_leg(&recipient) {
                             let configured = self.context.dialplan.audio_profile.as_ref().and_then(|p| p.ring.clone());
                             if let Some(path) = configured {
                                 match crate::media::audio_source::FileAudioSource::new(Self::resolve_audio_file_path(&path), true).await {
                                     Ok(source) => {
                                         if let Err(error) = peer.play_media(Box::new(source), true).await {
-                                            warn!(%agent, %error, "Could not play consultation ringback");
+                                            warn!(%recipient, %error, "Could not play dial ringback");
                                         }
                                     }
                                     Err(error) => {
-                                        warn!(%agent, %path, %error, "Could not load consultation ringback");
+                                        warn!(%recipient, %path, %error, "Could not load dial ringback");
                                     }
                                 }
                             }
                         }
                     }
+                    self.emit_typed_rwi_event(&crate::rwi::CallRinging {
+                        call_id: self.context.session_id.clone(), early_media,
+                    });
                     return CommandResult::success();
                 }
                 self.fire_on_call_ringing_hooks(false).await;
@@ -9598,6 +9594,21 @@ impl SipSession {
                 dialog_id,
             } => {
                 info!(session_id = %self.id, %leg_id, "Leg connected async notification");
+                if !self.legs.contains_key(&leg_id) {
+                    // The dial task can receive 200 OK and queue LegConnected
+                    // behind a Cancel/LegRemove command. That command removes
+                    // the leg before this notification is handled, but the
+                    // answered SIP dialog still needs BYE. Do not reattach it.
+                    // Retain a guard so session teardown also cleans it up if
+                    // the queued hangup has not run yet.
+                    if let Some(call_id) = dialog_id.as_deref() {
+                        for dialog in self.server.dialog_layer.get_client_dialog_by_call_id(call_id) {
+                            self.pending_hangup.insert(dialog.id());
+                            self.callee_guards.push(ClientDialogGuard::new(self.server.dialog_layer.clone(), dialog.id()));
+                        }
+                    }
+                    return CommandResult::success();
+                }
 
                 // Contract §3.3: CTI `{call_id}` is the B-leg SIP Call-ID.
                 // Map this leg's dialog Call-ID onto the session handle so
@@ -9797,33 +9808,12 @@ impl SipSession {
 
             CallCommand::LegFailed { leg_id, reason } => {
                 warn!(%leg_id, %reason, "Leg failed async notification");
-                let result = if leg_id == LegId::from("consult") {
-                    let resume_caller = self
-                        .legs
-                        .get(&LegId::from("caller"))
-                        .is_some_and(|leg| leg.state == LegState::Hold);
-                    // Remote failure must use the same media cleanup as Cancel.
-                    // After merge, this removes only Alice from the shared mixer.
-                    if let Err(error) = self.handle_remove_leg(leg_id.clone()).await {
-                        return CommandResult::failure(error.to_string());
-                    }
-                    let recovery = if resume_caller {
-                        self.handle_unhold(LegId::from("caller")).await
-                    } else {
-                        Ok(())
-                    };
-                    match recovery {
-                        Err(error) => CommandResult::failure(format!(
-                            "{}; failed to resume caller: {}",
-                            reason, error
-                        )),
-                        Ok(()) => CommandResult::failure(reason.clone()),
-                    }
-                } else {
+                if !self.legs.contains_key(&leg_id) { return CommandResult::success(); }
+                let result = {
                     let connected_bridge_leg = self
                         .legs
                         .get(&leg_id)
-                        .is_some_and(|leg| leg.state == LegState::Connected)
+                        .is_some_and(|leg| leg.state == LegState::Connected || leg.source_leg.is_some())
                         && self.bridge.active
                         && self.bridge.contains_leg(&LegId::from("caller"))
                         && self.bridge.contains_leg(&leg_id);
@@ -9905,9 +9895,13 @@ impl SipSession {
                     }
 
                     self.update_leg_state(&leg_id, LegState::Ended);
-                    self.legs.remove(&leg_id);
-                    self.update_media_path().await;
-                    if connected_bridge_leg
+                    if let Err(error) = self.handle_remove_leg(leg_id.clone()).await {
+                        return CommandResult::failure(error.to_string());
+                    }
+                    // A departed dial source cannot continue its private call.
+                    let dial_source_ended = self.legs.values().any(|leg|
+                        leg.source_leg.as_ref() == Some(&leg_id));
+                    if (connected_bridge_leg || dial_source_ended)
                         && self
                             .caller_dialog
                             .as_ref()
@@ -10169,18 +10163,14 @@ impl SipSession {
         content_type: String,
         body: Vec<u8>,
     ) -> Result<()> {
-        let dialog_id = match leg_id.as_str() {
-            "caller" => self.caller_dialog.as_ref().map(|_| self.caller_dialog_id()),
-            "callee" => self.meta.connected_callee_dialog_id.clone(),
-            other => {
-                warn!(session_id = %self.id,
-                    session_id = %self.context.session_id,
-                    leg_id = %other,
-                    "SendInfo: unsupported leg"
-                );
-                return Err(anyhow::anyhow!("Unsupported leg for SendInfo: {}", other));
+        let leg_id = self.resolve_transfer_leg(leg_id);
+        let dialog_id = self.legs.get_dialog(&leg_id).map(|dialog| dialog.id()).or_else(|| {
+            match leg_id.as_str() {
+                "caller" => self.caller_dialog.as_ref().map(|_| self.caller_dialog_id()),
+                "callee" => self.meta.connected_callee_dialog_id.clone(),
+                _ => None,
             }
-        };
+        });
 
         let Some(dialog_id) = dialog_id else {
             warn!(session_id = %self.id,
@@ -10589,8 +10579,9 @@ impl SipSession {
         target: String,
         leg_id: Option<LegId>,
         headers: Vec<rsipstack::sip::Header>,
+        source_leg: Option<LegId>,
     ) -> Result<LegId> {
-        match self.handle_add_leg_inner(target, leg_id, headers).await {
+        match self.handle_add_leg_inner(target, leg_id, headers, source_leg).await {
             Ok(id) => Ok(id),
             Err(e) => {
                 let in_queue = self.in_queue_context();
@@ -10617,6 +10608,7 @@ impl SipSession {
         target: String,
         leg_id: Option<LegId>,
         headers: Vec<rsipstack::sip::Header>,
+        source_leg: Option<LegId>,
     ) -> Result<LegId> {
         let new_leg_id =
             leg_id.unwrap_or_else(|| LegId::new(format!("leg-{}", uuid::Uuid::new_v4())));
@@ -10626,6 +10618,13 @@ impl SipSession {
             %target,
             "Adding new SIP leg to session"
         );
+
+        if let Some(source) = source_leg.as_ref() {
+            self.require_leg(source)?;
+        }
+        if self.legs.get(&new_leg_id).is_some_and(|leg| leg.state != LegState::Ended) {
+            return Err(anyhow!("Leg already exists: {}", new_leg_id));
+        }
 
         // Normalize bare-user targets ("1002") with the selected realm —
         // same normalization the blind-transfer B-leg dial uses — so the
@@ -10693,11 +10692,8 @@ impl SipSession {
 
         }
 
-        if self.legs.get(&new_leg_id).is_some_and(|leg| !leg.id.as_str().is_empty() && leg.state != LegState::Ended) {
-            return Err(anyhow!("Leg already exists: {}", new_leg_id));
-        }
-        // Create leg
-        let leg = crate::call::domain::Leg::new(new_leg_id.clone()).with_endpoint(target.clone());
+        let mut leg = crate::call::domain::Leg::new(new_leg_id.clone()).with_endpoint(target.clone());
+        leg.source_leg = source_leg;
         self.legs.insert(new_leg_id.clone(), leg);
         self.update_leg_state(&new_leg_id, LegState::Initializing);
         self.record_leg_event(
@@ -10740,26 +10736,27 @@ impl SipSession {
             "Removing leg from session"
         );
 
-        // Cancelling consultation returns the held customer to the agent.
-        if leg_id == LegId::from("consult")
-            && self
-                .legs
-                .get(&LegId::from("caller"))
-                .is_some_and(|leg| leg.state == LegState::Hold)
-        {
-            self.handle_leave_mixer().await?;
-        } else if let Some(conf_id) = self.conference_bridge.conf_id.as_deref() {
-            let _ = self
-                .server
-                .conference_server
-                .remove_participant(
-                    &crate::call::runtime::ConferenceId::from(conf_id),
-                    &self.participant_leg(&leg_id),
-                )
-                .await;
+        if let Some(conf_id) = self.conference_bridge.conf_id.as_deref() {
+            let _ = self.server.conference_server.remove_participant(
+                &crate::call::runtime::ConferenceId::from(conf_id), &self.participant_leg(&leg_id),
+            ).await;
         }
-        if let Some(dialog) = self.legs.get_dialog(&leg_id) {
-            self.pending_hangup.insert(dialog.id());
+        // A normal proxy call can already have a media route without a
+        // command-level BridgeConfig. Detach the actual selected peer.
+        if self.conference_bridge.conf_id.is_none()
+            && self.bridge().is_some_and(|bridge| bridge.side_for_leg(&leg_id).is_some())
+        {
+            if let Some(bridge) = self.bridge_mut() { bridge.unbridge().await?; }
+        }
+        let dialog_id = self.legs.get_dialog(&leg_id).map(|dialog| dialog.id())
+            .or_else(|| (leg_id == self.resolve_transfer_leg(LegId::from("callee")))
+                .then(|| self.meta.connected_callee_dialog_id.clone()).flatten());
+        if let Some(dialog_id) = dialog_id {
+            self.pending_hangup.insert(dialog_id.clone());
+            self.callee_dialogs.remove(&dialog_id);
+            if self.meta.connected_callee_dialog_id.as_ref() == Some(&dialog_id) {
+                self.meta.connected_callee_dialog_id = None;
+            }
         }
         if self.legs.remove(&leg_id).is_some() {
             info!(session_id = %self.id, %leg_id, "Leg removed");
@@ -10781,8 +10778,12 @@ impl SipSession {
         leg_id: &LegId,
         mode: rustrtc::TransportMode,
     ) -> Result<(crate::media::leg::Leg, String)> {
+        let source_sdp = self.legs.get(leg_id).and_then(|leg| leg.source_leg.as_ref())
+            .and_then(|id| self.media_leg(id).and_then(|peer| peer.pc().remote_description())
+                .map(|sdp| sdp.to_sdp_string())
+                .or_else(|| self.legs.get_answer(id).map(str::to_owned)));
         let allow_codecs = self.resolve_effective_codecs();
-        let mut codecs = if let Some(offer) = self.media.caller_offer.as_ref() {
+        let mut codecs = if let Some(offer) = source_sdp.as_ref().or(self.media.caller_offer.as_ref()) {
             MediaNegotiator::build_callee_codec_offer_with_allow(offer, &allow_codecs)
         } else {
             let defaults = if mode == rustrtc::TransportMode::WebRtc {
@@ -10793,12 +10794,12 @@ impl SipSession {
             } else { &allow_codecs })
         };
         if mode == rustrtc::TransportMode::WebRtc {
-            if let Some(offer) = self.media.caller_offer.as_ref() {
+            if let Some(offer) = source_sdp.as_ref().or(self.media.caller_offer.as_ref()) {
                 codecs = MediaNegotiator::filter_webrtc_offer_codecs(offer, codecs);
             }
         }
         let mut video = if self.video_relay_enabled() {
-            self.media.caller_offer.as_ref().map(|offer| self.video_caps_from_sdp(offer))
+            source_sdp.as_ref().or(self.media.caller_offer.as_ref()).map(|offer| self.video_caps_from_sdp(offer))
                 .unwrap_or_default()
         } else { Vec::new() };
         if mode == rustrtc::TransportMode::WebRtc {
@@ -10843,11 +10844,11 @@ impl SipSession {
         );
 
         // Build INVITE option
-        let caller = self
-            .context
-            .dialplan
-            .caller
-            .clone()
+        let caller = self.legs.get(leg_id).and_then(|leg| leg.source_leg.as_ref())
+            .filter(|id| id.as_str() != "caller")
+            .and_then(|id| self.legs.get_dialog(id).map(|dialog| dialog.to().uri)
+                .or_else(|| self.legs.get(id)?.endpoint.as_ref()?.parse().ok()))
+            .or_else(|| self.context.dialplan.caller.clone())
             .unwrap_or_else(|| callee_uri.clone());
         let contact = self
             .context
@@ -10910,6 +10911,8 @@ impl SipSession {
             .ok_or_else(|| anyhow!("No command sender available"))?;
         let cancel_token = self.cancel_token.child_token();
 
+        let ring_timeout = Self::effective_ring_timeout(&self.context.dialplan, &self.server);
+
         // Spawn background task to handle INVITE response
         let invite_handle = crate::utils::spawn(async move {
             let leg_id = leg_id_for_spawn;
@@ -10918,10 +10921,19 @@ impl SipSession {
 
             let mut result: Result<InviteDialog, String> = Err("not started".to_string());
             let mut state_rx_open = true;
+            let deadline = tokio::time::sleep(ring_timeout.unwrap_or(Duration::from_secs(60)));
+            tokio::pin!(deadline);
 
             loop {
                 tokio::select! {
                     biased;
+                    _ = cancel_token.cancelled() => break,
+                    _ = &mut deadline, if ring_timeout.is_some() => {
+                        let _ = cmd_tx.send(CallCommand::LegFailed {
+                            leg_id: leg_id.clone(), reason: "Ring timeout".to_string(),
+                        }).await;
+                        break;
+                    }
                     r = &mut invitation, if !result.is_ok() => {
                         match r {
                             Ok((dialog, response)) => {
@@ -11107,8 +11119,6 @@ impl SipSession {
     }
 
     pub(crate) async fn setup_bridge(&mut self, leg_a: LegId, leg_b: LegId) -> bool {
-        let leg_a = self.resolve_transfer_leg(leg_a);
-        let leg_b = self.resolve_transfer_leg(leg_b);
         if leg_a == leg_b || !self.legs.contains_key(&leg_a) || !self.legs.contains_key(&leg_b) {
             return false;
         }
@@ -11132,6 +11142,7 @@ impl SipSession {
         if let (Some(a), Some(b)) = (self.legs.media_leg(&leg_a), self.legs.media_leg(&leg_b)) {
             if a.negotiated().is_none() || b.negotiated().is_none()
                 || ![&leg_a, &leg_b].iter().all(|id| self.legs.get(id).is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::EarlyMedia))) {
+                self.sync_rtp_timeout_pause();
                 return true; // Keep the requested pair until usable media arrives.
             }
             if self.media.bridge.is_none() {
@@ -11156,6 +11167,10 @@ impl SipSession {
                 self.bridge.clear();
                 return false;
             }
+            if let Some(bridge) = self.bridge() {
+                Self::arm_bridged_rtp_timeouts(bridge, self.rtp_timeout_config(), self.cmd_tx.clone(), &self.context.session_id);
+            }
+            self.sync_rtp_timeout_pause();
             return true;
         }
 
@@ -11315,7 +11330,7 @@ impl SipSession {
             _ => return Err(anyhow!("Only file/URL playback supported")),
         };
 
-        let target = self.resolve_transfer_leg(leg_id.clone().unwrap_or_else(|| LegId::from("caller")));
+        let target = leg_id.clone().unwrap_or_else(|| LegId::from("caller"));
         let in_ivr_exec = self.extensions.read()
             .get::<crate::proxy::proxy_call::ivr_exec_hook::IvrExecState>().is_some();
         let single_peer = in_ivr_exec || options.as_ref().is_some_and(|o| o.side_only);
@@ -11372,7 +11387,7 @@ impl SipSession {
         let ids: Vec<_> = match leg_id {
             None => self.legs.keys().cloned().collect(),
             Some(id) if id.as_str() == "both" => self.legs.keys().cloned().collect(),
-            Some(id) => vec![self.resolve_transfer_leg(id)],
+            Some(id) => vec![id],
         };
         for id in ids {
             if let Some(peer) = self.media_leg(&id) {

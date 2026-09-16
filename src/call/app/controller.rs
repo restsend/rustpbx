@@ -599,6 +599,7 @@ impl CallController {
             .collect();
 
         self.session.send_command(CallCommand::LegAdd {
+            source_leg: None,
             target: target.clone(),
             leg_id: Some(LegId::from(call_id.clone())),
             headers: header_pairs,
