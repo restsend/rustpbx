@@ -1038,7 +1038,26 @@ impl CallModule {
                 contact_raw: Some(option.callee.to_string()),
                 ..Default::default()
             };
-            DialStrategy::Sequential(vec![target])
+            // A dest-less forward route that did not rewrite the callee (e.g.
+            // a per-extension route carrying only `[busy_wait]`) targets a
+            // same-realm extension. Prefer the locator's registered contacts
+            // over the bare AOR so the INVITE goes straight to the endpoint
+            // instead of looping back through the proxy.
+            let unchanged_callee = option.callee == callee_uri;
+            if option.destination.is_none()
+                && unchanged_callee
+                && callee_is_same_realm
+                && !locs.is_empty()
+            {
+                resolve_unhandled_targets(
+                    callee_is_same_realm,
+                    false,
+                    locs,
+                    self.inner.server.proxy_config.load().parallel_fork,
+                )?
+            } else {
+                DialStrategy::Sequential(vec![target])
+            }
         } else {
             resolve_unhandled_targets(
                 callee_is_same_realm,
@@ -1220,6 +1239,9 @@ impl CallModule {
             );
             if let Some(ringback) = hints.ringback.take() {
                 audio_profile.merge_from(ringback);
+            }
+            if let Some(busy_wait) = hints.busy_wait.take() {
+                dialplan.busy_wait = Some(busy_wait.to_plan());
             }
             dialplan.extensions = std::mem::take(&mut hints.extensions);
             *dialplan.concurrency_holds.lock() = std::mem::take(&mut hints.concurrency_holds);

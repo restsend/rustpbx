@@ -9,6 +9,8 @@ mod helpers;
 
 #[path = "call/audio_feature.rs"]
 mod audio_feature;
+#[path = "call/busy_wait.rs"]
+mod busy_wait;
 #[path = "call/conference_server_test.rs"]
 mod conference_server_test;
 #[path = "call/conference_strategy_test.rs"]

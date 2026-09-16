@@ -802,10 +802,68 @@ pub struct RouteAction {
 
     #[serde(default = "default_auto_answer")]
     pub auto_answer: bool,
+
+    /// Busy-wait (camp-on): when the dialed extension replies 486 Busy, keep
+    /// the caller parked with hold audio and re-dial the target(s) until they
+    /// become free or `max_wait_secs` elapses. Forward routes only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy_wait: Option<RouteBusyWaitConfig>,
 }
 
 fn default_auto_answer() -> bool {
     true
+}
+
+fn default_busy_wait_max_secs() -> u64 {
+    60
+}
+
+fn default_busy_wait_retry_secs() -> u64 {
+    5
+}
+
+/// `[routes.busy_wait]` table on a forward route.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct RouteBusyWaitConfig {
+    #[serde(default = "default_auto_answer")]
+    pub enabled: bool,
+    /// Total time the caller is kept waiting. `0` waits indefinitely.
+    #[serde(default = "default_busy_wait_max_secs")]
+    pub max_wait_secs: u64,
+    /// Delay between re-dial attempts of the busy target(s).
+    #[serde(default = "default_busy_wait_retry_secs")]
+    pub retry_interval_secs: u64,
+    /// Early-media audio looped to the caller while waiting
+    /// (file path or http(s) URL; `tone://` specs are not looped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_audio: Option<String>,
+}
+
+impl Default for RouteBusyWaitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_wait_secs: default_busy_wait_max_secs(),
+            retry_interval_secs: default_busy_wait_retry_secs(),
+            hold_audio: None,
+        }
+    }
+}
+
+impl RouteBusyWaitConfig {
+    /// Convert the route-level config into the runtime policy stored on the
+    /// dialplan.
+    pub fn to_plan(&self) -> crate::call::BusyWaitPlan {
+        crate::call::BusyWaitPlan {
+            max_wait: (self.max_wait_secs > 0)
+                .then(|| std::time::Duration::from_secs(self.max_wait_secs)),
+            retry_interval: std::time::Duration::from_secs(self.retry_interval_secs.max(1)),
+            hold_audio: self
+                .hold_audio
+                .clone()
+                .unwrap_or_else(|| crate::call::DEFAULT_QUEUE_HOLD_AUDIO.to_string()),
+        }
+    }
 }
 
 impl Default for RouteAction {
@@ -820,6 +878,7 @@ impl Default for RouteAction {
             app: None,
             app_params: None,
             auto_answer: default_auto_answer(),
+            busy_wait: None,
         }
     }
 }

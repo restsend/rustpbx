@@ -1515,6 +1515,9 @@ pub struct DialplanHints {
     pub network_profile_id: Option<String>,
     /// Per-trunk ringback/early-media audio configuration
     pub ringback: Option<crate::proxy::routing::RingbackAudio>,
+    /// Busy-wait (camp-on) policy from a forward route's `[busy_wait]` table.
+    /// Applied by the call session when the callee rejects with 486 Busy.
+    pub busy_wait: Option<crate::proxy::routing::RouteBusyWaitConfig>,
     /// Concurrency slots acquired during routing policy enforcement. The
     /// session releases them on hangup to avoid leaking the concurrency budget.
     pub concurrency_holds: Vec<crate::call::policy::ConcurrencyHold>,
@@ -1538,6 +1541,7 @@ impl std::fmt::Debug for DialplanHints {
             .field("external_ip", &self.external_ip)
             .field("bind_ip", &self.bind_ip)
             .field("ice_lite", &self.ice_lite)
+            .field("busy_wait", &self.busy_wait)
             .finish()
     }
 }

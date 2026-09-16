@@ -1915,7 +1915,9 @@ impl SipSession {
             }
         };
 
-        if let Err((status_code, text, reason)) = setup_result {
+        let mut setup_error = setup_result.err();
+
+        if let Some((status_code, text, reason)) = setup_error.as_ref() {
             warn!(session_id = %self.context.session_id, ?status_code, ?text, ?reason, "Dialplan execution failed");
 
             let caller_cancelled = self.caller_dialog.as_ref().is_some_and(|dialog| {
@@ -1941,7 +1943,58 @@ impl SipSession {
                 self.cleanup().await;
                 return Ok(());
             }
+        }
 
+        // Busy-wait (camp-on): on a 486 Busy from the callee, park the caller
+        // with looping hold audio and re-dial the targets until one becomes
+        // free or the wait budget expires.
+        if setup_error
+            .as_ref()
+            .is_some_and(|(code, _, _)| *code == StatusCode::BusyHere.code())
+            && let Some(plan) = self.context.dialplan.busy_wait.clone()
+        {
+            match self.busy_wait_and_redial(plan, &mut callee_state_rx).await {
+                Ok(()) => {
+                    info!(
+                        session_id = %self.id,
+                        session_id = %self.context.session_id,
+                        "busy_wait succeeded; callee became free, connecting caller"
+                    );
+                    self.meta.error_code = None;
+                    setup_error = None;
+                }
+                Err(err) => {
+                    // The caller may have hung up while camping on the busy
+                    // target — mirror the caller-cancelled path instead of
+                    // rejecting a dead dialog.
+                    let caller_gone = self
+                        .caller_dialog
+                        .as_ref()
+                        .is_none_or(|d| d.state().is_terminated());
+                    if caller_gone {
+                        info!(
+                            session_id = %self.context.session_id,
+                            "Caller gone during busy_wait; skipping rejection"
+                        );
+                        self.meta.error_code =
+                            Some(&crate::proxy::proxy_call::error_catalog::DIAL_CALLER_CANCELLED);
+                        self.meta.last_error = Some((
+                            StatusCode::RequestTerminated,
+                            Some("Caller cancelled".to_string()),
+                        ));
+                        self.meta
+                            .invite_final_status
+                            .get_or_insert(StatusCode::RequestTerminated.code());
+                        self.meta.hangup_reason = Some(CallRecordHangupReason::Canceled);
+                        self.cleanup().await;
+                        return Ok(());
+                    }
+                    setup_error = Some(err);
+                }
+            }
+        }
+
+        if let Some((status_code, text, reason)) = setup_error {
             if let Err(e) = self
                 .reject_with_tone(status_code, text.clone(), reason.clone())
                 .await
@@ -5265,6 +5318,135 @@ impl SipSession {
             dialog.reject(Some(status), reason.clone())?;
         }
         Ok(())
+    }
+
+    /// Busy-wait (camp-on): the callee rejected with 486 Busy and the route
+    /// carries a `[busy_wait]` policy. Park the caller with looping hold audio
+    /// (183 early media) and re-dial the dialplan targets every
+    /// `retry_interval` until one answers, the caller hangs up, or the wait
+    /// budget expires.
+    ///
+    /// Returns `Ok(())` once a target connected — the bridge/answer is already
+    /// handled by `finalize_callee_connection`, so the caller resumes into the
+    /// main call loop. Returns the final `CalleeError` otherwise (the caller
+    /// is rejected with that status, preceded by the configured failure tone).
+    async fn busy_wait_and_redial(
+        &mut self,
+        plan: crate::call::BusyWaitPlan,
+        callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
+    ) -> Result<(), CalleeError> {
+        let targets: Vec<crate::call::Location> = self
+            .context
+            .dialplan
+            .flow
+            .find_targets()
+            .cloned()
+            .unwrap_or_default();
+        if targets.is_empty() {
+            warn!(
+                session_id = %self.context.session_id,
+                "busy_wait configured but the dialplan has no targets; rejecting"
+            );
+            return Err(into_callee_err(
+                &StatusCode::BusyHere,
+                Some("Busy Here".to_string()),
+            ));
+        }
+
+        info!(
+            session_id = %self.id,
+            session_id = %self.context.session_id,
+            targets = targets.len(),
+            retry_interval = ?plan.retry_interval,
+            max_wait = ?plan.max_wait,
+            hold_audio = %plan.hold_audio,
+            "Callee busy; parking caller with hold audio and re-dialing"
+        );
+
+        if let Err(e) = self.send_early_media_tone(&plan.hold_audio).await {
+            warn!(
+                session_id = %self.context.session_id,
+                error = %e,
+                "Failed to play busy-wait hold audio"
+            );
+        }
+
+        let started = Instant::now();
+        let deadline = plan.max_wait.map(|d| started + d);
+        let mut last_busy = into_callee_err(&StatusCode::BusyHere, Some("Busy Here".to_string()));
+
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(plan.retry_interval) => {}
+                _ = self.cancel_token.cancelled() => {
+                    return Err(into_callee_err(
+                        &StatusCode::RequestTerminated,
+                        Some("Caller cancelled".to_string()),
+                    ));
+                }
+            }
+
+            if self
+                .caller_dialog
+                .as_ref()
+                .is_none_or(|d| d.state().is_terminated())
+            {
+                info!(
+                    session_id = %self.context.session_id,
+                    "Caller hung up while waiting for busy target"
+                );
+                return Err(into_callee_err(
+                    &StatusCode::RequestTerminated,
+                    Some("Caller cancelled".to_string()),
+                ));
+            }
+
+            if let Some(deadline) = deadline
+                && Instant::now() >= deadline
+            {
+                info!(
+                    session_id = %self.context.session_id,
+                    "busy_wait budget expired; rejecting with the last busy status"
+                );
+                if let Some(mb) = self.bridge_mut() {
+                    mb.stop_play(crate::media::media_bridge::LegSide::A)
+                        .await
+                        .ok();
+                }
+                return Err(last_busy);
+            }
+
+            let mut saw_busy = false;
+            for target in &targets {
+                match self
+                    .try_single_target(target, callee_state_rx, None, None, None, None)
+                    .await
+                {
+                    Ok(()) => return Ok(()),
+                    Err(err @ (code, _, _)) if code == StatusCode::BusyHere.code() => {
+                        saw_busy = true;
+                        last_busy = err;
+                    }
+                    Err(other) => {
+                        // Non-busy failure (offline / no-answer / error …) —
+                        // stop camping and let the caller be rejected.
+                        warn!(
+                            session_id = %self.context.session_id,
+                            target = %target.aor,
+                            error = ?other,
+                            "Non-busy failure during busy_wait; giving up"
+                        );
+                        if let Some(mb) = self.bridge_mut() {
+                            mb.stop_play(crate::media::media_bridge::LegSide::A)
+                                .await
+                                .ok();
+                        }
+                        return Err(other);
+                    }
+                }
+            }
+            debug_assert!(saw_busy, "round without busy or terminal failure");
+        }
     }
 
     /// Ensure the caller leg exists in the MediaBridge.

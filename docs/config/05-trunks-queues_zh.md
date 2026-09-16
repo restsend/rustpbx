@@ -46,7 +46,7 @@ inbound_hosts = ["203.0.113.50"] # Whitelist IPs
 | `call_id_mode` | string | 无 | Call-ID 改写：`"prefix"`、`"suffix"`、`"none"` |
 | `rewrite_hostport` | bool | `true` | 改写出站 Contact 头中的 host:port |
 | `recording` | table | 无 | 中继级录音策略覆盖 |
-| `ringback` | table | 无 | 中继级回铃音覆盖 |
+| `ringback` | table | 无 | 中继级回铃音覆盖，见[回铃音与失败提示音](#回铃音与失败提示音) |
 | `max_ring_time` | int | 无 | 中继级最大振铃/建立时长（秒）；超时未接听以 408 拒绝。`0` 禁用此中继的振铃超时。对通过该中继路由的呼叫覆盖全局 `[proxy] max_ring_time` |
 | `external_ip` | string | 无 | 覆盖此中继通话腿在 SDP `c=`/`o=` 行和 ICE 候选中公布的 IP，替代配置档/全局 RTP 外部 IP。当中继在 Tailscale/WireGuard 等覆盖网络终结，需要与公网 NAT 不同的公布地址时尤其重要 |
 | `bind_ip` | string | 无 | 覆盖此中继通话腿 RTP socket 绑定的本地 IP，替代配置档/全局 RTP 绑定 IP |
@@ -88,6 +88,36 @@ password = "mypassword"
 register_enabled = true
 register_expires = 3600
 # register_extra_headers = { "X-Client-ID" = "my-pbx" }
+```
+
+### 回铃音与失败提示音
+
+两层配置控制呼叫建立与失败时主叫听到的音频。每个取值可以是音频文件路径
+（相对路径基于 `config/` 解析，如 `sounds/x.wav` → `config/sounds/x.wav`）、
+`http(s)://` URL，或渲染为 WAV 的 `tone://频率,时长毫秒` 规格。
+
+字段：`ring`（被叫振铃期间的早媒体彩铃）、`busy`（486）、`reject`（603）、
+`offline`（480）、`notfound`（404）、`noanswer`（408/487）、`error`（5xx）。
+失败提示音完整播放一次后才发送拒接响应；`tone://` 按指定时长播放（最低 1 秒）。
+
+- **全局** `[proxy.audio_profile]` 作用于所有呼叫。内置默认：忙/拒接/不在线/
+  空号/无应答为 `tone://` 嘟嘟音，5xx（IVR/应用启动失败）为英文
+  `sounds/service_unavailable_en.mp3`。仓库自带中文语音
+  （`sounds/failure-busy-zh.wav`、`failure-offline-zh.wav`、
+  `failure-notfound-zh.wav`、`failure-noanswer-zh.wav`、
+  `failure-service-zh.wav`，可用 `python3 scripts/generate_failure_sounds.py`
+  重新生成）。声明空表可禁用所有内置失败提示音。
+- **中继级** `[proxy.trunks.<name>.ringback]` 在全局配置之上按字段覆盖
+  （未设置的字段继承全局值）。
+
+```toml
+[proxy.audio_profile]
+busy = "sounds/failure-busy-zh.wav"
+noanswer = "sounds/failure-noanswer-zh.wav"
+
+[proxy.trunks.wuhoo.ringback]
+ring = "/sounds/company_ringback.wav"
+busy = "tone://480,3000"
 ```
 
 ### 中继健康检查

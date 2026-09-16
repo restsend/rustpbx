@@ -12,6 +12,9 @@ mod test_webrtc_interop_e2e;
 #[path = "proxy_flow/test_ringback_e2e.rs"]
 mod test_ringback_e2e;
 
+#[path = "proxy_flow/test_busy_wait_e2e.rs"]
+mod test_busy_wait_e2e;
+
 #[path = "proxy_flow/test_recording_e2e.rs"]
 mod test_recording_e2e;
 

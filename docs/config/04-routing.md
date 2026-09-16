@@ -59,6 +59,7 @@ Flattened into the route (not nested under `[proxy.routes.action]`).
 | `app` | string | none | Application name (e.g., `"ivr"`) |
 | `app_params` | table | none | Application-specific parameters (JSON) |
 | `auto_answer` | bool | `true` | Auto-answer the call before routing to app |
+| `busy_wait` | table | none | Busy-wait (camp-on) policy for forward routes — see below |
 
 ### Forwarding Example
 Forward specific prefix to a trunk.
@@ -91,6 +92,39 @@ name = "Support Line"
 action = "queue"
 queue = "support-queue" # Name of queue config
 ```
+
+### Busy-Wait Route (camp-on)
+When a dest-less forward route targets a local extension, the extension's
+registered contact is dialed directly. Adding a `[busy_wait]` table enables
+camp-on: when the extension rejects with **486 Busy**, the caller is parked
+with looping hold audio (183 early media) and the extension is re-dialed every
+`retry_interval_secs`. Once the extension becomes free the call connects
+automatically; when `max_wait_secs` elapses the caller is rejected with 486
+(the configured busy tone from `[proxy.audio_profile]` plays first, e.g. the
+Chinese `sounds/failure-busy-zh.wav` announcement).
+
+```toml
+[[proxy.routes]]
+name = "busy-wait-1001"
+priority = 10
+
+[proxy.routes.match]
+"to.user" = "1001"
+
+[proxy.routes.busy_wait]
+enabled = true            # default true; set false to disable without deleting the table
+max_wait_secs = 60        # total wait budget; 0 = wait indefinitely
+retry_interval_secs = 5   # delay between re-dial attempts (minimum 1s)
+hold_audio = "sounds/phone-calling.wav"  # optional; default MOH audio
+```
+
+Notes:
+- Only **486 Busy** triggers camp-on. Other failures (offline/no-answer) still
+  reject immediately with their configured failure tone.
+- A non-busy failure during the wait (the extension goes offline, errors …)
+  ends the wait and rejects with that status.
+- If the caller hangs up while waiting, the session ends immediately (no
+  further re-dials, no leaked state).
 
 ## HTTP Dynamic Router (`proxy.http_router`)
 Ask an external service for routing instructions per call. 

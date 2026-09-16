@@ -43,7 +43,7 @@ inbound_hosts = ["203.0.113.50"] # Whitelist IPs
 | `call_id_mode` | string | none | Call-ID rewriting: `"prefix"`, `"suffix"`, `"none"` |
 | `rewrite_hostport` | bool | `true` | Rewrite host:port in outgoing Contact headers |
 | `recording` | table | none | Per-trunk recording policy override |
-| `ringback` | table | none | Per-trunk ringback audio override |
+| `ringback` | table | none | Per-trunk ringback audio override — see [Ringback & failure tones](#ringback--failure-tones) |
 | `max_ring_time` | int | none | Per-trunk max ring/setup time (seconds) before a no-answer call is rejected with 408. `0` disables the ring timeout for this trunk. Overrides the global `[proxy] max_ring_time` for calls routed through this trunk |
 | `external_ip` | string | none | Override the IP advertised in SDP `c=`/`o=` lines and ICE candidates for this trunk's legs. Replaces the profile/global RTP external IP. Essential when some trunks terminate on an overlay network (Tailscale/WireGuard) that needs a different advertised IP than the public NAT address |
 | `bind_ip` | string | none | Override the local IP RTP sockets bind to for this trunk's legs. Replaces the profile/global RTP bind IP |
@@ -85,6 +85,39 @@ password = "mypassword"
 register_enabled = true
 register_expires = 3600
 # register_extra_headers = { "X-Client-ID" = "my-pbx" }
+```
+
+### Ringback & Failure Tones
+
+Two configuration layers control the audio callers hear during setup and
+failure. Each value is an audio file path (relative paths resolve against
+`config/`, e.g. `sounds/x.wav` → `config/sounds/x.wav`), an `http(s)://` URL,
+or a `tone://frequency,duration_ms` spec rendered into a WAV.
+
+Fields: `ring` (early-media ringback while the callee rings), `busy` (486),
+`reject` (603), `offline` (480), `notfound` (404), `noanswer` (408/487),
+`error` (5xx). Failure audio plays ONCE to natural completion before the
+rejection is sent; `tone://` specs play for the given duration (1 s minimum).
+
+- **Global** `[proxy.audio_profile]` applies to every call. Built-in defaults
+  are `tone://` beeps for busy/reject/offline/notfound/noanswer and the English
+  `sounds/service_unavailable_en.mp3` for `error`. A Chinese voice set ships
+  ready-made (`sounds/failure-busy-zh.wav`, `failure-offline-zh.wav`,
+  `failure-notfound-zh.wav`, `failure-noanswer-zh.wav`,
+  `failure-service-zh.wav` — regenerate with
+  `python3 scripts/generate_failure_sounds.py`). Declaring an empty table
+  disables all built-in failure audio.
+- **Per-trunk** `[proxy.trunks.<name>.ringback]` overrides individual fields
+  on top of the global profile (unset fields inherit).
+
+```toml
+[proxy.audio_profile]
+busy = "sounds/failure-busy-zh.wav"
+noanswer = "sounds/failure-noanswer-zh.wav"
+
+[proxy.trunks.wuhoo.ringback]
+ring = "/sounds/company_ringback.wav"
+busy = "tone://480,3000"
 ```
 
 ### Trunk Health Checks

@@ -62,6 +62,7 @@ direction = "any" # inbound, outbound, any
 | `app` | string | 无 | 应用名称（例如 `"ivr"`） |
 | `app_params` | table | 无 | 应用专属参数（JSON） |
 | `auto_answer` | bool | `true` | 路由到应用之前自动接听 |
+| `busy_wait` | table | 无 | forward 路由的忙时等待（camp-on）策略，见下文 |
 
 ### 转发示例
 
@@ -96,6 +97,35 @@ name = "Support Line"
 action = "queue"
 queue = "support-queue" # Name of queue config
 ```
+
+### 忙时等待路由（camp-on）
+
+未配置 `dest` 的 forward 路由指向本域分机时，将直接拨打分机的注册联系人。
+为该路由添加 `[busy_wait]` 表即可启用忙时等待：当分机以 **486 Busy** 拒接时，
+主叫被保持（183 早媒体循环播放等待音），并每隔 `retry_interval_secs` 重拨一次
+分机。分机空闲后呼叫自动接通；超过 `max_wait_secs` 后主叫被 486 拒接
+（先播放 `[proxy.audio_profile]` 配置的忙音，例如中文语音
+`sounds/failure-busy-zh.wav`）。
+
+```toml
+[[proxy.routes]]
+name = "busy-wait-1001"
+priority = 10
+
+[proxy.routes.match]
+"to.user" = "1001"
+
+[proxy.routes.busy_wait]
+enabled = true            # 默认 true；设为 false 可保留配置但停用
+max_wait_secs = 60        # 总等待时长；0 表示一直等待
+retry_interval_secs = 5   # 重拨间隔（最小 1 秒）
+hold_audio = "sounds/phone-calling.wav"  # 可选；默认保持音
+```
+
+说明：
+- 仅 **486 Busy** 触发等待；其他失败（不在线/无人接听）仍按各自失败提示音立即拒接。
+- 等待期间出现非忙失败（分机注销、错误等）会终止等待并按该状态拒接。
+- 主叫在等待期间挂机，会话立即结束（停止重拨，不残留状态）。
 
 ## HTTP 动态路由器（`proxy.http_router`）
 

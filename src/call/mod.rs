@@ -492,6 +492,30 @@ pub enum QueueFallbackAction {
     Redirect { target: rsipstack::sip::Uri },
 }
 
+/// Resolved busy-wait (camp-on) policy carried on the dialplan. Populated from
+/// a forward route's `[busy_wait]` table. When the callee rejects the INVITE
+/// with 486 Busy, the session keeps the caller parked with looping hold audio
+/// and re-dials the target(s) until free or `max_wait` elapses.
+#[derive(Debug, Clone)]
+pub struct BusyWaitPlan {
+    /// Total wait budget. `None` waits indefinitely.
+    pub max_wait: Option<Duration>,
+    /// Delay between re-dial attempts.
+    pub retry_interval: Duration,
+    /// Early-media audio looped to the caller while waiting.
+    pub hold_audio: String,
+}
+
+impl Default for BusyWaitPlan {
+    fn default() -> Self {
+        Self {
+            max_wait: Some(Duration::from_secs(60)),
+            retry_interval: Duration::from_secs(5),
+            hold_audio: DEFAULT_QUEUE_HOLD_AUDIO.to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct QueuePlan {
     pub accept_immediately: bool,
@@ -674,7 +698,7 @@ impl DialplanFlow {
         }
     }
 
-    fn find_targets(&self) -> Option<&Vec<Location>> {
+    pub(crate) fn find_targets(&self) -> Option<&Vec<Location>> {
         match self {
             DialplanFlow::Targets(strategy) => match strategy {
                 DialStrategy::Sequential(targets) | DialStrategy::Parallel(targets) => {
@@ -1024,6 +1048,11 @@ pub struct Dialplan {
     /// Optional per-trunk ringback/early-media audio configuration
     pub audio_profile: Option<crate::proxy::routing::RingbackAudio>,
 
+    /// Busy-wait (camp-on) policy from a forward route's `[busy_wait]` table.
+    /// When set, a 486 Busy from the callee parks the caller with hold audio
+    /// and re-dials the targets until free or the wait budget expires.
+    pub busy_wait: Option<BusyWaitPlan>,
+
     /// Headers modified/added by routing (rewrite rules, trunk config, HTTP router).
     /// When present, these take priority over the original SIP request headers
     /// when building CallInfo for application flows (IVR, voicemail, etc.).
@@ -1097,6 +1126,7 @@ impl Dialplan {
             passthrough_failure: false,
             route_originated_calls: None,
             audio_profile: None,
+            busy_wait: None,
             routed_headers: None,
             concurrency_holds: Arc::new(Mutex::new(Vec::new())),
             concurrent_call_lease: concurrent_call_limiter::ConcurrentCallLease::default(),

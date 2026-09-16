@@ -368,6 +368,10 @@ async fn match_invite_impl(
             hints.max_ring_time =
                 (max_ring_time > 0).then(|| std::time::Duration::from_secs(max_ring_time as u64));
         }
+        if let Some(busy_wait) = rule.action.busy_wait.as_ref().filter(|bw| bw.enabled) {
+            let hints = hints.get_or_insert_with(DialplanHints::default);
+            hints.busy_wait = Some(busy_wait.clone());
+        }
         // Remember which route matched so the CDR reporter can attribute the
         // call to it (route id/name ride the dialplan extensions).
         {
