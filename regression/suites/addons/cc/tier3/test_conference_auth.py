@@ -78,7 +78,7 @@ async def test_conference_auth_ivr_authorized(pbx, api, sipbot_pool, event_check
                 break
     assert A, f"no transfer_id from consult response/events: {str(resp)[:300]}"
     evidence.log_metric("transfer_id", A)
-    # C 应答 → 咨询腿接通
+    # C answers -> consult leg Connected
     await asyncio.sleep(2.0)
 
     # 3) owner op: start the conference auth IVR on A
