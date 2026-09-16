@@ -283,7 +283,8 @@ REST 端点挂载在控制台的 `api_prefix` 下（默认为 `/api`，通过 `[
 
 - 自动附加到后续所有 call-scoped RWI 事件 / webhook 的 `user_data` 键下；
 - 每次变更发出 `call_userdata_updated` 事件（携带全量新值）；
-- 通话结束后写入 CDR `metadata["user_data"]`。
+- 通话结束后写入 CDR `metadata["user_data"]`；
+- 集群模式下复制到所有节点（`event_type=user_data`），`PUT/GET` 若命中非归属节点会自动转发到归属节点。
 
 `PUT {api_prefix}/calls/active/{session_id}/userdata`
 

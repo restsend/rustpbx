@@ -203,6 +203,14 @@ the object automatically, and it is persisted into the CDR
 `metadata["user_data"]` when the call ends. Replacements are announced via
 the `call_userdata_updated` event (carrying the full new value).
 
+**Cluster**: `user_data` is replicated to every node over the cluster event
+channel (`event_type=user_data`), so events emitted on a node a call migrated
+to still carry it. REST `PUT/GET /calls/active/{session_id}/userdata` is
+handled locally first and forwarded to the owning node (session-registry
+routing, with fan-out fallback) when this node does not host the session.
+Events on a transferred child session fall back to the root session's
+(`CallMeta.session_id`) `user_data`.
+
 ### Field Overlap Explanation
 
 Some events (e.g., `RecordStopped`, `IvrNodeEntered`) carry their own `ani`/`dnis` fields. When an event's own field is `None`, `enrich()` automatically backfills from context. Webhook consumers always receive the merged result.

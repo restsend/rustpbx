@@ -114,7 +114,15 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
         .route(
             &format!("/cluster/event/{}", event_etags::QUEUE),
             post(cluster_event_queue),
-        );
+        )
+        .route(
+            &format!("/cluster/event/{}", event_etags::USER_DATA),
+            post(cluster_event_user_data),
+        )
+        // Owner-routed session user-data ops: a peer that does not host the
+        // session forwards `PUT/GET /calls/active/{id}/userdata` here.
+        .route("/cluster/set_userdata", post(cluster_set_userdata))
+        .route("/cluster/get_userdata", post(cluster_get_userdata));
 
     let r = r.layer(middleware::from_fn_with_state(
         app_state.clone(),
@@ -2404,6 +2412,113 @@ async fn cluster_event_queue(
         hub.on_remote_queue_event(msg, source).await;
     }
     StatusCode::OK.into_response()
+}
+
+/// Session user-data change replicated from a peer node.
+///
+/// Applies the value to this node's RWI gateway so its own subsequent events
+/// (`queue_joined` / `call_ringing` / `call_answered` / `call_hangup`, …) enrich
+/// with the business context, then notifies addon handlers. Core owns the
+/// gateway write (the hub has no gateway handle), so it happens here.
+async fn cluster_event_user_data(
+    State(state): State<AppState>,
+    client: ClientAddr,
+    Json(msg): Json<crate::proxy::cluster_event::ClusterUserDataMessage>,
+) -> Response {
+    let server = state.sip_server();
+    if let Some(ref gateway) = server.inner.rwi_gateway {
+        gateway
+            .write()
+            .apply_remote_user_data(&msg.session_id, msg.data.clone());
+    }
+    if let Some(ref hub) = server.inner.cluster_event_hub {
+        let source = crate::proxy::cluster_event::EventSource::Remote(std::net::SocketAddr::new(
+            client.addr.ip(),
+            0,
+        ));
+        hub.on_remote_user_data(msg, source).await;
+    }
+    StatusCode::OK.into_response()
+}
+
+#[derive(Deserialize)]
+struct ClusterSetUserDataBody {
+    session_id: String,
+    data: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct ClusterGetUserDataBody {
+    session_id: String,
+}
+
+/// Apply a session user-data update forwarded by a peer node that does not
+/// host the session. Replace-all semantics; mirrors `PUT
+/// /calls/active/{session_id}/userdata` on the owner. Success also triggers
+/// the gateway's cluster replication hook, so every peer converges.
+async fn cluster_set_userdata(
+    State(state): State<AppState>,
+    Json(body): Json<ClusterSetUserDataBody>,
+) -> Response {
+    let data = match body.data {
+        serde_json::Value::Object(map) => map,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "message": "user data must be a JSON object" })),
+            )
+                .into_response();
+        }
+    };
+    let server = state.sip_server();
+    let Some(ref gateway) = server.inner.rwi_gateway else {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "message": "RWI gateway is not available" })),
+        )
+            .into_response();
+    };
+    // Scope the write guard: reading the stored value below needs a read lock,
+    // and parking_lot RwLock is not reentrant.
+    let result = gateway.write().set_user_data(&body.session_id, data);
+    match result {
+        Ok(()) => {
+            let stored = gateway.read().get_user_data(&body.session_id);
+            Json(serde_json::json!({
+                "message": "User data updated",
+                "data": serde_json::Value::Object(stored),
+            }))
+            .into_response()
+        }
+        Err(e) => {
+            let status = match e {
+                crate::rwi::SetUserDataError::SessionNotFound => StatusCode::NOT_FOUND,
+                crate::rwi::SetUserDataError::TooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+            };
+            (
+                status,
+                Json(serde_json::json!({ "message": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Read a session's user-data object on behalf of a forwarding peer.
+async fn cluster_get_userdata(
+    State(state): State<AppState>,
+    Json(body): Json<ClusterGetUserDataBody>,
+) -> Response {
+    let server = state.sip_server();
+    let Some(ref gateway) = server.inner.rwi_gateway else {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "message": "RWI gateway is not available" })),
+        )
+            .into_response();
+    };
+    let data = gateway.read().get_user_data(&body.session_id);
+    Json(serde_json::json!({ "data": serde_json::Value::Object(data) })).into_response()
 }
 
 #[cfg(test)]

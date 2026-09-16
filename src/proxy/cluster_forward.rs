@@ -276,4 +276,62 @@ mod tests {
         );
         assert!(peer_for_node_id(&peers, "10.9.9.9:5060").is_none());
     }
+
+    /// `dispatch_to_owner` must POST the body to the peer owning the session
+    /// (resolved via the session registry) — this is the path the console's
+    /// user-data forwarding uses when the REST request lands on a non-owner
+    /// node.
+    #[tokio::test]
+    async fn dispatch_to_owner_posts_to_owning_peer() {
+        use crate::call::runtime::{MemorySessionRegistry, SessionInfo};
+        use axum::{Json, Router, extract::State, routing::post};
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+        async fn capture(
+            State(tx): State<tokio::sync::mpsc::UnboundedSender<serde_json::Value>>,
+            Json(body): Json<serde_json::Value>,
+        ) -> Json<serde_json::Value> {
+            let _ = tx.send(body);
+            // Must return a JSON body: `forward_json` parses the response.
+            Json(serde_json::json!({"ok": true}))
+        }
+        let app: Router = Router::new()
+            .route("/cluster/set_userdata", post(capture))
+            .with_state(tx);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        let registry: crate::call::runtime::SessionRegistryRef = MemorySessionRegistry::new(
+            "127.0.0.1:5060",
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(3600),
+        );
+        registry
+            .register(&SessionInfo::new("sess-1", "127.0.0.1:5060"))
+            .await
+            .unwrap();
+
+        let peers = vec![peer("127.0.0.1", 5060, port)];
+        let body = serde_json::json!({"session_id":"sess-1","data":{"crm_id":"C-1"}});
+        let resp = dispatch_to_owner(
+            &registry,
+            &peers,
+            "",
+            &reqwest::Client::new(),
+            "sess-1",
+            "cluster/set_userdata",
+            &body,
+        )
+        .await;
+        assert_eq!(resp.as_ref().map(|(s, _)| s.as_u16()), Some(200));
+        let got = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("dispatch must reach the owning peer")
+            .expect("body captured");
+        assert_eq!(got["session_id"], "sess-1");
+        assert_eq!(got["data"]["crm_id"], "C-1");
+    }
 }

@@ -27,6 +27,15 @@ pub type WsEventSender = mpsc::UnboundedSender<serde_json::Value>;
 
 pub type RwiGatewayRef = StdArc<RwLock<RwiGateway>>;
 
+/// Cross-node replication hook for session user data.
+///
+/// Invoked on every local change with `Some(object)` (upsert) or `None`
+/// (removal), so the cluster layer can push the change to peers. Peers apply
+/// it via [`RwiGateway::apply_remote_user_data`] and then enrich their own
+/// events — otherwise a call that migrates between nodes emits events without
+/// the business context set on the original node.
+pub type UserDataSyncHook = StdArc<dyn Fn(&SessionId, Option<serde_json::Value>) + Send + Sync>;
+
 /// Keeps gateway-owned call state alive until the `CallRecord` and all of its
 /// completion hooks have finished. `CallRecord.extensions` requires cloneable
 /// values, so cleanup belongs to the shared inner value and runs exactly once
@@ -104,6 +113,8 @@ pub struct RwiGateway {
     /// carries an `agent_id` get a `client_ip` field injected (looked up via the
     /// CC AgentRegistry at dispatch time — no per-event locator/DB query).
     client_ip_lookup: Option<Arc<dyn Fn(&str) -> Option<String> + Send + Sync>>,
+    /// Optional cross-node user-data replication hook (cluster mode only).
+    user_data_sync: Option<UserDataSyncHook>,
 }
 
 #[derive(Debug)]
@@ -154,6 +165,7 @@ impl RwiGateway {
             meta_store: CallMetaStore::new(),
             node_ip: None,
             client_ip_lookup: None,
+            user_data_sync: None,
         }
     }
 
@@ -170,6 +182,34 @@ impl RwiGateway {
         lookup: Option<Arc<dyn Fn(&str) -> Option<String> + Send + Sync>>,
     ) {
         self.client_ip_lookup = lookup;
+    }
+
+    /// Install (or clear) the cross-node user-data replication hook. When set,
+    /// every successful [`Self::set_user_data`] / [`Self::remove_user_data`]
+    /// also publishes the change to cluster peers.
+    pub fn set_user_data_sync(&mut self, hook: Option<UserDataSyncHook>) {
+        self.user_data_sync = hook;
+    }
+
+    /// Apply a user-data change replicated from a peer node.
+    ///
+    /// Does NOT re-broadcast (avoids a replication storm) and does NOT emit a
+    /// `call_userdata_updated` event (peers observe the change silently, then
+    /// enrich their own subsequent events with it).
+    pub fn apply_remote_user_data(
+        &mut self,
+        session_id: &SessionId,
+        data: Option<serde_json::Value>,
+    ) {
+        match data {
+            Some(serde_json::Value::Object(map)) => {
+                self.user_data.insert(session_id.clone(), map);
+            }
+            // Removal, or a non-object payload (defensive): drop any local copy.
+            _ => {
+                self.user_data.remove(session_id);
+            }
+        }
     }
 
     /// Create a new RWI session and return the Arc handle.
@@ -480,8 +520,13 @@ impl RwiGateway {
         self.user_data.insert(session_id.clone(), data.clone());
         self.send_to_owner(&crate::rwi::CallUserDataUpdated {
             call_id: session_id.clone(),
-            user_data: serde_json::Value::Object(data),
+            user_data: serde_json::Value::Object(data.clone()),
         });
+        // Replicate to peers (cluster mode) so calls that migrate to another
+        // node still enrich their events with this context.
+        if let Some(hook) = &self.user_data_sync {
+            hook(session_id, Some(serde_json::Value::Object(data)));
+        }
         Ok(())
     }
 
@@ -498,9 +543,13 @@ impl RwiGateway {
     }
 
     /// Remove all user data for the given session (call hangup cleanup,
-    /// same lifecycle as the call-meta store).
+    /// same lifecycle as the call-meta store). Also tells cluster peers to
+    /// drop their replicated copy.
     pub fn remove_user_data(&mut self, session_id: &SessionId) {
-        self.user_data.remove(session_id);
+        let existed = self.user_data.remove(session_id).is_some();
+        if existed && let Some(hook) = &self.user_data_sync {
+            hook(session_id, None);
+        }
     }
 
     /// Cache an event for later session/call resume replay.
@@ -531,6 +580,9 @@ impl RwiGateway {
     }
 
     /// Get all cached events for a specific call.
+    ///
+    /// Like [`Self::resume_session`], entries are re-enriched with the current
+    /// context/user data before being returned for replay.
     pub fn get_events_for_call(&self, call_id: &CallId) -> Vec<EventCacheEntry> {
         let cache_state = self.event_cache.lock();
 
@@ -538,7 +590,7 @@ impl RwiGateway {
             .cache
             .iter()
             .filter(|entry| entry.call_id == *call_id)
-            .cloned()
+            .map(|entry| self.reenrich_cache_entry(entry))
             .collect()
     }
 
@@ -582,10 +634,17 @@ impl RwiGateway {
     /// Resume a session after disconnect.
     ///
     /// Returns all cached events (bounded by the cache's size/age window) for
-    /// replay to the reconnecting session.
+    /// replay to the reconnecting session. Cached events are stored raw, so
+    /// they are re-enriched here with the CURRENT call context and session
+    /// user data — otherwise a replayed event would silently lose fields
+    /// (e.g. `user_data`) that a live event carried.
     pub fn resume_session(&self) -> Vec<EventCacheEntry> {
         let cache_state = self.event_cache.lock();
-        cache_state.cache.iter().cloned().collect()
+        cache_state
+            .cache
+            .iter()
+            .map(|entry| self.reenrich_cache_entry(entry))
+            .collect()
     }
 
     /// Resume a specific call after disconnect.
@@ -595,10 +654,21 @@ impl RwiGateway {
         self.get_events_for_call(call_id)
     }
 
+    /// Clone a cached entry, re-running enrichment against the live stores.
+    fn reenrich_cache_entry(&self, entry: &EventCacheEntry) -> EventCacheEntry {
+        EventCacheEntry {
+            cached_at: entry.cached_at,
+            call_id: entry.call_id.clone(),
+            event: self.enrich_flat_event(&entry.event),
+        }
+    }
+
     fn enrich_flat_event(&self, flat: &RwiEvent) -> RwiEvent {
+        let mut ctx_root: Option<String> = None;
         let mut payload = if let Some(call_id) = &flat.call_id
             && let Some(meta) = self.meta_store.get_sync(call_id)
         {
+            ctx_root = meta.session_id.clone();
             let mut payload = flat.payload.clone();
             let ctx = crate::rwi::proto::EventCallContext::from(meta);
             merge_event_context(&mut payload, Some(&ctx));
@@ -616,18 +686,23 @@ impl RwiGateway {
 
         // Attach the session user data object (REST/RWI-set business context)
         // under `user_data`. Keyed by session_id; for the main call the event
-        // `call_id` equals the session_id. Existing keys win, matching the
+        // `call_id` equals the session_id. A transferred leg emits under a
+        // child `call_id`, so fall back to the root session id carried in the
+        // leg's `CallMeta` — business context set on the root call must ride
+        // every leg's events. Existing keys win, matching the
         // `merge_event_context` convention (the `call_userdata_updated` event
         // carries its own `user_data` field, which is never overwritten).
-        if let Some(call_id) = &flat.call_id
-            && let Some(data) = self.user_data.get(call_id)
-            && let Some(obj) = payload.as_object_mut()
-            && !obj.contains_key("user_data")
-        {
-            obj.insert(
-                "user_data".to_string(),
-                serde_json::Value::Object(data.clone()),
-            );
+        if let Some(call_id) = &flat.call_id {
+            let data = self.user_data.get(call_id).map(|d| d.clone()).or_else(|| {
+                let root = ctx_root.as_ref().filter(|root| *root != call_id)?;
+                self.user_data.get(root).map(|d| d.clone())
+            });
+            if let Some(data) = data
+                && let Some(obj) = payload.as_object_mut()
+                && !obj.contains_key("user_data")
+            {
+                obj.insert("user_data".to_string(), serde_json::Value::Object(data));
+            }
         }
 
         self.inject_origin_fields(&mut payload);
@@ -1016,6 +1091,120 @@ mod tests {
         let event = rx.recv().await.unwrap();
         assert_eq!(event["event_type"], "call_answered");
         assert_eq!(event["user_data"]["customer_id"], 42);
+    }
+
+    /// Business context is set on the root session, but a transferred leg runs
+    /// in a child session. Its events must still carry the root's `user_data`
+    /// (docs promise it on every call-scoped event).
+    #[tokio::test]
+    async fn test_user_data_falls_back_to_root_session_on_child_events() {
+        let mut gw = RwiGateway::new();
+        let mut rx = setup_owned_call(&mut gw, "root-1");
+        let mut data = serde_json::Map::new();
+        data.insert("crm_id".to_string(), serde_json::json!("C-1"));
+        gw.set_user_data(&"root-1".to_string(), data).unwrap();
+        let _ = rx.recv().await.unwrap(); // consume call_userdata_updated
+
+        // A transfer-target leg: its CallMeta points back at the root session.
+        gw.meta_store.insert(
+            "child-1".to_string(),
+            crate::rwi::proto::CallMeta {
+                session_id: Some("root-1".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let flat = RwiEvent::from_spec(
+            &crate::rwi::CallHangup {
+                call_id: "child-1".into(),
+                reason: None,
+                hangup_by: None,
+                sip_status: None,
+                duration_secs: None,
+            },
+            None,
+        );
+        let enriched = gw.enrich_flat_event(&flat);
+        assert_eq!(enriched.payload["user_data"]["crm_id"], "C-1");
+    }
+
+    /// The cluster replication hook must fire on both upsert and removal so
+    /// peers track the full lifecycle.
+    #[tokio::test]
+    async fn test_user_data_sync_hook_fires_on_set_and_remove() {
+        let mut gw = RwiGateway::new();
+        let _rx = setup_owned_call(&mut gw, "sess-1");
+        type Log = StdArc<parking_lot::Mutex<Vec<(String, Option<serde_json::Value>)>>>;
+        let log: Log = StdArc::new(parking_lot::Mutex::new(Vec::new()));
+        let log2 = log.clone();
+        gw.set_user_data_sync(Some(StdArc::new(move |sid: &SessionId, data| {
+            log2.lock().push((sid.clone(), data));
+        })));
+
+        let mut data = serde_json::Map::new();
+        data.insert("crm_id".to_string(), serde_json::json!("C-1"));
+        gw.set_user_data(&"sess-1".to_string(), data).unwrap();
+        gw.call_finished(&"sess-1".to_string());
+
+        let entries = log.lock();
+        assert_eq!(entries.len(), 2, "one upsert + one removal");
+        assert_eq!(entries[0].0, "sess-1");
+        assert_eq!(entries[0].1.as_ref().unwrap()["crm_id"], "C-1");
+        assert!(entries[1].1.is_none(), "removal must replicate as null");
+    }
+
+    /// Applying a replicated change enriches this node's later events, and a
+    /// replicated removal clears it.
+    #[tokio::test]
+    async fn test_apply_remote_user_data_enriches_subsequent_events() {
+        let mut gw = RwiGateway::new();
+        let mut rx = setup_owned_call(&mut gw, "sess-1");
+
+        gw.apply_remote_user_data(
+            &"sess-1".to_string(),
+            Some(serde_json::json!({ "crm_id": "C-9" })),
+        );
+        gw.send_to_owner(&crate::rwi::CallAnswered {
+            call_id: "sess-1".into(),
+        });
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event["user_data"]["crm_id"], "C-9");
+
+        gw.apply_remote_user_data(&"sess-1".to_string(), None);
+        gw.send_to_owner(&crate::rwi::CallAnswered {
+            call_id: "sess-1".into(),
+        });
+        let event = rx.recv().await.unwrap();
+        assert!(event.get("user_data").is_none());
+    }
+
+    /// Replayed (resumed) events are stored raw, so they must be re-enriched
+    /// against the live stores; otherwise a replay loses `user_data` set after
+    /// the event was cached.
+    #[tokio::test]
+    async fn test_resume_reenriches_user_data() {
+        let mut gw = RwiGateway::new();
+        let mut rx = setup_owned_call(&mut gw, "sess-1");
+
+        // Event cached BEFORE user data exists.
+        gw.send_to_owner(&crate::rwi::CallRinging {
+            call_id: "sess-1".into(),
+            early_media: false,
+        });
+        let _ = rx.recv().await.unwrap();
+
+        // User data set afterwards.
+        let mut data = serde_json::Map::new();
+        data.insert("crm_id".to_string(), serde_json::json!("C-1"));
+        gw.set_user_data(&"sess-1".to_string(), data).unwrap();
+        let _ = rx.recv().await.unwrap();
+
+        let replayed = gw.resume_call(&"sess-1".to_string());
+        let ringing = replayed
+            .iter()
+            .find(|e| e.event.event_type == "call_ringing")
+            .expect("cached call_ringing must be replayed");
+        assert_eq!(ringing.event.payload["user_data"]["crm_id"], "C-1");
     }
 
     #[tokio::test]

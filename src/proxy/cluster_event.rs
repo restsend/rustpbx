@@ -30,6 +30,9 @@ pub mod event_etags {
     pub const LOCATOR: &str = "locator";
     pub const AGENT_STATUS: &str = "agent_status";
     pub const QUEUE: &str = "queue";
+    /// Session user-data replication (business context rides every node so a
+    /// call that migrates still enriches its events).
+    pub const USER_DATA: &str = "user_data";
 }
 
 // ── Event source ────────────────────────────────────────────────────────────
@@ -69,6 +72,10 @@ pub trait ClusterEventHandler: Send + Sync {
 
     /// Queue event forwarded from a cluster peer (enqueue / dequeue / assign).
     async fn on_queue_event(&self, _msg: &ClusterQueueEventMessage, _source: &EventSource) {}
+
+    /// Session user-data change replicated from a cluster peer. `data == None`
+    /// means the peer removed the entry (call ended / explicit clear).
+    async fn on_user_data_event(&self, _msg: &ClusterUserDataMessage, _source: &EventSource) {}
 }
 
 // ── Cluster message types ───────────────────────────────────────────────────
@@ -85,6 +92,8 @@ enum ClusterMessageBody {
     AgentStatus(ClusterAgentStatusMessage),
     #[serde(rename = "queue_event")]
     QueueEvent(ClusterQueueEventMessage),
+    #[serde(rename = "user_data")]
+    UserData(ClusterUserDataMessage),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -234,6 +243,20 @@ pub struct ClusterQueueEventMessage {
     /// For `enqueue`: the skill group the call is waiting for.
     pub required_skills: Vec<String>,
     pub priority: i32,
+}
+
+/// Wire format for session user-data replication between cluster peers.
+///
+/// The session user data set via REST/`call.set_userdata` is a node-local
+/// `DashMap`; without replication a call that migrates to another node emits
+/// its `queue_joined` / `call_ringing` / `call_answered` / `call_hangup`
+/// without the business context. `data == None` means removal.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ClusterUserDataMessage {
+    pub session_id: String,
+    /// The full JSON object (replace-all semantics), or `None` to remove.
+    #[serde(default)]
+    pub data: Option<serde_json::Value>,
 }
 
 // ── ClusterEventHub ─────────────────────────────────────────────────────────
@@ -444,6 +467,21 @@ impl ClusterEventHub {
         }
     }
 
+    /// Broadcast a session user-data change (upsert or removal) to all peers.
+    ///
+    /// Synchronous (fire-and-forget): called from the RWI gateway under its
+    /// write lock, so it must not await peer I/O. `ClusterSync::broadcast`
+    /// already spawns the delivery task.
+    pub fn send_user_data_to_peers(&self, session_id: &str, data: Option<serde_json::Value>) {
+        if let Some(ref sync) = *self.cluster_sync.read() {
+            let msg = ClusterUserDataMessage {
+                session_id: session_id.to_string(),
+                data,
+            };
+            sync.broadcast(event_etags::USER_DATA, session_id, &msg);
+        }
+    }
+
     /// Remote agent status event (from peer MESSAGE).
     pub async fn on_remote_agent_status(
         &self,
@@ -463,6 +501,15 @@ impl ClusterEventHub {
             self.handlers.read().iter().cloned().collect();
         for h in &handlers {
             h.on_queue_event(&msg, &source).await;
+        }
+    }
+
+    /// Remote user-data change (from peer AMI).
+    pub async fn on_remote_user_data(&self, msg: ClusterUserDataMessage, source: EventSource) {
+        let handlers: Vec<Arc<dyn ClusterEventHandler>> =
+            self.handlers.read().iter().cloned().collect();
+        for h in &handlers {
+            h.on_user_data_event(&msg, &source).await;
         }
     }
 }
@@ -1473,5 +1520,177 @@ mod tests {
         assert_eq!(received.action, "ringing");
         assert_eq!(received.call_id, "sess-r1");
         assert_eq!(received.agent_id.as_deref(), Some("bob"));
+    }
+
+    // ── ClusterUserDataMessage JSON round-trip ──────────────────────────────
+
+    #[test]
+    fn test_user_data_message_round_trip() {
+        let msg = ClusterUserDataMessage {
+            session_id: "sess-1".to_string(),
+            data: Some(serde_json::json!({"crm_id": "C-1"})),
+        };
+        let body = ClusterMessageBody::UserData(msg.clone());
+        let json = serde_json::to_string(&body).unwrap();
+        let parsed: ClusterMessageBody = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClusterMessageBody::UserData(m) => {
+                assert_eq!(m.session_id, "sess-1");
+                assert_eq!(m.data.unwrap()["crm_id"], "C-1");
+            }
+            _ => panic!("expected UserData variant"),
+        }
+    }
+
+    #[test]
+    fn test_user_data_removal_serializes_as_null_and_tagged() {
+        let msg = ClusterUserDataMessage {
+            session_id: "sess-1".to_string(),
+            data: None,
+        };
+        let json = serde_json::to_string(&ClusterMessageBody::UserData(msg)).unwrap();
+        assert!(
+            json.contains("\"type\":\"user_data\""),
+            "JSON should contain type=user_data tag, got: {json}"
+        );
+        assert!(
+            json.contains("\"data\":null"),
+            "removal must serialize data as null, got: {json}"
+        );
+    }
+
+    /// Same URL→route pin as the queue event: the broadcast etag must match a
+    /// route registered in `handler::ami`, or the peer POST 404s and the
+    /// replication silently drops.
+    #[tokio::test]
+    async fn user_data_broadcast_url_reaches_ami_route() {
+        use axum::extract::State;
+        use axum::http::StatusCode;
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use tower::ServiceExt;
+
+        let broadcast_etag = event_etags::USER_DATA;
+        let peer = crate::proxy::cluster_sync::AmiPeer {
+            addr: "10.0.0.9".to_string(),
+            ami_port: 8081,
+            ami_path: String::new(),
+            sip_addr: "10.0.0.9".to_string(),
+        };
+        let url = peer.ami_url(broadcast_etag);
+        let url_path = format!("/{}", url.splitn(4, '/').nth(3).unwrap().to_string());
+
+        let route_path = format!("/cluster/event/{}", event_etags::USER_DATA);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        async fn spy_handler(
+            State(tx): State<tokio::sync::mpsc::UnboundedSender<ClusterUserDataMessage>>,
+            Json(msg): Json<ClusterUserDataMessage>,
+        ) -> StatusCode {
+            let _ = tx.send(msg);
+            StatusCode::OK
+        }
+        let app: Router = Router::new()
+            .route(&route_path, post(spy_handler))
+            .with_state(tx);
+
+        let msg = ClusterUserDataMessage {
+            session_id: "sess-u1".to_string(),
+            data: Some(serde_json::json!({"ticket": "T-9"})),
+        };
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(&url_path)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&msg).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "broadcast URL must hit the AMI route — a 404 here means the peer \
+             silently drops the replication"
+        );
+        let received = rx.recv().await.expect("handler must deliver the event");
+        assert_eq!(received.session_id, "sess-u1");
+        assert_eq!(received.data.unwrap()["ticket"], "T-9");
+    }
+
+    /// End-to-end: node A's hub broadcasts a user-data update over
+    /// `ClusterSync`; a mock peer (node B's AMI route) applies it to node B's
+    /// gateway, so B's own events can enrich with A's business context.
+    #[tokio::test]
+    async fn user_data_replication_reaches_peer_gateway() {
+        use crate::rwi::{RwiGateway, RwiGatewayRef};
+        use axum::extract::State;
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use parking_lot::RwLock as PlRwLock;
+
+        // Node B gateway + receiver that applies replicated changes.
+        let gateway_b: RwiGatewayRef = Arc::new(PlRwLock::new(RwiGateway::new()));
+        let gw_for_handler = gateway_b.clone();
+        async fn apply(
+            State(gw): State<RwiGatewayRef>,
+            Json(msg): Json<ClusterUserDataMessage>,
+        ) -> axum::http::StatusCode {
+            gw.write().apply_remote_user_data(&msg.session_id, msg.data);
+            axum::http::StatusCode::OK
+        }
+        let app: Router = Router::new()
+            .route("/cluster/event/user_data", post(apply))
+            .with_state(gw_for_handler);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        // Node A hub wired to the peer.
+        let hub = make_test_hub();
+        let peer = crate::proxy::cluster_sync::AmiPeer {
+            addr: "127.0.0.1".to_string(),
+            ami_port: port,
+            ami_path: String::new(),
+            sip_addr: "127.0.0.1".to_string(),
+        };
+        hub.set_cluster_sync(crate::proxy::cluster_sync::ClusterSync::new(
+            reqwest::Client::new(),
+            vec![peer],
+        ));
+
+        hub.send_user_data_to_peers("sess-1", Some(serde_json::json!({"crm_id": "C-1"})));
+        let mut seen = false;
+        for _ in 0..60 {
+            if gateway_b
+                .read()
+                .get_user_data(&"sess-1".to_string())
+                .contains_key("crm_id")
+            {
+                seen = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(seen, "peer gateway must receive the replicated user data");
+
+        // Removal replicates too.
+        hub.send_user_data_to_peers("sess-1", None);
+        let mut cleared = false;
+        for _ in 0..60 {
+            if gateway_b
+                .read()
+                .get_user_data(&"sess-1".to_string())
+                .is_empty()
+            {
+                cleared = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(cleared, "peer gateway must drop the removed user data");
     }
 }

@@ -368,6 +368,52 @@ fn snapshot_for(
 
 // ── Session user data ────────────────────────────────────────────────────
 
+/// Route a user-data op to the node that owns `session_id`.
+///
+/// Returns `None` when the session is hosted locally (caller applies it) or
+/// clustering is disabled. Otherwise forwards `cluster/set_userdata` or
+/// `cluster/get_userdata` to the owner (fan-out fallback) and returns its
+/// response.
+async fn forward_userdata_to_owner(
+    state: &ConsoleState,
+    session_id: &str,
+    payload: &serde_json::Value,
+    read: bool,
+) -> Option<Response> {
+    let peers = get_cluster_peers(state)?;
+    if peers.is_empty() {
+        return None;
+    }
+    let server = state.sip_server()?;
+    if server.active_call_registry.get_handle(session_id).is_some() {
+        return None;
+    }
+    let ami_path = get_ami_path(state);
+    let client = state.http_client().clone();
+    let (rel, body) = if read {
+        (
+            "cluster/get_userdata".to_string(),
+            json!({ "session_id": session_id }),
+        )
+    } else {
+        (
+            "cluster/set_userdata".to_string(),
+            json!({ "session_id": session_id, "data": payload }),
+        )
+    };
+    crate::proxy::cluster_forward::dispatch_to_owner(
+        &server.session_registry,
+        &peers,
+        &ami_path,
+        &client,
+        session_id,
+        &rel,
+        &body,
+    )
+    .await
+    .map(|(status, body)| (status, Json(body)).into_response())
+}
+
 /// Replace the whole user data object of an active call session.
 ///
 /// Body must be a JSON object (replace-all semantics). The value is stored on
@@ -380,6 +426,9 @@ pub async fn set_call_userdata(
     AxumPath(session_id): AxumPath<String>,
     Json(payload): Json<serde_json::Value>,
 ) -> Response {
+    if let Some(resp) = forward_userdata_to_owner(&state, &session_id, &payload, false).await {
+        return resp;
+    }
     set_call_userdata_inner(&state, &session_id, payload, &user.username)
 }
 
@@ -489,6 +538,11 @@ pub async fn get_call_userdata(
     AuthRequired(_): AuthRequired,
     AxumPath(session_id): AxumPath<String>,
 ) -> Response {
+    if let Some(resp) =
+        forward_userdata_to_owner(&state, &session_id, &serde_json::Value::Null, true).await
+    {
+        return resp;
+    }
     let Some(server) = state.sip_server() else {
         return (
             StatusCode::NOT_FOUND,
@@ -520,14 +574,16 @@ pub async fn get_call_userdata(
     Json(json!({ "data": serde_json::Value::Object(data) })).into_response()
 }
 
-#[cfg(feature = "commerce")]
+/// Cluster peers configured on this node, if clustering is enabled.
+///
+/// Not `commerce`-gated: session user-data forwarding must work on
+/// contact-center builds, which do not enable the `commerce` feature.
 fn get_cluster_peers(state: &ConsoleState) -> Option<Vec<crate::config::ClusterPeer>> {
     state
         .app_state()
         .and_then(|app| app.config().cluster.as_ref().map(|c| c.peers.clone()))
 }
 
-#[cfg(feature = "commerce")]
 fn get_ami_path(state: &ConsoleState) -> String {
     state
         .app_state()

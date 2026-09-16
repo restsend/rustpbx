@@ -270,7 +270,9 @@ call's `session_id` and:
 
 - rides every subsequent call-scoped RWI event / webhook under `user_data`,
 - is announced via the `call_userdata_updated` event on each change,
-- is persisted into the CDR `metadata["user_data"]` when the call ends.
+- is persisted into the CDR `metadata["user_data"]` when the call ends,
+- is replicated to every cluster node (`event_type=user_data`); `PUT/GET` that
+  land on a non-owner node are forwarded to the owning node automatically.
 
 `PUT {api_prefix}/calls/active/{session_id}/userdata`
 

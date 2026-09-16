@@ -781,6 +781,23 @@ impl AppStateBuilder {
                     .set_cluster_sync(sync.clone());
                 if let Some(ref hub) = app_state.sip_server().inner.cluster_event_hub {
                     hub.set_cluster_sync(sync);
+                    // Replicate session user data across nodes so a call that
+                    // migrates still enriches its events with the business
+                    // context set on the original node.
+                    if let Some(ref gateway) = app_state.sip_server().inner.rwi_gateway {
+                        let hub = hub.clone();
+                        gateway.write().set_user_data_sync(Some(std::sync::Arc::new(
+                            move |session_id: &crate::rwi::SessionId,
+                                  data: Option<serde_json::Value>| {
+                                // Replication is best-effort: `call_finished`
+                                // cleanup can run from a `Drop` on any thread,
+                                // where spawning would panic.
+                                if tokio::runtime::Handle::try_current().is_ok() {
+                                    hub.send_user_data_to_peers(session_id, data);
+                                }
+                            },
+                        )));
+                    }
                 }
                 info!(peer_count = %peer_count, "Cluster AMI sync initialized");
             }

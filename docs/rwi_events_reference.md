@@ -175,6 +175,8 @@ Webhook 处理器运行在专用的 tokio 运行时上,其 HTTP 推送不会与 
 
 业务系统可在通话任意阶段把 CRM 工单号、客户画像等上下文写入 `user_data`，此后每个事件（含 webhook）都自动携带，通话结束后落入 CDR `metadata["user_data"]`。变更时会发出 `call_userdata_updated` 事件（携带全量新值）。
 
+**集群**：`user_data` 会通过集群事件通道（`event_type=user_data`）复制到所有节点；转接/迁移到其它节点的腿所发事件同样携带。REST `PUT/GET /calls/active/{session_id}/userdata` 会先在本节点处理，若本节点不承载该会话则按 session registry 转发到归属节点（含 fan-out 兜底）。转接子会话的事件会回退用根会话（`CallMeta.session_id`）的 `user_data`。
+
 ### 来源字段（gateway 自动注入）
 
 集群模式下 gateway 还会给**所有**事件注入以下字段，Webhook 与 WS 消费者都可见：
