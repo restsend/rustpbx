@@ -346,6 +346,98 @@ async fn test_rotating_sqlite_saver_creates_daily_file() {
     );
 }
 
+/// Regression guard: rotation must work when seeded with a STALE date —
+/// `rotate_to` connects/creates the table OUTSIDE the state lock, then
+/// re-locks to publish. Verifies the daily file is created and the row lands.
+#[tokio::test]
+async fn test_rotating_saver_rotates_from_stale_date() {
+    let dir = TempDir::new().unwrap();
+    let base = format!("sqlite://{}/cdr.db", dir.path().display());
+    let today = today_string();
+    let saver = crate::callrecord::RotatingSqliteSaver {
+        base_url: base,
+        table_name: "rustpbx_call_records".to_string(),
+        skip_create_table: false,
+        // Stale date + throwaway in-memory connection forces the rotate path.
+        state: Arc::new(tokio::sync::Mutex::new(crate::callrecord::RotateState {
+            current_date: "2000-01-01".to_string(),
+            db: in_memory_db().await,
+        })),
+    };
+    let mut record = make_record();
+    record.call_id = "rotate-stale-call".to_string();
+
+    let result = saver.save(std::slice::from_ref(&record)).await;
+    assert!(
+        result.is_ok(),
+        "save after rotation should succeed: {:?}",
+        result.err()
+    );
+
+    let expected_path = dir.path().join(format!("cdr-{}.db", today));
+    assert!(expected_path.exists(), "daily file must exist after rotation");
+    let db = crate::models::connect_db(
+        &format!("sqlite://{}", expected_path.display()),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(count_rows(&db, "rustpbx_call_records").await, 1);
+}
+
+/// Regression guard for the concurrent-rotation double-check: N tasks race
+/// through `rotate_to` on the same stale state; every save must succeed and
+/// every row must persist (losers reuse the winner's published connection).
+#[tokio::test]
+async fn test_rotating_saver_concurrent_saves_all_persist() {
+    let dir = TempDir::new().unwrap();
+    let base = format!("sqlite://{}/cdr.db", dir.path().display());
+    let table = "rustpbx_call_records";
+    let saver = Arc::new(crate::callrecord::RotatingSqliteSaver {
+        base_url: base,
+        table_name: table.to_string(),
+        skip_create_table: false,
+        state: Arc::new(tokio::sync::Mutex::new(crate::callrecord::RotateState {
+            current_date: "2000-01-01".to_string(),
+            db: in_memory_db().await,
+        })),
+    });
+
+    const TASKS: usize = 8;
+    let mut handles = Vec::new();
+    for i in 0..TASKS {
+        let saver = saver.clone();
+        handles.push(tokio::spawn(async move {
+            let mut record = make_record();
+            record.call_id = format!("concurrent-call-{i}");
+            saver
+                .save(std::slice::from_ref(&record))
+                .await
+                .unwrap_or_else(|e| panic!("concurrent save {i} failed: {e:?}"))
+        }));
+    }
+    for h in handles {
+        tokio::time::timeout(std::time::Duration::from_secs(30), h)
+            .await
+            .expect("save finished within timeout")
+            .expect("task did not panic");
+    }
+
+    let today = today_string();
+    let expected_path = dir.path().join(format!("cdr-{}.db", today));
+    let db = crate::models::connect_db(
+        &format!("sqlite://{}", expected_path.display()),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        count_rows(&db, table).await,
+        TASKS as i64,
+        "every concurrent save must persist exactly one row"
+    );
+}
+
 // ── Builder without config (needs main_db) ─────────────────────────────────────
 
 #[tokio::test]

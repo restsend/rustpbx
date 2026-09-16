@@ -15,7 +15,10 @@ use rsipstack::transaction::transaction::Transaction;
 use sea_orm::{DatabaseConnection, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+// parking_lot (not std): guards are poison-free and the SIP REGISTER/SUBSCRIBE
+// hot path must never turn a panicked holder into permanent lock poisoning.
+use parking_lot::RwLock;
 use tracing::{debug, info, warn};
 
 // ── PIDF-XML (RFC 3863) and RPID (RFC 4480) support ─────────────────────
@@ -264,21 +267,21 @@ impl PresenceManager {
     }
 
     pub fn set_notify_tx(&self, tx: tokio::sync::mpsc::Sender<String>) {
-        let mut lock = self.notify_tx.write().unwrap();
+        let mut lock = self.notify_tx.write();
         *lock = Some(tx);
     }
 
     /// Drop the notify sender so the dispatcher task observes channel-closed.
     /// Called from `PresenceModule::on_stop` to ensure deterministic shutdown.
     pub fn clear_notify_tx(&self) {
-        let mut lock = self.notify_tx.write().unwrap();
+        let mut lock = self.notify_tx.write();
         *lock = None;
     }
 
     pub async fn load_from_db(&self) -> Result<()> {
         if let Some(db) = &self.database {
             let states = presence::Entity::find().all(db).await?;
-            let mut map = self.states.write().unwrap();
+            let mut map = self.states.write();
             for s in states {
                 let status = PresenceStatus::normalize(&s.status);
                 map.insert(
@@ -296,39 +299,37 @@ impl PresenceManager {
     }
 
     pub fn states_len(&self) -> usize {
-        self.states.read().unwrap().len()
+        self.states.read().len()
     }
 
     pub fn subscribers_len(&self) -> usize {
-        self.subscribers.read().unwrap().len()
+        self.subscribers.read().len()
     }
 
     /// Total presence subscription bindings (sum of all identity buckets).
     pub fn subscriber_bindings_len(&self) -> usize {
         self.subscribers
             .read()
-            .unwrap()
             .values()
             .map(|v| v.len())
             .sum()
     }
 
     pub fn mwi_subscribers_len(&self) -> usize {
-        self.mwi_subscribers.read().unwrap().len()
+        self.mwi_subscribers.read().len()
     }
 
     /// Total MWI subscription bindings (sum of all extension buckets).
     pub fn mwi_subscriber_bindings_len(&self) -> usize {
         self.mwi_subscribers
             .read()
-            .unwrap()
             .values()
             .map(|v| v.len())
             .sum()
     }
 
     pub fn get_state(&self, identity: &str) -> PresenceState {
-        let map = self.states.read().unwrap();
+        let map = self.states.read();
         map.get(identity).cloned().unwrap_or_default()
     }
 
@@ -343,7 +344,7 @@ impl PresenceManager {
         source: &EventSource,
     ) -> Option<PresenceState> {
         let old_state = {
-            let mut map = self.states.write().unwrap();
+            let mut map = self.states.write();
             map.insert(identity.to_string(), state.clone())
         };
 
@@ -385,7 +386,7 @@ impl PresenceManager {
 
         // Notify subscribers (triggers NOTIFY messages)
         let tx = {
-            let lock = self.notify_tx.read().unwrap();
+            let lock = self.notify_tx.read();
             lock.clone()
         };
         if let Some(tx) = tx {
@@ -396,7 +397,7 @@ impl PresenceManager {
     }
 
     pub fn add_subscriber(&self, identity: &str, sub: Subscriber) -> Vec<DialogId> {
-        let mut map = self.subscribers.write().unwrap();
+        let mut map = self.subscribers.write();
         let subs = map.entry(identity.to_string()).or_default();
         let mut replaced = Vec::new();
         let sub_key = Self::watcher_key(&sub.aor);
@@ -417,13 +418,13 @@ impl PresenceManager {
     }
 
     pub fn get_subscribers(&self, identity: &str) -> Vec<Subscriber> {
-        let map = self.subscribers.read().unwrap();
+        let map = self.subscribers.read();
         map.get(identity).cloned().unwrap_or_default()
     }
 
     /// Remove a presence subscription by dialog id. Returns true if removed.
     pub fn remove_subscriber_by_dialog(&self, dialog_id: &DialogId) -> bool {
-        let mut map = self.subscribers.write().unwrap();
+        let mut map = self.subscribers.write();
         let mut removed = false;
         map.retain(|_, subs| {
             let before = subs.len();
@@ -443,7 +444,7 @@ impl PresenceManager {
         if user.is_empty() {
             return Vec::new();
         }
-        let mut map = self.subscribers.write().unwrap();
+        let mut map = self.subscribers.write();
         let mut removed = Vec::new();
         map.retain(|_, subs| {
             subs.retain(|s| {
@@ -465,7 +466,7 @@ impl PresenceManager {
     }
 
     pub fn cleanup_expired(&self) {
-        let mut subscribers = self.subscribers.write().unwrap();
+        let mut subscribers = self.subscribers.write();
         let now = std::time::Instant::now();
         subscribers.retain(|_, subs| {
             subs.retain(|s| s.expires > now);
@@ -485,21 +486,21 @@ impl PresenceManager {
 
     /// Set the channel used by the MWI dispatch task.
     pub fn set_mwi_tx(&self, tx: tokio::sync::mpsc::Sender<MwiTrigger>) {
-        let mut lock = self.mwi_tx.write().unwrap();
+        let mut lock = self.mwi_tx.write();
         *lock = Some(tx);
     }
 
     /// Drop the MWI sender so the dispatch task observes channel-closed.
     /// Called from `PresenceModule::on_stop` to ensure deterministic shutdown.
     pub fn clear_mwi_tx(&self) {
-        let mut lock = self.mwi_tx.write().unwrap();
+        let mut lock = self.mwi_tx.write();
         *lock = None;
     }
 
     /// Add (or refresh) an MWI subscription for `extension`.
     /// Returns dialog ids replaced by the same watcher AOR.
     pub fn add_mwi_subscriber(&self, extension: &str, sub: MwiSubscriber) -> Vec<DialogId> {
-        let mut map = self.mwi_subscribers.write().unwrap();
+        let mut map = self.mwi_subscribers.write();
         let subs = map.entry(extension.to_string()).or_default();
         let mut replaced = Vec::new();
         let sub_key = Self::watcher_key(&sub.aor);
@@ -521,13 +522,13 @@ impl PresenceManager {
 
     /// Return all live MWI subscribers for `extension`.
     pub fn get_mwi_subscribers(&self, extension: &str) -> Vec<MwiSubscriber> {
-        let map = self.mwi_subscribers.read().unwrap();
+        let map = self.mwi_subscribers.read();
         map.get(extension).cloned().unwrap_or_default()
     }
 
     /// Remove an MWI subscription by dialog id. Returns true if removed.
     pub fn remove_mwi_subscriber_by_dialog(&self, dialog_id: &DialogId) -> bool {
-        let mut map = self.mwi_subscribers.write().unwrap();
+        let mut map = self.mwi_subscribers.write();
         let mut removed = false;
         map.retain(|_, subs| {
             let before = subs.len();
@@ -546,7 +547,7 @@ impl PresenceManager {
         if user.is_empty() {
             return Vec::new();
         }
-        let mut map = self.mwi_subscribers.write().unwrap();
+        let mut map = self.mwi_subscribers.write();
         let mut removed = Vec::new();
         map.retain(|_, subs| {
             subs.retain(|s| {
@@ -569,7 +570,7 @@ impl PresenceManager {
 
     /// Remove expired MWI subscriptions.
     pub fn cleanup_expired_mwi(&self) {
-        let mut map = self.mwi_subscribers.write().unwrap();
+        let mut map = self.mwi_subscribers.write();
         let now = std::time::Instant::now();
         map.retain(|_, subs| {
             subs.retain(|s| s.expires > now);
@@ -581,7 +582,7 @@ impl PresenceManager {
     /// of `extension`.  This is called from the voicemail notifier.
     pub async fn trigger_mwi(&self, extension: &str, new_messages: u32, old_messages: u32) {
         let tx = {
-            let lock = self.mwi_tx.read().unwrap();
+            let lock = self.mwi_tx.read();
             lock.clone()
         };
         if let Some(tx) = tx {
@@ -1501,6 +1502,39 @@ mod tests {
     use super::*;
     use crate::call::Location;
     use rsipstack::sip::Uri;
+
+    /// Regression guard for the parking_lot migration: a panic while holding
+    /// a presence lock must NOT poison it. Under `std::sync::RwLock` every
+    /// later `.read().unwrap()` on the hot path would panic forever (crash
+    /// loop); parking_lot has no poisoning, so the manager keeps working.
+    #[tokio::test]
+    async fn test_lock_not_poisoned_by_panic() {
+        let manager = PresenceManager::new(None);
+        let states = manager.states.clone();
+
+        // Panic inside a thread while the write guard is held.
+        let panic_joined = std::thread::spawn(move || {
+            let mut guard = states.write();
+            guard.insert(
+                "poison-ext".to_string(),
+                PresenceState::default(),
+            );
+            panic!("simulated panic while holding the presence states lock");
+        });
+        let res = panic_joined.join();
+        assert!(res.is_err(), "the spawned thread must have panicked");
+
+        // The lock must still be fully usable afterwards.
+        assert_eq!(
+            manager.get_state("poison-ext").status,
+            PresenceStatus::Offline
+        );
+        let ext = "1001";
+        let mut state = manager.get_state(ext);
+        state.status = PresenceStatus::Idle;
+        manager.update_state(ext, state, &EventSource::Local).await;
+        assert_eq!(manager.get_state(ext).status, PresenceStatus::Idle);
+    }
 
     #[tokio::test]
     async fn test_presence_manager_state() {

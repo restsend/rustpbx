@@ -5385,7 +5385,7 @@ async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
             server
                 .active_call_registry
                 .register_handle(session.id.to_string(), _handle.clone());
-            let mut transfers = crate::addons::cc::transfer::ConsultTransferManager::new(
+            let transfers = crate::addons::cc::transfer::ConsultTransferManager::new(
                 server.conference_server.manager_raw().clone(),
             )
             .with_call_registry(server.active_call_registry.clone());
@@ -5451,7 +5451,7 @@ async fn consult_media_preserves_agent_and_keeps_all_mixer_legs_alive() {
             assert_eq!(room, "consult-consult-media");
             assert!(matches!(transfers.get_state("transfer-media"),
             Some(crate::addons::cc::transfer::TransferState::Completed { conf_id, .. })
-                if conf_id == &room));
+                if conf_id == room));
             let command = _commands.try_recv().unwrap();
             assert!(
                 matches!(&command, CallCommand::JoinMixerLeg { mixer_id, leg_id }

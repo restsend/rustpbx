@@ -1127,20 +1127,17 @@ pub(crate) struct RotatingSqliteSaver {
 impl CallRecordSaver for RotatingSqliteSaver {
     async fn save(&self, records: &[CallRecord]) -> Result<Vec<String>> {
         let today = today_string();
+        // Fast path: connection for today already established. The lock is
+        // only held for the cheap date check / clone — never across
+        // `connect_db`, so a slow rotation cannot stall concurrent savers.
         let db = {
-            let mut st = self.state.lock().await;
-            if st.current_date != today {
-                let url = derive_daily_url(&self.base_url, &today);
-                let new_db = crate::models::connect_db(&url, None).await?;
-                if !self.skip_create_table {
-                    create_call_record_table(&new_db, &self.table_name).await?;
-                }
-                *st = RotateState {
-                    current_date: today,
-                    db: new_db,
-                };
+            let st = self.state.lock().await;
+            if st.current_date == today {
+                st.db.clone()
+            } else {
+                drop(st);
+                self.rotate_to(today).await?
             }
-            st.db.clone()
         };
         if !records.is_empty() {
             let mut insert = Query::insert();
@@ -1158,6 +1155,29 @@ impl CallRecordSaver for RotatingSqliteSaver {
             .iter()
             .map(|record| format!("{}/{}/{}", self.base_url, self.table_name, record.call_id))
             .collect())
+    }
+}
+
+impl RotatingSqliteSaver {
+    /// Open (and create the table for) the daily database OUTSIDE the state
+    /// lock, then re-lock to publish it. A concurrent rotation that already
+    /// published today's connection wins; ours is discarded.
+    async fn rotate_to(&self, today: String) -> Result<DatabaseConnection> {
+        let url = derive_daily_url(&self.base_url, &today);
+        let new_db = crate::models::connect_db(&url, None).await?;
+        if !self.skip_create_table {
+            create_call_record_table(&new_db, &self.table_name).await?;
+        }
+        let mut st = self.state.lock().await;
+        if st.current_date == today {
+            Ok(st.db.clone())
+        } else {
+            *st = RotateState {
+                current_date: today,
+                db: new_db.clone(),
+            };
+            Ok(new_db)
+        }
     }
 }
 

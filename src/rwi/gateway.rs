@@ -54,6 +54,12 @@ impl RwiCallRecordGuard {
 
 impl Drop for RwiCallRecordGuardInner {
     fn drop(&mut self) {
+        // Invariant: no caller may drop this guard while holding any gateway
+        // lock — the Drop takes `gateway.write()` and parking_lot RwLocks are
+        // not reentrant (see the scoped read guard in `processor.rs`
+        // `originate_call`, which releases before `cleanup()`).
+        // The critical section is pure in-memory bookkeeping (microseconds),
+        // so a blocking lock here is fine; do not defer it.
         if let Some(gateway) = self.gateway.upgrade() {
             gateway.write().call_finished(&self.call_id);
         }
@@ -1058,6 +1064,7 @@ mod tests {
 
         drop(guard);
 
+        // Cleanup is synchronous on drop (pure in-memory, no runtime deferral).
         let gateway = gateway.read();
         assert!(!gateway.call_ownership.contains_key("c1"));
         assert!(!gateway.sessions[&sid].read().owns_call("c1"));

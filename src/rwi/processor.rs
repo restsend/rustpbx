@@ -86,6 +86,12 @@ pub struct RwiCommandProcessor {
     /// emit `recording_metadata_available` / `record_end`).
     record_files: Arc<DashMap<String, String>>,
     conference_manager: Arc<ConferenceManager>,
+    // INVARIANT: `transfer_controller` is write-locked exactly once, here at
+    // construction. Every other site takes `read()` — including across
+    // `.await`s — and is safe only because no writer ever exists afterwards.
+    // If you ever add a `write()` path, audit every `read()` site for
+    // guard-across-await first (they will self-deadlock: tokio RwLock readers
+    // queue behind a pending writer).
     transfer_controller: Arc<RwLock<TransferController>>,
     command_dedup_cache: CommandDeduplicationCache,
 }
@@ -1105,10 +1111,17 @@ impl RwiCommandProcessor {
                             extensions: http::Extensions::new(),
                         };
                         record.extensions.insert(rwi_call_record_guard);
-                        if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
-                            sender.try_send(record)
-                        {
-                            tracing::warn!(call_id = %cdr_call_id, "call record channel full; dropping RWI-originated CDR");
+                        // NOTE: on `Full`/`Closed` the record (and the
+                        // `RwiCallRecordGuard` inside its extensions) drops
+                        // synchronously right here, taking `gateway.write()`
+                        // in its Drop impl. Callers of `cleanup` must not hold
+                        // any gateway lock at that point.
+                        if let Err(e) = sender.try_send(record) {
+                            tracing::warn!(
+                                call_id = %cdr_call_id,
+                                error = %e,
+                                "call record channel unavailable; dropping RWI-originated CDR"
+                            );
                         }
                     }
                 };
@@ -1221,14 +1234,21 @@ impl RwiCommandProcessor {
                 Ok(offer) => offer,
                 Err(e) => {
                     tracing::warn!(call_id = %call_id, error = %e, "failed to prepare originate media");
-                    let gw = gateway.read();
-                    gw.send_to_owner(&crate::rwi::CallHangup {
-                        call_id: call_id.clone(),
-                        reason: Some(format!("media_setup_failed: {}", e)),
-                        hangup_by: None,
-                        sip_status: None,
-                        duration_secs: None,
-                    });
+                    // The read guard MUST be released before `cleanup()`: the
+                    // CDR guard inside `cleanup` drops synchronously when the
+                    // record channel is full/closed, and its Drop impl takes
+                    // `gateway.write()` — parking_lot RwLocks are not
+                    // reentrant, so holding read across that drop deadlocks.
+                    {
+                        let gw = gateway.read();
+                        gw.send_to_owner(&crate::rwi::CallHangup {
+                            call_id: call_id.clone(),
+                            reason: Some(format!("media_setup_failed: {}", e)),
+                            hangup_by: None,
+                            sip_status: None,
+                            duration_secs: None,
+                        });
+                    }
                     cancel_token.cancel();
                     cleanup(cdr_ring_time, cdr_answer_time);
                     return;

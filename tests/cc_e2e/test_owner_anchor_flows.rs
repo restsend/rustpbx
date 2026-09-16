@@ -249,7 +249,7 @@ async fn e2e_owner_anchored_complete_removes_agent_leg_command() {
     upsert_session(&registry, "sess-abc-2", handle.clone());
 
     let conf_mgr = Arc::new(ConferenceManager::new());
-    let mut tm = ConsultTransferManager::new(conf_mgr.clone()).with_call_registry(registry);
+    let tm = ConsultTransferManager::new(conf_mgr.clone()).with_call_registry(registry);
 
     tm.initiate(
         "tx-complete-1".into(),

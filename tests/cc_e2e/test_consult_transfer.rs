@@ -172,10 +172,7 @@ async fn test_consult_transfer_bc_to_abc_to_ac() {
             rustpbx::addons::cc::CcAddonState::new(),
         ));
         let cc = cc_addon_state.read().await;
-        let mut tm: tokio::sync::RwLockWriteGuard<
-            '_,
-            rustpbx::addons::cc::transfer::ConsultTransferManager,
-        > = cc.transfer_manager.write().await;
+        let tm: &rustpbx::addons::cc::transfer::ConsultTransferManager = &cc.transfer_manager;
 
         // Initiate transfer (A-B session is the original, B-C is consultation)
         let transfer_id = "e2e-tx-001".to_string();
@@ -206,7 +203,7 @@ async fn test_consult_transfer_bc_to_abc_to_ac() {
         assert!(
             matches!(
                 state,
-                rustpbx::addons::cc::transfer::TransferState::Completed { conf_id: cid, .. }
+                rustpbx::addons::cc::transfer::TransferState::Completed { conf_id: ref cid, .. }
                     if *cid == conf_id
             ),
             "transfer must complete after merge_to_conference, got {state:?}"
@@ -218,7 +215,7 @@ async fn test_consult_transfer_bc_to_abc_to_ac() {
         // When consult is LegAdd on the A-B session, session_b == session_a
         // and merge must JoinMixerLeg(caller+callee+consult).
         let live_registry = server.registry.clone();
-        let mut tm_owner = rustpbx::addons::cc::transfer::ConsultTransferManager::new(Arc::new(
+        let tm_owner = rustpbx::addons::cc::transfer::ConsultTransferManager::new(Arc::new(
             rustpbx::call::runtime::ConferenceManager::new(),
         ))
         .with_call_registry(live_registry);

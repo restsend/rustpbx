@@ -105,6 +105,9 @@ impl GatewaySessionGuard {
 
 impl Drop for GatewaySessionGuard {
     fn drop(&mut self) {
+        // Same invariant as `RwiCallRecordGuardInner::drop`: no gateway lock
+        // may be held when this runs. The `gateway.write()` section is pure
+        // in-memory bookkeeping — blocking here is fine.
         let (call_ids, meta_store) = {
             let mut gw = self.gateway.write();
             let call_ids = gw.remove_session(&self.session_id);

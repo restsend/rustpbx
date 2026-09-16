@@ -414,9 +414,11 @@ impl ConferenceManager {
             remaining = conference.participant_count();
         }
 
-        // Remove from local audio mixer
-        if let Some(mixer) = self.audio_mixers.get(conf_id) {
-            let mixer = mixer.value().clone();
+        // Remove from local audio mixer. Clone the mixer out of the map first:
+        // holding the DashMap shard guard across the `.await` below is a known
+        // footgun (shard lock pins other map operations for the whole await).
+        let mixer = self.audio_mixers.get(conf_id).map(|m| m.value().clone());
+        if let Some(mixer) = mixer {
             mixer.remove_participant(leg_id).await?;
         }
 

@@ -67,6 +67,11 @@ impl TlsReloaderRegistry {
     }
 
     /// Reload HTTPS certificate
+    ///
+    /// Invariant: `https`/`sip_tls` are written only once, at startup
+    /// registration (`register_https`/`register_sip_tls`). Holding the read
+    /// guard across the reload `.await` is therefore safe — reloads serialize
+    /// against each other and against (at most one) registration.
     pub async fn reload_https(&self, cert_path: &str, key_path: &str) -> anyhow::Result<()> {
         let guard = self.https.read().await;
         if let Some(reloader) = guard.as_ref() {

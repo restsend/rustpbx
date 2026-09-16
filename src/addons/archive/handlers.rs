@@ -312,6 +312,10 @@ pub async fn manual_archive(
     }));
 
     // Prune tasks that finished more than 1 hour ago to prevent unbounded growth
+    //
+    // Lock order: `manual_tasks` DashMap shard → per-task inner RwLock.
+    // Every other site follows the same direction (`get` → `read`/`write`);
+    // never take a DashMap guard while holding a task's inner RwLock.
     {
         let ttl = std::time::Duration::from_secs(3600);
         archive_state.manual_tasks.retain(|_, v| {

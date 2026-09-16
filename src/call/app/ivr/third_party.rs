@@ -414,6 +414,11 @@ impl ActionProvider for ThirdPartyTreeProvider {
     }
 
     async fn next_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode> {
+        // SAFETY (lock scope): `state` (and the nested `tree`/`sess` locks —
+        // order `state` → `tree`, `state` → `sess`) is held for the whole
+        // provider step BY DESIGN and this body must stay **await-free**.
+        // Adding any `.await` below would turn the parking_lot guard into a
+        // guard-across-await and block every other IVR action on this call.
         let mut state = self.state.lock();
 
         match ctx.event {
