@@ -116,7 +116,8 @@ async def test_outbound_policy_filters_desk_lines(cc_api, evidence):
 
 
 async def test_outbound_policy_unconstrained_without_reference(cc_api, evidence):
-    """未引用策略的坐席 = 无约束（向后兼容）：任何 caller-id 的线路都可达。"""
+    """An agent with no policy reference = unconstrained (backwards-compatible):
+    lines with any caller-id are reachable."""
     agent_id = "1002"
     line_open = {"id": "line-open", "label": "open", "caller": "anyone", "enabled": True}
     resp = await cc_api.post(f"{API_BASE}/desk/lines", {"line": line_open})

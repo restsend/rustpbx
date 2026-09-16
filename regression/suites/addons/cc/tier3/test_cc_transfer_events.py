@@ -201,7 +201,7 @@ async def test_conference_end_endpoint(pbx, api, sipbot_pool, event_checker):
 async def test_queue_webhook_enqueue_dequeue(pbx, sipbot_pool, event_checker):
     """Queue events — enqueue and dequeue produce webhook events.
 
-    CSV 数据适配 L89-L95: 57 QUEUED / 58 DIVERTED / 59 ABANDONED.
+    CSV data adaptation L89-L95: 57 QUEUED / 58 DIVERTED / 59 ABANDONED.
     Verifies RustPBX-side events fire for ccf adapter mapping.
     """
     call_id = f"qevents-{uuid.uuid4().hex[:8]}"
@@ -232,7 +232,7 @@ async def test_queue_webhook_enqueue_dequeue(pbx, sipbot_pool, event_checker):
 async def test_agent_registration_webhook(pbx, sipbot_pool, api, event_checker):
     """Agent registration — agent_registered/agent_unregistered via webhook.
 
-    CSV 数据适配 L134-L156: 73 AGENTLOGIN / 74 AGENTLOGOUT.
+    CSV data adaptation L134-L156: 73 AGENTLOGIN / 74 AGENTLOGOUT.
     """
     agent = sipbot_pool.callee(
         host=pbx.host,
@@ -266,7 +266,7 @@ async def test_agent_registration_webhook(pbx, sipbot_pool, api, event_checker):
 async def test_agent_status_change_events(pbx, api, event_checker):
     """Agent status change — 75 AGENTREADY / 76 AGENTNOTREADY via webhook.
 
-    CSV 数据适配 L143-L145.
+    CSV data adaptation L143-L145.
     """
     event_checker.webhook.clear()
     await asyncio.sleep(0.5)
@@ -288,7 +288,7 @@ async def test_ivr_node_exit_events(pbx, sipbot_pool, event_checker):
 
     Asserts the IvrNodeExited webhook event carries the data-adapter fields
     (node_id/node_name/result_value/duration_ms/hangup_reason/call_result) that
-    the ccf layer maps onto G event codes. CSV 数据适配 L33-L44, L74-L76, L97-L98.
+    the ccf layer maps onto G event codes. CSV data adaptation L33-L44, L74-L76, L97-L98.
     Falls back to a softer assertion (event present) when the IVR app routes the
     caller straight to an extension without traversing a menu node.
     """

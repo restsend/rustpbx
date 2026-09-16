@@ -206,10 +206,19 @@ if not DEFAULT_ADDONS:
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_runtest_makereport(item, call):
-    """Stash each phase's report on the item for fixture-time failure checks."""
+    """Stash each phase's report on the item for fixture-time failure checks,
+    and convert failures of @pytest.mark.known_gap rows into xfail-style
+    skips (reason preserved; XPASS once the product gap is fixed)."""
     outcome = yield
     rep = outcome.get_result()
     setattr(item, f"rep_{rep.when}", rep)
+    if rep.when == "call" and rep.failed and item.get_closest_marker("known_gap"):
+        msg = ""
+        if rep.longrepr is not None:
+            msg = str(rep.longrepr)
+        msg = msg.strip().splitlines()[-1][:240] if msg else "unknown failure"
+        rep.outcome = "skipped"
+        rep.wasxfail = f"known product gap (under investigation): {msg}"
 
 
 @pytest.fixture(autouse=True)

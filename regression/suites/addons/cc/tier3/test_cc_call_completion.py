@@ -1,7 +1,7 @@
 """Tier 3 — CC Call Completion & After-Call scenarios.
 
 Verifies call lifecycle completion APIs that were corrected in
-CSV 功能清单 (L60 否→是, L94):
+CSV feature list (L60 no->yes, L94):
   - POST /cc/calls/{call_id}/end — end call with CDR metadata
   - POST /cc/calls/{call_id}/acw — after-call work submission
   - PATCH /cc/calls/{call_id} — call notes
@@ -121,7 +121,7 @@ async def test_cc_cdr_events(pbx, sipbot_pool, event_checker):
     """CDR events — call record generated after hangup.
 
     Verifies that a completed call generates CDR events
-    via webhook (CSV 录音模块 L303-L305).
+    via webhook (CSV recording module L303-L305).
     """
     callee = sipbot_pool.callee(
         host=pbx.host,

@@ -180,7 +180,8 @@ def enable_presence_module(pbx):
 
 @pytest.mark.asyncio
 async def test_presence_publish_accepted(pbx, webhook_server, sip, evidence):
-    """PUBLISH（无凭据，From 归属）必须被接受：200 + 有效 SIP-ETag 或显式状态。"""
+    """PUBLISH (unauthenticated, From-derived identity) must be accepted: 200 with
+    a valid SIP-ETag or explicit state."""
     h.boot_pbx(pbx, webhook_url=webhook_server.url)
     code, responses = sip.publish("1001", basic="open", note="at-desk")
     assert code == 200, f"PUBLISH answered {code}: {responses[:2]}"
@@ -189,7 +190,8 @@ async def test_presence_publish_accepted(pbx, webhook_server, sip, evidence):
 
 @pytest.mark.asyncio
 async def test_presence_subscribe_initial_notify_pidf(pbx, webhook_server, sip, evidence):
-    """SUBSCRIBE 必须 200 并收到初始 NOTIFY，PIDF 携带目标身份与状态字段。"""
+    """SUBSCRIBE must be answered 200 and followed by an initial NOTIFY whose PIDF
+    carries the target identity and status fields."""
     h.boot_pbx(pbx, webhook_url=webhook_server.url)
     code, traffic = sip.subscribe("1002", "1001")
     assert code == 200, f"SUBSCRIBE answered {code}: {traffic[:2]}"
@@ -203,7 +205,8 @@ async def test_presence_subscribe_initial_notify_pidf(pbx, webhook_server, sip, 
 
 @pytest.mark.asyncio
 async def test_presence_state_propagates_to_watchers(pbx, webhook_server, evidence, sip=None):
-    """PUBLISH 状态变更必须传播给在订 watcher：NOTIFY basic=closed + note 文本。"""
+    """A PUBLISHed state change must propagate to active watchers: NOTIFY with
+    basic=closed + the note text."""
     local = RawSipClient(h.ua_port(15602))
     local.attach_server(pbx.sip_port)
     try:

@@ -1,4 +1,4 @@
-"""Tier 3 — cc-desk Chrome E2E (cluster consult / 3-way / WS resilience / 强拆).
+"""Tier 3 — cc-desk Chrome E2E (cluster consult / 3-way / WS resilience / forced release).
 
 Runs the Playwright suite in cc-desk-e2e against a dedicated PBX instance
 booted by run-pbx.sh (same as cc-desk regression). Keeps cc addon regression

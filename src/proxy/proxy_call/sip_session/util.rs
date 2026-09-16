@@ -283,8 +283,15 @@ pub(super) fn forward_dtmf_event(
             // only the fallback for bridges without node context.
             let now = chrono::Utc::now().to_rfc3339();
             let step_start = ctx.step_start_time.clone().unwrap_or_else(|| now.clone());
+<<<<<<< Updated upstream
             let duration_ms =
                 crate::call::app::ivr::trace::duration_ms_between(Some(&step_start), &now);
+=======
+            let duration_ms = crate::call::app::ivr::trace::duration_ms_between(
+                Some(&step_start),
+                &now,
+            );
+>>>>>>> Stashed changes
             let ev = crate::rwi::IvrStepTrace {
                 call_id: session_id.to_string(),
                 session_id: session_id.to_string(),
@@ -377,7 +384,12 @@ pub(super) fn emit_suspended_flow_session_end(
         .as_ref()
         .and_then(|c| c.step_start_time.clone())
         .unwrap_or_else(|| now.clone());
+<<<<<<< Updated upstream
     let duration_ms = crate::call::app::ivr::trace::duration_ms_between(Some(&step_start), &now);
+=======
+    let duration_ms =
+        crate::call::app::ivr::trace::duration_ms_between(Some(&step_start), &now);
+>>>>>>> Stashed changes
     let ev = crate::rwi::IvrStepTrace {
         call_id: session_id.to_string(),
         session_id: session_id.to_string(),

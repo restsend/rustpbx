@@ -78,3 +78,6 @@ docs/RustPBX验收方案_v1.md
 e2e_test.md
 regression/reports/PHASE_REPORT_*.md
 src/addons/cc/acceptance-e2e/
+
+# Playwright platform-specific visual baselines (machine-local)
+*-snapshots/

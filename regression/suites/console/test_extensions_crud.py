@@ -80,7 +80,7 @@ async def auth_backend_api(pbx, webhook_server):
 
 @pytest.mark.asyncio
 async def test_extensions_full_crud_lifecycle(console_api, evidence):
-    """create → query 回读（字段级）→ patch 修改 → query 复核 → delete → 查无。"""
+    """create -> query round-trip (field-level) -> patch -> re-query -> delete -> gone."""
     ext = "7101"
     created = await console_api.put("/api/extensions", {
         "extension": ext,
@@ -101,7 +101,7 @@ async def test_extensions_full_crud_lifecycle(console_api, evidence):
     hit = _find(items, ext)
     A.require(hit, f"created extension {ext} in filtered query", f"items: {str(items)[:400]}")
     assert (hit.get("display_name") or "") == "CRUD Probe", f"display_name not persisted: {hit}"
-    # 安全回归（N1 修复）：列表 API 绝不可回传 sip_password 明文
+    # Security regression (N1 fix): the list API must never return sip_password
     assert "sip_password" not in hit or hit.get("sip_password") is None, (
         f"SECURITY: list API leaked sip_password: {hit}"
     )
@@ -136,7 +136,8 @@ async def test_extensions_full_crud_lifecycle(console_api, evidence):
 
 
 async def test_extensions_register_with_created_credentials(auth_backend_api, pbx, sipbot_pool, evidence):
-    """创建分机的 SIP 密码必须真实生效：REGISTER 认证通过并可在 locator 解析。"""
+    """A created extension's SIP password must actually authenticate a REGISTER
+    (and be resolvable via the locator)."""
     ext, pwd = "7102", "live-sip-pass"
     created = await auth_backend_api.put("/api/extensions", {
         "extension": ext, "display_name": "Live SIP", "sip_password": pwd,
@@ -152,7 +153,7 @@ async def test_extensions_register_with_created_credentials(auth_backend_api, pb
         await h.wait_registered(ua, f"created-ext-{ext}", timeout=10)
         evidence.log_metric("created_extension_registered", ext)
 
-        # locator 视角同步可见（console 诊断）
+        # also visible through the console diagnostics locator
         body = await auth_backend_api.post("/api/diagnostics/locator/lookup", {"user": ext})
         assert body.get("total", 0) >= 1, f"created extension not in locator: {str(body)[:200]}"
     finally:
@@ -160,7 +161,8 @@ async def test_extensions_register_with_created_credentials(auth_backend_api, pb
 
 
 async def test_extensions_delete_revokes_registration_credentials(auth_backend_api, pbx, sipbot_pool):
-    """删除分机后：旧密码 REGISTER 必须被拒（无 Registered successfully，且 401 持续）。"""
+    """After deletion the old credentials must be rejected (no 'Registered
+    successfully' — 401s persist)."""
     ext, pwd = "7103", "doomed-pass"
     created = await auth_backend_api.put("/api/extensions", {
         "extension": ext, "display_name": "Doomed", "sip_password": pwd,

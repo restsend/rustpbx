@@ -1,12 +1,13 @@
-"""RWI 命令面缺口补齐 — 产品已实现但此前零 Python e2e 的 action。
+"""RWI command-surface gap coverage — implemented actions that previously had
+zero Python e2e.
 
-覆盖（对照 src/rwi/session.rs RwiCommandPayload 全表）：
-  * record.pause / record.resume   → record_paused / record_resumed 事件
-  * dtmf.collect                   → dtmf_collected 事件携带精确数字串
-  * sip.message                    → 命令 ack 成功（无错误响应）
-  * call.set_ringback_source       → 命令 ack 成功
-严格：每条命令 ack 必须显式成功；事件断言用严格 schema 校验。
-"""
+Covered (against the full RwiCommandPayload table in src/rwi/session.rs):
+  * record.pause / record.resume   -> record_paused / record_resumed events
+  * dtmf.collect                   -> dtmf_collected event with exact digits
+  * sip.message                    -> command acks without error
+  * call.set_ringback_source       -> command acks without error
+Strict: every command ack must be explicitly successful; event assertions use
+the strict schema validators."""
 
 from __future__ import annotations
 
@@ -48,7 +49,7 @@ async def _live_call(pbx, sipbot_pool, event_checker, rwi, callee_port=15191, ca
 
 @pytest.mark.asyncio
 async def test_rwi_record_pause_resume_events(booted, pbx, webhook_server, sipbot_pool, event_checker, rwi, evidence, tmp_path):
-    """record.pause/resume 必须产生 record_paused / record_resumed RWI 事件。"""
+    """record.pause/resume must emit record_paused / record_resumed RWI events."""
     caller, callee, call_id = await _live_call(pbx, sipbot_pool, event_checker, rwi)
     rec = str(Path(pbx.work_dir) / "gap_rec.wav")
     resp = await rwi.record_start(call_id, str(rec), beep=False)
@@ -68,7 +69,7 @@ async def test_rwi_record_pause_resume_events(booted, pbx, webhook_server, sipbo
 
 @pytest.mark.asyncio
 async def test_rwi_dtmf_collect_digits(booted, pbx, webhook_server, sipbot_pool, event_checker, rwi, evidence):
-    """dtmf.collect：坐席侧 stdin 送数字，RWI 通道必须回 dtmf_collected 且数字精确。"""
+    """dtmf.collect: a DTMF digit sent via RWI must come back as dtmf_collected with the exact digits."""
     caller, callee, call_id = await _live_call(pbx, sipbot_pool, event_checker, rwi, callee_port=15192)
     collect = await rwi.send_request(
         "dtmf.collect",
@@ -97,7 +98,7 @@ async def test_rwi_dtmf_collect_digits(booted, pbx, webhook_server, sipbot_pool,
 
 @pytest.mark.asyncio
 async def test_rwi_sip_message_ack(booted, pbx, webhook_server, sipbot_pool, event_checker, rwi):
-    """sip.message：活动呼叫上发送必须 ack 成功（无错误码）。"""
+    """sip.message: sending on a live call must ack successfully (no error code)."""
     caller, callee, call_id = await _live_call(pbx, sipbot_pool, event_checker, rwi, callee_port=15193)
     resp = await rwi.send_request(
         "sip.message",
@@ -108,7 +109,7 @@ async def test_rwi_sip_message_ack(booted, pbx, webhook_server, sipbot_pool, eve
 
 @pytest.mark.asyncio
 async def test_rwi_set_ringback_source_ack(booted, pbx, webhook_server, sipbot_pool, event_checker, rwi):
-    """call.set_ringback_source：命令必须被接受（ack 成功或明确语义响应）。"""
+    """call.set_ringback_source: the command must be accepted (success or explicit semantic response)."""
     caller, callee, call_id = await _live_call(pbx, sipbot_pool, event_checker, rwi, callee_port=15194)
     resp = await rwi.send_request(
         "call.set_ringback_source",

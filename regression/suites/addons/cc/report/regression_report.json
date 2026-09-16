@@ -1,37 +1,6 @@
 {
-  "total": 2,
-  "passed": 2,
-  "duration": 21.498209953308105,
-  "tests": [
-    {
-      "name": "test_outbound_policy_filters_desk_lines",
-      "module": "outbound_policy::outbound_policy_filters_desk_lines",
-      "tier": "tier3",
-      "status": "passed",
-      "duration": 0.008,
-      "error": null,
-      "webhook_events": [],
-      "rtp_stats": {},
-      "sip_output": {},
-      "screenshot_path": null,
-      "timestamp": 1789539535.537123,
-      "event_flow_path": null,
-      "event_flow": null
-    },
-    {
-      "name": "test_outbound_policy_unconstrained_without_reference",
-      "module": "outbound_policy::outbound_policy_unconstrained_without_reference",
-      "tier": "tier3",
-      "status": "passed",
-      "duration": 0.003,
-      "error": null,
-      "webhook_events": [],
-      "rtp_stats": {},
-      "sip_output": {},
-      "screenshot_path": null,
-      "timestamp": 1789539546.156306,
-      "event_flow_path": null,
-      "event_flow": null
-    }
-  ]
+  "total": 0,
+  "passed": 0,
+  "duration": 52.65831518173218,
+  "tests": []
 }

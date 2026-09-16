@@ -1,8 +1,8 @@
 """Parallel / serial call-pattern coverage.
 
-并行呼叫: N concurrent p2p calls all establish with live media, and each leg
+Parallel calls: N concurrent p2p calls all establish with live media, and each leg
 produces its own CDR (no cross-call bleed).
-串行呼叫: back-to-back sequential calls on the SAME endpoints must all
+Serial calls: back-to-back sequential calls on the SAME endpoints must all
 complete independently — no state leak between calls (3rd call identical to
 1st).
 """
@@ -45,7 +45,8 @@ def _wait_cdr_count(cdr_dir, expected: int, timeout: float = 20.0) -> list:
 
 @pytest.mark.asyncio
 async def test_parallel_four_p2p_calls_all_establish(pbx, webhook_server, sipbot_pool, cdr_dir, evidence):
-    """并行呼叫 4 路：全部接通、每路有双向 RTP、每路独立 CDR（callId 互不相同）。"""
+    """4 parallel p2p calls: all establish, each leg has live RTP, and each
+    produces its own CDR (distinct callIds)."""
     h.boot_pbx(pbx, webhook_url=webhook_server.url)
     callees = [
         await _reg(sipbot_pool, pbx, h.ua_port(15170 + i), f"100{i % 3 + 1}")
@@ -81,7 +82,8 @@ async def test_parallel_four_p2p_calls_all_establish(pbx, webhook_server, sipbot
 
 @pytest.mark.asyncio
 async def test_serial_back_to_back_calls_no_state_leak(pbx, webhook_server, sipbot_pool, cdr_dir, evidence):
-    """串行呼叫 3 连打：同端点逐个完成，第三次与前两次行为一致（无状态残留）。"""
+    """3 back-to-back serial calls on the same endpoints: each completes and the
+    third behaves like the first (no state leak)."""
     h.boot_pbx(pbx, webhook_url=webhook_server.url)
     callee = await _reg(sipbot_pool, pbx, h.ua_port(15180), "1002")
     durations = []
@@ -112,7 +114,8 @@ async def test_serial_back_to_back_calls_no_state_leak(pbx, webhook_server, sipb
 
 @pytest.mark.asyncio
 async def test_concurrent_calls_to_same_callee_queue_or_answer(pbx, webhook_server, sipbot_pool, evidence):
-    """并行呼叫同一被叫：两路并发进线不导致崩溃或幽灵挂断——每路要么接通要么明确拒绝。"""
+    """Two concurrent calls to the same callee: no crash, no ghost hangups —
+    each call either establishes or is explicitly rejected."""
     h.boot_pbx(pbx, webhook_url=webhook_server.url)
     callee = await _reg(sipbot_pool, pbx, h.ua_port(15183), "1002")
     callers = [

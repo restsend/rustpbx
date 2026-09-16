@@ -91,7 +91,8 @@ async def cluster(pbx, webhook_server):
 
 
 async def test_cluster_ping_mesh(cluster, evidence):
-    """双节点互联：A→B 与 B→A 的 cluster/ping 都必须探活成功并回显 peer 身份。"""
+    """Dual-node interconnect: cluster/ping from A->B and B->A must both probe
+    the peer healthy (status ok + numeric latency) and echo the peer identity."""
     a, b = cluster
     for src, peer in ((a, b), (b, a)):
         status, body = await _post(src, "/ami/v1/cluster/ping")
@@ -104,7 +105,7 @@ async def test_cluster_ping_mesh(cluster, evidence):
 
 
 async def test_cluster_list_calls_schema(cluster, evidence):
-    """集群模式下两节点的 /ami/v1/calls 都必须是结构化 JSON（commerce 门控开）。"""
+    """Both nodes' /ami/v1/calls must return structured JSON (commerce-gated)."""
     a, b = cluster
     for node in (a, b):
         status, body = await _get(node, "/ami/v1/calls")
