@@ -60,28 +60,43 @@ img { margin: 8px 0; }
 <div class="header">
     <div>
         <h1>RustPBX CC E2E Regression Report</h1>
-        <p>Generated: 2026-09-16 09:00:53 | Duration: 18.5s</p>
+        <p>Generated: 2026-09-16 12:33:43 | Duration: 27.8s</p>
     </div>
-    <div class="overall pass">1/1 (100.0%)</div>
+    <div class="overall fail">0/2 (0.0%)</div>
 </div>
 
         <h2>Tier Summary</h2>
         <table class="summary"><thead><tr><th>Tier</th><th>Passed</th><th>Failed</th><th>Total</th><th>Rate</th></tr></thead>
-        <tbody><tr class='pass'><td>tier3</td><td>1</td><td>0</td><td>1</td><td>100.0%</td></tr></tbody></table>
+        <tbody><tr class='fail'><td>tier3</td><td>0</td><td>2</td><td>2</td><td>0.0%</td></tr></tbody></table>
         <h2>Module Summary</h2>
         <table class="summary"><thead><tr><th>Module</th><th>Passed</th><th>Failed</th><th>Total</th><th>Rate</th></tr></thead>
-        <tbody><tr class='pass'><td>ivr</td><td>1</td><td>0</td><td>1</td><td>100.0%</td></tr></tbody></table>
+        <tbody><tr class='fail'><td>acd</td><td>0</td><td>2</td><td>2</td><td>0.0%</td></tr></tbody></table>
         
 <h2>Test Details</h2>
 
-                <div class='test-card passed'>
+                <div class='test-card skipped'>
                     <div class='test-header'>
-                        <span class='test-status status-passed'>PASSED</span>
-                        <span class='test-name'>test_ivr_api_node</span>
-                        <span class='test-meta'>ivr / tier3 / 4.22s</span>
+                        <span class='test-status status-skipped'>SKIPPED</span>
+                        <span class='test-name'>test_outbound_policy_filters_desk_lines</span>
+                        <span class='test-meta'>acd / tier3 / 0.01s</span>
                     </div>
                     
-                    <details class='collapsible-section'><summary>Webhook Events (1)</summary><table class='events'><thead><tr><th>Time</th><th>Event Type</th><th>Call ID</th></tr></thead><tbody><tr><td>1789520447.553</td><td class='event-call_created'><strong>call_created</strong></td><td>984c6ad1c05e4e39b3b3cb3f0b4378a5</td></tr></tbody></table></details>
+                    
+                    
+                    
+                    
+                    
+                </div>
+                
+
+                <div class='test-card skipped'>
+                    <div class='test-header'>
+                        <span class='test-status status-skipped'>SKIPPED</span>
+                        <span class='test-name'>test_outbound_policy_unconstrained_without_reference</span>
+                        <span class='test-meta'>acd / tier3 / 0.01s</span>
+                    </div>
+                    
+                    
                     
                     
                     
