@@ -375,7 +375,13 @@ pub trait AgentRegistry: Send + Sync {
     /// group id). MUST be idempotent (upsert). Called when the call enters
     /// wait retention so the gate is visible to every node before the first
     /// poll — the async event tap alone is lossy under backpressure.
-    async fn fifo_register_wait(&self, _queue_id: &str, _call_id: &str, _caller: &str, _priority: i32) {
+    async fn fifo_register_wait(
+        &self,
+        _queue_id: &str,
+        _call_id: &str,
+        _caller: &str,
+        _priority: i32,
+    ) {
     }
 
     /// FIFO gate. Auto-detects the caller's mode from the shared queue:

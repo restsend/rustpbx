@@ -159,9 +159,8 @@ impl CallController {
 
     /// Stop the active realtime bridge (clean app exit — no hangup).
     pub fn stop_realtime(&self) -> anyhow::Result<()> {
-        self.session.send_command(CallCommand::RealtimeStop {
-            reason: None,
-        })
+        self.session
+            .send_command(CallCommand::RealtimeStop { reason: None })
     }
 
     /// Append an event to the session's call trace timeline.

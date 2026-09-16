@@ -344,13 +344,14 @@ async fn bridge_play_pcm_streams_and_fires_on_end() {
 
     let (end_tx, end_rx) = tokio::sync::oneshot::channel::<bool>();
     let end_slot = std::sync::Mutex::new(Some(end_tx));
-    let on_end: rustpbx_media::egress::EgressEndCallback = std::sync::Arc::new(move |interrupted| {
-        if let Ok(mut slot) = end_slot.lock() {
-            if let Some(tx) = slot.take() {
-                let _ = tx.send(interrupted);
+    let on_end: rustpbx_media::egress::EgressEndCallback =
+        std::sync::Arc::new(move |interrupted| {
+            if let Ok(mut slot) = end_slot.lock() {
+                if let Some(tx) = slot.take() {
+                    let _ = tx.send(interrupted);
+                }
             }
-        }
-    });
+        });
 
     // 20ms @ 8kHz = 160 samples per frame; stream 10 frames (200ms) then drop.
     let mut tx = mb

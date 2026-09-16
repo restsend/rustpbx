@@ -8,8 +8,8 @@
 //! hangup / app replacement.
 
 use crate::call::realtime::bridge::{
-    connect_realtime_ws, run_realtime_bridge, BridgeEndReason, BridgeIo, BridgeOutput, Playout,
-    UplinkPcm,
+    BridgeEndReason, BridgeIo, BridgeOutput, Playout, UplinkPcm, connect_realtime_ws,
+    run_realtime_bridge,
 };
 use crate::call::realtime::{RealtimeParams, RealtimeProtocol};
 use futures::StreamExt;
@@ -46,8 +46,10 @@ impl MediaBridgePlayout {
             return;
         }
         let (tx, rx) = mpsc::channel(256);
-        let source =
-            Box::new(crate::media::audio_source::ChannelAudioSource::new(rx, self.sample_rate));
+        let source = Box::new(crate::media::audio_source::ChannelAudioSource::new(
+            rx,
+            self.sample_rate,
+        ));
         match self.leg.play(source, false, None).await {
             Ok(()) => self.tx = Some(tx),
             Err(e) => warn!(error = %e, "realtime: failed to arm playout sink"),
@@ -83,7 +85,6 @@ impl Playout for MediaBridgePlayout {
     }
 }
 
-
 // ═══════════════════════════════════════════════════════════════════════
 // Session wiring — `impl SipSession` handlers for the realtime commands.
 // ═══════════════════════════════════════════════════════════════════════
@@ -98,7 +99,7 @@ pub(crate) struct RealtimeBridgeHandle {
 
 use super::session::SipSession;
 use crate::call::domain::{CallCommand, HangupCascade, HangupCommand, HangupInitiator};
-use crate::call_errors::{ErrSeverity, TraceKind, TraceEvent};
+use crate::call_errors::{ErrSeverity, TraceEvent, TraceKind};
 use crate::rwi::RealtimeEvent;
 
 impl SipSession {
@@ -308,7 +309,10 @@ impl SipSession {
     /// `reason` is `Some`, the stop came from the bridge task itself
     /// (endpoint close/error): with `hangup_on_disconnect` the call hangs up.
     /// `None` is the app's clean exit — no hangup.
-    pub(crate) async fn handle_realtime_stop(&mut self, reason: Option<String>) -> anyhow::Result<()> {
+    pub(crate) async fn handle_realtime_stop(
+        &mut self,
+        reason: Option<String>,
+    ) -> anyhow::Result<()> {
         let Some(handle) = self.realtime_bridge.take() else {
             return Ok(());
         };
@@ -319,7 +323,10 @@ impl SipSession {
                 TraceKind::Ivr,
                 format!(
                     "Realtime bridge stopped{}",
-                    reason.as_deref().map(|r| format!(" ({r})")).unwrap_or_default()
+                    reason
+                        .as_deref()
+                        .map(|r| format!(" ({r})"))
+                        .unwrap_or_default()
                 ),
             )
             .severity(ErrSeverity::Info),

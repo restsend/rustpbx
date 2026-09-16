@@ -3027,7 +3027,9 @@ mod tests {
             .await;
 
         let trace_a = events.try_recv().expect("step A trace must be enqueued");
-        let trace_b = events.try_recv().expect("chained step B trace must be enqueued");
+        let trace_b = events
+            .try_recv()
+            .expect("chained step B trace must be enqueued");
         let _transfer_trace = events.try_recv().expect("transfer trace must be enqueued");
 
         assert_eq!(trace_a.event.payload["step_id"], "step-a");
@@ -6605,7 +6607,10 @@ mod tests {
         // The start is a fixed past date, so the derived window is large.
         let expected = crate::call::app::ivr::trace::duration_ms_between(
             session_end.step_start_time.as_deref(),
-            session_end.step_end_time.as_deref().expect("session_end must carry step_end_time"),
+            session_end
+                .step_end_time
+                .as_deref()
+                .expect("session_end must carry step_end_time"),
         );
         assert_eq!(
             session_end.duration_ms, expected,
@@ -6864,7 +6869,10 @@ mod tests {
         // Contract: duration_ms is derived from the stamps, not hardcoded 0.
         let expected = crate::call::app::ivr::trace::duration_ms_between(
             fallback.step_start_time.as_deref(),
-            fallback.step_end_time.as_deref().expect("fallback must carry step_end_time"),
+            fallback
+                .step_end_time
+                .as_deref()
+                .expect("fallback must carry step_end_time"),
         );
         assert_eq!(
             fallback.duration_ms, expected,

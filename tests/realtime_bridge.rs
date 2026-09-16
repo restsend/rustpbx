@@ -10,13 +10,13 @@
 
 use futures::{SinkExt, StreamExt};
 use rustpbx::call::realtime::bridge::{
-    run_realtime_bridge, BridgeEndReason, BridgeIo, BridgeOutput, BridgeRun, Playout, UplinkPcm,
+    BridgeEndReason, BridgeIo, BridgeOutput, BridgeRun, Playout, UplinkPcm, run_realtime_bridge,
 };
-use rustpbx::call::realtime::{openai::OpenAiRealtime, RealtimeParams, RealtimeProtocolKind};
+use rustpbx::call::realtime::{RealtimeParams, RealtimeProtocolKind, openai::OpenAiRealtime};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::http::Request;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::http::Request;
 use tokio_util::sync::CancellationToken;
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -85,9 +85,7 @@ struct MockServer {
 
 /// Spawn the scripted mock: reads upgrade headers, emits them for asserts,
 /// applies `steps` in order, then closes.
-async fn spawn_mock(
-    steps: Vec<MockStep>,
-) -> (u16, MockServer) {
+async fn spawn_mock(steps: Vec<MockStep>) -> (u16, MockServer) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().unwrap().port();
     let (path_tx, path_rx) = mpsc::channel(1);
@@ -99,7 +97,12 @@ async fn spawn_mock(
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept");
         let ws = tokio_tungstenite::accept_hdr_async(stream, |req: &Request<()>, mut resp| {
-            let _ = path_tx.try_send(req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_default());
+            let _ = path_tx.try_send(
+                req.uri()
+                    .path_and_query()
+                    .map(|p| p.as_str().to_string())
+                    .unwrap_or_default(),
+            );
             let auth = req
                 .headers()
                 .get("Authorization")
@@ -194,12 +197,9 @@ async fn start_bridge(
         let mut p = params(mock_port);
         p.api_key = Some("sk-test-key".into());
         let protocol = Box::new(OpenAiRealtime);
-        let ws = rustpbx::call::realtime::bridge::connect_realtime_ws(
-            protocol.as_ref(),
-            &p,
-        )
-        .await
-        .expect("mock connect");
+        let ws = rustpbx::call::realtime::bridge::connect_realtime_ws(protocol.as_ref(), &p)
+            .await
+            .expect("mock connect");
         let (ws_write, ws_read) = ws.split();
         let (_u_tx, u_rx) = mpsc::channel(8);
         let io = BridgeIo {
@@ -215,13 +215,7 @@ async fn start_bridge(
         let run = run_realtime_bridge(protocol, &p, io, out_tx).await;
         let _ = run_tx.send(run);
     });
-    (
-        mock,
-        run_rx,
-        out_rx,
-        written_rx,
-        mutes_rx,
-    )
+    (mock, run_rx, out_rx, written_rx, mutes_rx)
 }
 
 // ── tests ───────────────────────────────────────────────────────────────────
@@ -253,10 +247,13 @@ async fn auth_url_and_handshake_then_disconnect() {
     assert!(!path.contains("sk-test-key"), "key must not ride the url");
 
     // Handshake sent session.update with voice + instructions.
-    let update = tokio::time::timeout(std::time::Duration::from_secs(2), mock.session_update.recv())
-        .await
-        .expect("session.update")
-        .expect("non-empty");
+    let update = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        mock.session_update.recv(),
+    )
+    .await
+    .expect("session.update")
+    .expect("non-empty");
     let v: serde_json::Value = serde_json::from_str(&update).unwrap();
     assert_eq!(v["session"]["voice"], "alloy");
 

@@ -1458,9 +1458,7 @@ mod tests {
                     .method("POST")
                     .uri(&url_path)
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        serde_json::to_vec(&msg).unwrap(),
-                    ))
+                    .body(axum::body::Body::from(serde_json::to_vec(&msg).unwrap()))
                     .unwrap(),
             )
             .await

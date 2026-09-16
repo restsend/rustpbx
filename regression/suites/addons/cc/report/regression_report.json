@@ -1,0 +1,28 @@
+{
+  "total": 1,
+  "passed": 1,
+  "duration": 18.529261827468872,
+  "tests": [
+    {
+      "name": "test_ivr_api_node",
+      "module": "ivr",
+      "tier": "tier3",
+      "status": "passed",
+      "duration": 4.224,
+      "error": null,
+      "webhook_events": [
+        {
+          "timestamp": 1789520447.553313,
+          "event_type": "call_created",
+          "call_id": "984c6ad1c05e4e39b3b3cb3f0b4378a5"
+        }
+      ],
+      "rtp_stats": {},
+      "sip_output": {},
+      "screenshot_path": null,
+      "timestamp": 1789520450.751004,
+      "event_flow_path": null,
+      "event_flow": null
+    }
+  ]
+}

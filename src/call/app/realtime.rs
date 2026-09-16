@@ -18,9 +18,7 @@
 //! inside the session — app params reference a preset by `name` and can
 //! never carry the API key.
 
-use crate::call::app::{
-    AppAction, ApplicationContext, CallApp, CallAppType, CallController,
-};
+use crate::call::app::{AppAction, ApplicationContext, CallApp, CallAppType, CallController};
 use crate::call::realtime::RealtimeParams;
 use async_trait::async_trait;
 use tracing::info;
@@ -39,8 +37,8 @@ impl RealtimeApp {
         value: Option<&serde_json::Value>,
         presets: Option<&[crate::config::RealtimePreset]>,
     ) -> anyhow::Result<Self> {
-        let value = value
-            .ok_or_else(|| anyhow::anyhow!("realtime app requires params (preset or url)"))?;
+        let value =
+            value.ok_or_else(|| anyhow::anyhow!("realtime app requires params (preset or url)"))?;
         Ok(Self::new(RealtimeParams::resolve(value, presets)?))
     }
 }
@@ -70,7 +68,10 @@ impl CallApp for RealtimeApp {
         ctrl.record_trace(
             crate::call_errors::TraceEvent::new(
                 crate::call_errors::TraceKind::Ivr,
-                format!("Realtime bridge started ({})", self.params.protocol.as_str()),
+                format!(
+                    "Realtime bridge started ({})",
+                    self.params.protocol.as_str()
+                ),
             )
             .severity(crate::call_errors::ErrSeverity::Info),
         );

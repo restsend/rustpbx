@@ -9,8 +9,8 @@
 //! - DTMF: JSON text `{"type":"dtmf","digit":"5"}` both directions.
 
 use super::{
-    bytes_to_pcm, pcm_to_bytes, DownlinkEvent, RealtimeParams, RealtimeProtocol,
-    RealtimeProtocolKind, UplinkMessage,
+    DownlinkEvent, RealtimeParams, RealtimeProtocol, RealtimeProtocolKind, UplinkMessage,
+    bytes_to_pcm, pcm_to_bytes,
 };
 
 pub struct PcmBridge;
@@ -62,7 +62,10 @@ impl RealtimeProtocol for PcmBridge {
                     .get("digit")
                     .and_then(|v| v.as_str())
                     .and_then(|s| s.chars().next());
-                digit.map(|d| DownlinkEvent::Dtmf { digit: d }).into_iter().collect()
+                digit
+                    .map(|d| DownlinkEvent::Dtmf { digit: d })
+                    .into_iter()
+                    .collect()
             }
             _ => Vec::new(),
         }

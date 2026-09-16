@@ -9688,21 +9688,21 @@ impl SipSession {
             CallCommand::StopApp { reason } => {
                 self.teardown_realtime_bridge("app stopped");
                 match self.app_runtime.stop_app(reason).await {
-                Ok(()) => {
-                    self.sync_rtp_timeout_pause();
-                    CommandResult::success()
+                    Ok(()) => {
+                        self.sync_rtp_timeout_pause();
+                        CommandResult::success()
+                    }
+                    Err(e) => CommandResult::failure(e.to_string()),
                 }
-                Err(e) => CommandResult::failure(e.to_string()),
-                }
-            },
+            }
 
-            CallCommand::RealtimeStart { params } => Self::ok_or_failure(
-                self.handle_realtime_start(params).await,
-            ),
+            CallCommand::RealtimeStart { params } => {
+                Self::ok_or_failure(self.handle_realtime_start(params).await)
+            }
 
-            CallCommand::RealtimeStop { reason } => Self::ok_or_failure(
-                self.handle_realtime_stop(reason).await,
-            ),
+            CallCommand::RealtimeStop { reason } => {
+                Self::ok_or_failure(self.handle_realtime_stop(reason).await)
+            }
 
             CallCommand::InjectAppEvent { event } => {
                 let event_value = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);

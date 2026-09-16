@@ -93,7 +93,6 @@ fn forward_dtmf_with_active_bridge_owns_digit_without_app_injection() {
     })));
     let digits = Arc::new(parking_lot::Mutex::new(Vec::new()));
 
-
     forward_dtmf_event(
         '1',
         "caller",
@@ -687,8 +686,7 @@ fn test_resolve_outbound_callee_uri_prefers_registered_aor_via_home_proxy() {
         r#type: Some(rsipstack::sip::Transport::Udp),
         addr: rsipstack::sip::HostWithPort::try_from("10.0.0.2:5070").unwrap(),
     };
-    let expected =
-        rsipstack::sip::Uri::try_from("sip:lp@10.0.0.2:5070;transport=UDP").unwrap();
+    let expected = rsipstack::sip::Uri::try_from("sip:lp@10.0.0.2:5070;transport=UDP").unwrap();
 
     let target = Location {
         aor: contact_uri,
@@ -1933,7 +1931,10 @@ async fn test_blind_transfer_reports_queue_flow_source() {
     );
     assert_eq!(entry.event.payload["transfer_source"]["name"], "sales");
     assert_eq!(entry.event.payload["transfer_source"]["agent_id"], "2002");
-    assert_eq!(entry.event.payload["transfer_source"]["agent_name"], "Alice");
+    assert_eq!(
+        entry.event.payload["transfer_source"]["agent_name"],
+        "Alice"
+    );
 }
 
 /// A bare (non-IVR, non-queue) call blind-transferred by an agent attributes
@@ -2048,7 +2049,10 @@ async fn test_blind_transfer_reports_agent_flow_source_with_name() {
         "agent"
     );
     assert_eq!(entry.event.payload["transfer_source"]["agent_id"], "2002");
-    assert_eq!(entry.event.payload["transfer_source"]["agent_name"], "Alice");
+    assert_eq!(
+        entry.event.payload["transfer_source"]["agent_name"],
+        "Alice"
+    );
     assert!(
         entry.event.payload["transfer_source"].get("name").is_none(),
         "agent branch keeps `name` unset"
@@ -2168,9 +2172,7 @@ async fn test_blind_transfer_agent_name_requires_resolved_id() {
     );
     assert_eq!(entry.event.payload["transfer_source"]["agent_id"], "2002");
     assert!(
-        entry
-            .event
-            .payload["transfer_source"]
+        entry.event.payload["transfer_source"]
             .get("agent_name")
             .is_none(),
         "agent_name must be omitted when the id did not come from the CC hook"

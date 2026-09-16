@@ -556,6 +556,16 @@ impl RwiGateway {
         self.dtmf_taps.remove(call_id);
     }
 
+    /// Feed a PBX-injected DTMF digit (`call.send_dtmf`) to any active
+    /// DtmfCollect tap for this call, mirroring how inbound `dtmf` events are
+    /// tapped in `dispatch`. Without this, collections never observe digits
+    /// that originate from the PBX side.
+    pub fn feed_dtmf_tap(&self, call_id: &CallId, leg_id: Option<String>, digit: char) {
+        if let Some(tx) = self.dtmf_taps.get(call_id) {
+            let _ = tx.send((leg_id, digit));
+        }
+    }
+
     /// Send an event to every known session (broadcast).
     /// Call-scoped events (with `call_id`) carry it in the envelope so webhook
     /// consumers can correlate. Truly global events (agent_state_changed, etc.)

@@ -490,9 +490,12 @@ async fn create_extension(
 
 async fn query_extensions(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<ListQuery<QueryExtensionsFilters>>,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "extensions", "read").await {
+        return resp;
+    }
     let db = state.db();
     let (_, per_page) = payload.normalize();
 
@@ -645,8 +648,12 @@ async fn query_extensions(
             .ok();
         let registrations =
             fetch_extension_locator_summary(server.clone(), &realm, &ext.extension).await;
+        // Security: never expose SIP credentials through the list API — the
+        // password is write-only (set via create/update, never returned).
+        let mut ext_json = json!(ext);
+        ext_json["sip_password"] = serde_json::Value::Null;
         items.push(json!({
-            "extension": ext,
+            "extension": ext_json,
             "departments": departments,
             "registrations": registrations,
         }));

@@ -401,10 +401,14 @@ async fn incoming_call_created_reaches_context_subscribers_before_attach() {
     {
         let mut gw = gateway.write();
         for context in ["default", "default", "other"] {
-            let sid = gw.create_session(RwiIdentity {
-                token: "test".into(),
-                scopes: vec!["call.control".into()],
-            }).read().id.clone();
+            let sid = gw
+                .create_session(RwiIdentity {
+                    token: "test".into(),
+                    scopes: vec!["call.control".into()],
+                })
+                .read()
+                .id
+                .clone();
             let (tx, rx) = mpsc::unbounded_channel();
             gw.set_session_event_sender(&sid, tx);
             gw.subscribe(&sid, vec![context.into()], None);
@@ -415,7 +419,11 @@ async fn incoming_call_created_reaches_context_subscribers_before_attach() {
     let (server, _) =
         create_test_server_with_rwi_gateway(ProxyConfig::default(), gateway.clone()).await;
     let request = create_test_request(
-        rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None,
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
     );
     let (mut tx, _transport) = create_transaction(request).await;
     let context = CallContext {
@@ -446,12 +454,17 @@ async fn incoming_call_created_reaches_context_subscribers_before_attach() {
                     break event;
                 }
             }
-        }).await.expect("incoming event must reach subscribers before attach");
+        })
+        .await
+        .expect("incoming event must reach subscribers before attach");
         assert_eq!(event["call_id"], "incoming-fanout");
         assert_eq!(event["context"], "default");
         assert_eq!(event["caller"], "sip:alice@rustpbx.com");
     }
-    assert!(other_context.try_recv().is_err(), "other contexts must not receive the event");
+    assert!(
+        other_context.try_recv().is_err(),
+        "other contexts must not receive the event"
+    );
     cancel.cancel();
     serving.abort();
     let _ = serving.await;
@@ -1482,9 +1495,20 @@ async fn test_accept_call_fires_connected_hook_only_for_callee_answer() {
         let mut session = build_session_on_server(server, dialplan).await;
         session.accept_call(None, None).await.unwrap();
         session.accept_call(None, None).await.unwrap();
-        assert_eq!(connected.load(Ordering::SeqCst), 0, "caller-only answer: {application:?}");
-        session.accept_call(Some("sip:agent@rustpbx.com".into()), None).await.unwrap();
-        assert_eq!(connected.load(Ordering::SeqCst), 1, "callee answer: {application:?}");
+        assert_eq!(
+            connected.load(Ordering::SeqCst),
+            0,
+            "caller-only answer: {application:?}"
+        );
+        session
+            .accept_call(Some("sip:agent@rustpbx.com".into()), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            connected.load(Ordering::SeqCst),
+            1,
+            "callee answer: {application:?}"
+        );
     }
 }
 
@@ -2691,7 +2715,11 @@ async fn queue_agent_connect_activates_media_bridge() {
         )
         .await;
 
-    assert_eq!(connected.load(Ordering::SeqCst), 1, "agent answer must fire connected hook");
+    assert_eq!(
+        connected.load(Ordering::SeqCst),
+        1,
+        "agent answer must fire connected hook"
+    );
 
     // The media bridge must now be active (both legs accepted + relay armed).
     let mb = session.media.bridge.as_ref().expect("media bridge present");

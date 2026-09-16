@@ -1,7 +1,0 @@
-# Keep test sources tracked; only ignore generated artifacts.
-node_modules/
-report/
-logs/
-test-results/
-playwright-report/
-screenshots/

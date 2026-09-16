@@ -181,7 +181,10 @@ mod tests {
 
         // Sub-millisecond windows truncate to 0 (instant steps).
         assert_eq!(
-            duration_ms_between(Some("2026-09-14T04:13:30.766221Z"), "2026-09-14T04:13:30.766382Z"),
+            duration_ms_between(
+                Some("2026-09-14T04:13:30.766221Z"),
+                "2026-09-14T04:13:30.766382Z"
+            ),
             0
         );
     }

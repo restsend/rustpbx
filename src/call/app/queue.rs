@@ -925,9 +925,7 @@ impl QueueApp {
         // Offline since then must NOT be re-dialled from the stale list —
         // presence changed, the resolve-time Idle filter no longer holds.
         // (Ringing reserved for OUR call = our own in-flight reservation.)
-        if agent.has_capacity()
-            && matches!(agent.presence, PresenceState::Idle)
-        {
+        if agent.has_capacity() && matches!(agent.presence, PresenceState::Idle) {
             return Some(true);
         }
         if matches!(
@@ -1395,7 +1393,9 @@ impl QueueApp {
                 | QueueState::PlayingHold { .. }
                 | QueueState::PlayingComfortPrompt
                 | QueueState::DialingAgents { .. }
-                | QueueState::PlayingTransferPrompt { connected_agent: None }
+                | QueueState::PlayingTransferPrompt {
+                    connected_agent: None
+                }
         ) {
             debug!(state = ?self.state, "Queue: escalation check skipped — not waiting");
             return Ok(());
@@ -2247,9 +2247,7 @@ impl CallApp for QueueApp {
                     if let Some(agent_id) = data.get("agent_id").and_then(|v| v.as_str())
                         && let Some(ref registry) = self.agent_registry
                     {
-                        let _ = registry
-                            .release_call(agent_id, &self.call_id)
-                            .await;
+                        let _ = registry.release_call(agent_id, &self.call_id).await;
                     }
                     self.handle_agent_unavailable(
                         ctrl,
@@ -2267,9 +2265,7 @@ impl CallApp for QueueApp {
                     if let Some(agent_id) = data.get("agent_id").and_then(|v| v.as_str())
                         && let Some(ref registry) = self.agent_registry
                     {
-                        let _ = registry
-                            .release_call(agent_id, &self.call_id)
-                            .await;
+                        let _ = registry.release_call(agent_id, &self.call_id).await;
                     }
                     self.handle_agent_unavailable(
                         ctrl,

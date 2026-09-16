@@ -1972,7 +1972,13 @@ mod tests {
                 .unwrap_or_default()
         }
 
-        async fn fifo_register_wait(&self, queue_id: &str, call_id: &str, _caller: &str, _priority: i32) {
+        async fn fifo_register_wait(
+            &self,
+            queue_id: &str,
+            call_id: &str,
+            _caller: &str,
+            _priority: i32,
+        ) {
             self.fifo_registers
                 .lock()
                 .unwrap()
@@ -3282,10 +3288,10 @@ mod tests {
     #[tokio::test]
     async fn test_fifo_gate_hooks_fire_on_dial_and_return_to_wait() {
         use std::sync::Arc;
-        let registry = Arc::new(HookRecordingRegistry::new().with_resolve_uris(vec![
-            vec!["sip:agent-001@localhost".to_string()],
-            vec![],
-        ]));
+        let registry = Arc::new(
+            HookRecordingRegistry::new()
+                .with_resolve_uris(vec![vec!["sip:agent-001@localhost".to_string()], vec![]]),
+        );
         registry
             .inner
             .register(
@@ -3375,7 +3381,11 @@ mod tests {
         }
         assert!(hold_restarted, "must return to wait retention");
         assert!(
-            registry.fifo_releases.lock().unwrap().contains(&"call-fifo-1".to_string()),
+            registry
+                .fifo_releases
+                .lock()
+                .unwrap()
+                .contains(&"call-fifo-1".to_string()),
             "return to wait retention must fifo_release_dispatch"
         );
 

@@ -16,8 +16,8 @@
 //! the URL, which ends up in logs and CDRs.
 
 use super::{
-    pcm_to_bytes, DownlinkEvent, RealtimeParams, RealtimeProtocol, RealtimeProtocolKind,
-    UplinkMessage,
+    DownlinkEvent, RealtimeParams, RealtimeProtocol, RealtimeProtocolKind, UplinkMessage,
+    pcm_to_bytes,
 };
 use base64::Engine as _;
 
@@ -279,7 +279,9 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(text).unwrap();
         assert_eq!(v["type"], "input_audio_buffer.append");
         let b64 = v["audio"].as_str().expect("base64 audio");
-        let decoded = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap();
         assert_eq!(decoded, pcm_to_bytes(&[1, -2, 3]));
         assert!(p.encode_uplink(&[]).is_empty());
     }
@@ -319,9 +321,10 @@ mod tests {
             }]
         );
         // Empty deltas are dropped.
-        assert!(p
-            .decode_text(r#"{"type":"response.audio_transcript.delta","delta":""}"#)
-            .is_empty());
+        assert!(
+            p.decode_text(r#"{"type":"response.audio_transcript.delta","delta":""}"#)
+                .is_empty()
+        );
 
         // Caller transcript final.
         assert_eq!(
@@ -362,10 +365,14 @@ mod tests {
 
         // Non-function output items are ignored; unknown types ignored; junk
         // text ignored (never an error).
-        assert!(p
-            .decode_text(r#"{"type":"response.output_item.done","item":{"type":"message"}}"#)
-            .is_empty());
-        assert!(p.decode_text(r#"{"type":"rate_limits.updated"}"#).is_empty());
+        assert!(
+            p.decode_text(r#"{"type":"response.output_item.done","item":{"type":"message"}}"#)
+                .is_empty()
+        );
+        assert!(
+            p.decode_text(r#"{"type":"rate_limits.updated"}"#)
+                .is_empty()
+        );
         assert!(p.decode_text("garbage").is_empty());
         assert!(p.decode_binary(&[1, 2, 3]).is_empty());
     }

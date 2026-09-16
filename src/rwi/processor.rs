@@ -2055,10 +2055,23 @@ impl RwiCommandProcessor {
         let handle = self.get_handle(&call_id).await?;
         handle
             .send_command(CallCommand::SendDtmf {
-                leg_id: leg_id.map(LegId::new).unwrap_or(LegId::from("caller")),
-                digits,
+                leg_id: leg_id.clone().map(LegId::new).unwrap_or(LegId::from("caller")),
+                digits: digits.clone(),
             })
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
+
+        // Mirror the injected digits into any active DtmfCollect tap so that
+        // `dtmf.collect` observes PBX-sourced digits exactly like inbound
+        // RFC2833/INFO DTMF (the tap is fed from the dispatch path for
+        // inbound digits only).
+        {
+            let gw = self.gateway.read();
+            let leg = leg_id.unwrap_or_else(|| "caller".to_string());
+            for ch in digits.chars() {
+                gw.feed_dtmf_tap(&crate::rwi::CallId::from(call_id.as_str()), Some(leg.clone()), ch);
+            }
+        }
+
         Ok(CommandResult::Success)
     }
 

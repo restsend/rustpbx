@@ -9,8 +9,8 @@
 use super::{DownlinkEvent, RealtimeParams, RealtimeProtocol, UplinkMessage};
 use futures::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 use tokio_util::sync::CancellationToken;
-use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 use tracing::info;
 
 /// One uplink PCM frame (mono, at `sample_rate`) ready for the protocol.
@@ -35,11 +35,13 @@ pub enum BridgeEndReason {
 #[derive(Debug)]
 pub enum BridgeOutput {
     /// RWI `realtime_event` to broadcast.
-    Event { kind: String, data: serde_json::Value },
+    Event {
+        kind: String,
+        data: serde_json::Value,
+    },
     /// Caller-side DTMF digit reported by the endpoint.
     Dtmf { digit: char },
 }
-
 
 /// Playout sink abstraction so the loop is testable without a MediaBridge.
 #[async_trait::async_trait]
@@ -58,8 +60,11 @@ pub struct BridgeIo {
         >,
         Message,
     >,
-    pub ws_read:
-        futures::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>,
+    pub ws_read: futures::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    >,
     pub uplink_rx: mpsc::Receiver<UplinkPcm>,
     pub playout: Box<dyn Playout>,
     pub cancel: CancellationToken,
@@ -264,8 +269,8 @@ pub async fn connect_realtime_ws(
     anyhow::Error,
 > {
     let url = protocol.connect_url(params);
-    let mut request =
-        IntoClientRequest::into_client_request(&url).map_err(|e| anyhow::anyhow!("invalid realtime url '{url}': {e}"))?;
+    let mut request = IntoClientRequest::into_client_request(&url)
+        .map_err(|e| anyhow::anyhow!("invalid realtime url '{url}': {e}"))?;
     for (name, value) in protocol.upgrade_headers(params) {
         let parsed_name = name
             .parse::<tokio_tungstenite::tungstenite::http::HeaderName>()
@@ -287,4 +292,3 @@ pub async fn connect_realtime_ws(
     };
     Ok(ws)
 }
-

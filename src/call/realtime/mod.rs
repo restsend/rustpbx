@@ -111,9 +111,7 @@ impl RealtimeParams {
             let preset = presets
                 .and_then(|list| list.iter().find(|p| p.name == name))
                 .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "realtime preset '{name}' not found in [[realtime]] config"
-                    )
+                    anyhow::anyhow!("realtime preset '{name}' not found in [[realtime]] config")
                 })?;
             preset_applied = true;
             Self {
@@ -198,7 +196,9 @@ impl RealtimeParams {
                 }
             }
         }
-        std::env::var("REALTIME_API_KEY").ok().filter(|k| !k.is_empty())
+        std::env::var("REALTIME_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())
     }
 }
 
@@ -301,7 +301,10 @@ mod tests {
 
     #[test]
     fn protocol_kind_parses_aliases() {
-        assert_eq!(RealtimeProtocolKind::parse("openai"), Some(RealtimeProtocolKind::OpenAi));
+        assert_eq!(
+            RealtimeProtocolKind::parse("openai"),
+            Some(RealtimeProtocolKind::OpenAi)
+        );
         assert_eq!(
             RealtimeProtocolKind::parse("openai-realtime"),
             Some(RealtimeProtocolKind::OpenAi)
@@ -378,11 +381,8 @@ mod tests {
 
     #[test]
     fn resolve_unknown_preset_fails() {
-        let err = RealtimeParams::resolve(
-            &serde_json::json!({"preset": "nope"}),
-            Some(&[]),
-        )
-        .unwrap_err();
+        let err =
+            RealtimeParams::resolve(&serde_json::json!({"preset": "nope"}), Some(&[])).unwrap_err();
         assert!(err.to_string().contains("not found"), "got: {err}");
     }
 
