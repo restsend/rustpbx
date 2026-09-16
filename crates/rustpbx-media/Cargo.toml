@@ -22,10 +22,12 @@ rustrtc = "0.3.132"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1.53", features = ["fs", "io-util", "sync"] }
 tokio-util = "0.7.18"
+tokio-stream = "0.1"
 tracing = "0.1.43"
 url = "2.5.8"
 
 [dev-dependencies]
+tokio = { version = "1.53", features = ["test-util"] }
 tempfile = "3.27.0"
 criterion = "0.5"
 chrono = "0.4"

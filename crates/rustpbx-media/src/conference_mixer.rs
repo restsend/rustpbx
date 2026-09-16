@@ -1,51 +1,55 @@
-//! Conference Mixer - MCU-style multi-party audio mixing
-//!
-//! This module provides real-time audio mixing for conference calls.
-//! It connects MediaPeers to the mixer and routes mixed audio back to participants.
+//! Conference mixer with one task owning all participants and audio queues.
 
 use crate::LegId;
 use crate::mixer::AudioMixer;
 use anyhow::{Result, anyhow};
 use audio_codec::CodecType;
-use dashmap::DashMap;
 use parking_lot::Mutex as ParkMutex;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::{mpsc, oneshot};
+use tokio_stream::{StreamExt, StreamMap, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 pub use crate::AudioFrame;
 
-/// Conference participant audio interface
-#[derive(Debug)]
-pub(crate) struct ConferenceParticipantAudio {
-    /// Input channel from participant (decoded PCM)
-    pub input_rx: mpsc::Receiver<AudioFrame>,
-    /// Output channel to participant (mixed PCM for encoding)
-    pub output_tx: mpsc::Sender<AudioFrame>,
-    /// Whether participant is muted
-    pub muted: bool,
+const INPUT_BUFFER_FRAMES: usize = 5;
+
+/// Owned only by the mixing task; no shared participant or audio state.
+struct ConferenceParticipantAudio {
+    leg_id: LegId,
+    input: VecDeque<AudioFrame>,
+    output_tx: mpsc::Sender<AudioFrame>,
+    muted: bool,
 }
 
-/// Real-time conference mixer with MCU architecture
+enum MixerCommand {
+    Start,
+    Add {
+        leg_id: LegId,
+        input_rx: mpsc::Receiver<AudioFrame>,
+        output_tx: mpsc::Sender<AudioFrame>,
+    },
+    Remove(LegId),
+    SetMuted { leg_id: LegId, muted: bool },
+    SetGain { src: LegId, dst: LegId, gain: f32 },
+}
+
+type MixerRequest = (MixerCommand, Option<oneshot::Sender<Result<()>>>);
+
+/// Control handle. Participant channels, rings and gains live in mixing_loop.
 pub struct ConferenceAudioMixer {
-    /// Conference ID
     conf_id: String,
-    /// Participant audio channels (DashMap for concurrent access)
-    participants: Arc<DashMap<LegId, ConferenceParticipantAudio>>,
-    /// Cached participant count for sync access
-    participant_count: Arc<std::sync::atomic::AtomicUsize>,
-    /// Audio sample rate
+    participant_count: Arc<AtomicUsize>,
     sample_rate: u32,
-    /// Frame size in samples (e.g., 160 for 20ms at 8kHz)
     frame_size: usize,
-    /// Cancellation token for stopping
     cancel_token: CancellationToken,
-    /// Mixing task handle
-    mixing_task: Arc<ParkMutex<Option<tokio::task::JoinHandle<()>>>>,
-    /// Per-(source, destination) gain overrides for supervisor modes.
-    /// Key: (src_leg_id, dst_leg_id), Value: gain (0.0 = silent, 1.0 = normal)
-    route_gains: Arc<DashMap<(LegId, LegId), f32>>,
+    commands: mpsc::UnboundedSender<MixerRequest>,
+    // These locks only initialize/join the single worker; the loop never uses them.
+    command_rx: ParkMutex<Option<mpsc::UnboundedReceiver<MixerRequest>>>,
+    mixing_task: ParkMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl std::fmt::Debug for ConferenceAudioMixer {
@@ -61,319 +65,344 @@ impl std::fmt::Debug for ConferenceAudioMixer {
 impl Drop for ConferenceAudioMixer {
     fn drop(&mut self) {
         self.cancel_token.cancel();
-        if let Some(task) = self.mixing_task.lock().take() {
+        if let Some(task) = self.mixing_task.get_mut().take() {
             task.abort();
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// MixingLoopContext — builder for mixing_loop
-// ---------------------------------------------------------------------------
-
-pub(crate) struct MixingLoopContext {
-    conf_id: String,
-    participants: Arc<DashMap<LegId, ConferenceParticipantAudio>>,
-    cancel_token: CancellationToken,
-    frame_size: usize,
-    sample_rate: u32,
-    route_gains: Arc<DashMap<(LegId, LegId), f32>>,
-}
-
 impl ConferenceAudioMixer {
-    /// Create a new conference mixer
     pub fn new(conf_id: String, sample_rate: u32) -> Self {
-        let frame_size = (sample_rate as usize * 20) / 1000; // 20ms frames
-
+        let (commands, command_rx) = mpsc::unbounded_channel();
         Self {
             conf_id,
-            participants: Arc::new(DashMap::new()),
-            participant_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            participant_count: Arc::new(AtomicUsize::new(0)),
             sample_rate,
-            frame_size,
+            frame_size: (sample_rate as usize * 20) / 1000,
             cancel_token: CancellationToken::new(),
-            mixing_task: Arc::new(ParkMutex::new(None)),
-            route_gains: Arc::new(DashMap::new()),
+            commands,
+            command_rx: ParkMutex::new(Some(command_rx)),
+            mixing_task: ParkMutex::new(None),
         }
     }
 
-    /// Add a participant to the conference
-    /// Returns channels for sending/receiving audio
+    // Adding before start() is supported: receive into the rings immediately,
+    // but enable the mixing interval only after the Start command.
+    fn ensure_worker(&self) {
+        let mut task = self.mixing_task.lock();
+        if task.is_some() || self.cancel_token.is_cancelled() {
+            return;
+        }
+        let Some(commands) = self.command_rx.lock().take() else { return; };
+        *task = Some(tokio::spawn(Self::mixing_loop(
+            self.conf_id.clone(), commands, self.cancel_token.clone(),
+            self.frame_size, self.sample_rate, self.participant_count.clone(),
+        )));
+    }
+
+    async fn send_command(&self, command: MixerCommand) -> Result<()> {
+        if self.cancel_token.is_cancelled() {
+            return Err(anyhow!("Conference mixer stopped"));
+        }
+        self.ensure_worker();
+        let (reply, result) = oneshot::channel();
+        self.commands.send((command, Some(reply)))
+            .map_err(|_| anyhow!("Conference mixer stopped"))?;
+        result.await.map_err(|_| anyhow!("Conference mixer stopped"))?
+    }
+
+    /// Returns channels for sending decoded PCM and receiving mixed audio.
     pub async fn add_participant(
         &self,
         leg_id: LegId,
         _codec: CodecType,
     ) -> Result<(mpsc::Sender<AudioFrame>, mpsc::Receiver<AudioFrame>)> {
-        // Reject duplicate participants
-        if self.participants.contains_key(&leg_id) {
-            return Err(anyhow!(
-                "Participant {} already exists in conference",
-                leg_id
-            ));
-        }
-
-        let (input_tx, input_rx) = mpsc::channel::<AudioFrame>(100);
-        let (output_tx, output_rx) = mpsc::channel::<AudioFrame>(100);
-
-        let participant = ConferenceParticipantAudio {
-            input_rx,
-            output_tx,
-            muted: false,
-        };
-
-        self.participants.insert(leg_id.clone(), participant);
-
-        // Update cached count
-        self.participant_count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        // Update mixing routes for all participants
-        self.update_routing().await?;
-
-        info!(
-            conf_id = %self.conf_id,
-            leg_id = %leg_id,
-            "Added participant to conference mixer"
-        );
-
+        let (input_tx, input_rx) = mpsc::channel(INPUT_BUFFER_FRAMES);
+        let (output_tx, output_rx) = mpsc::channel(100);
+        self.send_command(MixerCommand::Add { leg_id, input_rx, output_tx }).await?;
         Ok((input_tx, output_rx))
     }
 
-    /// Remove a participant from the conference
     pub async fn remove_participant(&self, leg_id: &LegId) -> Result<()> {
-        let was_present = self.participants.remove(leg_id).is_some();
-
-        // Only adjust the count if the participant actually existed, to avoid
-        // underflowing to usize::MAX on duplicate/erroneous remove calls (which
-        // would break every participant_count-based decision downstream).
-        if was_present {
-            self.participant_count
-                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-
-            // Prune any route gains that referenced the leaving leg (as source
-            // or destination), so the routing table does not grow monotonically
-            // as participants churn through a long-running conference.
-            let before = self.route_gains.len();
-            self.route_gains
-                .retain(|(src, dst), _| src != leg_id && dst != leg_id);
-            let pruned = before - self.route_gains.len();
-            if pruned > 0 {
-                debug!(
-                    conf_id = %self.conf_id,
-                    leg_id = %leg_id,
-                    pruned,
-                    "Pruned route gains for removed participant"
-                );
-            }
-        }
-
-        // Update mixing routes
-        self.update_routing().await?;
-
-        info!(
-            conf_id = %self.conf_id,
-            leg_id = %leg_id,
-            "Removed participant from conference mixer"
-        );
-
-        Ok(())
+        self.send_command(MixerCommand::Remove(leg_id.clone())).await
     }
 
-    /// Mute/unmute a participant
     pub async fn set_muted(&self, leg_id: &LegId, muted: bool) -> Result<()> {
-        if let Some(mut participant) = self.participants.get_mut(leg_id) {
-            participant.muted = muted;
-            info!(
-                conf_id = %self.conf_id,
-                leg_id = %leg_id,
-                muted = muted,
-                "Participant mute state changed"
-            );
-        }
-        Ok(())
+        self.send_command(MixerCommand::SetMuted { leg_id: leg_id.clone(), muted }).await
     }
 
-    /// Set per-route gain for supervisor modes.
-    /// A gain of 0.0 means the source participant is silent for the destination.
     pub async fn set_route_gain(&self, src: &LegId, dst: &LegId, gain: f32) {
-        if (gain - 1.0).abs() < f32::EPSILON {
-            self.route_gains.remove(&(src.clone(), dst.clone()));
-        } else {
-            self.route_gains.insert((src.clone(), dst.clone()), gain);
+        if let Err(error) = self.send_command(MixerCommand::SetGain {
+            src: src.clone(), dst: dst.clone(), gain,
+        }).await {
+            debug!(conf_id = %self.conf_id, %error, "Could not set conference route gain");
         }
-        info!(
-            conf_id = %self.conf_id,
-            src = %src,
-            dst = %dst,
-            gain = gain,
-            "Route gain set"
-        );
     }
 
-    /// Update audio routing for all participants
-    /// Each participant hears all other participants (N-1 mixing)
-    async fn update_routing(&self) -> Result<()> {
-        let participant_count = self.participants.len();
-
-        // ConferenceAudioMixer uses its own mixing loop (N-1 mixing)
-        // Each participant receives mixed audio from all other participants
-        // The actual mixing happens in mixing_loop(), not via SupervisorMode routing
-
-        debug!(
-            conf_id = %self.conf_id,
-            participant_count,
-            "Updated conference routing"
-        );
-
-        Ok(())
-    }
-
-    /// Start the conference mixing
     pub fn start(&self) {
-        let ctx = MixingLoopContext {
-            conf_id: self.conf_id.clone(),
-            participants: self.participants.clone(),
-            cancel_token: self.cancel_token.clone(),
-            frame_size: self.frame_size,
-            sample_rate: self.sample_rate,
-            route_gains: self.route_gains.clone(),
-        };
-        let task = tokio::spawn(async move {
-            Self::mixing_loop(ctx).await;
-        });
-
-        let mut mixing_task = self.mixing_task.lock();
-        *mixing_task = Some(task);
-
-        info!(conf_id = %self.conf_id, "Conference mixer started");
+        self.ensure_worker();
+        let _ = self.commands.send((MixerCommand::Start, None));
     }
 
-    /// Stop the conference mixing
     pub async fn stop(&self) {
         self.cancel_token.cancel();
-
-        // Clear the per-route gain table so it cannot retain entries after the
-        // mixer is torn down (defensive; remove_participant already prunes).
-        self.route_gains.clear();
-        self.participants.clear();
-
-        // Take the task out of the mutex before awaiting
-        let task = {
-            let mut mixing_task = self.mixing_task.lock();
-            mixing_task.take()
-        };
-
-        if let Some(t) = task {
-            let _ = t.await;
+        self.command_rx.lock().take();
+        let task = self.mixing_task.lock().take();
+        if let Some(task) = task {
+            let _ = task.await;
         }
-
+        self.participant_count.store(0, Ordering::Relaxed);
         info!(conf_id = %self.conf_id, "Conference mixer stopped");
     }
 
-    /// The main conference mixing loop
-    /// Collects audio from all participants, mixes, and distributes
-    async fn mixing_loop(ctx: MixingLoopContext) {
-        let interval_ms = (ctx.frame_size as f64 / ctx.sample_rate as f64 * 1000.0) as u64;
-        let interval = tokio::time::Duration::from_millis(interval_ms.max(1));
-
-        info!(
-            conf_id = %ctx.conf_id,
-            frame_size = ctx.frame_size,
-            sample_rate = ctx.sample_rate,
-            interval_ms = interval_ms,
-            "Conference mixing loop started"
+    async fn mixing_loop(
+        conf_id: String,
+        mut commands: mpsc::UnboundedReceiver<MixerRequest>,
+        cancel: CancellationToken,
+        frame_size: usize,
+        sample_rate: u32,
+        participant_count: Arc<AtomicUsize>,
+    ) {
+        let mut participants: Vec<ConferenceParticipantAudio> = Vec::new();
+        let mut inputs = StreamMap::new();
+        let mut route_gains: HashMap<(LegId, LegId), f32> = HashMap::new();
+        let period = tokio::time::Duration::from_millis(
+            ((frame_size as u64 * 1000) / sample_rate as u64).max(1),
         );
+        let mut ticker = tokio::time::interval(period);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut started = false;
 
         loop {
             tokio::select! {
                 biased;
-                _ = ctx.cancel_token.cancelled() => {
-                    info!(conf_id = %ctx.conf_id, "Conference mixing loop cancelled");
-                    break;
-                }
-                _ = tokio::time::sleep(interval) => {
-                    let mut participant_audio = std::collections::HashMap::new();
-                    for mut entry in ctx.participants.iter_mut() {
-                        loop {
-                            match entry.input_rx.try_recv() {
-                                Ok(frame) => {
-                                    if !entry.muted {
-                                        participant_audio.insert(entry.key().clone(), frame);
-                                    }
-                                }
-                                Err(mpsc::error::TryRecvError::Empty) => break,
-                                Err(mpsc::error::TryRecvError::Disconnected) => break,
+                _ = cancel.cancelled() => break,
+                request = commands.recv() => {
+                    let Some((command, reply)) = request else { break; };
+                    let result = match command {
+                        MixerCommand::Start => {
+                            if !started {
+                                started = true;
+                                ticker.reset();
+                                info!(%conf_id, frame_size, sample_rate, "Conference mixing loop started");
+                            }
+                            Ok(())
+                        }
+                        MixerCommand::Add { leg_id, input_rx, output_tx } => {
+                            if participants.iter().any(|p| p.leg_id == leg_id) {
+                                Err(anyhow!("Participant {} already exists in conference", leg_id))
+                            } else {
+                                inputs.insert(leg_id.clone(), ReceiverStream::new(input_rx));
+                                participants.push(ConferenceParticipantAudio {
+                                    leg_id: leg_id.clone(), input: VecDeque::with_capacity(INPUT_BUFFER_FRAMES),
+                                    output_tx, muted: false,
+                                });
+                                participant_count.store(participants.len(), Ordering::Relaxed);
+                                info!(%conf_id, %leg_id, "Added participant to conference mixer");
+                                Ok(())
                             }
                         }
-                    }
-
-                    let participant_ids: Vec<LegId> =
-                        ctx.participants.iter().map(|e| e.key().clone()).collect();
-
-                    if !participant_audio.is_empty() {
-                        for output_leg in &participant_ids {
-                            let mut input_frames = Vec::new();
-                            let mut gains = Vec::new();
-
-                            for (input_leg, frame) in &participant_audio {
-                                if input_leg != output_leg {
-                                    let gain = ctx.route_gains
-                                        .get(&(input_leg.clone(), output_leg.clone()))
-                                        .map(|r| *r)
-                                        .unwrap_or(1.0);
-                                    if gain > 0.0 {
-                                        input_frames.push(frame.samples.clone());
-                                        gains.push(gain);
-                                    }
-                                }
+                        MixerCommand::Remove(leg_id) => {
+                            inputs.remove(&leg_id);
+                            if let Some(index) = participants.iter().position(|p| p.leg_id == leg_id) {
+                                participants.swap_remove(index);
                             }
-
-                            if !input_frames.is_empty() {
-                                let mut normalized_frames = Vec::new();
-                                for mut frame in input_frames {
-                                    if frame.len() < ctx.frame_size {
-                                        frame.resize(ctx.frame_size, 0);
-                                    } else if frame.len() > ctx.frame_size {
-                                        frame.truncate(ctx.frame_size);
-                                    }
-                                    normalized_frames.push(frame);
+                            route_gains.retain(|(src, dst), _| src != &leg_id && dst != &leg_id);
+                            participant_count.store(participants.len(), Ordering::Relaxed);
+                            info!(%conf_id, %leg_id, "Removed participant from conference mixer");
+                            Ok(())
+                        }
+                        MixerCommand::SetMuted { leg_id, muted } => {
+                            if let Some(participant) = participants.iter_mut().find(|p| p.leg_id == leg_id) {
+                                if participant.muted != muted {
+                                    participant.input.clear();
                                 }
-                                let mixed_samples = AudioMixer::mix(normalized_frames, &gains);
-
-                                let output_frame = AudioFrame::new(mixed_samples, ctx.sample_rate);
-
-                                let output_tx = ctx.participants
-                                    .get(output_leg)
-                                    .map(|e| e.output_tx.clone());
-
-                                // try_send (never await) so a slow/saturated
-                                // output channel for ONE participant cannot
-                                // head-of-line-block the mix for everyone else.
-                                // A dropped frame is a single 20ms tick — loss
-                                // is preferable to stalling the whole room.
-                                if let Some(tx) = output_tx {
-                                    let _ = tx.try_send(output_frame);
+                                participant.muted = muted;
+                                info!(%conf_id, %leg_id, muted, "Participant mute state changed");
+                            }
+                            Ok(())
+                        }
+                        MixerCommand::SetGain { src, dst, gain } => {
+                            info!(%conf_id, %src, %dst, gain, "Route gain set");
+                            if (gain - 1.0).abs() < f32::EPSILON {
+                                route_gains.remove(&(src, dst));
+                            } else {
+                                route_gains.insert((src, dst), gain);
+                            }
+                            Ok(())
+                        }
+                    };
+                    if let Some(reply) = reply {
+                        let _ = reply.send(result);
+                    }
+                }
+                _ = ticker.tick(), if started => {
+                    // Exactly one queued frame per leg, independent of reception.
+                    let frames: Vec<_> = participants.iter_mut().map(|participant| {
+                        let frame = participant.input.pop_front();
+                        let frame = if participant.muted { None } else { frame };
+                        frame.map(|mut frame| {
+                            frame.samples.resize(frame_size, 0);
+                            frame.samples
+                        })
+                    }).collect();
+                    for (output_index, output) in participants.iter().enumerate() {
+                        let mut input_frames = Vec::new();
+                        let mut gains = Vec::new();
+                        for (input_index, input) in participants.iter().enumerate() {
+                            if input_index == output_index {
+                                continue;
+                            }
+                            let Some(samples) = &frames[input_index] else { continue; };
+                            let gain = route_gains.get(&(input.leg_id.clone(), output.leg_id.clone()))
+                                .copied().unwrap_or(1.0);
+                            if gain > 0.0 {
+                                input_frames.push(samples.clone());
+                                gains.push(gain);
+                            }
+                        }
+                        if !input_frames.is_empty() {
+                            let mixed = AudioMixer::mix(input_frames, &gains);
+                            let _ = output.output_tx.try_send(AudioFrame::new(mixed, sample_rate));
+                        }
+                    }
+                }
+                frame = inputs.next(), if !inputs.is_empty() => {
+                    if let Some((leg_id, frame)) = frame {
+                        if let Some(participant) = participants.iter_mut().find(|p| p.leg_id == leg_id) {
+                            if !participant.muted {
+                                if participant.input.len() == INPUT_BUFFER_FRAMES {
+                                    participant.input.pop_front();
                                 }
+                                participant.input.push_back(frame);
                             }
                         }
                     }
                 }
             }
         }
-
-        info!(conf_id = %ctx.conf_id, "Conference mixing loop stopped");
+        participant_count.store(0, Ordering::Relaxed);
+        info!(%conf_id, "Conference mixing loop stopped");
     }
 
-    /// Get participant count (synchronous)
     pub fn participant_count(&self) -> usize {
-        self.participant_count
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.participant_count.load(Ordering::Relaxed)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_audio_is_mixed_one_frame_per_interval_in_order() {
+        use tokio::time::{advance, Duration};
+
+        let mixer = ConferenceAudioMixer::new("fifo".into(), 8000);
+        let (tx, mut self_rx) = mixer.add_participant(LegId::new("source"), CodecType::PCMU).await.unwrap();
+        let (_listener_tx, mut rx) = mixer.add_participant(LegId::new("listener"), CodecType::PCMU).await.unwrap();
+        for value in [100, 200, 300] {
+            tx.send(AudioFrame::new(vec![value; 160], 8000)).await.unwrap();
+        }
+        tokio::task::yield_now().await;
+        mixer.start();
+        tokio::task::yield_now().await;
+
+        advance(Duration::from_millis(19)).await;
+        tokio::task::yield_now().await;
+        assert!(rx.try_recv().is_err());
+        advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(rx.try_recv().unwrap().samples, vec![100; 160]);
+        assert!(rx.try_recv().is_err(), "one tick must not consume the whole queue");
+
+        // Wake late: the next deadline stays at 60 ms rather than drifting
+        // to 65 ms as sleep(20 ms) after each completed iteration would.
+        advance(Duration::from_millis(25)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(rx.try_recv().unwrap().samples, vec![200; 160]);
+        advance(Duration::from_millis(15)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(rx.try_recv().unwrap().samples, vec![300; 160]);
+        assert!(self_rx.try_recv().is_err(), "N-1 mixing must exclude self audio");
+        advance(Duration::from_millis(20)).await;
+        tokio::task::yield_now().await;
+        assert!(rx.try_recv().is_err(), "empty slots must not replay old audio");
+
+        for value in [400, 500, 600] {
+            tx.send(AudioFrame::new(vec![value; 160], 8000)).await.unwrap();
+        }
+        tokio::task::yield_now().await;
+        advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(rx.try_recv().unwrap().samples, vec![400; 160]);
+        assert!(rx.try_recv().is_err(), "missed ticks must not burst-drain the ring");
+        advance(Duration::from_millis(20)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(rx.try_recv().unwrap().samples, vec![500; 160]);
+        mixer.stop().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn input_ring_keeps_only_five_frames_and_receivers_close_on_removal() {
+        use tokio::time::{advance, Duration};
+
+        let mixer = ConferenceAudioMixer::new("bounded".into(), 8000);
+        let source = LegId::new("source");
+        let (tx, _self_rx) = mixer.add_participant(source.clone(), CodecType::PCMU).await.unwrap();
+        let (listener_tx, mut rx) = mixer.add_participant(LegId::new("listener"), CodecType::PCMU).await.unwrap();
+        // Reception runs even when the mixer ticker is not started.
+        for value in 1..=8 {
+            tx.send(AudioFrame::new(vec![value; 160], 8000)).await.unwrap();
+            tokio::task::yield_now().await;
+        }
+        mixer.start();
+        tokio::task::yield_now().await;
+        for value in 4..=8 {
+            advance(Duration::from_millis(20)).await;
+            tokio::task::yield_now().await;
+            assert_eq!(rx.try_recv().unwrap().samples, vec![value; 160]);
+            assert!(rx.try_recv().is_err());
+        }
+        mixer.remove_participant(&source).await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(tx.is_closed(), "removing a slot must stop its receiver");
+        // Reusing a leg ID must create an empty slot and a fresh receiver.
+        let (replacement_tx, _) = mixer.add_participant(source, CodecType::PCMU).await.unwrap();
+        assert!(!replacement_tx.is_closed());
+        mixer.stop().await;
+        tokio::task::yield_now().await;
+        assert!(replacement_tx.is_closed());
+        assert!(listener_tx.is_closed());
+        assert_eq!(mixer.participant_count(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn merged_receiver_survives_closed_inputs_and_new_members() {
+        let mixer = ConferenceAudioMixer::new("merged-inputs".into(), 8000);
+        let listener = LegId::new("listener");
+        let (tx, mut rx) = mixer.add_participant(listener.clone(), CodecType::PCMU).await.unwrap();
+        drop(tx); // A receive-only participant remains an output destination.
+        mixer.start();
+        tokio::task::yield_now().await;
+
+        for id in ["first", "second"] {
+            let leg = LegId::new(id);
+            let (tx, _) = mixer.add_participant(leg.clone(), CodecType::PCMU).await.unwrap();
+            assert!(mixer.add_participant(leg.clone(), CodecType::PCMU).await.is_err());
+            assert_eq!(mixer.participant_count(), 2);
+            tx.send(AudioFrame::new(vec![700; 160], 8000)).await.unwrap();
+            tokio::task::yield_now().await;
+            tokio::time::advance(tokio::time::Duration::from_millis(20)).await;
+            tokio::task::yield_now().await;
+            assert_eq!(rx.try_recv().unwrap().samples, vec![700; 160]);
+            mixer.remove_participant(&leg).await.unwrap();
+            assert!(tx.is_closed());
+            assert_eq!(mixer.participant_count(), 1);
+        }
+        mixer.stop().await;
+        assert!(mixer.add_participant(LegId::new("late"), CodecType::PCMU).await.is_err());
+    }
 
     #[tokio::test]
     async fn test_conference_mixer_creation() {
@@ -875,16 +904,14 @@ mod tests {
     async fn test_mixer_drop_without_stop_aborts_task() {
         let mixer = ConferenceAudioMixer::new("drop-test".to_string(), 8000);
         mixer.start();
+        let (tx, mut rx) = mixer.add_participant(LegId::new("leg"), CodecType::PCMU).await.unwrap();
 
         // Drop without calling stop() — simulates a cleanup path that
         // forgets to stop the mixer.
         drop(mixer);
 
-        // If the Drop impl works, the mixing task is aborted.
-        // Give it a moment to propagate.
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        // No assertion needed — if the task leaked, it would hold the
-        // `participants` Arc alive, but we can't easily check that here.
-        // The key is that this test doesn't hang or panic.
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), tx.closed())
+            .await.expect("dropping the mixer must close its merged inputs");
+        assert!(rx.recv().await.is_none(), "the local participant outputs must also close");
     }
 }
