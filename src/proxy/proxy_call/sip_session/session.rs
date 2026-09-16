@@ -2832,6 +2832,7 @@ impl SipSession {
         let callee_call_id = self.context.dialplan.call_id.clone().unwrap_or_else(|| {
             rsipstack::transaction::make_call_id(
                 self.server.endpoint.inner.option.callid_suffix.as_deref(),
+                rsipstack::transaction::CallIdFormat::default(),
             )
             .value()
             .to_string()
