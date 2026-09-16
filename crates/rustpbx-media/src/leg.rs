@@ -868,6 +868,9 @@ impl LegInner {
         Ok(handle)
     }
 
+    /// Replace the current egress source with silence, reporting any active
+    /// playback as interrupted. Do not call before selecting another source
+    /// or bridging: the replacement itself already stops playback.
     pub async fn stop_playback(&self) -> Result<()> {
         self.set_egress_source(EgressSource::Silence).await
     }

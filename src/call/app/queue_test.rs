@@ -604,12 +604,8 @@ mod tests {
             serde_json::json!({"agent_uri": "sip:agent3@example.com"}),
         );
 
-        // Hold music is stopped first.
-        stack
-            .assert_cmd(2000, "StopHold", |c| {
-                matches!(c, CallCommand::StopPlayback { .. })
-            })
-            .await;
+        // The session bridge replaces hold music; the app must not stop it afterward.
+        assert!(stack.next_cmd(2000).await.is_none(), "connect must not queue playback cleanup");
 
         stack
             .join()
@@ -962,11 +958,6 @@ mod tests {
         stack
             .assert_cmd(2000, "LegAdd", |c| matches!(c, CallCommand::LegAdd { .. }))
             .await;
-        stack
-            .assert_cmd(2000, "StopHold", |c| {
-                matches!(c, CallCommand::StopPlayback { .. })
-            })
-            .await;
         let transfer_cmd = stack.next_cmd(2000).await.expect("transfer prompt Play");
         assert!(
             play_path(&transfer_cmd).ends_with("queue-transfer-zh.wav"),
@@ -983,11 +974,6 @@ mod tests {
             "agent_connected",
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
-        stack
-            .assert_cmd(2000, "StopTransfer", |c| {
-                matches!(c, CallCommand::StopPlayback { .. })
-            })
-            .await;
         let service_cmd = stack.next_cmd(2000).await.expect("service prompt Play");
         assert!(
             play_path(&service_cmd).ends_with("queue-service-zh.wav"),
@@ -1031,11 +1017,6 @@ mod tests {
         stack
             .assert_cmd(2000, "LegAdd", |c| matches!(c, CallCommand::LegAdd { .. }))
             .await;
-        stack
-            .assert_cmd(2000, "StopHold", |c| {
-                matches!(c, CallCommand::StopPlayback { .. })
-            })
-            .await;
         let transfer_cmd = stack.next_cmd(2000).await.expect("transfer prompt Play");
         let transfer_tid = play_track_id(&transfer_cmd);
 
@@ -1052,11 +1033,6 @@ mod tests {
             "agent_connected",
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
-        stack
-            .assert_cmd(2000, "StopHold2", |c| {
-                matches!(c, CallCommand::StopPlayback { .. })
-            })
-            .await;
         let service_cmd = stack.next_cmd(2000).await.expect("service prompt Play");
         let service_tid = play_track_id(&service_cmd);
         stack.audio_complete(service_tid);
@@ -1069,8 +1045,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_service_prompt_connects_directly() {
-        // Default prompts without service_prompt: connect right after cutting
-        // the transfer prompt, no post-connect announcement.
+        // Default prompts without service_prompt: bridging replaces the
+        // transfer prompt, with no post-connect playback commands.
         let plan = build_simple_queue();
         let mut stack = MockCallStack::run(
             Box::new(QueueApp::new(plan, build_queue_config_with_prompts())),
@@ -1094,11 +1070,6 @@ mod tests {
             .assert_cmd(2000, "LegAdd", |c| matches!(c, CallCommand::LegAdd { .. }))
             .await;
         stack
-            .assert_cmd(2000, "StopHold", |c| {
-                matches!(c, CallCommand::StopPlayback { .. })
-            })
-            .await;
-        stack
             .assert_cmd(2000, "PlayPrompt-transfer", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
@@ -1108,11 +1079,8 @@ mod tests {
             "agent_connected",
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
-        stack
-            .assert_cmd(2000, "StopTransfer", |c| {
-                matches!(c, CallCommand::StopPlayback { .. })
-            })
-            .await;
+        assert!(stack.next_cmd(2000).await.is_none(),
+            "agent answer must not enqueue a stop after the session has bridged the call");
 
         stack
             .join()
@@ -1211,11 +1179,6 @@ mod tests {
             })
             .await;
         // First originate starts the pre-connect transfer prompt.
-        stack
-            .assert_cmd(2000, "StopHold", |c| {
-                matches!(c, CallCommand::StopPlayback { .. })
-            })
-            .await;
         let transfer_cmd = stack.next_cmd(2000).await.expect("transfer prompt Play");
         assert!(play_is_side_only(&transfer_cmd));
 
@@ -1269,11 +1232,6 @@ mod tests {
         stack
             .assert_cmd(2000, "LegAdd", |c| matches!(c, CallCommand::LegAdd { .. }))
             .await;
-        stack
-            .assert_cmd(2000, "StopHold", |c| {
-                matches!(c, CallCommand::StopPlayback { .. })
-            })
-            .await;
         let transfer_cmd = stack.next_cmd(2000).await.expect("transfer prompt Play");
         assert!(
             play_path(&transfer_cmd).ends_with("queue-transfer-en.wav"),
@@ -1285,11 +1243,6 @@ mod tests {
             "agent_connected",
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
-        stack
-            .assert_cmd(2000, "StopTransfer", |c| {
-                matches!(c, CallCommand::StopPlayback { .. })
-            })
-            .await;
         let service_cmd = stack.next_cmd(2000).await.expect("service prompt Play");
         assert!(
             play_path(&service_cmd).ends_with("queue-service-en.wav"),
@@ -1371,11 +1324,6 @@ mod tests {
             .await;
         // First originate starts the pre-connect transfer prompt.
         stack
-            .assert_cmd(2000, "StopHold", |c| {
-                matches!(c, CallCommand::StopPlayback { .. })
-            })
-            .await;
-        stack
             .assert_cmd(2000, "PlayPrompt-transfer", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
@@ -1426,11 +1374,6 @@ mod tests {
             })
             .await;
         // First originate starts the pre-connect transfer prompt.
-        stack
-            .assert_cmd(2000, "StopHold", |c| {
-                matches!(c, CallCommand::StopPlayback { .. })
-            })
-            .await;
         stack
             .assert_cmd(2000, "PlayPrompt-transfer", |c| {
                 matches!(c, CallCommand::Play { .. })
@@ -1568,13 +1511,7 @@ mod tests {
             serde_json::json!({"agent_uri": "sip:agent1@example.com", "agent_id": "agent-001"}),
         );
 
-        // Hold music stops when the agent answers.
-        let stop = stack.next_cmd(2000).await.expect("StopHold");
-        assert!(
-            matches!(stop, CallCommand::StopPlayback { .. }),
-            "expected StopPlayback after agent connected, got {stop:?}"
-        );
-
+        // Bridging replaces hold music; only the losing agent needs cleanup.
         // Should cancel agent 2's leg via LegRemove (NOT agent 1's leg)
         let remove = stack.next_cmd(2000).await.expect("LegRemove");
         match &remove {
@@ -3606,11 +3543,6 @@ mod tests {
         stack
             .assert_cmd(2000, "LegAdd", |c| matches!(c, CallCommand::LegAdd { .. }))
             .await;
-        stack
-            .assert_cmd(2000, "StopHold", |c| {
-                matches!(c, CallCommand::StopPlayback { .. })
-            })
-            .await;
 
         let transfer_cmd = stack
             .next_cmd(2000)
@@ -3629,11 +3561,6 @@ mod tests {
             "agent_connected",
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
-        stack
-            .assert_cmd(2000, "StopTransfer", |c| {
-                matches!(c, CallCommand::StopPlayback { .. })
-            })
-            .await;
         let service_cmd = stack
             .next_cmd(2000)
             .await
@@ -3725,11 +3652,6 @@ mod tests {
             .await;
         // First originate starts the pre-connect transfer prompt.
         stack
-            .assert_cmd(2000, "StopHold", |c| {
-                matches!(c, CallCommand::StopPlayback { .. })
-            })
-            .await;
-        stack
             .assert_cmd(2000, "PlayPrompt-transfer", |c| {
                 matches!(c, CallCommand::Play { .. })
             })
@@ -3773,11 +3695,6 @@ mod tests {
             "agent_connected",
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
-        stack
-            .assert_cmd(2000, "StopHold", |c| {
-                matches!(c, CallCommand::StopPlayback { .. })
-            })
-            .await;
         stack
             .next_cmd(2000)
             .await
@@ -3971,11 +3888,6 @@ mod tests {
             })
             .await;
 
-        stack
-            .assert_cmd(2000, "StopHold", |c| {
-                matches!(c, CallCommand::StopPlayback { .. })
-            })
-            .await;
         let transfer_cmd = stack.next_cmd(2000).await.expect("transfer prompt Play");
         assert!(play_is_side_only(&transfer_cmd));
 
@@ -3994,11 +3906,6 @@ mod tests {
         stack
             .assert_cmd(2000, "LegRemove-agent2", |c| {
                 matches!(c, CallCommand::LegRemove { .. })
-            })
-            .await;
-        stack
-            .assert_cmd(2000, "StopTransfer", |c| {
-                matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
         let service_cmd = stack.next_cmd(2000).await.expect("service prompt Play");

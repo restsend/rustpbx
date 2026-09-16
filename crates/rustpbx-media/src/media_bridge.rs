@@ -832,7 +832,9 @@ impl MediaBridge {
     }
 
     /// Stop a running playback on a leg. Fires the handle's `done` with
-    /// `interrupted: true`. Sets the leg source to silence.
+    /// `interrupted: true`. Replaces the leg's current source with silence.
+    /// Not needed before bridging or selecting another source, since replacing
+    /// the source already stops playback.
     pub async fn stop_play(&mut self, side: LegSide) -> Result<()> {
         let leg = self
             .leg(side)

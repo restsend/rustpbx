@@ -305,7 +305,8 @@ impl CallController {
         Ok(PlaybackToken { track_id })
     }
 
-    /// Stop current audio playback.
+    /// Replace active audio playback with silence. Do not call before playing
+    /// another source or bridging: the source replacement already stops it.
     pub async fn stop_audio(&self) -> anyhow::Result<()> {
         self.session
             .send_command(CallCommand::StopPlayback { leg_id: None })?;

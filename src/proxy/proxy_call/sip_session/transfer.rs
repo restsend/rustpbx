@@ -1312,7 +1312,6 @@ impl SipSession {
                 &location,
                 callee_state_rx,
                 None,
-                None,
                 caller,
                 Some(headers),
             )

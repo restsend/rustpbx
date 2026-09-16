@@ -861,16 +861,6 @@ impl QueueApp {
         Ok(())
     }
 
-    /// Stop hold music.
-    async fn _stop_hold_music(&mut self, ctrl: &mut CallController) {
-        if self.hold_playback.take().is_some() {
-            debug!("Queue: stopping hold music");
-            if let Err(e) = ctrl.stop_audio().await {
-                warn!(error = %e, "Queue: failed to stop hold music");
-            }
-        }
-    }
-
     /// Get agent locations from dial strategy or dynamic agents.
     fn get_agents(&self) -> Vec<&Location> {
         if let Some(ref agents) = self.dynamic_agents {
@@ -1625,7 +1615,8 @@ impl QueueApp {
         };
         self.transfer_prompt_played = true;
 
-        self._stop_hold_music(ctrl).await;
+        // Playing the prompt replaces hold music on the caller peer.
+        self.hold_playback = None;
         info!(
             queue = %self.config.name,
             file = %path,
@@ -2117,7 +2108,12 @@ impl CallApp for QueueApp {
                 "agent_connected" => {
                     if let Some(agent_uri) = data.get("agent_uri").and_then(|v| v.as_str()) {
                         info!(agent = %agent_uri, "Queue: agent connected");
-                        self._stop_hold_music(ctrl).await;
+                        // SipSession replaces queue playback when it bridges
+                        // the answered agent. A queued stop could run after
+                        // that switch and interrupt the connected media.
+                        self.hold_playback = None;
+                        self.transfer_token = None;
+                        self.comfort_token = None;
 
                         // The call is connected: cancel the pending ring
                         // timeout and the escalation timer so a late fire
@@ -2189,18 +2185,6 @@ impl CallApp for QueueApp {
                                 }
                             },
                         });
-
-                        // The pre-connect transfer prompt may still be playing
-                        // (it starts when dialing began). Connect immediately:
-                        // cut the prompt — the interrupted completion is
-                        // swallowed by the event loop, and any late natural
-                        // completion is ignored via track-id matching.
-                        if matches!(self.state, QueueState::PlayingTransferPrompt { .. }) {
-                            info!(
-                                "Queue: agent answered during transfer prompt — cutting prompt and connecting"
-                            );
-                            ctrl.stop_audio().await?;
-                        }
 
                         // The agent is already connected via LegAdd/LegConnected and
                         // the media bridge is set up by SipSession. Play the

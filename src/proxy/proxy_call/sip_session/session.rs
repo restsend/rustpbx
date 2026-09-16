@@ -4616,7 +4616,7 @@ impl SipSession {
             info!(index = idx, target = %target.aor, "Trying sequential target");
 
             match self
-                .try_single_target(target, callee_state_rx, None, None, None, None)
+                .try_single_target(target, callee_state_rx, None, None, None)
                 .await
             {
                 Ok(()) => {
@@ -4652,7 +4652,7 @@ impl SipSession {
             info!(target = %target.aor, "dial_parallel: target");
         }
 
-        self.fork_targets_parallel(targets, None, callee_state_rx)
+        self.fork_targets_parallel(targets, callee_state_rx)
             .await
     }
 
@@ -4664,7 +4664,6 @@ impl SipSession {
     async fn fork_targets_parallel(
         &mut self,
         targets: &[crate::call::Location],
-        stop_playback_on_answer: Option<&str>,
         _callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<(), CalleeError> {
         use futures::StreamExt;
@@ -4880,7 +4879,6 @@ impl SipSession {
                                     dialog_id,
                                     response,
                                     callee_uri,
-                                    stop_playback_on_answer,
                                     &InviteOption::default(),
                                     default_expires,
                                 )
@@ -5228,7 +5226,7 @@ impl SipSession {
             let mut saw_busy = false;
             for target in &targets {
                 match self
-                    .try_single_target(target, callee_state_rx, None, None, None, None)
+                    .try_single_target(target, callee_state_rx, None, None, None)
                     .await
                 {
                     Ok(()) => return Ok(()),
@@ -5593,7 +5591,6 @@ impl SipSession {
         &mut self,
         target: &crate::call::Location,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
-        stop_playback_on_answer: Option<&str>,
         no_trying_timeout: Option<std::time::Duration>,
         caller: Option<rsipstack::sip::Uri>,
         transfer_headers: Option<&HashMap<String, String>>,
@@ -5900,7 +5897,6 @@ impl SipSession {
             dialog_id,
             response,
             callee_uri,
-            stop_playback_on_answer,
             &invite_option,
             default_expires,
         )
@@ -5915,7 +5911,6 @@ impl SipSession {
         dialog_id: rsipstack::dialog::DialogId,
         response: Option<rsipstack::sip::Response>,
         callee_uri: rsipstack::sip::Uri,
-        stop_playback_on_answer: Option<&str>,
         invite_option: &rsipstack::dialog::invitation::InviteOption,
         default_expires: u64,
     ) -> Result<(), CalleeError> {
@@ -5923,20 +5918,8 @@ impl SipSession {
             let body = r.body();
             Self::extract_sdp(body)
         });
-        if let Some(_track_id) = stop_playback_on_answer {
-            // Stop the caller-leg early-media playback before transitioning to
-            // the confirmed call (early-media tone plays on the A leg).
-            if let Some(peer) = self.media_leg(&LegId::from("caller")) {
-                peer.stop_playback().await.ok();
-            }
-        }
-
-        // Stop playback (if any) before transitioning to confirmed call.
-        if self.media.early_media_sent {
-            if let Some(peer) = self.media_leg(&LegId::from("caller")) {
-                peer.stop_playback().await.ok();
-            }
-        }
+        // Connecting the media peers replaces early-media playback directly;
+        // do not switch the caller to silence before selecting the new source.
 
         let callee_guard =
             ClientDialogGuard::new(self.server.dialog_layer.clone(), dialog_id.clone());
