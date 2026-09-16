@@ -5080,6 +5080,79 @@ async fn added_second_leg_relays_audio_and_dtmf_without_mixer() {
 }
 
 #[tokio::test]
+async fn conference_merge_resolves_queue_agent_alias_and_delivers_audio() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::media::leg::{LegConfig, LegInner};
+    use crate::proxy::tests::common::{create_test_request, create_test_server};
+
+    let (server, _) = create_test_server().await;
+    let request = create_test_request(rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None);
+    let context = CallContext {
+        session_id: "queue-merge".into(),
+        dialplan: Arc::new(Dialplan::new("queue-merge".into(), request, DialDirection::Inbound)),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".into(),
+        original_callee: "sip:queue@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let (mut session, _handle, _commands) = SipSession::new_uac(
+        server.clone(), CancellationToken::new(), None, context, true,
+    );
+    let agent = LegId::from(uuid::Uuid::new_v4().to_string());
+    let consult = LegId::from("consult-queue-merge");
+    let mut phones = Vec::new();
+    for id in [LegId::from("caller"), agent.clone(), consult.clone()] {
+        let mut leg = Leg::new(id.clone());
+        leg.state = LegState::Connected;
+        if id == consult { leg.source_leg = Some(agent.clone()); }
+        session.legs.insert(id.clone(), leg);
+        let local = LegInner::new(id.to_string(), &LegConfig::rtp_pcmu(), None).unwrap();
+        let phone = LegInner::new(format!("phone-{id}"), &LegConfig::rtp_pcmu(), None).unwrap();
+        let offer = local.create_offer().await.unwrap();
+        let answer = phone.answer(&offer).await.unwrap();
+        local.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
+        local.accept();
+        phone.accept();
+        session.legs.set_answer(id.clone(), answer);
+        session.legs.set_media_leg(&id, local);
+        phones.push(phone);
+    }
+    assert!(session.media_leg(&LegId::from("callee")).is_none());
+    assert!(session.setup_bridge(agent.clone(), consult.clone()).await);
+    let room = crate::call::runtime::ConferenceId::from("queue-merge-room");
+    server.conference_server.create_conference(room.clone(), None).await.unwrap();
+    // CC sends the legacy callee alias; the session must join the real UUID
+    // leg, while preserving the concrete caller and consultation IDs.
+    for id in [LegId::from("caller"), LegId::from("callee"), consult.clone()] {
+        let result = session.execute_command(CallCommand::JoinMixerLeg {
+            mixer_id: room.0.clone(), leg_id: id,
+        }, None).await;
+        assert!(result.success, "conference join failed: {:?}", result);
+    }
+    assert_eq!(server.conference_server.get_conference(&room).await.unwrap().participant_count(), 3);
+    assert!(session.legs.conference_bridge_handle(&agent).is_some());
+    assert!(session.legs.conference_bridge_handle(&LegId::from("callee")).is_none());
+
+    let cancel = CancellationToken::new();
+    let mut agent_audio = phones[1].pcm_stream(cancel.clone()).unwrap();
+    phones[0].play_media(Box::new(crate::media::audio_source::ToneAudioSource::new(
+        440, Duration::from_secs(2), 8000,
+    ).unwrap()), true).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let frame = agent_audio.recv().await.unwrap();
+            if frame.frame.samples.iter().any(|sample| sample.unsigned_abs() > 100) { break; }
+        }
+    }).await.expect("queued agent must hear caller audio after three-way merge");
+    cancel.cancel();
+    session.handle_leave_mixer().await.unwrap();
+    for phone in phones { phone.stop(); }
+}
+
+#[tokio::test]
 async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::config::ProxyConfig;

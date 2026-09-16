@@ -8902,6 +8902,7 @@ impl SipSession {
             | CallCommand::StopPlayback { leg_id: Some(id) }
             | CallCommand::Hold { leg_id: id, .. }
             | CallCommand::Unhold { leg_id: id }
+            | CallCommand::JoinMixerLeg { leg_id: id, .. }
             | CallCommand::LegRemove { leg_id: id } => *id = self.resolve_transfer_leg(id.clone()),
             _ => {}
         }
