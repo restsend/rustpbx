@@ -2910,15 +2910,12 @@ mod tests {
         let _ = stack.drain_cmds();
         stack.dtmf("1");
 
-<<<<<<< Updated upstream
         // DTMF barge-in stops playback before the next step's transfer.
         stack
             .assert_cmd(2000, "stop", |c| {
                 matches!(c, CallCommand::StopPlayback { .. })
             })
             .await;
-=======
->>>>>>> Stashed changes
         stack
             .assert_cmd(
                 200,
@@ -3030,13 +3027,9 @@ mod tests {
             .await;
 
         let trace_a = events.try_recv().expect("step A trace must be enqueued");
-<<<<<<< Updated upstream
         let trace_b = events
             .try_recv()
             .expect("chained step B trace must be enqueued");
-=======
-        let trace_b = events.try_recv().expect("chained step B trace must be enqueued");
->>>>>>> Stashed changes
         let _transfer_trace = events.try_recv().expect("transfer trace must be enqueued");
 
         assert_eq!(trace_a.event.payload["step_id"], "step-a");
@@ -3862,14 +3855,10 @@ mod tests {
         // time (start → key press), not a hardcoded 0.
         let invalid_duration = crate::call::app::ivr::trace::duration_ms_between(
             invalid.step_start_time.as_deref(),
-<<<<<<< Updated upstream
             invalid
                 .step_end_time
                 .as_deref()
                 .expect("invalid trace must carry step_end_time"),
-=======
-            invalid.step_end_time.as_deref().expect("invalid trace must carry step_end_time"),
->>>>>>> Stashed changes
         );
         assert_eq!(
             invalid.duration_ms, invalid_duration,
