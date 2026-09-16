@@ -113,8 +113,9 @@ pub enum EgressSource {
         loop_playback: bool,
         on_end: Option<EgressEndCallback>,
     },
-    /// External app pushes pre-encoded [`MediaSample`] frames. When the
-    /// channel is empty the pipeline emits silence to keep cadence.
+    /// External app pushes one ptime of audio encoded for this leg per frame.
+    /// The pipeline stamps it on the leg's RTP timeline; producer timestamps
+    /// and sequence numbers are ignored. An empty channel emits silence.
     Inject {
         rx: Mutex<mpsc::Receiver<MediaSample>>,
     },
@@ -559,9 +560,12 @@ impl EgressTask {
                     MediaSample::Video(_) => None,
                 });
                 match passed {
-                    Some(mut frame) => {
-                        frame.marker |= self.marker_pending;
-                        frame
+                    Some(frame) => {
+                        // Mixed audio and underrun silence share the leg's
+                        // timeline, including the timestamp adopted from relay.
+                        let mut output = self.build_frame(frame.data);
+                        output.marker |= frame.marker;
+                        output
                     }
                     None => {
                         // Same as live Media underrun: do not insert CNG between
@@ -1060,7 +1064,7 @@ mod tests {
     /// Same underrun contract for [`EgressSource::Inject`] (MCU / app push).
     #[tokio::test]
     async fn inject_underrun_emits_digital_silence_not_cng() {
-        let (_inj_tx, inj_rx) = tokio::sync::mpsc::channel::<MediaSample>(4);
+        let (inj_tx, inj_rx) = tokio::sync::mpsc::channel::<MediaSample>(4);
         let (sender, _track, _fb) = sample_track(MediaKind::Audio, 64);
         let codec = EgressCodec {
             codec: CodecType::PCMU,
@@ -1100,6 +1104,46 @@ mod tests {
             gap.data, digital_ref,
             "Inject underrun must match digital-silence encode, not CNG"
         );
+
+        // A mixer supplies its own unrelated timestamp/sequence. Its payload
+        // must use the same leg timeline as the silence before and after it.
+        let injected = AudioFrame {
+            rtp_timestamp: 1_000_000,
+            clock_rate: 8000,
+            data: ref_enc.encode(&vec![2_000i16; spf]).into(),
+            sequence_number: Some(5000),
+            payload_type: Some(0),
+            marker: true,
+            header_extension: None,
+            raw_packet: None,
+            source_addr: None,
+        };
+        inj_tx.try_send(MediaSample::Audio(injected.clone())).unwrap();
+        let speech = task.next_frame().await.unwrap();
+        assert_eq!(speech.data, injected.data);
+        assert!(speech.marker);
+        assert_eq!(speech.rtp_timestamp, gap.rtp_timestamp.wrapping_add(160));
+        assert_eq!(speech.sequence_number, Some(1));
+
+        let underrun = task.next_frame().await.unwrap();
+        assert_eq!(underrun.data, digital_ref);
+        assert_eq!(underrun.rtp_timestamp, speech.rtp_timestamp.wrapping_add(160));
+        assert_eq!(underrun.sequence_number, Some(2));
+
+        inj_tx.try_send(MediaSample::Audio(AudioFrame {
+            rtp_timestamp: 1_000_160,
+            sequence_number: Some(5001),
+            ..injected.clone()
+        })).unwrap();
+        let resumed = task.next_frame().await.unwrap();
+        assert_eq!(resumed.data, injected.data);
+        assert_eq!(resumed.rtp_timestamp, underrun.rtp_timestamp.wrapping_add(160));
+        assert_eq!(resumed.sequence_number, Some(3));
+
+        task.source = EgressSource::Silence;
+        let after = task.next_frame().await.unwrap();
+        assert_eq!(after.rtp_timestamp, resumed.rtp_timestamp.wrapping_add(160));
+        assert_eq!(after.sequence_number, Some(4));
     }
 
     /// Partial app chunks must not be zero-padded into a frame (that click

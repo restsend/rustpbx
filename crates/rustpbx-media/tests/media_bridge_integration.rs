@@ -1594,6 +1594,35 @@ async fn relay_timeline_survives_hold_playback_and_source_switches() {
                 }
             }
         }
+        // Conference output shares the leg's wire timeline with the relay.
+        // Feed isolated mixed frames so Inject alternates speech and silence.
+        bridge.unbridge().await.unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let injected_at = Instant::now();
+        peers[1].set_egress_source(rustpbx_media::egress::EgressSource::Inject {
+            rx: parking_lot::Mutex::new(rx),
+        }).await.unwrap();
+        let mut encoder = audio_codec::create_encoder(codec);
+        for index in 0..3 {
+            tx.send(rustrtc::media::MediaSample::Audio(rustrtc::media::AudioFrame {
+                rtp_timestamp: 1_000_000 + index * 160,
+                clock_rate: 8000,
+                data: encoder.encode(&vec![2_000i16; codec.samplerate() as usize / 50]).into(),
+                sequence_number: Some(5000 + index as u16),
+                payload_type: Some(pt),
+                marker: true,
+                header_extension: None,
+                raw_packet: None,
+                source_addr: None,
+            })).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(80)).await;
+        }
+        assert!(capture.0.lock().unwrap().iter()
+            .filter(|(time, h)| *time >= injected_at && h.ssrc == relay_ssrc && h.marker)
+            .count() >= 3, "{codec:?}: injected audio must reach the receiver");
+        bridge.unbridge().await.unwrap();
+        bridge.bridge().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
         bridge.force_transcode().await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(!peers[1].egress_is_relay());
@@ -1602,10 +1631,10 @@ async fn relay_timeline_survives_hold_playback_and_source_switches() {
             let output: Vec<_> = packets.iter().filter(|(_, h)| h.ssrc == relay_ssrc).collect();
             for pair in output.windows(2) {
                 assert_eq!(pair[1].1.sequence_number, pair[0].1.sequence_number.wrapping_add(1),
-                    "{codec:?}: all output paths must share the sender sequence");
+                    "{codec:?}: all output paths must share the sender sequence: {:?} -> {:?}", pair[0], pair[1]);
                 let advance = pair[1].1.timestamp.wrapping_sub(pair[0].1.timestamp);
                 assert!(advance > 0 && advance < 8000,
-                    "{codec:?}: output timestamp must advance through playback/relay/transcode: {advance}");
+                    "{codec:?}: output timestamp must advance through playback/mixer/relay/transcode: {advance}");
             }
         }
         bridge.close();
