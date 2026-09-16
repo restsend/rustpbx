@@ -463,7 +463,6 @@ impl ProxyModule for AuthModule {
                         .await
                     {
                         Ok(Some(_)) => {}
-                        Ok(Some(_)) => {}
                         _ => {
                             info!(
                                 from = %from_uri,

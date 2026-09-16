@@ -7,7 +7,7 @@ use crate::{
     models::routing::{Entity as RoutingEntity, Model as RoutingModel},
     models::sip_trunk::{
         ActiveModel as SipTrunkActiveModel, Column as SipTrunkColumn, Entity as SipTrunkEntity,
-        Model as SipTrunkModel, SipTransport, SipTrunkDirection, SipTrunkStatus,
+        SipTransport, SipTrunkDirection, SipTrunkStatus,
     },
     proxy::routing::ConfigOrigin,
 };
@@ -876,6 +876,7 @@ mod tests {
 
     use super::*;
     use crate::console::middleware::AuthRequired;
+    use crate::models::sip_trunk::Model as SipTrunkModel;
     use axum::{extract::State, http::StatusCode};
 
     #[tokio::test]
