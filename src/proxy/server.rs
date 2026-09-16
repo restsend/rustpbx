@@ -1123,10 +1123,11 @@ impl SipServerBuilder {
             match self.cluster_config.as_ref() {
                 Some(cfg) if !cfg.peers.is_empty() => {
                     let ttl = Duration::from_secs(cfg.session_registry_ttl_secs);
+                    let max_age = Duration::from_secs(cfg.session_max_age_secs);
                     let heartbeat = Duration::from_secs(cfg.session_registry_heartbeat_secs);
                     let registry: crate::call::runtime::SessionRegistryRef =
                         match cfg.session_registry_backend.as_str() {
-                            "memory" => MemorySessionRegistry::new(node_id.clone(), ttl),
+                            "memory" => MemorySessionRegistry::new(node_id.clone(), ttl, max_age),
                             "noop" | "disabled" => {
                                 info!(
                                     backend = %cfg.session_registry_backend,
@@ -1137,7 +1138,7 @@ impl SipServerBuilder {
                             _ => {
                                 // "db" (default) requires the shared database.
                                 if let Some(db) = database.clone() {
-                                    DbSessionRegistry::new(db, ttl)
+                                    DbSessionRegistry::new(db, ttl, max_age)
                                 } else {
                                     warn!(
                                         "cluster session registry backend \"db\" requested but no \
@@ -1148,11 +1149,18 @@ impl SipServerBuilder {
                             }
                         };
                     // Keep locally-owned sessions alive with a single batch
-                    // update per tick.  Harmless for a noop registry (no-op).
+                    // update per tick — scoped to sessions this node still
+                    // holds live, so rows whose session is gone stop being
+                    // refreshed and are reclaimed by the sweeper (ghost
+                    // protection).  Harmless for a noop registry (no-op).
+                    let live_ids_registry = active_call_registry.clone();
+                    let live_call_ids: crate::call::runtime::LiveCallIdsFn =
+                        Arc::new(move || live_ids_registry.session_ids());
                     let heartbeat_task = crate::call::runtime::NodeHeartbeat::spawn(
                         registry.clone(),
                         node_id,
                         heartbeat,
+                        live_call_ids,
                     );
                     (registry, Some(heartbeat_task))
                 }

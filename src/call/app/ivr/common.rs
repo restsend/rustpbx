@@ -675,6 +675,9 @@ pub async fn execute_action(
                 ("_bridge_step_name", "_rst_step_name"),
                 ("_bridge_extra", "_rst_extra"),
                 ("_bridge_step_start_time", "_rst_step_start_time"),
+                // Appended last: executor tests assert the URI prefix up to
+                // `_rst_step_start_time`, so existing expectations stay valid.
+                ("_bridge_step_index", "_rst_step_index"),
             ] {
                 if let Some(v) = sess.variables.remove(var) {
                     if !v.is_empty() {

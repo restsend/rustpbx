@@ -2,9 +2,11 @@
 //! shared database is available.
 //!
 //! Owns a local `DashMap` of active sessions plus a SWEA sweeper task that
-//! reclaims rows whose `last_update` is older than the TTL.  All read/write
+//! reclaims rows whose `last_update` is older than the TTL, plus an age-based
+//! cut by `started_at` that keeps possible ghosts mortal.  All read/write
 //! operations are O(1) hash lookups with zero network I/O.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -24,17 +26,22 @@ struct RegistryEntry {
 pub struct MemorySessionRegistry {
     sessions: Arc<DashMap<String, RegistryEntry>>,
     ttl: Duration,
+    max_age: Duration,
     sweeper_cancel: tokio_util::sync::CancellationToken,
     sweeper_handle: std::sync::Mutex<Option<JoinHandle<()>>>,
 }
 
 impl MemorySessionRegistry {
     /// Create a registry and start its SWEA sweeper background task.
-    pub fn new(node_id: impl Into<String>, ttl: Duration) -> Arc<Self> {
+    ///
+    /// `ttl` is the heartbeat-freshness window; `max_age` the absolute
+    /// ceiling by `started_at` (ghost bound, mirrors the DB backend).
+    pub fn new(node_id: impl Into<String>, ttl: Duration, max_age: Duration) -> Arc<Self> {
         let _ = node_id.into(); // reserved: nodes in a memory registry are per-instance
         let reg = Arc::new(Self {
             sessions: Arc::new(DashMap::new()),
             ttl,
+            max_age,
             sweeper_cancel: tokio_util::sync::CancellationToken::new(),
             sweeper_handle: std::sync::Mutex::new(None),
         });
@@ -64,14 +71,17 @@ impl MemorySessionRegistry {
         *self.sweeper_handle.lock().expect("sweeper mutex") = Some(handle);
     }
 
-    /// Remove all entries whose last update is older than TTL.
+    /// Remove entries past their freshness TTL **or** older than the absolute
+    /// age bound (ghost protection, mirrors `DbSessionRegistry::sweep`).
     /// Public so the SWEA behaviour is directly testable.
     pub fn sweep(&self) {
-        let cutoff = Instant::now() - self.ttl;
+        let freshness_cutoff = Instant::now() - self.ttl;
+        let age_cutoff = chrono::Utc::now()
+            - chrono::Duration::from_std(self.max_age).unwrap_or(chrono::Duration::hours(12));
         let expired: Vec<String> = self
             .sessions
             .iter()
-            .filter(|e| e.last_update < cutoff)
+            .filter(|e| e.last_update < freshness_cutoff || e.info.started_at < age_cutoff)
             .map(|e| e.key().clone())
             .collect();
         for call_id in expired {
@@ -86,6 +96,23 @@ impl MemorySessionRegistry {
             .iter()
             .filter(|e| e.info.node_id == node_id && now.duration_since(e.last_update) <= window)
             .count()
+    }
+
+    /// Test helper: was this row's `last_update` within `window`?
+    pub async fn touched_within(&self, call_id: &str, window: Duration) -> bool {
+        self.sessions
+            .get(call_id)
+            .map(|e| e.last_update.elapsed() <= window)
+            .unwrap_or(false)
+    }
+
+    /// Test helper: deterministically age a row's `last_update` backwards
+    /// (sleep-based tests are flaky under CI scheduling jitter).
+    #[cfg(test)]
+    pub async fn backdate_for_test(&self, call_id: &str, by: Duration) {
+        if let Some(mut e) = self.sessions.get_mut(call_id) {
+            e.last_update = Instant::now() - by;
+        }
     }
 }
 
@@ -107,11 +134,21 @@ impl SessionRegistry for MemorySessionRegistry {
         Ok(())
     }
 
-    async fn heartbeat_node(&self, node_id: &str) -> Result<(), RegistryError> {
+    async fn heartbeat_node(
+        &self,
+        node_id: &str,
+        live_call_ids: &[String],
+    ) -> Result<(), RegistryError> {
+        if live_call_ids.is_empty() {
+            return Ok(());
+        }
+        let live: HashSet<&str> = live_call_ids.iter().map(|s| s.as_str()).collect();
         let now = Instant::now();
-        // Single pass over the map — no per-session task/await overhead.
+        // Single pass over the map — no per-session task/await overhead.  Rows
+        // NOT in the live list are deliberately left stale so the sweeper can
+        // reclaim them (ghost protection).
         for mut entry in self.sessions.iter_mut() {
-            if entry.info.node_id == node_id {
+            if entry.info.node_id == node_id && live.contains(entry.info.call_id.as_str()) {
                 entry.last_update = now;
             }
         }
@@ -166,7 +203,15 @@ mod tests {
     use super::*;
 
     fn reg(ttl: Duration) -> Arc<MemorySessionRegistry> {
-        MemorySessionRegistry::new("node-1", ttl)
+        MemorySessionRegistry::new(
+            "node-1",
+            ttl,
+            Duration::from_secs(crate::call::runtime::DEFAULT_SESSION_MAX_AGE_SECS),
+        )
+    }
+
+    fn reg_full(ttl: Duration, max_age: Duration) -> Arc<MemorySessionRegistry> {
+        MemorySessionRegistry::new("node-1", ttl, max_age)
     }
 
     async fn seed(registry: &Arc<MemorySessionRegistry>, call: &str, node: &str) {
@@ -206,7 +251,9 @@ mod tests {
         seed(&r, "other", "node-2").await;
 
         tokio::time::sleep(Duration::from_millis(20)).await; // age node-1 rows
-        r.heartbeat_node("node-1").await.unwrap();
+        r.heartbeat_node("node-1", &["own1".to_string(), "own2".to_string()])
+            .await
+            .unwrap();
 
         assert_eq!(
             r.last_heartbeat_within("node-1", Duration::from_millis(5))
@@ -218,6 +265,53 @@ mod tests {
                 .await,
             0
         );
+    }
+
+    /// Ghost protection: only ids in the live list are refreshed; anything
+    /// else stops aging forward and becomes sweeper food.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn heartbeat_node_only_refreshes_listed_live_ids() {
+        let r = reg(Duration::from_secs(3600));
+        seed(&r, "live", "node-1").await;
+        seed(&r, "ghost", "node-1").await;
+        r.backdate_for_test("live", Duration::from_millis(200))
+            .await;
+        r.backdate_for_test("ghost", Duration::from_millis(200))
+            .await;
+
+        r.heartbeat_node("node-1", &["live".to_string()])
+            .await
+            .unwrap();
+
+        assert!(
+            r.touched_within("live", Duration::from_millis(50)).await,
+            "only the listed live id is refreshed"
+        );
+        assert!(
+            !r.touched_within("ghost", Duration::from_millis(50)).await,
+            "the unlisted row must stay stale"
+        );
+
+        // Empty live list → nothing refreshed at all.
+        r.backdate_for_test("live", Duration::from_millis(200))
+            .await;
+        r.heartbeat_node("node-1", &[]).await.unwrap();
+        assert!(!r.touched_within("live", Duration::from_millis(50)).await);
+    }
+
+    /// Age-bound cut: a row heartbeat-fresh but older than `max_age` by
+    /// `started_at` is swept anyway (the immortal-ghost scenario).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweeper_deletes_rows_older_than_max_age_even_when_fresh() {
+        let r = reg_full(Duration::from_secs(3600), Duration::from_millis(50));
+        seed(&r, "ancient", "node-1").await;
+
+        // Age past the 50ms max_age; the 3600s freshness TTL would NOT fire.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        r.sweep();
+
+        assert!(r.lookup_owner("ancient").await.is_none());
+        assert_eq!(r.active_count().await, 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]

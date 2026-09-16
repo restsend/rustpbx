@@ -356,7 +356,8 @@ auto_start_at = "media" # default; use "answer" to wait for 200
 # segment type), and seq is the per-call recording counter. Every media leg
 # carries a capture tap, so on-demand recording works even with
 # enabled = false. CDR metadata.recording_segments lists every slice, and a
-# `recording_metadata_available` event is emitted per segment on upload.
+# `recording_metadata_available` event is emitted per segment on upload
+# (metadata.full = false; the call-level aggregate event carries full = true).
 # The event payload stays lean: CDR-only keys (trace, recording_segments,
 # media_quality, self_ip, session_id) remain in the CDR metadata for the
 # console and are not repeated into the event.

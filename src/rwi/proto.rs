@@ -177,6 +177,13 @@ pub struct RecordingMetadata {
     pub call_end_time: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upload_time: Option<String>,
+    /// `true` on the call-level aggregate payload emitted once after every
+    /// recording segment finished uploading; `false` on per-segment payloads
+    /// (IVR slice, agent slice, …). Consumers that only care about "the call
+    /// recording is fully available" filter on this instead of reconciling
+    /// segment ids.
+    #[serde(default)]
+    pub full: bool,
     /// Generic metadata bag, populated from `CallDetails.metadata`. Addons
     /// write flat string keys (e.g. `agent_id`, `queue_id`, `tenant_id`)
     /// that the core passes through without naming — external consumers
@@ -188,6 +195,19 @@ pub struct RecordingMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Older producers (or hand-crafted webhook replays) may omit `full`;
+    /// deserialization must stay tolerant and default to `false`.
+    #[test]
+    fn recording_metadata_defaults_full_when_absent() {
+        let meta: RecordingMetadata = serde_json::from_value(serde_json::json!({
+            "filename": "a.wav",
+            "file_size": 12,
+            "call_type": "inbound",
+        }))
+        .expect("legacy payload without `full` must deserialize");
+        assert!(!meta.full);
+    }
 
     #[tokio::test]
     async fn call_meta_store_insert_and_get() {

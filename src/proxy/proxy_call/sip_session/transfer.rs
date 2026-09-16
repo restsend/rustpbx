@@ -240,6 +240,11 @@ pub(crate) struct BridgeTraceContext {
     pub step_name: Option<String>,
     pub extra: Option<serde_json::Value>,
     pub step_start_time: Option<String>,
+    /// Step index of the originating node as recorded by the step executor's
+    /// own hand-off trace (`self.step_index + 1`), so proxy-emitted traces
+    /// (bridge DTMF, suspended session_end) correlate with it instead of the
+    /// historical hard-coded 0.
+    pub step_index: Option<u32>,
 }
 
 impl BridgeTraceContext {
@@ -248,6 +253,7 @@ impl BridgeTraceContext {
             && self.step_name.is_none()
             && self.extra.is_none()
             && self.step_start_time.is_none()
+            && self.step_index.is_none()
     }
 }
 
@@ -390,6 +396,9 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                             "_rst_step_name" => trace_context.step_name = Some(decoded_val),
                             "_rst_step_start_time" => {
                                 trace_context.step_start_time = Some(decoded_val)
+                            }
+                            "_rst_step_index" => {
+                                trace_context.step_index = decoded_val.parse().ok()
                             }
                             "_rst_extra" => {
                                 trace_context.extra = serde_json::from_str(&decoded_val).ok()
@@ -3253,11 +3262,12 @@ mod tests {
             "nodename": "测试啊，按1转人工，按2挂机",
         });
         let target = format!(
-            "bridge:wss://facade.example.com/ivr/tts/bridge/RI_x?samplerate=8000&timeout_ms=30000&return_app=ivr&return_target=lf-step-ivr&_rst_step_id={}&_rst_step_name={}&_rst_extra={}&_rst_step_start_time={}",
+            "bridge:wss://facade.example.com/ivr/tts/bridge/RI_x?samplerate=8000&timeout_ms=30000&return_app=ivr&return_target=lf-step-ivr&_rst_step_id={}&_rst_step_name={}&_rst_extra={}&_rst_step_start_time={}&_rst_step_index={}",
             encode("step-1"),
             encode("菜单"),
             encode(&extra.to_string()),
             encode("2026-01-01T00:00:00.123456789+00:00"),
+            encode("2"),
         );
         let parsed = super::parse_transfer_target(&target);
         match parsed {
@@ -3279,6 +3289,26 @@ mod tests {
                     Some("2026-01-01T00:00:00.123456789+00:00"),
                     "step start time must round-trip through the URI (RFC3339 with '+' and ':' encoded)"
                 );
+                assert_eq!(
+                    ctx.step_index,
+                    Some(2),
+                    "step index must round-trip so proxy traces correlate with the executor hand-off trace"
+                );
+            }
+            other => panic!("expected Bridge, got {other:?}"),
+        }
+    }
+
+    /// A malformed `_rst_step_index` is dropped rather than failing the parse.
+    #[test]
+    fn test_parse_voip_bridge_ignores_malformed_step_index() {
+        let target =
+            "bridge:wss://room.example.com/ws?_rst_step_index=not-a-number&_rst_step_id=s1";
+        match super::parse_transfer_target(target) {
+            TransferTarget::Bridge { trace_context, .. } => {
+                let ctx = trace_context.expect("step_id alone must create a context");
+                assert_eq!(ctx.step_index, None);
+                assert_eq!(ctx.step_id.as_deref(), Some("s1"));
             }
             other => panic!("expected Bridge, got {other:?}"),
         }

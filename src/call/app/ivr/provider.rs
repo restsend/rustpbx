@@ -115,6 +115,9 @@ pub struct ProviderContext {
     /// Step timing: wall-clock duration of the previous step in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub step_duration_ms: Option<u64>,
+    /// Monotonic step index (0 for SessionStart, incremented thereafter).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_index: Option<u32>,
     /// Whether this session was re-entered from a transfer (JumpIvr /
     /// agent / queue transfer-back). Values: `"ivr"`, `"agent"`, `"queue"`,
     /// or `None` for a fresh entry. When `"ivr"`, the variables map also

@@ -731,6 +731,8 @@ fn build_segment_recording_metadata(
         call_start_time: Some(record.start_time.to_rfc3339()),
         call_end_time: Some(record.end_time.to_rfc3339()),
         upload_time: Some(chrono::Utc::now().to_rfc3339()),
+        // One slice of a (possibly) segmented recording — not the full call.
+        full: false,
         extra,
     }
 }
@@ -1055,6 +1057,8 @@ impl CallRecordHook for RecordingUploadHook {
                         call_start_time: Some(record.start_time.to_rfc3339()),
                         call_end_time: Some(record.end_time.to_rfc3339()),
                         upload_time: Some(chrono::Utc::now().to_rfc3339()),
+                        // Call-level summary: every segment finished uploading.
+                        full: true,
                         extra,
                     };
                     let gw_ref = gw.read();
@@ -1221,6 +1225,11 @@ mod tests {
             Some(format!("{}_{}_{}.wav", root_session, "02", "1001").as_str())
         );
         assert_eq!(meta["seq"].as_str(), Some("2"));
+        assert_eq!(
+            meta["full"].as_bool(),
+            Some(false),
+            "per-segment event must be marked full=false: {meta}"
+        );
         assert!(meta.get("caller_name").is_some());
 
         // Console/CDR-only keys are stripped from the event payload; the

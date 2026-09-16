@@ -1181,6 +1181,7 @@ btn_download_wav = "Download WAV"
 loading_waveform = "Loading waveform…"
 channel_left_caller = "Left · Caller"
 channel_right_callee = "Right · Callee"
+playback_segment = "Segment"
 no_recording = "No media recording stored for this session."
 
 # Participant rewrite labels

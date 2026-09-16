@@ -303,6 +303,18 @@
                                         }}</p>
                                 </div>
                                 <div class="flex flex-wrap items-center gap-2">
+                                    <template x-if="record.recording && record.recording.segments && record.recording.segments.length > 1">
+                                    <label class="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-600">
+                                        <span>{{ "call_record_detail.playback_segment" | t }}</span>
+                                        <select
+                                            class="rounded border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                            @change="onRecordingSegmentChange($event)">
+                                            <template x-for="option in playbackSegmentOptions()" :key="option.value">
+                                                <option :value="option.value" x-text="option.label" :selected="option.value === playbackSegment"></option>
+                                            </template>
+                                        </select>
+                                    </label>
+                                    </template>
                                     <template x-if="record.recording && record.recording.supports_streams">
                                     <label class="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-600">
                                         <span>Stream</span>
@@ -1011,6 +1023,14 @@
             init() {
                 const data = typeof payload === 'string' ? JSON.parse(payload || '{}') : (payload || {});
                 this.record = data.record || {};
+                // Segmented calls default to the first recording segment so the
+                // selector always reflects the audio being played.
+                const recordingSegments = (this.record.recording && Array.isArray(this.record.recording.segments))
+                    ? this.record.recording.segments
+                    : [];
+                this.playbackSegment = recordingSegments.length
+                    ? ((recordingSegments[0].unique_id && String(recordingSegments[0].unique_id).trim()) || recordingSegments[0].track_id || '')
+                    : '';
                 this.trace = Array.isArray(data.trace) ? data.trace : [];
                 const recordRewrite = (this.record && this.record.rewrite && typeof this.record.rewrite === 'object')
                     ? this.record.rewrite
@@ -1155,6 +1175,7 @@
                 { value: 'B', label: 'Callee (B)' },
                 { value: 'mixed', label: 'Mixed' },
             ],
+            playbackSegment: '',
             async addTag() {
                 const value = (this.tagInput || '').trim();
                 if (!value) {
@@ -1951,9 +1972,6 @@
                     ? this.record.recording.fallback_url
                     : '';
             },
-            recordingPlaybackUrl() {
-                return this.waveformSourceUrl || this.recordingPrimaryUrl();
-            },
             canUseRecordingFallback() {
                 const fallback = this.recordingFallbackUrl();
                 return !!fallback && fallback !== this.recordingPlaybackUrl() && !this.waveformTriedFallback;
@@ -2136,6 +2154,17 @@
                 if (!this.record || !this.record.recording || !this.record.recording.url) {
                     return '';
                 }
+                // A selected segment plays from its own URL; remote (presigned)
+                // segment URLs must keep their query string untouched.
+                const segment = this.selectedPlaybackSegment();
+                if (segment && segment.playback_url) {
+                    if (!segment.supports_streams) {
+                        return segment.playback_url;
+                    }
+                    const stream = this.normalizePlaybackStream(this.playbackStream) || 'A';
+                    const separator = segment.playback_url.includes('?') ? '&' : '?';
+                    return `${segment.playback_url}${separator}stream=${encodeURIComponent(stream)}`;
+                }
                 const base = this.record.recording.url;
                 if (!this.record.recording.supports_streams) {
                     return base;
@@ -2144,6 +2173,35 @@
                 const stream = selected || 'A';
                 const separator = base.includes('?') ? '&' : '?';
                 return `${base}${separator}stream=${encodeURIComponent(stream)}`;
+            },
+            recordingSegments() {
+                return (this.record && this.record.recording && Array.isArray(this.record.recording.segments))
+                    ? this.record.recording.segments
+                    : [];
+            },
+            selectedPlaybackSegment() {
+                if (!this.playbackSegment) {
+                    return null;
+                }
+                return this.recordingSegments().find((segment) => {
+                    const value = (segment.unique_id && String(segment.unique_id).trim()) || segment.track_id || '';
+                    return value === this.playbackSegment;
+                }) || null;
+            },
+            playbackSegmentOptions() {
+                return this.recordingSegments().map((segment, index) => {
+                    const value = (segment.unique_id && String(segment.unique_id).trim()) || segment.track_id || String(index + 1);
+                    const seq = Number(segment.seq) > 0 ? Number(segment.seq) : index + 1;
+                    const name = segment.label || segment.segment_type || '';
+                    let text = `#${seq}`;
+                    if (name) {
+                        text += ` ${name}`;
+                    }
+                    if (Number(segment.duration_secs) > 0) {
+                        text += ` (${this.formatDuration(Number(segment.duration_secs))})`;
+                    }
+                    return { value, label: text };
+                });
             },
             normalizePlaybackStream(value) {
                 const normalized = String(value || '').trim().toLowerCase();
@@ -2162,6 +2220,17 @@
                 this.playbackStream = this.normalizePlaybackStream(e && e.target ? e.target.value : this.playbackStream);
                 this.stopWaveform();
                 this.destroyWaveform();
+                if (this.record && this.record.recording && this.record.recording.url) {
+                    this.$nextTick(() => this.prepareWaveform());
+                }
+            },
+            onRecordingSegmentChange(e) {
+                this.playbackSegment = e && e.target ? e.target.value : this.playbackSegment;
+                this.stopWaveform();
+                this.destroyWaveform();
+                // Fresh segment: drop any fallback URL pinned to the previous one.
+                this.waveformSourceUrl = '';
+                this.waveformTriedFallback = false;
                 if (this.record && this.record.recording && this.record.recording.url) {
                     this.$nextTick(() => this.prepareWaveform());
                 }

@@ -17,15 +17,21 @@
 //!   on every exit path (normal, error, panic unwind), and `release()` provides
 //!   an explicit async variant for session cleanup paths.
 //!
-//! - [`NodeHeartbeat`] batch-refreshes `last_updated_at` for **all** sessions
-//!   owned by this node with a single update per tick.  There is deliberately
-//!   **no per-session heartbeat**, so registry write cost does not scale with
+//! - [`NodeHeartbeat`] batch-refreshes `last_updated_at` for the sessions this
+//!   node still holds **live** (a single bulk update per tick, scoped to the
+//!   caller-supplied live call-id list).  There is deliberately **no
+//!   per-session heartbeat**, so registry write cost does not scale with
 //!   concurrent call count (a 10k-call node costs ~1 batch UPDATE per 30s, not
-//!   333 writes/s).
+//!   333 writes/s).  Scoping to *live* sessions is load-bearing: refreshing
+//!   rows unconditionally would keep ghosts (sessions whose unregister failed,
+//!   or that never terminated) alive forever and defeat the sweeper.
 //!
 //! - SWEA (Session With Expiry Auto-cleanup): every backend runs a background
 //!   sweeper that reclaims rows whose `last_updated_at` is older than the TTL.
-//!   This is the safety net for crash-without-Drop (kill -9, power loss).
+//!   This is the safety net for crash-without-Drop (kill -9, power loss).  A
+//!   second, age-based cut ([`DEFAULT_SESSION_MAX_AGE_SECS`]) deletes rows by
+//!   `started_at` regardless of freshness — the last-resort bound that keeps
+//!   any possible ghost mortal.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,6 +41,17 @@ use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 
 use crate::utils;
+
+/// Default hard ceiling for any session row regardless of heartbeat
+/// freshness: rows older than this are ghosts and get swept by age even if a
+/// node keeps refreshing them.  Shared with the CC monitor so the console
+/// filters/flags the same cutoff the sweeper enforces.
+pub const DEFAULT_SESSION_MAX_AGE_SECS: u64 = 43200;
+
+/// Retries for the fire-and-forget `unregister` issued on
+/// [`SessionGuard::drop`].  A single transient DB failure must not leave an
+/// immortal row behind.
+const UNREGISTER_RETRY_DELAYS: &[Duration] = &[Duration::from_secs(1), Duration::from_secs(5)];
 
 /// Immutable routing snapshot placed in the registry at session birth.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,10 +151,17 @@ pub trait SessionRegistry: Send + Sync + 'static {
     /// [`SessionGuard`] RAII drop).
     async fn unregister(&self, call_id: &str) -> Result<(), RegistryError>;
 
-    /// Batch-refresh `last_updated_at` for every session owned by `node_id`.
-    /// Invoked by [`NodeHeartbeat`] roughly once per heartbeat interval; must
-    /// be a single bulk statement, never a per-session loop.
-    async fn heartbeat_node(&self, node_id: &str) -> Result<(), RegistryError>;
+    /// Batch-refresh `last_updated_at` for `live_call_ids` — the sessions this
+    /// node still holds live.  Rows for call ids **not** in the list are left
+    /// untouched so the TTL sweeper can reclaim them (ghost protection: a
+    /// session whose unregister failed must not be kept alive by the
+    /// heartbeat).  Invoked by [`NodeHeartbeat`] roughly once per heartbeat
+    /// interval; must be a single bulk statement, never a per-session loop.
+    async fn heartbeat_node(
+        &self,
+        node_id: &str,
+        live_call_ids: &[String],
+    ) -> Result<(), RegistryError>;
 
     /// Which node owns `call_id`?  `None` = not found / already ended.
     async fn lookup_owner(&self, call_id: &str) -> Option<String>;
@@ -177,7 +201,11 @@ impl SessionRegistry for NoopSessionRegistry {
     async fn unregister(&self, _call_id: &str) -> Result<(), RegistryError> {
         Ok(())
     }
-    async fn heartbeat_node(&self, _node_id: &str) -> Result<(), RegistryError> {
+    async fn heartbeat_node(
+        &self,
+        _node_id: &str,
+        _live_call_ids: &[String],
+    ) -> Result<(), RegistryError> {
         Ok(())
     }
     async fn lookup_owner(&self, _call_id: &str) -> Option<String> {
@@ -215,8 +243,10 @@ impl SessionRegistry for NoopSessionRegistry {
 /// ```
 ///
 /// On `Drop` (any exit path — normal, error, panic unwind) a fire-and-forget
-/// `unregister` is issued.  Use [`SessionGuard::release`] when an explicit
-/// async unregister is wanted (e.g. in `SipSession::cleanup`).
+/// `unregister` is issued with bounded retries
+/// ([`UNREGISTER_RETRY_DELAYS`]) — a transient DB blip on the one-shot path
+/// used to leave an immortal row behind.  Use [`SessionGuard::release`] when
+/// an explicit async unregister is wanted (e.g. in `SipSession::cleanup`).
 ///
 /// There is intentionally NO per-session heartbeat task here — liveness of all
 /// sessions owned by a node is maintained by the single [`NodeHeartbeat`].
@@ -224,6 +254,7 @@ pub struct SessionGuard {
     call_id: String,
     registry: SessionRegistryRef,
     released: bool,
+    retry_delays: Vec<Duration>,
 }
 
 impl SessionGuard {
@@ -237,6 +268,7 @@ impl SessionGuard {
             call_id: info.call_id,
             registry,
             released: false,
+            retry_delays: UNREGISTER_RETRY_DELAYS.to_vec(),
         })
     }
 
@@ -246,6 +278,40 @@ impl SessionGuard {
         self.released = true;
         result
     }
+
+    #[cfg(test)]
+    fn with_retry_delays(mut self, delays: Vec<Duration>) -> Self {
+        self.retry_delays = delays;
+        self
+    }
+}
+
+/// Fire-and-forget `unregister` with bounded backoff retries.
+fn spawn_unregister_with_retry(
+    registry: SessionRegistryRef,
+    call_id: String,
+    delays: Vec<Duration>,
+) {
+    utils::spawn(async move {
+        let mut attempt = 1usize;
+        loop {
+            match registry.unregister(&call_id).await {
+                Ok(()) => return,
+                Err(e) if attempt > delays.len() => {
+                    tracing::warn!(call_id = %call_id, error = %e, attempts = attempt,
+                        "session registry unregister failed after retries (RAII drop)");
+                    return;
+                }
+                Err(_) => {
+                    let delay = delays[attempt - 1];
+                    tracing::debug!(call_id = %call_id, attempt, ?delay,
+                        "session registry unregister failed (RAII drop); retrying");
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                }
+            }
+        }
+    });
 }
 
 impl Drop for SessionGuard {
@@ -253,14 +319,11 @@ impl Drop for SessionGuard {
         if self.released {
             return;
         }
-        let registry = self.registry.clone();
-        let call_id = self.call_id.clone();
-        utils::spawn(async move {
-            if let Err(e) = registry.unregister(&call_id).await {
-                tracing::warn!(call_id = %call_id, error = %e,
-                    "session registry unregister failed (RAII drop)");
-            }
-        });
+        spawn_unregister_with_retry(
+            self.registry.clone(),
+            self.call_id.clone(),
+            self.retry_delays.clone(),
+        );
     }
 }
 
@@ -270,17 +333,29 @@ impl Drop for SessionGuard {
 
 /// One background task per cluster node that keeps that node's sessions alive.
 ///
-/// Every `interval` it issues a **single** [`SessionRegistry::heartbeat_node`]
-/// call refreshing all locally-owned rows at once.  The sweeper's TTL is the
-/// crash-recovery window: a node that stops heartbeating (killed) has its
-/// sessions reclaimed after TTL.
+/// Every `interval` it snapshots the node's **live** call ids via
+/// `live_call_ids` and issues a **single**
+/// [`SessionRegistry::heartbeat_node`] call refreshing just those rows.
+/// Refreshing only live sessions is what keeps ghosts mortal: a row whose
+/// session is gone stops being refreshed and is reclaimed by the sweeper
+/// after the TTL.  The sweeper's TTL is the crash-recovery window: a node
+/// that stops heartbeating (killed) has its sessions reclaimed after TTL.
 pub struct NodeHeartbeat {
     cancel: tokio_util::sync::CancellationToken,
     handle: std::sync::Mutex<Option<JoinHandle<()>>>,
 }
 
+/// Provider of the node's currently-live call ids (e.g. a snapshot of the
+/// local [`crate::proxy::active_call_registry::ActiveProxyCallRegistry`]).
+pub type LiveCallIdsFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+
 impl NodeHeartbeat {
-    pub fn spawn(registry: SessionRegistryRef, node_id: String, interval: Duration) -> Self {
+    pub fn spawn(
+        registry: SessionRegistryRef,
+        node_id: String,
+        interval: Duration,
+        live_call_ids: LiveCallIdsFn,
+    ) -> Self {
         let cancel = tokio_util::sync::CancellationToken::new();
         let c = cancel.clone();
         let handle = utils::spawn(async move {
@@ -290,7 +365,15 @@ impl NodeHeartbeat {
                 tokio::select! {
                     _ = c.cancelled() => break,
                     _ = tick.tick() => {
-                        if let Err(e) = registry.heartbeat_node(&node_id).await {
+                        let live = (live_call_ids)();
+                        if live.is_empty() {
+                            // Nothing held live locally: refresh nothing so
+                            // any leftover rows age out of the TTL window.
+                            tracing::debug!(node_id = %node_id,
+                                "no live sessions; skipping registry heartbeat");
+                            continue;
+                        }
+                        if let Err(e) = registry.heartbeat_node(&node_id, &live).await {
                             tracing::warn!(node_id = %node_id, error = %e,
                                 "session registry node heartbeat failed");
                         }
@@ -344,6 +427,7 @@ mod tests {
         let reg = super::super::memory_session_registry::MemorySessionRegistry::new(
             "node-1",
             Duration::from_secs(3600),
+            Duration::from_secs(DEFAULT_SESSION_MAX_AGE_SECS),
         );
         let guard = SessionGuard::register(reg.clone(), SessionInfo::new("call-1", "node-1"))
             .await
@@ -361,6 +445,7 @@ mod tests {
         let reg = super::super::memory_session_registry::MemorySessionRegistry::new(
             "node-1",
             Duration::from_secs(3600),
+            Duration::from_secs(DEFAULT_SESSION_MAX_AGE_SECS),
         );
         {
             let _guard =
@@ -379,6 +464,7 @@ mod tests {
         let reg = super::super::memory_session_registry::MemorySessionRegistry::new(
             "node-1",
             Duration::from_secs(3600),
+            Duration::from_secs(DEFAULT_SESSION_MAX_AGE_SECS),
         );
         let guard = SessionGuard::register(reg.clone(), SessionInfo::new("call-x", "node-1"))
             .await
@@ -393,6 +479,7 @@ mod tests {
         let reg = super::super::memory_session_registry::MemorySessionRegistry::new(
             "10.0.0.1:5060",
             Duration::from_secs(3600),
+            Duration::from_secs(DEFAULT_SESSION_MAX_AGE_SECS),
         );
         reg.register(&SessionInfo::new("sess-abc", "10.0.0.1:5060"))
             .await
@@ -428,6 +515,7 @@ mod tests {
         let reg = super::super::memory_session_registry::MemorySessionRegistry::new(
             "node-1",
             Duration::from_secs(3600),
+            Duration::from_secs(DEFAULT_SESSION_MAX_AGE_SECS),
         );
         let _a = SessionGuard::register(reg.clone(), SessionInfo::new("a", "node-1"))
             .await
@@ -440,10 +528,158 @@ mod tests {
             .unwrap();
 
         // Batch heartbeat touches only node-1's rows.
-        reg.heartbeat_node("node-1").await.unwrap();
+        reg.heartbeat_node("node-1", &["a".to_string(), "b".to_string()])
+            .await
+            .unwrap();
         let refreshed = reg
             .last_heartbeat_within("node-1", Duration::from_secs(5))
             .await;
         assert_eq!(refreshed, 2, "only node-1's own sessions are refreshed");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn node_heartbeat_only_refreshes_live_ids() {
+        let reg = super::super::memory_session_registry::MemorySessionRegistry::new(
+            "node-1",
+            Duration::from_secs(3600),
+            Duration::from_secs(DEFAULT_SESSION_MAX_AGE_SECS),
+        );
+        let _a = SessionGuard::register(reg.clone(), SessionInfo::new("a", "node-1"))
+            .await
+            .unwrap();
+        let _b = SessionGuard::register(reg.clone(), SessionInfo::new("b", "node-1"))
+            .await
+            .unwrap();
+
+        // Only "a" is reported live: "b" must not be refreshed (ghost path —
+        // it stays untouched so the TTL sweeper can reclaim it).
+        reg.backdate_for_test("a", Duration::from_millis(200)).await;
+        reg.backdate_for_test("b", Duration::from_millis(200)).await;
+        reg.heartbeat_node("node-1", &["a".to_string()])
+            .await
+            .unwrap();
+        assert!(
+            reg.touched_within("a", Duration::from_millis(50)).await,
+            "the live call id is refreshed"
+        );
+        assert!(
+            !reg.touched_within("b", Duration::from_millis(50)).await,
+            "the unlisted call id stays stale"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn node_heartbeat_spawn_scopes_to_live_ids() {
+        let reg = super::super::memory_session_registry::MemorySessionRegistry::new(
+            "node-1",
+            Duration::from_secs(3600),
+            Duration::from_secs(DEFAULT_SESSION_MAX_AGE_SECS),
+        );
+        let _a = SessionGuard::register(reg.clone(), SessionInfo::new("a", "node-1"))
+            .await
+            .unwrap();
+        let _ghost = SessionGuard::register(reg.clone(), SessionInfo::new("ghost", "node-1"))
+            .await
+            .unwrap();
+
+        // Live-id provider reports only "a" — the "ghost" row must never be
+        // refreshed by the background heartbeat.
+        let live: LiveCallIdsFn = Arc::new(|| vec!["a".to_string()]);
+        let _hb = NodeHeartbeat::spawn(
+            reg.clone(),
+            "node-1".to_string(),
+            Duration::from_millis(20),
+            live,
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // "a" is re-refreshed every 20ms tick; "ghost" was seeded once at t=0
+        // and is ≥200ms stale — windows are chosen well inside those bounds.
+        assert!(
+            reg.touched_within("a", Duration::from_millis(100)).await,
+            "live session keeps being refreshed"
+        );
+        assert!(
+            !reg.touched_within("ghost", Duration::from_millis(100))
+                .await,
+            "ghost is never refreshed"
+        );
+    }
+
+    /// A flaky backend must not leave an immortal row behind: the RAII drop
+    /// path retries `unregister` with backoff until it succeeds.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session_guard_drop_retries_failed_unregister() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Flaky {
+            inner: Arc<super::super::memory_session_registry::MemorySessionRegistry>,
+            failures_left: AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl SessionRegistry for Flaky {
+            async fn register(&self, info: &SessionInfo) -> Result<(), RegistryError> {
+                self.inner.register(info).await
+            }
+            async fn unregister(&self, call_id: &str) -> Result<(), RegistryError> {
+                if self.failures_left.load(Ordering::SeqCst) > 0 {
+                    self.failures_left.fetch_sub(1, Ordering::SeqCst);
+                    return Err(RegistryError::Unavailable("db blip".into()));
+                }
+                self.inner.unregister(call_id).await
+            }
+            async fn heartbeat_node(
+                &self,
+                node_id: &str,
+                live_call_ids: &[String],
+            ) -> Result<(), RegistryError> {
+                self.inner.heartbeat_node(node_id, live_call_ids).await
+            }
+            async fn lookup_owner(&self, call_id: &str) -> Option<String> {
+                self.inner.lookup_owner(call_id).await
+            }
+            async fn lookup(&self, call_id: &str) -> Option<SessionInfo> {
+                self.inner.lookup(call_id).await
+            }
+            async fn list_all(&self, limit: usize) -> Vec<SessionInfo> {
+                self.inner.list_all(limit).await
+            }
+            async fn list_by_node(&self, node_id: &str) -> Vec<String> {
+                self.inner.list_by_node(node_id).await
+            }
+            async fn active_count(&self) -> usize {
+                self.inner.active_count().await
+            }
+            async fn health_check(&self) -> Result<(), RegistryError> {
+                self.inner.health_check().await
+            }
+        }
+
+        let inner = super::super::memory_session_registry::MemorySessionRegistry::new(
+            "node-1",
+            Duration::from_secs(3600),
+            Duration::from_secs(DEFAULT_SESSION_MAX_AGE_SECS),
+        );
+        let backend = Arc::new(Flaky {
+            inner: inner.clone(),
+            failures_left: AtomicUsize::new(2),
+        });
+        let reg: SessionRegistryRef = backend.clone();
+        {
+            let _guard =
+                SessionGuard::register(reg.clone(), SessionInfo::new("call-flaky", "node-1"))
+                    .await
+                    .unwrap()
+                    .with_retry_delays(vec![Duration::from_millis(10), Duration::from_millis(10)]);
+            assert_eq!(inner.active_count().await, 1);
+        }
+        // Two failures then success, with 10ms backoffs — well under 1s.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            inner.active_count().await,
+            0,
+            "retried unregister must land"
+        );
+        assert_eq!(backend.failures_left.load(Ordering::SeqCst), 0);
     }
 }

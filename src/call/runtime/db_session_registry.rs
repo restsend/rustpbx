@@ -4,10 +4,15 @@
 //! Write amplification is minimal by design:
 //!
 //! - `register` / `unregister` are single-row writes, once per call.
-//! - `heartbeat_node` is **one** bulk `UPDATE ... WHERE node_id = $self`
-//!   executed by the single [`NodeHeartbeat`] task — never per-session.
+//! - `heartbeat_node` is **one** bulk `UPDATE ... WHERE node_id = $self AND
+//!   call_id IN (live ids)` executed by the single [`NodeHeartbeat`] task —
+//!   never per-session.  Scoping to live ids means a ghost row (session whose
+//!   unregister failed or that never terminated) stops being refreshed and is
+//!   reclaimed by the sweeper instead of being kept alive forever.
 //! - SWEA sweeper runs one `DELETE WHERE last_updated_at < cutoff` per minute,
-//!   using the `idx_cluster_sessions_updated` index.
+//!   using the `idx_cluster_sessions_updated` index, plus an age-based cut
+//!   `DELETE WHERE started_at < now - max_age` that bounds any possible ghost
+//!   regardless of heartbeat freshness.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,16 +36,22 @@ const SWEEPER_INTERVAL: Duration = Duration::from_secs(60);
 pub struct DbSessionRegistry {
     db: DatabaseConnection,
     ttl: Duration,
+    max_age: Duration,
     sweeper_cancel: tokio_util::sync::CancellationToken,
     sweeper_handle: std::sync::Mutex<Option<JoinHandle<()>>>,
 }
 
 impl DbSessionRegistry {
     /// Connect to the shared DB and start the SWEA sweeper task.
-    pub fn new(db: DatabaseConnection, ttl: Duration) -> Arc<Self> {
+    ///
+    /// `ttl` is the heartbeat-freshness window (crash recovery); `max_age` is
+    /// the absolute ceiling for any row by `started_at` — the last-resort
+    /// bound that keeps ghosts mortal even if a heartbeat bug refreshes them.
+    pub fn new(db: DatabaseConnection, ttl: Duration, max_age: Duration) -> Arc<Self> {
         let reg = Arc::new(Self {
             db,
             ttl,
+            max_age,
             sweeper_cancel: tokio_util::sync::CancellationToken::new(),
             sweeper_handle: std::sync::Mutex::new(None),
         });
@@ -73,12 +84,25 @@ impl DbSessionRegistry {
         *self.sweeper_handle.lock().expect("sweeper mutex") = Some(handle);
     }
 
-    /// Delete rows whose `last_updated_at` is older than TTL (crash recovery).
-    async fn sweep(&self) -> Result<(), sea_orm::DbErr> {
-        let cutoff = chrono::Utc::now()
-            - chrono::Duration::from_std(self.ttl).unwrap_or(chrono::Duration::hours(1));
+    /// Delete stale rows:
+    ///
+    /// - rows whose `last_updated_at` is older than TTL (crash recovery), and
+    /// - rows whose `started_at` is older than `max_age` regardless of
+    ///   freshness (ghost bound — e.g. a session that never terminated and
+    ///   whose row was still being heartbeat-refreshed).
+    pub async fn sweep(&self) -> Result<(), sea_orm::DbErr> {
+        let now = chrono::Utc::now();
+        let freshness_cutoff =
+            now - chrono::Duration::from_std(self.ttl).unwrap_or(chrono::Duration::hours(1));
         Entity::delete_many()
-            .filter(Column::LastUpdatedAt.lt(cutoff))
+            .filter(Column::LastUpdatedAt.lt(freshness_cutoff))
+            .exec(&self.db)
+            .await?;
+
+        let age_cutoff =
+            now - chrono::Duration::from_std(self.max_age).unwrap_or(chrono::Duration::hours(12));
+        Entity::delete_many()
+            .filter(Column::StartedAt.lt(age_cutoff))
             .exec(&self.db)
             .await?;
         Ok(())
@@ -134,13 +158,26 @@ impl SessionRegistry for DbSessionRegistry {
         Ok(())
     }
 
-    async fn heartbeat_node(&self, node_id: &str) -> Result<(), RegistryError> {
-        // Refresh only rows that are due — avoids write amplification.
+    async fn heartbeat_node(
+        &self,
+        node_id: &str,
+        live_call_ids: &[String],
+    ) -> Result<(), RegistryError> {
+        if live_call_ids.is_empty() {
+            return Ok(());
+        }
+        // Refresh only live rows owned by this node — avoids write
+        // amplification AND keeps ghosts (ids not in the list) mortal so the
+        // sweeper can reclaim them.  App-clock `Expr::value` keeps the stored
+        // format identical to `register`/`unregister` writers (sqlite compares
+        // DATETIME TEXT lexicographically; mixing formats breaks ordering) and
+        // avoids DB-vs-app clock skew.
         let stale_before =
             chrono::Utc::now() - chrono::Duration::seconds(SWEEPER_INTERVAL.as_secs() as i64);
         Entity::update_many()
-            .col_expr(Column::LastUpdatedAt, Expr::current_timestamp().into())
+            .col_expr(Column::LastUpdatedAt, Expr::value(chrono::Utc::now()))
             .filter(Column::NodeId.eq(node_id))
+            .filter(Column::CallId.is_in(live_call_ids.iter().cloned()))
             .filter(Column::LastUpdatedAt.lt(stale_before))
             .exec(&self.db)
             .await
@@ -253,7 +290,58 @@ mod tests {
     }
 
     async fn reg() -> Arc<DbSessionRegistry> {
-        DbSessionRegistry::new(test_db().await, Duration::from_secs(3600))
+        DbSessionRegistry::new(
+            test_db().await,
+            Duration::from_secs(3600),
+            Duration::from_secs(crate::call::runtime::DEFAULT_SESSION_MAX_AGE_SECS),
+        )
+    }
+
+    /// Short-window registry for sweeper tests: TTL 60s freshness, 300s age
+    /// bound — lets tests backdate rows by minutes instead of hours.
+    async fn reg_short() -> (Arc<DbSessionRegistry>, DatabaseConnection) {
+        let db = test_db().await;
+        let reg = DbSessionRegistry::new(
+            db.clone(),
+            Duration::from_secs(60),
+            Duration::from_secs(300),
+        );
+        (reg, db)
+    }
+
+    /// Force a row's `last_updated_at` / `started_at` into the past.
+    async fn backdate_row(
+        db: &DatabaseConnection,
+        call_id: &str,
+        last_updated_secs_ago: i64,
+        started_secs_ago: i64,
+    ) {
+        use sea_orm::sea_query::Expr;
+        let now = chrono::Utc::now();
+        Entity::update_many()
+            .col_expr(
+                Column::LastUpdatedAt,
+                Expr::value(now - chrono::Duration::seconds(last_updated_secs_ago)),
+            )
+            .col_expr(
+                Column::StartedAt,
+                Expr::value(now - chrono::Duration::seconds(started_secs_ago)),
+            )
+            .filter(Column::CallId.eq(call_id))
+            .exec(db)
+            .await
+            .unwrap();
+    }
+
+    async fn row_freshness(
+        db: &DatabaseConnection,
+        call_id: &str,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        Entity::find_by_id(call_id)
+            .one(db)
+            .await
+            .unwrap()
+            .map(|m| m.last_updated_at)
     }
 
     fn info(call: &str, node: &str) -> SessionInfo {
@@ -298,16 +386,77 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn heartbeat_node_bulk_refresh() {
-        let r = reg().await;
+    async fn heartbeat_node_refreshes_only_live_rows() {
+        let (r, db) = reg_short().await;
         r.register(&info("own1", "node-1")).await.unwrap();
         r.register(&info("own2", "node-1")).await.unwrap();
         r.register(&info("other", "node-2")).await.unwrap();
 
-        r.heartbeat_node("node-1").await.unwrap();
-        // Both node-1 rows exist; node-2 row untouched but still present.
-        assert_eq!(r.active_count().await, 3);
-        assert_eq!(r.list_by_node("node-1").await.len(), 2);
+        // Backdate both node-1 rows so the heartbeat "due" filter passes.
+        backdate_row(&db, "own1", 120, 120).await;
+        backdate_row(&db, "own2", 120, 120).await;
+
+        // Only "own1" is reported live: "own2" (the ghost) must stay stale.
+        r.heartbeat_node("node-1", &["own1".to_string()])
+            .await
+            .unwrap();
+
+        let own1_fresh = row_freshness(&db, "own1").await.unwrap();
+        let own2_fresh = row_freshness(&db, "own2").await.unwrap();
+        assert!(
+            own1_fresh > chrono::Utc::now() - chrono::Duration::seconds(30),
+            "live row must be refreshed, got {own1_fresh}"
+        );
+        assert!(
+            own2_fresh < chrono::Utc::now() - chrono::Duration::seconds(60),
+            "ghost row must be left untouched, got {own2_fresh}"
+        );
+
+        // The sweeper reclaims the stale ghost; everything live/fresh stays.
+        r.sweep().await.unwrap();
+        assert!(r.lookup("own1").await.is_some());
+        assert!(
+            r.lookup("own2").await.is_none(),
+            "ghost row swept after TTL"
+        );
+        assert!(r.lookup("other").await.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn heartbeat_node_with_empty_live_list_is_noop() {
+        let (r, db) = reg_short().await;
+        r.register(&info("own1", "node-1")).await.unwrap();
+        backdate_row(&db, "own1", 120, 120).await;
+
+        r.heartbeat_node("node-1", &[]).await.unwrap();
+        let fresh = row_freshness(&db, "own1").await.unwrap();
+        assert!(
+            fresh < chrono::Utc::now() - chrono::Duration::seconds(60),
+            "no live ids → nothing refreshed, got {fresh}"
+        );
+    }
+
+    /// Defense-in-depth: a row can be heartbeat-fresh yet ancient by
+    /// `started_at` (the immortal-ghost scenario).  The age cut must delete
+    /// it regardless of freshness.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_deletes_rows_older_than_max_age_even_when_fresh() {
+        let (r, _db) = reg_short().await;
+
+        let mut ancient = info("ancient", "node-1");
+        ancient.started_at = chrono::Utc::now() - chrono::Duration::seconds(400);
+        r.register(&ancient).await.unwrap();
+        r.register(&info("young", "node-1")).await.unwrap();
+
+        // register leaves last_updated_at = now (heartbeat-fresh) while
+        // started_at is ancient — exactly the immortal-ghost shape.
+        r.sweep().await.unwrap();
+
+        assert!(
+            r.lookup("ancient").await.is_none(),
+            "age-bound ghost must be swept despite fresh last_updated_at"
+        );
+        assert!(r.lookup("young").await.is_some());
     }
 
     #[tokio::test(flavor = "multi_thread")]

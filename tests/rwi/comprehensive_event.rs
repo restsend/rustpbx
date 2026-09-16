@@ -281,6 +281,7 @@ async fn test_comprehensive_core_event_structs() {
                 session_id: "ivr-session-001".into(),
                 caller: "alice".into(),
                 callee: "bob".into(),
+                step_index: 1,
                 trigger: rustpbx::rwi::TriggerInfo::with_detail(
                     "dtmf",
                     serde_json::json!({ "digit": "1" }),

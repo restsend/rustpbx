@@ -95,6 +95,7 @@ async fn step_provider_waits_for_configured_retry_delay() {
         step_start_time: None,
         step_end_time: None,
         step_duration_ms: None,
+        step_index: None,
         transferred_from: None,
     };
 

@@ -728,14 +728,22 @@ Triggered when the recording file upload completes, containing full metadata.
 > `segment_type`, `segment_id`, `started_at` / `ended_at` next to the
 > call-level metadata. `record_end` remains a single per-call summary.
 >
+> **`full` flag**: every `recording_metadata_available` payload carries a
+> boolean `metadata.full` — `false` on per-segment events, `true` on the
+> call-level aggregate event (the one emitted once after every segment
+> finished uploading). Consumers only interested in "the call's recording is
+> fully available" filter on `metadata.full == true` and never need to
+> reconcile `segment_id`s; `segment_id` itself stays an optional `extra`
+> pass-through (per-segment events only).
+>
 > **Backwards compatibility**: the pre-existing **aggregate event is still
 > emitted once per call** (N segments → N+1 events) — its
 > `extra.recording_segments` remains a JSON **string** (containing the array;
 > `JSON.parse` it), and its `filename` is the first segment's file. Old
 > subscribers keep working; consumers that only want per-segment events can
-> skip the aggregate one (the event whose `extra` contains the
-> `recording_segments` key). The CDR's `metadata.recording_segments` stays a
-> native JSON array, unchanged.
+> skip the aggregate one (`metadata.full == true`, or the event whose
+> `extra` contains the `recording_segments` key). The CDR's
+> `metadata.recording_segments` stays a native JSON array, unchanged.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -747,6 +755,7 @@ Triggered when the recording file upload completes, containing full metadata.
 | Field | Type | Description |
 |-------|------|-------------|
 | `unique_id` | Option\<String\> | Recording unique identifier (UUID v4, the `uniqId` acceptance field; identical to the id carried by the segment's `record_started` / `record_stopped`) |
+| `full` | bool | `true` on the call-level aggregate event (all segments uploaded); `false` on per-segment events. Defaults to `false` when absent (tolerant deserialization) |
 | `filename` | String | Recording filename |
 | `file_size` | u64 | File size in bytes |
 | `download_url` | Option\<String\> | Download URL |
@@ -781,6 +790,7 @@ RWI WebSocket frame (flat payload, `event_type` injected by the gateway):
     "call_start_time": "2026-09-10T08:54:01.155781+00:00",
     "call_end_time": "2026-09-10T08:54:48.155781+00:00",
     "upload_time": "2026-09-10T08:54:18.157941+00:00",
+    "full": false,
     "segment_id": "9c1f02ab",
     "queue_id": "support",
     "label": "1001",
@@ -817,6 +827,7 @@ Webhook delivery wraps the same payload in an envelope (`webhook.rs`: `rwi` /
       "call_start_time": "2026-09-10T08:54:01.155781+00:00",
       "call_end_time": "2026-09-10T08:54:48.155781+00:00",
       "upload_time": "2026-09-10T08:54:18.157941+00:00",
+      "full": false,
       "segment_id": "9c1f02ab",
       "queue_id": "support",
       "label": "1001",
@@ -843,7 +854,8 @@ Webhook delivery wraps the same payload in an envelope (`webhook.rs`: `rwi` /
 > are appended verbatim; there is no typed `unique_id` field. Without
 > segmented recording (whole-call recording / SipFlow) the event keeps its
 > legacy single-event shape and `metadata` carries no `seq` / `label` /
-> `segment_*` keys.
+> `segment_*` keys — only the typed `full: true` marker (call-level
+> aggregate).
 >
 > **CDR-only keys never enter the event payload**: `trace` (console
 > timeline), `recording_segments` (full segment array), `media_quality`
@@ -979,6 +991,7 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 | `session_id` | String | Session ID |
 | `caller` | String | Caller |
 | `callee` | String | Callee |
+| `step_index` | u32 | Step index: incremented on every provider `/step` round-trip (first node is 1); terminal actions (Transfer/Hangup/Exit) and record-control steps increment once more before recording. Proxy-derived entries (bridge DTMF) carry the same value via `_rst_step_index`; 0 when there is no node context |
 | `trigger` | Object | Structured trigger info for this step, see below |
 | `action_type` | String | Action type (e.g., `Transfer`, `Prompt`, `DtmfMenu`) |
 | `action_json` | Option\<String\> | Action details JSON |

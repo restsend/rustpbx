@@ -111,6 +111,11 @@ struct QueryCallRecordFilters {
 struct RecordingPlaybackQuery {
     #[serde(default)]
     stream: Option<String>,
+    /// Select one recording segment of a segmented call: the media entry's
+    /// `unique_id` (preferred, same id as `recording_metadata_available`)
+    /// or its `track_id` as fallback. Absent → the first existing file.
+    #[serde(default)]
+    segment: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -710,7 +715,33 @@ async fn stream_call_recording(
     let record = find_or_404!(CallRecordEntity, pk, db, "Call record");
 
     let cdr_data = load_cdr_data(&state, &record).await;
-    let recording_path = select_recording_path(&record, cdr_data.as_ref());
+    // A `?segment=` selector pins the playback to one recording segment of a
+    // segmented call (unique_id / track_id). A missing match must 404 rather
+    // than silently falling back to another segment or the whole-call
+    // SipFlow rendition.
+    let requested_segment = query
+        .segment
+        .as_deref()
+        .map(str::trim)
+        .filter(|selector| !selector.is_empty());
+    let recording_path = match requested_segment {
+        Some(selector) => {
+            let found = select_recording_segment_path(&record, cdr_data.as_ref(), Some(selector));
+            if found.is_none() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    [(http::header::CACHE_CONTROL, "no-store")],
+                    Json(json!({
+                        "message": "Recording segment not found",
+                        "segment": selector,
+                    })),
+                )
+                    .into_response();
+            }
+            found
+        }
+        None => select_recording_path(&record, cdr_data.as_ref()),
+    };
 
     // Try to stream from file first
     if let Some(ref path) = recording_path
@@ -1884,6 +1915,103 @@ async fn derive_recording_download_url(
     None
 }
 
+/// Per-segment playback list for segmented calls, sourced from the CDR
+/// `recorder` media list (one entry per recording segment plus the
+/// `signaling` sidecar). Returns `None` for calls with fewer than two
+/// segments so single-file calls keep the existing payload shape.
+///
+/// Each entry's `playback_url` targets that segment only: the local
+/// `/call-records/{id}/recording?segment={unique_id}` endpoint when the file
+/// is on disk, otherwise the presigned per-segment upload URL when present.
+async fn build_recording_segments_payload(
+    state: &ConsoleState,
+    record: &CallRecordModel,
+    cdr: Option<&CdrData>,
+) -> Option<Value> {
+    let cdr_data = cdr?;
+    let entries: Vec<&crate::callrecord::CallRecordMedia> = cdr_data
+        .record
+        .recorder
+        .iter()
+        .filter(|media| media.track_id != "signaling" && !media.path.trim().is_empty())
+        .collect();
+    if entries.len() < 2 {
+        return None;
+    }
+
+    let mut segments = Vec::with_capacity(entries.len());
+    for media in entries {
+        let extra = media.extra.as_ref();
+        let string_extra = |key: &str| {
+            extra
+                .and_then(|bag| bag.get(key))
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        };
+        let number_extra = |key: &str| {
+            extra
+                .and_then(|bag| bag.get(key))
+                .and_then(|value| value.as_u64())
+        };
+        let duration_secs = match (string_extra("started_at"), string_extra("ended_at")) {
+            (Some(started), Some(ended)) => chrono::DateTime::parse_from_rfc3339(&started)
+                .ok()
+                .zip(chrono::DateTime::parse_from_rfc3339(&ended).ok())
+                .map(|(started, ended)| (ended - started).num_seconds().max(0)),
+            _ => None,
+        };
+        // Selector used by `?segment=`: unique_id preferred (matches
+        // `recording_metadata_available`), track_id fallback.
+        let selector = media
+            .unique_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or(&media.track_id);
+        // Local files are served through the console endpoint, which also
+        // accepts `?stream=`; remote objects are served by their presigned
+        // upload URL, whose query string must stay untouched (signature).
+        let local_playback = select_recording_segment_path(record, cdr, Some(selector)).is_some();
+        let playback_url = if local_playback {
+            Some(state.url_for(&format!(
+                "/call-records/{}/recording?segment={}",
+                record.id,
+                urlencoding::encode(selector)
+            )))
+        } else {
+            match extra
+                .and_then(|bag| bag.get("uploadUrl"))
+                .and_then(|value| value.as_str().map(str::trim).filter(|s| !s.is_empty()))
+            {
+                Some(upload_url)
+                    if upload_url.starts_with("http://") || upload_url.starts_with("https://") =>
+                {
+                    Some(
+                        presign_artifact_url(state, upload_url)
+                            .await
+                            .unwrap_or_else(|| upload_url.to_string()),
+                    )
+                }
+                _ => None,
+            }
+        };
+        segments.push(json!({
+            "unique_id": media.unique_id,
+            "track_id": media.track_id,
+            "segment_type": string_extra("segment_type"),
+            "segment_id": string_extra("segment_id"),
+            "seq": number_extra("seq"),
+            "label": string_extra("label"),
+            "started_at": string_extra("started_at"),
+            "ended_at": string_extra("ended_at"),
+            "duration_secs": duration_secs,
+            "size": media.size,
+            "supports_streams": local_playback,
+            "playback_url": playback_url,
+        }));
+    }
+    Some(Value::Array(segments))
+}
+
 fn strip_storage_root(state: &ConsoleState, path: &str) -> String {
     if let Some(app) = state.app_state() {
         if let Some(config) = &app.config().callrecord {
@@ -2052,6 +2180,39 @@ pub fn select_recording_path(record: &CallRecordModel, cdr: Option<&CdrData>) ->
     None
 }
 
+/// Resolve the media entry matching a `?segment=` selector (`unique_id`
+/// first, `track_id` fallback) and return its on-disk path. Returns `None`
+/// when the selector is empty, no entry matches, or the file is gone — the
+/// caller turns that into a 404 instead of silently playing another segment.
+pub fn select_recording_segment_path(
+    record: &CallRecordModel,
+    cdr: Option<&CdrData>,
+    segment: Option<&str>,
+) -> Option<String> {
+    let selector = segment.map(str::trim).filter(|s| !s.is_empty())?;
+    let cdr_data = cdr?;
+    for media in &cdr_data.record.recorder {
+        let matches = media
+            .unique_id
+            .as_deref()
+            .map(|id| id == selector)
+            .unwrap_or(false)
+            || media.track_id == selector;
+        if !matches {
+            continue;
+        }
+        let path = media.path.trim();
+        if path.is_empty() {
+            continue;
+        }
+        let resolved = resolve_archived_artifact_path(path, record.started_at);
+        if Path::new(&resolved).exists() {
+            return Some(resolved);
+        }
+    }
+    None
+}
+
 /// Extract a single channel from a stereo WAV file and return it as a mono WAV.
 /// Returns `Ok(data)` on success, `Err` if the file is not a valid 16-bit stereo WAV.
 /// The caller should fall back to serving the full file on error.
@@ -2103,8 +2264,19 @@ async fn build_detail_payload(
 ) -> Value {
     let inline_recording_url = select_recording_path(record, cdr)
         .map(|_| state.url_for(&format!("/call-records/{}/recording", record.id)));
-    let record_payload =
+    let mut record_payload =
         build_record_payload(record, related, state, inline_recording_url.as_deref()).await;
+    // Segmented calls: attach the per-segment playback list so the detail
+    // page can offer a segment selector. Single-file calls keep the existing
+    // payload shape (no `segments` key).
+    if let Some(segments) = build_recording_segments_payload(state, record, cdr).await {
+        if let Some(recording) = record_payload
+            .get_mut("recording")
+            .and_then(|value| value.as_object_mut())
+        {
+            recording.insert("segments".to_string(), segments);
+        }
+    }
     let participants = build_participants(record, related);
 
     // Per-leg media quality captured by the MediaBridge at call end (RTCP
@@ -3499,6 +3671,216 @@ mod tests {
             resolved.as_deref(),
             Some(archived.to_string_lossy().as_ref()),
             "stale pre-archive recording_url must resolve into the daily subdir"
+        );
+    }
+
+    /// `?segment=` playback: the selector must pin playback to the matching
+    /// recorder entry (`unique_id` first, `track_id` fallback) instead of the
+    /// first existing file; unknown selectors resolve to `None` so the
+    /// handler returns 404 rather than silently playing another segment.
+    #[tokio::test]
+    async fn select_recording_segment_path_matches_unique_id_then_track_id() {
+        let db = setup_db().await;
+        let started = Utc.with_ymd_and_hms(2026, 8, 21, 9, 25, 21).unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("call_01_ivr.wav");
+        let second = dir.path().join("call_02_agent.wav");
+        std::fs::write(&first, b"one").unwrap();
+        std::fs::write(&second, b"two").unwrap();
+
+        let record = call_record::ActiveModel {
+            call_id: Set("segment-playback".into()),
+            direction: Set("inbound".into()),
+            status: Set("completed".into()),
+            started_at: Set(started),
+            duration_secs: Set(30),
+            has_transcript: Set(false),
+            transcript_status: Set("pending".into()),
+            created_at: Set(started),
+            updated_at: Set(started),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert call record");
+
+        let media = |track_id: &str, unique_id: &str, path: &std::path::Path| {
+            crate::callrecord::CallRecordMedia {
+                track_id: track_id.into(),
+                path: path.to_string_lossy().into_owned(),
+                size: 3,
+                unique_id: Some(unique_id.into()),
+                extra: None,
+            }
+        };
+        let cdr = CdrData {
+            record: CallRecord {
+                call_id: "segment-playback".into(),
+                recorder: vec![
+                    media(
+                        "segment:ivr:1",
+                        "11111111-1111-1111-1111-111111111111",
+                        &first,
+                    ),
+                    media(
+                        "segment:agent:ab12",
+                        "22222222-2222-2222-2222-222222222222",
+                        &second,
+                    ),
+                ],
+                ..Default::default()
+            },
+            raw_content: String::new(),
+            cdr_path: String::new(),
+            storage: None,
+        };
+
+        // unique_id selector (the id `recording_metadata_available` carries)
+        let resolved = select_recording_segment_path(
+            &record,
+            Some(&cdr),
+            Some("22222222-2222-2222-2222-222222222222"),
+        );
+        assert_eq!(
+            resolved.as_deref(),
+            Some(second.to_string_lossy().as_ref()),
+            "unique_id selector must pick the matching segment"
+        );
+
+        // track_id fallback
+        let resolved = select_recording_segment_path(&record, Some(&cdr), Some("segment:ivr:1"));
+        assert_eq!(
+            resolved.as_deref(),
+            Some(first.to_string_lossy().as_ref()),
+            "track_id selector must pick the matching segment"
+        );
+
+        // Unknown / empty / absent selectors
+        assert_eq!(
+            select_recording_segment_path(&record, Some(&cdr), Some("missing")),
+            None,
+            "unknown selector must not fall back to another segment"
+        );
+        assert_eq!(
+            select_recording_segment_path(&record, Some(&cdr), Some("  ")),
+            None
+        );
+        assert_eq!(
+            select_recording_segment_path(&record, Some(&cdr), None),
+            None
+        );
+    }
+
+    /// Segmented calls expose a per-segment playback list on the detail
+    /// payload (local files → `/recording?segment=` URLs); calls with fewer
+    /// than two segments keep the legacy payload shape (`None`).
+    #[tokio::test]
+    async fn recording_segments_payload_lists_segment_playback_urls() {
+        let db = setup_db().await;
+        let state = create_console_state(db.clone()).await;
+        let started = Utc.with_ymd_and_hms(2026, 8, 21, 9, 25, 21).unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("call_01_ivr.wav");
+        let second = dir.path().join("call_02_agent.wav");
+        std::fs::write(&first, b"one").unwrap();
+        std::fs::write(&second, b"two").unwrap();
+
+        let record = call_record::ActiveModel {
+            call_id: Set("segments-payload".into()),
+            direction: Set("inbound".into()),
+            status: Set("completed".into()),
+            started_at: Set(started),
+            duration_secs: Set(30),
+            has_transcript: Set(false),
+            transcript_status: Set("pending".into()),
+            created_at: Set(started),
+            updated_at: Set(started),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert call record");
+
+        let media = |track_id: &str, unique_id: &str, path: &std::path::Path| {
+            crate::callrecord::CallRecordMedia {
+                track_id: track_id.into(),
+                path: path.to_string_lossy().into_owned(),
+                size: 3,
+                unique_id: Some(unique_id.into()),
+                extra: Some(HashMap::from([
+                    (
+                        "segment_type".to_string(),
+                        json!(track_id.split(':').nth(1)),
+                    ),
+                    ("seq".to_string(), json!(1)),
+                ])),
+            }
+        };
+        let cdr = CdrData {
+            record: CallRecord {
+                call_id: "segments-payload".into(),
+                recorder: vec![
+                    media(
+                        "segment:ivr:1",
+                        "11111111-1111-1111-1111-111111111111",
+                        &first,
+                    ),
+                    media(
+                        "segment:agent:ab12",
+                        "22222222-2222-2222-2222-222222222222",
+                        &second,
+                    ),
+                ],
+                ..Default::default()
+            },
+            raw_content: String::new(),
+            cdr_path: String::new(),
+            storage: None,
+        };
+
+        let payload = build_recording_segments_payload(&state, &record, Some(&cdr))
+            .await
+            .expect("segments payload");
+        let segments = payload.as_array().expect("segments array");
+        assert_eq!(segments.len(), 2);
+        assert_eq!(
+            segments[0]["unique_id"].as_str(),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+        assert_eq!(
+            segments[1]["unique_id"].as_str(),
+            Some("22222222-2222-2222-2222-222222222222")
+        );
+        assert_eq!(segments[1]["supports_streams"], json!(true));
+        let url = segments[1]["playback_url"].as_str().expect("playback url");
+        assert!(
+            url.contains(&format!("/call-records/{}/recording", record.id)),
+            "segment playback_url must target the console endpoint: {url}"
+        );
+        assert!(
+            url.contains("segment=22222222-2222-2222-2222-222222222222"),
+            "segment playback_url must carry the segment selector: {url}"
+        );
+
+        // Single-segment calls keep the legacy payload (no `segments` key).
+        let single = CdrData {
+            record: CallRecord {
+                call_id: "segments-payload".into(),
+                recorder: vec![media(
+                    "segment:ivr:1",
+                    "11111111-1111-1111-1111-111111111111",
+                    &first,
+                )],
+                ..Default::default()
+            },
+            raw_content: String::new(),
+            cdr_path: String::new(),
+            storage: None,
+        };
+        assert_eq!(
+            build_recording_segments_payload(&state, &record, Some(&single)).await,
+            None,
+            "calls with fewer than two segments must not grow a segments list"
         );
     }
 

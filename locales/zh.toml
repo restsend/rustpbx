@@ -1177,6 +1177,7 @@ btn_download_wav = "下载 WAV"
 loading_waveform = "加载波形中…"
 channel_left_caller = "左 · 主叫"
 channel_right_callee = "右 · 被叫"
+playback_segment = "录音片段"
 no_recording = "此次会话没有存储媒体录音。"
 # Participant rewrite labels
 rewrite_original = "原始"

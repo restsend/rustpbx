@@ -468,6 +468,11 @@ pub struct ClusterConfig {
     /// Default 30s.
     #[serde(default = "default_session_registry_heartbeat")]
     pub session_registry_heartbeat_secs: u64,
+    /// Hard ceiling for any session row regardless of heartbeat freshness:
+    /// rows whose `started_at` is older than this are treated as ghosts and
+    /// swept even while the node keeps heartbeating. Default 43200s (12h).
+    #[serde(default = "default_session_max_age")]
+    pub session_max_age_secs: u64,
 }
 
 impl Default for ClusterConfig {
@@ -477,6 +482,7 @@ impl Default for ClusterConfig {
             session_registry_backend: default_session_registry_backend(),
             session_registry_ttl_secs: default_session_registry_ttl(),
             session_registry_heartbeat_secs: default_session_registry_heartbeat(),
+            session_max_age_secs: default_session_max_age(),
         }
     }
 }
@@ -491,6 +497,10 @@ fn default_session_registry_ttl() -> u64 {
 
 fn default_session_registry_heartbeat() -> u64 {
     30
+}
+
+fn default_session_max_age() -> u64 {
+    43200
 }
 
 fn default_max_audio_download_bytes() -> u64 {
@@ -2893,6 +2903,7 @@ mod tests {
             session_registry_backend: "db".to_string(),
             session_registry_ttl_secs: 3600,
             session_registry_heartbeat_secs: 30,
+            session_max_age_secs: 43200,
         };
         let toml_str = toml::to_string(&config).unwrap();
         let parsed: ClusterConfig = toml::from_str(&toml_str).unwrap();
@@ -2913,18 +2924,21 @@ mod tests {
 
     #[test]
     fn test_cluster_config_session_registry_defaults() {
-        // Defaults: backend "db", TTL 3600, heartbeat 30 — and they survive
-        // a TOML round-trip (fields are always available, not commerce-gated).
+        // Defaults: backend "db", TTL 3600, heartbeat 30, max-age 43200 — and
+        // they survive a TOML round-trip (fields are always available, not
+        // commerce-gated).
         let cfg = ClusterConfig::default();
         assert_eq!(cfg.session_registry_backend, "db");
         assert_eq!(cfg.session_registry_ttl_secs, 3600);
         assert_eq!(cfg.session_registry_heartbeat_secs, 30);
+        assert_eq!(cfg.session_max_age_secs, 43200);
 
         let toml_str = toml::to_string(&cfg).unwrap();
         let parsed: ClusterConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.session_registry_backend, "db");
         assert_eq!(parsed.session_registry_ttl_secs, 3600);
         assert_eq!(parsed.session_registry_heartbeat_secs, 30);
+        assert_eq!(parsed.session_max_age_secs, 43200);
     }
 
     #[test]
@@ -2934,11 +2948,13 @@ mod tests {
             session_registry_backend = "memory"
             session_registry_ttl_secs = 120
             session_registry_heartbeat_secs = 10
+            session_max_age_secs = 3600
         "#;
         let parsed: ClusterConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(parsed.session_registry_backend, "memory");
         assert_eq!(parsed.session_registry_ttl_secs, 120);
         assert_eq!(parsed.session_registry_heartbeat_secs, 10);
+        assert_eq!(parsed.session_max_age_secs, 3600);
     }
 
     #[test]

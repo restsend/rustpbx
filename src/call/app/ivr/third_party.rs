@@ -54,6 +54,7 @@ impl ThirdPartyTree {
 struct ProviderState {
     current_node_id: Option<String>,
     awaiting_dtmf_menu_children: Option<HashMap<String, String>>,
+    step_index: u32,
 }
 
 pub struct ThirdPartyTreeProvider {
@@ -420,6 +421,7 @@ impl ActionProvider for ThirdPartyTreeProvider {
         // Adding any `.await` below would turn the parking_lot guard into a
         // guard-across-await and block every other IVR action on this call.
         let mut state = self.state.lock();
+        state.step_index += 1;
 
         match ctx.event {
             Some(ProviderEvent::SessionStart) => {
@@ -920,6 +922,7 @@ mod tests {
             step_start_time: None,
             step_end_time: None,
             step_duration_ms: None,
+            step_index: None,
             transferred_from: None,
         }
     }

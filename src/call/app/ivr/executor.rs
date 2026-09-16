@@ -48,9 +48,7 @@ pub struct StepIvrApp {
     awaiting_dtmf: bool,
     tts_service: Option<Arc<crate::tts::TtsService>>,
     trace: Option<Arc<IvrTraceCollector>>,
-    /// Whether at least one provider /step round-trip has completed. Used
-    /// only to classify startup failures vs mid-flow provider failures.
-    has_fetched_step: bool,
+    step_index: u32,
     ivr_name: Option<String>,
     rwi_gateway: Option<crate::rwi::RwiGatewayRef>,
     /// Name of the route that dispatched this call into the IVR.
@@ -141,7 +139,7 @@ impl StepIvrApp {
             awaiting_dtmf: false,
             tts_service: None,
             trace: None,
-            has_fetched_step: false,
+            step_index: 0,
             ivr_name: None,
             rwi_gateway: None,
             route_name: None,
@@ -185,7 +183,7 @@ impl StepIvrApp {
             awaiting_dtmf: false,
             tts_service: None,
             trace: None,
-            has_fetched_step: false,
+            step_index: 0,
             ivr_name: None,
             rwi_gateway: None,
             route_name: None,
@@ -326,6 +324,7 @@ impl StepIvrApp {
                 session_id: entry.session_id.clone(),
                 caller: entry.caller.clone(),
                 callee: entry.callee.clone(),
+                step_index: entry.step_index,
                 trigger: entry.trigger.clone(),
                 action_type: entry.action_type.clone(),
                 action_json: entry.action_json.clone(),
@@ -638,6 +637,7 @@ impl StepIvrApp {
                 }
                 let app_action = match action_result {
                     ActionResult::Terminal(terminal) => {
+                        self.step_index += 1;
                         self.increment_total_steps();
                         // Lifecycle exactly-once: resumable hand-offs (bridge/
                         // queue with a return app, JumpIvr) suppress the
@@ -659,6 +659,7 @@ impl StepIvrApp {
                             session_id: session_id.clone(),
                             caller: caller.clone(),
                             callee: callee.clone(),
+                            step_index: self.step_index,
                             trigger: trigger.clone(),
                             provider_url: None,
                             action_type: node_type_str,
@@ -691,6 +692,7 @@ impl StepIvrApp {
                             session_id: session_id.clone(),
                             caller: caller.clone(),
                             callee: callee.clone(),
+                            step_index: self.step_index,
                             trigger: trigger.clone(),
                             provider_url: None,
                             action_type: node_type_str,
@@ -719,6 +721,7 @@ impl StepIvrApp {
                         return Box::pin(self.__exec_node(ctrl, ctx)).await;
                     }
                     ActionResult::StartSubApp(sub_app) => {
+                        self.step_index += 1;
                         self.increment_total_steps();
                         return Ok(AppAction::Chain(sub_app));
                     }
@@ -754,6 +757,7 @@ impl StepIvrApp {
                                 session_id: session_id.clone(),
                                 caller: caller.clone(),
                                 callee: callee.clone(),
+                                step_index: self.step_index,
                                 trigger: step_trigger,
                                 provider_url: None,
                                 action_type: node_type_str,
@@ -794,11 +798,13 @@ impl StepIvrApp {
                                 _ => ProviderEvent::RecordingStopped { reason: None },
                             };
                             let _ = started;
+                            self.step_index += 1;
                             self.increment_total_steps();
                             self.record_trace(IvrTraceEntry {
                                 session_id: session_id.clone(),
                                 caller: caller.clone(),
                                 callee: callee.clone(),
+                                step_index: self.step_index,
                                 trigger: trigger.clone(),
                                 provider_url: None,
                                 action_type: node_type_str,
@@ -841,6 +847,7 @@ impl StepIvrApp {
                             session_id: session_id.clone(),
                             caller: caller.clone(),
                             callee: callee.clone(),
+                            step_index: self.step_index,
                             trigger: step_trigger,
                             provider_url: None,
                             action_type: node_type_str,
@@ -865,6 +872,7 @@ impl StepIvrApp {
                     session_id,
                     caller,
                     callee,
+                    step_index: self.step_index,
                     trigger,
                     provider_url: None,
                     action_type: node_type_str,
@@ -992,6 +1000,7 @@ impl StepIvrApp {
             session_id,
             caller,
             callee,
+            step_index: self.step_index,
             trigger: crate::rwi::TriggerInfo::with_detail(
                 "ivr_fallback",
                 serde_json::json!({
@@ -1099,6 +1108,7 @@ impl StepIvrApp {
             } else {
                 None
             },
+            step_index: Some(self.step_index),
             transferred_from: self.transferred_from.clone(),
         }
     }
@@ -1212,6 +1222,7 @@ impl StepIvrApp {
             } else {
                 None
             },
+            step_index: Some(self.step_index),
             transferred_from: self.transferred_from.clone(),
         };
 
@@ -1237,6 +1248,7 @@ impl StepIvrApp {
         // Save step timing for the next ProviderContext.
         self.step_prev_start_time = Some(now_rfc3339);
         self.step_prev_duration_ms = elapsed_ms;
+        self.step_index += 1;
 
         // Extract transparent passthrough data from provider response.
         if let Ok(ref node) = result {
@@ -1344,14 +1356,12 @@ impl StepIvrApp {
         });
 
         // Fallback on provider error instead of propagating
-        let first_step = !self.has_fetched_step;
-        self.has_fetched_step = true;
         match result {
             Ok(node) => Ok(node),
             Err(e) => {
                 tracing::warn!(error = %e, "StepIvrApp: provider /step failed, using IVR fallback");
                 let error_text = e.to_string();
-                if first_step {
+                if self.step_index <= 1 {
                     self.set_runtime_status_shared("startup_error");
                 } else {
                     self.set_runtime_status_shared("provider_error");
@@ -1406,6 +1416,14 @@ impl StepIvrApp {
                 self.current_step_start_time
                     .clone()
                     .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+            );
+            // `+1` mirrors the terminal trace this node produces at hand-off
+            // (the terminal arm increments before recording), so the executor
+            // trace and every proxy-emitted trace for THIS node share one
+            // step_index.
+            self.sess.variables.insert(
+                "_bridge_step_index".into(),
+                (self.step_index + 1).to_string(),
             );
         }
         let result = common::execute_action(
@@ -1855,6 +1873,7 @@ impl CallApp for StepIvrApp {
                 session_id: provider_session.session_id,
                 caller: provider_session.caller,
                 callee: provider_session.callee,
+                step_index: self.step_index,
                 trigger: crate::rwi::TriggerInfo::with_detail(
                     "dtmf_menu_invalid",
                     serde_json::json!({ "digit": digit }),
@@ -2200,6 +2219,7 @@ impl CallApp for StepIvrApp {
                 session_id: session_id.clone(),
                 caller,
                 callee,
+                step_index: self.step_index,
                 trigger: crate::rwi::TriggerInfo::new("session_end"),
                 provider_url: None,
                 action_type: last_action_type,
@@ -4619,12 +4639,27 @@ mod tests {
         stack
             .assert_cmd(2000, "transfer", |c| {
                 matches!(c, CallCommand::Transfer { target, .. }
-                    if target.starts_with("bridge:https://voip.example.com/rooms?_rst_step_start_time=")
-                        && chrono::DateTime::parse_from_rfc3339(
-                            &urlencoding::decode(target.rsplit('=').next().unwrap_or_default())
+                    if target.starts_with("bridge:https://voip.example.com/rooms?")
+                        && {
+                            let params: HashMap<&str, &str> = target
+                                .split('?')
+                                .nth(1)
+                                .unwrap_or_default()
+                                .split('&')
+                                .filter_map(|p| p.split_once('='))
+                                .collect();
+                            let start_ok = chrono::DateTime::parse_from_rfc3339(
+                                &urlencoding::decode(
+                                    params.get("_rst_step_start_time").copied().unwrap_or_default(),
+                                )
                                 .unwrap_or_default(),
-                        )
-                        .is_ok())
+                            )
+                            .is_ok();
+                            // First fetch → terminal records fetch+1 = 2; the
+                            // stashed index must mirror that terminal trace.
+                            let index_ok = params.get("_rst_step_index") == Some(&"2");
+                            start_ok && index_ok
+                        })
             })
             .await;
     }
@@ -6661,6 +6696,7 @@ mod tests {
             session_id: "test-session".into(),
             caller: "1001".into(),
             callee: "2000".into(),
+            step_index: 1,
             trigger,
             provider_url: None,
             action_type: "Prompt".into(),
@@ -7711,6 +7747,7 @@ mod tests {
             step_start_time: None,
             step_end_time: None,
             step_duration_ms: None,
+            step_index: None,
             transferred_from: None,
         };
         let prompt = step_provider.next_action(ctx).await.unwrap();
@@ -7740,6 +7777,7 @@ mod tests {
                 step_start_time: None,
                 step_end_time: None,
                 step_duration_ms: None,
+                step_index: None,
                 transferred_from: None,
             }
         };

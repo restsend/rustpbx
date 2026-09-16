@@ -908,6 +908,7 @@ pub struct IvrStepTrace {
     pub session_id: String,
     pub caller: String,
     pub callee: String,
+    pub step_index: u32,
     pub trigger: TriggerInfo,
     pub action_type: String,
     pub action_json: Option<String>,

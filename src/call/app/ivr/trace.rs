@@ -37,6 +37,7 @@ pub struct IvrTraceEntry {
     pub session_id: String,
     pub caller: String,
     pub callee: String,
+    pub step_index: u32,
     pub trigger: TriggerInfo,
     pub provider_url: Option<String>,
     pub action_type: String,
@@ -194,13 +195,14 @@ mod tests {
             session_id: session_id.to_string(),
             caller: "1001".to_string(),
             callee: "2000".to_string(),
+            step_index: step,
             trigger: TriggerInfo::new("test"),
             provider_url: None,
             action_type: "Transfer".to_string(),
             action_json: None,
             duration_ms: 0,
             error: None,
-            step_id: Some(step.to_string()),
+            step_id: None,
             step_name: None,
             step_start_time: None,
             step_end_time: None,
@@ -233,8 +235,8 @@ mod tests {
 
         let entries_001 = collector.query_by_session("call_001").await;
         assert_eq!(entries_001.len(), 2);
-        assert_eq!(entries_001[0].step_id.as_deref(), Some("0"));
-        assert_eq!(entries_001[1].step_id.as_deref(), Some("1"));
+        assert_eq!(entries_001[0].step_index, 0);
+        assert_eq!(entries_001[1].step_index, 1);
 
         let entries_002 = collector.query_by_session("call_002").await;
         assert_eq!(entries_002.len(), 1);
@@ -303,8 +305,8 @@ mod tests {
         }
         let entries = collector.query_by_session("call_001").await;
         assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].step_id.as_deref(), Some("2"));
-        assert_eq!(entries[2].step_id.as_deref(), Some("4"));
+        assert_eq!(entries[0].step_index, 2);
+        assert_eq!(entries[2].step_index, 4);
     }
 
     #[tokio::test]

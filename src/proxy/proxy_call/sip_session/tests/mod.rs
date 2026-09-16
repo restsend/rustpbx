@@ -90,6 +90,7 @@ fn forward_dtmf_with_active_bridge_owns_digit_without_app_injection() {
         step_name: Some("菜单".to_string()),
         extra: Some(serde_json::json!({"nodetype": "menu_tts", "businessnodeid": "42"})),
         step_start_time: Some("2026-01-01T00:00:00+00:00".to_string()),
+        step_index: Some(2),
     })));
     let digits = Arc::new(parking_lot::Mutex::new(Vec::new()));
 
@@ -130,6 +131,10 @@ fn forward_dtmf_with_active_bridge_owns_digit_without_app_injection() {
     assert_eq!(ev.event.payload["step_id"], "step-menu-tts");
     assert_eq!(ev.event.payload["action_type"], "Bridge");
     assert_eq!(ev.event.payload["extra"]["nodetype"], "menu_tts");
+    assert_eq!(
+        ev.event.payload["step_index"], 2,
+        "bridge DTMF trace must carry the executor-stashed step index, not a hard-coded 0"
+    );
     assert_eq!(
         ev.event.payload["step_start_time"], "2026-01-01T00:00:00+00:00",
         "bridge DTMF trace must carry the executor-stamped step start time"
@@ -187,6 +192,7 @@ fn suspended_flow_death_emits_compensating_session_end_trace() {
         step_name: Some("菜单".to_string()),
         extra: Some(serde_json::json!({"nodetype": "menu_tts"})),
         step_start_time: Some("2026-01-01T00:00:00+00:00".to_string()),
+        step_index: Some(3),
     })));
 
     emit_suspended_flow_session_end(
@@ -248,6 +254,10 @@ fn suspended_flow_death_emits_compensating_session_end_trace() {
     assert!(
         duration > 0,
         "synthetic session_end duration must be derived from its stamps, got 0"
+    );
+    assert_eq!(
+        ev.event.payload["step_index"], 3,
+        "synthetic session_end must carry the executor-stashed step index, not a hard-coded 0"
     );
 }
 

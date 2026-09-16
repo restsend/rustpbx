@@ -681,7 +681,9 @@ CC addon 的独立呼叫生命周期事件已移除。坐席归因改由核心�
 
 > **分段录音**：通话内每段录音（IVR 段、坐席段等）上传成功后**各自触发一条**本事件——`filename` / `download_url` / `file_size` 为该段独有，`extra` 在呼叫级元数据之外附带 `seq`（本通通话内序号）、`label`（坐席 id 或 IVR 名）、`segment_type`、`segment_id`、`started_at` / `ended_at`。`record_end` 仍保持每通呼叫一条汇总。
 >
-> **兼容**：改造前的**聚合事件仍然每通呼叫发一条**（共 N+1 条）——其 `extra.recording_segments` 依旧是一个 JSON **字符串**（内容为数组，需 `JSON.parse`），`filename` 取第一段文件。只按 `filename` 去重的新旧订阅方均可正常工作；只想要分段事件的消费方可忽略 `extra` 中含 `recording_segments` 键的那条聚合事件。CDR 的 `metadata.recording_segments` 保持原生 JSON 数组不变。
+> **`full` 标志**：每条 `recording_metadata_available` 的 `metadata` 均携带布尔字段 `full`——分段事件为 `false`，呼叫级聚合事件（所有分片上传完成后发的那条）为 `true`。只关心"整通录音已就绪"的消费方直接按 `metadata.full == true` 过滤即可，无需再对账 `segment_id`；`segment_id` 本身保持为可选的 `extra` 透传字段（仅分段事件携带）。
+>
+> **兼容**：改造前的**聚合事件仍然每通呼叫发一条**（共 N+1 条）——其 `extra.recording_segments` 依旧是一个 JSON **字符串**（内容为数组，需 `JSON.parse`），`filename` 取第一段文件。只按 `filename` 去重的新旧订阅方均可正常工作；只想要分段事件的消费方可忽略聚合事件（`metadata.full == true`，或 `extra` 中含 `recording_segments` 键的那条）。CDR 的 `metadata.recording_segments` 保持原生 JSON 数组不变。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -693,6 +695,7 @@ CC addon 的独立呼叫生命周期事件已移除。坐席归因改由核心�
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `unique_id` | Option\<String\> | 录音唯一标识（UUID v4，验收字段 `uniqId`；与同一段录音的 `record_started` / `record_stopped` 一致） |
+| `full` | bool | 呼叫级聚合事件（全部分段上传完成）为 `true`；分段事件为 `false`。缺省时按 `false` 容错反序列化 |
 | `filename` | String | 录音文件名 |
 | `file_size` | u64 | 文件大小（字节） |
 | `download_url` | Option\<String\> | 下载地址 |
@@ -720,6 +723,7 @@ RWI WebSocket 帧（payload 平铺，`event_type` 由网关注入）：
     "call_start_time": "2026-09-10T08:54:01.155781+00:00",
     "call_end_time": "2026-09-10T08:54:48.155781+00:00",
     "upload_time": "2026-09-10T08:54:18.157941+00:00",
+    "full": false,
     "segment_id": "9c1f02ab",
     "queue_id": "support",
     "label": "1001",
@@ -755,6 +759,7 @@ Webhook 投递使用信封（`webhook.rs`：`rwi` / `event_id` 幂等键 / `time
       "call_start_time": "2026-09-10T08:54:01.155781+00:00",
       "call_end_time": "2026-09-10T08:54:48.155781+00:00",
       "upload_time": "2026-09-10T08:54:18.157941+00:00",
+      "full": false,
       "segment_id": "9c1f02ab",
       "queue_id": "support",
       "label": "1001",
@@ -769,7 +774,7 @@ Webhook 投递使用信封（`webhook.rs`：`rwi` / `event_id` 幂等键 / `time
 }
 ```
 
-> 上面是坐席段的真实序列化输出（`cargo test segment_metadata_wire_shape -- --nocapture`）：文件名 `filename` 中 seq 为两位零填充（`_02_`）；`extra` 内所有值均为字符串（`seq` 数字同样序列化为 `"2"`）；`extra` 键序不定（HashMap）；typed 字段为 `None` 时整个键不出现（如无主被叫信息时没有 `caller_name`/`callee_name`）。`download_url`：`type=local` 为归档路径（`{path}/{YYYYMMDD}/{filename}`），`type=http`/`s3` 为上传返回/预构造的 URL。addon 透传键（wholesale 的 `switch_flag` 等）原样附加；不存在 `unique_id` typed 字段。无分段录音时（整通话录制 / SipFlow）事件保持原有单条形态，`metadata` 不含 `seq` / `label` / `segment_*` 键。
+> 上面是坐席段的真实序列化输出（`cargo test segment_metadata_wire_shape -- --nocapture`）：文件名 `filename` 中 seq 为两位零填充（`_02_`）；`extra` 内所有值均为字符串（`seq` 数字同样序列化为 `"2"`）；`extra` 键序不定（HashMap）；typed 字段为 `None` 时整个键不出现（如无主被叫信息时没有 `caller_name`/`callee_name`）。`download_url`：`type=local` 为归档路径（`{path}/{YYYYMMDD}/{filename}`），`type=http`/`s3` 为上传返回/预构造的 URL。addon 透传键（wholesale 的 `switch_flag` 等）原样附加；不存在 `unique_id` typed 字段。无分段录音时（整通话录制 / SipFlow）事件保持原有单条形态，`metadata` 不含 `seq` / `label` / `segment_*` 键，仅携带 typed 的 `full: true` 标志（呼叫级聚合）。
 >
 > **CDR-only 键不进入事件载荷**：`trace`（console 时间线）、`recording_segments`（完整分段数组，见下）、`media_quality`（RTP 质量统计）、`self_ip`（节点 IP，事件层由 gateway 注入 `node_ip`）、`session_id`（与事件层 `session_id` 上下文字段重复）只保留在 CDR `metadata` 中供 console 使用，`metadata` 透传袋会将其剔除。聚合条事件中的 `recording_segments` 键不受此影响（作为聚合事件的标识保留）。
 
@@ -953,6 +958,7 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 | `session_id` | String | 会话 ID |
 | `caller` | String | 主叫 |
 | `callee` | String | 被叫 |
+| `step_index` | u32 | 步骤序号：每次 provider `/step` 往返 +1（首个节点为 1）；终止类动作（Transfer/Hangup/Exit）及录制控制步骤在记录前再 +1。bridge 按键等 proxy 派生条目通过 `_rst_step_index` 透传同值，无节点上下文时为 0 |
 | `trigger` | Object | 触发该步骤的结构化信息，见下方说明 |
 | `action_type` | String | 动作类型（如 `Transfer`、`Prompt`、`DtmfMenu`） |
 | `action_json` | Option\<String\> | 动作详情 JSON |
