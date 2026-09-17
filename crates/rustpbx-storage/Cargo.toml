@@ -20,7 +20,14 @@ object_store = { version = "0.14.0", default-features = false, features = [
     "ring",
 ] }
 serde = { version = "1", features = ["derive"] }
+rustpbx-http-util = { path = "../rustpbx-http-util", version = "0.5.1" }
 tokio = { version = "1.53", features = ["fs"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
+tokio = { version = "1.53", features = [
+    "macros",
+    "rt-multi-thread",
+    "net",
+    "io-util",
+] }

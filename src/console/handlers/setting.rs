@@ -884,6 +884,7 @@ fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<Jso
             headers,
             with_media,
             keep_media_copy,
+            ..
         }) => {
             let mut profile = Profile::new(
                 "callrecord-http",

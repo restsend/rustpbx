@@ -305,12 +305,47 @@ delegate_upload = false    # Delegate S3/HTTP upload to cluster nodes
 |-------|------|---------|-------------|
 | `type` | `"s3"` / `"http"` | required | Upload backend |
 | S3 fields: `vendor`, `bucket`, `region`, `access_key`, `secret_key`, `endpoint`, `root` | various | required | S3 connection and path |
-| HTTP field: `url` | String | required | HTTP endpoint URL |
-| `headers` | Option\<Map\> | None | Custom HTTP headers |
+| HTTP field: `url` | String | required | HTTP endpoint URL. May contain `{key}`, replaced with the object key (raw concatenation) |
+| `headers` | Option\<Map\> | None | Custom HTTP headers (values support placeholders) |
+| `method` | Option\<String\> | `POST` | HTTP method for `type = "http"` |
+| `file_field` | Option\<String\> | `recording` | Multipart field carrying the binary payload |
+| `body_field` | Option\<String\> | None | Send the payload as this text field instead of a binary file part (mutually exclusive with `file_field`) |
+| `file_name` | Option\<String\> | media/signaling file name | Multipart file name template |
+| `content_type` | Option\<String\> | `audio/wav` / `application/jsonl` | MIME type of the binary payload |
+| `fields` | Option\<Map\> | None | Extra text form fields; values support `{call_id}` / `{filename}` / `{key}` |
+| `response_url_path` | Option\<String\> | None | Dot-path into a JSON response holding the uploaded object URL (e.g. `data.url`). When unset, an `http`-looking body is used, otherwise the request URL |
+| `response_success` | Option\<Table\> | None | Business-level success rule `{ path = "code", equals = 0 }`; when unset any 2xx succeeds |
+| `connect_timeout_ms` | Option\<u64\> | 3000 | TCP connect timeout |
+| `request_timeout_ms` | Option\<u64\> | 10000 | Total request timeout |
 | `signaling` | Option\<bool\> | `false` | Upload SIP signaling data |
 | `media` | Option\<bool\> | `true` | Upload RTP media (as WAV) |
 | `force_pcm` | Option\<bool\> | `false` | Transcode to PCM before upload |
 | `pcm_sample_rate` | Option\<u32\> | 16000 | PCM sample rate when `force_pcm` is true |
+
+### Generic HTTP upload scheme
+
+`type = "http"` is a configurable multipart uploader, so arbitrary
+third-party upload APIs can be described without code changes. Media is sent
+as the `recording` file part and signaling as the `signaling` part unless
+overridden. Example matching a key-based resource API:
+
+```toml
+[sipflow.upload]
+type = "http"
+url = "https://upload.example.com/resources/{key}"
+file_field = "filecontent"
+content_type = "application/octet-stream"
+fields = { call_id = "{call_id}" }
+response_url_path = "data.url"
+response_success = { path = "code", equals = 0 }
+connect_timeout_ms = 3000
+request_timeout_ms = 10000
+```
+
+The resolved URL is read from `data.url` in the JSON response; if
+`response_url_path` is omitted, a response body starting with `http` is used,
+otherwise the request URL (with `{key}` substituted) is returned.
+
 
 ### JSONL Export Format (`export_jsonl`)
 

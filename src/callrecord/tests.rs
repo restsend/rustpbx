@@ -569,6 +569,16 @@ async fn test_http_config_without_main_db_ok() {
             storage: CallRecordStorageConfig::Http {
                 url: "http://127.0.0.1:1/cdr".to_string(),
                 headers: None,
+                method: None,
+                file_field: None,
+                body_field: None,
+                file_name: None,
+                content_type: None,
+                fields: None,
+                response_url_path: None,
+                response_success: None,
+                connect_timeout_ms: None,
+                request_timeout_ms: None,
                 with_media: None,
                 keep_media_copy: None,
             },
@@ -766,14 +776,16 @@ async fn test_save_with_http_without_media() {
 
     // Test without media (should not fail if no server available)
     let url = "http://httpbin.org/post".to_string();
-    let headers = None;
 
     // This test will only pass if httpbin.org is available
     // In production, you might want to use a mock server
     let result = HttpCallRecordSaver {
-        url,
-        headers,
-        client: reqwest::Client::new(),
+        storage: crate::storage::Storage::from_http(crate::storage::HttpUploadConfig {
+            url,
+            body_field: Some("calllog.json".to_string()),
+            ..Default::default()
+        })
+        .unwrap(),
     }
     .save(std::slice::from_ref(&record))
     .await;
@@ -819,12 +831,14 @@ async fn test_save_with_http_with_media() {
 
     // Media stays local; `[recording]` controls recording upload.
     let url = "http://httpbin.org/post".to_string();
-    let headers = None;
 
     let result = HttpCallRecordSaver {
-        url,
-        headers,
-        client: reqwest::Client::new(),
+        storage: crate::storage::Storage::from_http(crate::storage::HttpUploadConfig {
+            url,
+            body_field: Some("calllog.json".to_string()),
+            ..Default::default()
+        })
+        .unwrap(),
     }
     .save(std::slice::from_ref(&record))
     .await;
@@ -859,9 +873,13 @@ async fn test_save_with_http_with_custom_headers() {
     let url = "http://httpbin.org/post".to_string();
 
     let result = HttpCallRecordSaver {
-        url,
-        headers: Some(headers),
-        client: reqwest::Client::new(),
+        storage: crate::storage::Storage::from_http(crate::storage::HttpUploadConfig {
+            url,
+            headers: Some(headers),
+            body_field: Some("calllog.json".to_string()),
+            ..Default::default()
+        })
+        .unwrap(),
     }
     .save(std::slice::from_ref(&record))
     .await;
@@ -899,9 +917,13 @@ async fn test_save_with_s3_like_with_custom_headers() {
     let url = "http://httpbin.org/post".to_string();
 
     let result = HttpCallRecordSaver {
-        url,
-        headers: Some(headers),
-        client: reqwest::Client::new(),
+        storage: crate::storage::Storage::from_http(crate::storage::HttpUploadConfig {
+            url,
+            headers: Some(headers),
+            body_field: Some("calllog.json".to_string()),
+            ..Default::default()
+        })
+        .unwrap(),
     }
     .save(std::slice::from_ref(&record))
     .await;

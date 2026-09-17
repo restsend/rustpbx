@@ -7,8 +7,13 @@ use object_store::{
     azure::MicrosoftAzureBuilder, gcp::GoogleCloudStorageBuilder, local::LocalFileSystem,
     path::Path as ObjectPath, signer::Signer,
 };
+use rustpbx_http_util::HttpUploader;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
+
+pub use rustpbx_http_util::{
+    HttpUploadConfig, SuccessRule, UploadRequest, UploadedObject, render,
+};
 
 /// Hard cap for presigned URL lifetime: SigV4 (AWS S3 and S3-compatible
 /// services such as Aliyun OSS / Tencent COS) reject signatures with
@@ -92,7 +97,12 @@ fn normalize_s3_credentials(
 
 #[derive(Clone)]
 pub struct Storage {
-    inner: Arc<dyn ObjectStore>,
+    /// Present for object-store backends (local FS, S3/S3-compatible, GCS,
+    /// Azure). `None` for the upload-only HTTP backend.
+    inner: Option<Arc<dyn ObjectStore>>,
+    /// Present for the upload-only HTTP backend. All read/list/delete/presign
+    /// operations are unsupported when this is set.
+    uploader: Option<HttpUploader>,
     prefix: String,
     is_local: bool,
     local_root: Option<PathBuf>,
@@ -105,7 +115,40 @@ pub struct Storage {
     s3_info: Option<(Option<String>, String)>,
 }
 
+/// Error returned by read/list/delete/presign operations on the upload-only
+/// HTTP backend.
+fn http_read_unsupported(operation: &str) -> anyhow::Error {
+    anyhow::anyhow!("http storage backend does not support {operation}")
+}
+
 impl Storage {
+    /// Build an upload-only HTTP backend. The configured endpoint receives the
+    /// bytes; subsequent reads, deletes, listings and presigning are
+    /// unsupported.
+    pub fn from_http(config: HttpUploadConfig) -> Result<Self> {
+        let uploader = HttpUploader::new(config)?;
+        Ok(Self {
+            inner: None,
+            uploader: Some(uploader),
+            prefix: String::new(),
+            is_local: false,
+            local_root: None,
+            signer: None,
+            s3_info: None,
+        })
+    }
+
+    /// Whether this backend is the upload-only HTTP scheme.
+    pub fn is_http(&self) -> bool {
+        self.uploader.is_some()
+    }
+
+    fn object_store(&self) -> Result<&Arc<dyn ObjectStore>> {
+        self.inner
+            .as_ref()
+            .ok_or_else(|| http_read_unsupported("object store operations"))
+    }
+
     pub fn new(config: &StorageConfig) -> Result<Self> {
         match config {
             StorageConfig::Local { path } => {
@@ -114,7 +157,8 @@ impl Storage {
                     .with_context(|| format!("create storage directory {}", path))?;
                 let store = LocalFileSystem::new_with_prefix(&root)?;
                 Ok(Self {
-                    inner: Arc::new(store),
+                    inner: Some(Arc::new(store)),
+                    uploader: None,
                     prefix: "".to_string(),
                     is_local: true,
                     local_root: Some(root),
@@ -226,7 +270,8 @@ impl Storage {
                 };
 
                 Ok(Self {
-                    inner,
+                    inner: Some(inner),
+                    uploader: None,
                     prefix: prefix.clone().unwrap_or_default(),
                     is_local: false,
                     local_root: None,
@@ -251,23 +296,36 @@ impl Storage {
     }
 
     pub async fn write(&self, path: &str, bytes: Bytes) -> Result<()> {
+        self.upload(UploadRequest::new(path, bytes)).await?;
+        Ok(())
+    }
+
+    /// Upload `req` and, for the HTTP backend, return the resolved object URL
+    /// and parsed response body. Object-store backends return an empty result
+    /// (their public URL is derived by the caller).
+    pub async fn upload(&self, req: UploadRequest) -> Result<UploadedObject> {
+        if let Some(uploader) = &self.uploader {
+            return uploader.upload_bytes(&req).await;
+        }
         if self.is_local
-            && let Some(local_path) = self.local_path(path)
+            && let Some(local_path) = self.local_path(&req.key)
             && let Some(parent) = local_path.parent()
         {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let object_path = self.object_path(path)?;
-        self.inner.put(&object_path, bytes.into()).await?;
-        Ok(())
+        let object_path = self.object_path(&req.key)?;
+        self.object_store()?
+            .put(&object_path, req.bytes.into())
+            .await?;
+        Ok(UploadedObject::default())
     }
 
     pub async fn write_opts(&self, path: &str, bytes: Bytes, options: PutOptions) -> Result<()> {
-        if self.is_local {
+        if self.uploader.is_some() || self.is_local {
             return self.write(path, bytes).await;
         }
         let object_path = self.object_path(path)?;
-        self.inner
+        self.object_store()?
             .put_opts(&object_path, bytes.into(), options)
             .await?;
         Ok(())
@@ -275,14 +333,14 @@ impl Storage {
 
     pub async fn read(&self, path: &str) -> Result<Bytes> {
         let object_path = self.object_path(path)?;
-        let result = self.inner.get(&object_path).await?;
+        let result = self.object_store()?.get(&object_path).await?;
         let bytes = result.bytes().await?;
         Ok(bytes)
     }
 
     pub async fn delete(&self, path: &str) -> Result<()> {
         let object_path = self.object_path(path)?;
-        self.inner.delete(&object_path).await?;
+        self.object_store()?.delete(&object_path).await?;
         Ok(())
     }
 
@@ -347,7 +405,7 @@ impl Storage {
         let prefix = prefix
             .map(|p| self.object_path(p))
             .unwrap_or_else(|| self.object_path(""))?;
-        let mut stream = self.inner.list(Some(&prefix));
+        let mut stream = self.object_store()?.list(Some(&prefix));
         let mut files = Vec::new();
         while let Some(item) = stream.next().await {
             let meta = item?;
@@ -404,6 +462,79 @@ impl Storage {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Minimal single-shot HTTP server returning a canned response.
+    async fn spawn_mock_server(response: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let n = socket.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.flush().await.ok();
+        });
+        format!("http://{addr}/upload")
+    }
+
+    fn static_response(body: &'static str) -> &'static str {
+        Box::leak(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .into_boxed_str(),
+        )
+    }
+
+    #[tokio::test]
+    async fn http_storage_uploads_and_resolves_url() -> Result<()> {
+        let base = spawn_mock_server(static_response(r#"{"url":"https://cdn/x.wav"}"#)).await;
+        let storage = Storage::from_http(HttpUploadConfig {
+            url: format!("{base}/{{key}}"),
+            file_field: Some("filecontent".to_string()),
+            response_url_path: Some("url".to_string()),
+            ..Default::default()
+        })?;
+
+        assert!(storage.is_http());
+        assert!(!storage.is_local());
+        assert!(!storage.supports_presign());
+
+        let uploaded = storage
+            .upload(UploadRequest::new("rec/a.wav", Bytes::from_static(b"data")))
+            .await?;
+        assert_eq!(uploaded.url.as_deref(), Some("https://cdn/x.wav"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn http_storage_read_operations_are_unsupported() -> Result<()> {
+        let base = spawn_mock_server(static_response("ok")).await;
+        let storage = Storage::from_http(HttpUploadConfig {
+            url: base,
+            ..Default::default()
+        })?;
+        assert!(storage.read("a.wav").await.is_err());
+        assert!(storage.delete("a.wav").await.is_err());
+        assert!(storage.list(None).await.is_err());
+        assert!(storage.local_path("a.wav").is_none());
+        assert!(storage.object_key_from_url("https://cdn/x.wav").is_none());
+        Ok(())
+    }
 
     fn s3_test_config(endpoint: Option<String>) -> StorageConfig {
         StorageConfig::S3 {

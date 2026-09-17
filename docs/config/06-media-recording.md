@@ -280,6 +280,49 @@ url = "https://archive.example.com/recording"
 # headers = { "Authorization" = "Bearer token" }
 ```
 
+`type = "http"` is a generic, configurable multipart uploader. The defaults
+(`POST`, multipart field `recording`, file name = local file name, MIME
+`audio/wav`, plus `call_id` / `track_id` form fields) preserve the historical
+wire format. Any third-party upload API can be described declaratively:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `url` | String | required | Endpoint. May contain `{key}` (replaced with the file name, raw concatenation) |
+| `method` | Option\<String\> | `POST` | HTTP method |
+| `headers` | Option\<Map\> | None | Extra headers (values support placeholders) |
+| `file_field` | Option\<String\> | `recording` | Multipart field carrying the binary payload |
+| `body_field` | Option\<String\> | None | Send the payload as this text field instead of a binary file part (mutually exclusive with `file_field`) |
+| `file_name` | Option\<String\> | local file name | Multipart file name template |
+| `content_type` | Option\<String\> | `audio/wav` | MIME type of the binary payload |
+| `fields` | Option\<Map\> | `{call_id, track_id}` | Extra text form fields; values support `{call_id}` / `{track_id}` / `{filename}` / `{key}` |
+| `response_url_path` | Option\<String\> | None | Dot-path into a JSON response holding the uploaded URL (e.g. `data.url`). When unset, an `http`-looking body is used, otherwise the request URL |
+| `response_success` | Option\<Table\> | None | Business success rule `{ path = "code", equals = 0 }`; when unset any 2xx succeeds |
+| `connect_timeout_ms` | Option\<u64\> | 3000 | TCP connect timeout |
+| `request_timeout_ms` | Option\<u64\> | 10000 | Total request timeout |
+
+Example matching a key-based resource API:
+
+```toml
+[recording]
+enabled = true
+type = "http"
+url = "https://upload.example.com/resources/{key}"
+file_field = "filecontent"
+file_name = "{key}"
+content_type = "application/octet-stream"
+fields = { call_id = "{call_id}", track_id = "{track_id}" }
+response_url_path = "data.url"
+response_success = { path = "code", equals = 0 }
+connect_timeout_ms = 3000
+request_timeout_ms = 10000
+```
+
+Response handling: a 2xx response is success unless `response_success` is set.
+The stored URL is extracted from `response_url_path` when configured, else a
+response body starting with `http`, else the request URL (with `{key}`
+substituted). Non-2xx responses and failed `response_success` checks write the
+usual `.upload_failed.*` marker and are retried by the retry worker.
+
 ### S3 Recording Upload
 ```toml
 [recording]
@@ -474,4 +517,15 @@ with_media = true
 keep_media_copy = false
 ```
 
-HTTP CDR delivery uses `multipart/form-data` with field `calllog.json`. Recording media is delivered separately by `[recording] type = "http"`.
+HTTP CDR delivery uses `multipart/form-data` with the CDR JSON as a text field. The default field name is `calllog.json`; override it with `body_field`, or send the JSON as a binary part with `file_field` plus `file_name`/`content_type`. The same generic HTTP scheme options as `[recording] type = "http"` are accepted (`method`, `headers`, `fields`, `response_url_path`, `response_success`, `connect_timeout_ms`, `request_timeout_ms`). Recording media is delivered separately by `[recording] type = "http"`.
+
+```toml
+[callrecord]
+type = "http"
+url = "http://my-crm/cdr-hook"
+body_field = "calllog.json"   # default
+# method = "POST"
+# headers = { Authorization = "Bearer token" }
+# response_success = { path = "code", equals = 0 }
+```
+

@@ -4,6 +4,14 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
+pub mod upload;
+
+pub use upload::{
+    DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_CONTENT_TYPE, DEFAULT_FILE_FIELD,
+    DEFAULT_REQUEST_TIMEOUT_MS, HttpUploadConfig, HttpUploader, SuccessRule, UploadRequest,
+    UploadedObject, render,
+};
+
 const DEFAULT_HTTP_TCP_KEEPALIVE: Duration = Duration::from_secs(60);
 const DEFAULT_HTTP_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const DEFAULT_HTTP_POOL_MAX_IDLE_PER_HOST: usize = 8;

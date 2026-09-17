@@ -10,7 +10,7 @@ use chrono::{Local, TimeZone, Utc};
 use clap::Parser;
 use lru::LruCache;
 use rustpbx::callrecord::sipflow_upload::{
-    SipFlowUploadRequest, SipFlowUploadResponse, build_s3_storage, join_root, upload_media,
+    SipFlowUploadRequest, SipFlowUploadResponse, build_storage, join_root, upload_media,
     upload_signaling_flow,
 };
 use rustpbx::callrecord::{
@@ -126,7 +126,6 @@ struct AppState {
     backend: Arc<dyn SipFlowBackend>,
     root: String,
     subdirs: SipFlowSubdirs,
-    client: reqwest::Client,
     receiver_counters: Arc<Mutex<LruCache<u32, u64>>>,
     /// Per-sender report tracking: client_id → (last_sent, last_recv), used to
     /// derive per-interval loss on the collector when a report is received.
@@ -288,11 +287,6 @@ async fn main() -> Result<()> {
     }
     metrics::gauge!("sipflow_info", "version" => rustpbx::version::get_short_version()).set(1.0);
 
-    let http_client = rustpbx::http_util::build_keepalive_client(
-        Some(std::time::Duration::from_secs(120)),
-        Some(std::time::Duration::from_secs(10)),
-    )?;
-
     let receiver_counters: Arc<Mutex<LruCache<u32, u64>>> = Arc::new(Mutex::new(LruCache::new(
         std::num::NonZeroUsize::new(65536).unwrap(),
     )));
@@ -304,7 +298,6 @@ async fn main() -> Result<()> {
         backend: backend.clone(),
         root: args.root.clone(),
         subdirs,
-        client: http_client,
         receiver_counters: receiver_counters.clone(),
         report_tracking,
     };
@@ -916,7 +909,7 @@ async fn upload_handler(
     let call_id = &req.call_id;
     let _start = std::time::Instant::now();
 
-    let s3_storage = match build_s3_storage(&req.upload) {
+    let storage = match build_storage(&req.upload) {
         Ok(s) => s,
         Err(e) => {
             return Err((
@@ -988,8 +981,7 @@ async fn upload_handler(
             &full_media_key,
             None,
             0,
-            &state.client,
-            s3_storage.as_ref(),
+            storage.as_ref(),
         )
         .await
         {
@@ -1016,8 +1008,7 @@ async fn upload_handler(
             end,
             &full_signaling_key,
             &sig_file_name,
-            &state.client,
-            s3_storage.as_ref(),
+            storage.as_ref(),
         )
         .await
     } else {

@@ -218,6 +218,39 @@ pub struct RecordingPolicy {
     pub path: Option<String>,
     pub url: Option<String>,
     pub headers: Option<HashMap<String, String>>,
+    /// HTTP upload method for `type = "http"` (default `POST`).
+    #[serde(default)]
+    pub method: Option<String>,
+    /// Multipart field carrying the binary payload (default `recording`).
+    #[serde(default)]
+    pub file_field: Option<String>,
+    /// Multipart field carrying the payload as text (mutually exclusive with
+    /// `file_field`). When set, the WAV/JSONL payload is sent as this text
+    /// field instead of a binary file part.
+    #[serde(default)]
+    pub body_field: Option<String>,
+    /// File name sent in the multipart part. Defaults to the local file name.
+    #[serde(default)]
+    pub file_name: Option<String>,
+    /// MIME type of the binary payload (default `audio/wav`).
+    #[serde(default)]
+    pub content_type: Option<String>,
+    /// Extra text form fields; values support `{call_id}` / `{track_id}` /
+    /// `{filename}` / `{key}` placeholders.
+    #[serde(default)]
+    pub fields: Option<HashMap<String, String>>,
+    /// Dot-path into a JSON response holding the uploaded object URL.
+    #[serde(default)]
+    pub response_url_path: Option<String>,
+    /// Business-level success rule evaluated against the JSON response.
+    #[serde(default)]
+    pub response_success: Option<crate::http_util::SuccessRule>,
+    /// TCP connect timeout in milliseconds (default 3000).
+    #[serde(default)]
+    pub connect_timeout_ms: Option<u64>,
+    /// Total request timeout in milliseconds (default 10000).
+    #[serde(default)]
+    pub request_timeout_ms: Option<u64>,
     pub vendor: Option<crate::storage::S3Vendor>,
     pub bucket: Option<String>,
     pub region: Option<String>,
@@ -288,6 +321,38 @@ impl RecordingPolicy {
             .filter(|p| !p.is_empty())
             .map(|p| p.to_string())
             .unwrap_or_else(default_config_recorder_path)
+    }
+
+    /// Build the generic HTTP upload config for `type = "http"`. Defaults
+    /// preserve the historical wire format (multipart field `recording`,
+    /// `audio/wav`). Returns `None` when no `url` is configured.
+    pub fn http_upload_config(&self) -> Option<crate::http_util::HttpUploadConfig> {
+        let url = self
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())?
+            .to_string();
+        Some(crate::http_util::HttpUploadConfig {
+            url,
+            method: self.method.clone(),
+            headers: self.headers.clone(),
+            file_field: self
+                .file_field
+                .clone()
+                .or_else(|| Some("recording".to_string())),
+            body_field: self.body_field.clone(),
+            file_name: self.file_name.clone(),
+            content_type: self
+                .content_type
+                .clone()
+                .or_else(|| Some("audio/wav".to_string())),
+            fields: self.fields.clone(),
+            response_url_path: self.response_url_path.clone(),
+            response_success: self.response_success.clone(),
+            connect_timeout_ms: self.connect_timeout_ms,
+            request_timeout_ms: self.request_timeout_ms,
+        })
     }
 
     /// True when the `[recording]` upload path should handle WAV artifacts.
@@ -760,6 +825,37 @@ pub enum CallRecordStorageConfig {
     Http {
         url: String,
         headers: Option<HashMap<String, String>>,
+        /// HTTP method (default `POST`).
+        #[serde(default)]
+        method: Option<String>,
+        /// Multipart field carrying the payload as a binary file part.
+        #[serde(default)]
+        file_field: Option<String>,
+        /// Multipart field carrying the CDR JSON as text. Defaults to
+        /// `calllog.json` to preserve the historical wire format.
+        #[serde(default)]
+        body_field: Option<String>,
+        /// File name sent in the multipart part (binary mode only).
+        #[serde(default)]
+        file_name: Option<String>,
+        /// MIME type of the binary payload.
+        #[serde(default)]
+        content_type: Option<String>,
+        /// Extra text form fields; values support `{key}` placeholders.
+        #[serde(default)]
+        fields: Option<HashMap<String, String>>,
+        /// Dot-path into a JSON response holding the uploaded object URL.
+        #[serde(default)]
+        response_url_path: Option<String>,
+        /// Business-level success rule evaluated against the JSON response.
+        #[serde(default)]
+        response_success: Option<crate::http_util::SuccessRule>,
+        /// TCP connect timeout in milliseconds.
+        #[serde(default)]
+        connect_timeout_ms: Option<u64>,
+        /// Total request timeout in milliseconds.
+        #[serde(default)]
+        request_timeout_ms: Option<u64>,
         /// Deprecated and unused. Recording media upload is configured by `[recording]`.
         with_media: Option<bool>,
         /// Deprecated with `with_media`; accepted for config compatibility.
@@ -779,6 +875,52 @@ pub enum CallRecordStorageConfig {
         #[serde(default)]
         rotate: RotationMode,
     },
+}
+
+impl CallRecordStorageConfig {
+    /// Build the generic HTTP upload config for `type = "http"`. The CDR JSON
+    /// is sent as a multipart text field (default `calllog.json`) to preserve
+    /// the historical wire format.
+    pub fn http_upload_config(&self) -> Option<crate::http_util::HttpUploadConfig> {
+        let CallRecordStorageConfig::Http {
+            url,
+            headers,
+            method,
+            file_field,
+            body_field,
+            file_name,
+            content_type,
+            fields,
+            response_url_path,
+            response_success,
+            connect_timeout_ms,
+            request_timeout_ms,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let url = url.trim();
+        if url.is_empty() {
+            return None;
+        }
+        Some(crate::http_util::HttpUploadConfig {
+            url: url.to_string(),
+            method: method.clone(),
+            headers: headers.clone(),
+            file_field: file_field.clone(),
+            body_field: body_field
+                .clone()
+                .or_else(|| Some("calllog.json".to_string())),
+            file_name: file_name.clone(),
+            content_type: content_type.clone(),
+            fields: fields.clone(),
+            response_url_path: response_url_path.clone(),
+            response_success: response_success.clone(),
+            connect_timeout_ms: *connect_timeout_ms,
+            request_timeout_ms: *request_timeout_ms,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize, Default, PartialEq, Eq)]
@@ -2737,6 +2879,79 @@ mod tests {
             policy.effective_signed_url_expiry_secs(),
             crate::storage::MAX_PRESIGN_EXPIRY_SECS
         );
+    }
+
+    #[test]
+    fn test_recording_http_upload_scheme_fields() {
+        let toml_str = r#"
+            [proxy]
+            addr = "0.0.0.0"
+
+            [recording]
+            enabled = true
+            type = "http"
+            url = "https://host/upload/{key}"
+            file_field = "filecontent"
+            file_name = "{key}"
+            content_type = "application/octet-stream"
+            fields = { call_id = "{call_id}" }
+            response_url_path = "data.url"
+            response_success = { path = "code", equals = 0 }
+            connect_timeout_ms = 3000
+            request_timeout_ms = 10000
+        "#;
+        let config: Config = toml::from_str(toml_str).expect("Config should parse");
+        let policy = config.recording.expect("recording policy should parse");
+        let http = policy.http_upload_config().expect("http upload config");
+        assert_eq!(http.url, "https://host/upload/{key}");
+        assert_eq!(http.file_field.as_deref(), Some("filecontent"));
+        assert_eq!(http.file_name.as_deref(), Some("{key}"));
+        assert_eq!(
+            http.content_type.as_deref(),
+            Some("application/octet-stream")
+        );
+        assert_eq!(http.response_url_path.as_deref(), Some("data.url"));
+        assert_eq!(
+            http.response_success
+                .as_ref()
+                .map(|rule| (rule.path.as_str(), rule.equals.clone())),
+            Some(("code", serde_json::json!(0)))
+        );
+        assert_eq!(http.connect_timeout_ms, Some(3000));
+        assert_eq!(http.request_timeout_ms, Some(10000));
+    }
+
+    #[test]
+    fn test_recording_http_upload_defaults_preserve_wire_format() {
+        let policy: RecordingPolicy = toml::from_str(
+            "enabled = true\ntype = \"http\"\nurl = \"http://host/recording\"\n",
+        )
+        .expect("recording policy should parse");
+        let http = policy.http_upload_config().expect("http upload config");
+        assert_eq!(http.file_field.as_deref(), Some("recording"));
+        assert_eq!(http.content_type.as_deref(), Some("audio/wav"));
+        assert!(http.body_field.is_none());
+    }
+
+    #[test]
+    fn test_callrecord_http_upload_defaults_to_text_field() {
+        let toml_str = r#"
+            [proxy]
+            addr = "0.0.0.0"
+
+            [callrecord]
+            type = "http"
+            url = "http://crm/cdr-hook"
+        "#;
+        let config: Config = toml::from_str(toml_str).expect("Config should parse");
+        let callrecord = config.callrecord.expect("callrecord should parse");
+        let http = callrecord
+            .storage
+            .http_upload_config()
+            .expect("http upload config");
+        assert_eq!(http.url, "http://crm/cdr-hook");
+        assert_eq!(http.body_field.as_deref(), Some("calllog.json"));
+        assert!(http.file_field.is_none());
     }
 
     #[test]
