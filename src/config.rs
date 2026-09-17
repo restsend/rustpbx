@@ -213,7 +213,9 @@ pub struct RecordingPolicy {
     pub auto_start: Option<bool>,
     pub auto_start_at: Option<RecordingAutoStartAt>,
     pub filename_pattern: Option<String>,
+    /// Live file output rate in Hz; explicit values select resampled PCM WAV.
     pub samplerate: Option<u32>,
+    /// Live file flush interval in milliseconds, not RTP packetization.
     pub ptime: Option<u32>,
     pub path: Option<String>,
     pub url: Option<String>,

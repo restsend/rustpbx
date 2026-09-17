@@ -544,6 +544,27 @@ impl SipSession {
         }
     }
 
+    /// Fill missing file options from per-call policy, then server policy.
+    /// Explicit RecorderOption values win, including stereo_swap = false.
+    fn recorder_option(&self, path: String) -> crate::media::recorder::RecorderOption {
+        let global = self.server.recording_policy.load();
+        let global = global.as_ref().as_ref();
+        let local = self.context.dialplan.recording_policy.as_ref();
+        let mut option = self.context.dialplan.recording.option.clone().unwrap_or_default();
+        option.recorder_file = path;
+        option.samplerate = option.samplerate
+            .or_else(|| local.and_then(|p| p.samplerate))
+            .or_else(|| global.and_then(|p| p.samplerate));
+        option.ptime = option.ptime
+            .or_else(|| local.and_then(|p| p.ptime))
+            .or_else(|| global.and_then(|p| p.ptime));
+        option.stereo_swap = option.stereo_swap
+            .or_else(|| local.and_then(|p| p.stereo_swap))
+            .or_else(|| self.context.dialplan.recording.stereo_swap.then_some(true))
+            .or_else(|| global.and_then(|p| p.stereo_swap));
+        option
+    }
+
     /// Install the recorder implementation selected for this call. Signaling
     /// call sites decide when automatic installation is allowed.
     pub(crate) async fn set_auto_recorder(&mut self) -> Result<()> {
@@ -564,8 +585,9 @@ impl SipSession {
             }
             let profile = self.media_leg(&LegId::from("caller")).and_then(|peer| peer.negotiated())
                 .ok_or_else(|| anyhow!("No caller media profile for recording"))?;
+            let option = self.recorder_option(path.clone());
             self.media.recording
-                .start_recording(profile, path.clone(), 2, false, None)
+                .start_recording(profile, option, 2, false, None)
                 .await?;
             self.active_recording = Some(crate::callrecord::ActiveRecording {
                 path,
@@ -9192,10 +9214,11 @@ impl SipSession {
                         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                     let profile = self.media_leg(&LegId::from("caller")).and_then(|peer| peer.negotiated())
                         .ok_or_else(|| anyhow!("No caller media profile for recording"))?;
+                    let option = self.recorder_option(path.clone());
                     self.media.recording
                         .start_recording(
                             profile,
-                            path.clone(),
+                            option,
                             config.channels.unwrap_or(2),
                             config.mono_caller_only.unwrap_or(false),
                             config

@@ -247,8 +247,9 @@ callee_allow = []
 callee_deny = ["911"]
 
 # Recording quality
-samplerate = 8000       # Audio sample rate (Hz)
-ptime = 20              # Packetization time (ms)
+samplerate = 16000      # Resampled 16-bit PCM WAV output rate (Hz); optional
+ptime = 20              # File-recorder flush interval (ms); default 500
+stereo_swap = false     # true: callee left, caller right (stereo only)
 
 # Hybrid mode: force legacy WAV recorder even when [sipflow] is active
 # When true, SipFlow captures signalling only; [recording] handles media
@@ -268,6 +269,8 @@ enabled = true
 directions = ["inbound"]
 auto_start = true
 ```
+
+File recording settings also apply to on-demand recording. Per-call overrides take precedence over the server recording policy. An explicit `samplerate` (8000–192000 Hz) selects resampled 16-bit PCM WAV; omitting it preserves the codec-based WAV output. `ptime` must be positive and controls file flushing, not RTP packetization. These settings do not change SipFlow packet capture.
 
 ### HTTP Recording Upload
 ```toml

@@ -15,6 +15,16 @@ use tracing::debug;
 pub struct RecorderOption {
     #[serde(default)]
     pub recorder_file: String,
+    /// Explicit output rate in Hz selects resampled signed 16-bit PCM WAV.
+    /// Unset preserves the codec-based WAV format and rate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub samplerate: Option<u32>,
+    /// File flush interval in milliseconds; unset uses 500 ms.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ptime: Option<u32>,
+    /// Swap stereo channels. Optional so explicit false overrides inherited true.
+    #[serde(alias = "stereo_swap", skip_serializing_if = "Option::is_none")]
+    pub stereo_swap: Option<bool>,
 }
 
 impl RecorderOption {
@@ -30,6 +40,9 @@ impl Default for RecorderOption {
     fn default() -> Self {
         Self {
             recorder_file: "".to_string(),
+            samplerate: None,
+            ptime: None,
+            stereo_swap: None,
         }
     }
 }
@@ -93,7 +106,7 @@ impl Recorder {
     /// Create a stereo (2-channel) recorder.
     #[cfg(test)]
     pub async fn new(path: &str, codec: CodecType) -> Result<Self> {
-        Self::new_with_channels(path, codec, 2, false).await
+        Self::new_with_channels(&RecorderOption::new(path.to_string()), codec, 2, false).await
     }
 
     /// Create a recorder with an explicit channel count.
@@ -103,11 +116,21 @@ impl Recorder {
     /// (caller ingress) is written at full amplitude (used by voicemail where
     /// the egress leg is silence).
     pub async fn new_with_channels(
-        path: &str,
+        option: &RecorderOption,
         codec: CodecType,
         channels: u16,
         mono_caller_only: bool,
     ) -> Result<Self> {
+        let path = &option.recorder_file;
+        if let Some(rate) = option.samplerate {
+            anyhow::ensure!(
+                (8000..=192000).contains(&rate),
+                "recording sample rate must be between 8000 and 192000 Hz"
+            );
+        }
+        if let Some(ptime) = option.ptime {
+            anyhow::ensure!(ptime > 0, "recording ptime must be greater than zero");
+        }
         let src_codec = codec;
         let codec = match codec {
             CodecType::Opus => CodecType::PCMU,
@@ -116,13 +139,18 @@ impl Recorder {
             _ => codec,
         };
 
-        let sample_rate = codec.samplerate();
-        let encoder = Some(create_encoder(codec));
+        let sample_rate = option.samplerate.unwrap_or_else(|| codec.samplerate());
+        let encoder = option.samplerate.is_none().then(|| create_encoder(codec));
         debug!(
             "Creating recorder: path={}, src_codec={:?} codec={:?}",
             path, src_codec, codec
         );
-        let writer = CodecWavWriter::create(path, sample_rate, channels, Some(codec)).await?;
+        let writer = CodecWavWriter::create(
+            path,
+            sample_rate,
+            channels,
+            option.samplerate.is_none().then_some(codec),
+        ).await?;
 
         Ok(Self {
             path: path.to_string(),
@@ -147,8 +175,8 @@ impl Recorder {
             // write syscall. Larger intervals reduce blocking-pool dispatches
             // and syscalls at high concurrency; buffered audio is bounded by
             // the 2 s slow-leg safety valve in flush_impl.
-            ptime: Duration::from_millis(500),
-            stereo_swap: false,
+            ptime: Duration::from_millis(option.ptime.unwrap_or(500) as u64),
+            stereo_swap: option.stereo_swap.unwrap_or(false),
             mono_caller_only,
             leg_a_started: false,
             leg_b_started: false,
@@ -290,7 +318,7 @@ impl Recorder {
             },
         };
 
-        if decoder_type != self.codec {
+        if decoder_type != self.codec || self.encoder.is_none() {
             let decoder = self
                 .decoders
                 .entry((leg, decoder_type.payload_type()))
@@ -663,6 +691,9 @@ impl Recorder {
     }
 
     fn block_info(&self) -> (u32, usize) {
+        if self.encoder.is_none() {
+            return (1, 2); // Signed 16-bit PCM output.
+        }
         match self.codec {
             CodecType::G729 => (80, 10),
             CodecType::PCMU | CodecType::PCMA => (1, 1),
@@ -795,6 +826,11 @@ impl Recorder {
     }
 
     fn mix(&mut self, data_a: &[u8], data_b: &[u8]) -> Result<Vec<u8>> {
+        if self.encoder.is_none() {
+            return Ok(rustpbx_record_common::mix_pcm(
+                data_a, data_b, rustpbx_record_common::MixMode::Average,
+            ));
+        }
         let (_, bytes_per_block) = self.block_info();
         let len = data_a.len().min(data_b.len());
         let mut mixed = Vec::with_capacity(len);
@@ -847,6 +883,43 @@ pub use rustpbx_record_common::DtmfGenerator;
 mod tests {
     use super::*;
     use audio_codec::{CodecType, create_decoder, create_encoder};
+
+    #[tokio::test]
+    async fn file_output_ptime_controls_flushing() {
+        let dir = tempfile::tempdir().unwrap();
+        for ptime in [20, 500] {
+            let path = dir.path().join(format!("flush-{ptime}.wav"));
+            let mut recorder = Recorder::new_with_channels(
+                &RecorderOption {
+                    recorder_file: path.to_string_lossy().into_owned(),
+                    ptime: Some(ptime),
+                    ..Default::default()
+                },
+                CodecType::PCMU, 2, false,
+            ).await.unwrap();
+            recorder.last_flush = Instant::now() - Duration::from_millis(100);
+            let frame = rustrtc::media::AudioFrame {
+                rtp_timestamp: 0,
+                payload_type: Some(0),
+                data: vec![0xff; 160].into(),
+                ..Default::default()
+            };
+            for leg in [Leg::A, Leg::B] {
+                recorder.write_sample(
+                    leg, &MediaSample::Audio(frame.clone()), None, None, Some(CodecType::PCMU),
+                ).await.unwrap();
+            }
+            // Tokio's file write may still be queued on its blocking worker;
+            // measure dispatched recording bytes, then verify the finalized file.
+            if ptime == 20 {
+                assert!(recorder.written_bytes > 0, "short ptime must flush before stop");
+            } else {
+                assert_eq!(recorder.written_bytes, 0, "long ptime must keep audio buffered");
+            }
+            recorder.finalize().await.unwrap();
+            assert!(std::fs::metadata(&path).unwrap().len() > 44);
+        }
+    }
 
     #[test]
     fn test_mix_pcmu_both_silent() {
