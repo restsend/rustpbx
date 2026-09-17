@@ -635,8 +635,6 @@ impl Locator for MemoryLocator {
         let binding_key = location.binding_key();
         let now = Instant::now();
 
-        debug!(%identifier, binding = %binding_key, %location, "Memory locator: registering");
-
         // Prune expired bindings for THIS identifier (opportunistic GC).
         if let Some(mut map) = self.locations.get_mut(&identifier) {
             map.retain(|_, loc| !loc.is_expired_at(now));
@@ -656,7 +654,7 @@ impl Locator for MemoryLocator {
                 if empty {
                     self.locations.remove(&identifier);
                 }
-                info!(%identifier, binding = %binding_key, "unregistered location (expires=0)");
+                debug!(%identifier, binding = %binding_key, "unregistered location (expires=0)");
             }
             return Ok(());
         }
@@ -677,7 +675,7 @@ impl Locator for MemoryLocator {
             }) {
                 if let Some(ref new_dest) = location.destination {
                     old_loc.destination = Some(new_dest.clone());
-                    info!(
+                    debug!(
                         old_aor = %old_loc.aor,
                         new_aor = %location.aor,
                         %instance_id,
@@ -693,13 +691,13 @@ impl Locator for MemoryLocator {
         if location.last_modified.is_none() {
             location.last_modified = Some(Instant::now());
         }
-        let bk = binding_key.clone();
+        
+        debug!(%identifier, binding = %binding_key, %location, "registered location");
+
         self.locations
             .entry(identifier.clone())
             .or_default()
             .insert(binding_key, location);
-        info!(%identifier, binding = %bk, "registered location");
-
         Ok(())
     }
 

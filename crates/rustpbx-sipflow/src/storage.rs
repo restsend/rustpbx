@@ -33,6 +33,10 @@ pub struct StorageManager {
     base_path: PathBuf,
     current_hour: (i32, u32, u32, u32), // Year, Month, Day, Hour
     raw_file: Option<File>,
+    /// Path backing `raw_file`. Lets `rotate` detect a same-bucket re-open and
+    /// keep the existing descriptor (and its flock) instead of re-acquiring a
+    /// conflicting exclusive lock on the same file.
+    raw_path: Option<PathBuf>,
     current_offset: u64,
     /// Whether the raw file cursor is known to equal `current_offset`.
     ///
@@ -271,6 +275,7 @@ impl StorageManager {
             base_path: base_path.to_path_buf(),
             current_hour: (0, 0, 0, 0),
             raw_file: None,
+            raw_path: None,
             current_offset: 0,
             pos_known: true,
             write_buf: Vec::with_capacity(RAW_WRITE_BUF_SIZE),
@@ -444,6 +449,19 @@ impl StorageManager {
         let db_path = write_dir.join("sipflow.db");
         let raw_path = write_dir.join("data.raw");
 
+        // Same bucket as the currently open file → keep the existing descriptor
+        // and its advisory lock. Re-opening the same path and calling
+        // flock(LOCK_EX) while our own previous descriptor still holds the lock
+        // fails (flock is per open-file-description), which produced the
+        // "data.raw is locked by another process — offset tracking may be
+        // unreliable" error on every bucket-boundary rotation.
+        if self.raw_path.as_deref() == Some(raw_path.as_path()) {
+            return Ok(());
+        }
+        // Bucket path changed: release the previous descriptor (and its lock)
+        // BEFORE acquiring the new one so the two locks never self-conflict.
+        self.raw_file = None;
+
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -460,6 +478,7 @@ impl StorageManager {
             if ret != 0 {
                 tracing::error!(
                     path = %raw_path.display(),
+                    pid = std::process::id(),
                     errno = %std::io::Error::last_os_error(),
                     "data.raw is locked by another process — offset tracking may be unreliable"
                 );
@@ -474,6 +493,7 @@ impl StorageManager {
         self.pos_known = true;
 
         self.raw_file = Some(file);
+        self.raw_path = Some(raw_path);
 
         if let Some(ref tx) = self.flusher_tx {
             let _ = tx.send(FlushCommand::Rotate { db_path }).await;
@@ -1067,6 +1087,34 @@ mod tests {
             None,
         );
         (storage, flusher)
+    }
+
+    /// Regression: rotating within the same bucket must NOT re-open `data.raw`.
+    /// The previous descriptor still holds `flock(LOCK_EX)`, so a second
+    /// `LOCK_EX` on the same path cannot be acquired (flock is per
+    /// open-file-description) — the "data.raw is locked by another process"
+    /// error seen every bucket boundary. Re-opening also reset offset tracking.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rotate_same_bucket_reuses_raw_fd() {
+        use std::os::unix::io::AsRawFd;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut storage, _flusher) = new_test_storage(dir.path()).await;
+
+        storage
+            .write_processed(make_sip_processed(1_000_000, "cid-1"))
+            .await
+            .unwrap();
+        let fd_before = storage.raw_file.as_ref().unwrap().as_raw_fd();
+
+        // Same wall-clock bucket → rotate must keep the existing fd/lock.
+        storage.rotate(Local::now()).await.unwrap();
+        let fd_after = storage.raw_file.as_ref().unwrap().as_raw_fd();
+
+        assert_eq!(
+            fd_before, fd_after,
+            "same-bucket rotate re-opened data.raw (flock self-conflict)"
+        );
     }
 
     async fn new_test_storage_sharded(

@@ -951,6 +951,11 @@ pub struct RtpConfig {
     /// (`;+sip.ice` registration detection) override this global default.
     #[serde(default)]
     pub ice_lite: bool,
+    /// Max seconds to wait for a WebRTC leg's ICE+DTLS before degrading the
+    /// fast-path relay to transcoding. Unset = 5s. Raise it for clients on
+    /// slow networks that need longer to bring media up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_ready_timeout_secs: Option<u64>,
 }
 
 fn default_comfort_noise() -> bool {
@@ -974,6 +979,11 @@ pub struct MediaSection {
     /// Defaults to false.
     #[serde(default)]
     pub ice_lite: bool,
+    /// Max seconds to wait for a WebRTC leg's ICE+DTLS before degrading the
+    /// fast-path relay to transcoding (see
+    /// `LegConfig::relay_ready_timeout`). Unset = 5s default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_ready_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2115,6 +2125,7 @@ impl Config {
                 .map(|m| m.comfort_noise_level_db)
                 .unwrap_or_else(default_comfort_noise_level_db),
             ice_lite: media.map(|m| m.ice_lite).unwrap_or(false),
+            relay_ready_timeout_secs: media.and_then(|m| m.relay_ready_timeout_secs),
         }
     }
 
