@@ -9,9 +9,8 @@ use tracing::{error, info, warn};
 
 use crate::{
     callrecord::{
-        CALL_RECORD_HTTP_CONNECT_TIMEOUT, CALL_RECORD_HTTP_TIMEOUT, CallRecord, CallRecordHook,
-        format_sipflow_media_key, format_sipflow_signaling_file_name, format_sipflow_signaling_key,
-        sipflow::SipFlowSlot,
+        CallRecord, CallRecordHook, format_sipflow_media_key, format_sipflow_signaling_file_name,
+        format_sipflow_signaling_key, sipflow::SipFlowSlot,
     },
     config::SipFlowUploadConfig,
     sipflow::SipFlowBackend,
@@ -25,8 +24,7 @@ pub struct SipFlowUploadHook {
     sipflow: SipFlowSlot,
     upload_config: SipFlowUploadConfig,
     db: Option<DatabaseConnection>,
-    client: reqwest::Client,
-    s3_storage: Option<Storage>,
+    storage: Option<Storage>,
 }
 
 impl SipFlowUploadHook {
@@ -36,18 +34,14 @@ impl SipFlowUploadHook {
         upload_config: SipFlowUploadConfig,
         db: Option<DatabaseConnection>,
     ) -> Result<Self> {
-        let s3_storage = build_s3_storage(&upload_config)?;
+        let storage = build_storage(&upload_config)?;
 
         Ok(Self {
             backend,
             sipflow,
             upload_config,
             db,
-            client: crate::http_util::build_keepalive_client(
-                Some(CALL_RECORD_HTTP_TIMEOUT),
-                Some(CALL_RECORD_HTTP_CONNECT_TIMEOUT),
-            )?,
-            s3_storage,
+            storage,
         })
     }
 }
@@ -89,8 +83,7 @@ impl CallRecordHook for SipFlowUploadHook {
                 &self.sipflow,
                 &self.upload_config,
                 self.db.as_ref(),
-                &self.client,
-                self.s3_storage.as_ref(),
+                self.storage.as_ref(),
                 call_id,
                 &signaling_call_ids,
                 start,
@@ -122,8 +115,7 @@ async fn do_upload(
     sipflow: &crate::callrecord::sipflow::SipFlowSlot,
     upload_config: &SipFlowUploadConfig,
     db: Option<&DatabaseConnection>,
-    client: &reqwest::Client,
-    s3_storage: Option<&Storage>,
+    storage: Option<&Storage>,
     call_id: &str,
     signaling_call_ids: &[String],
     start: DateTime<Local>,
@@ -169,8 +161,7 @@ async fn do_upload(
             &full_media_key,
             db,
             duration_secs,
-            client,
-            s3_storage,
+            storage,
         )
         .await
         {
@@ -194,8 +185,7 @@ async fn do_upload(
             end,
             &full_signaling_key,
             signaling_file_name,
-            client,
-            s3_storage,
+            storage,
         )
         .await;
     }
@@ -214,8 +204,7 @@ pub async fn upload_media(
     full_media_key: &str,
     db: Option<&DatabaseConnection>,
     duration_secs: i32,
-    client: &reqwest::Client,
-    s3_storage: Option<&Storage>,
+    storage: Option<&Storage>,
 ) -> Option<(String, u64)> {
     let temp_file: tempfile::NamedTempFile =
         match backend.generate_wav_file(call_id, start, end, None).await {
@@ -239,6 +228,14 @@ pub async fn upload_media(
         return None;
     }
 
+    let wav_bytes = match tokio::fs::read(&temp_path).await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(call_id, "SipFlowUploadHook: read temp file failed: {e}");
+            return None;
+        }
+    };
+
     let url_result = match upload_config {
         SipFlowUploadConfig::S3 {
             vendor,
@@ -246,22 +243,34 @@ pub async fn upload_media(
             endpoint,
             ..
         } => {
-            let wav_bytes = match tokio::fs::read(&temp_path).await {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!(call_id, "SipFlowUploadHook: read temp file failed: {e}");
-                    return None;
-                }
-            };
-            let Some(storage) = s3_storage else {
+            let Some(storage) = storage else {
                 return None;
             };
             upload_s3(storage, full_media_key, wav_bytes)
                 .await
                 .map(|_| sipflow_s3_url(vendor, endpoint, bucket, full_media_key))
         }
-        SipFlowUploadConfig::Http { url, headers, .. } => {
-            upload_http_file(client, url, headers.as_ref(), call_id, &temp_path).await
+        SipFlowUploadConfig::Http { .. } => {
+            let Some(storage) = storage else {
+                return None;
+            };
+            let file_name = format!("{call_id}.wav");
+            let request = crate::storage::UploadRequest {
+                key: full_media_key.to_string(),
+                file_name: Some(file_name.clone()),
+                content_type: Some("audio/wav".to_string()),
+                file_field: Some("recording".to_string()),
+                body_field: None,
+                vars: std::collections::HashMap::from([
+                    ("call_id".to_string(), call_id.to_string()),
+                    ("filename".to_string(), file_name),
+                ]),
+                bytes: Bytes::from(wav_bytes),
+            };
+            storage
+                .upload(request)
+                .await
+                .map(|uploaded| uploaded.url.unwrap_or_else(|| full_media_key.to_string()))
         }
     };
 
@@ -308,8 +317,7 @@ pub async fn upload_signaling_flow(
     end: DateTime<Local>,
     full_signaling_key: &str,
     signaling_file_name: &str,
-    client: &reqwest::Client,
-    s3_storage: Option<&Storage>,
+    storage: Option<&Storage>,
 ) -> bool {
     let query_start = start - chrono::Duration::seconds(1);
     let query_end = end + chrono::Duration::seconds(1);
@@ -350,14 +358,30 @@ pub async fn upload_signaling_flow(
 
     let result = match upload_config {
         SipFlowUploadConfig::S3 { .. } => {
-            let Some(storage) = s3_storage else {
+            let Some(storage) = storage else {
                 warn!(call_id, "SipFlowUploadHook: S3 storage is not initialized");
                 return false;
             };
             upload_s3(storage, full_signaling_key, data).await
         }
-        SipFlowUploadConfig::Http { url, headers, .. } => {
-            upload_http_jsonl(client, url, headers.as_ref(), signaling_file_name, data).await
+        SipFlowUploadConfig::Http { .. } => {
+            let Some(storage) = storage else {
+                warn!(call_id, "SipFlowUploadHook: HTTP storage is not initialized");
+                return false;
+            };
+            let request = crate::storage::UploadRequest {
+                key: full_signaling_key.to_string(),
+                file_name: Some(signaling_file_name.to_string()),
+                content_type: Some("application/jsonl".to_string()),
+                file_field: Some("signaling".to_string()),
+                body_field: None,
+                vars: std::collections::HashMap::from([
+                    ("call_id".to_string(), call_id.to_string()),
+                    ("filename".to_string(), signaling_file_name.to_string()),
+                ]),
+                bytes: Bytes::from(data),
+            };
+            storage.upload(request).await.map(|_| ())
         }
     };
 
@@ -375,7 +399,7 @@ pub async fn upload_signaling_flow(
 
 // ── Shared helpers (used by bin and hook) ─────────────────────────────────────
 
-pub fn build_s3_storage(upload_config: &SipFlowUploadConfig) -> Result<Option<Storage>> {
+pub fn build_storage(upload_config: &SipFlowUploadConfig) -> Result<Option<Storage>> {
     match upload_config {
         SipFlowUploadConfig::S3 {
             vendor,
@@ -394,7 +418,10 @@ pub fn build_s3_storage(upload_config: &SipFlowUploadConfig) -> Result<Option<St
             endpoint: Some(endpoint.clone()),
             prefix: None,
         })?)),
-        SipFlowUploadConfig::Http { .. } => Ok(None),
+        SipFlowUploadConfig::Http { .. } => Ok(upload_config
+            .http_upload_config()
+            .map(Storage::from_http)
+            .transpose()?),
     }
 }
 
@@ -482,76 +509,6 @@ async fn upload_s3(storage: &Storage, key: &str, data: Vec<u8>) -> Result<()> {
     Ok(())
 }
 
-async fn upload_http_file(
-    client: &reqwest::Client,
-    url: &str,
-    headers: Option<&std::collections::HashMap<String, String>>,
-    call_id: &str,
-    file_path: &std::path::Path,
-) -> Result<String> {
-    let file_name = format!("{}.wav", call_id);
-    let file = tokio::fs::File::open(file_path).await?;
-    let part = reqwest::multipart::Part::stream(reqwest::Body::wrap_stream(
-        tokio_util::io::ReaderStream::new(file),
-    ))
-    .file_name(file_name)
-    .mime_str("audio/wav")?;
-    let form = reqwest::multipart::Form::new().part("recording", part);
-
-    let mut req = client.post(url).multipart(form);
-    if let Some(h) = headers {
-        for (k, v) in h {
-            req = req.header(k.as_str(), v.as_str());
-        }
-    }
-    let response = req.send().await?;
-    if response.status().is_success() {
-        let body = response.text().await.unwrap_or_default();
-        let recording_url = if body.starts_with("http") {
-            body.trim().to_string()
-        } else {
-            url.to_string()
-        };
-        Ok(recording_url)
-    } else {
-        Err(anyhow::anyhow!(
-            "HTTP upload failed: {} – {}",
-            response.status(),
-            response.text().await.unwrap_or_default()
-        ))
-    }
-}
-
-async fn upload_http_jsonl(
-    client: &reqwest::Client,
-    url: &str,
-    headers: Option<&std::collections::HashMap<String, String>>,
-    file_name: &str,
-    data: Vec<u8>,
-) -> Result<()> {
-    let part = reqwest::multipart::Part::bytes(data)
-        .file_name(file_name.to_string())
-        .mime_str("application/jsonl")?;
-    let form = reqwest::multipart::Form::new().part("signaling", part);
-
-    let mut req = client.post(url).multipart(form);
-    if let Some(h) = headers {
-        for (k, v) in h {
-            req = req.header(k.as_str(), v.as_str());
-        }
-    }
-    let response = req.send().await?;
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(
-            "HTTP signaling upload failed: {} – {}",
-            response.status(),
-            response.text().await.unwrap_or_default()
-        ))
-    }
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -612,6 +569,31 @@ mod tests {
         }
     }
 
+    fn http_upload_config(
+        url: &str,
+        signaling: Option<bool>,
+        media: Option<bool>,
+    ) -> SipFlowUploadConfig {
+        SipFlowUploadConfig::Http {
+            url: url.to_string(),
+            headers: None,
+            method: None,
+            file_field: None,
+            body_field: None,
+            file_name: None,
+            content_type: None,
+            fields: None,
+            response_url_path: None,
+            response_success: None,
+            connect_timeout_ms: None,
+            request_timeout_ms: None,
+            signaling,
+            media,
+            force_pcm: None,
+            pcm_sample_rate: None,
+        }
+    }
+
     fn make_record() -> CallRecord {
         use crate::callrecord::CallDetails;
         let now = chrono::Utc::now();
@@ -660,7 +642,7 @@ mod tests {
             raw,
             format!("https://test-bucket.oss-cn-beijing.aliyuncs.com/{key}")
         );
-        assert!(build_s3_storage(&config).unwrap().is_some());
+        assert!(build_storage(&config).unwrap().is_some());
     }
 
     #[test]
@@ -709,14 +691,7 @@ mod tests {
                 queried_ranges: Arc::new(std::sync::Mutex::new(Vec::new())),
             }),
             Arc::new(std::sync::OnceLock::new()),
-            SipFlowUploadConfig::Http {
-                url: "http://localhost:9999/upload".to_string(),
-                headers: None,
-                signaling: None,
-                media: None,
-                force_pcm: None,
-                pcm_sample_rate: None,
-            },
+            http_upload_config("http://localhost:9999/upload", None, None),
             None,
         )
         .unwrap();
@@ -739,14 +714,7 @@ mod tests {
                 queried_ranges: Arc::new(std::sync::Mutex::new(Vec::new())),
             }),
             Arc::new(std::sync::OnceLock::new()),
-            SipFlowUploadConfig::Http {
-                url: "http://localhost:9999/upload".to_string(),
-                headers: None,
-                signaling: Some(false),
-                media: Some(false),
-                force_pcm: None,
-                pcm_sample_rate: None,
-            },
+            http_upload_config("http://localhost:9999/upload", Some(false), Some(false)),
             None,
         )
         .unwrap();
@@ -770,15 +738,8 @@ mod tests {
             queried_call_ids: queried_call_ids.clone(),
             queried_ranges: queried_ranges.clone(),
         };
-        let upload_config = SipFlowUploadConfig::Http {
-            url: "http://localhost:9999/upload".to_string(),
-            headers: None,
-            signaling: Some(true),
-            media: Some(false),
-            force_pcm: None,
-            pcm_sample_rate: None,
-        };
-        let client = crate::http_util::build_keepalive_client(None, None).unwrap();
+        let upload_config =
+            http_upload_config("http://localhost:9999/upload", Some(true), Some(false));
         let now = Local::now();
         let start = now - chrono::Duration::seconds(1);
         let end = now + chrono::Duration::seconds(1);
@@ -792,7 +753,6 @@ mod tests {
             end,
             "flow.jsonl",
             "flow.jsonl",
-            &client,
             None,
         )
         .await;
@@ -822,7 +782,6 @@ mod tests {
             now + chrono::Duration::seconds(1),
             "flow.jsonl",
             "flow.jsonl",
-            &client,
             None,
         )
         .await;
@@ -889,6 +848,39 @@ url = "https://example.com/recordings"
             }
             _ => panic!("expected Local sipflow config"),
         }
+    }
+
+    #[test]
+    fn http_upload_config_builds_generic_scheme() {
+        let toml_str = r#"
+type = "local"
+root = "/var/sipflow"
+
+[upload]
+type = "http"
+url = "https://example.com/recordings/{key}"
+file_field = "filecontent"
+response_url_path = "data.url"
+response_success = { path = "code", equals = 0 }
+connect_timeout_ms = 1500
+request_timeout_ms = 7000
+"#;
+        let cfg: crate::config::SipFlowConfig =
+            toml::from_str(toml_str).expect("should parse http upload config");
+        let upload = match cfg {
+            crate::config::SipFlowConfig::Local { upload, .. } => {
+                upload.expect("upload should be set")
+            }
+            _ => panic!("expected Local sipflow config"),
+        };
+        let http = upload.http_upload_config().expect("http config");
+        assert_eq!(http.url, "https://example.com/recordings/{key}");
+        assert_eq!(http.file_field.as_deref(), Some("filecontent"));
+        assert_eq!(http.response_url_path.as_deref(), Some("data.url"));
+        assert_eq!(http.connect_timeout_ms, Some(1500));
+        assert_eq!(http.request_timeout_ms, Some(7000));
+        // The generic config builds a valid upload-only storage backend.
+        assert!(crate::storage::Storage::from_http(http).is_ok());
     }
 
     #[test]

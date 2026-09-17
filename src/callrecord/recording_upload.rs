@@ -7,14 +7,12 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use bytes::Bytes;
 use object_store::{Attribute, Attributes, PutOptions};
-use reqwest::multipart::{Form, Part};
 use serde_json::json;
 use tracing::{info, warn};
 
 use crate::{
     callrecord::{
-        CALL_RECORD_HTTP_CONNECT_TIMEOUT, CALL_RECORD_HTTP_TIMEOUT, CallRecord, CallRecordHook,
-        CallRecordMedia, UploadFailedMarker, is_direct_child_of_root,
+        CallRecord, CallRecordHook, CallRecordMedia, UploadFailedMarker, is_direct_child_of_root,
     },
     config::{RecordingPolicy, RecordingType},
     models::call_record::extract_sip_username,
@@ -25,7 +23,8 @@ use crate::{
 pub struct RecordingUploadHook {
     policy: RecordingPolicy,
     rwi_gateway: Option<RwiGatewayRef>,
-    client: reqwest::Client,
+    /// Upload-only HTTP backend for `type = "http"`.
+    http_storage: Option<Storage>,
     s3_upload_sender: Option<tokio::sync::mpsc::Sender<PathBuf>>,
 }
 
@@ -45,7 +44,7 @@ impl RecordingUploadHook {
         policy: RecordingPolicy,
     ) -> Result<(Self, Option<RecordingUploadManager>, Option<Storage>)> {
         let recording_type = policy.effective_recording_type();
-        let (s3_upload_sender, upload_manager, s3_storage) = if recording_type == RecordingType::S3
+        let (s3_upload_sender, upload_manager, upload_storage) = if recording_type == RecordingType::S3
         {
             let endpoint = policy
                 .endpoint
@@ -77,6 +76,12 @@ impl RecordingUploadHook {
                 }),
                 Some(storage),
             )
+        } else if recording_type == RecordingType::Http {
+            let storage = policy
+                .http_upload_config()
+                .map(Storage::from_http)
+                .transpose()?;
+            (None, None, storage)
         } else {
             (None, None, None)
         };
@@ -85,14 +90,11 @@ impl RecordingUploadHook {
             Self {
                 policy,
                 rwi_gateway: None,
-                client: crate::http_util::build_keepalive_client(
-                    Some(CALL_RECORD_HTTP_TIMEOUT),
-                    Some(CALL_RECORD_HTTP_CONNECT_TIMEOUT),
-                )?,
+                http_storage: upload_storage.clone(),
                 s3_upload_sender,
             },
             upload_manager,
-            s3_storage,
+            upload_storage,
         ))
     }
 
@@ -348,20 +350,21 @@ impl RecordingUploadManager {
 /// the configured SLA window (default 10 minutes).
 pub struct RecordingRetryWorker {
     policy: RecordingPolicy,
-    client: reqwest::Client,
     storage: Option<Storage>,
 }
 
 impl RecordingRetryWorker {
     pub fn new(policy: RecordingPolicy, storage: Option<Storage>) -> Result<Self> {
-        Ok(Self {
-            policy,
-            client: crate::http_util::build_keepalive_client(
-                Some(CALL_RECORD_HTTP_CONNECT_TIMEOUT),
-                Some(CALL_RECORD_HTTP_TIMEOUT),
-            )?,
-            storage,
-        })
+        // Build the HTTP backend from the policy when the caller did not
+        // provide one (e.g. direct construction in tests / embedded usage).
+        let storage = match storage {
+            Some(storage) => Some(storage),
+            None if policy.effective_recording_type() == RecordingType::Http => {
+                policy.http_upload_config().map(Storage::from_http).transpose()?
+            }
+            None => None,
+        };
+        Ok(Self { policy, storage })
     }
 
     pub async fn serve(self) {
@@ -482,29 +485,29 @@ impl RecordingRetryWorker {
         let data = tokio::fs::read(source).await?;
         match self.policy.effective_recording_type() {
             RecordingType::Http => {
-                let url = RecordingUploadHook::required(&self.policy.url, "url")?;
+                let storage = self
+                    .storage
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("HTTP storage unavailable for retry"))?;
                 let file_name = source
                     .file_name()
                     .unwrap_or_else(|| std::ffi::OsStr::new("recording.wav"))
                     .to_string_lossy()
                     .to_string();
-                let part = Part::bytes(data)
-                    .file_name(file_name)
-                    .mime_str("audio/wav")?;
-                let form = Form::new()
-                    .text("call_id", call_id.unwrap_or("retry").to_string())
-                    .text("track_id", "retry".to_string())
-                    .part("recording", part);
-                let mut request = self.client.post(&url).multipart(form);
-                if let Some(headers) = self.policy.headers.as_ref() {
-                    for (key, value) in headers {
-                        request = request.header(key, value);
-                    }
-                }
-                let resp = request.send().await?;
-                if !resp.status().is_success() {
-                    return Err(anyhow!("HTTP upload retry status {}", resp.status()));
-                }
+                let request = crate::storage::UploadRequest {
+                    key: file_name.clone(),
+                    file_name: Some(file_name.clone()),
+                    content_type: None,
+                    file_field: None,
+                    body_field: None,
+                    vars: HashMap::from([
+                        ("call_id".to_string(), call_id.unwrap_or("retry").to_string()),
+                        ("track_id".to_string(), "retry".to_string()),
+                        ("filename".to_string(), file_name),
+                    ]),
+                    bytes: Bytes::from(data),
+                };
+                storage.upload(request).await?;
                 Ok(())
             }
             RecordingType::S3 => {
@@ -603,41 +606,31 @@ impl RecordingUploadHook {
         media_path: &str,
         data: Vec<u8>,
     ) -> Result<String> {
+        let storage = self
+            .http_storage
+            .as_ref()
+            .ok_or_else(|| anyhow!("recording http upload is not configured (missing url?)"))?;
         let url = Self::required(&self.policy.url, "url")?;
         let file_name = Path::new(media_path)
             .file_name()
             .unwrap_or_else(|| std::ffi::OsStr::new("recording.wav"))
             .to_string_lossy()
             .to_string();
-        let part = Part::bytes(data)
-            .file_name(file_name)
-            .mime_str("audio/wav")?;
-        let form = Form::new()
-            .text("call_id", record.call_id.clone())
-            .text("track_id", track_id.to_string())
-            .part("recording", part);
-        let mut request = self.client.post(&url).multipart(form);
-        if let Some(headers) = self.policy.headers.as_ref() {
-            for (key, value) in headers {
-                request = request.header(key.as_str(), value.as_str());
-            }
-        }
-        let response = request.send().await?;
-        if response.status().is_success() {
-            let body = response.text().await.unwrap_or_default();
-            let trimmed = body.trim();
-            if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-                Ok(trimmed.to_string())
-            } else {
-                Ok(url)
-            }
-        } else {
-            Err(anyhow!(
-                "HTTP upload failed: {} - {}",
-                response.status(),
-                response.text().await.unwrap_or_default()
-            ))
-        }
+        let request = crate::storage::UploadRequest {
+            key: file_name.clone(),
+            file_name: Some(file_name.clone()),
+            content_type: None,
+            file_field: None,
+            body_field: None,
+            vars: HashMap::from([
+                ("call_id".to_string(), record.call_id.clone()),
+                ("track_id".to_string(), track_id.to_string()),
+                ("filename".to_string(), file_name),
+            ]),
+            bytes: Bytes::from(data),
+        };
+        let uploaded = storage.upload(request).await?;
+        Ok(uploaded.url.unwrap_or(url))
     }
 
     /// Emit one `recording_metadata_available` per recording segment. The
@@ -1600,6 +1593,93 @@ mod tests {
             !Path::new(&path).exists(),
             "local wav should be deleted after successful HTTP upload"
         );
+    }
+
+    #[tokio::test]
+    async fn http_upload_uses_configurable_scheme() {
+        use axum::body::Bytes as AxumBytes;
+
+        let captured = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let captured_request = captured.clone();
+        let app = axum::Router::new().route(
+            "/upload/{key}",
+            axum::routing::post(
+                move |path: axum::extract::Path<String>, body: AxumBytes| {
+                    let captured = captured_request.clone();
+                    async move {
+                        captured.lock().unwrap().extend_from_slice(&body);
+                        axum::Json(serde_json::json!({
+                            "code": 0,
+                            "data": { "url": format!("https://cdn.example/{}", path.0) }
+                        }))
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upload server");
+        let address = listener.local_addr().expect("upload server address");
+        crate::utils::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scheme.wav");
+        tokio::fs::write(&path, b"scheme-bytes")
+            .await
+            .expect("write recording");
+        let path = path.to_string_lossy().into_owned();
+
+        let policy = RecordingPolicy {
+            enabled: Some(true),
+            recording_type: Some(RecordingType::Http),
+            url: Some(format!("http://{address}/upload/{{key}}")),
+            file_field: Some("filecontent".to_string()),
+            content_type: Some("application/octet-stream".to_string()),
+            fields: Some(HashMap::from([(
+                "call_id".to_string(),
+                "{call_id}".to_string(),
+            )])),
+            response_url_path: Some("data.url".to_string()),
+            response_success: Some(crate::storage::SuccessRule {
+                path: "code".to_string(),
+                equals: serde_json::json!(0),
+            }),
+            ..Default::default()
+        };
+        let (hook, _upload_manager, _) = RecordingUploadHook::new(policy).expect("recording hook");
+        let now = chrono::Utc::now();
+        let mut record = CallRecord {
+            call_id: "scheme-call".to_string(),
+            start_time: now - chrono::Duration::seconds(3),
+            answer_time: Some(now - chrono::Duration::seconds(2)),
+            end_time: now,
+            recorder: vec![CallRecordMedia {
+                unique_id: None,
+                track_id: "mixed".to_string(),
+                path: path.clone(),
+                size: 12,
+                extra: None,
+            }],
+            details: CallDetails::default(),
+            ..Default::default()
+        };
+        hook.on_record_completed(std::slice::from_mut(&mut record))
+            .await
+            .expect("upload via configurable scheme");
+
+        assert_eq!(
+            record.details.recording_url.as_deref(),
+            Some("https://cdn.example/scheme.wav")
+        );
+
+        let body = String::from_utf8_lossy(&captured.lock().unwrap()).to_string();
+        assert!(body.contains("name=\"filecontent\""), "custom file field: {body}");
+        assert!(body.contains("filename=\"scheme.wav\""), "file name: {body}");
+        assert!(body.contains("name=\"call_id\""), "extra field: {body}");
+        assert!(body.contains("scheme-call"), "extra field value: {body}");
+        assert!(!Path::new(&path).exists(), "local file removed after upload");
     }
 
     #[tokio::test]

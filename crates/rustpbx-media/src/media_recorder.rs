@@ -21,7 +21,7 @@ use tracing::{trace, warn};
 
 use crate::ingress_tap::PacketDirection;
 use crate::negotiate::NegotiatedLegProfile;
-use crate::recorder::{Leg, Recorder};
+use crate::recorder::{Leg, Recorder, RecorderOption};
 
 // 256 slots ≈ 2.5 s of audio at 100 pkt/s per call. Large pre-allocated
 // queues (2048) cost ~150 KB per recording call and add malloc churn at
@@ -92,10 +92,11 @@ pub trait MediaRecorder: Send {
     async fn finalize(self: Box<Self>) -> Result<Option<RecordingResult>>;
 }
 
+
 /// Synchronous file-recorder configuration. File creation and WAV header
 /// initialization happen later in [`MediaRecorder::initialize`] on the task.
 pub struct FileRecorder {
-    path: String,
+    option: RecorderOption,
     caller_profile: NegotiatedLegProfile,
     channels: u16,
     mono_caller_only: bool,
@@ -104,13 +105,13 @@ pub struct FileRecorder {
 
 impl FileRecorder {
     pub fn new(
-        path: impl Into<String>,
+        option: RecorderOption,
         caller_profile: NegotiatedLegProfile,
         channels: u16,
         mono_caller_only: bool,
     ) -> Self {
         Self {
-            path: path.into(),
+            option,
             caller_profile,
             channels,
             mono_caller_only,
@@ -122,7 +123,7 @@ impl FileRecorder {
 #[async_trait]
 impl MediaRecorder for FileRecorder {
     fn file_path(&self) -> Option<&str> {
-        Some(&self.path)
+        Some(&self.option.recorder_file)
     }
 
     async fn initialize(&mut self) -> Result<()> {
@@ -133,7 +134,7 @@ impl MediaRecorder for FileRecorder {
             .map(|codec| codec.codec)
             .unwrap_or(audio_codec::CodecType::PCMU);
         let mut recorder = Recorder::new_with_channels(
-            &self.path,
+            &self.option,
             output_codec,
             self.channels,
             self.mono_caller_only,
@@ -642,6 +643,144 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_output_sample_rate_resamples_audio_and_preserves_duration() {
+        use audio_codec::{CodecType, create_encoder};
+        let dir = tempfile::tempdir().unwrap();
+        for source_codec in [CodecType::PCMU, CodecType::G722] {
+            for rate in [8000, 16000, 48000] {
+                for channels in [1, 2] {
+                    let path = dir.path().join(format!("{rate}-{channels}.wav"));
+                    let mut source_profile = profile();
+                    source_profile.audio.as_mut().unwrap().codec = source_codec;
+                    source_profile.audio.as_mut().unwrap().payload_type = source_codec.payload_type();
+                    let mut recorder = FileRecorder::new(
+                        RecorderOption {
+                            recorder_file: path.to_string_lossy().into_owned(),
+                            samplerate: Some(rate),
+                            ..Default::default()
+                        },
+                        source_profile, channels, false,
+                    );
+                    recorder.initialize().await.unwrap();
+                    let mut encoder = create_encoder(source_codec);
+                    let source_rate = encoder.sample_rate() as usize;
+                    let frame_samples = source_rate / 50;
+                    for seq in 0..50u16 {
+                        let pcm: Vec<i16> = (0..frame_samples).map(|i| {
+                            let t = (seq as usize * frame_samples + i) as f64 / source_rate as f64;
+                            (8000.0 * (t * 440.0 * std::f64::consts::TAU).sin()) as i16
+                        }).collect();
+                        let packet = RtpPacket::new(
+                            RtpHeader::new(source_codec.payload_type(), seq, seq as u32 * 160, 1234),
+                            encoder.encode(&pcm).to_vec(),
+                        );
+                        recorder.write_rtp(PacketDirection::Ingress, &packet, 0).await.unwrap();
+                        recorder.write_rtp(PacketDirection::Egress, &packet, 0).await.unwrap();
+                    }
+                    let result = Box::new(recorder).finalize().await.unwrap().unwrap();
+                    let wav = std::fs::read(path).unwrap();
+                    assert_eq!(u16::from_le_bytes(wav[20..22].try_into().unwrap()), 1);
+                    assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), rate);
+                    assert_eq!(u16::from_le_bytes(wav[34..36].try_into().unwrap()), 16);
+                    let samples: Vec<i16> = wav[44..].chunks_exact(2)
+                        .map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+                    let duration = samples.len() as f64 / (rate as f64 * channels as f64);
+                    assert!((duration - 1.0).abs() < 0.03, "duration: {duration}, rate: {rate}");
+                    assert!((result.duration_secs - 1.0).abs() < 0.03);
+                    let mono: Vec<i16> = samples.iter().step_by(channels as usize).copied().collect();
+                    // Hysteresis avoids counting resampler ringing around zero twice.
+                    let mut below = false;
+                    let mut crossings = 0;
+                    for sample in &mono {
+                        if *sample < -1000 {
+                            below = true;
+                        } else if *sample > 1000 && below {
+                            crossings += 1;
+                            below = false;
+                        }
+                    }
+                    assert!((crossings as f64 / duration - 440.0).abs() < 5.0, "rate={rate} channels={channels} crossings={crossings} duration={duration}");
+                    assert!(mono.iter().any(|s| *s > 6000));
+                    assert!(mono.iter().any(|s| *s < -6000));
+                    if channels == 2 {
+                        assert!(samples.chunks_exact(2).all(|s| s[0] == s[1]));
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn file_output_stereo_swap_preserves_mono_and_legacy_format() {
+        use audio_codec::{CodecType, create_encoder, create_decoder};
+        let dir = tempfile::tempdir().unwrap();
+        for rate in [None, Some(16000)] {
+            for channels in [1, 2] {
+                for swap in [false, true] {
+                    let path = dir.path().join(format!("{rate:?}-{channels}-{swap}.wav"));
+                    let mut recorder = FileRecorder::new(
+                        RecorderOption {
+                            recorder_file: path.to_string_lossy().into_owned(),
+                            samplerate: rate,
+                            stereo_swap: Some(swap),
+                            ..Default::default()
+                        },
+                        profile(), channels, true,
+                    );
+                    recorder.initialize().await.unwrap();
+                    let mut encoder = create_encoder(CodecType::PCMU);
+                    for seq in 0..10u16 {
+                        for (direction, level) in [
+                            (PacketDirection::Ingress, 8000i16),
+                            (PacketDirection::Egress, -8000i16),
+                        ] {
+                            let packet = RtpPacket::new(
+                                RtpHeader::new(0, seq, seq as u32 * 160, 1234),
+                                encoder.encode(&vec![level; 160]).to_vec(),
+                            );
+                            recorder.write_rtp(direction, &packet, 0).await.unwrap();
+                        }
+                    }
+                    Box::new(recorder).finalize().await.unwrap();
+                    let wav = std::fs::read(path).unwrap();
+                    let samples = if rate.is_some() {
+                        wav[44..].chunks_exact(2)
+                            .map(|b| i16::from_le_bytes([b[0], b[1]])).collect::<Vec<_>>()
+                    } else {
+                        assert_eq!(u16::from_le_bytes(wav[20..22].try_into().unwrap()), 7);
+                        assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 8000);
+                        create_decoder(CodecType::PCMU).decode(&wav[44..])
+                    };
+                    let middle = samples.len() / channels as usize / 2 * channels as usize;
+                    if channels == 1 {
+                        assert!(samples[middle] > 6000, "caller-only mono must not swap");
+                    } else if swap {
+                        assert!(samples[middle] < -6000 && samples[middle + 1] > 6000);
+                    } else {
+                        assert!(samples[middle] > 6000 && samples[middle + 1] < -6000);
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn file_output_rejects_invalid_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        for mut option in [
+            RecorderOption { samplerate: Some(0), ..Default::default() },
+            RecorderOption { samplerate: Some(192001), ..Default::default() },
+            RecorderOption { ptime: Some(0), ..Default::default() },
+        ] {
+            let path = dir.path().join("invalid.wav");
+            option.recorder_file = path.to_string_lossy().into_owned();
+            let mut recorder = FileRecorder::new(option, profile(), 2, false);
+            assert!(recorder.initialize().await.is_err());
+            assert!(!path.exists());
+        }
+    }
+
+    #[tokio::test]
     async fn file_stop_returns_recorder_result() {
         let (handle, sender, mut recorder_finished_rx) = RecorderHandle::new();
         assert!(!handle.status().await.unwrap().active);
@@ -651,7 +790,7 @@ mod tests {
 
         handle
             .set_recorder(
-                Box::new(FileRecorder::new(path.clone(), profile(), 2, false)),
+                Box::new(FileRecorder::new(RecorderOption::new(path.clone()), profile(), 2, false)),
                 None,
             )
             .await
@@ -695,7 +834,7 @@ mod tests {
 
         handle
             .set_recorder(
-                Box::new(FileRecorder::new(path.clone(), profile(), 2, false)),
+                Box::new(FileRecorder::new(RecorderOption::new(path.clone()), profile(), 2, false)),
                 Some(Duration::from_millis(20)),
             )
             .await
@@ -731,7 +870,7 @@ mod tests {
         drop(temp);
         handle
             .set_recorder(
-                Box::new(FileRecorder::new(path.clone(), profile(), 2, false)),
+                Box::new(FileRecorder::new(RecorderOption::new(path.clone()), profile(), 2, false)),
                 None,
             )
             .await
@@ -755,7 +894,7 @@ mod tests {
         drop(temp);
         handle
             .set_recorder(
-                Box::new(FileRecorder::new(path.clone(), profile(), 2, false)),
+                Box::new(FileRecorder::new(RecorderOption::new(path.clone()), profile(), 2, false)),
                 None,
             )
             .await
@@ -836,7 +975,7 @@ mod tests {
 
         let error = handle
             .set_recorder(
-                Box::new(FileRecorder::new(path.clone(), profile(), 2, false)),
+                Box::new(FileRecorder::new(RecorderOption::new(path.clone()), profile(), 2, false)),
                 None,
             )
             .await
@@ -846,7 +985,7 @@ mod tests {
 
         handle
             .set_recorder(
-                Box::new(FileRecorder::new(path.clone(), profile(), 2, false)),
+                Box::new(FileRecorder::new(RecorderOption::new(path.clone()), profile(), 2, false)),
                 None,
             )
             .await
@@ -897,12 +1036,12 @@ impl RecordingSession {
     pub async fn start_recording(
         &mut self,
         caller_profile: NegotiatedLegProfile,
-        path: String,
+        option: RecorderOption,
         channels: u16,
         mono_caller_only: bool,
         max_duration: Option<Duration>,
     ) -> Result<()> {
-        let recorder = FileRecorder::new(path, caller_profile, channels, mono_caller_only);
+        let recorder = FileRecorder::new(option, caller_profile, channels, mono_caller_only);
         self.set_recorder(Box::new(recorder), max_duration).await
     }
 

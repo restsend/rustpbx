@@ -393,7 +393,7 @@ impl AppStateBuilder {
             // the handle is filled in as soon as it exists.
             if let Some(upload_cfg) = sipflow_upload_config.as_ref() {
                 sipflow_upload_storage =
-                    crate::callrecord::sipflow_upload::build_s3_storage(upload_cfg)
+                    crate::callrecord::sipflow_upload::build_storage(upload_cfg)
                         .ok()
                         .flatten();
                 match config.sipflow.as_ref() {

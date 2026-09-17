@@ -3031,7 +3031,13 @@ async fn finalize_recording_for_app_shutdown_finalizes_active_recording() {
     session
         .media
         .recording
-        .start_recording(profile, path, 1, true, None)
+        .start_recording(
+            profile,
+            crate::media::recorder::RecorderOption::new(path),
+            1,
+            true,
+            None,
+        )
         .await
         .unwrap();
     assert!(session.media.bridge.is_none());
@@ -3081,7 +3087,13 @@ async fn record_stopped_event_carries_recording_unique_id() {
     session
         .media
         .recording
-        .start_recording(profile, path, 1, true, None)
+        .start_recording(
+            profile,
+            crate::media::recorder::RecorderOption::new(path),
+            1,
+            true,
+            None,
+        )
         .await
         .unwrap();
     assert!(session.media.bridge.is_none());
@@ -4155,4 +4167,103 @@ async fn toivr_transfer_injects_origin_into_route_variables() {
         vars[0].get("source_node").map(String::as_str),
         Some("menu-1")
     );
+}
+
+#[tokio::test]
+async fn file_output_policy_applies_to_automatic_and_on_demand_recording() {
+    use crate::config::RecordingPolicy;
+    use crate::call::domain::RecordConfig;
+    use crate::media::recorder::RecorderOption;
+    use rustrtc::rtp::{RtpHeader, RtpPacket};
+    use rustrtc::peer_connection::RtpObserver;
+    for automatic in [false, true] {
+        for override_mode in 0..3 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("output.wav");
+            let (server, _) = create_test_server().await;
+            let policy: RecordingPolicy = toml::from_str(
+                "samplerate = 16000\nptime = 20\nstereo_swap = true",
+            ).unwrap();
+            server.recording_policy.store(Arc::new(Some(policy)));
+            let mut dialplan = build_dialplan_with_mode(MediaProxyMode::All);
+            if override_mode > 0 {
+                dialplan.recording_policy = Some(RecordingPolicy {
+                    samplerate: Some(48000),
+                    stereo_swap: Some(override_mode == 2),
+                    // Partial overrides must inherit global ptime.
+                    ..Default::default()
+                });
+            }
+            if automatic || override_mode == 2 {
+                let mut option = RecorderOption::new(path.to_string_lossy().into_owned());
+                if override_mode == 2 {
+                    option.samplerate = Some(8000);
+                    option.ptime = Some(30);
+                    option.stereo_swap = Some(false);
+                }
+                dialplan.recording.option = Some(option);
+            }
+            let mut session = build_session_on_server(server, dialplan).await;
+            session.media_profile.path = MediaPathMode::Anchored;
+            setup_recording_test_media(&mut session).await;
+            if automatic {
+                session.set_auto_recorder().await.unwrap();
+            } else {
+                let result = session.execute_command(CallCommand::StartRecording {
+                    config: RecordConfig {
+                        path: path.to_string_lossy().into_owned(),
+                        ..Default::default()
+                    },
+                }, None).await;
+                assert!(result.success, "{result:?}");
+            }
+            let peer = session.legs.media_leg(&LegId::from("caller")).unwrap();
+            let tap = peer.ingress_tap();
+            let mut encoder = audio_codec::create_encoder(audio_codec::CodecType::PCMU);
+            let addr = "127.0.0.1:12345".parse().unwrap();
+            for seq in 0..10u16 {
+                let ingress = RtpPacket::new(RtpHeader::new(0, seq, seq as u32 * 160, 1234),
+                    encoder.encode(&vec![8000; 160]).to_vec());
+                let egress = RtpPacket::new(RtpHeader::new(0, seq, seq as u32 * 160, 5678),
+                    encoder.encode(&vec![-8000; 160]).to_vec());
+                tap.on_ingress(&ingress, addr);
+                tap.on_egress(&egress, addr);
+            }
+            session.finalize_recording_for_app_shutdown().await;
+            let wav = std::fs::read(path).unwrap();
+            assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()),
+                [16000, 48000, 8000][override_mode]);
+            assert_eq!(u16::from_le_bytes(wav[20..22].try_into().unwrap()), 1);
+            let samples: Vec<i16> = wav[44..].chunks_exact(2)
+                .map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+            assert!(!samples.is_empty());
+            let middle = samples.len() / 4 * 2;
+            if override_mode > 0 {
+                assert!(samples[middle] > 6000 && samples[middle + 1] < -6000);
+            } else {
+                assert!(samples[middle] < -6000 && samples[middle + 1] > 6000);
+            }
+        }
+    }
+}
+
+#[test]
+fn recording_option_preserves_legacy_json_and_output_settings() {
+    use crate::media::recorder::RecorderOption;
+    let old = serde_json::json!({"recorderFile": "call.wav"});
+    let option: RecorderOption = serde_json::from_value(old.clone()).unwrap();
+    assert!(option.samplerate.is_none());
+    assert!(option.ptime.is_none());
+    assert!(option.stereo_swap.is_none());
+    assert_eq!(serde_json::to_value(&option).unwrap(), old);
+    let option: RecorderOption = serde_json::from_value(serde_json::json!({
+        "recorderFile": "call.wav", "samplerate": 16000, "ptime": 20,
+        "stereo_swap": false,
+    })).unwrap();
+    let roundtrip: RecorderOption = serde_json::from_value(
+        serde_json::to_value(option).unwrap(),
+    ).unwrap();
+    assert_eq!(roundtrip.samplerate, Some(16000));
+    assert_eq!(roundtrip.ptime, Some(20));
+    assert_eq!(roundtrip.stereo_swap, Some(false));
 }

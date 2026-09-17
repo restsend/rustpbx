@@ -8,7 +8,6 @@ use crate::{
 use anyhow::Result;
 use chrono::Utc;
 use futures::future::try_join_all;
-use reqwest;
 use rustpbx_models::DatabasePoolConfig;
 use sea_orm::{
     ConnectionTrait, DatabaseConnection,
@@ -49,9 +48,6 @@ pub use recording_artifacts::{
     segmented_wav_path, upload_failed_marker_path, write_upload_failed_marker,
     write_upload_failed_marker_ex,
 };
-
-const CALL_RECORD_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
-const CALL_RECORD_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -785,14 +781,12 @@ impl CallRecordManagerBuilder {
                     storage,
                 })
             }
-            Some(CallRecordStorageConfig::Http { url, headers, .. }) => {
+            Some(config @ CallRecordStorageConfig::Http { .. }) => {
+                let http_config = config.http_upload_config().ok_or_else(|| {
+                    anyhow::anyhow!("callrecord http storage requires a non-empty url")
+                })?;
                 Box::new(HttpCallRecordSaver {
-                    url,
-                    headers,
-                    client: crate::http_util::build_keepalive_client(
-                        Some(CALL_RECORD_HTTP_TIMEOUT),
-                        Some(CALL_RECORD_HTTP_CONNECT_TIMEOUT),
-                    )?,
+                    storage: crate::storage::Storage::from_http(http_config)?,
                 })
             }
         };
@@ -852,9 +846,7 @@ impl CallRecordSaver for LocalCallRecordSaver {
 }
 
 struct HttpCallRecordSaver {
-    url: String,
-    headers: Option<HashMap<String, String>>,
-    client: reqwest::Client,
+    storage: crate::storage::Storage,
 }
 
 #[async_trait::async_trait]
@@ -862,25 +854,19 @@ impl CallRecordSaver for HttpCallRecordSaver {
     async fn save(&self, records: &[CallRecord]) -> Result<Vec<String>> {
         try_join_all(records.iter().map(|record| async move {
             let call_log_json = format_call_record(record)?;
-            let form = reqwest::multipart::Form::new().text("calllog.json", call_log_json);
-
-            let mut request = self.client.post(&self.url).multipart(form);
-            if let Some(headers_map) = &self.headers {
-                for (key, value) in headers_map {
-                    request = request.header(key, value);
-                }
-            }
-            let response = request.send().await?;
-            if response.status().is_success() {
-                let response_text = response.text().await.unwrap_or_default();
-                Ok(format!("HTTP upload successful: {}", response_text))
-            } else {
-                Err(anyhow::anyhow!(
-                    "HTTP upload failed with status: {} - {}",
-                    response.status(),
-                    response.text().await.unwrap_or_default()
-                ))
-            }
+            let key = format!("{}.json", record.call_id);
+            // The payload is sent as the configured text form field (default
+            // `calllog.json`) to preserve the historical wire format.
+            let request = crate::storage::UploadRequest {
+                key: key.clone(),
+                bytes: bytes::Bytes::from(call_log_json.clone().into_bytes()),
+                ..Default::default()
+            };
+            let uploaded = self.storage.upload(request).await?;
+            Ok(format!(
+                "HTTP upload successful: {}",
+                uploaded.url.unwrap_or(key)
+            ))
         }))
         .await
     }

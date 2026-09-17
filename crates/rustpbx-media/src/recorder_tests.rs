@@ -1562,7 +1562,7 @@ mod recorder_advanced_tests {
         let temp_path = std::env::temp_dir().join("test_mono_caller_only.wav");
         let path_str = temp_path.to_str().unwrap();
 
-        let mut recorder = Recorder::new_with_channels(path_str, CodecType::PCMU, 1, true)
+        let mut recorder = Recorder::new_with_channels(&crate::recorder::RecorderOption::new(path_str.to_string()), CodecType::PCMU, 1, true)
             .await
             .unwrap();
         let profile = NegotiatedLegProfile {

@@ -386,6 +386,23 @@ auto_start_at = "media" # default; use "answer" to wait for 200
 # buckets). signed_url_expiry_secs controls how long each presigned URL stays
 # valid; default 86400 (24h), capped at 7 days (604800) by the S3 SigV4 spec.
 # # signed_url_expiry_secs = 86400
+#
+# HTTP mode: a generic, configurable multipart uploader. Defaults preserve the
+# historical wire format (POST, multipart field "recording", file name = local
+# file name, audio/wav, plus call_id/track_id form fields). Any upload API can
+# be described declaratively:
+# # url = "https://archive.example.com/recording"   # may contain {key}
+# # headers = { Authorization = "Bearer token" }
+# # method = "POST"
+# # file_field = "filecontent"      # binary part name (default "recording")
+# # body_field = "..."             # or send payload as a text part
+# # file_name = "{key}"            # multipart file name template
+# # content_type = "application/octet-stream"
+# # fields = { call_id = "{call_id}", track_id = "{track_id}" }
+# # response_url_path = "data.url" # JSON dot-path for the stored URL
+# # response_success = { path = "code", equals = 0 }
+# # connect_timeout_ms = 3000
+# # request_timeout_ms = 10000
 
 # ── Live transcription (streaming ASR) ───────────────────────────────────────
 # Real-time call transcription over a streaming ASR WebSocket. When configured,

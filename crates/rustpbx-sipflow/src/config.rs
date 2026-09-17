@@ -100,6 +100,38 @@ pub enum SipFlowUploadConfig {
     Http {
         url: String,
         headers: Option<std::collections::HashMap<String, String>>,
+        /// HTTP method (default `POST`).
+        #[serde(default)]
+        method: Option<String>,
+        /// Default multipart field for the binary payload (per-upload
+        /// overrides are used for media vs signaling).
+        #[serde(default)]
+        file_field: Option<String>,
+        /// Multipart field carrying the payload as text (mutually exclusive
+        /// with `file_field`).
+        #[serde(default)]
+        body_field: Option<String>,
+        /// File name template sent in the multipart part.
+        #[serde(default)]
+        file_name: Option<String>,
+        /// MIME type of the binary payload.
+        #[serde(default)]
+        content_type: Option<String>,
+        /// Extra text form fields; values support placeholders.
+        #[serde(default)]
+        fields: Option<std::collections::HashMap<String, String>>,
+        /// Dot-path into a JSON response holding the uploaded object URL.
+        #[serde(default)]
+        response_url_path: Option<String>,
+        /// Business-level success rule evaluated against the JSON response.
+        #[serde(default)]
+        response_success: Option<rustpbx_http_util::SuccessRule>,
+        /// TCP connect timeout in milliseconds.
+        #[serde(default)]
+        connect_timeout_ms: Option<u64>,
+        /// Total request timeout in milliseconds.
+        #[serde(default)]
+        request_timeout_ms: Option<u64>,
         #[serde(default)]
         signaling: Option<bool>,
         #[serde(default = "default_true")]
@@ -129,6 +161,50 @@ impl SipFlowUploadConfig {
             ),
             SipFlowUploadConfig::Http { .. } => None,
         }
+    }
+
+    /// Build the generic HTTP upload config for `type = "http"`. Returns
+    /// `None` for S3 or when no `url` is configured. Per-upload field names
+    /// (`recording` / `signaling`) are supplied by the caller.
+    pub fn http_upload_config(&self) -> Option<rustpbx_http_util::HttpUploadConfig> {
+        let SipFlowUploadConfig::Http {
+            url,
+            headers,
+            method,
+            file_field,
+            body_field,
+            file_name,
+            content_type,
+            fields,
+            response_url_path,
+            response_success,
+            connect_timeout_ms,
+            request_timeout_ms,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let url = url.trim();
+        if url.is_empty() {
+            return None;
+        }
+        Some(rustpbx_http_util::HttpUploadConfig {
+            url: url.to_string(),
+            method: method.clone(),
+            headers: headers.clone(),
+            file_field: file_field
+                .clone()
+                .or_else(|| Some("recording".to_string())),
+            body_field: body_field.clone(),
+            file_name: file_name.clone(),
+            content_type: content_type.clone(),
+            fields: fields.clone(),
+            response_url_path: response_url_path.clone(),
+            response_success: response_success.clone(),
+            connect_timeout_ms: *connect_timeout_ms,
+            request_timeout_ms: *request_timeout_ms,
+        })
     }
 }
 
