@@ -9,6 +9,7 @@ use std::path::Path;
 use tracing::debug;
 
 pub mod cli_driver;
+pub mod error_catalog;
 pub mod http_driver;
 
 use cli_driver::synthesize_cli;

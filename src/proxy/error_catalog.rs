@@ -185,6 +185,18 @@ pub const CREATE_ROUTE_INVITE_FAILED: CallErrInfo = CallErrInfo {
     remediation_key: None,
 };
 
+/// Generic routing failure with no more specific registry code attached.
+pub const ROUTE_FAILED: CallErrInfo = CallErrInfo {
+    app: APP,
+    code: "proxy.route_failed",
+    message: "Call routing failed",
+    sip_status: Some(500),
+    hangup_reason: CallRecordHangupReason::Failed,
+    severity: ErrSeverity::Error,
+    locale_key: "errors.proxy.route_failed",
+    remediation_key: None,
+};
+
 pub const CATALOG: &[CallErrInfo] = &[
     CALLEE_OFFLINE,
     EXTERNAL_REALM_BOTH,
@@ -201,5 +213,6 @@ pub const CATALOG: &[CallErrInfo] = &[
     ALWAYS_FWD_CONFERENCE_EMPTY,
     ROUTE_PREVIEW_ERROR,
     ROUTE_ABORTED,
+    ROUTE_FAILED,
     CREATE_ROUTE_INVITE_FAILED,
 ];

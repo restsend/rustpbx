@@ -44,3 +44,6 @@ mod test_reinvite_e2e;
 
 #[path = "proxy_flow/test_outbound_cancel_e2e.rs"]
 mod test_outbound_cancel_e2e;
+
+#[path = "proxy_flow/test_call_error_e2e.rs"]
+mod test_call_error_e2e;

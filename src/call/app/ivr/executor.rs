@@ -112,6 +112,10 @@ pub struct StepIvrApp {
     /// (`ivr_resumed` / `_ivr_resume` markers): the first node's lifecycle
     /// trace trigger is `resume` (or `dtmf`), never a second `session_start`.
     resumed_flow: bool,
+    /// Session handle captured in `on_enter`, used to route step-level errors
+    /// through the unified `CallCommand::ReportCallError` path (log + RWI +
+    /// CDR trace). `None` in unit tests that drive the app without a session.
+    session_handle: Option<crate::proxy::proxy_call::sip_session::SipSessionHandle>,
 }
 
 #[derive(Clone)]
@@ -167,6 +171,7 @@ impl StepIvrApp {
             ivr_fallback: None,
             pending_audio_delay_ms: 0,
             resumed_flow: false,
+            session_handle: None,
         }
     }
 
@@ -211,6 +216,7 @@ impl StepIvrApp {
             ivr_fallback: None,
             pending_audio_delay_ms: 0,
             resumed_flow: false,
+            session_handle: None,
         }
     }
 
@@ -341,6 +347,37 @@ impl StepIvrApp {
             };
             let guard = gw.read();
             guard.fan_out(&call_id, &ev);
+        }
+    }
+
+    /// Emit the unified `call_error` RWI event for a step-IVR failure, logged
+    /// at the registry severity's level. Used for provider `/step` and `/fail`
+    /// failures; the CDR-side trace entry is the existing `ivr_step_trace`.
+    fn report_step_error(
+        &self,
+        info: &'static crate::call_errors::CallErrInfo,
+        detail: Option<serde_json::Value>,
+    ) {
+        // Preferred: route through the session so the error is logged, emitted
+        // as `call_error`, AND recorded as a `TraceKind::Error` CDR entry.
+        if let Some(ref handle) = self.session_handle {
+            let _ = handle.send_command(crate::call::domain::CallCommand::ReportCallError {
+                stage: "ivr_step".to_string(),
+                app: info.app.to_string(),
+                code: info.code.to_string(),
+                severity: info.severity,
+                message: info.message.to_string(),
+                sip_status: info.sip_status,
+                detail,
+            });
+            return;
+        }
+        // Fallback (no session, e.g. unit tests): log + RWI event only.
+        let call_id = self.provider_session_context().session_id;
+        crate::call_errors::log_call_error(&call_id, "ivr_step", info, detail.clone());
+        if let Some(ref gw) = self.rwi_gateway {
+            let ev = crate::rwi::CallError::from_info(call_id.clone(), "ivr_step", info, detail);
+            gw.read().fan_out(&call_id, &ev);
         }
     }
 
@@ -1119,7 +1156,10 @@ impl StepIvrApp {
         err: anyhow::Error,
     ) -> anyhow::Result<ActionNode> {
         let reason = err.to_string();
-        tracing::warn!(error = %reason, "StepIvrApp: node execute failed, calling /fail");
+        self.report_step_error(
+            &crate::call::app::error_catalog::IVR_STEP_EXECUTE_FAILED,
+            Some(serde_json::json!({ "error": reason })),
+        );
         self.set_runtime_error_shared(&reason);
         self.set_runtime_status_shared("execute_error");
 
@@ -1130,9 +1170,9 @@ impl StepIvrApp {
                 Ok(node)
             }
             Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "StepIvrApp: /fail failed, entering IVR fallback"
+                self.report_step_error(
+                    &crate::call::app::error_catalog::IVR_STEP_FAIL_FAILED,
+                    Some(serde_json::json!({ "error": e.to_string() })),
                 );
                 Ok(self.enter_ivr_fallback_node(&format!("fail:{e}")))
             }
@@ -1359,7 +1399,10 @@ impl StepIvrApp {
         match result {
             Ok(node) => Ok(node),
             Err(e) => {
-                tracing::warn!(error = %e, "StepIvrApp: provider /step failed, using IVR fallback");
+                self.report_step_error(
+                    &crate::call::app::error_catalog::IVR_STEP_NEXT_FAILED,
+                    Some(serde_json::json!({ "error": e.to_string(), "step_index": self.step_index })),
+                );
                 let error_text = e.to_string();
                 if self.step_index <= 1 {
                     self.set_runtime_status_shared("startup_error");
@@ -1590,6 +1633,9 @@ impl CallApp for StepIvrApp {
     ) -> anyhow::Result<AppAction> {
         self.runtime_vars = Some(context.session_vars.clone());
         self.session_extensions = Some(context.session_extensions.clone());
+        // Capture the session handle so step-level failures can be routed
+        // through the unified `ReportCallError` path (log + RWI + CDR trace).
+        self.session_handle = Some(ctrl.session.clone());
         self.set_runtime_status(context, "starting");
         ctrl.answer().await?;
 

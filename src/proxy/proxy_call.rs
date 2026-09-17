@@ -186,6 +186,7 @@ impl CallSessionBuilder {
             None,
         );
 
+        let rwi_gateway = server.rwi_gateway.clone();
         let reporter = crate::proxy::proxy_call::reporter::CallReporter {
             server,
             context,
@@ -198,15 +199,44 @@ impl CallSessionBuilder {
         // a trace entry. Severity is resolved from the standardized error code
         // carried in the routing extensions, defaulting to error.
         let mut metadata = std::collections::HashMap::new();
-        let err_code = dialplan
+        let route_exts = dialplan
             .extensions
-            .get::<std::collections::HashMap<String, String>>()
-            .and_then(|m| m.get("error_code").cloned());
-        let severity = err_code
+            .get::<std::collections::HashMap<String, String>>();
+        let err_code = route_exts.and_then(|m| m.get("error_code").cloned());
+        let err_detail = route_exts.and_then(|m| m.get("error_detail").cloned());
+        let info = err_code
             .as_deref()
             .and_then(|c| crate::call_errors::registry().find(c))
-            .map(|info| info.severity)
-            .unwrap_or(crate::call_errors::ErrSeverity::Error);
+            .unwrap_or(&crate::proxy::error_catalog::ROUTE_FAILED);
+
+        // Unified log + `call_error` RWI event for this early failure. The
+        // raw `error_code` string rides the trace/event even when it is not in
+        // this build's registry (forward-compat records / addon codes).
+        let session_id = dialplan.session_id.clone().unwrap_or_default();
+        let detail = err_detail.clone().map(serde_json::Value::String);
+        crate::call_errors::log_call_error(&session_id, "routing", info, detail.clone());
+        if let Some(gw) = rwi_gateway.as_ref() {
+            let mut ev =
+                crate::rwi::CallError::from_info(&session_id, "routing", info, detail.clone());
+            if let Some(c) = &err_code {
+                ev.code = c.clone();
+            }
+            gw.read().broadcast(&ev);
+        }
+
+        let mut events: Vec<serde_json::Value> = Vec::new();
+        // Unified error entry first (detailed, registry code + severity),
+        // followed by the terminal `end` entry for continuity with existing
+        // consumers/tests.
+        if err_code.is_some() {
+            let mut err_ev = crate::call_errors::call_error_trace(info, detail);
+            if let Some(c) = &err_code {
+                err_ev.code = Some(c.clone());
+            }
+            if let Ok(v) = serde_json::to_value(err_ev) {
+                events.push(v);
+            }
+        }
         let mut end = crate::call_errors::TraceEvent::new(
             crate::call_errors::TraceKind::End,
             format!(
@@ -214,13 +244,14 @@ impl CallSessionBuilder {
                 reason.clone().unwrap_or_else(|| "unknown".to_string())
             ),
         )
-        .severity(severity);
+        .severity(info.severity);
         if let Some(c) = &err_code {
             end = end.code(c);
         }
-        if let Ok(arr) = serde_json::to_value(vec![end]) {
-            metadata.insert("trace".to_string(), arr);
+        if let Ok(v) = serde_json::to_value(end) {
+            events.push(v);
         }
+        metadata.insert("trace".to_string(), serde_json::Value::Array(events));
 
         let snapshot = crate::proxy::proxy_call::state::CallSessionRecordSnapshot {
             ring_time: None,
@@ -309,11 +340,16 @@ mod tests {
             .get("trace")
             .and_then(|v| v.as_array())
             .expect("trace array present");
-        assert_eq!(trace[0]["kind"], "end");
+        // Unified error entry first (registry code + severity), then the
+        // terminal `end` entry carrying the SIP reason.
+        assert_eq!(trace[0]["kind"], "error");
         assert_eq!(trace[0]["severity"], "error");
         assert_eq!(trace[0]["code"], "wholesale.insufficient_funds");
+        assert_eq!(trace[1]["kind"], "end");
+        assert_eq!(trace[1]["severity"], "error");
+        assert_eq!(trace[1]["code"], "wholesale.insufficient_funds");
         assert!(
-            trace[0]["message"]
+            trace[1]["message"]
                 .as_str()
                 .unwrap()
                 .contains("Insufficient funds")

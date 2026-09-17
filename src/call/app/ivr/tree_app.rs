@@ -340,11 +340,19 @@ impl IvrApp {
 
     async fn resolve_audio(
         &self,
+        ctrl: &CallController,
         file: Option<&str>,
         text: Option<&str>,
         voice: Option<&str>,
     ) -> Option<String> {
-        super::common::resolve_audio(file, text, voice, self.tts_service.as_ref()).await
+        super::common::resolve_audio_report(
+            ctrl,
+            file,
+            text,
+            voice,
+            self.tts_service.as_ref(),
+        )
+        .await
     }
 
     /// Start playing the greeting for the specified menu.
@@ -441,7 +449,7 @@ impl IvrApp {
         }
 
         let greeting = self
-            .resolve_audio(
+            .resolve_audio(ctrl, 
                 Some(&menu.greeting),
                 menu.greeting_text.as_deref(),
                 menu.greeting_voice.as_deref(),
@@ -691,7 +699,7 @@ impl IvrApp {
                     return_menu: return_menu.clone(),
                 };
                 if let Some(path) = self
-                    .resolve_audio(
+                    .resolve_audio(ctrl, 
                         Some(prompt),
                         prompt_text.as_deref(),
                         prompt_voice.as_deref(),
@@ -728,7 +736,7 @@ impl IvrApp {
                 ..
             } => {
                 if let Some(path) = self
-                    .resolve_audio(
+                    .resolve_audio(ctrl, 
                         prompt.as_deref(),
                         prompt_text.as_deref(),
                         prompt_voice.as_deref(),
@@ -764,7 +772,7 @@ impl IvrApp {
             } => {
                 self.state = IvrState::PlayingAndHangup { code: *code };
                 if let Some(path) = self
-                    .resolve_audio(
+                    .resolve_audio(ctrl, 
                         prompt.as_deref(),
                         prompt_text.as_deref(),
                         prompt_voice.as_deref(),
@@ -798,7 +806,7 @@ impl IvrApp {
             } => {
                 self.state = IvrState::CollectingExtension;
                 let resolved_prompt = self
-                    .resolve_audio(
+                    .resolve_audio(ctrl, 
                         Some(prompt),
                         prompt_text.as_deref(),
                         prompt_voice.as_deref(),
@@ -878,7 +886,7 @@ impl IvrApp {
                 );
                 let terminator = end_key.as_ref().and_then(|k| k.chars().next());
                 let resolved_prompt = self
-                    .resolve_audio(
+                    .resolve_audio(ctrl, 
                         prompt.as_deref(),
                         prompt_text.as_deref(),
                         prompt_voice.as_deref(),
@@ -977,11 +985,14 @@ impl IvrApp {
                         Box::pin(self.execute_action(&derived_action, ctrl, ctx, None)).await
                     }
                     Err(e) => {
-                        error!(
-                            ivr = %self.definition.name,
-                            url,
-                            error = %e,
-                            "Webhook call failed, continuing IVR"
+                        ctrl.report_call_error(
+                            "rest_api",
+                            &crate::call::app::error_catalog::REST_API_IVR_WEBHOOK_FAILED,
+                            Some(serde_json::json!({
+                                "url": url,
+                                "ivr": self.definition.name,
+                                "error": e.to_string(),
+                            })),
                         );
                         // On error, stay in current menu (re-play greeting)
                         let current = self.current_menu_key().to_string();
@@ -1149,7 +1160,7 @@ impl IvrApp {
                     };
                     self.pending_retry_count = new_retry;
                     if let Some(path) = self
-                        .resolve_audio(
+                        .resolve_audio(ctrl, 
                             Some(&menu.greeting),
                             menu.greeting_text.as_deref(),
                             menu.greeting_voice.as_deref(),
@@ -1177,7 +1188,7 @@ impl IvrApp {
             };
             self.pending_retry_count = new_retry;
             if let Some(path) = self
-                .resolve_audio(
+                .resolve_audio(ctrl, 
                     Some(&menu.greeting),
                     menu.greeting_text.as_deref(),
                     menu.greeting_voice.as_deref(),
@@ -1253,7 +1264,7 @@ impl IvrApp {
         }
 
         if let Some(path) = self
-            .resolve_audio(
+            .resolve_audio(ctrl, 
                 invalid_prompt.as_deref(),
                 invalid_text.as_deref(),
                 invalid_voice.as_deref(),
@@ -1313,7 +1324,7 @@ impl CallApp for IvrApp {
             if bh.enabled && !self.is_within_business_hours(bh) {
                 info!(ivr = %self.definition.name, "Outside business hours");
                 if let Some(path) = self
-                    .resolve_audio(
+                    .resolve_audio(ctrl, 
                         bh.closed_greeting.as_deref(),
                         bh.closed_text.as_deref(),
                         None,
@@ -1555,7 +1566,7 @@ impl CallApp for IvrApp {
                     };
                     self.pending_retry_count = retry_count;
                     if let Some(path) = self
-                        .resolve_audio(
+                        .resolve_audio(ctrl, 
                             Some(&menu.greeting),
                             menu.greeting_text.as_deref(),
                             menu.greeting_voice.as_deref(),

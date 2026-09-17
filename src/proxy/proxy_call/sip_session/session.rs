@@ -4333,28 +4333,48 @@ impl SipSession {
             });
         }
 
-        self.ensure_app_running_with(
-            "queue",
-            None,
-            plan.accept_immediately,
-            &format!("queue '{}'", plan.queue_name),
-            None,
-        )
-        .await
-        .map_err(|e| {
+        if let Err(e) = self
+            .ensure_app_running_with(
+                "queue",
+                None,
+                plan.accept_immediately,
+                &format!("queue '{}'", plan.queue_name),
+                None,
+            )
+            .await
+        {
+            let info = &crate::proxy::proxy_call::error_catalog::QUEUE_START_FAILED;
+            self.meta.error_code = Some(info);
+            let detail = serde_json::json!({
+                "queue": plan.queue_name,
+                "error": format!("{e:?}"),
+            });
+            self.record_trace(crate::call_errors::call_error_trace(info, Some(detail.clone())));
+            self.emit_typed_rwi_event(&crate::rwi::CallError {
+                call_id: self.context.session_id.clone(),
+                session_id: Some(self.context.session_id.clone()),
+                stage: "queue".to_string(),
+                app: info.app.to_string(),
+                code: info.code.to_string(),
+                severity: info.severity.as_str().to_string(),
+                message: info.message.to_string(),
+                sip_status: info.sip_status,
+                detail: Some(detail),
+            });
             // Avoid an orphan `queue_joined`: with the queue app never
             // started, no `queue_left` would ever close the lifecycle.
-            if joined_emitted {
-                let gw = self.server.rwi_gateway.as_ref().unwrap().read();
-                gw.broadcast(&crate::rwi::QueueLeft {
+            if joined_emitted
+                && let Some(gw) = self.server.rwi_gateway.as_ref()
+            {
+                gw.read().broadcast(&crate::rwi::QueueLeft {
                     call_id: self.context.session_id.clone(),
                     queue_id: plan.display_queue_id(),
                     reason: Some("start_failed".to_string()),
                     skill_groups: None,
                 });
             }
-            anyhow!("Failed to start queue app: {:?}", e)
-        })?;
+            return Err(anyhow!("Failed to start queue app: {:?}", e));
+        }
 
         // The queue app now drives the session. Attribute the terminal phase to
         // the queue and record the queue entry so the call trace shows the full
@@ -7904,6 +7924,14 @@ impl SipSession {
         if self.meta.rtp_timeout_fired {
             return;
         }
+        // A queue abandon classified above must not be reclassified by a stale
+        // IVR end reason left by the IVR flow that handed the call off to the
+        // queue (e.g. `ivr_end_reason = "user_hangup"`).
+        if self.meta.error_code.map(|info| info.code)
+            == Some(crate::proxy::proxy_call::error_catalog::QUEUE_ABANDONED.code)
+        {
+            return;
+        }
         if let Some(ctx) = self.app_runtime.app_context() {
             let ivr_end = ctx.get_var("ivr_end_reason");
             let ivr_error = ctx.get_var("ivr_last_error");
@@ -9234,6 +9262,54 @@ impl SipSession {
 
             CallCommand::Trace { event } => {
                 self.record_trace(event);
+                CommandResult::success()
+            }
+
+            CallCommand::ReportCallError {
+                stage,
+                app,
+                code,
+                severity,
+                message,
+                sip_status,
+                detail,
+            } => {
+                let call_id = self.context.session_id.clone();
+                match severity {
+                    crate::call_errors::ErrSeverity::Info => tracing::info!(
+                        call_id = %call_id, stage = %stage, app = %app, code = %code,
+                        detail = ?detail, "{}", message
+                    ),
+                    crate::call_errors::ErrSeverity::Warn => tracing::warn!(
+                        call_id = %call_id, stage = %stage, app = %app, code = %code,
+                        detail = ?detail, "{}", message
+                    ),
+                    crate::call_errors::ErrSeverity::Error => tracing::error!(
+                        call_id = %call_id, stage = %stage, app = %app, code = %code,
+                        detail = ?detail, "{}", message
+                    ),
+                }
+                let mut trace = crate::call_errors::TraceEvent::new(
+                    crate::call_errors::TraceKind::Error,
+                    message.clone(),
+                )
+                .severity(severity)
+                .code(&code);
+                if let Some(detail) = detail.clone() {
+                    trace = trace.detail(detail.clone());
+                }
+                self.record_trace(trace);
+                self.emit_typed_rwi_event(&crate::rwi::CallError {
+                    call_id: call_id.clone(),
+                    session_id: Some(call_id),
+                    stage,
+                    app,
+                    code,
+                    severity: severity.as_str().to_string(),
+                    message,
+                    sip_status,
+                    detail,
+                });
                 CommandResult::success()
             }
 

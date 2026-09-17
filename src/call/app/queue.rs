@@ -761,23 +761,39 @@ impl QueueApp {
     }
 
     /// Get the next action based on fallback configuration.
-    async fn execute_fallback(&mut self) -> anyhow::Result<AppAction> {
-        info!("Queue: executing fallback action");
+    async fn execute_fallback(&mut self, ctrl: &mut CallController) -> anyhow::Result<AppAction> {
         self.state = QueueState::ExecutingFallback;
 
-        let action = match &self.plan.fallback {
-            Some(QueueFallbackAction::Failure(failure_action)) => {
-                self.get_fallback_action(failure_action)
-            }
-            Some(QueueFallbackAction::Redirect { target }) => {
-                info!(target = %target, "Queue: fallback redirect");
-                AppAction::Transfer(target.to_string())
-            }
-            None => AppAction::Hangup {
-                reason: Some(CallRecordHangupReason::ServerUnavailable),
-                code: Some(486),
-            },
+        let (action, info) = match &self.plan.fallback {
+            Some(QueueFallbackAction::Failure(failure_action)) => (
+                self.get_fallback_action(failure_action),
+                &crate::proxy::proxy_call::error_catalog::QUEUE_ALL_AGENTS_UNAVAILABLE,
+            ),
+            Some(QueueFallbackAction::Redirect { target }) => (
+                {
+                    info!(target = %target, "Queue: fallback redirect");
+                    AppAction::Transfer(target.to_string())
+                },
+                &crate::proxy::proxy_call::error_catalog::QUEUE_REDIRECT_FAILED,
+            ),
+            None => (
+                AppAction::Hangup {
+                    reason: Some(CallRecordHangupReason::ServerUnavailable),
+                    code: Some(486),
+                },
+                &crate::proxy::proxy_call::error_catalog::QUEUE_ALL_AGENTS_UNAVAILABLE_DEFAULT,
+            ),
         };
+
+        // Unified error: log at severity + `call_error` RWI + CDR trace entry.
+        ctrl.report_call_error(
+            "queue",
+            info,
+            Some(serde_json::json!({
+                "queue": self.config.name,
+                "wait_secs": self.enqueued_at.map(|t| t.elapsed().as_secs()),
+            })),
+        );
 
         let action_label = match &action {
             AppAction::Transfer(t) => format!("transfer:{}", t),
@@ -1173,7 +1189,7 @@ impl QueueApp {
             self.final_token = Some(token);
             return Ok(AppAction::Continue);
         }
-        self.execute_fallback().await
+        self.execute_fallback(ctrl).await
     }
 
     /// Check and play comfort prompts between hold music loops.
@@ -1787,7 +1803,11 @@ impl CallApp for QueueApp {
             if self.allows_wait_retention() {
                 return self.enter_waiting_for_agent(ctrl).await;
             }
-            warn!("Queue: no agents configured, executing fallback");
+            ctrl.report_call_error(
+                "queue",
+                &crate::proxy::proxy_call::error_catalog::QUEUE_NO_AGENTS,
+                Some(serde_json::json!({ "queue": self.config.name })),
+            );
             // Answer first if we need to play a busy prompt (needs media path)
             self.answer_if_busy_prompt(ctrl).await?;
             return self
@@ -1878,7 +1898,14 @@ impl CallApp for QueueApp {
                 warn!("Queue: no available agents for skill routing — wait retention");
                 return self.enter_waiting_for_agent(ctrl).await;
             } else {
-                warn!("Queue: no available agents for skill routing");
+                ctrl.report_call_error(
+                    "queue",
+                    &crate::proxy::proxy_call::error_catalog::QUEUE_NO_AGENTS_SKILL,
+                    Some(serde_json::json!({
+                        "queue": self.config.name,
+                        "skills": self.config.required_skills,
+                    })),
+                );
                 // Answer first if we need to play a busy prompt (needs media path)
                 self.answer_if_busy_prompt(ctrl).await?;
                 return self
@@ -1914,7 +1941,14 @@ impl CallApp for QueueApp {
                     warn!("Queue: no available parallel agents — wait retention");
                     return self.enter_waiting_for_agent(ctrl).await;
                 }
-                warn!("Queue: no available parallel agents, executing fallback");
+                ctrl.report_call_error(
+                    "queue",
+                    &crate::proxy::proxy_call::error_catalog::QUEUE_NO_AGENTS,
+                    Some(serde_json::json!({
+                        "queue": self.config.name,
+                        "mode": "parallel",
+                    })),
+                );
                 self.answer_if_busy_prompt(ctrl).await?;
                 return self
                     .play_unavailable_prompt_and_then_fallback(ctrl, AgentUnavailableReason::Busy)
@@ -2087,7 +2121,7 @@ impl CallApp for QueueApp {
                 if !Self::take_if_matching(&mut self.final_token, &track_id, "final prompt") {
                     return Ok(AppAction::Continue);
                 }
-                return self.execute_fallback().await;
+                return self.execute_fallback(ctrl).await;
             }
             _ => {}
         }

@@ -95,6 +95,18 @@ pub const TRUNK_POLICY_REJECTED: CallErrInfo = CallErrInfo {
     remediation_key: None,
 };
 
+/// IP / User-Agent / DoS ACL rejection (`src/proxy/acl.rs`).
+pub const DENIED: CallErrInfo = CallErrInfo {
+    app: APP,
+    code: "acl.denied",
+    message: "Call rejected by access control list",
+    sip_status: Some(403),
+    hangup_reason: CallRecordHangupReason::Rejected,
+    severity: ErrSeverity::Warn,
+    locale_key: "errors.acl.denied",
+    remediation_key: None,
+};
+
 pub const CATALOG: &[CallErrInfo] = &[
     SOURCE_CPS_LIMIT,
     SOURCE_CONCURRENT_LIMIT,
@@ -104,4 +116,5 @@ pub const CATALOG: &[CallErrInfo] = &[
     DEST_CPS_LIMIT,
     DEST_CONCURRENT_LIMIT,
     TRUNK_POLICY_REJECTED,
+    DENIED,
 ];

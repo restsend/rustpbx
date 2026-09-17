@@ -289,6 +289,29 @@ pub enum CallCommand {
         event: crate::call_errors::TraceEvent,
     },
 
+    /// Report a standardized, call-affecting error.
+    ///
+    /// The session logs it at the level implied by `severity`, appends a
+    /// `TraceKind::Error` entry to the CDR `metadata["trace"]`, and emits the
+    /// unified `call_error` RWI event. This is the in-session analogue of
+    /// [`crate::call_errors::emit_call_error`] for pre-session failures.
+    ReportCallError {
+        /// Subsystem stage, e.g. `queue`, `cc`, `ivr_step`, `tts`, `rest_api`.
+        stage: String,
+        /// Owning subsystem (`CallErrInfo::app`).
+        app: String,
+        /// Stable hierarchical registry code.
+        code: String,
+        /// `info` | `warn` | `error`.
+        severity: crate::call_errors::ErrSeverity,
+        /// Human-readable message (registry default or runtime override).
+        message: String,
+        /// Canonical SIP status, if any.
+        sip_status: Option<u16>,
+        /// Structured runtime detail.
+        detail: Option<serde_json::Value>,
+    },
+
     /// Supervisor listen mode (monitoring only)
     SupervisorListen {
         /// Supervisor's leg (or supervisor session ID for cross-session monitoring)
@@ -721,6 +744,7 @@ impl CallCommand {
                 | CallCommand::Hold { music: None, .. }
                 | CallCommand::Unhold { .. }
                 | CallCommand::Trace { .. }
+                | CallCommand::ReportCallError { .. }
                 | CallCommand::UpdateQueueMeta { .. }
         )
     }

@@ -14,6 +14,7 @@
 
 pub mod api;
 pub mod dispatcher;
+pub mod error_catalog;
 pub mod events;
 pub mod request;
 pub mod webhook;

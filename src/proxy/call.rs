@@ -29,7 +29,7 @@ use rsipstack::transaction::key::TransactionRole;
 use rsipstack::transaction::transaction::Transaction;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Error type returned by [`CallRouter::resolve`] on failure.
 #[derive(Debug)]
@@ -868,23 +868,45 @@ impl CallModule {
             }
         }
 
-        if callee_is_same_realm
-            && !always_forwarding
-            && let Ok(results) = self.inner.server.locator.lookup(&callee_uri).await
-        {
-            internal_lookup_empty = results.is_empty();
-            if internal_lookup_empty {
-                locs.clear();
-                warn!(
-                    callee_uri = %callee_uri,
-                    callee_realm = %callee_realm,
-                    caller_realm = ?caller.realm,
-                    "locator lookup returned empty results for same-realm callee"
-                );
-            } else if !results.is_empty() {
-                // Keep locator-provided target metadata (destination/home_proxy/path/etc.)
-                // so SipSession can route cross-node calls via remote home_proxy.
-                locs = results;
+        if callee_is_same_realm && !always_forwarding {
+            let call_id = original
+                .call_id_header()
+                .map(|h| h.value().to_string())
+                .unwrap_or_default();
+            match self.inner.server.locator.lookup(&callee_uri).await {
+                Ok(results) => {
+                    internal_lookup_empty = results.is_empty();
+                    if internal_lookup_empty {
+                        // NB: an empty locator result is NOT a failure yet — a
+                        // route/dialplan inspector may still handle the call.
+                        // The terminal offline decision emits
+                        // `proxy.callee_offline` (see CalleeOfflineMarker).
+                        locs.clear();
+                        warn!(
+                            callee_uri = %callee_uri,
+                            callee_realm = %callee_realm,
+                            caller_realm = ?caller.realm,
+                            "locator lookup returned empty results for same-realm callee"
+                        );
+                    } else {
+                        // Keep locator-provided target metadata
+                        // (destination/home_proxy/path/etc.) so SipSession can
+                        // route cross-node calls via remote home_proxy.
+                        locs = results;
+                    }
+                }
+                Err(e) => {
+                    crate::call_errors::emit_call_error(
+                        self.inner.server.rwi_gateway.as_ref(),
+                        &call_id,
+                        "locator",
+                        &crate::proxy::locator_error_catalog::LOOKUP_FAILED,
+                        Some(serde_json::json!({
+                            "callee": callee_uri.to_string(),
+                            "error": e.to_string(),
+                        })),
+                    );
+                }
             }
         }
 
@@ -1816,7 +1838,7 @@ impl CallModule {
             }
             Ok(None) => {}
             Err(err) => {
-                warn!(error = %err, "failed to resolve callee user for forwarding/voicemail");
+                error!(error = %err, "failed to resolve callee user for forwarding/voicemail");
             }
         }
 
@@ -2105,7 +2127,7 @@ impl CallModule {
         let dialplan = match dialplan {
             Ok(d) => d,
             Err(route_err) => {
-                warn!(key = %tx.key, error = %route_err.error, status = ?route_err.status, reason = %route_error_reason(&route_err), "failed to build dialplan");
+                error!(key = %tx.key, error = %route_err.error, status = ?route_err.status, reason = %route_error_reason(&route_err), "failed to build dialplan");
                 return self.reply_route_error(tx, &cookie, route_err).await;
             }
         };

@@ -464,12 +464,21 @@ impl ProxyModule for AuthModule {
                     {
                         Ok(Some(_)) => {}
                         _ => {
-                            info!(
-                                from = %from_uri,
-                                %source,
-                                "INVITE from unknown user silently dropped (ensure_user=true): \
-                                 caller will time out with no response — add the user to \
-                                 proxy.user_backends or disable ensure_user to accept guest calls"
+                            let call_id = tx
+                                .original
+                                .call_id_header()
+                                .map(|h| h.value().to_string())
+                                .unwrap_or_default();
+                            crate::call_errors::emit_call_error(
+                                self.server.rwi_gateway.as_ref(),
+                                &call_id,
+                                "auth",
+                                &crate::proxy::auth_error_catalog::GUEST_DENIED,
+                                Some(serde_json::json!({
+                                    "from": from_uri.to_string(),
+                                    "realm": realm,
+                                    "source": source,
+                                })),
                             );
                             cookie.mark_as_spam(SpamResult::Spam);
                             return Ok(ProxyAction::Abort);

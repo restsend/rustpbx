@@ -169,10 +169,14 @@ fn build_registry_inner() -> CallErrRegistry {
 
     // Core (non-addon) catalogs — always present.
     reg.merge_slice(crate::proxy::error_catalog::CATALOG);
+    reg.merge_slice(crate::proxy::auth_error_catalog::CATALOG);
+    reg.merge_slice(crate::proxy::locator_error_catalog::CATALOG);
     reg.merge_slice(crate::proxy::routing::error_catalog::CATALOG);
     reg.merge_slice(crate::proxy::routing::http_error_catalog::CATALOG);
     reg.merge_slice(crate::proxy::proxy_call::error_catalog::CATALOG);
     reg.merge_slice(crate::call::app::error_catalog::CATALOG);
+    reg.merge_slice(crate::tts::error_catalog::CATALOG);
+    reg.merge_slice(crate::outbound::error_catalog::CATALOG);
 
     // Compiled-in addon catalogs. AppState may still merge a live AddonRegistry
     // and install_registry() (first-wins); including features here keeps unit
@@ -240,6 +244,10 @@ pub enum TraceKind {
     /// call end; unlike RtpTimeout the watchdog did not tear the call down —
     /// the leg simply never sent media, e.g. browser ICE/DTLS never completed).
     MediaIssue,
+    /// A subsystem error/warning that affected the call (routing, REST call,
+    /// step IVR, TTS, queue/CC, auth/ACL, locator, ...). Carries `severity`
+    /// and a registry `code` so the CDR timeline explains degraded calls.
+    Error,
     /// The call ended (terminal event).
     End,
 }
@@ -325,6 +333,70 @@ pub fn append_trace(
         if let Ok(v) = serde_json::to_value(event) {
             items.push(v);
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unified call-affecting error reporting
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Every subsystem that can degrade/reject/fail a call funnels through these
+// helpers so that a single failure produces (a) a tracing line whose level
+// follows the registry severity, (b) one unified `call_error` RWI event, and
+// (c) a `TraceKind::Error` entry in the CDR `metadata["trace"]`. In-session
+// code should prefer `CallController::report_call_error` (which routes through
+// `CallCommand::ReportCallError`); the free functions here cover pre-session
+// failures (routing/ACL/auth rejections) that have no live session.
+
+/// Build the unified `TraceKind::Error` entry for a registry error.
+pub fn call_error_trace(
+    info: &'static CallErrInfo,
+    detail: Option<serde_json::Value>,
+) -> TraceEvent {
+    let mut ev = TraceEvent::new(TraceKind::Error, info.message.to_string())
+        .severity(info.severity)
+        .code(info.code);
+    if let Some(detail) = detail {
+        ev = ev.detail(detail);
+    }
+    ev
+}
+
+/// Log a call-affecting error at the level implied by its registry severity,
+/// and return the unified `CallError` RWI event describing it.
+pub fn log_call_error(
+    call_id: &str,
+    stage: &str,
+    info: &'static CallErrInfo,
+    detail: Option<serde_json::Value>,
+) -> crate::rwi::CallError {
+    match info.severity {
+        ErrSeverity::Info => {
+            tracing::info!(call_id = %call_id, stage = %stage, app = %info.app, code = %info.code, detail = ?detail, "{}", info.message)
+        }
+        ErrSeverity::Warn => {
+            tracing::warn!(call_id = %call_id, stage = %stage, app = %info.app, code = %info.code, detail = ?detail, "{}", info.message)
+        }
+        ErrSeverity::Error => {
+            tracing::error!(call_id = %call_id, stage = %stage, app = %info.app, code = %info.code, detail = ?detail, "{}", info.message)
+        }
+    }
+    crate::rwi::CallError::from_info(call_id, stage, info, detail)
+}
+
+/// Emit the unified `call_error` RWI event through the RWI gateway for
+/// pre-session failures (no call owner yet). Best-effort: absent gateway is a
+/// no-op. Always logs the error at the severity's level.
+pub fn emit_call_error(
+    gateway: Option<&crate::rwi::RwiGatewayRef>,
+    call_id: &str,
+    stage: &str,
+    info: &'static CallErrInfo,
+    detail: Option<serde_json::Value>,
+) {
+    let event = log_call_error(call_id, stage, info, detail);
+    if let Some(gw) = gateway {
+        gw.read().broadcast(&event);
     }
 }
 
@@ -443,6 +515,50 @@ mod tests {
                 .map(|a| a.len()),
             Some(3)
         );
+    }
+
+    #[test]
+    fn call_error_trace_has_error_kind_and_code() {
+        let info = registry()
+            .find("tts.synthesis_failed")
+            .expect("tts catalog registered");
+        let ev = call_error_trace(info, Some(serde_json::json!({ "text": "hi" })));
+        assert_eq!(ev.kind, TraceKind::Error);
+        assert_eq!(ev.code.as_deref(), Some("tts.synthesis_failed"));
+        assert_eq!(ev.severity, Some(ErrSeverity::Error));
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v["kind"], "error");
+        assert_eq!(v["code"], "tts.synthesis_failed");
+        assert_eq!(v["detail"]["text"], "hi");
+    }
+
+    #[test]
+    fn call_error_event_uses_unified_type() {
+        let info = registry().find("tts.synthesis_failed").unwrap();
+        let ev = crate::rwi::CallError::from_info("call-1", "tts", info, None);
+        let flat = crate::rwi::RwiEvent::from_spec(&ev, None);
+        assert_eq!(flat.event_type, "call_error");
+        assert_eq!(flat.call_id.as_deref(), Some("call-1"));
+        assert_eq!(flat.payload["stage"], "tts");
+        assert_eq!(flat.payload["severity"], "error");
+    }
+
+    #[test]
+    fn new_catalogs_registered() {
+        let reg = registry();
+        for code in [
+            "tts.synthesis_failed",
+            "tts.cli_failed",
+            "ivr.step_next_failed",
+            "rest_api.ivr_step_failed",
+            "locator.lookup_failed",
+            "auth.guest_denied",
+            "acl.denied",
+            "queue.start_failed",
+            "outbound.webhook_failed",
+        ] {
+            assert!(reg.find(code).is_some(), "missing catalog code {code}");
+        }
     }
 
     #[test]

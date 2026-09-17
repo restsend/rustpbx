@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::{error, info};
 
 // ── Provider Trait ───────────────────────────────────────────────────────────
 
@@ -387,7 +387,7 @@ impl StepProvider {
                 Err(e) => {
                     let elapsed = start.elapsed();
                     last_err = e;
-                    info!(
+                    error!(
                         url = %url,
                         error = %last_err,
                         duration_ms = %elapsed.as_millis(),
@@ -449,7 +449,7 @@ impl ActionProvider for StepProvider {
         let start = std::time::Instant::now();
         let req = self.http_client.post(&url).json(ctx);
         if let Err(e) = crate::http_util::execute_request(req, &self.headers, None).await {
-            warn!(
+            error!(
                 url = %url,
                 error = %e,
                 duration_ms = %start.elapsed().as_millis(),
@@ -488,7 +488,7 @@ impl ActionProvider for StepProvider {
         let start = std::time::Instant::now();
         let req = self.http_client.post(&url).json(&body);
         if let Err(e) = crate::http_util::execute_request(req, &self.headers, None).await {
-            warn!(
+            error!(
                 url = %url,
                 error = %e,
                 duration_ms = %start.elapsed().as_millis(),
@@ -512,7 +512,7 @@ impl ActionProvider for StepProvider {
         let start = std::time::Instant::now();
         let req = self.http_client.post(&url).json(&body);
         if let Err(e) = crate::http_util::execute_request(req, &self.headers, None).await {
-            warn!(
+            error!(
                 url = %url,
                 error = %e,
                 duration_ms = %start.elapsed().as_millis(),

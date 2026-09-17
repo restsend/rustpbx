@@ -515,6 +515,10 @@
                                             </template>
                                         </div>
                                         <p class="mt-0.5 text-sm text-slate-600" x-text="ev.message"></p>
+                                        <template x-if="hasTraceDetail(ev)">
+                                            <pre class="mt-1 max-h-40 overflow-auto rounded-md bg-slate-50 px-2.5 py-1.5 font-mono text-[11px] leading-relaxed text-slate-500 ring-1 ring-slate-200"
+                                                x-text="traceDetail(ev)"></pre>
+                                        </template>
                                         <template x-if="ev.kind === 'play' && ev.duration_ms != null">
                                             <p class="mt-0.5 text-xs text-slate-400"
                                                 x-text="'duration: ' + formatTraceMs(ev.duration_ms) + (ev.interrupted ? ' · interrupted' : ' · completed')"></p>
@@ -2535,6 +2539,9 @@
                     case 'media_issue':
                         // minus-circle (missing media)
                         return svg('M15 12H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z');
+                    case 'error':
+                        // exclamation-triangle (call-affecting subsystem error)
+                        return svg('M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z');
                     case 'end':
                     default:
                         // phone-x-mark (hung up)
@@ -2563,9 +2570,23 @@
                     play: 'Media play',
                     rtp_timeout: 'RTP timeout',
                     media_issue: 'Media issue',
+                    error: 'Error',
                     end: 'Call end',
                 };
                 return map[kind] || kind;
+            },
+            hasTraceDetail(ev) {
+                return ev && ev.detail != null && ev.kind === 'error';
+            },
+            traceDetail(ev) {
+                if (!ev || ev.detail == null) return '';
+                try {
+                    return typeof ev.detail === 'string'
+                        ? ev.detail
+                        : JSON.stringify(ev.detail);
+                } catch (e) {
+                    return String(ev.detail);
+                }
             },
             formatTraceTs(ts) {
                 const v = Number(ts) || 0;

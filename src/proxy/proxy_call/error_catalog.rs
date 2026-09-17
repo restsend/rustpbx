@@ -50,6 +50,28 @@ pub const QUEUE_NO_AGENTS_SKILL: CallErrInfo = CallErrInfo {
     remediation_key: None,
 };
 
+pub const QUEUE_START_FAILED: CallErrInfo = CallErrInfo {
+    app: "queue",
+    code: "queue.start_failed",
+    message: "Failed to start queue application",
+    sip_status: Some(500),
+    hangup_reason: CallRecordHangupReason::ServerUnavailable,
+    severity: ErrSeverity::Error,
+    locale_key: "errors.queue.start_failed",
+    remediation_key: None,
+};
+
+pub const QUEUE_NOT_FOUND: CallErrInfo = CallErrInfo {
+    app: "queue",
+    code: "queue.not_found",
+    message: "Queue not found",
+    sip_status: Some(404),
+    hangup_reason: CallRecordHangupReason::Rejected,
+    severity: ErrSeverity::Warn,
+    locale_key: "errors.queue.not_found",
+    remediation_key: None,
+};
+
 pub const QUEUE_AGENT_REGISTRY_MISSING: CallErrInfo = CallErrInfo {
     app: "queue",
     code: "queue.agent_registry_missing",
@@ -315,6 +337,8 @@ pub const CATALOG: &[CallErrInfo] = &[
     QUEUE_ALL_AGENTS_UNAVAILABLE,
     QUEUE_NO_AGENTS,
     QUEUE_NO_AGENTS_SKILL,
+    QUEUE_START_FAILED,
+    QUEUE_NOT_FOUND,
     QUEUE_AGENT_REGISTRY_MISSING,
     QUEUE_IVR_START_FAILED,
     QUEUE_VOICEMAIL_START_FAILED,

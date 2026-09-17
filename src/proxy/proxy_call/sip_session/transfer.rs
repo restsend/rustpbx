@@ -1714,14 +1714,34 @@ impl SipSession {
         code: &str,
         return_app: Option<&ReturnTargetSpec>,
     ) -> Result<()> {
+        let info = crate::call_errors::registry()
+            .find(code)
+            .unwrap_or(&crate::proxy::proxy_call::error_catalog::QUEUE_NOT_FOUND);
+        self.meta.error_code = Some(info);
+        let detail = serde_json::json!({
+            "queue": queue_name,
+            "reason": reason,
+        });
         self.record_trace(
             crate::call_errors::TraceEvent::new(
                 crate::call_errors::TraceKind::Queue,
                 format!("Queue '{}' {} — using fallback", queue_name, reason),
             )
-            .severity(crate::call_errors::ErrSeverity::Error)
-            .code(code),
+            .severity(info.severity)
+            .code(info.code)
+            .detail(detail.clone()),
         );
+        self.emit_typed_rwi_event(&crate::rwi::CallError {
+            call_id: self.context.session_id.clone(),
+            session_id: Some(self.context.session_id.clone()),
+            stage: "queue".to_string(),
+            app: info.app.to_string(),
+            code: info.code.to_string(),
+            severity: info.severity.as_str().to_string(),
+            message: format!("Queue '{}' {}", queue_name, reason),
+            sip_status: info.sip_status,
+            detail: Some(detail),
+        });
 
         if let Some(spec) = return_app {
             info!(

@@ -103,6 +103,76 @@ pub const APP_RUNTIME_ERROR: CallErrInfo = CallErrInfo {
     remediation_key: None,
 };
 
+// ── Step-mode IVR (provider `/step`, `/fail`, node execution) ──────────────
+
+pub const IVR_STEP_NEXT_FAILED: CallErrInfo = CallErrInfo {
+    app: "ivr",
+    code: "ivr.step_next_failed",
+    message: "Step IVR provider /step request failed",
+    sip_status: Some(500),
+    hangup_reason: CallRecordHangupReason::ServerUnavailable,
+    severity: ErrSeverity::Error,
+    locale_key: "errors.ivr.step_next_failed",
+    remediation_key: Some("errors.ivr.step_next_failed.remedy"),
+};
+
+pub const IVR_STEP_FAIL_FAILED: CallErrInfo = CallErrInfo {
+    app: "ivr",
+    code: "ivr.step_fail_failed",
+    message: "Step IVR provider /fail request failed",
+    sip_status: Some(500),
+    hangup_reason: CallRecordHangupReason::ServerUnavailable,
+    severity: ErrSeverity::Error,
+    locale_key: "errors.ivr.step_fail_failed",
+    remediation_key: None,
+};
+
+pub const IVR_STEP_EXECUTE_FAILED: CallErrInfo = CallErrInfo {
+    app: "ivr",
+    code: "ivr.step_execute_failed",
+    message: "Step IVR node execution failed",
+    sip_status: Some(500),
+    hangup_reason: CallRecordHangupReason::Failed,
+    severity: ErrSeverity::Error,
+    locale_key: "errors.ivr.step_execute_failed",
+    remediation_key: None,
+};
+
+// ── Outbound REST calls made on the call path ─────────────────────────────
+
+pub const REST_API_IVR_STEP_FAILED: CallErrInfo = CallErrInfo {
+    app: "rest_api",
+    code: "rest_api.ivr_step_failed",
+    message: "IVR step provider REST request failed",
+    sip_status: Some(500),
+    hangup_reason: CallRecordHangupReason::ServerUnavailable,
+    severity: ErrSeverity::Error,
+    locale_key: "errors.rest_api.ivr_step_failed",
+    remediation_key: Some("errors.rest_api.ivr_step_failed.remedy"),
+};
+
+pub const REST_API_IVR_WEBHOOK_FAILED: CallErrInfo = CallErrInfo {
+    app: "rest_api",
+    code: "rest_api.ivr_webhook_failed",
+    message: "IVR webhook REST request failed",
+    sip_status: Some(500),
+    hangup_reason: CallRecordHangupReason::ServerUnavailable,
+    severity: ErrSeverity::Error,
+    locale_key: "errors.rest_api.ivr_webhook_failed",
+    remediation_key: None,
+};
+
+pub const REST_API_TTS_TEXT_FETCH_FAILED: CallErrInfo = CallErrInfo {
+    app: "rest_api",
+    code: "rest_api.tts_text_fetch_failed",
+    message: "Failed to fetch TTS text from API",
+    sip_status: None,
+    hangup_reason: CallRecordHangupReason::Failed,
+    severity: ErrSeverity::Error,
+    locale_key: "errors.rest_api.tts_text_fetch_failed",
+    remediation_key: None,
+};
+
 pub const CATALOG: &[CallErrInfo] = &[
     IVR_START_FAILED,
     IVR_EXECUTE_ERROR,
@@ -113,4 +183,10 @@ pub const CATALOG: &[CallErrInfo] = &[
     VOICEMAIL_START_FAILED,
     CONFERENCE_START_FAILED,
     APP_RUNTIME_ERROR,
+    IVR_STEP_NEXT_FAILED,
+    IVR_STEP_FAIL_FAILED,
+    IVR_STEP_EXECUTE_FAILED,
+    REST_API_IVR_STEP_FAILED,
+    REST_API_IVR_WEBHOOK_FAILED,
+    REST_API_TTS_TEXT_FETCH_FAILED,
 ];

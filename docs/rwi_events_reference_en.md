@@ -394,6 +394,28 @@ Dispatch: call_owner (both legs receive it)
 | `leg_a` | String | A-leg call_id |
 | `leg_b` | String | B-leg call_id |
 
+#### call_error
+
+Dispatch: call_owner when an owner exists; early routing/auth failures with no session are broadcast (visible to webhook / WS subscribers).
+
+Unified event for every call-affecting subsystem failure: routing failures, outbound REST calls on the call path, step-IVR next action, TTS, queue/CC scheduling, auth/ACL, locator, etc. Each `call_error` also:
+- logs at the level implied by `severity` (`info`/`warn`/`error`);
+- appends a `TraceKind::Error` entry to the CDR `metadata["trace"]` (with `code`/`severity`/`detail`).
+
+| Field | Type | Description |
+|------|------|------|
+| `call_id` | String | Call/session identifier |
+| `session_id` | Option\<String\> | Root session id (omitted for pre-session failures) |
+| `stage` | String | Failure stage: `routing` / `rest_api` / `ivr_step` / `tts` / `queue` / `cc` / `auth` / `acl` / `locator` / `media` / `conference` |
+| `app` | String | Owning subsystem from the error registry (`CallErrInfo::app`), e.g. `queue`, `tts`, `http_router` |
+| `code` | String | Stable hierarchical registry code, e.g. `tts.synthesis_failed`, `queue.no_agents` |
+| `severity` | String | `info` / `warn` / `error` (drives log level) |
+| `message` | String | Human-readable message |
+| `sip_status` | Option\<u16\> | Related SIP status, if any |
+| `detail` | Option\<Object\> | Structured runtime detail (url, target, attempts, agent_id, ...) |
+
+Level convention: hard failures (routing / REST / step-IVR / TTS / queue unavailable) are `error`; policy rejections (ACL/CPS) are `warn`; `busy` (`acl.busy_action`) and `spam` (`http_router.spam`) are `info`.
+
 #### call_hangup
 
 Dispatch: call_owner
@@ -1548,6 +1570,7 @@ Dispatch: broadcast
 | `call_hangup` | owner | yes | +ctx (+`duration_secs`) |
 | `call_no_answer` | owner | yes | +ctx |
 | `call_busy` | owner | yes | +ctx |
+| `call_error` | owner; broadcast for pre-session failures | yes | Unified subsystem error (stage/app/code/severity/detail), also written to the CDR trace |
 | `call_held` | owner | yes | +ctx |
 | `call_unheld` | owner | yes | +ctx |
 | `media_hold_started` | owner | yes | +ctx |

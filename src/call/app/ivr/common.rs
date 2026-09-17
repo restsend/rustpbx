@@ -112,12 +112,33 @@ pub fn resolve_audio_path(
     None
 }
 
+/// A TTS resolution failure that the caller should report through the unified
+/// `call_error` pipeline (`CallController::report_call_error("tts", ...)`).
+pub struct AudioFailure {
+    pub info: &'static crate::call_errors::CallErrInfo,
+    pub detail: String,
+}
+
 pub async fn resolve_audio(
     file: Option<&str>,
     tts_text: Option<&str>,
     tts_voice: Option<&str>,
     tts_service: Option<&Arc<TtsService>>,
 ) -> Option<String> {
+    resolve_audio_with_diag(file, tts_text, tts_voice, tts_service)
+        .await
+        .0
+}
+
+/// Like [`resolve_audio`] but also returns the failure that produced `None`
+/// (or a recovered fallback) so the caller can log + emit `call_error` + record
+/// a CDR trace entry with the actual call id.
+pub async fn resolve_audio_with_diag(
+    file: Option<&str>,
+    tts_text: Option<&str>,
+    tts_voice: Option<&str>,
+    tts_service: Option<&Arc<TtsService>>,
+) -> (Option<String>, Option<AudioFailure>) {
     if let Some(f) = file.filter(|f| !f.is_empty()) {
         if let Some(rest) = f.strip_prefix("tts://") {
             let (encoded_text, voice) = if let Some((t, q)) = rest.split_once('?') {
@@ -130,29 +151,37 @@ pub async fn resolve_audio(
                 .unwrap_or(std::borrow::Cow::Borrowed(encoded_text));
             return synthesize_tts(&tts_text, voice, tts_service).await;
         }
-        return Some(f.to_string());
+        return (Some(f.to_string()), None);
     }
     if let Some(text) = tts_text.filter(|t| !t.is_empty()) {
         return synthesize_tts(text, tts_voice, tts_service).await;
     }
-    None
+    (None, None)
 }
 
 async fn synthesize_tts(
     text: &str,
     voice: Option<&str>,
     tts_service: Option<&Arc<TtsService>>,
-) -> Option<String> {
-    if let Some(service) = tts_service {
+) -> (Option<String>, Option<AudioFailure>) {
+    use crate::tts::error_catalog as tts_err;
+
+    let primary_failure: Option<AudioFailure> = if let Some(service) = tts_service {
         match service.synthesize(text, voice).await {
-            Ok(path) => return Some(path),
-            Err(e) => {
-                tracing::warn!(text = %text, error = %e, "TTS synthesis failed");
-            }
+            Ok(path) => return (Some(path), None),
+            Err(e) => Some(AudioFailure {
+                info: &tts_err::SYNTHESIS_FAILED,
+                detail: format!("text={text:?} voice={voice:?} error={e}"),
+            }),
         }
-    }
-    // Fallback: try edge-cli if no TTS service configured
-    tracing::info!(text = %text, "TTS service not configured, falling back to edge-cli");
+    } else {
+        Some(AudioFailure {
+            info: &tts_err::NO_SERVICE,
+            detail: format!("text={text:?} voice={voice:?}"),
+        })
+    };
+
+    // Fallback: try edge-cli when TTS service is absent or failed.
     let voice_str = voice.unwrap_or("zh-CN-XiaoxiaoNeural").to_string();
     let fallback_cfg = crate::tts::TtsConfig {
         cache_dir: std::env::temp_dir()
@@ -177,17 +206,48 @@ async fn synthesize_tts(
     let fallback_service = crate::tts::TtsService::new(fallback_cfg);
     match fallback_service.synthesize(text, Some(&voice_str)).await {
         Ok(audio_path) => {
-            tracing::info!(path = %audio_path, "edge-cli TTS synthesis succeeded");
-            Some(audio_path)
+            tracing::info!(path = %audio_path, "edge-cli TTS synthesis succeeded (fallback)");
+            // Keep the primary failure so callers still surface the degraded
+            // path, even though audio was produced by the fallback.
+            (Some(audio_path), primary_failure)
         }
-        Err(e) => {
-            tracing::warn!(text = %text, error = %e, "edge-cli TTS fallback failed");
-            None
-        }
+        Err(e) => (
+            None,
+            Some(AudioFailure {
+                info: &tts_err::CLI_FAILED,
+                detail: format!(
+                    "text={text:?} voice={voice_str:?} edge-cli error={e}; {}",
+                    primary_failure
+                        .as_ref()
+                        .map(|f| f.detail.clone())
+                        .unwrap_or_default()
+                ),
+            }),
+        ),
     }
 }
 
+/// Resolve audio and report any TTS failure through the unified pipeline.
+pub(crate) async fn resolve_audio_report(
+    ctrl: &CallController,
+    file: Option<&str>,
+    tts_text: Option<&str>,
+    tts_voice: Option<&str>,
+    tts_service: Option<&Arc<TtsService>>,
+) -> Option<String> {
+    let (audio, failure) = resolve_audio_with_diag(file, tts_text, tts_voice, tts_service).await;
+    if let Some(f) = failure {
+        ctrl.report_call_error(
+            "tts",
+            f.info,
+            Some(serde_json::json!({ "detail": f.detail })),
+        );
+    }
+    audio
+}
+
 async fn fetch_tts_text_from_api(
+    ctrl: &CallController,
     url: &str,
     sess: &SessionData,
     ctx: &ApplicationContext,
@@ -197,7 +257,11 @@ async fn fetch_tts_text_from_api(
     match http_util::fetch_json(&ctx.http_client, &url, &opts).await {
         Ok(body) => extract_tts_text(&body),
         Err(e) => {
-            tracing::warn!(url = %url, error = %e, "fetch_tts_text_from_api failed");
+            ctrl.report_call_error(
+                "rest_api",
+                &crate::call::app::error_catalog::REST_API_TTS_TEXT_FETCH_FAILED,
+                Some(serde_json::json!({ "url": url, "error": e.to_string() })),
+            );
             None
         }
     }
@@ -321,7 +385,8 @@ pub async fn execute_action(
             delay_before_ms,
             ..
         } => {
-            if let Some(a) = resolve_audio(
+            if let Some(a) = resolve_audio_report(
+                ctrl,
                 prompt.as_deref(),
                 prompt_text.as_deref(),
                 prompt_voice.as_deref(),
@@ -350,7 +415,8 @@ pub async fn execute_action(
             delay_before_ms,
             ..
         } => {
-            let audio = resolve_audio(
+            let audio = resolve_audio_report(
+                ctrl,
                 prompt.as_deref(),
                 prompt_text.as_deref(),
                 prompt_voice.as_deref(),
@@ -388,7 +454,9 @@ pub async fn execute_action(
                 && file.as_deref().unwrap_or_default().is_empty()
                 && record_name_list.is_none();
             let resolved_text = if tts_api_url.is_some() {
-                match fetch_tts_text_from_api(tts_api_url.as_deref().unwrap(), sess, ctx).await {
+                match fetch_tts_text_from_api(ctrl, tts_api_url.as_deref().unwrap(), sess, ctx)
+                    .await
+                {
                     Some(text) => Some(text),
                     None => tts_text.clone(),
                 }
@@ -398,7 +466,8 @@ pub async fn execute_action(
             let audio = if let Some(rnl) = record_name_list {
                 Some(rnl.clone())
             } else {
-                resolve_audio(
+                resolve_audio_report(
+                    ctrl,
                     file.as_deref(),
                     resolved_text.as_deref(),
                     tts_voice.as_deref(),
@@ -431,7 +500,13 @@ pub async fn execute_action(
             ..
         } => {
             let resolved_greeting_text = if greeting_api_url.is_some() {
-                match fetch_tts_text_from_api(greeting_api_url.as_deref().unwrap(), sess, ctx).await
+                match fetch_tts_text_from_api(
+                    ctrl,
+                    greeting_api_url.as_deref().unwrap(),
+                    sess,
+                    ctx,
+                )
+                .await
                 {
                     Some(text) => Some(text),
                     None => greeting_text.clone(),
@@ -442,7 +517,8 @@ pub async fn execute_action(
             let audio = if let Some(grl) = greeting_record_list {
                 Some(grl.clone())
             } else {
-                resolve_audio(
+                resolve_audio_report(
+                    ctrl,
                     greeting.as_deref(),
                     resolved_greeting_text.as_deref(),
                     greeting_voice.as_deref(),
@@ -469,7 +545,8 @@ pub async fn execute_action(
             prompt,
         } => {
             if let Some(p) = prompt {
-                if let Some(a) = resolve_audio(Some(p), None, None, tts_service).await {
+                if let Some(a) = resolve_audio_report(ctrl, Some(p), None, None, tts_service).await
+                {
                     ctrl.play_audio(a, false).await?;
                 }
             }
@@ -503,7 +580,8 @@ pub async fn execute_action(
             inter_digit_timeout_ms,
             terminator,
         } => {
-            let audio = resolve_audio(
+            let audio = resolve_audio_report(
+                ctrl,
                 prompt.as_deref(),
                 prompt_text.as_deref(),
                 prompt_voice.as_deref(),
@@ -710,7 +788,8 @@ pub async fn execute_action(
             max_duration_secs,
         } => {
             if let Some(p) = prompt {
-                if let Some(a) = resolve_audio(Some(p), None, None, tts_service).await {
+                if let Some(a) = resolve_audio_report(ctrl, Some(p), None, None, tts_service).await
+                {
                     ctrl.play_audio(a, false).await?;
                 }
             }

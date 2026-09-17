@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 #[derive(Debug, Clone)]
 struct IpNetwork {
@@ -162,6 +162,27 @@ impl AclModule {
             Some(server) => server.proxy_config.load(),
             None => self.inner.config.load(),
         }
+    }
+
+    /// Emit the unified `call_error` event for an ACL denial (best-effort:
+    /// no-op in standalone/test mode without a server). Log level follows the
+    /// registry severity (`acl.denied` is Warn, so this is a `warn!`).
+    fn report_denied(&self, tx: &Transaction, detail: serde_json::Value) {
+        let Some(server) = self.inner.server.as_ref() else {
+            return;
+        };
+        let call_id = tx
+            .original
+            .call_id_header()
+            .map(|h| h.value().to_string())
+            .unwrap_or_default();
+        crate::call_errors::emit_call_error(
+            server.rwi_gateway.as_ref(),
+            &call_id,
+            "acl",
+            &crate::proxy::routing::error_catalog::DENIED,
+            Some(detail),
+        );
     }
 
     fn live_ua_lists(&self) -> (HashSet<String>, HashSet<String>) {
@@ -400,10 +421,9 @@ impl ProxyModule for AclModule {
             Some(ua_header) => {
                 let ua = ua_header.value();
                 if !self.is_ua_allowed(ua) {
-                    info!(
-                        method = tx.original.method().to_string(),
-                        ua = ua,
-                        "User-Agent is denied by acl module"
+                    self.report_denied(
+                        tx,
+                        serde_json::json!({ "reason": "ua_blacklist", "ua": ua }),
                     );
                     cookie.mark_as_spam(crate::call::cookie::SpamResult::UaBlacklist);
                     return Ok(ProxyAction::Abort);
@@ -412,9 +432,9 @@ impl ProxyModule for AclModule {
             None => {
                 let (white, _) = self.live_ua_lists();
                 if !white.is_empty() {
-                    info!(
-                        method = tx.original.method().to_string(),
-                        "Missing User-Agent header, denied by acl module"
+                    self.report_denied(
+                        tx,
+                        serde_json::json!({ "reason": "missing_user_agent" }),
                     );
                     cookie.mark_as_spam(crate::call::cookie::SpamResult::Spam);
                     return Ok(ProxyAction::Abort);
@@ -423,7 +443,11 @@ impl ProxyModule for AclModule {
         }
 
         // 2. URI normalization check (safety)
-        if let Err(_e) = self.check_uri_normalization(tx) {
+        if let Err(e) = self.check_uri_normalization(tx) {
+            self.report_denied(
+                tx,
+                serde_json::json!({ "reason": "uri_normalization", "error": e.to_string() }),
+            );
             return Ok(ProxyAction::Abort);
         }
 
@@ -431,7 +455,10 @@ impl ProxyModule for AclModule {
         if self.live_config().dos_enabled {
             if let Some(ip) = self.extract_ip(tx) {
                 if let Err(e) = self.dos_check_and_track(ip).await {
-                    warn!("DoS blocked {}: {}", ip, e);
+                    self.report_denied(
+                        tx,
+                        serde_json::json!({ "reason": "dos_rate_limit", "ip": ip.to_string(), "error": e.to_string() }),
+                    );
                     return Ok(ProxyAction::Abort);
                 }
             }
@@ -455,10 +482,9 @@ impl ProxyModule for AclModule {
         if self.is_ip_allowed(&from_addr).await {
             return Ok(ProxyAction::Continue);
         }
-        info!(
-            method = tx.original.method().to_string(),
-            source_ip = %from_addr,
-            "IP is denied by acl module"
+        self.report_denied(
+            tx,
+            serde_json::json!({ "reason": "ip_denied", "ip": from_addr.to_string() }),
         );
         cookie.mark_as_spam(crate::call::cookie::SpamResult::IpBlacklist);
         Ok(ProxyAction::Abort)

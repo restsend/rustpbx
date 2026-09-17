@@ -171,6 +171,31 @@ impl CallController {
         let _ = self.session.send_command(CallCommand::Trace { event });
     }
 
+    /// Report a standardized, call-affecting error.
+    ///
+    /// The session logs it at the level implied by the registry severity,
+    /// appends a `TraceKind::Error` entry to the CDR `metadata["trace"]`, and
+    /// emits the unified `call_error` RWI event. `stage` identifies the
+    /// subsystem (e.g. `queue`, `cc`, `ivr_step`, `tts`, `rest_api`).
+    pub fn report_call_error(
+        &self,
+        stage: &str,
+        info: &'static crate::call_errors::CallErrInfo,
+        detail: Option<serde_json::Value>,
+    ) {
+        let _ = self
+            .session
+            .send_command(CallCommand::ReportCallError {
+                stage: stage.to_string(),
+                app: info.app.to_string(),
+                code: info.code.to_string(),
+                severity: info.severity,
+                message: info.message.to_string(),
+                sip_status: info.sip_status,
+                detail,
+            });
+    }
+
     /// Update the session's queue metadata (`CallCommand::UpdateQueueMeta`).
     ///
     /// Used by the queue app after an overflow / escalation stage joins

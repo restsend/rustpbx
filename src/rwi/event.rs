@@ -194,6 +194,58 @@ pub struct CallBusy {
 }
 rwi_event!(CallBusy, "call_busy");
 
+/// Unified call-affecting error event. One event type for every subsystem that
+/// can degrade, reject, or fail a call (routing, REST calls on the call path,
+/// step IVR, TTS, queue/CC, auth/ACL, locator, ...). It is emitted alongside an
+/// `error!`/`warn!`/`info!` log line (level follows `severity`) and a matching
+/// `TraceKind::Error` entry in the CDR `metadata["trace"]`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CallError {
+    pub call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Subsystem stage this failure belongs to. Stable values include
+    /// `routing`, `rest_api`, `ivr_step`, `tts`, `queue`, `cc`, `auth`,
+    /// `acl`, `locator`, `media`, `conference`.
+    pub stage: String,
+    /// Owning subsystem from the standardized error registry
+    /// (`CallErrInfo::app`), e.g. `queue`, `tts`, `http_router`.
+    pub app: String,
+    /// Stable hierarchical registry code, e.g. `tts.synthesis_failed`.
+    pub code: String,
+    /// `info` | `warn` | `error` (mirrors `ErrSeverity`, drives log level).
+    pub severity: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sip_status: Option<u16>,
+    /// Structured runtime detail (targets, url, attempts, agent ids, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<serde_json::Value>,
+}
+rwi_event!(CallError, "call_error");
+
+impl CallError {
+    /// Build from a standardized registry entry plus runtime detail.
+    pub fn from_info(
+        call_id: impl Into<String>,
+        stage: &str,
+        info: &'static crate::call_errors::CallErrInfo,
+        detail: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            session_id: None,
+            stage: stage.to_string(),
+            app: info.app.to_string(),
+            code: info.code.to_string(),
+            severity: info.severity.as_str().to_string(),
+            message: info.message.to_string(),
+            sip_status: info.sip_status,
+            detail,
+        }
+    }
+}
+
 /// Where a transfer originated from — the flow position of the call at the
 /// moment it was transferred (IVR / queue / agent / SIP REFER), so consumers
 /// can reconstruct the call path from RWI events alone.

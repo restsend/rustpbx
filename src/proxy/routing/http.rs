@@ -15,7 +15,7 @@ use rsipstack::transport::SipConnection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::{error, info};
 
 pub struct HttpCallRouter {
     pub config: HttpRouterConfig,
@@ -194,7 +194,7 @@ impl CallRouter for HttpCallRouter {
                 let elapsed = start.elapsed();
                 let err_str = e.to_string();
                 let is_status_error = err_str.contains("HTTP returned");
-                warn!(
+                error!(
                     %call_id,
                     from = %payload.from,
                     to = %payload.to,
@@ -207,21 +207,26 @@ impl CallRouter for HttpCallRouter {
                         error: anyhow!("HTTP router returned error"),
                         status: None,
                         extensions: None,
-                    });
+                    }
+                    .with_code(&crate::proxy::routing::http_error_catalog::UPSTREAM_ERROR));
                 }
                 return Err(RouteError {
                     error: anyhow!("HTTP router failed: {}", err_str),
                     status: Some(rsipstack::sip::StatusCode::ServiceUnavailable),
                     extensions: None,
-                });
+                }
+                .with_code(&crate::proxy::routing::http_error_catalog::UPSTREAM_FAILED));
             }
         };
 
         let elapsed = start.elapsed();
-        let result: HttpResponsePayload = response.json().await.map_err(|e| RouteError {
-            error: anyhow!("Failed to parse HTTP router response: {}", e),
-            status: Some(rsipstack::sip::StatusCode::ServerInternalError),
-            extensions: None,
+        let result: HttpResponsePayload = response.json().await.map_err(|e| {
+            RouteError {
+                error: anyhow!("Failed to parse HTTP router response: {}", e),
+                status: Some(rsipstack::sip::StatusCode::ServerInternalError),
+                extensions: None,
+            }
+            .with_code(&crate::proxy::routing::http_error_catalog::PARSE_FAILED)
         })?;
 
         info!(
@@ -244,7 +249,8 @@ impl CallRouter for HttpCallRouter {
                     ),
                     status: Some(rsipstack::sip::StatusCode::Forbidden),
                     extensions: result.extensions,
-                });
+                }
+                .with_code(&crate::proxy::routing::http_error_catalog::SPAM));
             }
             HttpRouteAction::Reject | HttpRouteAction::Abort => {
                 let status = result
@@ -259,14 +265,16 @@ impl CallRouter for HttpCallRouter {
                     ),
                     status: Some(status),
                     extensions: result.extensions,
-                });
+                }
+                .with_code(&crate::proxy::routing::http_error_catalog::REJECTED));
             }
             HttpRouteAction::NotHandled => {
                 return Err(RouteError {
                     error: anyhow!("not handled by HTTP router"),
                     status: None,
                     extensions: result.extensions,
-                });
+                }
+                .with_code(&crate::proxy::routing::http_error_catalog::NOT_HANDLED));
             }
             HttpRouteAction::Forward => {
                 let mut locs = Vec::new();
@@ -344,7 +352,8 @@ impl CallRouter for HttpCallRouter {
                                 ),
                                 status: Some(rsipstack::sip::StatusCode::ServerInternalError),
                                 extensions: None,
-                            });
+                            }
+                            .with_code(&crate::proxy::routing::http_error_catalog::PARSE_FAILED));
                         }
                     }
                 }

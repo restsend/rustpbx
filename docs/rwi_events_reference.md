@@ -365,6 +365,44 @@ Webhook 使用 `(call_id, timestamp)` 元组去重，环形缓冲区容量 4096 
 | `leg_a` | String | A 腿 call_id |
 | `leg_b` | String | B 腿 call_id |
 
+#### call_error
+
+分发：有 owner 时 call_owner；无 session 的早期路由/鉴权失败走 broadcast（webhook / WS 订阅可见）。
+
+所有"会影响通话"的子系统失败的统一事件：路由失败、通话链路上的出站 REST 调用、step IVR 下一步、TTS、队列/CC 排队、鉴权/ACL、locator 等。每个 `call_error` 都同时：
+- 按 `severity` 输出对应级别的日志（`info`/`warn`/`error`）；
+- 以 `TraceKind::Error` 条目写入 CDR 的 `metadata["trace"]`（带 `code`/`severity`/`detail`）。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫/会话标识 |
+| `session_id` | Option\<String\> | 根会话 id（无 session 的早期失败省略） |
+| `stage` | String | 失败所属阶段：`routing` / `rest_api` / `ivr_step` / `tts` / `queue` / `cc` / `auth` / `acl` / `locator` / `media` / `conference` |
+| `app` | String | 标准错误目录所属子系统（`CallErrInfo::app`），如 `queue`、`tts`、`http_router` |
+| `code` | String | 稳定层级错误码，如 `tts.synthesis_failed`、`queue.no_agents` |
+| `severity` | String | `info` / `warn` / `error`（决定日志级别） |
+| `message` | String | 可读错误信息 |
+| `sip_status` | Option\<u16\> | 关联的 SIP 响应码（如有） |
+| `detail` | Option\<Object\> | 结构化运行时细节（url、target、attempts、agent_id 等） |
+
+```json
+{
+  "rwi": "1.0",
+  "event_type": "call_error",
+  "call_id": "a1b2c3d4-...",
+  "session_id": "a1b2c3d4-...",
+  "stage": "tts",
+  "app": "tts",
+  "code": "tts.synthesis_failed",
+  "severity": "error",
+  "message": "TTS synthesis failed",
+  "sip_status": null,
+  "detail": { "text": "你好", "voice": "zh-CN", "error": "connection refused" }
+}
+```
+
+> 级别约定：硬失败（路由/REST/step IVR/TTS/队列不可用等）为 `error`；策略性拒绝（ACL/CPS）为 `warn`；`busy`（`acl.busy_action`）与 `spam`（`http_router.spam`）为 `info`。
+
 #### call_hangup
 
 分发：call_owner
@@ -1489,6 +1527,7 @@ SIP PUBLISH  presence 状态变化（每个本地 PUBLISH 触发）。
 | `call_hangup` | owner | ✅ | +ctx（涉及坐席时含 agent_id/queue_id；+`duration_secs`） |
 | `call_no_answer` | owner | ✅ | +ctx |
 | `call_busy` | owner | ✅ | +ctx |
+| `call_error` | owner；早期失败 broadcast | ✅ | 统一子系统错误（stage/app/code/severity/detail），同步写入 CDR trace |
 | `media_hold_started` | owner | ✅ | +ctx |
 | `media_hold_stopped` | owner | ✅ | +ctx |
 | `media_ringback_passthrough_started` | owner | ✅ | — |
