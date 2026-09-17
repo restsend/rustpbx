@@ -120,6 +120,9 @@ pub struct LegConfig {
     /// Number of inbound RTP packets observed before a latching decision is
     /// committed (probation window). `None` uses the rustrtc default.
     pub probation_max_packets: Option<u8>,
+    /// Max wait for a WebRTC leg's ICE+DTLS before degrading the fast-path
+    /// relay to transcoding. `None` uses `WEBRTC_RELAY_READY_TIMEOUT` (5s).
+    pub relay_ready_timeout: Option<std::time::Duration>,
 }
 
 impl LegConfig {
@@ -146,6 +149,7 @@ impl LegConfig {
             enable_ice_lite: false,
             enable_latching: true,
             probation_max_packets: None,
+            relay_ready_timeout: None,
         }
     }
 }
@@ -184,6 +188,9 @@ pub struct LegInner {
     /// `Drop` and before re-spawning, so stale arming tasks never pile up
     /// across negotiation churn / leg replacement.
     relay_arm_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Max wait for a WebRTC peer's ICE+DTLS before degrading the relay to
+    /// transcoding (from config; falls back to `WEBRTC_RELAY_READY_TIMEOUT`).
+    relay_ready_timeout: Option<std::time::Duration>,
     /// RTCP-derived quality (jitter / RTT / fraction lost) plus the remote SR
     /// packet count, updated lock-free by the RTCP listener task(s).
     rtcp_stats: Arc<LegRtcpStats>,
@@ -270,6 +277,7 @@ impl LegInner {
         codecs: Vec<CodecInfo>,
         comfort_noise: bool,
         comfort_noise_level_db: f32,
+        relay_ready_timeout: Option<std::time::Duration>,
         recorder_sender: Option<RecorderSender>,
     ) -> Result<Leg> {
         let first_codec = codecs.first().ok_or_else(|| anyhow!("no codecs"))?;
@@ -427,6 +435,7 @@ impl LegInner {
             observer_attached: Arc::new(AtomicBool::new(false)),
             observer_task: Mutex::new(None),
             relay_arm_task: Mutex::new(None),
+            relay_ready_timeout,
             rtcp_stats,
             rtcp_listener_tasks: Mutex::new(rtcp_listener_tasks),
             dtmf_send: parking_lot::Mutex::new(DtmfSendState::default()),
@@ -476,6 +485,7 @@ impl LegInner {
             cfg.codecs.clone(),
             cfg.comfort_noise,
             cfg.comfort_noise_level_db,
+            cfg.relay_ready_timeout,
             recorder_sender,
         )
     }
@@ -763,6 +773,9 @@ impl LegInner {
                 // application and are ready synchronously.
                 let has_webrtc_peer = self.pc.config().transport_mode == TransportMode::WebRtc
                     || peer_pc.config().transport_mode == TransportMode::WebRtc;
+                let ready_timeout = self
+                    .relay_ready_timeout
+                    .unwrap_or(WEBRTC_RELAY_READY_TIMEOUT);
                 if has_webrtc_peer {
                     let pc = self.pc.clone();
                     let peer = peer_pc.clone();
@@ -770,8 +783,11 @@ impl LegInner {
                     let rules = rules.clone();
                     let video_payload_types = video_payload_types.clone();
                     let on_arm_failed = on_arm_failed.clone();
+                    let leg_id = self.id.clone();
                     let handle = tokio::spawn(async move {
                         if let Err(error) = wait_and_arm_rewrite_relay(
+                            &leg_id,
+                            ready_timeout,
                             &pc,
                             &peer,
                             options,
@@ -780,7 +796,7 @@ impl LegInner {
                         )
                         .await
                         {
-                            tracing::warn!(%error, "fast-path relay arming failed");
+                            tracing::warn!(leg = %leg_id, %error, "fast-path relay arming failed");
                             if let Some(cb) = on_arm_failed.as_ref() {
                                 cb();
                             }
@@ -789,6 +805,8 @@ impl LegInner {
                     *self.relay_arm_task.lock() = Some(handle);
                 } else {
                     wait_and_arm_rewrite_relay(
+                        &self.id,
+                        ready_timeout,
                         &self.pc,
                         peer_pc,
                         *options,
@@ -1114,6 +1132,9 @@ impl rustrtc::peer_connection::RtpObserver for OutboundClockSync {
     }
 }
 
+/// Default max wait for a WebRTC peer's ICE+DTLS before degrading the fast-path
+/// relay to transcoding. Overridable per-call via `[media]
+/// relay_ready_timeout_secs` (`RtpConfig::relay_ready_timeout_secs`).
 const WEBRTC_RELAY_READY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Transports attach asynchronously relative to relay arming (a WebRTC
 /// destination's SRTP transport appears right after `wait_for_connected`);
@@ -1143,12 +1164,15 @@ async fn wait_rtp_transport(
 }
 
 async fn wait_and_arm_rewrite_relay(
+    leg: &LegId,
+    ready_timeout: Duration,
     source_pc: &PeerConnection,
     destination_pc: &PeerConnection,
     options: rustrtc::RtpRewriteBridgeOptions,
     rules: &[rustrtc::RtpRewriteRule],
     video_payload_types: &[u8],
 ) -> Result<()> {
+    let arm_started = std::time::Instant::now();
     let webrtc_pc = if source_pc.config().transport_mode == TransportMode::WebRtc {
         Some(source_pc)
     } else if destination_pc.config().transport_mode == TransportMode::WebRtc {
@@ -1158,9 +1182,20 @@ async fn wait_and_arm_rewrite_relay(
     };
 
     if let Some(pc) = webrtc_pc {
-        tokio::time::timeout(WEBRTC_RELAY_READY_TIMEOUT, pc.wait_for_connected())
+        let wait_started = std::time::Instant::now();
+        tokio::time::timeout(ready_timeout, pc.wait_for_connected())
             .await
-            .map_err(|_| anyhow!("timed out waiting for WebRTC DTLS/SRTP setup"))??;
+            .map_err(|_| {
+                anyhow!(
+                    "timed out waiting for WebRTC DTLS/SRTP setup after {}s",
+                    ready_timeout.as_secs()
+                )
+            })??;
+        tracing::debug!(
+            leg = %leg,
+            wait_ms = wait_started.elapsed().as_millis() as u64,
+            "fast-path relay: WebRTC leg ready"
+        );
     }
 
     let audio_source = wait_rtp_transport(source_pc, rustrtc::MediaKind::Audio, "source").await?;
@@ -1173,7 +1208,12 @@ async fn wait_and_arm_rewrite_relay(
         source_pc.clear_rtp_rewrite_bridge();
         let options = seed_rewrite_options_from_destination(destination_pc, rules, options);
         audio_source.bridge_rewrite_rules_to(audio_target, options, rules.to_vec());
-        debug!(video = false, "fast-path relay armed");
+        debug!(
+            leg = %leg,
+            video = false,
+            arm_ms = arm_started.elapsed().as_millis() as u64,
+            "fast-path relay armed"
+        );
         return Ok(());
     }
 
@@ -1223,7 +1263,12 @@ async fn wait_and_arm_rewrite_relay(
         video_source.bridge_rewrite_rules_to(video_target, options, video_rules);
     }
 
-    debug!(video = true, "fast-path relay armed");
+    debug!(
+        leg = %leg,
+        video = true,
+        arm_ms = arm_started.elapsed().as_millis() as u64,
+        "fast-path relay armed"
+    );
     Ok(())
 }
 
@@ -1410,6 +1455,7 @@ mod relay_policy_tests {
             comfort_noise_level_db: -35.0,
             enable_latching: true,
             probation_max_packets: None,
+            relay_ready_timeout: None,
             ice_servers,
             relay_only,
             enable_ice_lite: false,
@@ -1543,17 +1589,31 @@ mod tests {
         set_test_sender_transport(source.pc(), rustrtc::MediaKind::Audio, source_audio.clone());
         set_test_sender_transport(target.pc(), rustrtc::MediaKind::Audio, target_audio.clone());
 
-        let missing_video =
-            wait_and_arm_rewrite_relay(source.pc(), target.pc(), Default::default(), &[], &[96])
-                .await;
+        let missing_video = wait_and_arm_rewrite_relay(
+            &LegId::from("test-leg"),
+            Duration::from_secs(5),
+            source.pc(),
+            target.pc(),
+            Default::default(),
+            &[],
+            &[96],
+        )
+        .await;
         assert!(missing_video.is_err(), "video transports must be required");
 
         let source_video = test_rtp_transport().await;
         set_test_sender_transport(source.pc(), rustrtc::MediaKind::Video, source_video.clone());
 
-        let missing_target_video =
-            wait_and_arm_rewrite_relay(source.pc(), target.pc(), Default::default(), &[], &[96])
-                .await;
+        let missing_target_video = wait_and_arm_rewrite_relay(
+            &LegId::from("test-leg"),
+            Duration::from_secs(5),
+            source.pc(),
+            target.pc(),
+            Default::default(),
+            &[],
+            &[96],
+        )
+        .await;
         assert!(
             missing_target_video.is_err(),
             "target video transport must be required"
@@ -1562,9 +1622,17 @@ mod tests {
         let target_video = test_rtp_transport().await;
         set_test_sender_transport(target.pc(), rustrtc::MediaKind::Video, target_video.clone());
 
-        wait_and_arm_rewrite_relay(source.pc(), target.pc(), Default::default(), &[], &[96])
-            .await
-            .expect("relay should arm once all transports are ready");
+        wait_and_arm_rewrite_relay(
+            &LegId::from("test-leg"),
+            Duration::from_secs(5),
+            source.pc(),
+            target.pc(),
+            Default::default(),
+            &[],
+            &[96],
+        )
+        .await
+        .expect("relay should arm once all transports are ready");
 
         source.stop();
         target.stop();
@@ -1707,6 +1775,7 @@ mod tests {
             comfort_noise_level_db: -35.0,
             enable_latching: true,
             probation_max_packets: None,
+            relay_ready_timeout: None,
         };
         let a = LegInner::new("a", &cfg, None).expect("webrtc leg");
         let offer = a.create_offer().await.expect("create_offer");
@@ -1789,6 +1858,7 @@ mod tests {
             comfort_noise_level_db: -35.0,
             enable_latching: true,
             probation_max_packets: None,
+            relay_ready_timeout: None,
         };
         let leg = LegInner::new("video", &cfg, None).expect("video leg");
         let offer = leg.create_offer().await.expect("create_offer");
@@ -1848,6 +1918,7 @@ mod tests {
             comfort_noise_level_db: -35.0,
             enable_latching: true,
             probation_max_packets: None,
+            relay_ready_timeout: None,
         };
         let leg = LegInner::new("answerer", &cfg, None).expect("answerer leg");
 
@@ -1958,6 +2029,7 @@ mod tests {
             comfort_noise_level_db: -35.0,
             enable_latching: true,
             probation_max_packets: None,
+            relay_ready_timeout: None,
         };
 
         let leg = LegInner::new("caller-dtmf", &cfg, None).expect("leg");
@@ -2067,6 +2139,7 @@ mod p24_uac_test {
             comfort_noise_level_db: -35.0,
             enable_latching: true,
             probation_max_packets: None,
+            relay_ready_timeout: None,
         };
         let leg = LegInner::new("plain-rtp-av", &cfg, None).expect("leg");
         let offer = leg.create_offer().await.expect("offer");

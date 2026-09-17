@@ -1883,6 +1883,7 @@ impl SipServerInner {
             .with_probation_max_packets(proxy_config.latching_probation_max_packets)
             .with_comfort_noise(rtp.comfort_noise, rtp.comfort_noise_level_db)
             .with_ice_lite(rtp.ice_lite)
+            .with_relay_ready_timeout_secs(rtp.relay_ready_timeout_secs)
     }
 
     /// Hot-reload the full `[proxy]` section plus related platform settings
