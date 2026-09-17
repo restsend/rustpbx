@@ -6131,7 +6131,7 @@ impl SipSession {
                 .is_some();
 
             let has_bridge = self.media_profile.path == MediaPathMode::Anchored || self.media.bridge.is_some();
-            tracing::info!(
+            tracing::debug!(
                 session_id = %self.id,
                 has_bridge,
                 has_callee_leg,
