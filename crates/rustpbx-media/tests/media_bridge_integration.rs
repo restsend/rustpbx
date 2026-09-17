@@ -482,7 +482,7 @@ async fn file_recorder_writes_wav() {
     la.apply_sdp(&answer, rustrtc::SdpType::Answer)
         .await
         .expect("apply answer");
-    recording.start_recording(la.negotiated().unwrap(), path.clone(), 2, false, None)
+    recording.start_recording(la.negotiated().unwrap(), rustpbx_media::recorder::RecorderOption::new(path.clone()), 2, false, None)
         .await
         .expect("file output start");
 
@@ -827,6 +827,7 @@ async fn rtp_timeout_fires_on_inactive_webrtc_leg() {
         comfort_noise_level_db: -35.0,
         enable_latching: true,
         probation_max_packets: None,
+        relay_ready_timeout: None,
     };
     let mut mb = MediaBridge::new("it-rtp-webrtc");
     let a = LegInner::new("a", &cfg, None).unwrap();

@@ -224,8 +224,9 @@ callee_allow = []
 callee_deny = ["911"]
 
 # Recording quality
-samplerate = 8000       # Audio sample rate (Hz)
-ptime = 20              # Packetization time (ms)
+samplerate = 16000      # Resampled 16-bit PCM WAV output rate (Hz); optional
+ptime = 20              # File-recorder flush interval (ms); default 500
+stereo_swap = false     # true: callee left, caller right (stereo only)
 
 # Hybrid mode: force legacy WAV recorder even when [sipflow] is active
 # When true, SipFlow captures signalling only; [recording] handles media
@@ -245,6 +246,8 @@ enabled = true
 directions = ["inbound"]
 auto_start = true
 ```
+
+这些文件录音设置也适用于按需录音，单次通话的设置优先于服务器录音策略。显式设置 `samplerate`（8000–192000 Hz）时，输出重采样后的 16 位 PCM WAV；省略时保留按编码器选择的 WAV 格式。`ptime` 必须大于零，仅控制文件刷新间隔，不改变 RTP 打包间隔。这些设置不影响 SipFlow 报文采集。
 
 ### HTTP 录音上传
 

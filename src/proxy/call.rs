@@ -1331,6 +1331,9 @@ impl CallModule {
                 if overrides.ptime.is_some() {
                     merged.ptime = overrides.ptime;
                 }
+                if overrides.stereo_swap.is_some() {
+                    merged.stereo_swap = overrides.stereo_swap;
+                }
                 if overrides.path.is_some() {
                     merged.path = overrides.path.clone();
                 }
@@ -1451,6 +1454,9 @@ impl CallModule {
                 if existing.recorder_file.is_empty() {
                     existing.recorder_file = recorder_option.recorder_file.clone();
                 }
+                existing.samplerate = existing.samplerate.or(recorder_option.samplerate);
+                existing.ptime = existing.ptime.or(recorder_option.ptime);
+                existing.stereo_swap = existing.stereo_swap.or(recorder_option.stereo_swap);
             } else {
                 dialplan.recording.option = Some(recorder_option);
             }
@@ -1574,7 +1580,12 @@ impl CallModule {
         path.push(sanitized);
         path.set_extension("wav");
 
-        let option = RecorderOption::new(path.to_string_lossy().to_string());
+        let option = RecorderOption {
+            recorder_file: path.to_string_lossy().into_owned(),
+            samplerate: policy.samplerate,
+            ptime: policy.ptime,
+            stereo_swap: policy.stereo_swap,
+        };
         Some(option)
     }
 
@@ -3976,6 +3987,9 @@ mod tests {
     async fn default_resolve_partial_recording_policy_inherits_global_policy_fields() {
         let mut proxy_config = ProxyConfig::default();
         proxy_config.recording = Some(RecordingPolicy {
+            samplerate: Some(16000),
+            ptime: Some(30),
+            stereo_swap: Some(true),
             enabled: Some(true),
             recording_type: Some(crate::config::RecordingType::S3),
             bucket: Some("recordings".to_string()),
@@ -4018,6 +4032,7 @@ mod tests {
                     recording: Some(RecordingPolicy {
                         enabled: Some(true),
                         auto_start: Some(false),
+                        stereo_swap: Some(false),
                         ..Default::default()
                     }),
                     enable_recording: None,
@@ -4050,6 +4065,9 @@ mod tests {
             .recording
             .option
             .expect("merged policy should build recorder option");
+        assert_eq!(option.samplerate, Some(16000));
+        assert_eq!(option.ptime, Some(30));
+        assert_eq!(option.stereo_swap, Some(false));
         assert!(
             option
                 .recorder_file
