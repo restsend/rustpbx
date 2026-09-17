@@ -438,6 +438,11 @@ auto_start_at = "media" # default; use "answer" to wait for 200
 #   type = "s3"       — upload CDR JSON to S3-compatible object storage
 #   type = "http"     — POST CDR JSON to an HTTP webhook endpoint
 #
+# For any S3 storage (here, [recording], [sipflow.upload], voicemail):
+# `access_key` and `secret_key` are OPTIONAL. Omit both (or leave them blank)
+# for anonymous/public access to object stores that don't require credentials;
+# requests are then sent unsigned. Setting only one of the two is an error.
+#
 # When type = "database":
 #   - database_url     = None → use the main database (default)
 #   - table_name       = "rustpbx_call_records" (default)
@@ -504,8 +509,8 @@ subdirs = "daily"  # "none" | "daily" | "hourly"
 # vendor = "aws"
 # bucket = "my-recordings"
 # region = "us-east-1"
-# access_key = "AKID"
-# secret_key = "SECRET"
+# access_key = "AKID"   # optional; omit both keys for anonymous/public access
+# secret_key = "SECRET" # optional; omit both keys for anonymous/public access
 # endpoint = "https://s3.amazonaws.com"
 # root = "recordings"
 # media = true          # upload RTP as WAV when type=sipflow (default: true)

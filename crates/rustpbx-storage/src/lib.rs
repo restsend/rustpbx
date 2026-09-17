@@ -41,8 +41,15 @@ pub enum StorageConfig {
         bucket: String,
         #[serde(default)]
         region: String,
-        access_key: String,
-        secret_key: String,
+        /// Access key id. Omit (or leave empty) together with `secret_key` to
+        /// use anonymous/public access; S3-compatible stores that don't require
+        /// credentials then receive unsigned requests.
+        #[serde(default)]
+        access_key: Option<String>,
+        /// Secret access key. Omit (or leave empty) together with `access_key`
+        /// for anonymous/public access.
+        #[serde(default)]
+        secret_key: Option<String>,
         endpoint: Option<String>,
         prefix: Option<String>,
     },
@@ -53,6 +60,33 @@ impl Default for StorageConfig {
         StorageConfig::Local {
             path: "storage".to_string(),
         }
+    }
+}
+
+/// Normalize an optional credential: trims whitespace and treats an empty
+/// string as absent.
+fn normalize_credential(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// Normalize an access/secret key pair shared by the AWS-style and Azure
+/// backends. Returns `Some((access_key, secret_key))` when both are set,
+/// `None` for anonymous/public access, and an error when only one of the two
+/// is provided (a partial credential pair is a misconfiguration).
+fn normalize_s3_credentials(
+    access_key: Option<String>,
+    secret_key: Option<String>,
+) -> Result<Option<(String, String)>> {
+    match (access_key, secret_key) {
+        (Some(access_key), Some(secret_key)) => Ok(Some((access_key, secret_key))),
+        (None, None) => Ok(None),
+        _ => anyhow::bail!(
+            "access_key and secret_key must both be set, or neither for anonymous access"
+        ),
     }
 }
 
@@ -103,6 +137,8 @@ impl Storage {
                     .filter(|endpoint| !endpoint.is_empty())
                     .map(str::to_string);
                 let bucket = bucket.trim_matches('/').to_string();
+                let access_key = normalize_credential(access_key);
+                let secret_key = normalize_credential(secret_key);
                 let (inner, signer): (Arc<dyn ObjectStore>, Option<Arc<dyn Signer>>) = match vendor
                 {
                     S3Vendor::AWS
@@ -110,11 +146,23 @@ impl Storage {
                     | S3Vendor::Tencent
                     | S3Vendor::Minio
                     | S3Vendor::DigitalOcean => {
+                        let credentials =
+                            normalize_s3_credentials(access_key.clone(), secret_key.clone())?;
                         let mut builder = AmazonS3Builder::new()
                             .with_bucket_name(&bucket)
-                            .with_region(region)
-                            .with_access_key_id(access_key)
-                            .with_secret_access_key(secret_key);
+                            .with_region(region);
+                        match credentials.as_ref() {
+                            Some((access_key, secret_key)) => {
+                                builder = builder
+                                    .with_access_key_id(access_key)
+                                    .with_secret_access_key(secret_key);
+                            }
+                            // No credentials → anonymous/public access; send
+                            // unsigned requests instead of probing env/IMDS.
+                            None => {
+                                builder = builder.with_skip_signature(true);
+                            }
+                        }
 
                         if *vendor == S3Vendor::Aliyun {
                             builder = builder.with_virtual_hosted_style_request(true);
@@ -126,29 +174,54 @@ impl Storage {
                             }
                         }
                         let store = Arc::new(builder.build()?);
-                        let signer = store.clone();
-                        (store, Some(signer))
+                        let signer: Option<Arc<dyn Signer>> = credentials
+                            .as_ref()
+                            .map(|_| store.clone() as Arc<dyn Signer>);
+                        (store as Arc<dyn ObjectStore>, signer)
                     }
                     S3Vendor::GCP => {
-                        let instance = Arc::new(
-                            GoogleCloudStorageBuilder::new()
-                                .with_bucket_name(&bucket)
-                                .with_service_account_key(secret_key)
-                                .build()?,
-                        );
-                        let signer = instance.clone();
-                        (instance, Some(signer))
+                        // GCS authenticates with a service-account key supplied
+                        // via `secret_key`; `access_key` is accepted but ignored.
+                        // Only the service-account key (or neither) is required.
+                        if access_key.is_some() && secret_key.is_none() {
+                            anyhow::bail!(
+                                "gcp storage requires secret_key (service account key), \
+                                 or neither key for anonymous access"
+                            );
+                        }
+                        let mut builder = GoogleCloudStorageBuilder::new().with_bucket_name(&bucket);
+                        match secret_key.as_ref() {
+                            Some(service_account_key) => {
+                                builder = builder.with_service_account_key(service_account_key);
+                            }
+                            None => {
+                                builder = builder.with_skip_signature(true);
+                            }
+                        }
+                        let store = Arc::new(builder.build()?);
+                        let signer: Option<Arc<dyn Signer>> = secret_key
+                            .as_ref()
+                            .map(|_| store.clone() as Arc<dyn Signer>);
+                        (store as Arc<dyn ObjectStore>, signer)
                     }
                     S3Vendor::Azure => {
-                        let instance = Arc::new(
-                            MicrosoftAzureBuilder::new()
-                                .with_container_name(&bucket)
-                                .with_account(access_key)
-                                .with_access_key(secret_key)
-                                .build()?,
-                        );
-                        let signer = instance.clone();
-                        (instance, Some(signer))
+                        let credentials =
+                            normalize_s3_credentials(access_key, secret_key)?;
+                        let mut builder =
+                            MicrosoftAzureBuilder::new().with_container_name(&bucket);
+                        match credentials.as_ref() {
+                            Some((account, access_key)) => {
+                                builder = builder.with_account(account).with_access_key(access_key);
+                            }
+                            None => {
+                                builder = builder.with_skip_signature(true);
+                            }
+                        }
+                        let store = Arc::new(builder.build()?);
+                        let signer: Option<Arc<dyn Signer>> = credentials
+                            .as_ref()
+                            .map(|_| store.clone() as Arc<dyn Signer>);
+                        (store as Arc<dyn ObjectStore>, signer)
                     }
                 };
 
@@ -337,8 +410,8 @@ mod tests {
             vendor: S3Vendor::AWS,
             bucket: "recordings-bucket".to_string(),
             region: "oss-cn-hangzhou".to_string(),
-            access_key: "test-access-key".to_string(),
-            secret_key: "test-secret-key".to_string(),
+            access_key: Some("test-access-key".to_string()),
+            secret_key: Some("test-secret-key".to_string()),
             endpoint,
             prefix: None,
         }
@@ -568,6 +641,86 @@ mod tests {
         );
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_anonymous_s3_without_credentials() -> Result<()> {
+        let storage = Storage::new(&StorageConfig::S3 {
+            vendor: S3Vendor::Minio,
+            bucket: "public-bucket".to_string(),
+            region: "us-east-1".to_string(),
+            access_key: None,
+            secret_key: None,
+            endpoint: Some("http://127.0.0.1:9000".to_string()),
+            prefix: None,
+        })?;
+        assert!(!storage.is_local());
+        // Anonymous stores cannot sign, so callers fall back to raw public URLs.
+        assert!(!storage.supports_presign());
+        assert_eq!(
+            storage.object_key_from_url("http://127.0.0.1:9000/public-bucket/a.wav"),
+            Some("a.wav".to_string())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_blank_credentials_are_anonymous() -> Result<()> {
+        let storage = Storage::new(&StorageConfig::S3 {
+            vendor: S3Vendor::Minio,
+            bucket: "public-bucket".to_string(),
+            region: "us-east-1".to_string(),
+            access_key: Some("  ".to_string()),
+            secret_key: Some(String::new()),
+            endpoint: Some("http://127.0.0.1:9000".to_string()),
+            prefix: None,
+        })?;
+        assert!(!storage.supports_presign());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_partial_credentials_rejected() {
+        let result = Storage::new(&StorageConfig::S3 {
+            vendor: S3Vendor::Minio,
+            bucket: "b".to_string(),
+            region: "us-east-1".to_string(),
+            access_key: Some("only-access".to_string()),
+            secret_key: None,
+            endpoint: Some("http://127.0.0.1:9000".to_string()),
+            prefix: None,
+        });
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_gcp_anonymous_builds() -> Result<()> {
+        let storage = Storage::new(&StorageConfig::S3 {
+            vendor: S3Vendor::GCP,
+            bucket: "public".to_string(),
+            region: "us-central1".to_string(),
+            access_key: None,
+            secret_key: None,
+            endpoint: None,
+            prefix: None,
+        })?;
+        assert!(!storage.supports_presign());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_gcp_access_key_without_secret_rejected() {
+        // GCS has no access-key concept: a lone access key is an error.
+        let result = Storage::new(&StorageConfig::S3 {
+            vendor: S3Vendor::GCP,
+            bucket: "bucket".to_string(),
+            region: "us-central1".to_string(),
+            access_key: Some("access".to_string()),
+            secret_key: None,
+            endpoint: None,
+            prefix: None,
+        });
+        assert!(result.is_err());
+    }
 }
 
 #[cfg(test)]
@@ -583,8 +736,8 @@ mod aliyun_tests {
             bucket: String::new(),
             region: String::new(),
             endpoint: Some("https://test-bucket.oss-cn-beijing.aliyuncs.com".into()),
-            access_key: "test".into(),
-            secret_key: "test".into(),
+            access_key: Some("test".into()),
+            secret_key: Some("test".into()),
             prefix: None,
         })?;
         for key in ["recordings/day/call.wav", "sipflow/day/call.jsonl"] {
@@ -612,8 +765,8 @@ mod aliyun_tests {
                 bucket: "bucket".into(),
                 region: "us-east-1".into(),
                 endpoint: Some(ep.into()),
-                access_key: "test".into(),
-                secret_key: "test".into(),
+                access_key: Some("test".into()),
+                secret_key: Some("test".into()),
                 prefix: None,
             })?;
             let raw = "https://objects.example.com/bucket/nested/file.wav";

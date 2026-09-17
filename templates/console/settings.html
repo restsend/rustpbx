@@ -1345,7 +1345,7 @@
                                         <div class="grid gap-3 md:grid-cols-2">
                                             <div>
                                                 <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">S3 Vendor</label>
-                                                <select x-model="storageDraft.callrecord_s3_vendor" :disabled="sipflowProcessing"
+                                                <select x-model="sipflowDraft.s3_vendor" :disabled="sipflowProcessing"
                                                     class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                                     <option value="aws">AWS S3</option>
                                                     <option value="gcp">Google Cloud Storage</option>
@@ -1358,30 +1358,36 @@
                                             </div>
                                             <div>
                                                 <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Region</label>
-                                                <input type="text" x-model="storageDraft.callrecord_s3_region" :disabled="sipflowProcessing"
+                                                <input type="text" x-model="sipflowDraft.s3_region" :disabled="sipflowProcessing"
                                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" placeholder="us-east-1">
                                             </div>
                                             <div>
                                                 <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Bucket</label>
-                                                <input type="text" x-model="storageDraft.callrecord_s3_bucket" :disabled="sipflowProcessing"
+                                                <input type="text" x-model="sipflowDraft.s3_bucket" :disabled="sipflowProcessing"
                                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" placeholder="my-recordings">
                                             </div>
                                             <div>
-                                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Endpoint (optional)</label>
-                                                <input type="text" x-model="storageDraft.callrecord_s3_endpoint" :disabled="sipflowProcessing"
+                                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Endpoint</label>
+                                                <input type="text" x-model="sipflowDraft.s3_endpoint" :disabled="sipflowProcessing"
                                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" placeholder="https://s3.amazonaws.com">
                                             </div>
                                             <div>
-                                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Access Key</label>
-                                                <input type="password" x-model="storageDraft.callrecord_s3_access_key" :disabled="sipflowProcessing"
+                                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Object Prefix</label>
+                                                <input type="text" x-model="sipflowDraft.s3_root" :disabled="sipflowProcessing"
+                                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" placeholder="sipflow">
+                                            </div>
+                                            <div>
+                                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Access Key (optional)</label>
+                                                <input type="password" x-model="sipflowDraft.s3_access_key" :disabled="sipflowProcessing"
                                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                             </div>
                                             <div>
-                                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Secret Key</label>
-                                                <input type="password" x-model="storageDraft.callrecord_s3_secret_key" :disabled="sipflowProcessing"
+                                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Secret Key (optional)</label>
+                                                <input type="password" x-model="sipflowDraft.s3_secret_key" :disabled="sipflowProcessing"
                                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                             </div>
                                         </div>
+                                        <p class="text-xs text-slate-400">Leave both credential fields blank for anonymous/public access (no signing).</p>
                                     </div>
                                 </div>
 
@@ -1678,12 +1684,12 @@
                                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" placeholder="https://s3.amazonaws.com">
                                 </div>
                                 <div>
-                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Access Key</label>
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Access Key (optional)</label>
                                     <input type="password" x-model="storageDraft.callrecord_s3_access_key" :disabled="storageProcessing"
                                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                 </div>
                                 <div>
-                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Secret Key</label>
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Secret Key (optional)</label>
                                     <input type="password" x-model="storageDraft.callrecord_s3_secret_key" :disabled="storageProcessing"
                                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                 </div>
@@ -1693,6 +1699,7 @@
                                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" placeholder="cdr/">
                                 </div>
                             </div>
+                            <p class="text-xs text-slate-400">Leave both credential fields blank for anonymous/public access (no signing).</p>
                             <div class="flex items-center justify-end gap-3 border-t border-slate-100 pt-4">
                                 <button type="button"
                                     class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-600 shadow-sm transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-200 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
@@ -5932,10 +5939,17 @@
                     const s3Region = this.normalizeOptionalString(this.storageDraft.callrecord_s3_region);
                     const s3AccessKey = this.normalizeOptionalString(this.storageDraft.callrecord_s3_access_key);
                     const s3SecretKey = this.normalizeOptionalString(this.storageDraft.callrecord_s3_secret_key);
-                    if (!s3Vendor || !s3Bucket || !s3Region || !s3AccessKey || !s3SecretKey) {
+                    if (!s3Vendor || !s3Bucket || !s3Region) {
                         this.$dispatch('toast', {
                             title: 'Missing S3 fields',
-                            message: 'Vendor, bucket, region, access key, and secret key are required.',
+                            message: 'Vendor, bucket, and region are required.',
+                        });
+                        return;
+                    }
+                    if ((s3AccessKey && !s3SecretKey) || (!s3AccessKey && s3SecretKey)) {
+                        this.$dispatch('toast', {
+                            title: 'Incomplete credentials',
+                            message: 'Provide both access key and secret key, or leave both blank for anonymous access.',
                         });
                         return;
                     }
@@ -6033,6 +6047,9 @@
                     }
                 }
 
+                const upload = (config.upload && config.upload.type) ? config.upload : null;
+                const isS3Upload = upload?.type === 's3';
+
                 this.sipflowDraft = {
                     backend_type: backendType,
                     // Local backend
@@ -6045,13 +6062,66 @@
                     remote_timeout_secs: backendType === 'remote' ? (config.timeout_secs || 10) : 10,
                     // Media & S3 upload
                     media_recording_enabled: config.media_recording_enabled !== false,
-                    s3_upload_enabled: config.s3_upload_enabled || false,
-                    s3_upload_media: config.s3_upload_media !== false,
-                    s3_upload_signaling: config.s3_upload_signaling !== false,
+                    s3_upload_enabled: !!upload,
+                    s3_upload_media: upload?.media !== false,
+                    s3_upload_signaling: upload?.signaling !== false,
+                    s3_vendor: isS3Upload ? (upload.vendor || 'aws') : 'aws',
+                    s3_bucket: isS3Upload ? (upload.bucket || '') : '',
+                    s3_region: isS3Upload ? (upload.region || '') : '',
+                    s3_endpoint: isS3Upload ? (upload.endpoint || '') : '',
+                    s3_root: isS3Upload ? (upload.root || 'sipflow') : 'sipflow',
+                    s3_access_key: '',
+                    s3_secret_key: '',
+                    // Preserve a non-S3 (e.g. HTTP) upload config that this UI
+                    // cannot edit, so saving other settings doesn't drop it.
+                    existing_upload: upload,
                 };
             },
             resetSipFlowDraft() {
                 this.initSipFlowDraft();
+            },
+            buildSipFlowUpload() {
+                if (!this.sipflowDraft.s3_upload_enabled) {
+                    // Preserve an existing non-S3 (e.g. HTTP) upload config that
+                    // this UI cannot edit.
+                    const existing = this.sipflowDraft.existing_upload;
+                    if (existing && existing.type && existing.type !== 's3') {
+                        return existing;
+                    }
+                    return null;
+                }
+                const vendor = this.normalizeOptionalString(this.sipflowDraft.s3_vendor);
+                const bucket = this.normalizeOptionalString(this.sipflowDraft.s3_bucket);
+                const region = this.normalizeOptionalString(this.sipflowDraft.s3_region);
+                const endpoint = this.normalizeOptionalString(this.sipflowDraft.s3_endpoint);
+                const accessKey = this.normalizeOptionalString(this.sipflowDraft.s3_access_key);
+                const secretKey = this.normalizeOptionalString(this.sipflowDraft.s3_secret_key);
+                if (!vendor || !bucket || !region || !endpoint) {
+                    this.$dispatch('toast', {
+                        title: this.tt('settings_page.missing_information'),
+                        message: 'S3 upload requires vendor, bucket, region, and endpoint.',
+                    });
+                    return undefined;
+                }
+                if ((accessKey && !secretKey) || (!accessKey && secretKey)) {
+                    this.$dispatch('toast', {
+                        title: 'Incomplete credentials',
+                        message: 'Provide both access key and secret key, or leave both blank for anonymous access.',
+                    });
+                    return undefined;
+                }
+                return {
+                    type: 's3',
+                    vendor,
+                    bucket,
+                    region,
+                    endpoint,
+                    root: this.normalizeOptionalString(this.sipflowDraft.s3_root) || 'sipflow',
+                    media: !!this.sipflowDraft.s3_upload_media,
+                    signaling: !!this.sipflowDraft.s3_upload_signaling,
+                    access_key: accessKey,
+                    secret_key: secretKey,
+                };
             },
             async saveSipFlowSettings() {
                 if (this.sipflowProcessing) {
@@ -6091,6 +6161,14 @@
                         nodes,
                         timeout_secs: this.sipflowDraft.remote_timeout_secs || 10,
                     };
+                }
+
+                if (backendType !== 'none') {
+                    const uploadConfig = this.buildSipFlowUpload();
+                    if (uploadConfig === undefined) {
+                        return; // validation failed; toast already dispatched
+                    }
+                    config.upload = uploadConfig;
                 }
 
                 const body = {
@@ -6151,10 +6229,17 @@
                 const endpoint = this.normalizeOptionalString(this.storageDraft.callrecord_s3_endpoint);
                 const root = this.normalizeOptionalString(this.storageDraft.callrecord_s3_root);
 
-                if (!vendor || !bucket || !region || !access_key || !secret_key) {
+                if (!vendor || !bucket || !region) {
                     this.$dispatch('toast', {
                         title: 'Missing information',
-                        message: 'Vendor, bucket, region, access key, and secret key are required for S3 test.',
+                        message: 'Vendor, bucket, and region are required for S3 test.',
+                    });
+                    return;
+                }
+                if ((access_key && !secret_key) || (!access_key && secret_key)) {
+                    this.$dispatch('toast', {
+                        title: 'Incomplete credentials',
+                        message: 'Provide both access key and secret key, or leave both blank for anonymous access.',
                     });
                     return;
                 }

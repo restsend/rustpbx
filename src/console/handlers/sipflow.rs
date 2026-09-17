@@ -90,6 +90,7 @@ async fn get_settings(
                     compress,
                     compress_level,
                     shards,
+                    upload,
                     ..
                 } => (
                     "local",
@@ -101,7 +102,8 @@ async fn get_settings(
                         "id_cache_size": id_cache_size,
                         "compress": compress,
                         "compress_level": compress_level,
-                        "shards": shards
+                        "shards": shards,
+                        "upload": sipflow_upload_json(upload.as_ref()),
                     }),
                 ),
                 SipFlowConfig::Remote {
@@ -109,6 +111,7 @@ async fn get_settings(
                     udp_addr,
                     http_addr,
                     timeout_secs,
+                    upload,
                     ..
                 } => {
                     let mut resolved = nodes.clone();
@@ -124,7 +127,8 @@ async fn get_settings(
                         "remote",
                         json!({
                             "nodes": resolved,
-                            "timeout_secs": timeout_secs
+                            "timeout_secs": timeout_secs,
+                            "upload": sipflow_upload_json(upload.as_ref()),
                         }),
                     )
                 }
@@ -139,6 +143,152 @@ async fn get_settings(
         config: config_json,
     })
     .into_response()
+}
+
+/// Serialize the optional `[sipflow.upload]` section for the console UI.
+/// Secrets are never exposed; only whether credentials are configured is sent.
+fn sipflow_upload_json(upload: Option<&crate::config::SipFlowUploadConfig>) -> serde_json::Value {
+    use crate::config::SipFlowUploadConfig;
+    match upload {
+        None => json!(null),
+        Some(SipFlowUploadConfig::S3 {
+            vendor,
+            bucket,
+            region,
+            access_key,
+            secret_key,
+            endpoint,
+            root,
+            signaling,
+            media,
+            ..
+        }) => json!({
+            "type": "s3",
+            "vendor": vendor,
+            "bucket": bucket,
+            "region": region,
+            "endpoint": endpoint,
+            "root": root,
+            "media": media,
+            "signaling": signaling,
+            "has_credentials": access_key.is_some() || secret_key.is_some(),
+        }),
+        Some(SipFlowUploadConfig::Http {
+            url,
+            signaling,
+            media,
+            ..
+        }) => json!({
+            "type": "http",
+            "url": url,
+            "media": media,
+            "signaling": signaling,
+        }),
+    }
+}
+
+/// Apply the optional `upload` object from an [`UpdateSettingsRequest`] to the
+/// `[sipflow]` table. A missing/null upload removes the section. Credentials are
+/// optional: omitting both access and secret key selects anonymous/public
+/// access to the bucket.
+fn apply_sipflow_upload(
+    table: &mut toml_edit::Table,
+    config: &serde_json::Value,
+) -> Result<(), String> {
+    let Some(upload) = config.get("upload").filter(|value| !value.is_null()) else {
+        table.remove("upload");
+        return Ok(());
+    };
+
+    let mut upload_table = InlineTable::new();
+    match upload.get("type").and_then(|value| value.as_str()) {
+        Some("s3") => {
+            let vendor = upload
+                .get("vendor")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .trim();
+            let bucket = upload
+                .get("bucket")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .trim();
+            let region = upload
+                .get("region")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .trim();
+            let endpoint = upload
+                .get("endpoint")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .trim();
+            if vendor.is_empty() || bucket.is_empty() || region.is_empty() || endpoint.is_empty() {
+                return Err(
+                    "S3 upload requires vendor, bucket, region, and endpoint".to_string(),
+                );
+            }
+            upload_table.insert("type", "s3".into());
+            upload_table.insert("vendor", vendor.into());
+            upload_table.insert("bucket", bucket.into());
+            upload_table.insert("region", region.into());
+            upload_table.insert("endpoint", endpoint.into());
+            let root = upload
+                .get("root")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("sipflow");
+            upload_table.insert("root", root.into());
+            if let Some(access_key) = upload
+                .get("access_key")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                upload_table.insert("access_key", access_key.into());
+            }
+            if let Some(secret_key) = upload
+                .get("secret_key")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                upload_table.insert("secret_key", secret_key.into());
+            }
+            if let Some(media) = upload.get("media").and_then(|value| value.as_bool()) {
+                upload_table.insert("media", media.into());
+            }
+            if let Some(signaling) = upload.get("signaling").and_then(|value| value.as_bool()) {
+                upload_table.insert("signaling", signaling.into());
+            }
+        }
+        Some("http") => {
+            let url = upload
+                .get("url")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .trim();
+            if url.is_empty() {
+                return Err("HTTP upload requires a url".to_string());
+            }
+            upload_table.insert("type", "http".into());
+            upload_table.insert("url", url.into());
+            if let Some(media) = upload.get("media").and_then(|value| value.as_bool()) {
+                upload_table.insert("media", media.into());
+            }
+            if let Some(signaling) = upload.get("signaling").and_then(|value| value.as_bool()) {
+                upload_table.insert("signaling", signaling.into());
+            }
+        }
+        other => {
+            let label = other.unwrap_or("<missing>");
+            return Err(format!("Invalid upload type: {label}"));
+        }
+    }
+
+    table["upload"] = toml_edit::value(upload_table);
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -200,6 +350,13 @@ async fn update_settings(
             table.remove("memtable_size_mb");
             table.remove("block_cache_capacity_mb");
             table.remove("flowdb_sync_mode");
+            if let Err(err) = apply_sipflow_upload(table, &payload.config) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": err })),
+                )
+                    .into_response();
+            }
         }
         "remote" => {
             table["type"] = value("remote");
@@ -248,6 +405,13 @@ async fn update_settings(
             table.remove("memtable_size_mb");
             table.remove("block_cache_capacity_mb");
             table.remove("flowdb_sync_mode");
+            if let Err(err) = apply_sipflow_upload(table, &payload.config) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": err })),
+                )
+                    .into_response();
+            }
         }
         _ => {
             return (
@@ -575,4 +739,107 @@ fn parse_datetime(s: &str) -> Option<DateTime<chrono::Local>> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn apply(config: serde_json::Value) -> Result<toml_edit::Table, String> {
+        let mut table = toml_edit::Table::new();
+        apply_sipflow_upload(&mut table, &config)?;
+        Ok(table)
+    }
+
+    #[test]
+    fn s3_upload_without_credentials_omits_keys_and_deserializes() {
+        // Mirror the handler's write order: backend fields first, upload last.
+        let mut table = toml_edit::Table::new();
+        table["type"] = value("local");
+        table["root"] = value("./sipflow");
+        apply_sipflow_upload(
+            &mut table,
+            &json!({
+                "upload": {
+                    "type": "s3",
+                    "vendor": "minio",
+                    "bucket": "public",
+                    "region": "us-east-1",
+                    "endpoint": "http://127.0.0.1:9000",
+                    "root": "sipflow",
+                    "media": true,
+                    "signaling": true,
+                }
+            }),
+        )
+        .expect("apply");
+
+        let text = table.to_string();
+        assert!(!text.contains("access_key"), "unexpected credential: {text}");
+        assert!(!text.contains("secret_key"), "unexpected credential: {text}");
+
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            sipflow: crate::config::SipFlowConfig,
+        }
+        let mut doc = toml_edit::DocumentMut::new();
+        doc["sipflow"] = toml_edit::Item::Table(table);
+        let parsed: crate::config::SipFlowConfig =
+            toml::from_str::<Wrapper>(&doc.to_string())
+                .expect("roundtrip")
+                .sipflow;
+        let crate::config::SipFlowConfig::Local {
+            upload: Some(upload),
+            ..
+        } = parsed
+        else {
+            panic!("expected local config with upload");
+        };
+        let crate::config::SipFlowUploadConfig::S3 {
+            access_key,
+            secret_key,
+            ..
+        } = upload
+        else {
+            panic!("expected s3 upload");
+        };
+        assert_eq!(access_key, None);
+        assert_eq!(secret_key, None);
+    }
+
+    #[test]
+    fn s3_upload_with_credentials_persists_keys() {
+        let table = apply(json!({
+            "upload": {
+                "type": "s3",
+                "vendor": "minio",
+                "bucket": "private",
+                "region": "us-east-1",
+                "endpoint": "http://127.0.0.1:9000",
+                "root": "sipflow",
+                "access_key": "ak",
+                "secret_key": "sk",
+            }
+        }))
+        .expect("apply");
+
+        let text = table.to_string();
+        assert!(text.contains("access_key = \"ak\""), "{text}");
+        assert!(text.contains("secret_key = \"sk\""), "{text}");
+    }
+
+    #[test]
+    fn missing_upload_removes_section() {
+        let mut table = toml_edit::Table::new();
+        table["upload"] = toml_edit::value(toml_edit::InlineTable::new());
+
+        apply_sipflow_upload(&mut table, &json!({})).expect("apply");
+
+        assert!(!table.contains_key("upload"));
+    }
+
+    #[test]
+    fn invalid_s3_upload_rejected() {
+        assert!(apply(json!({"upload": {"type": "s3", "vendor": "minio"}})).is_err());
+    }
 }

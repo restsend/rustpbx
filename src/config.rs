@@ -740,8 +740,14 @@ pub enum CallRecordStorageConfig {
         vendor: S3Vendor,
         bucket: String,
         region: String,
-        access_key: String,
-        secret_key: String,
+        /// Omit (or leave empty) together with `secret_key` for anonymous /
+        /// public access to S3-compatible stores that don't require keys.
+        #[serde(default)]
+        access_key: Option<String>,
+        /// Omit (or leave empty) together with `access_key` for anonymous /
+        /// public access.
+        #[serde(default)]
+        secret_key: Option<String>,
         #[serde(default)]
         endpoint: Option<String>,
         #[serde(default = "default_call_record_root")]
@@ -2595,6 +2601,74 @@ mod tests {
             config.callrecord.as_ref().unwrap().storage,
             CallRecordStorageConfig::S3 { .. }
         ));
+    }
+
+    #[test]
+    fn test_config_parses_s3_without_credentials_as_anonymous() {
+        let toml_str = r#"
+            http_addr = "0.0.0.0:8080"
+
+            [proxy]
+            addr = "0.0.0.0"
+
+            [callrecord]
+            type = "s3"
+            vendor = "minio"
+            bucket = "public"
+            region = "us-east-1"
+            endpoint = "http://127.0.0.1:9000"
+
+            [recording]
+            enabled = true
+            type = "s3"
+            vendor = "minio"
+            bucket = "public"
+            region = "us-east-1"
+            endpoint = "http://127.0.0.1:9000"
+
+            [sipflow]
+            type = "local"
+            root = "./sipflow"
+
+            [sipflow.upload]
+            type = "s3"
+            vendor = "minio"
+            bucket = "public"
+            region = "us-east-1"
+            endpoint = "http://127.0.0.1:9000"
+            root = "sipflow"
+        "#;
+        let config: Config = toml::from_str(toml_str).expect("Config should parse");
+
+        let CallRecordStorageConfig::S3 {
+            access_key,
+            secret_key,
+            ..
+        } = &config.callrecord.expect("callrecord").storage
+        else {
+            panic!("expected s3 callrecord storage");
+        };
+        assert!(access_key.is_none());
+        assert!(secret_key.is_none());
+
+        let policy = config.recording.expect("recording policy");
+        assert!(policy.access_key.is_none());
+        assert!(policy.secret_key.is_none());
+
+        let upload = match config.sipflow.expect("sipflow") {
+            SipFlowConfig::Local { upload, .. } => upload,
+            SipFlowConfig::Remote { .. } => panic!("expected local sipflow backend"),
+        };
+        let Some(SipFlowUploadConfig::S3 {
+            access_key,
+            secret_key,
+            ..
+        }) = upload
+        else {
+            panic!("expected s3 sipflow upload");
+        };
+        assert!(access_key.is_none());
+        assert!(secret_key.is_none());
     }
 
     #[test]

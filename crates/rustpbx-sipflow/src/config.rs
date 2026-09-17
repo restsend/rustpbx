@@ -73,8 +73,14 @@ pub enum SipFlowUploadConfig {
         bucket: String,
         #[serde(default)]
         region: String,
-        access_key: String,
-        secret_key: String,
+        /// Omit (or leave empty) together with `secret_key` for anonymous /
+        /// public access to S3-compatible stores that don't require keys.
+        #[serde(default)]
+        access_key: Option<String>,
+        /// Omit (or leave empty) together with `access_key` for anonymous /
+        /// public access.
+        #[serde(default)]
+        secret_key: Option<String>,
         endpoint: String,
         root: String,
         #[serde(default)]

@@ -863,8 +863,14 @@ fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<Jso
             profile.insert("region", json!(region));
             profile.insert("endpoint", json!(endpoint));
             profile.insert("root", json!(root));
-            profile.insert("access_key", json!(mask_basic(access_key)));
-            profile.insert("secret_key", json!(mask_basic(secret_key)));
+            profile.insert(
+                "access_key",
+                json!(access_key.as_deref().map(mask_basic).unwrap_or_default()),
+            );
+            profile.insert(
+                "secret_key",
+                json!(secret_key.as_deref().map(mask_basic).unwrap_or_default()),
+            );
             if let Some(flag) = with_media {
                 profile.insert("with_media", json!(flag));
             }
@@ -1623,8 +1629,10 @@ pub(crate) struct TestStoragePayload {
     pub vendor: crate::storage::S3Vendor,
     pub bucket: String,
     pub region: String,
-    pub access_key: String,
-    pub secret_key: String,
+    #[serde(default)]
+    pub access_key: Option<String>,
+    #[serde(default)]
+    pub secret_key: Option<String>,
     pub endpoint: Option<String>,
     pub root: Option<String>,
 }
@@ -1653,8 +1661,12 @@ enum CallRecordStoragePayload {
         vendor: String,
         bucket: String,
         region: String,
-        access_key: String,
-        secret_key: String,
+        /// Optional; omitted/empty together selects anonymous/public access.
+        #[serde(default)]
+        access_key: Option<String>,
+        /// Optional; omitted/empty together selects anonymous/public access.
+        #[serde(default)]
+        secret_key: Option<String>,
         #[serde(default)]
         endpoint: Option<String>,
         #[serde(default)]
@@ -4080,6 +4092,60 @@ mod tests {
         let items = parsed["items"].as_array().expect("items");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["name"], "viewer");
+    }
+
+    fn anonymous_s3_callrecord_config() -> CallRecordConfig {
+        CallRecordConfig {
+            channel_capacity: 2048,
+            batch_size: 4,
+            track_queue_latency: false,
+            storage: CallRecordStorageConfig::S3 {
+                vendor: crate::storage::S3Vendor::Minio,
+                bucket: "public".into(),
+                region: "us-east-1".into(),
+                access_key: None,
+                secret_key: None,
+                endpoint: Some("http://127.0.0.1:9000".into()),
+                root: "cdr".into(),
+                with_media: None,
+                keep_media_copy: None,
+            },
+        }
+    }
+
+    #[test]
+    fn s3_profile_without_credentials_renders_empty_masked_keys() {
+        let mut config = crate::config::Config::default();
+        config.callrecord = Some(anonymous_s3_callrecord_config());
+
+        let (storage, profiles) = build_storage_profiles(&config);
+
+        assert_eq!(storage["mode"], "s3");
+        let profile = profiles
+            .iter()
+            .find(|profile| profile["id"] == "callrecord-s3")
+            .expect("s3 profile");
+        assert_eq!(profile["config"]["access_key"], "");
+        assert_eq!(profile["config"]["secret_key"], "");
+    }
+
+    #[test]
+    fn callrecord_s3_payload_omits_blank_credentials() {
+        let payload = CallRecordStoragePayload::S3 {
+            vendor: "minio".into(),
+            bucket: "public".into(),
+            region: "us-east-1".into(),
+            access_key: None,
+            secret_key: None,
+            endpoint: Some("http://127.0.0.1:9000".into()),
+            root: Some("cdr".into()),
+            with_media: None,
+            keep_media_copy: None,
+        };
+        let item = serialize_to_item(&payload, "callrecord").expect("serialize");
+        let text = item.to_string();
+        assert!(!text.contains("access_key"), "unexpected credentials: {text}");
+        assert!(!text.contains("secret_key"), "unexpected credentials: {text}");
     }
 
     #[test]

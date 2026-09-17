@@ -54,8 +54,10 @@ impl RecordingUploadHook {
                 .filter(|endpoint| !endpoint.is_empty())
                 .map(str::to_string);
             let vendor = policy.vendor.clone().unwrap_or_default();
-            let access_key = Self::required(&policy.access_key, "access_key")?;
-            let secret_key = Self::required(&policy.secret_key, "secret_key")?;
+            // Credentials are optional: omitting both selects anonymous/public
+            // access. `Storage::new` rejects a partial access/secret pair.
+            let access_key = policy.access_key.clone();
+            let secret_key = policy.secret_key.clone();
             let storage = Storage::new(&StorageConfig::S3 {
                 vendor,
                 bucket: policy.bucket.clone().unwrap_or_default(),

@@ -595,8 +595,8 @@ async fn test_s3_config_without_main_db_ok() {
                 vendor: crate::config::S3Vendor::Minio,
                 bucket: "test-bucket".to_string(),
                 region: "us-east-1".to_string(),
-                access_key: "minioadmin".to_string(),
-                secret_key: "minioadmin".to_string(),
+                access_key: Some("minioadmin".to_string()),
+                secret_key: Some("minioadmin".to_string()),
                 endpoint: Some("http://127.0.0.1:1".to_string()),
                 root: "cdr".to_string(),
                 with_media: None,
@@ -961,8 +961,8 @@ async fn test_save_with_s3_like_with_media() {
         let record = record.clone();
         let bucket = "test-bucket".to_string();
         let region = "us-east-1".to_string();
-        let access_key = "test_access_key".to_string();
-        let secret_key = "test_secret_key".to_string();
+        let access_key = Some("test_access_key".to_string());
+        let secret_key = Some("test_secret_key".to_string());
         let endpoint = endpoint.to_string();
 
         let result = match crate::storage::Storage::new(&crate::storage::StorageConfig::S3 {
