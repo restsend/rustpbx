@@ -861,8 +861,7 @@ pub struct MediaConfig {
     /// that passes a single STUN binding on its host candidate but cannot
     /// sustain the DTLS handshake. Defaults to false.
     #[serde(default)]
-    pub relay_only: bool,
-    /// Advertise `a=ice-lite` in the SDP of this call's plain-RTP legs (see
+    pub relay_only: bool,    /// Advertise `a=ice-lite` in the SDP of this call's plain-RTP legs (see
     /// `crate::media::leg::LegConfig::enable_ice_lite`). Answering as an
     /// ICE-lite agent lets strict full-ICE peers (e.g. Teams Direct Routing
     /// SBCs) that never fall back to plain RTP establish connectivity via
@@ -871,6 +870,10 @@ pub struct MediaConfig {
     /// detection < per-trunk override. Defaults to false.
     #[serde(default)]
     pub ice_lite: bool,
+    /// Max seconds to wait for a WebRTC leg's ICE+DTLS before degrading the
+    /// fast-path relay to transcoding. Unset = 5s default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_ready_timeout_secs: Option<u64>,
 }
 
 impl Default for MediaConfig {
@@ -898,6 +901,7 @@ impl MediaConfig {
             sip_contact: None,
             relay_only: false,
             ice_lite: false,
+            relay_ready_timeout_secs: None,
         }
     }
 
@@ -938,6 +942,11 @@ impl MediaConfig {
 
     pub fn with_ice_lite(mut self, enable: bool) -> Self {
         self.ice_lite = enable;
+        self
+    }
+
+    pub fn with_relay_ready_timeout_secs(mut self, secs: Option<u64>) -> Self {
+        self.relay_ready_timeout_secs = secs;
         self
     }
 

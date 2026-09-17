@@ -460,6 +460,12 @@ impl SipSession {
             // resolve their address via ICE and ignore this.
             enable_latching: self.context.dialplan.media.enable_latching,
             probation_max_packets: self.context.dialplan.media.probation_max_packets,
+            relay_ready_timeout: self
+                .context
+                .dialplan
+                .media
+                .relay_ready_timeout_secs
+                .map(std::time::Duration::from_secs),
         }
     }
 
@@ -6145,7 +6151,7 @@ impl SipSession {
                 .is_some();
 
             let has_bridge = self.media_profile.path == MediaPathMode::Anchored || self.media.bridge.is_some();
-            tracing::info!(
+            tracing::debug!(
                 session_id = %self.id,
                 has_bridge,
                 has_callee_leg,

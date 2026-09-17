@@ -655,6 +655,7 @@ impl CallModule {
                 )
                 .with_comfort_noise(rtp.comfort_noise, rtp.comfort_noise_level_db)
                 .with_ice_lite(rtp.ice_lite || caller.ice_lite)
+                .with_relay_ready_timeout_secs(rtp.relay_ready_timeout_secs)
         };
 
         let caller_is_same_realm = self
