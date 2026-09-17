@@ -454,6 +454,12 @@ impl SipSession {
             // it off for WebRTC/Srtp), so pass the dialplan flag through
             // unconditionally — WebRTC callers are unaffected.
             enable_ice_lite: self.context.dialplan.media.ice_lite,
+            // Symmetric-RTP latching: on plain RTP/SRTP legs, follow the
+            // peer's observed source address so NAT'd softphones whose SDP
+            // advertises a private `c=` still receive audio. WebRTC legs
+            // resolve their address via ICE and ignore this.
+            enable_latching: self.context.dialplan.media.enable_latching,
+            probation_max_packets: self.context.dialplan.media.probation_max_packets,
         }
     }
 

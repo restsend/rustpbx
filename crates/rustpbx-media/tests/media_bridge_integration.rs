@@ -825,6 +825,8 @@ async fn rtp_timeout_fires_on_inactive_webrtc_leg() {
         cname: Some("rtp-timeout-webrtc".to_string()),
         comfort_noise: true,
         comfort_noise_level_db: -35.0,
+        enable_latching: true,
+        probation_max_packets: None,
     };
     let mut mb = MediaBridge::new("it-rtp-webrtc");
     let a = LegInner::new("a", &cfg, None).unwrap();

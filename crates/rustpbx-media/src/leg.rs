@@ -111,6 +111,15 @@ pub struct LegConfig {
     /// limitation), so `build_rtc_config` forces it off for those modes.
     /// Defaults to false.
     pub enable_ice_lite: bool,
+    /// Enable symmetric-RTP latching on plain RTP/SRTP legs: egress follows
+    /// the address the remote peer actually sends from, instead of the
+    /// (often private) media address in its SDP. Must be plumbed into
+    /// `RtcConfiguration` for the rustrtc `Leg` path — without it NAT'd
+    /// softphones that advertise a private `c=` never receive audio.
+    pub enable_latching: bool,
+    /// Number of inbound RTP packets observed before a latching decision is
+    /// committed (probation window). `None` uses the rustrtc default.
+    pub probation_max_packets: Option<u8>,
 }
 
 impl LegConfig {
@@ -135,6 +144,8 @@ impl LegConfig {
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
+            enable_latching: true,
+            probation_max_packets: None,
         }
     }
 }
@@ -1247,6 +1258,12 @@ fn build_rtc_config(cfg: &LegConfig) -> RtcConfiguration {
         },
         cname: cfg.cname.clone(),
         buffer_drop_strategy: BufferDropStrategy::DropOldest,
+        // Symmetric-RTP latching for plain RTP/SRTP legs. Without this the
+        // rustrtc default (`false`) applies and the leg keeps sending to the
+        // SDP media address — unusable when the peer is behind NAT and its
+        // SDP carries a private `c=` (e.g. Linphone without STUN).
+        enable_latching: cfg.enable_latching,
+        probation_max_packets: cfg.probation_max_packets,
         // Plain SIP/RTP peers (and SDES-SRTP trunks) do not understand BUNDLE:
         // they expect one distinct UDP port per m-line, no `a=rtcp-mux` and no
         // `a=mid`. Without this a plain-RTP audio+video leg emits an offer with
@@ -1391,6 +1408,8 @@ mod relay_policy_tests {
             cname: None,
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
+            enable_latching: true,
+            probation_max_packets: None,
             ice_servers,
             relay_only,
             enable_ice_lite: false,
@@ -1424,6 +1443,40 @@ mod relay_policy_tests {
             "default (relay_only=false) must keep standard RFC 5245 behavior"
         );
         assert!(rtc.ice_servers.is_empty());
+    }
+
+    /// Plain RTP/SRTP legs must carry the dialplan latching settings into the
+    /// `RtcConfiguration`; dropping them let the rustrtc default (`false`)
+    /// apply, so NAT'd peers that advertise a private `c=` never received
+    /// audio while the bridge counters still looked healthy.
+    #[test]
+    fn latching_config_is_plumbed_into_rtc_config() {
+        let mut cfg = webrtc_cfg(false, Vec::new());
+        cfg.transport = TransportMode::Rtp;
+
+        cfg.enable_latching = true;
+        cfg.probation_max_packets = Some(6);
+        let rtc = build_rtc_config(&cfg);
+        assert!(
+            rtc.enable_latching,
+            "enable_latching must reach the rustrtc PeerConnection config"
+        );
+        assert_eq!(rtc.probation_max_packets, Some(6));
+
+        cfg.enable_latching = false;
+        cfg.probation_max_packets = None;
+        let rtc = build_rtc_config(&cfg);
+        assert!(!rtc.enable_latching);
+        assert_eq!(rtc.probation_max_packets, None);
+    }
+
+    #[test]
+    fn plain_rtp_pcmu_helper_enables_latching() {
+        let rtc = build_rtc_config(&LegConfig::rtp_pcmu());
+        assert!(
+            rtc.enable_latching,
+            "production default must latch plain RTP legs"
+        );
     }
 }
 
@@ -1652,6 +1705,8 @@ mod tests {
             cname: Some("webrtc-test".to_string()),
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
+            enable_latching: true,
+            probation_max_packets: None,
         };
         let a = LegInner::new("a", &cfg, None).expect("webrtc leg");
         let offer = a.create_offer().await.expect("create_offer");
@@ -1732,6 +1787,8 @@ mod tests {
             cname: Some("video-test".to_string()),
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
+            enable_latching: true,
+            probation_max_packets: None,
         };
         let leg = LegInner::new("video", &cfg, None).expect("video leg");
         let offer = leg.create_offer().await.expect("create_offer");
@@ -1789,6 +1846,8 @@ mod tests {
             cname: Some("video-answer".to_string()),
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
+            enable_latching: true,
+            probation_max_packets: None,
         };
         let leg = LegInner::new("answerer", &cfg, None).expect("answerer leg");
 
@@ -1897,6 +1956,8 @@ mod tests {
             cname: Some("dtmf-remote-pt".to_string()),
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
+            enable_latching: true,
+            probation_max_packets: None,
         };
 
         let leg = LegInner::new("caller-dtmf", &cfg, None).expect("leg");
@@ -2004,6 +2065,8 @@ mod p24_uac_test {
             cname: Some("repro".to_string()),
             comfort_noise: false,
             comfort_noise_level_db: -35.0,
+            enable_latching: true,
+            probation_max_packets: None,
         };
         let leg = LegInner::new("plain-rtp-av", &cfg, None).expect("leg");
         let offer = leg.create_offer().await.expect("offer");

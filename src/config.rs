@@ -96,7 +96,7 @@ fn default_config_webrtc_start_port() -> Option<u16> {
 }
 
 fn default_config_webrtc_end_port() -> Option<u16> {
-    Some(40000)
+    Some(60000)
 }
 
 fn default_useragent() -> Option<String> {

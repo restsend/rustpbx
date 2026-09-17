@@ -1781,6 +1781,8 @@ mod tests {
             cname: Some("webrtc-test".to_string()),
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
+            enable_latching: true,
+            probation_max_packets: None,
         };
         let mut mb = MediaBridge::new("s7");
         let a = LegInner::new("a", &cfg, None).unwrap();
@@ -1841,6 +1843,8 @@ mod tests {
             cname: Some("webrtc-video".to_string()),
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
+            enable_latching: true,
+            probation_max_packets: None,
         };
         let mut mb = MediaBridge::new("s-video-rtcp");
         let a = LegInner::new("a", &cfg, None).unwrap();
@@ -1901,6 +1905,8 @@ mod tests {
             cname: Some("x-transport".to_string()),
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
+            enable_latching: true,
+            probation_max_packets: None,
         };
 
         let a = LegInner::new("a", &webrtc_cfg, None).unwrap();
@@ -1983,6 +1989,8 @@ mod tests {
                         cname: Some("x-opus-webrtc".to_string()),
                         comfort_noise: true,
                         comfort_noise_level_db: -35.0,
+                        enable_latching: true,
+                        probation_max_packets: None,
                     };
                     let rtp_opus_cfg = LegConfig {
                         ice_servers: Vec::new(),
@@ -2003,6 +2011,8 @@ mod tests {
                         cname: Some("x-opus-rtp".to_string()),
                         comfort_noise: true,
                         comfort_noise_level_db: -35.0,
+                        enable_latching: true,
+                        probation_max_packets: None,
                     };
 
                     let a = LegInner::new("a", &webrtc_cfg, None).unwrap();
@@ -2079,6 +2089,8 @@ mod tests {
             cname: Some("unready-webrtc".to_string()),
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
+            enable_latching: true,
+            probation_max_packets: None,
         };
         let rtp_pcmu_cfg = LegConfig {
             ice_servers: Vec::new(),
@@ -2099,6 +2111,8 @@ mod tests {
             cname: Some("rtp-pcmu".to_string()),
             comfort_noise: true,
             comfort_noise_level_db: -35.0,
+            enable_latching: true,
+            probation_max_packets: None,
         };
 
         // Leg A: WebRTC answerer whose remote (10.0.0.1) never connects, so its
