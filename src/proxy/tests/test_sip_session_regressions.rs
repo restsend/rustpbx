@@ -627,6 +627,83 @@ async fn test_connected_dynamic_leg_failure_hangs_up_caller() {
 }
 
 #[tokio::test]
+async fn test_connected_dynamic_leg_failure_hangs_up_caller_even_without_bridge() {
+    // Production 2026-09-17 (node 10.193.244.54): the media bridge was never
+    // activated (TTS voip bridge poisoning regression), so when the connected
+    // agent leg hung up, `LegFailed` skipped the post-disconnect handler and
+    // the trunk caller stayed on the dead call in silence for 15s until the
+    // PSTN side gave up. A connected dynamic leg must trigger the
+    // post-disconnect flow (return app / hangup) regardless of bridge state.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+    let agent_leg = LegId::from("queue-agent");
+    let mut leg = Leg::new(agent_leg.clone());
+    leg.state = LegState::Connected;
+    session.legs.insert(agent_leg.clone(), leg);
+    // NOTE: no `session.bridge = ...` — exactly the broken production state
+    // (media bridge never established).
+    assert!(!session.bridge.active);
+
+    let caller_dialog_id = session
+        .caller_dialog
+        .as_ref()
+        .map(|d| d.id())
+        .expect("caller dialog present");
+    session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: agent_leg,
+                reason: "Remote hung up".to_string(),
+            },
+            None,
+        )
+        .await;
+
+    assert!(
+        session.pending_hangup.contains(&caller_dialog_id),
+        "a connected agent leg hanging up must release the caller even when the media bridge was never established"
+    );
+}
+
+// A RINGING agent leg failing must NOT release the caller (queue keeps dialing).
+#[tokio::test]
+async fn test_ringing_dynamic_leg_failure_does_not_hang_up_caller() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+    let agent_leg = LegId::from("queue-agent");
+    let mut leg = Leg::new(agent_leg.clone());
+    leg.state = LegState::Ringing;
+    session.legs.insert(agent_leg.clone(), leg);
+    assert!(!session.bridge.active);
+
+    let caller_dialog_id = session
+        .caller_dialog
+        .as_ref()
+        .map(|d| d.id())
+        .expect("caller dialog present");
+    session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: agent_leg,
+                reason: "Remote hung up".to_string(),
+            },
+            None,
+        )
+        .await;
+
+    assert!(
+        !session.pending_hangup.contains(&caller_dialog_id),
+        "a ringing (never answered) leg failing must not hang up the caller"
+    );
+}
+
+#[tokio::test]
 async fn test_connected_dynamic_leg_failure_returns_to_ivr_when_set() {
     // Regression: when meta.transfer_return_to_ivr is set and a connected
     // dynamic leg (queue agent) hangs up, the caller should be returned to

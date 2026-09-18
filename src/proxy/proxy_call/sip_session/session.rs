@@ -9914,13 +9914,17 @@ impl SipSession {
                 warn!(%leg_id, %reason, "Leg failed async notification");
                 if !self.legs.contains_key(&leg_id) { return CommandResult::success(); }
                 let result = {
+                    // A CONNECTED agent leg just died (the state check keeps
+                    // ringing/no-answer failures out — the queue keeps dialing
+                    // those). Whether the media bridge was actually activated
+                    // must not gate the post-disconnect handling: a bridging
+                    // failure or a media-bypass call would otherwise strand the
+                    // caller on a dead call (production 2026-09-17: the caller
+                    // sat in silence for 15s until the trunk gave up).
                     let connected_bridge_leg = self
                         .legs
                         .get(&leg_id)
-                        .is_some_and(|leg| leg.state == LegState::Connected || leg.source_leg.is_some())
-                        && self.bridge.active
-                        && self.bridge.contains_leg(&LegId::from("caller"))
-                        && self.bridge.contains_leg(&leg_id);
+                        .is_some_and(|leg| leg.state == LegState::Connected || leg.source_leg.is_some());
                     // Forward to running app before removing the leg (so we can get the URI)
                     let agent_uri = self.legs.get(&leg_id).and_then(|l| l.endpoint.clone());
                     let event_name =
