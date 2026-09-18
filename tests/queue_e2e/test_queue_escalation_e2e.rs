@@ -372,9 +372,13 @@ mod escalation_e2e {
         // ── Second escalated call: the fair round-robin head must ROTATE ──
         // The adapter-owned rr counter persists across calls (ec720bc), so
         // the head of the second escalation union differs from the first:
-        // call 1 dialled agent1 (primary head) → agent2 (widen); call 2 must
-        // dial agent2 (rotated head) → agent3 (widen).
-        for id in ["agent1", "agent2"] {
+        // call 1 dialled agent1 (primary head) → the widen replaced the legs
+        // with the fair union tail (agent3, agent2). Reset EVERY agent the
+        // widen may have left in Ringing — missing one (e.g. agent3, whose
+        // leg was cancelled mid-ring when agent2 answered) leaves it
+        // un-candidate-able for call 2 and the widening dials a shorter
+        // union than the rotation contract guarantees.
+        for id in ["agent1", "agent2", "agent3"] {
             // idle→idle is rejected by the state machine; only reset the
             // agents actually left in Ringing/Busy by call 1.
             let needs_reset = cc_registry_reset
