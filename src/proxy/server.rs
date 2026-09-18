@@ -928,7 +928,11 @@ impl SipServerBuilder {
             );
 
         let locator_events = self.locator_events.unwrap_or_else(|| {
-            let (tx, _) = tokio::sync::broadcast::channel(12);
+            // All locator-event consumers (webhook, presence, cluster hub,
+            // addon bridges) share this channel; a lagging consumer silently
+            // drops events — including Offline. Size it for registration
+            // bursts instead of a handful of slots.
+            let (tx, _) = tokio::sync::broadcast::channel(1024);
             tx
         });
         let locator_event_lock = Arc::new(tokio::sync::Mutex::new(()));
