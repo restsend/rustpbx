@@ -2,7 +2,7 @@ use super::SipSession;
 use crate::call::domain::{CallCommand, LegId, LegState};
 use crate::call::runtime::BridgeConfig;
 use anyhow::{Result, anyhow};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 impl SipSession {
     async fn handle_supervisor_monitor(
@@ -216,10 +216,19 @@ impl SipSession {
                         .get_handle_by_dialog(sup_session)
                 })
             {
-                let _ = sup_handle.send_command(CallCommand::JoinMixerLeg {
+                if let Err(error) = sup_handle.send_command(CallCommand::JoinMixerLeg {
                     mixer_id: conf_id.clone(),
                     leg_id: LegId::new("caller"),
-                });
+                }) {
+                    // Fire-and-forget here means the supervisor may never be in
+                    // the conference while the takeover still proceeds — make
+                    // that visible instead of silently dropping it.
+                    error!(session_id = %self.id,
+                        supervisor_session = %sup_session,
+                        %error,
+                        "Failed to ask supervisor session to join the takeover conference"
+                    );
+                }
             }
             self.conference_bridge.conf_id = Some(conf_id);
             // Kick the agent leg: mark it ended and queue the SIP BYE so the

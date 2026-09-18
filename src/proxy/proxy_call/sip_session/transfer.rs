@@ -2191,15 +2191,18 @@ impl SipSession {
         let session_id = self.id.to_string();
 
         // ── 1. Establish WebSocket connection ──────────────────────────
+        // A default bound is mandatory: this runs inside `execute_command` on
+        // the session's command loop, so an unbounded wait here freezes the
+        // whole session — Hangup/BYE commands queue behind it and the call
+        // cannot be hung up while the endpoint stays silent. The URI
+        // `timeout_ms` parameter still overrides the default.
+        const DEFAULT_BRIDGE_CONNECT_TIMEOUT_MS: u64 = 10_000;
         let ws_connect = tokio_tungstenite::connect_async(&endpoint);
-        let (ws_stream, _) = if let Some(ms) = timeout_ms {
+        let (ws_stream, _) = {
+            let ms = timeout_ms.unwrap_or(DEFAULT_BRIDGE_CONNECT_TIMEOUT_MS);
             tokio::time::timeout(Duration::from_millis(ms), ws_connect)
                 .await
                 .map_err(|_| anyhow!("Bridge connection timed out after {}ms", ms))?
-                .map_err(|e| anyhow!("Failed to connect Bridge WebSocket: {}", e))?
-        } else {
-            ws_connect
-                .await
                 .map_err(|e| anyhow!("Failed to connect Bridge WebSocket: {}", e))?
         };
         info!(session_id = %self.id, endpoint = %endpoint, "Bridge WebSocket connected");

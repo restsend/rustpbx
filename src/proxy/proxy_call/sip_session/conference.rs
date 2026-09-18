@@ -210,6 +210,16 @@ impl SipSession {
     pub(super) async fn handle_leave_mixer(&mut self) -> Result<()> {
         info!(session_id = %self.id, "Leaving mixer/conference");
 
+        // The takeover flag deliberately suppressed the B-leg-disconnect
+        // cascade while the customer was parked in the takeover conference.
+        // Leaving the mixer ends that state: if the flag stayed set it would
+        // permanently disable the cascade and strand the caller on a dead
+        // call, so it must expire here.
+        if self.meta.supervisor_takeover_active {
+            self.meta.supervisor_takeover_active = false;
+            info!(session_id = %self.id, "Left takeover mixer; disconnect cascade re-enabled");
+        }
+
         if let Some(conf_id) = self.conference_bridge.conf_id.take() {
             let conf_id = crate::call::runtime::ConferenceId::from(conf_id.as_str());
             for leg in self.legs.keys() {

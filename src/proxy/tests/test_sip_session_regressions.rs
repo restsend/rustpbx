@@ -3121,6 +3121,195 @@ async fn voip_bridge_must_not_block_queue_agent_media_bridge() {
     }
 }
 
+// ─── supervisor takeover flag must not permanently block caller release ──────
+//
+// Production-risk audit 2026-09-18: `supervisor_takeover_active` is set when a
+// supervisor takeover kicks the agent leg (supervisor.rs) and is NEVER cleared
+// anywhere. `handle_start_return_app` early-returns on it, so once a takeover
+// happened, every later B-leg disconnect on this session silently skips the
+// CSAT / return-app / hangup cascade — the caller is stranded on a dead call
+// (the takeover conference can die with the customer still in it, and nothing
+// releases them). Leaving the mixer must expire the flag so the normal
+// cascade works again.
+
+#[tokio::test]
+async fn supervisor_takeover_flag_must_not_permanently_block_caller_release() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+
+    // A supervisor takeover happened: the flag is set and the customer was
+    // parked in the takeover conference (exactly what supervisor.rs does).
+    session.meta.supervisor_takeover_active = true;
+    session.conference_bridge.conf_id = Some(format!("supervisor-{}-takeover", session.id.0));
+
+    // The customer leaves the mixer (explicit leave / kicked after the
+    // takeover conference went away).
+    session.execute_command(CallCommand::LeaveMixer, None).await;
+
+    assert!(
+        !session.meta.supervisor_takeover_active,
+        "leaving the mixer must expire the takeover flag; a sticky flag permanently disables the disconnect cascade"
+    );
+
+    // And the normal cascade must work again afterwards: a connected agent
+    // leg hanging up releases the caller.
+    let agent_leg = LegId::from("queue-agent");
+    let mut leg = Leg::new(agent_leg.clone());
+    leg.state = LegState::Connected;
+    session.legs.insert(agent_leg.clone(), leg);
+    let caller_dialog_id = session
+        .caller_dialog
+        .as_ref()
+        .map(|d| d.id())
+        .expect("caller dialog present");
+    session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: agent_leg,
+                reason: "Remote hung up".to_string(),
+            },
+            None,
+        )
+        .await;
+    assert!(
+        session.pending_hangup.contains(&caller_dialog_id),
+        "after the takeover flag expired, a connected agent leg hanging up must release the caller"
+    );
+}
+
+// ─── voip bridge connect without timeout_ms must be bounded ──────────────────
+//
+// Production-risk audit 2026-09-18: `connect_bridge` only applies a connect
+// timeout when the bridge URI carried `timeout_ms`. Without it, the TCP +
+// WebSocket handshake wait is unbounded — and it runs inside
+// `execute_command`, so a silent endpoint freezes the ENTIRE session command
+// loop: Hangup/BYE commands queue behind it and the call cannot be hung up.
+// A default connect timeout must apply.
+
+#[tokio::test]
+async fn voip_bridge_connect_without_timeout_ms_must_be_bounded() {
+    use std::collections::HashMap;
+
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+        "ivr".to_string(),
+        None,
+        true,
+    );
+    let mut session = build_session(dialplan).await;
+
+    // The bridged leg needs a media endpoint (connect_bridge looks it up).
+    let caller_offer = crate::proxy::tests::test_helpers::pcmu_sdp("127.0.0.1", 10002);
+    session.media.caller_offer = Some(caller_offer.clone());
+    let codecs = crate::media::negotiate::MediaNegotiator::build_codec_list_from_offer(
+        &caller_offer,
+        &[],
+    );
+    let cfg = crate::media::leg::LegConfig {
+        codecs,
+        ..crate::media::leg::LegConfig::rtp_pcmu()
+    };
+    let caller_peer = crate::media::leg::LegInner::new("caller", &cfg, None).unwrap();
+    caller_peer.answer(&caller_offer).await.unwrap();
+    session
+        .legs
+        .set_media_leg(&LegId::from("caller"), caller_peer);
+
+    // A TCP endpoint that accepts but NEVER speaks: the WebSocket handshake
+    // would wait forever without a connect timeout. The accept thread blocks
+    // on a read and exits as soon as the peer gives up (EOF on close).
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let accept_task = tokio::task::spawn_blocking(move || {
+        if let Ok((mut sock, _)) = listener.accept() {
+            use std::io::Read;
+            let mut buf = [0u8; 512];
+            // Swallow bytes and stay silent until the peer gives up and
+            // closes (EOF) — a single read would drop the socket and the
+            // client would error out immediately instead of exercising the
+            // connect timeout.
+            while matches!(sock.read(&mut buf), Ok(n) if n > 0) {}
+        }
+    });
+
+    // No `timeout_ms` — the default bound must kick in.
+    let connect = session.connect_bridge(
+        LegId::from("caller"),
+        format!("ws://127.0.0.1:{port}/tts/bridge"),
+        HashMap::new(),
+        16000,
+        "pcm".to_string(),
+        None,
+        None,
+        None,
+    );
+    let started = std::time::Instant::now();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(15), connect).await;
+    accept_task.abort();
+
+    let result = result.expect(
+        "connect_bridge must return in bounded time without timeout_ms; an unbounded wait freezes the session command loop (cannot hang up)",
+    );
+    assert!(result.is_err(), "the connect itself must fail (endpoint never speaks)");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(15),
+        "the default connect timeout must be well under the outer bound"
+    );
+
+    // The session must still be responsive afterwards.
+    let ping = session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: LegId::from("queue-agent"),
+                reason: "Timeout".to_string(),
+            },
+            None,
+        )
+        .await;
+    let _ = ping;
+}
+
+// ─── transfer_in_progress must clear when the transferred leg fails ──────────
+//
+// Production-risk audit 2026-09-18: `meta.transfer_in_progress` suppresses the
+// RTP-inactivity watchdog (`sync_rtp_timeout_pause`). It is cleared on
+// transfer error / new leg answer / bridge established — but NOT when a
+// ringing transfer leg fails outright, leaving the watchdog suppressed for
+// the rest of the call.
+
+#[tokio::test]
+async fn transfer_in_progress_cleared_when_transfer_leg_fails() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+
+    // A blind transfer dials a new leg: the flag is set while it rings.
+    session.meta.transfer_in_progress = true;
+    let agent_leg = LegId::from("consult");
+    let mut leg = Leg::new(agent_leg.clone());
+    leg.state = LegState::Ringing;
+    session.legs.insert(agent_leg.clone(), leg);
+
+    session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: agent_leg,
+                reason: "Remote hung up".to_string(),
+            },
+            None,
+        )
+        .await;
+
+    assert!(
+        !session.meta.transfer_in_progress,
+        "a failed transfer leg must lift the RTP-watchdog suppression"
+    );
+}
+
 // ─── proxy queue fallback routing (no agents) ───────────────────────────────
 //
 // Covers the path the original bug report exercised: IVR → queue transfer →
