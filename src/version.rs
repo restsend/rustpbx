@@ -186,7 +186,14 @@ pub fn spawn_update_checker(
                             Ok(_) => {
                                 info!(latest = %info.latest_version, "update notification created")
                             }
-                            Err(e) => debug!("failed to insert update notification: {e}"),
+                            Err(e) => {
+                                crate::db_report::report_db_write_failure(
+                                    "update_notification",
+                                    "insert",
+                                    None,
+                                    &e,
+                                );
+                            }
                         }
                     }
                 }

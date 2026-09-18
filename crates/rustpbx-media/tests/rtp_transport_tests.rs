@@ -350,6 +350,7 @@ impl TestMediaHarness {
             vec![codec_a.clone()],
             true,
             -35.0,
+            None,
             recorder_sender,
         )
         .unwrap();
@@ -359,6 +360,7 @@ impl TestMediaHarness {
             vec![codec_b.clone()],
             true,
             -35.0,
+            None,
             None,
         )
         .unwrap();
@@ -1132,7 +1134,7 @@ async fn create_video_harness(
         let mut cfg = rtc_config(transport, &codec);
         cfg.media_capabilities.as_mut().unwrap().video = caps;
         cfg.sdp_compatibility = sdp_compatibility;
-        LegInner::from_rtc_config(name, cfg, vec![codec.clone()], true, -35.0, None).unwrap()
+        LegInner::from_rtc_config(name, cfg, vec![codec.clone()], true, -35.0, None, None).unwrap()
     };
     let leg_a = mk_leg(
         "a",
@@ -1897,7 +1899,7 @@ async fn leg_send_dtmf_emits_telephone_events_to_peer() {
     };
     let mut leg_cfg = rtc_config(TransportMode::Rtp, &pcmu);
     leg_cfg.media_capabilities = Some(leg_caps);
-    let leg = LegInner::from_rtc_config("a", leg_cfg, codecs.clone(), true, -35.0, None).unwrap();
+    let leg = LegInner::from_rtc_config("a", leg_cfg, codecs.clone(), true, -35.0, None, None).unwrap();
 
     // Peer: offer PCMU + telephone-event so the leg's DTMF PT gets negotiated.
     let mut caps = rustrtc::config::MediaCapabilities::default();
@@ -2627,6 +2629,264 @@ async fn canary_media_resumes_after_hold_resume() {
     h.send_b_to_a_receive(CodecType::PCMU, 5000)
         .await
         .expect("B→A must flow again after unhold");
+
+    h.close();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+}
+
+// ── Transcode duration matrix (accumulator regression guards) ────────────
+//
+// The transcode egress accumulates decoded PCM between pacing ticks
+// (`transcode_pending`): peers whose ptime differs from the leg's ptime must
+// neither lose frames (pre-fix: receiver-ring overflow dropped every other
+// frame) nor stretch/duplicate them (pre-fix: one frame per tick with
+// zero-fill, and zero-padded partials folded into the next frame).
+//
+// The property asserted here, for EVERY ordered codec pair among
+// g729 / opus / pcmu / pcma / g722, through REAL RTP transports: feed one
+// second of speech, the peer receives (≈) that same duration of VOICED
+// audio. Frames are counted by decoding the received RTP and measuring
+// energy, so the egress's silence/comfort-noise cadence keepers (expected on
+// an idle link) never inflate the measurement.
+
+/// Codec set under test (the codecs production deployments negotiate).
+const TRANSCODE_MATRIX_CODECS: [CodecType; 5] = [
+    CodecType::PCMU,
+    CodecType::PCMA,
+    CodecType::G722,
+    CodecType::G729,
+    CodecType::Opus,
+];
+
+/// Amplitude above which a decoded chunk counts as tone (comfort noise at
+/// -35 dBFS ≈ 583 peak, codec dither and μ/A-law quantization noise stay far
+/// below this; the fed tone rides at 12000).
+const VOICED_SAMPLE_THRESHOLD: i16 = 3000;
+
+/// `total_frames` × `frame_ms` of a loud 440 Hz tone at `rate`, so every fed
+/// chunk is unambiguously detectable after any codec round-trip.
+fn encode_tone_frames(codec: CodecType, frame_ms: u64, total_frames: usize) -> Vec<Vec<u8>> {
+    let rate = codec.samplerate();
+    let samples_per_frame = (rate as usize * frame_ms as usize) / 1000;
+    let mut encoder = audio_codec::create_encoder(codec);
+    (0..total_frames)
+        .map(|f| {
+            let pcm: Vec<i16> = (0..samples_per_frame)
+                .map(|i| {
+                    let t = (f * samples_per_frame + i) as f32;
+                    (12000.0 * (2.0 * std::f32::consts::PI * 440.0 * t / rate as f32).sin()) as i16
+                })
+                .collect();
+            encoder.encode(&pcm)
+        })
+        .filter(|f| !f.is_empty())
+        .collect()
+}
+
+/// Push `total_frames` frames of `frame_ms` (encoded with `send_codec`),
+/// optionally paced `pace_ms` apart in wall-clock (matching a real peer's
+/// media clock), then drain the receiving peer and measure the total
+/// voiced-audio duration that came out the other side. The receiver's chunks
+/// are decoded with `recv_codec` and timed by SAMPLE COUNT (chunk granularity
+/// follows RTP packetization, not the egress ptime).
+async fn transcode_voiced_duration(
+    sender: &TestPeer,
+    send_codec: CodecType,
+    receiver: &TestPeer,
+    recv_codec: CodecType,
+    frame_ms: u64,
+    total_frames: usize,
+    pace_ms: Option<u64>,
+) -> Duration {
+    let frames = encode_tone_frames(send_codec, frame_ms, total_frames);
+    assert!(!frames.is_empty(), "must encode frames for {send_codec:?}");
+    let rate = send_codec.samplerate();
+    let mut decoder = audio_codec::create_decoder(recv_codec);
+    let clock_rate = recv_codec.samplerate() as u64;
+    let mut voiced_samples = 0u64;
+
+    // Count one received chunk: decode, and if it carries tone (not the
+    // egress's silence/comfort-noise keepers), credit its sample count.
+    let mut count_chunk = |frame: &AudioFrame, voiced_samples: &mut u64| {
+        if frame.data.is_empty() {
+            return;
+        }
+        let pcm = decoder.decode(&frame.data);
+        if pcm.iter().any(|s| s.abs() > VOICED_SAMPLE_THRESHOLD) {
+            *voiced_samples += pcm.len() as u64;
+        }
+    };
+
+    let mut ts = 0u32;
+    for i in 0..total_frames {
+        sender.send_audio(frames[i % frames.len()].clone(), ts);
+        ts = ts.wrapping_add(rate * frame_ms as u32 / 1000);
+        if let Some(pace) = pace_ms {
+            // Drain during the feed too — chunks must be counted, not
+            // discarded, or the measurement loses the whole first half.
+            while let Some(frame) = receiver.recv_audio(1).await {
+                count_chunk(&frame, &mut voiced_samples);
+            }
+            tokio::time::sleep(Duration::from_millis(pace)).await;
+        }
+    }
+
+    let deadline = tokio::time::Instant::now()
+        + Duration::from_millis(total_frames as u64 * frame_ms * 3 + 2000);
+    while tokio::time::Instant::now() < deadline {
+        match receiver.recv_audio(25).await {
+            Some(frame) => count_chunk(&frame, &mut voiced_samples),
+            None => tokio::time::sleep(Duration::from_millis(5)).await,
+        }
+    }
+    Duration::from_millis(voiced_samples * 1000 / clock_rate)
+}
+
+fn assert_voiced_duration_preserved(fed_ms: u64, got: Duration, context: &str) {
+    assert!(
+        got >= Duration::from_millis(fed_ms - 250)
+            && got <= Duration::from_millis(fed_ms + 350),
+        "{context}: fed {fed_ms} ms of speech but received {got:?} of voiced \
+         audio — loss (accumulator drop), time-stretch (one frame per tick) \
+         or duplication must not happen"
+    );
+}
+
+macro_rules! transcode_matrix_test {
+    ($fn_name:ident, $src:expr) => {
+        #[tokio::test]
+        async fn $fn_name() {
+            for dst in TRANSCODE_MATRIX_CODECS {
+                if dst == $src {
+                    continue; // same codec = fast-path relay, not transcode
+                }
+                let context = format!("transcode {:?} → {:?}", $src, dst);
+                let mut h =
+                    TestMediaHarness::create(TransportMode::Rtp, $src, TransportMode::Rtp, dst)
+                        .await;
+                h.bridge_and_accept().await;
+                h.assert_relay(false);
+
+                // 50 × 20 ms = one second of speech, both directions, so both
+                // egress pipelines of the pair are exercised.
+                let fed_ab = transcode_voiced_duration(
+                    &h.test_a, $src, &h.test_b, dst, 20, 50, None,
+                )
+                .await;
+                assert_voiced_duration_preserved(1000, fed_ab, &context);
+
+                let fed_ba = transcode_voiced_duration(
+                    &h.test_b, dst, &h.test_a, $src, 20, 50, None,
+                )
+                .await;
+                assert_voiced_duration_preserved(
+                    1000,
+                    fed_ba,
+                    &format!("{context} (reverse direction)"),
+                );
+
+                h.close();
+                tokio::time::sleep(Duration::from_millis(80)).await;
+            }
+        }
+    };
+}
+
+transcode_matrix_test!(transcode_matrix_from_pcmu, CodecType::PCMU);
+transcode_matrix_test!(transcode_matrix_from_pcma, CodecType::PCMA);
+transcode_matrix_test!(transcode_matrix_from_g722, CodecType::G722);
+transcode_matrix_test!(transcode_matrix_from_g729, CodecType::G729);
+transcode_matrix_test!(transcode_matrix_from_opus, CodecType::Opus);
+
+/// Recording through a transcoded call: the recorder is mounted on leg A
+/// (G729). One second fed A→B must land as ≈50 × 20 ms voiced G729 INGRESS
+/// items, and one second fed B→A (PCMA speech, transcoded to G729 for A) as
+/// ≈50 × 20 ms voiced G729 EGRESS items. Wrong PT, a shortened capture or a
+/// stretched capture means the recording no longer matches the call.
+#[tokio::test]
+async fn transcode_recording_preserves_both_directions_g729_pcma() {
+    let (recorder, mut rx) = recorder_capture("transcode-rec");
+    let mut h = TestMediaHarness::create_with_recorder(
+        TransportMode::Rtp,
+        CodecType::G729,
+        TransportMode::Rtp,
+        CodecType::PCMA,
+        recorder,
+    )
+    .await;
+    h.bridge_and_accept().await;
+    h.assert_relay(false);
+
+    let g729_pt = CodecType::G729.payload_type();
+
+    // A speaks for one second (PCMA listener on B receives it transcoded).
+    let fed_ab = transcode_voiced_duration(
+        &h.test_a,
+        CodecType::G729,
+        &h.test_b,
+        CodecType::PCMA,
+        20,
+        50,
+        Some(20),
+    )
+    .await;
+    assert_voiced_duration_preserved(1000, fed_ab, "A→B G729→PCMA");
+
+    // B speaks for one second (transcoded to G729 on the way to A).
+    let fed_ba = transcode_voiced_duration(
+        &h.test_b,
+        CodecType::PCMA,
+        &h.test_a,
+        CodecType::G729,
+        20,
+        50,
+        Some(20),
+    )
+    .await;
+    assert_voiced_duration_preserved(1000, fed_ba, "B→A PCMA→G729");
+
+    // Let the recorder task flush, then inspect everything captured.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut decoder = audio_codec::create_decoder(CodecType::G729);
+    let (mut ingress_voiced, mut egress_voiced) = (0usize, 0usize);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
+    while tokio::time::Instant::now() < deadline {
+        let mut item = match tokio::time::timeout(Duration::from_millis(50), rx.recv()).await {
+            Ok(Some(item)) => item,
+            _ => continue,
+        };
+        let direction = match item.leg {
+            Some(0) => PacketDirection::Ingress,
+            Some(1) => PacketDirection::Egress,
+            leg => panic!("unexpected recording leg: {leg:?}"),
+        };
+        let pt = item
+            .payload
+            .get(1)
+            .map(|value| value & 0x7f)
+            .expect("captured item must contain an RTP header");
+        assert_eq!(
+            pt, g729_pt,
+            "recorded stream must stay in the recorded leg's codec (G729)"
+        );
+        let payload = item.payload.split_off(12);
+        let pcm = decoder.decode(&payload);
+        if pcm.iter().any(|s| s.abs() > VOICED_SAMPLE_THRESHOLD) {
+            match direction {
+                PacketDirection::Ingress => ingress_voiced += 1,
+                PacketDirection::Egress => egress_voiced += 1,
+            }
+        }
+    }
+    for (label, count) in [("ingress", ingress_voiced), ("egress", egress_voiced)] {
+        // Wide enough for receiver-PLC / comfort-noise excursions under
+        // parallel load, tight enough to catch halved (accumulator drop)
+        // or doubled (duplication) captures.
+        assert!(
+            (30..=80).contains(&count),
+            "A-leg {label} capture must be ≈1s (50×20ms voiced), got {count} frames"
+        );
+    }
 
     h.close();
     tokio::time::sleep(Duration::from_millis(80)).await;

@@ -308,7 +308,7 @@ delegate_upload = false    # Delegate S3/HTTP upload to cluster nodes
 | HTTP field: `url` | String | required | HTTP endpoint URL. May contain `{key}`, replaced with the object key (raw concatenation) |
 | `headers` | Option\<Map\> | None | Custom HTTP headers (values support placeholders) |
 | `method` | Option\<String\> | `POST` | HTTP method for `type = "http"` |
-| `file_field` | Option\<String\> | `recording` | Multipart field carrying the binary payload |
+| `file_field` | Option\<String\> | `recording` (media) / `signaling` (signaling) | Multipart field carrying the binary payload; configured value applies to both uploads |
 | `body_field` | Option\<String\> | None | Send the payload as this text field instead of a binary file part (mutually exclusive with `file_field`) |
 | `file_name` | Option\<String\> | media/signaling file name | Multipart file name template |
 | `content_type` | Option\<String\> | `audio/wav` / `application/jsonl` | MIME type of the binary payload |

@@ -13,6 +13,7 @@ pub mod leg;
 pub mod leg_id;
 pub mod leg_stats;
 pub mod media_bridge;
+pub mod media_health;
 pub mod media_recorder;
 pub mod media_stream;
 pub mod mixer;

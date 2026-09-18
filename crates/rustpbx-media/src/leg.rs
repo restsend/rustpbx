@@ -169,6 +169,14 @@ pub struct LegInner {
     /// sender's RTCP/seq state while relay owns the wire.
     was_relay: Arc<AtomicBool>,
     negotiated: Mutex<Option<NegotiatedLegProfile>>,
+    /// Audio address this leg advertised in its local SDP (session/media `c=`
+    /// + audio m-line port), captured when the local description commits —
+    /// the address a remote peer would send media to. Diagnostics: comparing
+    /// it with the address the peer actually sends from exposes NAT/firewall
+    /// black holes (`caller_rx == 0` class failures).
+    advertised_addr: Mutex<Option<String>>,
+    /// Audio address the remote peer advertised in its SDP.
+    peer_advertised_addr: Mutex<Option<String>>,
     /// Gate: before the remote peer answers (200 OK), relay must not forward.
     /// Set true on construction, flipped to false by [`LegInner::accept`].
     gated: Arc<AtomicBool>,
@@ -430,6 +438,8 @@ impl LegInner {
             egress,
             was_relay,
             negotiated: Mutex::new(None),
+            advertised_addr: Mutex::new(None),
+            peer_advertised_addr: Mutex::new(None),
             gated: Arc::new(AtomicBool::new(true)),
             rtp_timeout: Arc::new(RtpTimeoutState::default()),
             observer_attached: Arc::new(AtomicBool::new(false)),
@@ -508,6 +518,18 @@ impl LegInner {
         self.negotiated.lock().clone()
     }
 
+    /// Audio address this leg advertised in its local SDP (`addr:port` a
+    /// remote peer would send media to), captured when the local description
+    /// commits. Diagnostics anchor for media black-hole analysis.
+    pub fn advertised_addr(&self) -> Option<String> {
+        self.advertised_addr.lock().clone()
+    }
+
+    /// Audio address the remote peer advertised in its SDP (`addr:port`).
+    pub fn peer_advertised_addr(&self) -> Option<String> {
+        self.peer_advertised_addr.lock().clone()
+    }
+
     pub(crate) fn stats(&self) -> TapStats {
         self.tap.stats()
     }
@@ -551,6 +573,11 @@ impl LegInner {
     pub async fn create_offer(&self) -> Result<String> {
         let offer = self.prepare_offer().await?;
         let sdp = set_local(&self.pc, offer)?;
+        if let Some(desc) = self.pc.local_description()
+            && let Some(addr) = advertised_audio_addr(&desc)
+        {
+            *self.advertised_addr.lock() = Some(addr);
+        }
         debug!(
             leg = %self.id,
             sdp = ?sdp,
@@ -572,6 +599,9 @@ impl LegInner {
         );
         let desc = SessionDescription::parse(sdp_type, remote)
             .map_err(|e| anyhow!("failed to parse remote sdp: {:?}", e))?;
+        if let Some(addr) = advertised_audio_addr(&desc) {
+            *self.peer_advertised_addr.lock() = Some(addr);
+        }
         self.pc
             .set_remote_description(desc)
             .await
@@ -605,7 +635,13 @@ impl LegInner {
             self.pc.wait_for_gathering_complete().await;
             let mut answer = self.pc.create_answer().await?;
             answer.sdp_type = SdpType::Answer;
-            set_local(&self.pc, answer)?
+            let local = set_local(&self.pc, answer)?;
+            if let Some(desc) = self.pc.local_description()
+                && let Some(addr) = advertised_audio_addr(&desc)
+            {
+                *self.advertised_addr.lock() = Some(addr);
+            }
+            local
         } else {
             // Applying a remote answer (UAC): no local SDP to emit.
             String::new()
@@ -844,6 +880,11 @@ impl LegInner {
     pub fn quality_report(&self, side: &'static str) -> crate::leg_stats::LegQualityReport {
         let tap = self.stats();
         let rtcp = self.rtcp_stats().snapshot();
+        let remote_addr = self
+            .pc()
+            .ice_transport()
+            .get_selected_pair()
+            .map(|pair| pair.remote.address.to_string());
         crate::leg_stats::LegQualityReport {
             side,
             codec: self.negotiated().and_then(|p| p.audio.map(|c| format!("{:?}", c.codec))),
@@ -853,6 +894,9 @@ impl LegInner {
             jitter_us: rtcp.jitter_us,
             rtt_us: rtcp.rtt_us,
             loss_pct: rtcp.loss_pct(),
+            advertised_addr: self.advertised_addr(),
+            peer_advertised_addr: self.peer_advertised_addr(),
+            remote_addr,
         }
     }
 
@@ -1343,6 +1387,26 @@ fn audio_capability_from_codec(c: &CodecInfo) -> rustrtc::config::AudioCapabilit
         fmtp: c.fmtp.clone(),
         rtcp_fbs: vec![],
     }
+}
+
+/// Extract the audio media address from a parsed SDP description in
+/// `addr:port` form: the audio m-line's connection (falling back to the
+/// session-level `c=`) plus the m-line port. This is the address a remote
+/// peer sends media to; comparing it with the address packets actually
+/// arrive from (ICE selected pair / RTP latch) is the primary diagnostic for
+/// media black holes (firewall / mis-advertised address).
+fn advertised_audio_addr(desc: &SessionDescription) -> Option<String> {
+    let audio = desc
+        .media_sections
+        .iter()
+        .find(|m| m.kind == rustrtc::MediaKind::Audio)?;
+    let conn = audio
+        .connection
+        .as_deref()
+        .or(desc.session.connection.as_deref())?;
+    // `c=IN IP4 1.2.3.4` → take the last token (the address).
+    let host = conn.split_whitespace().next_back()?;
+    Some(format!("{host}:{}", audio.port))
 }
 
 pub(crate) fn set_local(pc: &PeerConnection, desc: SessionDescription) -> Result<String> {

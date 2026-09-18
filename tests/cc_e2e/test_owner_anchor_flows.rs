@@ -199,7 +199,11 @@ async fn e2e_blind_transfer_retires_agent_dialog_and_preserves_customer() {
 async fn e2e_blind_transfer_resolves_dialog_alias_to_session() {
     use rustpbx::call::runtime::{MemorySessionRegistry, SessionInfo, resolve_owner_and_session};
 
-    let reg = MemorySessionRegistry::new("10.0.0.2:5060", Duration::from_secs(3600));
+    let reg = MemorySessionRegistry::new(
+        "10.0.0.2:5060",
+        Duration::from_secs(3600),
+        Duration::from_secs(rustpbx::call::runtime::DEFAULT_SESSION_MAX_AGE_SECS),
+    );
     let reg: rustpbx::call::runtime::SessionRegistryRef = reg.into_ref();
     reg.register(&SessionInfo::new("sess-blind-1", "10.0.0.2:5060"))
         .await
@@ -345,7 +349,11 @@ async fn e2e_indialog_forward_looks_up_dialog_owner() {
     use rustpbx::call::runtime::{MemorySessionRegistry, SessionInfo, resolve_owner_and_session};
     use rustpbx::config::ClusterPeer;
 
-    let reg = MemorySessionRegistry::new("10.0.0.1:5060", Duration::from_secs(3600));
+    let reg = MemorySessionRegistry::new(
+        "10.0.0.1:5060",
+        Duration::from_secs(3600),
+        Duration::from_secs(rustpbx::call::runtime::DEFAULT_SESSION_MAX_AGE_SECS),
+    );
     let reg: rustpbx::call::runtime::SessionRegistryRef = reg.into_ref();
     reg.register(&SessionInfo::dialog_alias(
         "dlg-midcall-1",

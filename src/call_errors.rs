@@ -244,6 +244,11 @@ pub enum TraceKind {
     /// call end; unlike RtpTimeout the watchdog did not tear the call down —
     /// the leg simply never sent media, e.g. browser ICE/DTLS never completed).
     MediaIssue,
+    /// Periodic / stall-triggered per-leg media health snapshot (counters,
+    /// advertised vs wire addresses, codec). `detail` carries the
+    /// `MediaHealthSnapshot` JSON; emitted every `[media]
+    /// media_trace_interval_secs` and immediately when a leg first stalls.
+    MediaHealth,
     /// A subsystem error/warning that affected the call (routing, REST call,
     /// step IVR, TTS, queue/CC, auth/ACL, locator, ...). Carries `severity`
     /// and a registry `code` so the CDR timeline explains degraded calls.

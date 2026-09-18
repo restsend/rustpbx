@@ -697,7 +697,12 @@ async fn cluster_session_registry_dialog_alias_routes_to_owner() {
 
     let db = shared_db().await;
     let reg: rustpbx::call::runtime::SessionRegistryRef =
-        DbSessionRegistry::new(db, Duration::from_secs(3600)).into_ref();
+        DbSessionRegistry::new(
+            db,
+            Duration::from_secs(3600),
+            Duration::from_secs(rustpbx::call::runtime::DEFAULT_SESSION_MAX_AGE_SECS),
+        )
+        .into_ref();
     reg.register(&SessionInfo::new("sess-owner-1", "10.0.0.2:5060"))
         .await
         .unwrap();

@@ -1342,7 +1342,8 @@ async fn rwi_bridge_setup_results_reach_listener_before_call_ends() {
         .await
         .expect("bridge setup result must reach the RWI controller");
         assert!(!session.cancel_token.is_cancelled());
-        assert!(session.conference_bridge.bridge_handle.is_some());
+        assert!(session.voip_bridge.is_some());
+        assert!(session.conference_bridge.conf_id.is_none(), "a voip bridge must not occupy the conference slot");
         assert!(server.active_call_registry.get(call_id).is_some());
     }
 
@@ -5681,34 +5682,53 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
             assert!(matches!(transfers.get_state("transfer-media"),
             Some(crate::addons::cc::transfer::TransferState::Completed { conf_id, .. })
                 if conf_id == room));
-            let command = _commands.try_recv().unwrap();
-            assert!(
-                matches!(&command, CallCommand::JoinMixerLeg { mixer_id, leg_id }
-            if mixer_id == &room && leg_id == &LegId::from("caller"))
+            // prepare_conference_merge_media queues the B↔C topology restore
+            // (LeaveMixer / Hold / Unhold×2 / Bridge — an idempotent re-assert
+            // of the switch-back state) BEFORE the merge attaches the three
+            // legs to the mixer. Drain everything and verify both groups.
+            let mut joins: Vec<CallCommand> = Vec::new();
+            let mut restored = 0;
+            let mut mark_transferred = false;
+            while let Ok(cmd) = _commands.try_recv() {
+                match cmd {
+                    CallCommand::JoinMixerLeg { .. } => joins.push(cmd),
+                    CallCommand::LeaveMixer
+                    | CallCommand::Hold { .. }
+                    | CallCommand::Unhold { .. }
+                    | CallCommand::Bridge { .. } => restored += 1,
+                    CallCommand::MarkTransferred => mark_transferred = true,
+                    other => panic!("unexpected command from merge: {other:?}"),
+                }
+            }
+            assert_eq!(
+                restored, 5,
+                "B↔C topology restore (5 commands) must precede the joins"
             );
-            // Same-session merge also re-attaches agent + consult (idempotent
-            // when the consultation mixer is still intact).
-            let cmd_b = _commands.try_recv().unwrap();
+            assert_eq!(joins.len(), 3, "merge must attach A/B/C to the mixer");
+            for (i, expected) in ["caller", "callee", "consult-transfer-media"]
+                .iter()
+                .enumerate()
+            {
+                assert!(
+                    matches!(
+                        &joins[i],
+                        CallCommand::JoinMixerLeg { mixer_id, leg_id }
+                            if mixer_id == &room && leg_id == &LegId::from(*expected)
+                    ),
+                    "expected JoinMixerLeg({expected}) into {room}"
+                );
+            }
             assert!(
-                matches!(&cmd_b, CallCommand::JoinMixerLeg { mixer_id, leg_id }
-            if mixer_id == &room && leg_id == &LegId::from("callee"))
-            );
-            let cmd_c = _commands.try_recv().unwrap();
-            assert!(
-                matches!(&cmd_c, CallCommand::JoinMixerLeg { mixer_id, leg_id }
-            if mixer_id == &room && leg_id == &LegId::from("consult-transfer-media"))
-            );
-            assert!(
-                matches!(_commands.try_recv().unwrap(), CallCommand::MarkTransferred),
+                mark_transferred,
                 "merge retains the existing transfer bookkeeping command"
             );
             assert!(
                 _commands.try_recv().is_err(),
                 "merge must only attach A/B/C + MarkTransferred"
             );
-            session.execute_command(command, None).await;
-            session.execute_command(cmd_b, None).await;
-            session.execute_command(cmd_c, None).await;
+            for cmd in joins.into_iter() {
+                session.execute_command(cmd, None).await;
+            }
             for name in ["callee", "consult-transfer-media"] {
                 private_tokens.push(session.legs.conference_bridge_handle(&LegId::from(name))
                     .unwrap().cancel_token.clone());

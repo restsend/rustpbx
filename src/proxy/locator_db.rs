@@ -914,7 +914,9 @@ impl Locator for DbLocator {
                 .delete_expired_snapshots(expired, now_epoch, now_instant)
                 .await
             {
-                Err(e) => warn!(error = %e, "Failed to delete expired location rows during lookup"),
+                Err(e) => {
+                    crate::db_report::report_db_write_failure("locator", "delete", None, &e);
+                }
                 Ok(expired_locations) if !expired_locations.is_empty() => {
                     // The backend removed these bindings on its own (no explicit
                     // unregister arrived). Broadcast Offline so downstream
@@ -1496,6 +1498,55 @@ mod tests {
             .await
             .expect("query carol rows");
         assert_eq!(carol_rows.len(), 1, "never-expire row must not be swept");
+    }
+
+    /// Regression for the DB offline chain: a client that stops refreshing
+    /// REGISTER must surface as Offline carrying its registration identity and
+    /// pass the active-binding gate. Mirrors the RedisLocator test so both
+    /// backends stay in lockstep.
+    #[tokio::test]
+    async fn sweep_expired_location_keeps_registered_identity() {
+        let locator = DbLocator::new_with_migrate("sqlite::memory:".to_string(), true)
+            .await
+            .expect("create db locator");
+
+        let aor: rsipstack::sip::Uri = "sip:46ih70eb@adu5tvgvvbah.invalid;transport=ws"
+            .try_into()
+            .expect("contact aor");
+        locator
+            .register(
+                "carol",
+                Some("pbx.example.com"),
+                Location {
+                    aor: aor.clone(),
+                    expires: 30,
+                    destination: Some(SipAddr {
+                        r#type: Some(Transport::Wss),
+                        addr: "192.0.2.10:5060".try_into().expect("destination"),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("register carol");
+
+        // Client vanished: no unregister, binding is far past expiry+grace.
+        backdate_rows(&locator, "carol", 3600).await;
+
+        let swept = sweep_offline_locations(&locator)
+            .await
+            .expect("sweep expired");
+        assert_eq!(swept.len(), 1, "stale DB binding must be swept");
+        assert_eq!(
+            swept[0].registered_username.as_deref(),
+            Some("carol"),
+            "swept location must keep the registration identity"
+        );
+        assert_eq!(
+            swept[0].registered_realm.as_deref(),
+            Some("pbx.example.com"),
+        );
+        assert_eq!(swept[0].aor, aor);
     }
 
     /// When `lookup` opportunistically deletes expired rows, the backend must

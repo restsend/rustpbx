@@ -19,6 +19,7 @@ pub mod call_record_indices;
 pub mod call_record_optimization_indices;
 pub mod call_record_session_id_column;
 pub mod cluster_session;
+pub mod m20260917_000001_cluster_session_target_session_id;
 pub mod config_entry;
 pub mod department;
 pub mod extension;
@@ -252,12 +253,18 @@ mod tests {
     use sea_orm_migration::seaql_migrations;
 
     fn temp_db_url() -> String {
+        // pid + nanos + a process-wide sequence: tests run in parallel and
+        // two calls in the same nanosecond must not share one SQLite file
+        // (concurrent migrations trip seaql_migrations' UNIQUE(version)).
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "rustpbx-models-migrate-{}-{nanos}.sqlite3",
+            "rustpbx-models-migrate-{}-{nanos}-{seq}.sqlite3",
             std::process::id()
         ));
         format!("sqlite://{}", path.display())

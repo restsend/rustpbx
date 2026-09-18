@@ -2257,3 +2257,5 @@ internal = "内部 SIP"
 [errors.proxy]
 rtp_timeout = "RTP 无活动超时"
 leg_media_incomplete = "已接通但有一侧或双侧未收到任何媒体"
+media_stalled = "接通后坐席/主叫腿持续无入向媒体"
+"media_stalled.remediation" = "常见原因：防火墙拦截了对端→PBX 方向的 UDP 媒体端口段，或本端 answer SDP 通告的媒体地址（容器/内网 IP）对端不可达。请核对 trace 中的 advertised_addr 与 remote_addr，并放行 UDP 媒体端口段。"

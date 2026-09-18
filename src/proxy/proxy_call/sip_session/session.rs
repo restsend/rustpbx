@@ -120,6 +120,14 @@ pub struct SipSession {
     /// `CallCommand::RealtimeStart`, cleared by `RealtimeStop` / teardown.
     pub(crate) realtime_bridge: Option<super::realtime_bridge::RealtimeBridgeHandle>,
 
+    /// Active TTS/voip WebSocket bridge handle — set by `connect_bridge()`,
+    /// cleared on disconnect (`CallCommand::VoipBridgeClosed`) / teardown.
+    /// Kept separate from `conference_bridge`: storing the voip handle there
+    /// set a fake `conf_id` that permanently gated `update_media_path()`, so a
+    /// queue agent leg connecting after any TTS bridge flow was never bridged
+    /// (silent one-way audio).
+    pub(crate) voip_bridge: Option<crate::call::runtime::ConferenceBridgeHandle>,
+
     pub cmd_tx: Option<mpsc::Sender<CallCommand>>,
 
     /// Cluster session-registry RAII guard: registers this session's owning
@@ -1092,6 +1100,7 @@ impl SipSession {
             bridge_trace_context: Arc::new(parking_lot::Mutex::new(None)),
             bridge_dtmf_digits: Arc::new(parking_lot::Mutex::new(Vec::new())),
             realtime_bridge: None,
+            voip_bridge: None,
             cmd_tx: Some(cmd_tx.clone()),
             handle: sip_handle.clone(),
             session_registry_guard: None,
@@ -1520,6 +1529,97 @@ impl SipSession {
         });
     }
 
+    /// Monitor the bridge's media-health snapshots: append a bounded number
+    /// of `media_health` trace entries (periodic + at first stall) and fire
+    /// `proxy.media_stalled` (CDR error chip + RWI `call_error`) once per
+    /// leg that keeps receiving zero inbound RTP while the route is active —
+    /// the mid-call signal for firewall / mis-advertised-address black
+    /// holes that previously was only discoverable at hangup
+    /// (`leg_media_incomplete`) or by reading logs.
+    pub(crate) fn arm_media_health_monitor(
+        mb: &crate::media::media_bridge::MediaBridge,
+        cmd_tx: Option<mpsc::Sender<CallCommand>>,
+        session_id: &str,
+        stall_detect_secs: Option<u64>,
+        trace_interval_secs: Option<u64>,
+    ) {
+        match stall_detect_secs {
+            // `0` disables stall detection: route age can never reach
+            // `Duration::MAX`, so no leg is ever flagged stalled.
+            Some(0) => mb.set_stall_detect(std::time::Duration::MAX),
+            Some(secs) => {
+                mb.set_stall_detect(std::time::Duration::from_secs(secs));
+            }
+            None => {} // bridge default (15s)
+        }
+        let mut rx = mb.health_rx();
+        let sid = session_id.to_string();
+        let reported: Arc<parking_lot::Mutex<std::collections::HashSet<String>>> =
+            Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
+        // Periodic snapshots: 5s sampler tick, publish every
+        // `trace_interval_secs`, bounded to 20 entries per call so long
+        // calls cannot bloat the CDR metadata.
+        let every_ticks = match trace_interval_secs.unwrap_or(30) {
+            0 => 0,
+            secs => (secs as usize / 5).max(1),
+        };
+        let tick: Arc<std::sync::atomic::AtomicUsize> = Arc::default();
+        let periodic_emitted: Arc<std::sync::atomic::AtomicUsize> = Arc::default();
+        const MAX_PERIODIC_TRACE_EVENTS: usize = 20;
+        crate::utils::spawn(async move {
+            loop {
+                match rx.changed().await {
+                    Ok(()) => {}
+                    Err(_) => return, // bridge dropped — session is over
+                }
+                let Some(snapshot) = rx.borrow_and_update().clone() else {
+                    continue;
+                };
+                let n = tick.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if every_ticks > 0
+                    && n % every_ticks == 0
+                    && periodic_emitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        < MAX_PERIODIC_TRACE_EVENTS
+                {
+                    if let Ok(detail) = serde_json::to_value(snapshot.as_ref()) {
+                        if let Some(tx) = &cmd_tx {
+                            let _ = tx.try_send(CallCommand::Trace {
+                                event: crate::call_errors::TraceEvent::new(
+                                    crate::call_errors::TraceKind::MediaHealth,
+                                    format!("media health @ {:.0}s", snapshot.route_age_secs),
+                                )
+                                .detail(detail),
+                            });
+                        }
+                    }
+                }
+                for side in snapshot.stalled_sides() {
+                    if !reported.lock().insert(side.to_string()) {
+                        continue; // once per leg per call
+                    }
+                    let detail = serde_json::to_value(snapshot.as_ref()).ok();
+                    warn!(
+                        session_id = %sid,
+                        leg = side,
+                        route_age_s = format!("{:.0}", snapshot.route_age_secs),
+                        "media stalled: no inbound RTP on connected leg"
+                    );
+                    if let Some(tx) = &cmd_tx {
+                        let _ = tx.try_send(CallCommand::ReportCallError {
+                            stage: "proxy".to_string(),
+                            app: "proxy".to_string(),
+                            code: "proxy.media_stalled".to_string(),
+                            severity: crate::call_errors::ErrSeverity::Warn,
+                            message: format!("no inbound media on {side} leg"),
+                            sip_status: None,
+                            detail,
+                        });
+                    }
+                }
+            }
+        });
+    }
+
     /// Reconcile the RTP-inactivity watchdog suppression against the current
     /// session state. Apps (IVR / voicemail / queue / conference) keep the
     /// watchdog active so a caller that drops media without a BYE is still
@@ -1630,11 +1730,20 @@ impl SipSession {
         tokio::pin!(hangup_futures);
         tokio::pin!(timeout);
 
-        let max_duration_sleep = if let Some(max_dur) = self.context.dialplan.max_call_duration {
+        let max_duration_sleep = {
+            // Fallback of last resort: a dialplan without `max_call_duration`
+            // must still have a hard ceiling, otherwise a call that loses both
+            // its RTP watchdog (un-bridged media) and its peers can hang
+            // forever. Dialplans normally carry 1h from `Dialplan::default`.
+            const FALLBACK_MAX_CALL_DURATION: std::time::Duration =
+                std::time::Duration::from_secs(3600);
+            let max_dur = self
+                .context
+                .dialplan
+                .max_call_duration
+                .unwrap_or(FALLBACK_MAX_CALL_DURATION);
             debug!(session_id = %self.context.session_id, ?max_dur, "Max call duration timer armed");
             tokio::time::sleep(max_dur).boxed()
-        } else {
-            futures::future::pending::<()>().boxed()
         };
         tokio::pin!(max_duration_sleep);
 
@@ -6248,11 +6357,30 @@ impl SipSession {
                 if arm_relay_monitor {
                     self.meta.relay_arm_monitor_spawned = true;
                 }
+                // Same one-shot rule for the media-health monitor: the answer
+                // path can run more than once per session, and a second
+                // watcher on the same bridge would duplicate every periodic
+                // media_health trace and every proxy.media_stalled error.
+                let arm_health_monitor = !self.meta.media_health_monitor_spawned;
+                if arm_health_monitor {
+                    self.meta.media_health_monitor_spawned = true;
+                }
+                let stall_detect_secs = self.context.dialplan.media.stall_detect_secs;
+                let trace_interval_secs = self.context.dialplan.media.media_trace_interval_secs;
                 let mb = self.bridge_mut().ok_or_else(|| anyhow!("No MediaBridge"))?;
                 mb.accept(LegSide::B).await;
                 mb.accept(LegSide::A).await;
                 if !is_early_media {
                     Self::arm_bridged_rtp_timeouts(mb, rtp_timeout, cmd_tx.clone(), &session_id);
+                }
+                if arm_health_monitor {
+                    Self::arm_media_health_monitor(
+                        mb,
+                        cmd_tx.clone(),
+                        &session_id,
+                        stall_detect_secs,
+                        trace_interval_secs,
+                    );
                 }
                 if arm_relay_monitor {
                     Self::arm_relay_arm_failure_monitor(mb, cmd_tx, &session_id);
@@ -8918,6 +9046,7 @@ impl SipSession {
             caller: self.context.original_caller.clone(),
             callee: self.context.original_callee.clone(),
             direction: self.context.dialplan.direction.to_string(),
+            target_session_id: None,
             started_at: chrono::Utc::now(),
         };
         match crate::call::runtime::SessionGuard::register(
@@ -8928,10 +9057,19 @@ impl SipSession {
         {
             Ok(guard) => self.session_registry_guard = Some(guard),
             Err(e) => {
-                tracing::warn!(
-                    session_id = %self.id,
-                    error = %e,
-                    "session registry registration failed (cluster routing degraded)"
+                crate::db_report::report_db_write_failure(
+                    "cluster_sessions",
+                    "insert",
+                    Some(self.id.0.as_str()),
+                    &e,
+                );
+                self.record_trace(
+                    crate::call_errors::TraceEvent::new(
+                        crate::call_errors::TraceKind::Error,
+                        "Session registry registration failed (cluster routing degraded)",
+                    )
+                    .severity(crate::call_errors::ErrSeverity::Error)
+                    .detail(serde_json::json!({ "error": e.to_string() })),
                 );
             }
         }
@@ -9736,7 +9874,23 @@ impl SipSession {
                     let registry = self.server.session_registry.clone();
                     crate::utils::spawn(async move {
                         if let Err(e) = registry.register(&alias).await {
-                            tracing::debug!(error = %e, "dialog alias registry failed");
+                            // Incident 2026-09-17: this used to be a debug! —
+                            // every alias insert was silently failing on
+                            // MySQL ("Data too long for column 'direction'")
+                            // and cross-node dialog resolution was dead
+                            // without anyone noticing.
+                            crate::db_report::report_db_write_failure_with_detail(
+                                "cluster_sessions",
+                                "upsert",
+                                None,
+                                &e,
+                                Some(serde_json::json!({
+                                    "stage": "dialog_alias",
+                                    "dialog_call_id": alias.call_id,
+                                    "target_session_id": alias.canonical_session_id(),
+                                })),
+                                crate::db_report::THROTTLE_COOLDOWN,
+                            );
                         }
                     });
                 }
@@ -9905,13 +10059,30 @@ impl SipSession {
                 warn!(%leg_id, %reason, "Leg failed async notification");
                 if !self.legs.contains_key(&leg_id) { return CommandResult::success(); }
                 let result = {
-                    let connected_bridge_leg = self
+                    // Bridge-based trigger (legacy): the failed leg was paired
+                    // with the caller inside an armed media bridge.
+                    let bridge_paired_leg = self
                         .legs
                         .get(&leg_id)
                         .is_some_and(|leg| leg.state == LegState::Connected || leg.source_leg.is_some())
                         && self.bridge.active
                         && self.bridge.contains_leg(&LegId::from("caller"))
                         && self.bridge.contains_leg(&leg_id);
+                    // B-leg trigger: the failed leg IS the session's current
+                    // B-leg toward the caller even when the media bridge never
+                    // armed (e.g. ICE never completed on the agent leg). This
+                    // mirrors the unconditional cascade in handle_callee_state
+                    // for tracked callee dialogs. resolve_transfer_leg excludes
+                    // consult legs and dial-source legs, so a consult hangup
+                    // (a normal flow event) never triggers the cascade — and a
+                    // ringing/no-answer failure never does either (the queue
+                    // keeps dialing; production 2026-09-17).
+                    let current_b_leg = self
+                        .legs
+                        .get(&leg_id)
+                        .is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::Hold))
+                        && self.resolve_transfer_leg(LegId::from("callee")) == leg_id;
+                    let connected_bridge_leg = bridge_paired_leg || current_b_leg;
                     // Forward to running app before removing the leg (so we can get the URI)
                     let agent_uri = self.legs.get(&leg_id).and_then(|l| l.endpoint.clone());
                     let event_name =
@@ -9993,6 +10164,15 @@ impl SipSession {
                     if let Err(error) = self.handle_remove_leg(leg_id.clone()).await {
                         return CommandResult::failure(error.to_string());
                     }
+                    // The dial leg is gone: lift the RTP-watchdog suppression
+                    // that the transfer dial armed (`sync_rtp_timeout_pause`
+                    // re-evaluates from current leg state). Without this a
+                    // ringing transfer leg that fails outright leaves the
+                    // watchdog paused for the rest of the call.
+                    if self.meta.transfer_in_progress {
+                        self.meta.transfer_in_progress = false;
+                        self.sync_rtp_timeout_pause();
+                    }
                     // A departed dial source cannot continue its private call.
                     let dial_source_ended = self.legs.values().any(|leg|
                         leg.source_leg.as_ref() == Some(&leg_id));
@@ -10031,6 +10211,19 @@ impl SipSession {
             CallCommand::AppExited => self.handle_app_exited().await,
 
             CallCommand::StartReturnApp => self.handle_start_return_app().await,
+
+            CallCommand::VoipBridgeClosed => {
+                // The TTS/voip WS bridge ended. Drop the handle (cancelling its
+                // token) and re-evaluate the media path: while the bridge was
+                // up, `update_media_path()` deliberately stayed out of the way;
+                // a route that became pending meanwhile (e.g. a queue agent leg
+                // connecting) must be established now that it is gone.
+                if self.voip_bridge.take().is_some() {
+                    debug!(session_id = %self.id, "Voip bridge closed; re-evaluating media path");
+                }
+                self.update_media_path().await;
+                CommandResult::success()
+            }
 
             CallCommand::SendInfo {
                 leg_id,
@@ -11237,11 +11430,39 @@ impl SipSession {
         if let (Some(a), Some(b)) = (self.legs.media_leg(&leg_a), self.legs.media_leg(&leg_b)) {
             if a.negotiated().is_none() || b.negotiated().is_none()
                 || ![&leg_a, &leg_b].iter().all(|id| self.legs.get(id).is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::EarlyMedia))) {
+                // Incident 2026-09-17: an answered agent leg whose ICE never
+                // completed kept deferring here silently — the call showed
+                // "answered" with no audio and no log trail. Make the
+                // pathological case (legs answered but media never negotiated)
+                // visible at warn; mid-call transitions stay debug.
+                let legs_ready = ![&leg_a, &leg_b].iter().all(|id| self.legs.get(id).is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::EarlyMedia)));
+                let a_neg = a.negotiated().is_some();
+                let b_neg = b.negotiated().is_some();
+                if legs_ready && (!a_neg || !b_neg) {
+                    warn!(session_id = %self.id,
+                        leg_a = %leg_a, leg_b = %leg_b,
+                        a_negotiated = a_neg, b_negotiated = b_neg,
+                        "Media bridge deferred: legs answered but peer not negotiated (ICE incomplete?)"
+                    );
+                } else {
+                    debug!(session_id = %self.id, leg_a = %leg_a, leg_b = %leg_b,
+                        "Media bridge deferred until usable media arrives");
+                }
                 self.sync_rtp_timeout_pause();
                 return true; // Keep the requested pair until usable media arrives.
             }
             if self.media.bridge.is_none() {
                 self.media.bridge = Some(MediaBridge::new(self.id.to_string()));
+            }
+            if !self.meta.media_health_monitor_spawned {
+                Self::arm_media_health_monitor(
+                    self.bridge().unwrap(),
+                    self.cmd_tx.clone(),
+                    &self.context.session_id,
+                    self.context.dialplan.media.stall_detect_secs,
+                    self.context.dialplan.media.media_trace_interval_secs,
+                );
+                self.meta.media_health_monitor_spawned = true;
             }
             if !self.meta.relay_arm_monitor_spawned {
                 Self::arm_relay_arm_failure_monitor(self.bridge().unwrap(), self.cmd_tx.clone(), &self.context.session_id);
@@ -12004,6 +12225,7 @@ impl Drop for SipSession {
         // Stop conference bridges (safety net — cancel only, since we can't
         // .await in Drop)
         self.conference_bridge.stop_bridge();
+        self.voip_bridge = None;
         self.legs.stop_all_conference_bridge_handles();
 
         // Media bridge — torn down explicitly under catch_unwind so a teardown

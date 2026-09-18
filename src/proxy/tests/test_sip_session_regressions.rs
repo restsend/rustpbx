@@ -627,6 +627,83 @@ async fn test_connected_dynamic_leg_failure_hangs_up_caller() {
 }
 
 #[tokio::test]
+async fn test_connected_dynamic_leg_failure_hangs_up_caller_even_without_bridge() {
+    // Production 2026-09-17 (node 10.193.244.54): the media bridge was never
+    // activated (TTS voip bridge poisoning regression), so when the connected
+    // agent leg hung up, `LegFailed` skipped the post-disconnect handler and
+    // the trunk caller stayed on the dead call in silence for 15s until the
+    // PSTN side gave up. A connected dynamic leg must trigger the
+    // post-disconnect flow (return app / hangup) regardless of bridge state.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+    let agent_leg = LegId::from("queue-agent");
+    let mut leg = Leg::new(agent_leg.clone());
+    leg.state = LegState::Connected;
+    session.legs.insert(agent_leg.clone(), leg);
+    // NOTE: no `session.bridge = ...` — exactly the broken production state
+    // (media bridge never established).
+    assert!(!session.bridge.active);
+
+    let caller_dialog_id = session
+        .caller_dialog
+        .as_ref()
+        .map(|d| d.id())
+        .expect("caller dialog present");
+    session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: agent_leg,
+                reason: "Remote hung up".to_string(),
+            },
+            None,
+        )
+        .await;
+
+    assert!(
+        session.pending_hangup.contains(&caller_dialog_id),
+        "a connected agent leg hanging up must release the caller even when the media bridge was never established"
+    );
+}
+
+// A RINGING agent leg failing must NOT release the caller (queue keeps dialing).
+#[tokio::test]
+async fn test_ringing_dynamic_leg_failure_does_not_hang_up_caller() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+    let agent_leg = LegId::from("queue-agent");
+    let mut leg = Leg::new(agent_leg.clone());
+    leg.state = LegState::Ringing;
+    session.legs.insert(agent_leg.clone(), leg);
+    assert!(!session.bridge.active);
+
+    let caller_dialog_id = session
+        .caller_dialog
+        .as_ref()
+        .map(|d| d.id())
+        .expect("caller dialog present");
+    session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: agent_leg,
+                reason: "Remote hung up".to_string(),
+            },
+            None,
+        )
+        .await;
+
+    assert!(
+        !session.pending_hangup.contains(&caller_dialog_id),
+        "a ringing (never answered) leg failing must not hang up the caller"
+    );
+}
+
+#[tokio::test]
 async fn test_connected_dynamic_leg_failure_returns_to_ivr_when_set() {
     // Regression: when meta.transfer_return_to_ivr is set and a connected
     // dynamic leg (queue agent) hangs up, the caller should be returned to
@@ -677,6 +754,184 @@ async fn test_connected_dynamic_leg_failure_returns_to_ivr_when_set() {
         .map(|d| d.id())
         .expect("caller dialog present");
     assert!(!session.pending_hangup.contains(&caller_dialog_id));
+}
+
+#[tokio::test]
+async fn test_connected_dynamic_leg_failure_without_bridge_still_hangs_up_caller() {
+    // Incident 2026-09-17: a queue agent answered but the media bridge never
+    // armed (ICE incomplete on the agent leg). The agent's BYE removed the leg
+    // without cascading, leaving the caller connected forever (no BYE, no
+    // recording stop, no call record). The dynamic-leg path must cascade like
+    // handle_callee_state does for tracked callee dialogs — bridge or not.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+    let agent_leg = LegId::from("queue-agent");
+    let mut leg = Leg::new(agent_leg.clone());
+    leg.state = LegState::Connected;
+    session.legs.insert(agent_leg.clone(), leg);
+    // NOTE: no session.bridge configured on purpose.
+
+    let caller_dialog_id = session
+        .caller_dialog
+        .as_ref()
+        .map(|d| d.id())
+        .expect("caller dialog present");
+    session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: agent_leg.clone(),
+                reason: "Remote hung up".to_string(),
+            },
+            None,
+        )
+        .await;
+
+    assert!(
+        session.pending_hangup.contains(&caller_dialog_id),
+        "connected dynamic B-leg BYE without an armed bridge must still hang up the caller"
+    );
+    // The failed leg must be fully reaped, not just cascaded.
+    assert!(
+        session.legs.get(&agent_leg).is_none(),
+        "failed leg must be removed from the registry"
+    );
+}
+
+#[tokio::test]
+async fn test_connected_dynamic_leg_failure_without_bridge_returns_to_ivr_when_set() {
+    // Same incident shape as
+    // test_connected_dynamic_leg_failure_without_bridge_still_hangs_up_caller,
+    // but with a pending return app: the cascade must behave identically to
+    // the bridge-based trigger — return app wins over caller hangup even when
+    // the media bridge never armed.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+    let agent_leg = LegId::from("queue-agent");
+    let mut leg = Leg::new(agent_leg.clone());
+    leg.state = LegState::Connected;
+    session.legs.insert(agent_leg.clone(), leg);
+    // NOTE: no session.bridge configured on purpose.
+
+    session.meta.transfer_return_app = Some(ReturnAppSpec {
+        app_name: "ivr".to_string(),
+        params: serde_json::json!({"file": "main-menu"}),
+    });
+    let runtime = Arc::new(StartOnlyRuntime::new());
+    session.app_runtime = runtime.clone();
+
+    session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: agent_leg,
+                reason: "Remote hung up".to_string(),
+            },
+            None,
+        )
+        .await;
+
+    assert_eq!(
+        runtime.start_calls.load(Ordering::SeqCst),
+        1,
+        "IVR app must start on B-leg BYE even without an armed bridge"
+    );
+    assert!(session.meta.transfer_return_app.is_none());
+    let caller_dialog_id = session
+        .caller_dialog
+        .as_ref()
+        .map(|d| d.id())
+        .expect("caller dialog present");
+    assert!(!session.pending_hangup.contains(&caller_dialog_id));
+}
+
+#[tokio::test]
+async fn test_hold_b_leg_failure_still_hangs_up_caller() {
+    // The B-leg put on Hold (e.g. during a consult flow) still counts as the
+    // session's B-leg (resolve_transfer_leg includes Hold) — its remote BYE
+    // must cascade.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+    let agent_leg = LegId::from("queue-agent");
+    let mut leg = Leg::new(agent_leg.clone());
+    leg.state = LegState::Hold;
+    session.legs.insert(agent_leg.clone(), leg);
+
+    let caller_dialog_id = session
+        .caller_dialog
+        .as_ref()
+        .map(|d| d.id())
+        .expect("caller dialog present");
+    session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: agent_leg.clone(),
+                reason: "Remote hung up".to_string(),
+            },
+            None,
+        )
+        .await;
+
+    assert!(
+        session.pending_hangup.contains(&caller_dialog_id),
+        "Hold B-leg BYE must still hang up the caller"
+    );
+    assert!(session.legs.get(&agent_leg).is_none());
+}
+
+#[tokio::test]
+async fn test_consult_leg_failure_does_not_hang_up_caller() {
+    // A consult leg BYE is a normal flow event (consultation ends, control
+    // returns to the agent leg): it must NOT cascade. The original agent leg
+    // sits in Hold while the consult leg is Connected.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+    let agent_leg = LegId::from("queue-agent");
+    let mut agent = Leg::new(agent_leg);
+    agent.state = LegState::Hold;
+    let consult_leg = LegId::from("consult");
+    let mut consult = Leg::new(consult_leg.clone());
+    consult.state = LegState::Connected;
+    session.legs.insert(LegId::from("queue-agent"), agent);
+    session.legs.insert(consult_leg.clone(), consult);
+
+    let caller_dialog_id = session
+        .caller_dialog
+        .as_ref()
+        .map(|d| d.id())
+        .expect("caller dialog present");
+    session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: consult_leg.clone(),
+                reason: "Remote hung up".to_string(),
+            },
+            None,
+        )
+        .await;
+
+    assert!(
+        !session.pending_hangup.contains(&caller_dialog_id),
+        "consult leg BYE must not hang up the caller"
+    );
+    // The consult leg is reaped, but the held agent B-leg must survive with
+    // its state untouched — the consultation ended, the call did not.
+    assert!(session.legs.get(&consult_leg).is_none());
+    let agent = session
+        .legs
+        .get(&LegId::from("queue-agent"))
+        .expect("agent leg must survive consult leg failure");
+    assert_eq!(agent.state, LegState::Hold);
 }
 
 #[tokio::test]
@@ -2835,6 +3090,404 @@ async fn queue_agent_connect_activates_media_bridge() {
     }
 }
 
+// ─── production repro (2026-09-17, node 10.193.244.54): G729 trunk caller ────
+//
+// Sequence from the field capture: a trunk caller (G729, Mediant) is answered
+// by the queue app through the real Answer command path, the queue then dials
+// a dynamic agent leg; when the agent answers the session logged "Leg connected
+// async notification" and applied the answer SDP, but never established the
+// media bridge (no "transcoding activated" / "MBRIDGE fast-path relay" logs,
+// zero RTP toward the agent side). Both parties heard silence until hangup.
+//
+// This test drives the same sequence and asserts the bridge comes up.
+
+#[tokio::test]
+async fn queue_agent_leg_after_app_answer_bridges_trunk_caller() {
+    use crate::media::leg::{LegConfig, LegInner};
+
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+
+    // Caller: Mediant-style G729 offer as the inbound INVITE body.
+    let caller_offer = crate::proxy::tests::test_helpers::build_sdp(
+        "127.0.0.1",
+        10001,
+        &[(18, "G729/8000"), (96, "telephone-event/8000")],
+    );
+    session.media.caller_offer = Some(caller_offer.clone());
+
+    // Caller media leg exactly as ensure_caller_leg builds it (apply the
+    // caller's offer on an RTP leg with the negotiated codecs). The test
+    // harness dialog cannot emit a real 200 OK, so the accept/Connected part
+    // of the Answer command is applied directly.
+    {
+        let codecs = crate::media::negotiate::MediaNegotiator::build_codec_list_from_offer(
+            &caller_offer,
+            &[],
+        );
+        let cfg = crate::media::leg::LegConfig {
+            codecs,
+            ..crate::media::leg::LegConfig::rtp_pcmu()
+        };
+        let caller_peer = crate::media::leg::LegInner::new("caller", &cfg, None).unwrap();
+        caller_peer
+            .answer(&caller_offer)
+            .await
+            .expect("caller leg must negotiate the G729 offer");
+        session
+            .legs
+            .set_media_leg(&LegId::from("caller"), caller_peer.clone());
+        caller_peer.accept();
+        session.update_leg_state(&LegId::from("caller"), LegState::Connected);
+    }
+    assert!(
+        session.legs.media_leg(&LegId::from("caller")).is_some(),
+        "caller media leg must exist after app answer"
+    );
+    assert_eq!(
+        session.legs.get(&LegId::from("caller")).map(|l| l.state),
+        Some(LegState::Connected),
+        "caller leg must be Connected after the app answer"
+    );
+    assert!(
+        session
+            .legs
+            .media_leg(&LegId::from("caller"))
+            .is_some_and(|leg| leg.negotiated().is_some()),
+        "caller leg must be negotiated before the agent leg connects"
+    );
+
+    // Queue dials the dynamic agent leg: the leg and its own media peer are
+    // registered up-front (as handle_add_leg / initiate_sip_leg do), and the
+    // INVITE offer goes out before the answer arrives.
+    let agent_leg = LegId::from("queue-agent-1");
+    let peer = LegInner::new(agent_leg.as_str(), &LegConfig::rtp_pcmu(), None).unwrap();
+    let agent_offer = peer.create_offer().await.unwrap();
+    let scratch = LegInner::new("agent-scratch", &LegConfig::rtp_pcmu(), None).unwrap();
+    let agent_answer = scratch.answer(&agent_offer).await.expect("agent answer");
+    session.legs.insert(
+        agent_leg.clone(),
+        Leg::new(agent_leg.clone()).with_endpoint("sip:1002@127.0.0.1"),
+    );
+    session.legs.set_media_leg(&agent_leg, peer);
+
+    session
+        .execute_command(
+            CallCommand::LegConnected {
+                leg_id: agent_leg,
+                answer_sdp: Some(agent_answer),
+                dialog_id: None,
+            },
+            None,
+        )
+        .await;
+
+    // The media bridge must be established (G729 caller ↔ PCMU agent →
+    // transcode route, not just a logical pair).
+    let mb = session
+        .media
+        .bridge
+        .as_ref()
+        .expect("media bridge must be established after agent connect");
+    assert!(
+        mb.is_bridged(),
+        "caller<->agent media bridge must be active after agent connect"
+    );
+
+    if let Some(mb) = session.media.bridge.as_mut() {
+        mb.close();
+    }
+}
+
+// ─── production repro (2026-09-17, node 10.193.244.54), part 2: TTS bridge ───
+//
+// The failing call ran an IVR with TTS voip bridges before the queue transfer.
+// The voip bridge stored its handle in `conference_bridge` with a fake
+// `conf_id = Some("bridge-{session}")` and nothing cleared it on disconnect.
+// `update_media_path()` starts with `if conference_bridge.conf_id.is_some()
+// { return; }`, so after any TTS bridge flow every later media-route update
+// was silently skipped: the queue agent leg connected but was never bridged
+// (zero RTP toward the agent, hold music kept playing on the caller leg until
+// its file ended). The fix keeps the voip handle on a dedicated field and
+// reports the disconnect via `VoipBridgeClosed`.
+
+#[tokio::test]
+async fn voip_bridge_must_not_block_queue_agent_media_bridge() {
+    use crate::media::leg::{LegConfig, LegInner};
+
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+
+    // Caller answered by the IVR app (same setup as the previous test).
+    let caller_offer = crate::proxy::tests::test_helpers::pcmu_sdp("127.0.0.1", 10001);
+    session.media.caller_offer = Some(caller_offer.clone());
+    {
+        let codecs = crate::media::negotiate::MediaNegotiator::build_codec_list_from_offer(
+            &caller_offer,
+            &[],
+        );
+        let cfg = crate::media::leg::LegConfig {
+            codecs,
+            ..crate::media::leg::LegConfig::rtp_pcmu()
+        };
+        let caller_peer = crate::media::leg::LegInner::new("caller", &cfg, None).unwrap();
+        caller_peer.answer(&caller_offer).await.unwrap();
+        session
+            .legs
+            .set_media_leg(&LegId::from("caller"), caller_peer.clone());
+        caller_peer.accept();
+        session.update_leg_state(&LegId::from("caller"), LegState::Connected);
+    }
+
+    // An IVR TTS voip bridge goes up — the session must NOT poison the
+    // conference guard (the regression: conf_id stayed Some forever).
+    session.voip_bridge = Some(crate::call::runtime::ConferenceBridgeHandle {
+        _tasks: vec![],
+        cancel_token: tokio_util::sync::CancellationToken::new(),
+    });
+    assert!(
+        session.conference_bridge.conf_id.is_none(),
+        "voip bridge must not set conference_bridge.conf_id"
+    );
+
+    // The voip bridge disconnects (TTS prompt finished / WS closed).
+    session
+        .execute_command(CallCommand::VoipBridgeClosed, None)
+        .await;
+    assert!(session.voip_bridge.is_none(), "handle must be dropped");
+
+    // Queue dials the dynamic agent leg and it answers.
+    let agent_leg = LegId::from("queue-agent-1");
+    let peer = LegInner::new(agent_leg.as_str(), &LegConfig::rtp_pcmu(), None).unwrap();
+    let agent_offer = peer.create_offer().await.unwrap();
+    let scratch = LegInner::new("agent-scratch", &LegConfig::rtp_pcmu(), None).unwrap();
+    let agent_answer = scratch.answer(&agent_offer).await.expect("agent answer");
+    session.legs.insert(
+        agent_leg.clone(),
+        Leg::new(agent_leg.clone()).with_endpoint("sip:1002@127.0.0.1"),
+    );
+    session.legs.set_media_leg(&agent_leg, peer);
+    session
+        .execute_command(
+            CallCommand::LegConnected {
+                leg_id: agent_leg,
+                answer_sdp: Some(agent_answer),
+                dialog_id: None,
+            },
+            None,
+        )
+        .await;
+
+    let mb = session
+        .media
+        .bridge
+        .as_ref()
+        .expect("media bridge must be established after agent connect");
+    assert!(
+        mb.is_bridged(),
+        "a closed TTS bridge must not block the caller<->agent media bridge"
+    );
+
+    if let Some(mb) = session.media.bridge.as_mut() {
+        mb.close();
+    }
+}
+
+// ─── supervisor takeover flag must not permanently block caller release ──────
+//
+// Production-risk audit 2026-09-18: `supervisor_takeover_active` is set when a
+// supervisor takeover kicks the agent leg (supervisor.rs) and is NEVER cleared
+// anywhere. `handle_start_return_app` early-returns on it, so once a takeover
+// happened, every later B-leg disconnect on this session silently skips the
+// CSAT / return-app / hangup cascade — the caller is stranded on a dead call
+// (the takeover conference can die with the customer still in it, and nothing
+// releases them). Leaving the mixer must expire the flag so the normal
+// cascade works again.
+
+#[tokio::test]
+async fn supervisor_takeover_flag_must_not_permanently_block_caller_release() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+
+    // A supervisor takeover happened: the flag is set and the customer was
+    // parked in the takeover conference (exactly what supervisor.rs does).
+    session.meta.supervisor_takeover_active = true;
+    session.conference_bridge.conf_id = Some(format!("supervisor-{}-takeover", session.id.0));
+
+    // The customer leaves the mixer (explicit leave / kicked after the
+    // takeover conference went away).
+    session.execute_command(CallCommand::LeaveMixer, None).await;
+
+    assert!(
+        !session.meta.supervisor_takeover_active,
+        "leaving the mixer must expire the takeover flag; a sticky flag permanently disables the disconnect cascade"
+    );
+
+    // And the normal cascade must work again afterwards: a connected agent
+    // leg hanging up releases the caller.
+    let agent_leg = LegId::from("queue-agent");
+    let mut leg = Leg::new(agent_leg.clone());
+    leg.state = LegState::Connected;
+    session.legs.insert(agent_leg.clone(), leg);
+    let caller_dialog_id = session
+        .caller_dialog
+        .as_ref()
+        .map(|d| d.id())
+        .expect("caller dialog present");
+    session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: agent_leg,
+                reason: "Remote hung up".to_string(),
+            },
+            None,
+        )
+        .await;
+    assert!(
+        session.pending_hangup.contains(&caller_dialog_id),
+        "after the takeover flag expired, a connected agent leg hanging up must release the caller"
+    );
+}
+
+// ─── voip bridge connect without timeout_ms must be bounded ──────────────────
+//
+// Production-risk audit 2026-09-18: `connect_bridge` only applies a connect
+// timeout when the bridge URI carried `timeout_ms`. Without it, the TCP +
+// WebSocket handshake wait is unbounded — and it runs inside
+// `execute_command`, so a silent endpoint freezes the ENTIRE session command
+// loop: Hangup/BYE commands queue behind it and the call cannot be hung up.
+// A default connect timeout must apply.
+
+#[tokio::test]
+async fn voip_bridge_connect_without_timeout_ms_must_be_bounded() {
+    use std::collections::HashMap;
+
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+        "ivr".to_string(),
+        None,
+        true,
+    );
+    let mut session = build_session(dialplan).await;
+
+    // The bridged leg needs a media endpoint (connect_bridge looks it up).
+    let caller_offer = crate::proxy::tests::test_helpers::pcmu_sdp("127.0.0.1", 10002);
+    session.media.caller_offer = Some(caller_offer.clone());
+    let codecs = crate::media::negotiate::MediaNegotiator::build_codec_list_from_offer(
+        &caller_offer,
+        &[],
+    );
+    let cfg = crate::media::leg::LegConfig {
+        codecs,
+        ..crate::media::leg::LegConfig::rtp_pcmu()
+    };
+    let caller_peer = crate::media::leg::LegInner::new("caller", &cfg, None).unwrap();
+    caller_peer.answer(&caller_offer).await.unwrap();
+    session
+        .legs
+        .set_media_leg(&LegId::from("caller"), caller_peer);
+
+    // A TCP endpoint that accepts but NEVER speaks: the WebSocket handshake
+    // would wait forever without a connect timeout. The accept thread blocks
+    // on a read and exits as soon as the peer gives up (EOF on close).
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let accept_task = tokio::task::spawn_blocking(move || {
+        if let Ok((mut sock, _)) = listener.accept() {
+            use std::io::Read;
+            let mut buf = [0u8; 512];
+            // Swallow bytes and stay silent until the peer gives up and
+            // closes (EOF) — a single read would drop the socket and the
+            // client would error out immediately instead of exercising the
+            // connect timeout.
+            while matches!(sock.read(&mut buf), Ok(n) if n > 0) {}
+        }
+    });
+
+    // No `timeout_ms` — the default bound must kick in.
+    let connect = session.connect_bridge(
+        LegId::from("caller"),
+        format!("ws://127.0.0.1:{port}/tts/bridge"),
+        HashMap::new(),
+        16000,
+        "pcm".to_string(),
+        None,
+        None,
+        None,
+    );
+    let started = std::time::Instant::now();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(15), connect).await;
+    accept_task.abort();
+
+    let result = result.expect(
+        "connect_bridge must return in bounded time without timeout_ms; an unbounded wait freezes the session command loop (cannot hang up)",
+    );
+    assert!(result.is_err(), "the connect itself must fail (endpoint never speaks)");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(15),
+        "the default connect timeout must be well under the outer bound"
+    );
+
+    // The session must still be responsive afterwards.
+    let ping = session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: LegId::from("queue-agent"),
+                reason: "Timeout".to_string(),
+            },
+            None,
+        )
+        .await;
+    let _ = ping;
+}
+
+// ─── transfer_in_progress must clear when the transferred leg fails ──────────
+//
+// Production-risk audit 2026-09-18: `meta.transfer_in_progress` suppresses the
+// RTP-inactivity watchdog (`sync_rtp_timeout_pause`). It is cleared on
+// transfer error / new leg answer / bridge established — but NOT when a
+// ringing transfer leg fails outright, leaving the watchdog suppressed for
+// the rest of the call.
+
+#[tokio::test]
+async fn transfer_in_progress_cleared_when_transfer_leg_fails() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+
+    // A blind transfer dials a new leg: the flag is set while it rings.
+    session.meta.transfer_in_progress = true;
+    let agent_leg = LegId::from("consult");
+    let mut leg = Leg::new(agent_leg.clone());
+    leg.state = LegState::Ringing;
+    session.legs.insert(agent_leg.clone(), leg);
+
+    session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: agent_leg,
+                reason: "Remote hung up".to_string(),
+            },
+            None,
+        )
+        .await;
+
+    assert!(
+        !session.meta.transfer_in_progress,
+        "a failed transfer leg must lift the RTP-watchdog suppression"
+    );
+}
+
 // ─── proxy queue fallback routing (no agents) ───────────────────────────────
 //
 // Covers the path the original bug report exercised: IVR → queue transfer →
@@ -4266,4 +4919,80 @@ fn recording_option_preserves_legacy_json_and_output_settings() {
     assert_eq!(roundtrip.samplerate, Some(16000));
     assert_eq!(roundtrip.ptime, Some(20));
     assert_eq!(roundtrip.stereo_swap, Some(false));
+}
+
+/// The trunk black-hole regression: a connected bridge whose legs receive
+/// ZERO inbound RTP (firewall dropping the peer→PBX UDP direction, or an
+/// answer SDP advertising an address the peer cannot reach) must surface
+/// `proxy.media_stalled` mid-call — periodic `media_health` trace entries +
+/// one `ReportCallError` per silent leg — instead of the problem only being
+/// discoverable at hangup (`leg_media_incomplete`) or by grepping logs.
+#[tokio::test]
+async fn media_stalled_fires_when_connected_leg_receives_nothing() {
+    let dialplan =
+        build_dialplan_with_mode(MediaProxyMode::Auto).with_application("ivr".to_string(), None, true);
+    let (mut session, _handle, mut cmd_rx) = build_session_with_cmd_rx(dialplan).await;
+    let mut mb = playable_bridge("media-stalled-test").await;
+    mb.accept(crate::media::media_bridge::LegSide::A).await;
+    mb.accept(crate::media::media_bridge::LegSide::B).await;
+    assert!(mb.is_bridged(), "route active before arming the monitor");
+    for (id, side) in [("caller", "caller"), ("callee", "callee")] {
+        let id = LegId::from(id);
+        session
+            .legs
+            .set_media_leg(&id, mb.leg_for_id(&crate::media::leg_id::LegId::from(side)).unwrap());
+        session.update_leg_state(&id, LegState::Connected);
+    }
+    session.media.bridge = Some(mb);
+
+    // stall_detect_secs = Some(1): the first sampler snapshot (5s tick)
+    // already exceeds the window, and no RTP flows in unit context — both
+    // legs must be flagged stalled.
+    SipSession::arm_media_health_monitor(
+        session.media.bridge.as_ref().unwrap(),
+        session.cmd_tx.clone(),
+        "media-stalled-test",
+        Some(1),
+        Some(5),
+    );
+
+    let mut seen_stall = false;
+    let mut seen_health_trace = false;
+    for _ in 0..8 {
+        let cmd = tokio::time::timeout(std::time::Duration::from_secs(15), cmd_rx.recv())
+            .await
+            .expect("health monitor should emit commands")
+            .expect("session command channel must stay open");
+        match &cmd {
+            CallCommand::Trace { event } => {
+                assert_eq!(
+                    event.kind,
+                    crate::call_errors::TraceKind::MediaHealth,
+                    "periodic trace entries are media_health snapshots"
+                );
+                seen_health_trace = true;
+            }
+            CallCommand::ReportCallError { code, detail, .. } => {
+                assert_eq!(code.as_str(), "proxy.media_stalled");
+                assert!(detail.is_some(), "stall carries the health snapshot");
+                seen_stall = true;
+            }
+            other => panic!("unexpected command from health monitor: {other:?}"),
+        }
+        let result = session.execute_command(cmd, None).await;
+        assert!(result.success, "health commands must execute cleanly");
+        if seen_stall && seen_health_trace {
+            break;
+        }
+    }
+    assert!(seen_health_trace, "periodic media_health trace entry expected");
+    assert!(seen_stall, "proxy.media_stalled call_error expected for silent legs");
+    assert!(
+        session
+            .meta
+            .trace
+            .iter()
+            .any(|e| e.code.as_deref() == Some("proxy.media_stalled")),
+        "stall must be recorded in the call trace"
+    );
 }

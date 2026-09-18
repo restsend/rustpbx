@@ -102,6 +102,34 @@ pub struct MediaBridge {
     /// from re-selecting the relay for the rest of the session (the relay
     /// already proved it cannot be armed).
     force_transcode: bool,
+    /// Media-health snapshot channel + stall state, shared with the 5s
+    /// sampler task. The session monitors [`Self::health_rx`] to write
+    /// call-trace events and fire `proxy.media_stalled`.
+    health: Arc<HealthShared>,
+}
+
+/// Shared media-health state between the bridge and its sampler task.
+struct HealthShared {
+    /// Latest snapshot; `None` until the first tick with at least one leg.
+    tx: watch::Sender<Option<Arc<crate::media_health::MediaHealthSnapshot>>>,
+    /// Instant the route became active (both legs accepted); reset on
+    /// unbridge. The stall window is measured from this.
+    route_activated_at: parking_lot::Mutex<Option<std::time::Instant>>,
+    /// Zero-inbound-RTP window before a leg is flagged stalled.
+    stall_detect: parking_lot::RwLock<Duration>,
+}
+
+impl HealthShared {
+    fn new() -> Arc<Self> {
+        let (tx, _) = watch::channel(None);
+        Arc::new(Self {
+            tx,
+            route_activated_at: parking_lot::Mutex::new(None),
+            stall_detect: parking_lot::RwLock::new(
+                crate::media_health::DEFAULT_STALL_DETECT,
+            ),
+        })
+    }
 }
 
 impl MediaBridge {
@@ -111,12 +139,14 @@ impl MediaBridge {
         let cancel = CancellationToken::new();
         let session = session_id.into();
         crate::telemetry::MediaTelemetry::register_bridge();
+        let (relay_arm_failed, _) = watch::channel(false);
+        let health = HealthShared::new();
         spawn_bridge_stats_task(
             session.clone(),
             Arc::clone(&legs_shared),
+            Arc::clone(&health),
             cancel.child_token(),
         );
-        let (relay_arm_failed, _) = watch::channel(false);
         Self {
             session_id: session,
             leg_a: None,
@@ -131,7 +161,22 @@ impl MediaBridge {
             legs_shared,
             relay_arm_failed,
             force_transcode: false,
+            health,
         }
+    }
+
+    /// Subscribe to the latest media-health snapshot (published every 5 s
+    /// sampler tick). `None` until the first tick with at least one leg.
+    pub fn health_rx(
+        &self,
+    ) -> watch::Receiver<Option<Arc<crate::media_health::MediaHealthSnapshot>>> {
+        self.health.tx.subscribe()
+    }
+
+    /// Override the zero-inbound-RTP stall window (default
+    /// [`crate::media_health::DEFAULT_STALL_DETECT`]).
+    pub fn set_stall_detect(&self, window: Duration) {
+        *self.health.stall_detect.write() = window;
     }
 
     pub fn leg(&self, side: LegSide) -> Option<Leg> {
@@ -613,6 +658,7 @@ impl MediaBridge {
         }
 
         self.route_active = true;
+        *self.health.route_activated_at.lock() = Some(std::time::Instant::now());
         Ok(())
     }
 
@@ -624,6 +670,7 @@ impl MediaBridge {
         }
         self.route_active = false;
         self.last_bridged = None;
+        *self.health.route_activated_at.lock() = None;
         if let Some(old) = self.rtcp_cancel.take() {
             old.cancel();
         }
@@ -1101,6 +1148,7 @@ struct LegSample {
     ingress: u64,
     egress: u64,
     transport_rx: u64,
+    transport_tx: u64,
     sr_packet_count: u64,
     sr_ssrc: u32,
     has_sr: bool,
@@ -1112,10 +1160,21 @@ struct LegSample {
 fn sample_leg(leg: &Leg) -> LegSample {
     let tap = leg.stats();
     let rtcp = leg.rtcp_stats().snapshot();
+    // Wire-level outbound RTP: sum the audio senders' counters (includes
+    // rewrite-relay pushes via note_external_packet).
+    let transport_tx: u64 = leg
+        .pc()
+        .get_transceivers()
+        .iter()
+        .filter(|t| t.kind() == rustrtc::MediaKind::Audio)
+        .filter_map(|t| t.sender())
+        .map(|s| s.packets_sent() as u64)
+        .sum();
     LegSample {
         ingress: tap.ingress_packets,
         egress: tap.egress_packets,
         transport_rx: leg.pc().received_rtp_packets(),
+        transport_tx,
         sr_packet_count: rtcp.sr_packet_count,
         sr_ssrc: rtcp.sr_ssrc,
         has_sr: rtcp.has_sr,
@@ -1131,6 +1190,7 @@ struct LegSampleDelta {
     ingress: u64,
     egress: u64,
     transport_rx: u64,
+    transport_tx: u64,
     sr: u64,
     jitter_us: u64,
     rtt_us: u64,
@@ -1159,6 +1219,7 @@ fn leg_delta(cur: Option<&LegSample>, prev: Option<&LegSample>) -> LegSampleDelt
         ingress: cur.ingress.saturating_sub(prev.ingress),
         egress: cur.egress.saturating_sub(prev.egress),
         transport_rx: cur.transport_rx.saturating_sub(prev.transport_rx),
+        transport_tx: cur.transport_tx.saturating_sub(prev.transport_tx),
         sr,
         jitter_us: cur.jitter_us,
         rtt_us: cur.rtt_us,
@@ -1176,12 +1237,14 @@ fn fmt_ms(us: u64) -> String {
 
 /// Spawn the 5s media-quality sampler for a bridge. Publishes receive/send
 /// deltas into the process-wide [`crate::telemetry::MediaTelemetry`] (feeding
-/// the host's local stats log / Prometheus) and logs an `info!` line ONLY when
+/// the host's local stats log / Prometheus), logs an `info!` line ONLY when
 /// a quality anomaly is detected (internal drops or >=1% loss in either
-/// direction), so idle bridges stay silent.
+/// direction), and publishes a [`crate::media_health::MediaHealthSnapshot`]
+/// on the bridge's watch channel every tick for call-trace diagnostics.
 fn spawn_bridge_stats_task(
     session_id: String,
     legs_shared: Arc<parking_lot::Mutex<(Option<Leg>, Option<Leg>)>>,
+    health: Arc<HealthShared>,
     cancel: CancellationToken,
 ) {
     tokio::spawn(async move {
@@ -1190,6 +1253,12 @@ fn spawn_bridge_stats_task(
         interval.tick().await; // skip the immediate first tick
         let mut prev_a: Option<LegSample> = None;
         let mut prev_b: Option<LegSample> = None;
+        // First/last inbound-RTP observations per side (for
+        // first_rx_after_s / ms_since_last_rx in the health snapshot).
+        let mut first_rx: (Option<std::time::Instant>, Option<std::time::Instant>) =
+            (None, None);
+        let mut last_rx: (Option<std::time::Instant>, Option<std::time::Instant>) =
+            (None, None);
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
@@ -1273,6 +1342,108 @@ fn spawn_bridge_stats_task(
                             tx_idrop = 0u64,
                             "bridge media quality anomaly [5s]"
                         );
+                    }
+
+                    // ── media health snapshot (call-trace diagnostics) ──
+                    let stall_detect = *health.stall_detect.read();
+                    let activated = *health.route_activated_at.lock();
+                    let route_age_secs = activated
+                        .map(|t| t.elapsed().as_secs_f64())
+                        .unwrap_or(0.0);
+                    let stalled_by_age = match activated {
+                        Some(t) => t.elapsed() >= stall_detect,
+                        None => false,
+                    };
+                    let build_leg_health = |side: &'static str,
+                                            leg: &Option<Leg>,
+                                            sample: &Option<LegSample>,
+                                            delta: &LegSampleDelta,
+                                            first_rx: Option<std::time::Instant>,
+                                            last_rx: Option<std::time::Instant>|
+                     -> Option<crate::media_health::LegMediaHealth> {
+                        let leg = leg.as_ref()?;
+                        let sample = sample.as_ref()?;
+                        let transport_mode = format!("{:?}", leg.pc().config().transport_mode);
+                        let audio = leg
+                            .negotiated()
+                            .and_then(|p| p.audio.map(|c| (c.codec, c.payload_type)));
+                        let remote_addr = leg
+                            .pc()
+                            .ice_transport()
+                            .get_selected_pair()
+                            .map(|pair| pair.remote.address.to_string());
+                        let peer_advertised = leg.peer_advertised_addr();
+                        let latched = if leg.pc().config().transport_mode
+                            == rustrtc::TransportMode::Rtp
+                        {
+                            peer_advertised
+                                .as_deref()
+                                .map(|adv| remote_addr.as_deref() != Some(adv))
+                        } else {
+                            None
+                        };
+                        let first_rx_after_s = activated.and_then(|activated| {
+                            first_rx
+                                .map(|first| {
+                                    first.saturating_duration_since(activated).as_secs_f64()
+                                })
+                        });
+                        let rtcp = leg.rtcp_stats().snapshot();
+                        Some(crate::media_health::LegMediaHealth {
+                            side,
+                            transport_mode,
+                            codec: audio.map(|(c, _)| format!("{c:?}")),
+                            payload_type: audio.map(|(_, pt)| pt),
+                            advertised_addr: leg.advertised_addr(),
+                            latched,
+                            remote_addr,
+                            peer_advertised_addr: peer_advertised,
+                            ingress_packets: sample.ingress,
+                            egress_packets: sample.egress,
+                            transport_rx_packets: sample.transport_rx,
+                            transport_tx_packets: sample.transport_tx,
+                            ingress_delta: delta.ingress,
+                            egress_delta: delta.egress,
+                            rx_delta: delta.transport_rx,
+                            tx_delta: delta.transport_tx,
+                            rx_gap_delta: delta.transport_rx.saturating_sub(delta.ingress),
+                            jitter_ms: rtcp.jitter_ms().unwrap_or(0.0),
+                            rtt_ms: rtcp.rtt_ms().unwrap_or(0.0),
+                            fraction_lost_pct: rtcp.fraction_lost as f64 / 255.0 * 100.0,
+                            ms_since_last_rx: last_rx.map(|t| t.elapsed().as_millis() as u64),
+                            first_rx_after_s,
+                            stalled: stalled_by_age && sample.transport_rx == 0,
+                        })
+                    };
+                    let legs_health: Vec<crate::media_health::LegMediaHealth> = [
+                        build_leg_health("caller", &la, &sa, &da, first_rx.0, last_rx.0),
+                        build_leg_health("callee", &lb, &sb, &db, first_rx.1, last_rx.1),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                    if !legs_health.is_empty() {
+                        let snapshot = Arc::new(crate::media_health::MediaHealthSnapshot {
+                            route_age_secs,
+                            relay_mode,
+                            legs: legs_health,
+                        });
+                        let _ = health.tx.send(Some(snapshot));
+                    }
+                    // Track first/last inbound observations from cumulative
+                    // counters (must run before prev_* is overwritten).
+                    let now = std::time::Instant::now();
+                    if sa.as_ref().is_some_and(|s| s.transport_rx > 0) {
+                        if first_rx.0.is_none() {
+                            first_rx.0 = Some(now);
+                        }
+                        last_rx.0 = Some(now);
+                    }
+                    if sb.as_ref().is_some_and(|s| s.transport_rx > 0) {
+                        if first_rx.1.is_none() {
+                            first_rx.1 = Some(now);
+                        }
+                        last_rx.1 = Some(now);
                     }
 
                     prev_a = sa;

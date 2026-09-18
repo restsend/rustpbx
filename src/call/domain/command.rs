@@ -534,6 +534,11 @@ pub enum CallCommand {
     /// precedence over the stored return spec.
     StartReturnApp,
 
+    /// The TTS/voip WebSocket bridge disconnected. Clears the voip bridge
+    /// handle and re-evaluates the media path — a pending caller↔agent route
+    /// must not stay blocked by a bridge that is already gone.
+    VoipBridgeClosed,
+
     /// Restore the MediaBridge route after an announcement/playback finished
     /// (re-activates fast-path relay or transcode). Issued internally when a
     /// playback handle's `done` resolves.

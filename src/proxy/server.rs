@@ -928,7 +928,11 @@ impl SipServerBuilder {
             );
 
         let locator_events = self.locator_events.unwrap_or_else(|| {
-            let (tx, _) = tokio::sync::broadcast::channel(12);
+            // All locator-event consumers (webhook, presence, cluster hub,
+            // addon bridges) share this channel; a lagging consumer silently
+            // drops events — including Offline. Size it for registration
+            // bursts instead of a handful of slots.
+            let (tx, _) = tokio::sync::broadcast::channel(1024);
             tx
         });
         let locator_event_lock = Arc::new(tokio::sync::Mutex::new(()));
@@ -1884,6 +1888,8 @@ impl SipServerInner {
             .with_comfort_noise(rtp.comfort_noise, rtp.comfort_noise_level_db)
             .with_ice_lite(rtp.ice_lite)
             .with_relay_ready_timeout_secs(rtp.relay_ready_timeout_secs)
+            .with_stall_detect_secs(rtp.stall_detect_secs)
+            .with_media_trace_interval_secs(rtp.media_trace_interval_secs)
     }
 
     /// Hot-reload the full `[proxy]` section plus related platform settings

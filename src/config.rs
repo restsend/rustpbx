@@ -1100,6 +1100,16 @@ pub struct RtpConfig {
     /// slow networks that need longer to bring media up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_ready_timeout_secs: Option<u64>,
+    /// Zero-inbound-RTP stall window on a connected bridge leg before the
+    /// call is flagged `proxy.media_stalled` (CDR trace + RWI `call_error`).
+    /// Unset = 15s; `0` disables stall detection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_detect_secs: Option<u64>,
+    /// Emit a `media_health` call-trace snapshot every N seconds while a
+    /// bridge is active (bounded per call). Unset = 30s; `0` disables
+    /// periodic snapshots (stall events are still emitted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_trace_interval_secs: Option<u64>,
 }
 
 fn default_comfort_noise() -> bool {
@@ -1128,6 +1138,16 @@ pub struct MediaSection {
     /// `LegConfig::relay_ready_timeout`). Unset = 5s default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_ready_timeout_secs: Option<u64>,
+    /// Zero-inbound-RTP window on a connected bridge leg before the call is
+    /// flagged `proxy.media_stalled` (CDR trace + RWI `call_error`). Unset =
+    /// 15s default. `0` disables stall detection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_detect_secs: Option<u64>,
+    /// Emit a `media_health` call-trace snapshot every N seconds while a
+    /// bridge is active (bounded per call). Unset = 30s; `0` disables
+    /// periodic snapshots (stall events are still emitted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_trace_interval_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2270,6 +2290,8 @@ impl Config {
                 .unwrap_or_else(default_comfort_noise_level_db),
             ice_lite: media.map(|m| m.ice_lite).unwrap_or(false),
             relay_ready_timeout_secs: media.and_then(|m| m.relay_ready_timeout_secs),
+            stall_detect_secs: media.and_then(|m| m.stall_detect_secs),
+            media_trace_interval_secs: media.and_then(|m| m.media_trace_interval_secs),
         }
     }
 
