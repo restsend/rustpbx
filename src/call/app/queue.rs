@@ -2333,14 +2333,15 @@ impl CallApp for QueueApp {
                 // Look up the canonical agent_id via the registry so URI
                 // user-parts that differ from the registered agent_id are
                 // handled correctly (e.g. DbRegistry custom URIs).
-                let timed_out_uris: Vec<String> = std::mem::take(&mut self.pending_agents)
-                    .into_iter()
-                    .map(|(uri, _)| uri)
-                    .collect();
+                let timed_out_agents = std::mem::take(&mut self.pending_agents);
+                let timed_out_legs: Vec<String> = timed_out_agents.iter()
+                    .map(|(_, leg_id)| leg_id.clone()).collect();
+                // Cancel the unanswered INVITEs before releasing agents or retrying.
+                ctrl.remove_legs(&timed_out_legs);
 
                 if let Some(ref registry) = self.agent_registry {
                     let all_agents = registry.list_agents().await;
-                    for uri in &timed_out_uris {
+                    for (uri, _) in &timed_out_agents {
                         let agent_id = all_agents
                             .iter()
                             .find(|a| a.uri == *uri)
