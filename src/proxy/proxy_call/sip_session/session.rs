@@ -1639,11 +1639,20 @@ impl SipSession {
         tokio::pin!(hangup_futures);
         tokio::pin!(timeout);
 
-        let max_duration_sleep = if let Some(max_dur) = self.context.dialplan.max_call_duration {
+        let max_duration_sleep = {
+            // Fallback of last resort: a dialplan without `max_call_duration`
+            // must still have a hard ceiling, otherwise a call that loses both
+            // its RTP watchdog (un-bridged media) and its peers can hang
+            // forever. Dialplans normally carry 1h from `Dialplan::default`.
+            const FALLBACK_MAX_CALL_DURATION: std::time::Duration =
+                std::time::Duration::from_secs(3600);
+            let max_dur = self
+                .context
+                .dialplan
+                .max_call_duration
+                .unwrap_or(FALLBACK_MAX_CALL_DURATION);
             debug!(session_id = %self.context.session_id, ?max_dur, "Max call duration timer armed");
             tokio::time::sleep(max_dur).boxed()
-        } else {
-            futures::future::pending::<()>().boxed()
         };
         tokio::pin!(max_duration_sleep);
 
@@ -10005,6 +10014,15 @@ impl SipSession {
                     self.update_leg_state(&leg_id, LegState::Ended);
                     if let Err(error) = self.handle_remove_leg(leg_id.clone()).await {
                         return CommandResult::failure(error.to_string());
+                    }
+                    // The dial leg is gone: lift the RTP-watchdog suppression
+                    // that the transfer dial armed (`sync_rtp_timeout_pause`
+                    // re-evaluates from current leg state). Without this a
+                    // ringing transfer leg that fails outright leaves the
+                    // watchdog paused for the rest of the call.
+                    if self.meta.transfer_in_progress {
+                        self.meta.transfer_in_progress = false;
+                        self.sync_rtp_timeout_pause();
                     }
                     // A departed dial source cannot continue its private call.
                     let dial_source_ended = self.legs.values().any(|leg|
