@@ -6246,12 +6246,32 @@ async fn blind_transfer_detaches_agent_before_independent_target_answers() {
     use crate::call::{DialDirection, Dialplan, MediaConfig, TransactionCookie};
     use crate::config::{MediaProxyMode, ProxyConfig};
     use crate::media::leg::{LegConfig, LegInner};
-    use crate::proxy::tests::common::{create_test_request, create_test_server_with_config, create_transaction};
+    use crate::proxy::tests::common::{create_test_request, create_transaction};
 
     for outcome in ["answer", "early_media", "reject", "timeout"] {
         let mut config = ProxyConfig::default();
         config.blind_transfer_use_refer = false;
-        let (server, _) = create_test_server_with_config(config).await;
+        #[cfg(feature = "addon-cc")]
+        let registry = Arc::new(crate::addons::cc::agent::AgentRegistry::new());
+        #[cfg(feature = "addon-cc")]
+        let (server, _) = {
+            use crate::addons::cc::agent::AgentStatus;
+            registry.register("agent".into(), vec![], 1).await.unwrap();
+            registry.update_status("agent", AgentStatus::Idle).await.unwrap();
+            registry.update_status_with_call_delta("agent", AgentStatus::Ringing {
+                call_id: format!("blind-{outcome}"), since: Instant::now(),
+            }, 1).await.unwrap();
+            registry.update_status("agent", AgentStatus::Busy {
+                call_id: format!("blind-{outcome}"), since: Instant::now(),
+            }).await.unwrap();
+            crate::proxy::tests::common::create_test_server_with_session_hooks(config, vec![
+                Arc::new(crate::addons::cc::cc_call_session_hook::CcCallSessionHook::new(
+                    registry.clone(), Arc::new(crate::addons::cc::metrics::MetricsCollector::new()),
+                )),
+            ]).await
+        };
+        #[cfg(not(feature = "addon-cc"))]
+        let (server, _) = crate::proxy::tests::common::create_test_server_with_config(config).await;
         let request = create_test_request(rsipstack::sip::Method::Invite, "caller", None, "rustpbx.com", None);
         let (tx, _) = create_transaction(request.clone()).await;
         let (state_tx, _state_rx) = mpsc::unbounded_channel();
@@ -6297,7 +6317,7 @@ async fn blind_transfer_detaches_agent_before_independent_target_answers() {
         let target = LegId::new(format!("transfer-{}", uuid::Uuid::new_v4()));
         for command in [
             CallCommand::LegAdd { source_leg: Some(LegId::from("caller")), target: "sip:alice@127.0.0.1:5099".into(), leg_id: Some(target.clone()), headers: vec![] },
-            CallCommand::LegRemove { leg_id: LegId::from("callee") },
+            CallCommand::HangupAgentLeg,
             CallCommand::Bridge { leg_a: LegId::from("caller"), leg_b: target.clone(), mode: crate::call::domain::P2PMode::Audio },
             CallCommand::MarkTransferred,
         ] {
@@ -6320,6 +6340,18 @@ async fn blind_transfer_detaches_agent_before_independent_target_answers() {
         assert!(!session.bridge().unwrap().is_bridged(), "unanswered C must not enter the media bridge");
         assert!(target_peer.negotiated().is_none());
         assert!(session.meta.transferred);
+        #[cfg(feature = "addon-cc")]
+        {
+            use crate::addons::cc::agent::AgentStatus;
+            let released = registry.get_agent("agent").await.unwrap();
+            assert!(matches!(released.status, AgentStatus::Wrapup { .. }));
+            assert_eq!(released.current_calls, 0);
+            session.execute_command(CallCommand::HangupAgentLeg, None).await;
+            session.fire_on_call_ended_hooks(None, 10).await;
+            let duplicate = registry.get_agent("agent").await.unwrap();
+            assert_eq!(duplicate.last_state_changed_at, released.last_state_changed_at);
+            assert_eq!(duplicate.current_calls, 0);
+        }
         // Retired B's termination must not cascade into a caller BYE.
         session.handle_callee_state(DialogState::Terminated(old_dialog,
             rsipstack::dialog::dialog::TerminatedReason::UacBye)).await.unwrap();
@@ -6348,6 +6380,12 @@ async fn blind_transfer_detaches_agent_before_independent_target_answers() {
                 leg_id: target.clone(), answer_sdp: Some(answer), dialog_id: None,
             }, None).await;
             assert!(connected.success, "{:?}", connected.message);
+            #[cfg(feature = "addon-cc")]
+            {
+                let released = registry.get_agent("agent").await.unwrap();
+                assert!(matches!(released.status, crate::addons::cc::agent::AgentStatus::Wrapup { .. }));
+                assert_eq!(released.current_calls, 0);
+            }
             assert!(!session.meta.transfer_in_progress);
             assert!(session.bridge().unwrap().is_bridged());
             assert!(Arc::ptr_eq(&target_peer, &session.bridge().unwrap().leg(LegSide::B).unwrap()));

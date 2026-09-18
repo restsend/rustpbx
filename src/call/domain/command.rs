@@ -195,7 +195,7 @@ pub enum CallCommand {
     },
 
     /// Hang up the original direct/queue agent, resolving the legacy callee alias.
-    /// Used when the agent leaves an existing conference after transfer.
+    /// Notifies agent-disconnect hooks when leaving for blind or attended transfer.
     HangupAgentLeg,
 
     /// Place a leg on hold

@@ -9175,7 +9175,21 @@ impl SipSession {
             CallCommand::HangupAgentLeg => {
                 // Resolve the original queue/direct agent, excluding added dial targets.
                 let agent = self.resolve_transfer_leg(LegId::from("callee"));
-                Self::ok_or_failure(self.handle_remove_leg(agent).await)
+                if !self.legs.get(&agent).is_some_and(|leg|
+                    matches!(leg.state, LegState::Connected | LegState::Hold))
+                {
+                    return CommandResult::success();
+                }
+                let mut ctx = self.session_hook_ctx();
+                if let Err(error) = self.handle_remove_leg(agent).await {
+                    return CommandResult::failure(error.to_string());
+                }
+                self.mark_transferred_with(None);
+                ctx.transferred = true;
+                for hook in self.server.session_hooks.iter() {
+                    hook.on_agent_disconnected(&ctx, &*self.app_runtime).await;
+                }
+                CommandResult::success()
             }
 
             CallCommand::ResumeMedia => {
