@@ -213,6 +213,8 @@ impl EgressPipeline {
             noise_lp: 0.0,
             eof_tail_total: PLAYBACK_EOF_TAIL_MS.div_ceil(ptime_ms.unwrap_or(DEFAULT_PTIME_MS)),
             eof_tail_remaining: 0,
+            transcode_pending: Vec::new(),
+            transcode_overflow_samples: 0,
         };
         tokio::spawn(task.run(cmd_rx, ptime, cancel.clone()));
 
@@ -327,7 +329,22 @@ struct EgressTask {
     /// Remaining grace ticks while draining a finished non-looping Media
     /// source. 0 = idle.
     eof_tail_remaining: u32,
+    /// TranscodePeer: decoded + resampled PCM carried over between ticks.
+    /// Peers whose ptime does not divide evenly into this leg's ptime (e.g. a
+    /// 10 ms opus peer into a 20 ms ptime leg) leave partial frames here that
+    /// combine with the next tick's input, so no audio is lost between the
+    /// pull-cadence mismatch and the fixed output cadence.
+    transcode_pending: Vec<i16>,
+    /// PCM samples dropped from `transcode_pending` because a peer produces
+    /// faster than this leg consumes for a sustained period (bounded queue —
+    /// drop-oldest, mirroring the receiver ring's own overflow policy).
+    transcode_overflow_samples: u64,
 }
+
+/// Maximum PCM carried between ticks for [`EgressSource::TranscodePeer`], in
+/// output frames (8 × 20 ms ≈ 160 ms). Bounds memory and added latency when a
+/// burst of peer frames arrives; steady-state peers never reach it.
+const TRANSCODE_PENDING_MAX_FRAMES: usize = 8;
 
 impl EgressTask {
     async fn run(
@@ -438,6 +455,9 @@ impl EgressTask {
                             self.marker_pending = true;
                         }
                         self.dtmf_event_timestamp = None;
+                        // A pending transcode accumulator belongs to the
+                        // previous peer/source — never carry it across.
+                        self.transcode_pending.clear();
                         self.source = s;
                     }
                     Some(EgressCmd::UpdateCodec(new_codec)) => {
@@ -449,6 +469,8 @@ impl EgressTask {
                         self.resampler = None;
                         self.marker_pending = true;
                         self.dtmf_event_timestamp = None;
+                        // Pending PCM was decoded for the old codec rate.
+                        self.transcode_pending.clear();
                     }
                     Some(EgressCmd::AdoptWireTimeline { last_wire_ts }) => {
                         self.next_rtp_timestamp =
@@ -586,6 +608,7 @@ impl EgressTask {
                 // receiver track. Before the first real audio frame, skip the
                 // tick entirely (ICE/DTLS setup). After priming, timeouts
                 // emit comfort-noise so the remote PLC covers gaps.
+                let frame_samples = self.pcm_buf.len();
                 match tokio::time::timeout(self.ptime, peer.recv()).await {
                     Ok(Ok(MediaSample::Audio(input)))
                         if input
@@ -596,9 +619,90 @@ impl EgressTask {
                         if let Some(rs) = &mut self.resampler {
                             pcm = rs.resample(&pcm);
                         }
-                        let encoded: Bytes = self.encoder.encode(&pcm).into();
+                        self.transcode_pending.extend_from_slice(&pcm);
                         *primed = true;
-                        self.build_frame(encoded)
+                        // Non-blocking drain of frames already queued on the
+                        // receiver track: a peer whose ptime is shorter than
+                        // this leg's (10 ms opus into a 20 ms ptime leg)
+                        // otherwise overflows the receiver ring between ticks
+                        // and loses every second frame. The surplus PCM is
+                        // accumulated and merges into the following output
+                        // frames instead.
+                        let want_pt = *source_audio_payload_type;
+                        let pending = &mut self.transcode_pending;
+                        let overflow = &mut self.transcode_overflow_samples;
+                        let resampler = &mut self.resampler;
+                        let cap_samples = frame_samples * TRANSCODE_PENDING_MAX_FRAMES;
+                        let mut popped_dtmf: Option<AudioFrame> = None;
+                        std::future::poll_fn(|cx| {
+                            loop {
+                                // Enforce the cap first: the tick's first
+                                // frame was appended before this loop ran, so
+                                // the surplus must be trimmed even when no
+                                // further frames are drained.
+                                let excess = pending.len().saturating_sub(cap_samples);
+                                if excess > 0 {
+                                    pending.drain(..excess);
+                                    *overflow += excess as u64;
+                                    trace!(
+                                        dropped = excess,
+                                        "transcode: pending PCM cap exceeded, dropped oldest"
+                                    );
+                                }
+                                if popped_dtmf.is_some() || pending.len() >= cap_samples {
+                                    return std::task::Poll::Ready(());
+                                }
+                                match peer.recv().as_mut().poll(cx) {
+                                    std::task::Poll::Ready(Ok(MediaSample::Audio(input))) => {
+                                        if input.payload_type.is_none_or(|pt| pt == want_pt) {
+                                            let mut pcm = decoder.decode(&input.data);
+                                            if let Some(rs) = resampler {
+                                                pcm = rs.resample(&pcm);
+                                            }
+                                            pending.extend_from_slice(&pcm);
+                                        } else {
+                                            // Telephone-event frame popped
+                                            // mid-drain: stop and let this tick
+                                            // emit it, exactly like a DTMF
+                                            // frame arriving on its own tick
+                                            // before the drain existed.
+                                            popped_dtmf = Some(input);
+                                            return std::task::Poll::Ready(());
+                                        }
+                                    }
+                                    // Empty queue, stream end, or non-audio
+                                    // sample: stop draining — the tick's
+                                    // first frame is already accounted for.
+                                    _ => return std::task::Poll::Ready(()),
+                                }
+                            }
+                        })
+                        .await;
+                        if let Some(dtmf_input) = popped_dtmf {
+                            match self.build_dtmf_frame(&dtmf_input) {
+                                Some(frame) => frame,
+                                // `primed` is already true here (the first
+                                // audio frame was decoded above), so a
+                                // non-mappable event emits silence instead of
+                                // skipping the tick.
+                                None => {
+                                    let encoded = self.encode_silence();
+                                    self.build_frame(encoded)
+                                }
+                            }
+                        } else if self.transcode_pending.len() >= frame_samples {
+                            // At least one full frame accumulated: emit
+                            // exactly one ptime, carry the remainder over.
+                            let encoded = self.encode_pending_frame(frame_samples);
+                            self.build_frame(encoded)
+                        } else {
+                            // Short of one frame (e.g. a lone 10 ms peer
+                            // frame): zero-pad to keep the RTP cadence intact
+                            // and leave the partial in the accumulator so it
+                            // merges with the next tick's input.
+                            let encoded = self.encode_pending_padded(frame_samples);
+                            self.build_frame(encoded)
+                        }
                     }
                     Ok(Ok(MediaSample::Audio(input))) => {
                         tracing::trace!(
@@ -639,9 +743,18 @@ impl EgressTask {
                             self.source = source;
                             return None;
                         }
-                        tracing::trace!("transcode: peer.recv() timeout, emitting silence");
-                        let encoded = self.encode_silence();
-                        self.build_frame(encoded)
+                        // Peer went quiet: if a full frame has accumulated
+                        // (peer ptime not a multiple of this leg's ptime),
+                        // emit it rather than silence so nothing rots in the
+                        // accumulator; otherwise comfort-noise as before.
+                        if self.transcode_pending.len() >= frame_samples {
+                            let encoded = self.encode_pending_frame(frame_samples);
+                            self.build_frame(encoded)
+                        } else {
+                            tracing::trace!("transcode: peer.recv() timeout, emitting silence");
+                            let encoded = self.encode_silence();
+                            self.build_frame(encoded)
+                        }
                     }
                     _ if !*primed => {
                         self.source = source;
@@ -736,6 +849,29 @@ impl EgressTask {
                 *s = 0;
             }
         }
+        self.encoder.encode(&self.pcm_buf).into()
+    }
+
+    /// Encode exactly one ptime frame from the transcode accumulator,
+    /// consuming the samples. Caller guarantees at least `frame_samples`
+    /// samples are pending (`frame_samples == self.pcm_buf.len()`).
+    fn encode_pending_frame(&mut self, frame_samples: usize) -> Bytes {
+        self.pcm_buf
+            .copy_from_slice(&self.transcode_pending[..frame_samples]);
+        self.transcode_pending.drain(..frame_samples);
+        self.encoder.encode(&self.pcm_buf).into()
+    }
+
+    /// Encode a zero-padded frame from a partial transcode accumulator
+    /// (fewer than one frame pending), consuming the samples: every sample
+    /// is emitted exactly once. Without the drain the partial would also be
+    /// folded into the next full frame — an audible repeat after any dry
+    /// tick on a short-ptime peer.
+    fn encode_pending_padded(&mut self, frame_samples: usize) -> Bytes {
+        let n = self.transcode_pending.len().min(frame_samples);
+        self.pcm_buf[..n].copy_from_slice(&self.transcode_pending[..n]);
+        self.pcm_buf[n..].fill(0);
+        self.transcode_pending.drain(..n);
         self.encoder.encode(&self.pcm_buf).into()
     }
 
@@ -896,6 +1032,8 @@ mod tests {
             noise_lp: 0.0,
             eof_tail_total: 0,
             eof_tail_remaining: 0,
+            transcode_pending: Vec::new(),
+            transcode_overflow_samples: 0,
         };
         // With CNG on, the encoded silence frame must differ from a pure
         // zero-encode: a zero PCMU frame is all 0xFF (μ-law of 0) and any
@@ -946,6 +1084,8 @@ mod tests {
             noise_lp: 0.0,
             eof_tail_total: 0,
             eof_tail_remaining: 0,
+            transcode_pending: Vec::new(),
+            transcode_overflow_samples: 0,
         };
 
         let first = task.next_frame().await.expect("first frame");
@@ -1019,6 +1159,8 @@ mod tests {
             noise_lp: 0.0,
             eof_tail_total: 0,
             eof_tail_remaining: 0,
+            transcode_pending: Vec::new(),
+            transcode_overflow_samples: 0,
         };
 
         pcm_tx.try_send(vec![2_000i16; spf]).unwrap();
@@ -1095,6 +1237,8 @@ mod tests {
             noise_lp: 0.0,
             eof_tail_total: 0,
             eof_tail_remaining: 0,
+            transcode_pending: Vec::new(),
+            transcode_overflow_samples: 0,
         };
 
         let mut ref_enc = create_encoder(CodecType::PCMU);
@@ -1185,6 +1329,8 @@ mod tests {
             noise_lp: 0.0,
             eof_tail_total: 0,
             eof_tail_remaining: 0,
+            transcode_pending: Vec::new(),
+            transcode_overflow_samples: 0,
         };
 
         let mut ref_enc = create_encoder(CodecType::PCMU);
@@ -1429,6 +1575,8 @@ mod tests {
             noise_lp: 0.0,
             eof_tail_total: 0,
             eof_tail_remaining: 0,
+            transcode_pending: Vec::new(),
+            transcode_overflow_samples: 0,
         };
         let f = task.next_frame().await.expect("silence yields a frame");
         assert_eq!(f.clock_rate, 8000);
@@ -1558,6 +1706,8 @@ mod tests {
             noise_lp: 0.0,
             eof_tail_total: 0,
             eof_tail_remaining: 0,
+            transcode_pending: Vec::new(),
+            transcode_overflow_samples: 0,
         };
 
         let first = task.next_frame().await.expect("first DTMF frame");
@@ -1635,6 +1785,8 @@ mod tests {
             noise_lp: 0.0,
             eof_tail_total: 0,
             eof_tail_remaining: 0,
+            transcode_pending: Vec::new(),
+            transcode_overflow_samples: 0,
         };
         // has_data() false + no loop → source becomes Silence, still yields a frame.
         let f = task
@@ -1829,6 +1981,8 @@ mod tests {
             noise_lp: 0.0,
             eof_tail_total: tail,
             eof_tail_remaining: 0,
+            transcode_pending: Vec::new(),
+            transcode_overflow_samples: 0,
         };
 
         let speech_ref: Bytes = create_encoder(CodecType::PCMU)
@@ -1914,5 +2068,349 @@ mod tests {
         assert!(end_rx.try_recv().is_err(), "on_end must not fire twice");
 
         pipe.stop();
+    }
+}
+
+/// Regression tests for the TranscodePeer drain fix: peers whose ptime is
+/// shorter than this leg's ptime (e.g. 10 ms opus into a 20 ms ptime leg)
+/// must not lose frames to the receiver ring's drop-oldest overflow between
+/// pacing ticks.
+#[cfg(test)]
+mod transcode_drain_tests {
+    use super::*;
+    use audio_codec::{create_decoder, create_encoder};
+    use rustrtc::media::MediaKind;
+    use rustrtc::media::track::sample_track;
+
+    fn pcma_codec() -> EgressCodec {
+        EgressCodec {
+            codec: CodecType::PCMA,
+            payload_type: 8,
+            clock_rate: 8000,
+            dtmf_payload_type: Some(101),
+            comfort_noise: false,
+            comfort_noise_level_db: -35.0,
+        }
+    }
+
+    /// Build an `EgressTask` with a `TranscodePeer` source (PCMU peer →
+    /// `codec` output) without spawning the pacing loop, so tests can drive
+    /// `next_frame()` deterministically.
+    fn make_transcode_task(
+        sender: SampleStreamSource,
+        peer: Arc<dyn MediaStreamTrack>,
+        codec: EgressCodec,
+    ) -> EgressTask {
+        EgressTask {
+            sender,
+            codec,
+            encoder: create_egress_encoder(codec.codec),
+            source: EgressSource::TranscodePeer {
+                peer,
+                decoder: create_decoder(CodecType::PCMU),
+                source_audio_payload_type: 0,
+                src_sample_rate: 8000,
+                primed: false,
+            },
+            resampler: None,
+            ptime: Duration::from_millis(20),
+            gate: None,
+            next_rtp_timestamp: 1000,
+            sequence_number: 0,
+            marker_pending: false,
+            dtmf_event_timestamp: None,
+            pcm_buf: vec![0i16; pcm_samples_per_frame(codec.codec, Duration::from_millis(20))],
+            noise_state: 0x9E37_79B9,
+            noise_amplitude: 0.0,
+            noise_lp: 0.0,
+            eof_tail_total: 0,
+            eof_tail_remaining: 0,
+            transcode_pending: Vec::new(),
+            transcode_overflow_samples: 0,
+        }
+    }
+
+    /// A PCMU RTP audio frame: `ms` milliseconds of μ-law silence
+    /// (8 samples per ms at 8 kHz, one byte per sample).
+    fn pcmu_frame(ms: u32, ts: u32, seq: u16) -> MediaSample {
+        MediaSample::Audio(AudioFrame {
+            rtp_timestamp: ts,
+            clock_rate: 8000,
+            data: Bytes::from(vec![0xFFu8; ms as usize * 8]),
+            sequence_number: Some(seq),
+            payload_type: Some(0),
+            marker: false,
+            header_extension: None,
+            source_addr: None,
+            raw_packet: None,
+        })
+    }
+
+    /// THE regression: a 10 ms-ptime peer feeding a 20 ms ptime leg must come
+    /// out lossless. Before the drain, one frame per tick was consumed and
+    /// every other frame was dropped by the receiver ring (recording duration
+    /// ≈ half the call duration).
+    #[tokio::test]
+    async fn drain_consumes_short_peer_frames_without_loss() {
+        let (out_sender, _out_track, _fb) = sample_track(MediaKind::Audio, 64);
+        let (in_sender, in_track, _ifb) = sample_track(MediaKind::Audio, 512);
+        for i in 0..200u16 {
+            in_sender
+                .try_send(MediaSample::Audio(AudioFrame {
+                    rtp_timestamp: i as u32 * 80,
+                    clock_rate: 8000,
+                    data: Bytes::from(vec![0xFFu8; 80]),
+                    sequence_number: Some(i),
+                    payload_type: Some(0),
+                    marker: false,
+                    header_extension: None,
+                    source_addr: None,
+                    raw_packet: None,
+                }))
+                .expect("ring holds all frames");
+        }
+        assert_eq!(in_sender.drop_count(), 0, "input ring sized to fit");
+
+        let mut task = make_transcode_task(out_sender, in_track, pcma_codec());
+        for i in 0..100 {
+            let frame = task
+                .next_frame()
+                .await
+                .unwrap_or_else(|| panic!("frame {i} missing — input was pre-buffered"));
+            assert_eq!(frame.data.len(), 160, "each output is one full 20 ms PCMA frame");
+        }
+        // 200 × 10 ms in → 100 × 20 ms out: zero loss, nothing pending,
+        // nothing dropped by either the ring or the accumulator cap.
+        assert_eq!(task.transcode_pending.len(), 0);
+        assert_eq!(task.transcode_overflow_samples, 0);
+        assert_eq!(
+            in_sender.drop_count(),
+            0,
+            "steady drain must keep the receiver ring empty (drop-oldest never fires)"
+        );
+    }
+
+    /// Unchanged behaviour guard: a peer whose ptime equals the leg's ptime
+    /// maps one frame to one frame, exactly like the pre-drain code path.
+    #[tokio::test]
+    async fn same_ptime_peer_maps_one_to_one() {
+        let (out_sender, _out_track, _fb) = sample_track(MediaKind::Audio, 64);
+        let (in_sender, in_track, _ifb) = sample_track(MediaKind::Audio, 256);
+        for i in 0..100u16 {
+            in_sender
+                .try_send(pcmu_frame(20, i as u32 * 160, i))
+                .expect("ring holds all frames");
+        }
+        let mut task = make_transcode_task(out_sender, in_track, pcma_codec());
+        let mut prev_seq: i64 = -1;
+        for i in 0..100 {
+            let frame = task.next_frame().await.expect("frame expected");
+            assert_eq!(frame.data.len(), 160);
+            let seq = frame.sequence_number.expect("seq stamped") as i64;
+            assert_eq!(seq, prev_seq + 1, "sequence stays gapless");
+            prev_seq = seq;
+            let _ = i;
+        }
+        assert_eq!(task.transcode_pending.len(), 0);
+        assert_eq!(task.transcode_overflow_samples, 0);
+        assert_eq!(in_sender.drop_count(), 0);
+    }
+
+    /// Peer ptime longer than the leg's ptime (30 ms → 20 ms): the remainder
+    /// must carry across ticks and, once the queue runs dry, the timeout tick
+    /// flushes accumulated full frames instead of emitting silence — total
+    /// output duration must equal total input duration.
+    #[tokio::test(start_paused = true)]
+    async fn long_ptime_peer_carries_remainder_without_loss() {
+        let (out_sender, _out_track, _fb) = sample_track(MediaKind::Audio, 64);
+        let (in_sender, in_track, _ifb) = sample_track(MediaKind::Audio, 64);
+        let mut task = make_transcode_task(out_sender, in_track, pcma_codec());
+        // Feed frames one at a time (paced like a real 30 ms peer): each tick
+        // merges the carried remainder with the new frame and emits exactly
+        // one 20 ms output.
+        for i in 0..6u16 {
+            in_sender.try_send(pcmu_frame(30, i as u32 * 240, i)).unwrap();
+            let frame = task.next_frame().await.expect("frame while peer alive");
+            assert_eq!(frame.data.len(), 160);
+        }
+        // Queues drained: 480 ms of PCM still carried — timeout ticks must
+        // flush it instead of emitting silence (paused time fires instantly).
+        for _ in 0..3 {
+            let frame = task.next_frame().await.expect("carry flush tick");
+            assert_eq!(frame.data.len(), 160);
+        }
+        // 6 × 30 ms = 180 ms = 1440 samples = exactly 9 × 20 ms frames.
+        assert_eq!(task.transcode_pending.len(), 0, "all PCM flushed");
+        assert_eq!(task.transcode_overflow_samples, 0, "carry never hits the cap");
+        assert_eq!(in_sender.drop_count(), 0);
+    }
+
+    /// Sustained overload (peer produces 1.5× the leg's output rate) must be
+    /// bounded: the accumulator drops oldest beyond its cap and counts the
+    /// dropped samples instead of growing without limit.
+    #[tokio::test]
+    async fn accumulator_cap_bounds_sustained_overload() {
+        let (out_sender, _out_track, _fb) = sample_track(MediaKind::Audio, 64);
+        let (in_sender, in_track, _ifb) = sample_track(MediaKind::Audio, 128);
+        for i in 0..64u16 {
+            in_sender
+                .try_send(pcmu_frame(30, i as u32 * 240, i))
+                .expect("ring holds all frames");
+        }
+        let mut task = make_transcode_task(out_sender, in_track, pcma_codec());
+        for _ in 0..64 {
+            let _ = task.next_frame().await;
+        }
+        assert!(
+            task.transcode_overflow_samples > 0,
+            "1.5× overload must eventually hit the cap"
+        );
+        assert!(
+            task.transcode_pending.len()
+                <= 160 * TRANSCODE_PENDING_MAX_FRAMES,
+            "accumulator must stay within the cap"
+        );
+    }
+
+    /// A telephone-event frame encountered mid-drain is emitted on the very
+    /// tick that popped it (pre-drain semantics), and audio continues after.
+    #[tokio::test]
+    async fn dtmf_frame_mid_drain_emits_and_recovers() {
+        let (out_sender, _out_track, _fb) = sample_track(MediaKind::Audio, 64);
+        let (in_sender, in_track, _ifb) = sample_track(MediaKind::Audio, 64);
+        // a1, a2 (10 ms audio), then an RFC 2833 event, then a3.
+        for (idx, sample) in [
+            pcmu_frame(10, 0, 0),
+            pcmu_frame(10, 80, 1),
+            MediaSample::Audio(AudioFrame {
+                rtp_timestamp: 160,
+                clock_rate: 8000,
+                // event=5, flags=volume 10 (no end bit), duration=160
+                data: Bytes::from_static(&[0x05, 0x0A, 0x00, 0xA0]),
+                sequence_number: Some(2),
+                payload_type: Some(101),
+                marker: false,
+                header_extension: None,
+                source_addr: None,
+                raw_packet: None,
+            }),
+            pcmu_frame(10, 240, 3),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            in_sender
+                .try_send(sample)
+                .unwrap_or_else(|e| panic!("push {idx}: {e}"));
+        }
+        let mut task = make_transcode_task(out_sender, in_track, pcma_codec());
+
+        // Tick 1 pops a1 + a2 via drain, hits the DTMF frame, emits it.
+        let first = task.next_frame().await.expect("dtmf tick");
+        assert_eq!(first.payload_type, Some(101), "DTMF frame emitted on its tick");
+
+        // Tick 2 resumes audio: the carried a1+a2 merge into one full frame;
+        // a3 (80) becomes the new carried tail.
+        let second = task.next_frame().await.expect("audio tick after dtmf");
+        assert_eq!(second.payload_type, Some(8));
+        assert_eq!(second.data.len(), 160);
+
+        // Everything consumed: a1+a2+dtmf+a3 = 3 audio frames (240 samples);
+        // 2 were emitted, the 80-sample tail stays carried for future audio
+        // (no loss, no overflow).
+        assert_eq!(task.transcode_pending.len(), 80);
+        assert_eq!(task.transcode_overflow_samples, 0);
+        assert_eq!(in_sender.drop_count(), 0);
+    }
+
+    /// Pre-priming behaviour is byte-for-byte unchanged: no input → skip tick
+    /// (None); first frame → Some; empty afterwards → silence (never None).
+    #[tokio::test(start_paused = true)]
+    async fn primed_gate_semantics_unchanged() {
+        let (out_sender, _out_track, _fb) = sample_track(MediaKind::Audio, 64);
+        let (in_sender, in_track, _ifb) = sample_track(MediaKind::Audio, 64);
+        let mut task = make_transcode_task(out_sender, in_track, pcma_codec());
+
+        assert!(
+            task.next_frame().await.is_none(),
+            "timeout before first audio must skip the tick"
+        );
+
+        in_sender.try_send(pcmu_frame(20, 0, 0)).unwrap();
+        let first = task.next_frame().await.expect("first audio primes");
+        assert_eq!(first.payload_type, Some(8));
+        assert!(matches!(
+            task.source,
+            EgressSource::TranscodePeer { primed: true, .. }
+        ));
+
+        // After priming an empty tick emits silence (never None — the paced
+        // stream must not gap).
+        let silence = task.next_frame().await.expect("post-primed silence");
+        assert_eq!(silence.payload_type, Some(8));
+        assert_eq!(task.transcode_pending.len(), 0);
+    }
+
+    /// THE padded-path regression: a lone 10 ms frame on a 20 ms leg is
+    /// emitted zero-padded and CONSUMED — the partial must never surface
+    /// again inside a later frame (pre-fix, every input segment was played
+    /// twice: once padded, once folded into the next full frame).
+    #[tokio::test(start_paused = true)]
+    async fn padded_partial_frame_is_not_repeated() {
+        let (out_sender, _out_track, _fb) = sample_track(MediaKind::Audio, 64);
+        let (in_sender, in_track, _ifb) = sample_track(MediaKind::Audio, 64);
+        let mut task = make_transcode_task(out_sender, in_track, pcma_codec());
+        let mut pcma_dec = create_decoder(CodecType::PCMA);
+        let mut pcmu_enc = create_encoder(CodecType::PCMU);
+
+        // Paced lone 10 ms frames, each a distinct constant amplitude, fed
+        // one per tick so the drain never finds a second frame.
+        for (i, amp) in [6_000i16, -6_000, 3_000, -3_000].into_iter().enumerate() {
+            in_sender
+                .try_send(MediaSample::Audio(AudioFrame {
+                    rtp_timestamp: i as u32 * 80,
+                    clock_rate: 8000,
+                    data: pcmu_enc.encode(&vec![amp; 80]).into(),
+                    sequence_number: Some(i as u16),
+                    payload_type: Some(0),
+                    marker: false,
+                    header_extension: None,
+                    source_addr: None,
+                    raw_packet: None,
+                }))
+                .unwrap();
+
+            let frame = task.next_frame().await.expect("padded frame");
+            assert_eq!(frame.data.len(), 160, "one full 20 ms PCMA frame");
+            let decoded = pcma_dec.decode(&frame.data);
+            assert_eq!(decoded.len(), 160);
+            // Signal half: every sample close to THIS tick's amplitude. A
+            // repeated previous segment (the pre-fix bug) or silence fails.
+            for (j, s) in decoded[..80].iter().enumerate() {
+                assert_eq!(
+                    s.signum(),
+                    amp.signum(),
+                    "tick {i} sample {j}: stale/repeated sample {s}, expected {amp}"
+                );
+                assert!(
+                    ((*s as i32) - amp as i32).abs() < (amp as i32).abs() / 2 + 64,
+                    "tick {i} sample {j}: {s} not close to {amp}"
+                );
+            }
+            // Padding half: silence. The egress encoder's filter state leaks
+            // a tiny residual into a digital-zero tail, so allow a small
+            // bound — anything near the repeated amplitude (the pre-fix bug)
+            // still fails loudly.
+            assert!(
+                decoded[80..].iter().all(|s| s.abs() < 200),
+                "tick {i}: padding half must be silence, got {:?}",
+                &decoded[80..][..8]
+            );
+        }
+        // Each lone segment was fully consumed: nothing carried, nothing
+        // dropped.
+        assert_eq!(task.transcode_pending.len(), 0);
+        assert_eq!(task.transcode_overflow_samples, 0);
+        assert_eq!(in_sender.drop_count(), 0);
     }
 }

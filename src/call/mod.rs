@@ -874,6 +874,14 @@ pub struct MediaConfig {
     /// fast-path relay to transcoding. Unset = 5s default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_ready_timeout_secs: Option<u64>,
+    /// Zero-inbound-RTP stall window on a connected bridge leg before
+    /// flagging `proxy.media_stalled` (trace + RWI). Unset = 15s; 0 disables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_detect_secs: Option<u64>,
+    /// Periodic `media_health` call-trace snapshot interval in seconds.
+    /// Unset = 30s; 0 disables periodic snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_trace_interval_secs: Option<u64>,
 }
 
 impl Default for MediaConfig {
@@ -902,6 +910,8 @@ impl MediaConfig {
             relay_only: false,
             ice_lite: false,
             relay_ready_timeout_secs: None,
+            stall_detect_secs: None,
+            media_trace_interval_secs: None,
         }
     }
 
@@ -947,6 +957,16 @@ impl MediaConfig {
 
     pub fn with_relay_ready_timeout_secs(mut self, secs: Option<u64>) -> Self {
         self.relay_ready_timeout_secs = secs;
+        self
+    }
+
+    pub fn with_stall_detect_secs(mut self, secs: Option<u64>) -> Self {
+        self.stall_detect_secs = secs;
+        self
+    }
+
+    pub fn with_media_trace_interval_secs(mut self, secs: Option<u64>) -> Self {
+        self.media_trace_interval_secs = secs;
         self
     }
 

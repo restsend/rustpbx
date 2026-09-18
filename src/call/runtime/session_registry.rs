@@ -62,8 +62,13 @@ pub struct SessionInfo {
     pub node_id: String,
     pub caller: String,
     pub callee: String,
-    /// `"inbound"` | `"outbound"`.
+    /// `"inbound"` | `"outbound"` | `"alias"` (dialog Call-ID alias row).
     pub direction: String,
+    /// Alias rows: the canonical proxy session id this dialog Call-ID maps
+    /// to. `None` on regular session rows. Legacy rows (pre column) stashed
+    /// `"alias:<session_id>"` in `direction`; [`Self::canonical_session_id`]
+    /// still understands that form.
+    pub target_session_id: Option<String>,
     pub started_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -76,11 +81,19 @@ impl SessionInfo {
             caller: String::new(),
             callee: String::new(),
             direction: String::new(),
+            target_session_id: None,
             started_at: chrono::Utc::now(),
         }
     }
 
-    /// Direction prefix for dialog Call-ID → proxy session id alias rows.
+    /// Direction marker for dialog Call-ID → proxy session id alias rows.
+    /// The target id itself lives in [`Self::target_session_id`] — it can be
+    /// far longer than the short `direction` enum column allows.
+    pub const ALIAS_DIRECTION: &'static str = "alias";
+
+    /// Legacy prefix written into `direction` before the dedicated
+    /// `target_session_id` column existed. Kept read-compatible so rows from
+    /// older deployments (non-strict SQL modes) still resolve.
     pub const ALIAS_PREFIX: &'static str = "alias:";
 
     /// Build a registry row that maps a SIP dialog Call-ID onto a session.
@@ -89,26 +102,32 @@ impl SessionInfo {
         session_id: impl Into<String>,
         node_id: impl Into<String>,
     ) -> Self {
-        let session_id = session_id.into();
         Self {
             call_id: dialog_call_id.into(),
             node_id: node_id.into(),
             caller: String::new(),
             callee: String::new(),
-            direction: format!("{}{}", Self::ALIAS_PREFIX, session_id),
+            direction: Self::ALIAS_DIRECTION.to_string(),
+            target_session_id: Some(session_id.into()),
             started_at: chrono::Utc::now(),
         }
     }
 
     /// Resolve the canonical proxy session id (unwrap alias rows).
     pub fn canonical_session_id(&self) -> &str {
+        if let Some(target) = self.target_session_id.as_deref() {
+            return target;
+        }
+        // Legacy rows: the target id was stuffed into `direction`.
         self.direction
             .strip_prefix(Self::ALIAS_PREFIX)
             .unwrap_or(self.call_id.as_str())
     }
 
     pub fn is_alias(&self) -> bool {
-        self.direction.starts_with(Self::ALIAS_PREFIX)
+        self.target_session_id.is_some()
+            || self.direction == Self::ALIAS_DIRECTION
+            || self.direction.starts_with(Self::ALIAS_PREFIX)
     }
 }
 
@@ -298,8 +317,12 @@ fn spawn_unregister_with_retry(
             match registry.unregister(&call_id).await {
                 Ok(()) => return,
                 Err(e) if attempt > delays.len() => {
-                    tracing::warn!(call_id = %call_id, error = %e, attempts = attempt,
-                        "session registry unregister failed after retries (RAII drop)");
+                    crate::db_report::report_db_write_failure(
+                        "cluster_sessions",
+                        "delete",
+                        Some(call_id.as_str()),
+                        &e,
+                    );
                     return;
                 }
                 Err(_) => {
@@ -504,10 +527,37 @@ mod tests {
     fn session_info_alias_helpers() {
         let alias = SessionInfo::dialog_alias("dlg", "sess", "node");
         assert!(alias.is_alias());
+        assert_eq!(alias.direction, SessionInfo::ALIAS_DIRECTION);
+        assert_eq!(alias.target_session_id.as_deref(), Some("sess"));
         assert_eq!(alias.canonical_session_id(), "sess");
         let plain = SessionInfo::new("sess", "node");
         assert!(!plain.is_alias());
         assert_eq!(plain.canonical_session_id(), "sess");
+    }
+
+    #[test]
+    fn session_info_legacy_prefix_alias_rows_still_resolve() {
+        // Rows written by older builds stuffed "alias:<session_id>" into
+        // `direction` (before the `target_session_id` column existed). They
+        // must keep resolving after the upgrade.
+        let legacy = SessionInfo {
+            direction: format!("{}sess-legacy", SessionInfo::ALIAS_PREFIX),
+            target_session_id: None,
+            ..SessionInfo::new("dlg-legacy", "node")
+        };
+        assert!(legacy.is_alias());
+        assert_eq!(legacy.canonical_session_id(), "sess-legacy");
+    }
+
+    #[test]
+    fn session_info_alias_direction_fits_enum_column() {
+        // Regression (incident 2026-09-17): the marker stored in `direction`
+        // must fit the VARCHAR(16) enum column even when the target session id
+        // is a long verbatim Call-ID.
+        let long_session_id = "c".repeat(200);
+        let alias = SessionInfo::dialog_alias("dlg", long_session_id.clone(), "node");
+        assert!(alias.direction.len() <= 16, "direction must stay enum-width");
+        assert_eq!(alias.canonical_session_id(), long_session_id);
     }
 
     #[tokio::test(flavor = "multi_thread")]

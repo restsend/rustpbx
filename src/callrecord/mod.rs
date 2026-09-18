@@ -1499,7 +1499,17 @@ impl CallRecordManager {
                         }
                         Err(err) => {
                             crate::metrics::cdr::push_failed(records.len() as u64);
-                            warn!(batch_size = records.len(), "Failed to save call record batch: {}", err);
+                            // The call record IS the record here — nothing to
+                            // attach a trace to; error! + db_write_failed
+                            // webhook is the only signal.
+                            crate::db_report::report_db_write_failure_with_detail(
+                                "rustpbx_call_records",
+                                "insert",
+                                None,
+                                &err,
+                                Some(serde_json::json!({ "batch_size": records.len() })),
+                                crate::db_report::THROTTLE_COOLDOWN,
+                            );
                         }
                     }
 

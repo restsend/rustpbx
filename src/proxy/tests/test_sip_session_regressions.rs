@@ -757,6 +757,184 @@ async fn test_connected_dynamic_leg_failure_returns_to_ivr_when_set() {
 }
 
 #[tokio::test]
+async fn test_connected_dynamic_leg_failure_without_bridge_still_hangs_up_caller() {
+    // Incident 2026-09-17: a queue agent answered but the media bridge never
+    // armed (ICE incomplete on the agent leg). The agent's BYE removed the leg
+    // without cascading, leaving the caller connected forever (no BYE, no
+    // recording stop, no call record). The dynamic-leg path must cascade like
+    // handle_callee_state does for tracked callee dialogs — bridge or not.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+    let agent_leg = LegId::from("queue-agent");
+    let mut leg = Leg::new(agent_leg.clone());
+    leg.state = LegState::Connected;
+    session.legs.insert(agent_leg.clone(), leg);
+    // NOTE: no session.bridge configured on purpose.
+
+    let caller_dialog_id = session
+        .caller_dialog
+        .as_ref()
+        .map(|d| d.id())
+        .expect("caller dialog present");
+    session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: agent_leg.clone(),
+                reason: "Remote hung up".to_string(),
+            },
+            None,
+        )
+        .await;
+
+    assert!(
+        session.pending_hangup.contains(&caller_dialog_id),
+        "connected dynamic B-leg BYE without an armed bridge must still hang up the caller"
+    );
+    // The failed leg must be fully reaped, not just cascaded.
+    assert!(
+        session.legs.get(&agent_leg).is_none(),
+        "failed leg must be removed from the registry"
+    );
+}
+
+#[tokio::test]
+async fn test_connected_dynamic_leg_failure_without_bridge_returns_to_ivr_when_set() {
+    // Same incident shape as
+    // test_connected_dynamic_leg_failure_without_bridge_still_hangs_up_caller,
+    // but with a pending return app: the cascade must behave identically to
+    // the bridge-based trigger — return app wins over caller hangup even when
+    // the media bridge never armed.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+    let agent_leg = LegId::from("queue-agent");
+    let mut leg = Leg::new(agent_leg.clone());
+    leg.state = LegState::Connected;
+    session.legs.insert(agent_leg.clone(), leg);
+    // NOTE: no session.bridge configured on purpose.
+
+    session.meta.transfer_return_app = Some(ReturnAppSpec {
+        app_name: "ivr".to_string(),
+        params: serde_json::json!({"file": "main-menu"}),
+    });
+    let runtime = Arc::new(StartOnlyRuntime::new());
+    session.app_runtime = runtime.clone();
+
+    session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: agent_leg,
+                reason: "Remote hung up".to_string(),
+            },
+            None,
+        )
+        .await;
+
+    assert_eq!(
+        runtime.start_calls.load(Ordering::SeqCst),
+        1,
+        "IVR app must start on B-leg BYE even without an armed bridge"
+    );
+    assert!(session.meta.transfer_return_app.is_none());
+    let caller_dialog_id = session
+        .caller_dialog
+        .as_ref()
+        .map(|d| d.id())
+        .expect("caller dialog present");
+    assert!(!session.pending_hangup.contains(&caller_dialog_id));
+}
+
+#[tokio::test]
+async fn test_hold_b_leg_failure_still_hangs_up_caller() {
+    // The B-leg put on Hold (e.g. during a consult flow) still counts as the
+    // session's B-leg (resolve_transfer_leg includes Hold) — its remote BYE
+    // must cascade.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+    let agent_leg = LegId::from("queue-agent");
+    let mut leg = Leg::new(agent_leg.clone());
+    leg.state = LegState::Hold;
+    session.legs.insert(agent_leg.clone(), leg);
+
+    let caller_dialog_id = session
+        .caller_dialog
+        .as_ref()
+        .map(|d| d.id())
+        .expect("caller dialog present");
+    session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: agent_leg.clone(),
+                reason: "Remote hung up".to_string(),
+            },
+            None,
+        )
+        .await;
+
+    assert!(
+        session.pending_hangup.contains(&caller_dialog_id),
+        "Hold B-leg BYE must still hang up the caller"
+    );
+    assert!(session.legs.get(&agent_leg).is_none());
+}
+
+#[tokio::test]
+async fn test_consult_leg_failure_does_not_hang_up_caller() {
+    // A consult leg BYE is a normal flow event (consultation ends, control
+    // returns to the agent leg): it must NOT cascade. The original agent leg
+    // sits in Hold while the consult leg is Connected.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+    let agent_leg = LegId::from("queue-agent");
+    let mut agent = Leg::new(agent_leg);
+    agent.state = LegState::Hold;
+    let consult_leg = LegId::from("consult");
+    let mut consult = Leg::new(consult_leg.clone());
+    consult.state = LegState::Connected;
+    session.legs.insert(LegId::from("queue-agent"), agent);
+    session.legs.insert(consult_leg.clone(), consult);
+
+    let caller_dialog_id = session
+        .caller_dialog
+        .as_ref()
+        .map(|d| d.id())
+        .expect("caller dialog present");
+    session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: consult_leg.clone(),
+                reason: "Remote hung up".to_string(),
+            },
+            None,
+        )
+        .await;
+
+    assert!(
+        !session.pending_hangup.contains(&caller_dialog_id),
+        "consult leg BYE must not hang up the caller"
+    );
+    // The consult leg is reaped, but the held agent B-leg must survive with
+    // its state untouched — the consultation ended, the call did not.
+    assert!(session.legs.get(&consult_leg).is_none());
+    let agent = session
+        .legs
+        .get(&LegId::from("queue-agent"))
+        .expect("agent leg must survive consult leg failure");
+    assert_eq!(agent.state, LegState::Hold);
+}
+
+#[tokio::test]
 async fn bridge_rtp_dtmf_reaches_return_app_once_without_stale_app_injection() {
     use rustrtc::peer_connection::RtpObserver;
 
@@ -4741,4 +4919,80 @@ fn recording_option_preserves_legacy_json_and_output_settings() {
     assert_eq!(roundtrip.samplerate, Some(16000));
     assert_eq!(roundtrip.ptime, Some(20));
     assert_eq!(roundtrip.stereo_swap, Some(false));
+}
+
+/// The trunk black-hole regression: a connected bridge whose legs receive
+/// ZERO inbound RTP (firewall dropping the peer→PBX UDP direction, or an
+/// answer SDP advertising an address the peer cannot reach) must surface
+/// `proxy.media_stalled` mid-call — periodic `media_health` trace entries +
+/// one `ReportCallError` per silent leg — instead of the problem only being
+/// discoverable at hangup (`leg_media_incomplete`) or by grepping logs.
+#[tokio::test]
+async fn media_stalled_fires_when_connected_leg_receives_nothing() {
+    let dialplan =
+        build_dialplan_with_mode(MediaProxyMode::Auto).with_application("ivr".to_string(), None, true);
+    let (mut session, _handle, mut cmd_rx) = build_session_with_cmd_rx(dialplan).await;
+    let mut mb = playable_bridge("media-stalled-test").await;
+    mb.accept(crate::media::media_bridge::LegSide::A).await;
+    mb.accept(crate::media::media_bridge::LegSide::B).await;
+    assert!(mb.is_bridged(), "route active before arming the monitor");
+    for (id, side) in [("caller", "caller"), ("callee", "callee")] {
+        let id = LegId::from(id);
+        session
+            .legs
+            .set_media_leg(&id, mb.leg_for_id(&crate::media::leg_id::LegId::from(side)).unwrap());
+        session.update_leg_state(&id, LegState::Connected);
+    }
+    session.media.bridge = Some(mb);
+
+    // stall_detect_secs = Some(1): the first sampler snapshot (5s tick)
+    // already exceeds the window, and no RTP flows in unit context — both
+    // legs must be flagged stalled.
+    SipSession::arm_media_health_monitor(
+        session.media.bridge.as_ref().unwrap(),
+        session.cmd_tx.clone(),
+        "media-stalled-test",
+        Some(1),
+        Some(5),
+    );
+
+    let mut seen_stall = false;
+    let mut seen_health_trace = false;
+    for _ in 0..8 {
+        let cmd = tokio::time::timeout(std::time::Duration::from_secs(15), cmd_rx.recv())
+            .await
+            .expect("health monitor should emit commands")
+            .expect("session command channel must stay open");
+        match &cmd {
+            CallCommand::Trace { event } => {
+                assert_eq!(
+                    event.kind,
+                    crate::call_errors::TraceKind::MediaHealth,
+                    "periodic trace entries are media_health snapshots"
+                );
+                seen_health_trace = true;
+            }
+            CallCommand::ReportCallError { code, detail, .. } => {
+                assert_eq!(code.as_str(), "proxy.media_stalled");
+                assert!(detail.is_some(), "stall carries the health snapshot");
+                seen_stall = true;
+            }
+            other => panic!("unexpected command from health monitor: {other:?}"),
+        }
+        let result = session.execute_command(cmd, None).await;
+        assert!(result.success, "health commands must execute cleanly");
+        if seen_stall && seen_health_trace {
+            break;
+        }
+    }
+    assert!(seen_health_trace, "periodic media_health trace entry expected");
+    assert!(seen_stall, "proxy.media_stalled call_error expected for silent legs");
+    assert!(
+        session
+            .meta
+            .trace
+            .iter()
+            .any(|e| e.code.as_deref() == Some("proxy.media_stalled")),
+        "stall must be recorded in the call trace"
+    );
 }

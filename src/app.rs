@@ -539,6 +539,10 @@ impl AppStateBuilder {
 
                 // Pass RWI gateway to the SIP server so call lifecycle events can be emitted.
                 if let Some(ref gw) = core.rwi_gateway {
+                    // Also register it process-wide so non-session code paths
+                    // (DB failure reporting, background persistence) can emit
+                    // RWI events without a gateway handle.
+                    crate::rwi::set_global_gateway(gw.clone());
                     builder = builder.with_rwi_gateway(gw.clone());
                 }
 

@@ -48,7 +48,8 @@ pub struct TestUa {
     cancel_token: CancellationToken,
     dialog_layer: Option<Arc<DialogLayer>>,
     state_sender: Option<DialogStateSender>,
-    state_receiver: Option<Arc<tokio::sync::Mutex<DialogStateReceiver>>>,
+    /// Events collected by the background dialog-state pump (see `start`).
+    pending_events: Arc<tokio::sync::Mutex<Vec<TestUaEvent>>>,
     contact_uri: Option<rsipstack::sip::Uri>,
     /// Store answer SDP per dialog for re-INVITE responses
     answer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
@@ -198,7 +199,7 @@ impl TestUa {
             cancel_token: CancellationToken::new(),
             dialog_layer: None,
             state_sender: None,
-            state_receiver: None,
+            pending_events: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             contact_uri: None,
             answer_sdps: Arc::new(Mutex::new(HashMap::new())),
             received_offer_sdps: Arc::new(Mutex::new(HashMap::new())),
@@ -232,10 +233,34 @@ impl TestUa {
 
         let incoming = endpoint.incoming_transactions()?;
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
-        let (state_sender, state_receiver) = dialog_layer.new_dialog_state_channel();
+        let (state_sender, mut state_receiver) = dialog_layer.new_dialog_state_channel();
         self.dialog_layer = Some(dialog_layer);
         self.state_sender = Some(state_sender.clone());
-        self.state_receiver = Some(Arc::new(tokio::sync::Mutex::new(state_receiver)));
+
+        // Background dialog-state pump. It consumes states continuously so
+        // that:
+        // - server-initiated re-INVITEs are answered right away (an unanswered
+        //   re-INVITE wedges the remote session's command loop — e.g. a
+        //   merge-restore Hold — stalling every later request, BYE included);
+        // - every other state is buffered for `process_dialog_events`, which
+        //   the tests poll at phase boundaries.
+        let pump_ua = self.clone();
+        rustpbx::utils::spawn(async move {
+            loop {
+                let state = select! {
+                    _ = pump_ua.cancel_token.cancelled() => break,
+                    state = state_receiver.recv() => match state {
+                        Some(state) => state,
+                        None => break,
+                    }
+                };
+                let mut events = Vec::new();
+                pump_ua.collect_dialog_event(state, &mut events).await;
+                if !events.is_empty() {
+                    pump_ua.pending_events.lock().await.extend(events);
+                }
+            }
+        });
 
         // Create Contact URI
         self.contact_uri = Some(rsipstack::sip::Uri {
@@ -907,14 +932,17 @@ impl TestUa {
         }
     }
 
-    /// Process dialog events and return collected events
+    /// Drain dialog events collected by the background pump (see `start`).
     pub async fn process_dialog_events(&self) -> Result<Vec<TestUaEvent>> {
-        let mut events = Vec::new();
+        let events = std::mem::take(&mut *self.pending_events.lock().await);
+        Ok(events)
+    }
 
-        if let Some(state_receiver_mutex) = &self.state_receiver {
-            let mut state_receiver = state_receiver_mutex.lock().await;
-            while let Ok(state) = state_receiver.try_recv() {
-                match state {
+    /// Map one dialog state to test events, performing the in-band replies
+    /// the harness owes the peer (200 for re-INVITE / NOTIFY / INFO, 202 for
+    /// REFER, ...). Runs on the background pump task.
+    async fn collect_dialog_event(&self, state: DialogState, events: &mut Vec<TestUaEvent>) {
+        match state {
                     DialogState::Calling(id) => {
                         debug!("TestUa: Received Calling state for {}", id);
                         // Get SDP from stored received offers
@@ -1084,11 +1112,7 @@ impl TestUa {
                         }
                     }
                     _ => {}
-                }
-            }
         }
-
-        Ok(events)
     }
 
     pub fn stop(&self) {

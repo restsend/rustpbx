@@ -1888,6 +1888,8 @@ impl SipServerInner {
             .with_comfort_noise(rtp.comfort_noise, rtp.comfort_noise_level_db)
             .with_ice_lite(rtp.ice_lite)
             .with_relay_ready_timeout_secs(rtp.relay_ready_timeout_secs)
+            .with_stall_detect_secs(rtp.stall_detect_secs)
+            .with_media_trace_interval_secs(rtp.media_trace_interval_secs)
     }
 
     /// Hot-reload the full `[proxy]` section plus related platform settings

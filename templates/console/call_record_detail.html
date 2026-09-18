@@ -449,6 +449,7 @@
                                         "call_record_detail.mq_col_rtt" | t }}</th>
                                     <th class="px-3 py-2 font-semibold text-right">{{
                                         "call_record_detail.mq_col_loss" | t }}</th>
+                                    <th class="px-3 py-2 font-semibold">Advertised / wire</th>
                                 </tr>
                             </thead>
                             <tbody class="divide-y divide-slate-100">
@@ -472,6 +473,14 @@
                                         <td class="px-3 py-2 font-mono text-right"
                                             :class="packetLossClass(leg.lossPct)"
                                             x-text="formatPercent(leg.lossPct)"></td>
+                                        <td class="px-3 py-2 font-mono text-[11px] leading-4 text-slate-500">
+                                            <div x-show="leg.advertisedAddr"
+                                                x-text="(leg.advertisedAddr || '') + ' → ' + (leg.remoteAddr || 'no path')"></div>
+                                            <div x-show="leg.peerAdvertisedAddr"
+                                                class="text-slate-400"
+                                                x-text="'peer: ' + (leg.peerAdvertisedAddr || '')"></div>
+                                            <div x-show="!leg.advertisedAddr && !leg.peerAdvertisedAddr">—</div>
+                                        </td>
                                     </tr>
                                 </template>
                             </tbody>
@@ -2539,6 +2548,9 @@
                     case 'media_issue':
                         // minus-circle (missing media)
                         return svg('M15 12H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z');
+                    case 'media_health':
+                        // signal (per-leg media counters snapshot)
+                        return svg('M2 20h.01M7 20v-4m5 4v-8m5 4V8m5 4v8');
                     case 'error':
                         // exclamation-triangle (call-affecting subsystem error)
                         return svg('M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z');
@@ -2570,13 +2582,14 @@
                     play: 'Media play',
                     rtp_timeout: 'RTP timeout',
                     media_issue: 'Media issue',
+                    media_health: 'Media health',
                     error: 'Error',
                     end: 'Call end',
                 };
                 return map[kind] || kind;
             },
             hasTraceDetail(ev) {
-                return ev && ev.detail != null && ev.kind === 'error';
+                return ev && ev.detail != null && (ev.kind === 'error' || ev.kind === 'media_health');
             },
             traceDetail(ev) {
                 if (!ev || ev.detail == null) return '';

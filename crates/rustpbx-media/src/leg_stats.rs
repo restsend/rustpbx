@@ -75,6 +75,14 @@ pub struct LegQualityReport {
     pub rtt_us: u64,
     /// Latest RTCP fraction lost as a percentage (0..=100).
     pub loss_pct: f64,
+    /// Audio `addr:port` this leg advertised in its SDP (where the peer
+    /// sends media). Diagnostics anchor for media black holes.
+    pub advertised_addr: Option<String>,
+    /// Audio `addr:port` the peer advertised in its SDP (where this leg
+    /// sends media).
+    pub peer_advertised_addr: Option<String>,
+    /// Wire-level remote address in use (ICE selected pair / RTP latch).
+    pub remote_addr: Option<String>,
 }
 
 /// Live RTCP stats for one leg, updated lock-free by a background listener.

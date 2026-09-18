@@ -379,7 +379,14 @@ impl PresenceManager {
                     .exec(db)
                     .await
                 {
-                    tracing::error!("failed to persist presence state for {}: {}", identity, e);
+                    crate::db_report::report_db_write_failure_with_detail(
+                        "presence",
+                        "upsert",
+                        None,
+                        &e,
+                        Some(serde_json::json!({ "identity": identity })),
+                        crate::db_report::THROTTLE_COOLDOWN,
+                    );
                 }
             }
         }

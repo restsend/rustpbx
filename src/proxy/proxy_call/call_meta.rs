@@ -105,6 +105,10 @@ pub struct CallMeta {
     /// One-shot: the `RelayArmFailure` command was already handled (bridge
     /// forced into transcode mode). Duplicate commands are ignored.
     pub relay_arm_failure_handled: bool,
+    /// One-shot: the media-health snapshot monitor has been spawned for this
+    /// session's bridge (writes `media_health` trace entries + fires
+    /// `proxy.media_stalled`).
+    pub media_health_monitor_spawned: bool,
     /// True once a supervisor takeover kicked the agent leg and moved the
     /// customer into the takeover conference. While set, B-leg termination
     /// must NOT cascade into a caller hangup (the customer keeps talking to

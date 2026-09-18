@@ -246,6 +246,35 @@ impl CallError {
     }
 }
 
+/// A database write failed. Emitted for background/async DB writes whose
+/// failure would otherwise be silent (cluster session registry, queue
+/// persistence, presence, locator cleanup, ...); call-scoped failures
+/// additionally land a `TraceKind::Error` entry in the CDR trace at the
+/// call site. `call_id` is present when the failed write belongs to a live
+/// call, `None` for cluster/system tables.
+#[derive(Debug, Clone, Serialize)]
+pub struct DbWriteFailed {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    /// Table / model that failed to persist, e.g. `cluster_sessions`.
+    pub entity: String,
+    /// Coarse verb: `insert` | `update` | `delete` | `upsert` | `sweep`.
+    pub operation: String,
+    pub error: String,
+    /// Failures suppressed by the per-(entity, operation) throttle since the
+    /// last emission — lets consumers gauge the true failure rate during an
+    /// outage window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suppressed: Option<u64>,
+}
+
+impl RwiEventSpec for DbWriteFailed {
+    const TYPE: &'static str = "db_write_failed";
+    fn call_id(&self) -> Option<&str> {
+        self.call_id.as_deref()
+    }
+}
+
 /// Where a transfer originated from — the flow position of the call at the
 /// moment it was transferred (IVR / queue / agent / SIP REFER), so consumers
 /// can reconstruct the call path from RWI events alone.

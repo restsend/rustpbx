@@ -31,6 +31,7 @@ impl MigratorTrait for Migrator {
             Box::new(super::config_entry::Migration),
             Box::new(super::cluster_session::Migration),
             Box::new(super::call_record_session_id_column::Migration),
+            Box::new(super::m20260917_000001_cluster_session_target_session_id::Migration),
             // The queue addon migration is registered in the addon's own migrator.
         ]
     }

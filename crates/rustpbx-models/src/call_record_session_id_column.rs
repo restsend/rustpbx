@@ -183,7 +183,10 @@ mod tests {
         assert_eq!(legs.len(), 3, "all legs share the root session_id");
 
         // down() drops the index and the column without touching the rows.
-        crate::migration::Migrator::down(&db, Some(1))
+        // Targeted (not Migrator::down) so the test stays independent of this
+        // migration's position in the registry list.
+        use sea_orm_migration::MigrationTrait;
+        super::Migration.down(&sea_orm_migration::SchemaManager::new(&db))
             .await
             .expect("down");
         let cols = sqlite_scalar(

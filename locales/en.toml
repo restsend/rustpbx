@@ -2275,3 +2275,5 @@ internal = "Internal SIP"
 [errors.proxy]
 rtp_timeout = "RTP inactivity timeout"
 leg_media_incomplete = "Answered but one or more legs delivered no media"
+media_stalled = "Connected leg keeps receiving no inbound media"
+"media_stalled.remediation" = "Typical causes: a firewall dropping the peer→PBX direction of the UDP media port range, or our answer SDP advertising an address the peer cannot reach (container/NAT IP). Compare advertised_addr vs remote_addr in the trace and open the UDP media port range."

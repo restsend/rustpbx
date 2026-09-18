@@ -484,10 +484,16 @@ mod tests {
             Err(err) => {
                 assert_eq!(err.status, Some(rsipstack::sip::StatusCode::Forbidden));
                 assert!(err.error.to_string().contains("Forbidden by test"));
-                assert!(
-                    err.extensions.is_none(),
-                    "extensions should be None when not provided in reject"
+                // The unified call-error catalog stamps `error_code` onto the
+                // extensions even when the HTTP payload provided none.
+                let exts = err.extensions.expect(
+                    "extensions should carry the catalog error_code when not provided in reject",
                 );
+                assert_eq!(
+                    exts.get("error_code").map(String::as_str),
+                    Some("http_router.rejected")
+                );
+                assert_eq!(exts.len(), 1, "no other extensions invented in reject");
             }
             _ => panic!("Expected rejection"),
         }
@@ -785,10 +791,16 @@ mod tests {
         let err = result.expect_err("abort should return error");
         assert_eq!(err.status, Some(rsipstack::sip::StatusCode::BusyHere));
         assert!(err.error.to_string().contains("Busy"));
-        assert!(
-            err.extensions.is_none(),
-            "extensions should be None when not provided"
+        // The unified call-error catalog stamps `error_code` onto the
+        // extensions even when the HTTP payload provided none.
+        let exts = err
+            .extensions
+            .expect("extensions should carry the catalog error_code when not provided");
+        assert_eq!(
+            exts.get("error_code").map(String::as_str),
+            Some("http_router.rejected")
         );
+        assert_eq!(exts.len(), 1, "no other extensions invented");
     }
 
     #[tokio::test]

@@ -299,7 +299,12 @@ pub async fn trigger_call_record_transcript(
     .update(db)
     .await
     {
-        warn!(call_id = %record.call_id, "failed to update transcript status: {}", err);
+        crate::db_report::report_db_write_failure(
+            "transcript",
+            "update",
+            Some(record.call_id.as_str()),
+            &err,
+        );
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "message": format!("Failed to update call record: {}", err) })),

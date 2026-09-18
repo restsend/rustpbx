@@ -332,6 +332,26 @@ pub const LEG_MEDIA_INCOMPLETE: CallErrInfo = CallErrInfo {
     remediation_key: None,
 };
 
+/// Mid-call counterpart of `leg_media_incomplete`: a connected bridge leg has
+/// received ZERO inbound RTP for longer than `[media] stall_detect_secs`
+/// (default 15s). Fired once per affected leg while the call is up, so the
+/// problem is visible in real time (CDR trace + RWI `call_error`) instead of
+/// only at hangup. Typical causes: a firewall dropping the peer's UDP media
+/// direction, or our answer SDP advertising an address the peer cannot
+/// reach (container/NAT) — compare `advertised_addr` vs `remote_addr` in
+/// the trace detail.
+pub const LEG_MEDIA_STALLED: CallErrInfo = CallErrInfo {
+    app: "proxy",
+    code: "proxy.media_stalled",
+    message: "No inbound media on a connected leg",
+    sip_status: None,
+    // Detection-only diagnostic: never changes the hangup outcome.
+    hangup_reason: CallRecordHangupReason::Other(String::new()),
+    severity: ErrSeverity::Warn,
+    locale_key: "errors.proxy.media_stalled",
+    remediation_key: Some("errors.proxy.media_stalled.remediation"),
+};
+
 pub const CATALOG: &[CallErrInfo] = &[
     QUEUE_ABANDONED,
     QUEUE_ALL_AGENTS_UNAVAILABLE,
@@ -361,4 +381,5 @@ pub const CATALOG: &[CallErrInfo] = &[
     TRANSFER_INTERNAL_ERROR,
     RTP_TIMEOUT,
     LEG_MEDIA_INCOMPLETE,
+    LEG_MEDIA_STALLED,
 ];

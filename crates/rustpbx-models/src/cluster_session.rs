@@ -18,8 +18,13 @@ pub struct Model {
     pub node_id: String,
     pub caller: String,
     pub callee: String,
-    /// `"inbound"` | `"outbound"`.
+    /// `"inbound"` | `"outbound"` | `"alias"` (dialog Call-ID alias row).
     pub direction: String,
+    /// For alias rows: the canonical proxy session id this dialog Call-ID
+    /// maps to. `NULL` on regular session rows. Kept in a dedicated column
+    /// because the id can be up to 200 chars (verbatim Call-IDs) — far beyond
+    /// the short enum `direction` column.
+    pub target_session_id: Option<String>,
     pub started_at: DateTimeUtc,
     /// Refreshed by the node heartbeat; the sweeper deletes rows older than
     /// the TTL using the `idx_cluster_sessions_updated` index.
@@ -47,6 +52,7 @@ impl MigrationTrait for Migration {
                     .col(string(Column::Caller).string_len(160))
                     .col(string(Column::Callee).string_len(160))
                     .col(string(Column::Direction).string_len(16))
+                    .col(string_null(Column::TargetSessionId).string_len(200))
                     .col(timestamp(Column::StartedAt).default(Expr::current_timestamp()))
                     .col(timestamp(Column::LastUpdatedAt).default(Expr::current_timestamp()))
                     .to_owned(),

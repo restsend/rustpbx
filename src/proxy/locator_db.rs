@@ -914,7 +914,9 @@ impl Locator for DbLocator {
                 .delete_expired_snapshots(expired, now_epoch, now_instant)
                 .await
             {
-                Err(e) => warn!(error = %e, "Failed to delete expired location rows during lookup"),
+                Err(e) => {
+                    crate::db_report::report_db_write_failure("locator", "delete", None, &e);
+                }
                 Ok(expired_locations) if !expired_locations.is_empty() => {
                     // The backend removed these bindings on its own (no explicit
                     // unregister arrived). Broadcast Offline so downstream

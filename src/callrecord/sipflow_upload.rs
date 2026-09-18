@@ -250,7 +250,11 @@ pub async fn upload_media(
                 .await
                 .map(|_| sipflow_s3_url(vendor, endpoint, bucket, full_media_key))
         }
-        SipFlowUploadConfig::Http { .. } => {
+        SipFlowUploadConfig::Http {
+            file_field,
+            content_type,
+            ..
+        } => {
             let Some(storage) = storage else {
                 return None;
             };
@@ -258,8 +262,13 @@ pub async fn upload_media(
             let request = crate::storage::UploadRequest {
                 key: full_media_key.to_string(),
                 file_name: Some(file_name.clone()),
-                content_type: Some("audio/wav".to_string()),
-                file_field: Some("recording".to_string()),
+                // Config wins; these are only historical fallbacks.
+                content_type: content_type
+                    .clone()
+                    .or_else(|| Some("audio/wav".to_string())),
+                file_field: file_field
+                    .clone()
+                    .or_else(|| Some("recording".to_string())),
                 body_field: None,
                 vars: std::collections::HashMap::from([
                     ("call_id".to_string(), call_id.to_string()),
@@ -364,7 +373,11 @@ pub async fn upload_signaling_flow(
             };
             upload_s3(storage, full_signaling_key, data).await
         }
-        SipFlowUploadConfig::Http { .. } => {
+        SipFlowUploadConfig::Http {
+            file_field,
+            content_type,
+            ..
+        } => {
             let Some(storage) = storage else {
                 warn!(call_id, "SipFlowUploadHook: HTTP storage is not initialized");
                 return false;
@@ -372,8 +385,13 @@ pub async fn upload_signaling_flow(
             let request = crate::storage::UploadRequest {
                 key: full_signaling_key.to_string(),
                 file_name: Some(signaling_file_name.to_string()),
-                content_type: Some("application/jsonl".to_string()),
-                file_field: Some("signaling".to_string()),
+                // Config wins; these are only historical fallbacks.
+                content_type: content_type
+                    .clone()
+                    .or_else(|| Some("application/jsonl".to_string())),
+                file_field: file_field
+                    .clone()
+                    .or_else(|| Some("signaling".to_string())),
                 body_field: None,
                 vars: std::collections::HashMap::from([
                     ("call_id".to_string(), call_id.to_string()),
@@ -592,6 +610,141 @@ mod tests {
             force_pcm: None,
             pcm_sample_rate: None,
         }
+    }
+
+    /// Backend returning a single flow item so signaling upload proceeds.
+    struct SingleFlowBackend;
+
+    #[async_trait::async_trait]
+    impl SipFlowBackend for SingleFlowBackend {
+        fn record(&self, _: std::borrow::Cow<'_, str>, _: SipFlowItem) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn flush(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn query_flow(
+            &self,
+            _: &str,
+            _: DateTime<Local>,
+            _: DateTime<Local>,
+        ) -> anyhow::Result<Vec<SipFlowItem>> {
+            Ok(vec![SipFlowItem {
+                timestamp: 1,
+                seq: 0,
+                leg: None,
+                msg_type: crate::sipflow::SipFlowMsgType::Sip,
+                src_addr: "127.0.0.1:5060".to_string(),
+                dst_addr: String::new(),
+                payload: Bytes::from_static(b"INVITE sip:x SIP/2.0"),
+            }])
+        }
+        async fn query_media_stats(
+            &self,
+            _: &str,
+            _: DateTime<Local>,
+            _: DateTime<Local>,
+        ) -> anyhow::Result<Vec<SipFlowMediaStats>> {
+            Ok(vec![])
+        }
+        async fn query_media(
+            &self,
+            _: &str,
+            _: DateTime<Local>,
+            _: DateTime<Local>,
+        ) -> anyhow::Result<Vec<u8>> {
+            Ok(vec![])
+        }
+    }
+
+    async fn spawn_capture_server() -> (String, Arc<std::sync::Mutex<Vec<u8>>>) {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let captured_clone = captured.clone();
+        let app = axum::Router::new().route(
+            "/upload",
+            axum::routing::post(move |body: axum::body::Bytes| {
+                let captured = captured_clone.clone();
+                async move {
+                    captured.lock().unwrap().extend_from_slice(&body);
+                    "ok"
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind capture server");
+        let address = listener.local_addr().expect("capture server address");
+        crate::utils::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        (format!("http://{address}/upload"), captured)
+    }
+
+    #[tokio::test]
+    async fn http_signaling_upload_honors_configured_file_field() {
+        let now = Local::now();
+        let call_ids = vec!["flow-call".to_string()];
+        let window = |now: DateTime<Local>| (now - chrono::Duration::seconds(1), now + chrono::Duration::seconds(1));
+
+        // A configured file_field must win over the built-in fallback.
+        let (url, captured) = spawn_capture_server().await;
+        let upload: SipFlowUploadConfig = toml::from_str(&format!(
+            r#"type = "http"
+url = "{url}"
+file_field = "filecontent"
+"#
+        ))
+        .expect("parse http upload config");
+        let storage = build_storage(&upload).unwrap().expect("http storage");
+        let (start, end) = window(now);
+        assert!(
+            upload_signaling_flow(
+                &upload,
+                &SingleFlowBackend,
+                "flow-call",
+                &call_ids,
+                start,
+                end,
+                "flow.jsonl",
+                "flow.jsonl",
+                Some(&storage),
+            )
+            .await
+        );
+        let body = String::from_utf8_lossy(&captured.lock().unwrap()).to_string();
+        assert!(body.contains("name=\"filecontent\""), "configured field: {body}");
+        assert!(
+            !body.contains("name=\"signaling\""),
+            "fallback must not shadow config: {body}"
+        );
+
+        // Without configuration the historical part name is preserved.
+        let (url, captured) = spawn_capture_server().await;
+        let upload: SipFlowUploadConfig = toml::from_str(&format!(
+            r#"type = "http"
+url = "{url}"
+"#
+        ))
+        .expect("parse http upload config");
+        let storage = build_storage(&upload).unwrap().expect("http storage");
+        let now = Local::now();
+        let (start, end) = window(now);
+        assert!(
+            upload_signaling_flow(
+                &upload,
+                &SingleFlowBackend,
+                "flow-call",
+                &call_ids,
+                start,
+                end,
+                "flow.jsonl",
+                "flow.jsonl",
+                Some(&storage),
+            )
+            .await
+        );
+        let body = String::from_utf8_lossy(&captured.lock().unwrap()).to_string();
+        assert!(body.contains("name=\"signaling\""), "historical fallback: {body}");
     }
 
     fn make_record() -> CallRecord {

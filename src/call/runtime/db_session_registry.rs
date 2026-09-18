@@ -75,7 +75,12 @@ impl DbSessionRegistry {
                     _ = cancel.cancelled() => break,
                     _ = interval.tick() => {
                         if let Err(e) = this.sweep().await {
-                            tracing::error!("session registry sweeper error: {}", e);
+                            crate::db_report::report_db_write_failure(
+                                "cluster_sessions",
+                                "sweep",
+                                None,
+                                &e,
+                            );
                         }
                     }
                 }
@@ -116,6 +121,7 @@ fn from_model(m: Model) -> SessionInfo {
         caller: m.caller,
         callee: m.callee,
         direction: m.direction,
+        target_session_id: m.target_session_id,
         started_at: m.started_at,
     }
 }
@@ -129,6 +135,7 @@ impl SessionRegistry for DbSessionRegistry {
             caller: Set(info.caller.clone()),
             callee: Set(info.callee.clone()),
             direction: Set(info.direction.clone()),
+            target_session_id: Set(info.target_session_id.clone()),
             started_at: Set(info.started_at),
             last_updated_at: Set(chrono::Utc::now()),
         };
@@ -140,6 +147,7 @@ impl SessionRegistry for DbSessionRegistry {
                         Column::Caller,
                         Column::Callee,
                         Column::Direction,
+                        Column::TargetSessionId,
                         Column::LastUpdatedAt,
                     ])
                     .to_owned(),
@@ -374,6 +382,69 @@ mod tests {
         r.register(&info("a", "node-2")).await.unwrap();
         assert_eq!(r.active_count().await, 1);
         assert_eq!(r.lookup_owner("a").await.as_deref(), Some("node-2"));
+    }
+
+    /// Incident 2026-09-17 regression: the alias payload used to be stuffed
+    /// into the 16-wide `direction` enum column, so every alias insert failed
+    /// on strict deployments ("Data too long for column 'direction'") and
+    /// cross-node dialog Call-ID resolution silently died. The target id now
+    /// lives in its own 200-wide column and must round-trip — including at
+    /// full column width (verbatim Call-IDs reach that size) — through
+    /// register, lookup, the cluster resolver, and upsert.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dialog_alias_persists_target_session_id() {
+        let db = test_db().await;
+        let r = DbSessionRegistry::new(
+            db.clone(),
+            Duration::from_secs(3600),
+            Duration::from_secs(crate::call::runtime::DEFAULT_SESSION_MAX_AGE_SECS),
+        );
+        let target = format!("{}-{}", "a".repeat(32), "b".repeat(100)); // 133 chars > 16
+        r.register(&SessionInfo::dialog_alias(
+            "dlg-call-id",
+            target.clone(),
+            "node-1",
+        ))
+        .await
+        .unwrap();
+
+        // Raw row shape: direction stays the short enum marker, payload in
+        // the dedicated column.
+        let row = Entity::find_by_id("dlg-call-id")
+            .one(&db)
+            .await
+            .unwrap()
+            .expect("alias row present");
+        assert_eq!(row.direction, "alias", "direction must stay enum-width");
+        assert_eq!(row.target_session_id.as_deref(), Some(target.as_str()));
+
+        // Registry lookup + the cluster resolution path consumers rely on.
+        let full = r.lookup("dlg-call-id").await.unwrap();
+        assert!(full.is_alias());
+        assert_eq!(full.canonical_session_id(), target);
+        let (owner, canonical) = crate::call::runtime::resolve_owner_and_session(
+            &(r.clone() as super::super::SessionRegistryRef),
+            "dlg-call-id",
+        )
+        .await
+        .unwrap();
+        assert_eq!(owner, "node-1");
+        assert_eq!(canonical, target);
+
+        // Upsert must update the target (OnConflict column list includes
+        // TargetSessionId) alongside node ownership.
+        let new_target = "sess-reassigned".to_string();
+        r.register(&SessionInfo::dialog_alias(
+            "dlg-call-id",
+            new_target.clone(),
+            "node-2",
+        ))
+        .await
+        .unwrap();
+        let updated = r.lookup("dlg-call-id").await.unwrap();
+        assert_eq!(updated.node_id, "node-2");
+        assert_eq!(updated.canonical_session_id(), new_target);
+        assert_eq!(updated.target_session_id.as_deref(), Some(new_target.as_str()));
     }
 
     #[tokio::test(flavor = "multi_thread")]
