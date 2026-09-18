@@ -2412,17 +2412,20 @@ impl SipSession {
         };
 
         // ── 8. Store bridge reference on session ─────────────────────
-        self.conference_bridge = crate::call::runtime::SessionConferenceBridge {
-            bridge_handle: Some(crate::call::runtime::ConferenceBridgeHandle {
-                _tasks: vec![],
-                cancel_token: cancel_token.clone(),
-            }),
-            conf_id: Some(format!("bridge-{}", self.id.0)),
-        };
+        // Kept on the dedicated voip_bridge slot: `conference_bridge` carries
+        // a `conf_id` that gates `update_media_path()` for REAL conferences;
+        // parking the voip handle there left that guard set forever after the
+        // bridge closed, silently blocking every later media-route update
+        // (e.g. bridging a queue agent leg that connects afterwards).
+        self.voip_bridge = Some(crate::call::runtime::ConferenceBridgeHandle {
+            _tasks: vec![],
+            cancel_token: cancel_token.clone(),
+        });
 
         // ── 9. Write return app to CallMeta + spawn disconnect monitor ──
-        //    The monitor sends `StartReturnApp` on bridge disconnect; the
-        //    handler reads `meta.transfer_return_app` (written here).
+        //    The monitor always reports the disconnect (VoipBridgeClosed) so
+        //    the session drops the handle and re-evaluates the media path;
+        //    when a return app is configured it also starts it.
         let has_return_app = return_app.is_some();
         self.meta.transfer_return_app = self.resolve_return_app(return_app).await;
         let cancel = self.cancel_token.child_token();
@@ -2437,10 +2440,14 @@ impl SipSession {
                 pcm_ended_rx,
             )
             .await;
-            if bridge_disconnected
-                && has_return_app
-                && let Some(tx) = tx
-            {
+            if !bridge_disconnected {
+                return;
+            }
+            let Some(tx) = tx else { return };
+            if tx.send(CallCommand::VoipBridgeClosed).await.is_err() {
+                return;
+            }
+            if has_return_app {
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => {}

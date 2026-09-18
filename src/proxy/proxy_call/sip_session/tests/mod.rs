@@ -1342,7 +1342,8 @@ async fn rwi_bridge_setup_results_reach_listener_before_call_ends() {
         .await
         .expect("bridge setup result must reach the RWI controller");
         assert!(!session.cancel_token.is_cancelled());
-        assert!(session.conference_bridge.bridge_handle.is_some());
+        assert!(session.voip_bridge.is_some());
+        assert!(session.conference_bridge.conf_id.is_none(), "a voip bridge must not occupy the conference slot");
         assert!(server.active_call_registry.get(call_id).is_some());
     }
 

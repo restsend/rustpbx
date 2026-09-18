@@ -120,6 +120,14 @@ pub struct SipSession {
     /// `CallCommand::RealtimeStart`, cleared by `RealtimeStop` / teardown.
     pub(crate) realtime_bridge: Option<super::realtime_bridge::RealtimeBridgeHandle>,
 
+    /// Active TTS/voip WebSocket bridge handle — set by `connect_bridge()`,
+    /// cleared on disconnect (`CallCommand::VoipBridgeClosed`) / teardown.
+    /// Kept separate from `conference_bridge`: storing the voip handle there
+    /// set a fake `conf_id` that permanently gated `update_media_path()`, so a
+    /// queue agent leg connecting after any TTS bridge flow was never bridged
+    /// (silent one-way audio).
+    pub(crate) voip_bridge: Option<crate::call::runtime::ConferenceBridgeHandle>,
+
     pub cmd_tx: Option<mpsc::Sender<CallCommand>>,
 
     /// Cluster session-registry RAII guard: registers this session's owning
@@ -1092,6 +1100,7 @@ impl SipSession {
             bridge_trace_context: Arc::new(parking_lot::Mutex::new(None)),
             bridge_dtmf_digits: Arc::new(parking_lot::Mutex::new(Vec::new())),
             realtime_bridge: None,
+            voip_bridge: None,
             cmd_tx: Some(cmd_tx.clone()),
             handle: sip_handle.clone(),
             session_registry_guard: None,
@@ -10032,6 +10041,19 @@ impl SipSession {
 
             CallCommand::StartReturnApp => self.handle_start_return_app().await,
 
+            CallCommand::VoipBridgeClosed => {
+                // The TTS/voip WS bridge ended. Drop the handle (cancelling its
+                // token) and re-evaluate the media path: while the bridge was
+                // up, `update_media_path()` deliberately stayed out of the way;
+                // a route that became pending meanwhile (e.g. a queue agent leg
+                // connecting) must be established now that it is gone.
+                if self.voip_bridge.take().is_some() {
+                    debug!(session_id = %self.id, "Voip bridge closed; re-evaluating media path");
+                }
+                self.update_media_path().await;
+                CommandResult::success()
+            }
+
             CallCommand::SendInfo {
                 leg_id,
                 content_type,
@@ -12004,6 +12026,7 @@ impl Drop for SipSession {
         // Stop conference bridges (safety net — cancel only, since we can't
         // .await in Drop)
         self.conference_bridge.stop_bridge();
+        self.voip_bridge = None;
         self.legs.stop_all_conference_bridge_handles();
 
         // Media bridge — torn down explicitly under catch_unwind so a teardown

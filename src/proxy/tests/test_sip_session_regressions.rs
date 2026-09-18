@@ -2835,6 +2835,215 @@ async fn queue_agent_connect_activates_media_bridge() {
     }
 }
 
+// ─── production repro (2026-09-17, node 10.193.244.54): G729 trunk caller ────
+//
+// Sequence from the field capture: a trunk caller (G729, Mediant) is answered
+// by the queue app through the real Answer command path, the queue then dials
+// a dynamic agent leg; when the agent answers the session logged "Leg connected
+// async notification" and applied the answer SDP, but never established the
+// media bridge (no "transcoding activated" / "MBRIDGE fast-path relay" logs,
+// zero RTP toward the agent side). Both parties heard silence until hangup.
+//
+// This test drives the same sequence and asserts the bridge comes up.
+
+#[tokio::test]
+async fn queue_agent_leg_after_app_answer_bridges_trunk_caller() {
+    use crate::media::leg::{LegConfig, LegInner};
+
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+
+    // Caller: Mediant-style G729 offer as the inbound INVITE body.
+    let caller_offer = crate::proxy::tests::test_helpers::build_sdp(
+        "127.0.0.1",
+        10001,
+        &[(18, "G729/8000"), (96, "telephone-event/8000")],
+    );
+    session.media.caller_offer = Some(caller_offer.clone());
+
+    // Caller media leg exactly as ensure_caller_leg builds it (apply the
+    // caller's offer on an RTP leg with the negotiated codecs). The test
+    // harness dialog cannot emit a real 200 OK, so the accept/Connected part
+    // of the Answer command is applied directly.
+    {
+        let codecs = crate::media::negotiate::MediaNegotiator::build_codec_list_from_offer(
+            &caller_offer,
+            &[],
+        );
+        let cfg = crate::media::leg::LegConfig {
+            codecs,
+            ..crate::media::leg::LegConfig::rtp_pcmu()
+        };
+        let caller_peer = crate::media::leg::LegInner::new("caller", &cfg, None).unwrap();
+        caller_peer
+            .answer(&caller_offer)
+            .await
+            .expect("caller leg must negotiate the G729 offer");
+        session
+            .legs
+            .set_media_leg(&LegId::from("caller"), caller_peer.clone());
+        caller_peer.accept();
+        session.update_leg_state(&LegId::from("caller"), LegState::Connected);
+    }
+    assert!(
+        session.legs.media_leg(&LegId::from("caller")).is_some(),
+        "caller media leg must exist after app answer"
+    );
+    assert_eq!(
+        session.legs.get(&LegId::from("caller")).map(|l| l.state),
+        Some(LegState::Connected),
+        "caller leg must be Connected after the app answer"
+    );
+    assert!(
+        session
+            .legs
+            .media_leg(&LegId::from("caller"))
+            .is_some_and(|leg| leg.negotiated().is_some()),
+        "caller leg must be negotiated before the agent leg connects"
+    );
+
+    // Queue dials the dynamic agent leg: the leg and its own media peer are
+    // registered up-front (as handle_add_leg / initiate_sip_leg do), and the
+    // INVITE offer goes out before the answer arrives.
+    let agent_leg = LegId::from("queue-agent-1");
+    let peer = LegInner::new(agent_leg.as_str(), &LegConfig::rtp_pcmu(), None).unwrap();
+    let agent_offer = peer.create_offer().await.unwrap();
+    let scratch = LegInner::new("agent-scratch", &LegConfig::rtp_pcmu(), None).unwrap();
+    let agent_answer = scratch.answer(&agent_offer).await.expect("agent answer");
+    session.legs.insert(
+        agent_leg.clone(),
+        Leg::new(agent_leg.clone()).with_endpoint("sip:1002@127.0.0.1"),
+    );
+    session.legs.set_media_leg(&agent_leg, peer);
+
+    session
+        .execute_command(
+            CallCommand::LegConnected {
+                leg_id: agent_leg,
+                answer_sdp: Some(agent_answer),
+                dialog_id: None,
+            },
+            None,
+        )
+        .await;
+
+    // The media bridge must be established (G729 caller ↔ PCMU agent →
+    // transcode route, not just a logical pair).
+    let mb = session
+        .media
+        .bridge
+        .as_ref()
+        .expect("media bridge must be established after agent connect");
+    assert!(
+        mb.is_bridged(),
+        "caller<->agent media bridge must be active after agent connect"
+    );
+
+    if let Some(mb) = session.media.bridge.as_mut() {
+        mb.close();
+    }
+}
+
+// ─── production repro (2026-09-17, node 10.193.244.54), part 2: TTS bridge ───
+//
+// The failing call ran an IVR with TTS voip bridges before the queue transfer.
+// The voip bridge stored its handle in `conference_bridge` with a fake
+// `conf_id = Some("bridge-{session}")` and nothing cleared it on disconnect.
+// `update_media_path()` starts with `if conference_bridge.conf_id.is_some()
+// { return; }`, so after any TTS bridge flow every later media-route update
+// was silently skipped: the queue agent leg connected but was never bridged
+// (zero RTP toward the agent, hold music kept playing on the caller leg until
+// its file ended). The fix keeps the voip handle on a dedicated field and
+// reports the disconnect via `VoipBridgeClosed`.
+
+#[tokio::test]
+async fn voip_bridge_must_not_block_queue_agent_media_bridge() {
+    use crate::media::leg::{LegConfig, LegInner};
+
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session(dialplan).await;
+
+    // Caller answered by the IVR app (same setup as the previous test).
+    let caller_offer = crate::proxy::tests::test_helpers::pcmu_sdp("127.0.0.1", 10001);
+    session.media.caller_offer = Some(caller_offer.clone());
+    {
+        let codecs = crate::media::negotiate::MediaNegotiator::build_codec_list_from_offer(
+            &caller_offer,
+            &[],
+        );
+        let cfg = crate::media::leg::LegConfig {
+            codecs,
+            ..crate::media::leg::LegConfig::rtp_pcmu()
+        };
+        let caller_peer = crate::media::leg::LegInner::new("caller", &cfg, None).unwrap();
+        caller_peer.answer(&caller_offer).await.unwrap();
+        session
+            .legs
+            .set_media_leg(&LegId::from("caller"), caller_peer.clone());
+        caller_peer.accept();
+        session.update_leg_state(&LegId::from("caller"), LegState::Connected);
+    }
+
+    // An IVR TTS voip bridge goes up — the session must NOT poison the
+    // conference guard (the regression: conf_id stayed Some forever).
+    session.voip_bridge = Some(crate::call::runtime::ConferenceBridgeHandle {
+        _tasks: vec![],
+        cancel_token: tokio_util::sync::CancellationToken::new(),
+    });
+    assert!(
+        session.conference_bridge.conf_id.is_none(),
+        "voip bridge must not set conference_bridge.conf_id"
+    );
+
+    // The voip bridge disconnects (TTS prompt finished / WS closed).
+    session
+        .execute_command(CallCommand::VoipBridgeClosed, None)
+        .await;
+    assert!(session.voip_bridge.is_none(), "handle must be dropped");
+
+    // Queue dials the dynamic agent leg and it answers.
+    let agent_leg = LegId::from("queue-agent-1");
+    let peer = LegInner::new(agent_leg.as_str(), &LegConfig::rtp_pcmu(), None).unwrap();
+    let agent_offer = peer.create_offer().await.unwrap();
+    let scratch = LegInner::new("agent-scratch", &LegConfig::rtp_pcmu(), None).unwrap();
+    let agent_answer = scratch.answer(&agent_offer).await.expect("agent answer");
+    session.legs.insert(
+        agent_leg.clone(),
+        Leg::new(agent_leg.clone()).with_endpoint("sip:1002@127.0.0.1"),
+    );
+    session.legs.set_media_leg(&agent_leg, peer);
+    session
+        .execute_command(
+            CallCommand::LegConnected {
+                leg_id: agent_leg,
+                answer_sdp: Some(agent_answer),
+                dialog_id: None,
+            },
+            None,
+        )
+        .await;
+
+    let mb = session
+        .media
+        .bridge
+        .as_ref()
+        .expect("media bridge must be established after agent connect");
+    assert!(
+        mb.is_bridged(),
+        "a closed TTS bridge must not block the caller<->agent media bridge"
+    );
+
+    if let Some(mb) = session.media.bridge.as_mut() {
+        mb.close();
+    }
+}
+
 // ─── proxy queue fallback routing (no agents) ───────────────────────────────
 //
 // Covers the path the original bug report exercised: IVR → queue transfer →
