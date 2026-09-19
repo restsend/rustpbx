@@ -356,6 +356,12 @@ pub struct QueueApp {
     comfort_token: Option<PlaybackToken>,
     final_token: Option<PlaybackToken>,
     abandoned_recorded: bool,
+    /// Set once `execute_fallback` runs. The fallback owns the call from that
+    /// point — wait-retention re-entries and retry polls racing the fallback
+    /// (round-exhausted completing while the fallback prompt/failure action is
+    /// in flight) must NOT re-dial or re-park the caller, or the fallback
+    /// hangup/transfer is lost and the leg lingers forever.
+    fallback_executed: bool,
     /// Agent ids this queue entry has dialed (resolve-time or wait-retention
     /// assignments). Used at connect/exit to release *phantom* states: an
     /// agent the queue marked Busy/Ringing for this call that never actually
@@ -402,6 +408,7 @@ impl QueueApp {
             comfort_token: None,
             final_token: None,
             abandoned_recorded: false,
+            fallback_executed: false,
             attempted_agents: Vec::new(),
             max_wait_armed: false,
             joined_emitted_externally: false,
@@ -700,6 +707,13 @@ impl QueueApp {
         if self.call_already_connected() {
             return Ok(AppAction::Continue);
         }
+        if self.fallback_executed {
+            debug!(
+                queue = %self.config.name,
+                "Queue: fallback already executed — skipping wait-retention offer"
+            );
+            return Ok(AppAction::Continue);
+        }
         if !matches!(
             self.state,
             QueueState::WaitingForAgent
@@ -763,6 +777,7 @@ impl QueueApp {
     /// Get the next action based on fallback configuration.
     async fn execute_fallback(&mut self, ctrl: &mut CallController) -> anyhow::Result<AppAction> {
         self.state = QueueState::ExecutingFallback;
+        self.fallback_executed = true;
 
         let (action, info) = match &self.plan.fallback {
             Some(QueueFallbackAction::Failure(failure_action)) => (
@@ -1084,6 +1099,13 @@ impl QueueApp {
 
         let agents = self.get_agents();
         if self.current_agent_idx >= agents.len() {
+            if self.fallback_executed {
+                debug!(
+                    queue = %self.config.name,
+                    "Queue: fallback already executed — skipping wait-retention re-entry"
+                );
+                return Ok(AppAction::Continue);
+            }
             if self.allows_wait_retention() {
                 // Skill-group queue: every resolved agent failed — return to
                 // wait retention and poll for the next Idle agent instead of
@@ -1112,15 +1134,13 @@ impl QueueApp {
     ) -> anyhow::Result<AppAction> {
         let queue_id = self.config.name.clone();
         let wait_secs = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
-        let (abandon_log, prompt_log) = match reason {
-            AgentUnavailableReason::Busy => (
-                "Queue: call abandoned, playing busy prompt or fallback",
-                "Queue: playing busy prompt before fallback",
-            ),
-            AgentUnavailableReason::NoAnswer => (
-                "Queue: call abandoned, playing no-answer prompt or fallback",
-                "Queue: playing no-answer prompt before fallback",
-            ),
+        let abandon_log = match reason {
+            AgentUnavailableReason::Busy => {
+                "Queue: call abandoned, playing busy prompt or fallback"
+            }
+            AgentUnavailableReason::NoAnswer => {
+                "Queue: call abandoned, playing no-answer prompt or fallback"
+            }
         };
 
         self.abandoned_recorded = true;
@@ -1140,7 +1160,7 @@ impl QueueApp {
         let groups = self.all_skill_groups();
         self.emit_rwi(&crate::rwi::event::QueueLeft {
             call_id: self.call_id.clone(),
-            queue_id,
+            queue_id: queue_id.clone(),
             reason: Some("abandoned".to_string()),
             skill_groups: if groups.is_empty() {
                 None
@@ -1154,27 +1174,46 @@ impl QueueApp {
             AgentUnavailableReason::Busy => prompts.and_then(|p| p.busy_prompt.as_ref()),
             AgentUnavailableReason::NoAnswer => prompts.and_then(|p| p.no_answer_prompt.as_ref()),
         };
+        // The fallback MUST run even when the prompt cannot be played (e.g.
+        // the audio file is missing in a minimal deployment): the continuation
+        // lives in the media_play_finished handler, which never fires for a
+        // track that failed to start — leaving the caller parked forever with
+        // the fallback pending.
+        let mut prompt_played = false;
         if let Some(path) = prompt_path {
-            info!("{prompt_log}");
-            let token = ctrl.play_audio(path.clone(), false).await?;
-            match reason {
-                AgentUnavailableReason::Busy => {
-                    self.state = QueueState::PlayingBusyPrompt;
-                    self.busy_token = Some(token);
+            match ctrl.play_audio(path.clone(), false).await {
+                Ok(token) => {
+                    match reason {
+                        AgentUnavailableReason::Busy => {
+                            self.state = QueueState::PlayingBusyPrompt;
+                            self.busy_token = Some(token);
+                        }
+                        AgentUnavailableReason::NoAnswer => {
+                            self.state = QueueState::PlayingNoAnswerPrompt;
+                            self.no_answer_token = Some(token);
+                        }
+                    }
+                    prompt_played = true;
                 }
-                AgentUnavailableReason::NoAnswer => {
-                    self.state = QueueState::PlayingNoAnswerPrompt;
-                    self.no_answer_token = Some(token);
-                }
-            }
-            return Ok(AppAction::Continue);
+                Err(e) => {
+                    warn!(
+                        queue = %queue_id,
+                        path = %path,
+                        error = %e,
+                        "Queue: fallback prompt failed to start — executing fallback directly"
+                    );
+                }            }
         }
-
-        self.play_final_destination_prompt_or_fallback(ctrl).await
+        if !prompt_played {
+            return self.play_final_destination_prompt_or_fallback(ctrl).await;
+        }
+        Ok(AppAction::Continue)
     }
 
     /// Try to play the final_destination_prompt before fallback.
     /// If no prompt is configured, falls through to execute_fallback directly.
+    /// A prompt that fails to start also falls through — the fallback hangup /
+    /// transfer must never be lost to an unplayable file.
     async fn play_final_destination_prompt_or_fallback(
         &mut self,
         ctrl: &mut CallController,
@@ -1183,11 +1222,21 @@ impl QueueApp {
             .prompts()
             .and_then(|p| p.final_destination_prompt.clone());
         if let Some(path) = final_destination_prompt {
-            info!("Queue: playing final destination prompt before fallback");
-            self.state = QueueState::PlayingFinalPrompt;
-            let token = ctrl.play_audio(path.clone(), false).await?;
-            self.final_token = Some(token);
-            return Ok(AppAction::Continue);
+            match ctrl.play_audio(path.clone(), false).await {
+                Ok(token) => {
+                    info!("Queue: playing final destination prompt before fallback");
+                    self.state = QueueState::PlayingFinalPrompt;
+                    self.final_token = Some(token);
+                    return Ok(AppAction::Continue);
+                }
+                Err(e) => {
+                    warn!(
+                        path = %path,
+                        error = %e,
+                        "Queue: final destination prompt failed to start — executing fallback directly"
+                    );
+                }
+            }
         }
         self.execute_fallback(ctrl).await
     }
@@ -1229,6 +1278,13 @@ impl QueueApp {
 
     /// Dial the next agent in a sequential dialing strategy.
     async fn dial_next_agent(&mut self, ctrl: &mut CallController) -> anyhow::Result<AppAction> {
+        if self.fallback_executed {
+            debug!(
+                queue = %self.config.name,
+                "Queue: fallback already executed — skipping agent dial"
+            );
+            return Ok(AppAction::Continue);
+        }
         // Skip agents that became unavailable since this queue's target list
         // was resolved (e.g. reserved by or busy on another concurrent call)
         // so sequential fallback never INVITEs an agent already on a call.
