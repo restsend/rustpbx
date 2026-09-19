@@ -59,6 +59,7 @@ class ConfigBuilder:
         self.routes: list[dict] = {}
         self.queues: dict[str, dict] = {}
         self.extra_memory_users: list[str] = []
+        self.extra_guest_users: list[str] = []
         self.ivr_files: dict[str, str] = {}  # route_point -> TOML body
         self.agents_file: Optional[str] = None
         self.skill_groups_file: Optional[str] = None
@@ -425,6 +426,17 @@ class ConfigBuilder:
         registrar/auth backend only knows users listed here, not CC agent rows.
         """
         self.extra_memory_users.extend(usernames)
+        return self
+
+    def add_guest_user(self, usernames: list[str]) -> "ConfigBuilder":
+        """Register memory users with ``allow_guest_calls = true``.
+
+        Unauthenticated callers (e.g. RWI ``call.originate`` legs, which carry
+        no SIP credentials) can only reach users with the guest flag — queue /
+        IVR entry numbers in production are the same idea: dialable without
+        registration.
+        """
+        self.extra_guest_users.extend(usernames)
         return self
 
     def add_queue(
@@ -1046,6 +1058,20 @@ class ConfigBuilder:
                 f'username = "{username}"',
                 'password = "123456"',
                 "allow_guest_calls = false",
+                "voicemail_disabled = false",
+                "is_support_webrtc = false",
+                *self_fwd(username),
+                "",
+            ])
+            next_id += 1
+        for username in self.extra_guest_users:
+            lines.extend([
+                "[[proxy.user_backends.users]]",
+                f"id = {next_id}",
+                "enabled = true",
+                f'username = "{username}"',
+                'password = "123456"',
+                "allow_guest_calls = true",
                 "voicemail_disabled = false",
                 "is_support_webrtc = false",
                 *self_fwd(username),
