@@ -2,10 +2,13 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{Local, TimeZone};
 use sea_orm::DatabaseConnection;
+use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::{
-    callrecord::sipflow_upload::{SipFlowUploadRequest, SipFlowUploadResponse},
+    callrecord::sipflow_upload::{
+        SipFlowUploadRequest, SipFlowUploadResponse, SipFlowUploadRuntime,
+    },
     callrecord::{
         CallRecord, CallRecordHook, format_sipflow_media_key, format_sipflow_signaling_file_name,
         format_sipflow_signaling_key, sipflow::SipFlowSlot,
@@ -19,7 +22,9 @@ use crate::{
 /// [`SipFlowConfig::Remote::delegate_upload`] is `true`.
 pub struct SipFlowRemoteUploadHook {
     nodes: Vec<SipFlowClusterNode>,
-    upload_config: SipFlowUploadConfig,
+    /// Late-bound `[sipflow.upload]` config; re-resolved per batch so config
+    /// hot-reloads take effect without a restart.
+    runtime: Arc<SipFlowUploadRuntime>,
     db: Option<DatabaseConnection>,
     client: reqwest::Client,
     /// Late-bound handle to the SipFlow wrapper. Flushed before delegating so
@@ -32,13 +37,13 @@ pub struct SipFlowRemoteUploadHook {
 impl SipFlowRemoteUploadHook {
     pub fn new(
         nodes: Vec<SipFlowClusterNode>,
-        upload_config: SipFlowUploadConfig,
+        runtime: Arc<SipFlowUploadRuntime>,
         db: Option<DatabaseConnection>,
         sipflow: SipFlowSlot,
     ) -> Result<Self> {
         Ok(Self {
             nodes,
-            upload_config,
+            runtime,
             db,
             client: crate::http_util::build_keepalive_client(
                 Some(std::time::Duration::from_secs(120)),
@@ -52,10 +57,13 @@ impl SipFlowRemoteUploadHook {
 #[async_trait]
 impl CallRecordHook for SipFlowRemoteUploadHook {
     async fn on_record_enrich(&self, records: &mut [CallRecord]) -> Result<()> {
+        let Some(upload_config) = self.runtime.config() else {
+            return Ok(());
+        };
         for record in records {
             crate::callrecord::sipflow_upload::preconstruct_signaling_url(
                 record,
-                &self.upload_config,
+                &upload_config,
                 false,
             );
         }
@@ -63,6 +71,9 @@ impl CallRecordHook for SipFlowRemoteUploadHook {
     }
 
     async fn on_record_completed(&self, records: &mut [CallRecord]) -> Result<()> {
+        let Some(upload_config) = self.runtime.config() else {
+            return Ok(());
+        };
         // Flush the client-side pipeline (writer thread → UDP sender batch)
         // once for the whole batch, so the collector has everything before it
         // flushes + queries on /upload. Bounded: proceed on timeout.
@@ -86,7 +97,7 @@ impl CallRecordHook for SipFlowRemoteUploadHook {
             let upload_url = format!("{}/upload", node_http);
 
             // Clone upload config so we can adjust per-call flags.
-            let mut upload_config = self.upload_config.clone();
+            let mut upload_config = upload_config.clone();
             if skip_media {
                 match &mut upload_config {
                     SipFlowUploadConfig::S3 { media, .. } => *media = Some(false),
@@ -168,6 +179,15 @@ impl CallRecordHook for SipFlowRemoteUploadHook {
                     .extensions
                     .insert(crate::callrecord::RecordingFileSize(resp.media_size));
             }
+
+            if let Some(ref jsonl_url) = resp.signaling_url {
+                crate::callrecord::sipflow_upload::stash_sipflow_jsonl(
+                    record,
+                    jsonl_url,
+                    self.db.as_ref(),
+                )
+                .await;
+            }
         }
 
         Ok(())
@@ -193,11 +213,12 @@ mod tests {
                 let request_count = request_count.clone();
                 async move {
                     request_count.fetch_add(1, Ordering::Relaxed);
-                    Json(SipFlowUploadResponse {
-                        media_url: None,
-                        media_size: 0,
-                        signaling_uploaded: false,
-                    })
+                Json(SipFlowUploadResponse {
+                    media_url: None,
+                    media_size: 0,
+                    signaling_uploaded: false,
+                    signaling_url: None,
+                })
                 }
             }),
         );
@@ -208,29 +229,43 @@ mod tests {
         crate::utils::spawn(async move {
             axum::serve(listener, app).await.ok();
         });
+        let runtime = Arc::new(SipFlowUploadRuntime::for_config(Some(
+            crate::config::SipFlowConfig::Remote {
+                nodes: vec![],
+                udp_addr: None,
+                http_addr: None,
+                timeout_secs: 10,
+                channel_capacity: 40000,
+                dns_ttl_secs: 5,
+                mtu: 1500,
+                report_interval_secs: 10,
+                upload: Some(SipFlowUploadConfig::Http {
+                    url: "http://recording-upload.invalid".to_string(),
+                    headers: None,
+                    method: None,
+                    file_field: None,
+                    body_field: None,
+                    file_name: None,
+                    content_type: None,
+                    fields: None,
+                    response_url_path: None,
+                    response_success: None,
+                    connect_timeout_ms: None,
+                    request_timeout_ms: None,
+                    signaling: Some(true),
+                    media: Some(true),
+                    force_pcm: None,
+                    pcm_sample_rate: None,
+                }),
+                delegate_upload: true,
+            },
+        )));
         let hook = SipFlowRemoteUploadHook::new(
             vec![SipFlowClusterNode {
                 udp: "127.0.0.1:0".to_string(),
                 http: format!("http://{address}"),
             }],
-            SipFlowUploadConfig::Http {
-                url: "http://recording-upload.invalid".to_string(),
-                headers: None,
-                method: None,
-                file_field: None,
-                body_field: None,
-                file_name: None,
-                content_type: None,
-                fields: None,
-                response_url_path: None,
-                response_success: None,
-                connect_timeout_ms: None,
-                request_timeout_ms: None,
-                signaling: Some(true),
-                media: Some(true),
-                force_pcm: None,
-                pcm_sample_rate: None,
-            },
+            runtime,
             None,
             Arc::new(std::sync::OnceLock::new()),
         )

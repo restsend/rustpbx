@@ -136,7 +136,7 @@ async fn create_test_server_with_dependencies(
         network_profiles: ArcSwap::new(Arc::new(Vec::new())),
         default_network_profile_id: ArcSwap::new(Arc::new("default".to_string())),
         media_proxy: ArcSwap::new(Arc::new(MediaProxyMode::default())),
-        recording_policy: ArcSwap::new(Arc::new(None)),
+        recording_policy: Arc::new(ArcSwap::new(Arc::new(None))),
         proxy_config: ArcSwap::from_pointee(config.as_ref().clone()),
         emergency_config: ArcSwap::from_pointee(config.emergency.clone()),
         rwi_webhook_config: ArcSwap::from_pointee(None),
@@ -158,7 +158,7 @@ async fn create_test_server_with_dependencies(
         ignore_out_of_dialog_request: true,
         locator_events: Some(locator_events_tx),
         locator_event_lock,
-        sipflow_config: ArcSwap::new(Arc::new(None)),
+        sipflow_config: Arc::new(ArcSwap::new(Arc::new(None))),
         sip_flow: sipflow_backend
             .map(|backend| crate::callrecord::sipflow::SipFlow::new(Some(backend), Vec::new())),
         active_call_registry: Arc::new(ActiveProxyCallRegistry::new()),

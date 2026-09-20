@@ -33,6 +33,37 @@ pub async fn update_recording_url(
     Ok(())
 }
 
+/// Merge `sipflow_jsonl` into the stored metadata of a call record after it
+/// has been inserted. Used by the async upload hook when the signaling JSONL
+/// URL is only known once the upload completes (HTTP uploaders), which runs
+/// after the saver has persisted the row.
+pub async fn update_sipflow_jsonl(
+    db: &DatabaseConnection,
+    call_id: &str,
+    jsonl_url: &str,
+) -> anyhow::Result<()> {
+    use sea_orm::EntityTrait;
+    let record = Entity::find()
+        .filter(Column::CallId.eq(call_id))
+        .one(db)
+        .await?;
+    if let Some(record) = record {
+        let mut metadata = match record.metadata {
+            Some(Json::Object(ref map)) => map.clone(),
+            _ => serde_json::Map::new(),
+        };
+        metadata.insert(
+            "sipflow_jsonl".to_string(),
+            serde_json::Value::String(jsonl_url.to_string()),
+        );
+        let mut active: ActiveModel = record.into();
+        active.metadata = Set(Some(Json::Object(metadata)));
+        active.updated_at = Set(chrono::Utc::now());
+        Entity::update(active).exec(db).await?;
+    }
+    Ok(())
+}
+
 pub fn extract_sip_username(input: &str) -> Option<String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {

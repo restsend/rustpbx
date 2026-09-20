@@ -998,7 +998,7 @@ async fn upload_handler(
         SipFlowUploadConfig::Http { signaling, .. } => signaling.unwrap_or(false),
     };
 
-    let signaling_uploaded = if signaling_enabled {
+    let signaling_url = if signaling_enabled {
         upload_signaling_flow(
             &req.upload,
             state.backend.as_ref(),
@@ -1012,14 +1012,16 @@ async fn upload_handler(
         )
         .await
     } else {
-        false
+        None
     };
+    let signaling_uploaded = signaling_url.is_some();
 
     let elapsed = _start.elapsed();
     info!(
         call_id,
         media_url = media_url.as_deref().unwrap_or("(none)"),
         media_size,
+        signaling_url = signaling_url.as_deref().unwrap_or("(none)"),
         signaling_uploaded,
         elapsed = %format!("{:.2?}", elapsed),
         "upload: complete"
@@ -1029,6 +1031,7 @@ async fn upload_handler(
         media_url,
         media_size,
         signaling_uploaded,
+        signaling_url,
     }))
 }
 
