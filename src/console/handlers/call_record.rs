@@ -1783,35 +1783,36 @@ async fn presign_artifact_url(state: &ConsoleState, raw_url: &str) -> Option<Str
     let app = state.app_state()?;
     let core = &app.core;
 
-    let recording_expiry = core
-        .config
-        .recording
-        .as_ref()
-        .map(|policy| policy.effective_signed_url_expiry_secs());
-    let sipflow_expiry = core.config.sipflow.as_ref().and_then(|s| match s {
-        crate::config::SipFlowConfig::Local { upload, .. } => {
-            upload.as_ref().and_then(|u| u.signed_url_expiry_secs())
-        }
-        crate::config::SipFlowConfig::Remote { upload, .. } => {
-            upload.as_ref().and_then(|u| u.signed_url_expiry_secs())
-        }
+    // Resolve live storages + expiries from the late-bound upload runtimes so
+    // hot-reloaded `[recording]` / `[sipflow.upload]` configs are honored.
+    let recording = core.recording_upload.as_ref().and_then(|rt| {
+        rt.resolve()
+            .ok()
+            .flatten()
+            .and_then(|(policy, storage)| {
+                storage.map(|s| (s, policy.effective_signed_url_expiry_secs()))
+            })
+    });
+    let sipflow = core.sipflow_upload.as_ref().and_then(|rt| {
+        rt.resolve()
+            .ok()
+            .flatten()
+            .and_then(|(policy, storage)| storage.map(|s| (s, policy.signed_url_expiry_secs())))
     });
 
     let candidates = [
-        (
-            core.recording_storage.as_ref(),
-            recording_expiry.unwrap_or(FALLBACK_SIGNED_URL_EXPIRY_SECS),
-        ),
-        (
-            core.sipflow_storage.as_ref(),
-            sipflow_expiry.unwrap_or(FALLBACK_SIGNED_URL_EXPIRY_SECS),
-        ),
+        recording
+            .as_ref()
+            .map(|(storage, expiry)| (storage, *expiry)),
+        sipflow.as_ref().map(|(storage, expiry)| {
+            (
+                storage,
+                expiry.unwrap_or(FALLBACK_SIGNED_URL_EXPIRY_SECS),
+            )
+        }),
     ];
 
-    for (storage, expiry_secs) in candidates {
-        let Some(storage) = storage else {
-            continue;
-        };
+    for (storage, expiry_secs) in candidates.into_iter().flatten() {
         if !storage.supports_presign() {
             continue;
         }

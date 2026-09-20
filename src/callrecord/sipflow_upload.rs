@@ -1,4 +1,5 @@
 use anyhow::Result;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Local, TimeZone};
@@ -17,31 +18,96 @@ use crate::{
     storage::{Storage, StorageConfig},
 };
 
+/// Shared handle to the `[sipflow]` config section. The SIP server swaps the
+/// inner value on hot-reload (`SipServerInner::reload_sipflow`), so upload
+/// hooks and the console observe the current `[sipflow.upload]` without a
+/// restart.
+pub type SipFlowConfigSlot = Arc<ArcSwap<Option<crate::config::SipFlowConfig>>>;
+
+/// Late-bound `[sipflow.upload]` config plus its derived upload storage.
+///
+/// The storage is rebuilt lazily whenever the slot content changes (config
+/// hot-reload); S3 storages construct an HTTP client pool so they are cached
+/// and only recreated when the config signature actually differs.
+pub struct SipFlowUploadRuntime {
+    slot: SipFlowConfigSlot,
+    cached: parking_lot::Mutex<(String, Option<Storage>)>,
+}
+
+impl SipFlowUploadRuntime {
+    pub fn new(slot: SipFlowConfigSlot) -> Self {
+        Self {
+            slot,
+            cached: parking_lot::Mutex::new((String::new(), None)),
+        }
+    }
+
+    /// Build a standalone runtime seeded with a fixed config (tests, embedded
+    /// callers without a server slot).
+    pub fn for_config(config: Option<crate::config::SipFlowConfig>) -> Self {
+        Self::new(Arc::new(ArcSwap::new(Arc::new(config))))
+    }
+
+    /// Current `[sipflow.upload]` config, if any. `None` when `[sipflow]` is
+    /// absent or carries no `upload` section (hooks become no-ops).
+    pub fn config(&self) -> Option<SipFlowUploadConfig> {
+        self.slot
+            .load()
+            .as_ref()
+            .as_ref()
+            .and_then(|cfg| match cfg {
+                crate::config::SipFlowConfig::Local { upload, .. } => upload.clone(),
+                crate::config::SipFlowConfig::Remote { upload, .. } => upload.clone(),
+            })
+    }
+
+    /// Current upload config + storage, rebuilding the storage when the config
+    /// changed since the last call. Returns `None` when upload is unconfigured.
+    pub fn resolve(&self) -> Result<Option<(SipFlowUploadConfig, Option<Storage>)>> {
+        let Some(config) = self.config() else {
+            return Ok(None);
+        };
+        let signature = format!("{config:?}");
+        let mut cached = self.cached.lock();
+        if cached.0 != signature {
+            cached.1 = build_storage(&config)?;
+            cached.0 = signature;
+            info!(
+                upload_type = if matches!(config, SipFlowUploadConfig::Http { .. }) {
+                    "http"
+                } else {
+                    "s3"
+                },
+                "sipflow upload storage (re)built"
+            );
+        }
+        Ok(Some((config, cached.1.clone())))
+    }
+}
+
 pub struct SipFlowUploadHook {
     backend: Arc<dyn SipFlowBackend>,
     /// Late-bound handle to the SipFlow wrapper (writer batch + backend);
     /// flushed before uploading so the tail messages are persisted.
     sipflow: SipFlowSlot,
-    upload_config: SipFlowUploadConfig,
+    /// Late-bound `[sipflow.upload]` config + storage; re-resolved on every
+    /// batch so config hot-reloads take effect without a restart.
+    runtime: Arc<SipFlowUploadRuntime>,
     db: Option<DatabaseConnection>,
-    storage: Option<Storage>,
 }
 
 impl SipFlowUploadHook {
     pub fn new(
         backend: Arc<dyn SipFlowBackend>,
         sipflow: SipFlowSlot,
-        upload_config: SipFlowUploadConfig,
+        runtime: Arc<SipFlowUploadRuntime>,
         db: Option<DatabaseConnection>,
     ) -> Result<Self> {
-        let storage = build_storage(&upload_config)?;
-
         Ok(Self {
             backend,
             sipflow,
-            upload_config,
+            runtime,
             db,
-            storage,
         })
     }
 }
@@ -49,14 +115,20 @@ impl SipFlowUploadHook {
 #[async_trait]
 impl CallRecordHook for SipFlowUploadHook {
     async fn on_record_enrich(&self, records: &mut [CallRecord]) -> anyhow::Result<()> {
+        let Some((upload_config, _)) = self.runtime.resolve()? else {
+            return Ok(());
+        };
         for record in records {
             let skip_media = record.recorder.iter().any(|m| m.track_id != "signaling");
-            preconstruct_signaling_url(record, &self.upload_config, skip_media);
+            preconstruct_signaling_url(record, &upload_config, skip_media);
         }
         Ok(())
     }
 
     async fn on_record_completed(&self, records: &mut [CallRecord]) -> anyhow::Result<()> {
+        let Some((upload_config, storage)) = self.runtime.resolve()? else {
+            return Ok(());
+        };
         for record in records {
             let call_id = record.call_id.as_str();
             let signaling_call_ids = record.sip_leg_roles.keys().cloned().collect::<Vec<_>>();
@@ -78,12 +150,12 @@ impl CallRecordHook for SipFlowUploadHook {
             // Full sipflow media path: keep historical default (signaling off).
             let signaling_default = skip_media;
 
-            if let Some((url, size)) = crate::callrecord::sipflow_upload::do_upload(
+            let outcome = crate::callrecord::sipflow_upload::do_upload(
                 self.backend.as_ref(),
                 &self.sipflow,
-                &self.upload_config,
+                &upload_config,
                 self.db.as_ref(),
-                self.storage.as_ref(),
+                storage.as_ref(),
                 call_id,
                 &signaling_call_ids,
                 start,
@@ -95,18 +167,75 @@ impl CallRecordHook for SipFlowUploadHook {
                 skip_media,
                 signaling_default,
             )
-            .await
-            {
+            .await;
+
+            if let Some(url) = outcome.media_url {
                 record.details.recording_url = Some(url);
                 record.details.recording_duration_secs = Some(duration_secs.max(0));
                 record
                     .extensions
-                    .insert(crate::callrecord::RecordingFileSize(size));
+                    .insert(crate::callrecord::RecordingFileSize(outcome.media_size));
+            }
+            if let Some(jsonl_url) = outcome.signaling_url {
+                stash_sipflow_jsonl(record, &jsonl_url, self.db.as_ref()).await;
             }
         }
 
         Ok(())
     }
+}
+
+/// Record the signaling JSONL URL on the in-memory record (for downstream
+/// hooks/events) and persist it into the CDR row's metadata when enrichment
+/// has not already stored the same URL. HTTP uploaders only learn the final
+/// URL from the upload response — which happens after the row was persisted —
+/// so the metadata column is updated in place here.
+pub async fn stash_sipflow_jsonl(
+    record: &mut CallRecord,
+    url: &str,
+    db: Option<&DatabaseConnection>,
+) {
+    let already_stored = record
+        .details
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("sipflow_jsonl"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|existing| existing == url);
+    record
+        .details
+        .metadata
+        .get_or_insert_with(Default::default)
+        .insert(
+            "sipflow_jsonl".to_string(),
+            serde_json::Value::String(url.to_string()),
+        );
+    if already_stored {
+        return;
+    }
+    let Some(db) = db else {
+        return;
+    };
+    if let Err(e) =
+        crate::models::call_record::update_sipflow_jsonl(db, &record.call_id, url).await
+    {
+        warn!(
+            call_id = %record.call_id,
+            "SipFlowUploadHook: failed to persist sipflow_jsonl metadata: {e}"
+        );
+    }
+}
+
+/// Result of one call's sipflow upload pass.
+#[derive(Debug, Default)]
+pub struct UploadOutcome {
+    /// Resolved URL of the uploaded media WAV (None when media was skipped or
+    /// the upload failed).
+    pub media_url: Option<String>,
+    pub media_size: u64,
+    /// Resolved URL of the uploaded signaling JSONL (None when signaling was
+    /// skipped or the upload failed).
+    pub signaling_url: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -126,7 +255,7 @@ async fn do_upload(
     signaling_file_name: &str,
     skip_media: bool,
     signaling_default: bool,
-) -> Option<(String, u64)> {
+) -> UploadOutcome {
     // Flush the writer batch + backend pipeline so the tail messages (BYE /
     // 200 OK) are persisted before querying/uploading.
     crate::callrecord::sipflow::flush_hook_pipeline(sipflow, backend).await;
@@ -175,7 +304,7 @@ async fn do_upload(
         SipFlowUploadConfig::Http { signaling, .. } => signaling.unwrap_or(signaling_default),
     };
 
-    if signaling {
+    let signaling_url = if signaling {
         upload_signaling_flow(
             upload_config,
             backend,
@@ -187,10 +316,16 @@ async fn do_upload(
             signaling_file_name,
             storage,
         )
-        .await;
-    }
+        .await
+    } else {
+        None
+    };
 
-    first_uploaded_url.map(|url| (url, uploaded_file_size))
+    UploadOutcome {
+        media_url: first_uploaded_url,
+        media_size: uploaded_file_size,
+        signaling_url,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -316,7 +451,11 @@ pub async fn upload_media(
 }
 
 #[allow(clippy::too_many_arguments)]
-/// Returns true if signaling was successfully uploaded, false otherwise.
+/// Uploads the signaling JSONL and returns the resolved URL on success, None
+/// otherwise. The S3 URL is assembled from the config (matching what
+/// `preconstruct_signaling_url` stores); the HTTP URL comes from the upload
+/// response (`response_url_path`, the body when it looks like a URL, or the
+/// request URL).
 pub async fn upload_signaling_flow(
     upload_config: &SipFlowUploadConfig,
     backend: &dyn SipFlowBackend,
@@ -327,7 +466,7 @@ pub async fn upload_signaling_flow(
     full_signaling_key: &str,
     signaling_file_name: &str,
     storage: Option<&Storage>,
-) -> bool {
+) -> Option<String> {
     let query_start = start - chrono::Duration::seconds(1);
     let query_end = end + chrono::Duration::seconds(1);
     let mut query_call_ids = signaling_call_ids.to_vec();
@@ -347,7 +486,7 @@ pub async fn upload_signaling_flow(
                     call_id,
                     leg_call_id, "SipFlowUploadHook: query_flow failed: {e}"
                 );
-                return false;
+                return None;
             }
         }
     }
@@ -359,19 +498,26 @@ pub async fn upload_signaling_flow(
             queried_call_ids = ?query_call_ids,
             "SipFlowUploadHook: signaling query returned no flow items; upload skipped"
         );
-        return false;
+        return None;
     }
 
     let jsonl = crate::sipflow::SipFlowQuery::export_jsonl(&flow_items);
     let data = jsonl.into_bytes();
 
-    let result = match upload_config {
-        SipFlowUploadConfig::S3 { .. } => {
+    let result: Result<String> = match upload_config {
+        SipFlowUploadConfig::S3 {
+            vendor,
+            bucket,
+            endpoint,
+            ..
+        } => {
             let Some(storage) = storage else {
                 warn!(call_id, "SipFlowUploadHook: S3 storage is not initialized");
-                return false;
+                return None;
             };
-            upload_s3(storage, full_signaling_key, data).await
+            upload_s3(storage, full_signaling_key, data)
+                .await
+                .map(|_| sipflow_s3_url(vendor, endpoint, bucket, full_signaling_key))
         }
         SipFlowUploadConfig::Http {
             file_field,
@@ -380,7 +526,7 @@ pub async fn upload_signaling_flow(
         } => {
             let Some(storage) = storage else {
                 warn!(call_id, "SipFlowUploadHook: HTTP storage is not initialized");
-                return false;
+                return None;
             };
             let request = crate::storage::UploadRequest {
                 key: full_signaling_key.to_string(),
@@ -399,18 +545,21 @@ pub async fn upload_signaling_flow(
                 ]),
                 bytes: Bytes::from(data),
             };
-            storage.upload(request).await.map(|_| ())
+            storage
+                .upload(request)
+                .await
+                .map(|uploaded| uploaded.url.unwrap_or_else(|| full_signaling_key.to_string()))
         }
     };
 
     match result {
-        Ok(_) => {
-            info!(call_id, "SipFlowUploadHook: signaling uploaded");
-            true
+        Ok(url) => {
+            info!(call_id, url = %url, "SipFlowUploadHook: signaling uploaded");
+            Some(url)
         }
         Err(e) => {
             warn!(call_id, "SipFlowUploadHook: signaling upload failed: {e}");
-            false
+            None
         }
     }
 }
@@ -474,6 +623,10 @@ pub struct SipFlowUploadResponse {
     pub media_url: Option<String>,
     pub media_size: u64,
     pub signaling_uploaded: bool,
+    /// Resolved URL of the uploaded signaling JSONL. Optional for wire
+    /// compatibility with older bins that only reported the boolean.
+    #[serde(default)]
+    pub signaling_url: Option<String>,
 }
 
 // ── Internal upload helpers ───────────────────────────────────────────────────
@@ -680,6 +833,55 @@ mod tests {
         (format!("http://{address}/upload"), captured)
     }
 
+    /// JSON capture server: stores the raw request body and replies with a
+    /// `{"data":{"url": ...}}` envelope so `response_url_path` resolves.
+    async fn spawn_json_capture_server(
+        stored_url: &'static str,
+    ) -> (String, Arc<std::sync::Mutex<Vec<u8>>>) {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let captured_clone = captured.clone();
+        let app = axum::Router::new().route(
+            "/upload",
+            axum::routing::post(move |body: axum::body::Bytes| {
+                let captured = captured_clone.clone();
+                async move {
+                    captured.lock().unwrap().extend_from_slice(&body);
+                    axum::Json(serde_json::json!({
+                        "code": 0,
+                        "data": {"url": stored_url}
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind json capture server");
+        let address = listener.local_addr().expect("json capture server address");
+        crate::utils::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        (format!("http://{address}/upload"), captured)
+    }
+
+    /// Full `[sipflow]` local config carrying the given upload section — the
+    /// slot content shape consumed by `SipFlowUploadRuntime`.
+    fn local_sipflow_config(
+        upload: Option<SipFlowUploadConfig>,
+    ) -> crate::config::SipFlowConfig {
+        crate::config::SipFlowConfig::Local {
+            root: "./config/sipflow".to_string(),
+            subdirs: Default::default(),
+            flush_count: 1000,
+            flush_interval_secs: 5,
+            id_cache_size: 8192,
+            compress: true,
+            compress_level: 6,
+            shards: 4,
+            upload,
+            blocking_backpressure: false,
+        }
+    }
+
     #[tokio::test]
     async fn http_signaling_upload_honors_configured_file_field() {
         let now = Local::now();
@@ -710,6 +912,7 @@ file_field = "filecontent"
                 Some(&storage),
             )
             .await
+            .is_some()
         );
         let body = String::from_utf8_lossy(&captured.lock().unwrap()).to_string();
         assert!(body.contains("name=\"filecontent\""), "configured field: {body}");
@@ -742,6 +945,7 @@ url = "{url}"
                 Some(&storage),
             )
             .await
+            .is_some()
         );
         let body = String::from_utf8_lossy(&captured.lock().unwrap()).to_string();
         assert!(body.contains("name=\"signaling\""), "historical fallback: {body}");
@@ -836,6 +1040,9 @@ url = "{url}"
     #[tokio::test]
     async fn test_hook_runs_inline() {
         let flush_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let runtime = Arc::new(SipFlowUploadRuntime::for_config(Some(local_sipflow_config(
+            Some(http_upload_config("http://localhost:9999/upload", None, None)),
+        ))));
         let hook = SipFlowUploadHook::new(
             Arc::new(MockBackend {
                 media: vec![],
@@ -844,7 +1051,7 @@ url = "{url}"
                 queried_ranges: Arc::new(std::sync::Mutex::new(Vec::new())),
             }),
             Arc::new(std::sync::OnceLock::new()),
-            http_upload_config("http://localhost:9999/upload", None, None),
+            runtime,
             None,
         )
         .unwrap();
@@ -859,6 +1066,9 @@ url = "{url}"
     #[tokio::test]
     async fn test_hook_checks_backend_for_unanswered_early_media() {
         let flush_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let runtime = Arc::new(SipFlowUploadRuntime::for_config(Some(local_sipflow_config(
+            Some(http_upload_config("http://localhost:9999/upload", Some(false), Some(false))),
+        ))));
         let hook = SipFlowUploadHook::new(
             Arc::new(MockBackend {
                 media: vec![],
@@ -867,7 +1077,7 @@ url = "{url}"
                 queried_ranges: Arc::new(std::sync::Mutex::new(Vec::new())),
             }),
             Arc::new(std::sync::OnceLock::new()),
-            http_upload_config("http://localhost:9999/upload", Some(false), Some(false)),
+            runtime,
             None,
         )
         .unwrap();
@@ -879,6 +1089,147 @@ url = "{url}"
             .unwrap();
 
         assert_eq!(flush_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    /// Regression for the console "sipflow_jsonl still points at the old S3"
+    /// report: with an HTTP uploader, the URL resolved from the upload
+    /// response must be stashed into `details.metadata["sipflow_jsonl"]` (and
+    /// replacing any stale preconstructed value).
+    #[tokio::test]
+    async fn http_signaling_upload_stashes_response_url_in_metadata() {
+        const STORED_URL: &str = "https://archive.example.com/flows/call-42.jsonl";
+        let (url, captured) = spawn_json_capture_server(STORED_URL).await;
+        let upload: SipFlowUploadConfig = toml::from_str(&format!(
+            r#"type = "http"
+url = "{url}"
+signaling = true
+media = false
+response_url_path = "data.url"
+response_success = {{ path = "code", equals = 0 }}
+"#
+        ))
+        .expect("parse http upload config");
+        let runtime = Arc::new(SipFlowUploadRuntime::for_config(Some(
+            local_sipflow_config(Some(upload)),
+        )));
+        let hook = SipFlowUploadHook::new(
+            Arc::new(SingleFlowBackend),
+            Arc::new(std::sync::OnceLock::new()),
+            runtime,
+            None,
+        )
+        .unwrap();
+
+        let mut record = make_record();
+        record.call_id = "call-42".to_string();
+        // Simulate a stale preconstructed S3 URL from an earlier config.
+        record.details.metadata = Some(std::collections::HashMap::from([(
+            "sipflow_jsonl".to_string(),
+            serde_json::Value::String("http://old-minio:9000/bucket/sipflow/call-42.jsonl".into()),
+        )]));
+
+        hook.on_record_completed(std::slice::from_mut(&mut record))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            record
+                .details
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("sipflow_jsonl"))
+                .and_then(serde_json::Value::as_str),
+            Some(STORED_URL)
+        );
+        let body = String::from_utf8_lossy(&captured.lock().unwrap()).to_string();
+        assert!(body.contains("name=\"signaling\""), "wire shape: {body}");
+    }
+
+    /// The upload config is late-bound: swapping the slot between calls (the
+    /// `reload_sipflow` path) must switch the destination without rebuilding
+    /// the hook.
+    #[tokio::test]
+    async fn hook_follows_hot_reloaded_upload_config() {
+        use arc_swap::ArcSwap;
+
+        // Start with an S3 upload config; the hook must preconstruct S3 URLs.
+        let s3_config: SipFlowUploadConfig = toml::from_str(
+            r#"
+            type = "s3"
+            vendor = "minio"
+            bucket = "old-bucket"
+            region = "us-east-1"
+            endpoint = "http://127.0.0.1:9000"
+            root = "sipflow"
+            signaling = true
+            media = false
+        "#,
+        )
+        .unwrap();
+        let slot: SipFlowConfigSlot =
+            Arc::new(ArcSwap::new(Arc::new(Some(local_sipflow_config(Some(
+                s3_config,
+            ))))));
+        let runtime = Arc::new(SipFlowUploadRuntime::new(slot.clone()));
+        let hook = SipFlowUploadHook::new(
+            Arc::new(SingleFlowBackend),
+            Arc::new(std::sync::OnceLock::new()),
+            runtime,
+            None,
+        )
+        .unwrap();
+
+        let mut record = make_record();
+        hook.on_record_enrich(std::slice::from_mut(&mut record))
+            .await
+            .unwrap();
+        assert!(
+            record
+                .details
+                .metadata
+                .as_ref()
+                .unwrap()["sipflow_jsonl"]
+                .as_str()
+                .unwrap()
+                .starts_with("http://127.0.0.1:9000/old-bucket/"),
+            "S3 URL expected before reload"
+        );
+
+        // Hot-reload: swap the slot to an HTTP uploader.
+        let (url, captured) = spawn_capture_server().await;
+        let http_config: SipFlowUploadConfig = toml::from_str(&format!(
+            r#"type = "http"
+url = "{url}"
+signaling = true
+media = false
+"#
+        ))
+        .unwrap();
+        slot.store(Arc::new(Some(local_sipflow_config(Some(http_config)))));
+
+        let mut record = make_record();
+        hook.on_record_enrich(std::slice::from_mut(&mut record))
+            .await
+            .unwrap();
+        assert!(
+            record
+                .details
+                .metadata
+                .as_ref()
+                .map(|m| m.get("sipflow_jsonl"))
+                .unwrap_or(None)
+                .is_none(),
+            "HTTP mode must not preconstruct an S3 URL"
+        );
+
+        hook.on_record_completed(std::slice::from_mut(&mut record))
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&captured.lock().unwrap()).to_string();
+        assert!(
+            body.contains("name=\"signaling\""),
+            "jsonl must be POSTed to the HTTP endpoint after reload: {body}"
+        );
     }
 
     #[tokio::test]

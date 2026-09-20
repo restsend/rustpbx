@@ -1,9 +1,11 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use anyhow::{Result, anyhow};
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use bytes::Bytes;
 use object_store::{Attribute, Attributes, PutOptions};
@@ -20,17 +22,121 @@ use crate::{
     storage::{Storage, StorageConfig},
 };
 
+/// Shared handle to the `[recording]` policy. The SIP server swaps the inner
+/// value on hot-reload (`reload_recording_settings` / `reload_proxy_config`),
+/// so upload paths observe the current policy without a restart.
+pub type RecordingPolicySlot = Arc<ArcSwap<Option<RecordingPolicy>>>;
+
+/// Late-bound `[recording]` policy + derived upload storage, shared between
+/// the upload hook, the background S3 uploader, the retry worker and the
+/// console (on-demand presigned URLs). The storage is rebuilt lazily whenever
+/// the slot content changes.
+pub struct RecordingUploadRuntime {
+    slot: RecordingPolicySlot,
+    cached: parking_lot::Mutex<(String, Option<Storage>)>,
+}
+
+impl RecordingUploadRuntime {
+    pub fn new(slot: RecordingPolicySlot) -> Self {
+        Self {
+            slot,
+            cached: parking_lot::Mutex::new((String::new(), None)),
+        }
+    }
+
+    /// Standalone runtime seeded with a fixed policy (tests, embedded callers
+    /// without a server slot).
+    pub fn for_policy(policy: Option<RecordingPolicy>) -> Self {
+        Self::new(Arc::new(ArcSwap::new(Arc::new(policy))))
+    }
+
+    /// Current `[recording]` policy, if any. `None` when the section is
+    /// absent (upload paths become no-ops).
+    pub fn policy(&self) -> Option<RecordingPolicy> {
+        self.slot.load().as_ref().clone()
+    }
+
+    /// Current policy + upload storage, rebuilding the storage when the
+    /// policy changed since the last call. Returns `None` when the recording
+    /// section is absent or the mode needs no uploads (local/sipflow).
+    pub fn resolve(&self) -> Result<Option<(RecordingPolicy, Option<Storage>)>> {
+        let Some(policy) = self.policy() else {
+            return Ok(None);
+        };
+        let signature = format!("{policy:?}");
+        let mut cached = self.cached.lock();
+        if cached.0 != signature {
+            let storage = match build_recording_storage(&policy) {
+                Ok(storage) => storage,
+                Err(err) => {
+                    tracing::error!(%err, "failed to rebuild recording upload storage");
+                    return Err(err);
+                }
+            };
+            if cached.0.is_empty() {
+                info!("recording upload storage initialised");
+            } else {
+                info!("recording upload storage rebuilt after policy reload");
+            }
+            cached.1 = storage;
+            cached.0 = signature;
+        }
+        Ok(Some((policy, cached.1.clone())))
+    }
+
+    /// Test-only: pre-seed the storage cache so `resolve()` returns the given
+    /// storage for this policy signature without deriving it from the mode
+    /// (unit tests drive the manager with a local object store).
+    #[cfg(test)]
+    pub(crate) fn seed_storage(&self, policy: &RecordingPolicy, storage: Storage) {
+        let mut cached = self.cached.lock();
+        cached.0 = format!("{policy:?}");
+        cached.1 = Some(storage);
+    }
+}
+
+/// Build the upload storage described by a policy: S3 object storage, or the
+/// generic HTTP uploader. `None` for local/sipflow modes (no remote upload).
+fn build_recording_storage(policy: &RecordingPolicy) -> Result<Option<Storage>> {
+    match policy.effective_recording_type() {
+        RecordingType::S3 => {
+            let endpoint = policy
+                .endpoint
+                .as_deref()
+                .map(str::trim)
+                .filter(|endpoint| !endpoint.is_empty())
+                .map(str::to_string);
+            // Credentials are optional: omitting both selects anonymous/public
+            // access. `Storage::new` rejects a partial access/secret pair.
+            let storage = Storage::new(&StorageConfig::S3 {
+                vendor: policy.vendor.clone().unwrap_or_default(),
+                bucket: policy.bucket.clone().unwrap_or_default(),
+                region: policy.region.clone().unwrap_or_default(),
+                access_key: policy.access_key.clone(),
+                secret_key: policy.secret_key.clone(),
+                endpoint,
+                prefix: None,
+            })?;
+            Ok(Some(storage))
+        }
+        RecordingType::Http => policy
+            .http_upload_config()
+            .map(Storage::from_http)
+            .transpose(),
+        _ => Ok(None),
+    }
+}
+
 pub struct RecordingUploadHook {
-    policy: RecordingPolicy,
+    /// Late-bound `[recording]` policy + upload storage; re-resolved on every
+    /// batch so config hot-reloads take effect without a restart.
+    runtime: Arc<RecordingUploadRuntime>,
     rwi_gateway: Option<RwiGatewayRef>,
-    /// Upload-only HTTP backend for `type = "http"`.
-    http_storage: Option<Storage>,
     s3_upload_sender: Option<tokio::sync::mpsc::Sender<PathBuf>>,
 }
 
 pub struct RecordingUploadManager {
-    policy: RecordingPolicy,
-    storage: Storage,
+    runtime: Arc<RecordingUploadRuntime>,
     receiver: tokio::sync::mpsc::Receiver<PathBuf>,
 }
 
@@ -38,64 +144,59 @@ const RECORDING_UPLOAD_CHANNEL_CAPACITY: usize = 65_536;
 
 impl RecordingUploadHook {
     /// Builds the hook plus (in S3 mode) the background upload manager and the
-    /// shared S3 storage handle. The storage clone is returned so callers can
+    /// shared storage handle. The storage clone is returned so callers can
     /// expose it for on-demand presigned URL generation.
     pub fn new(
         policy: RecordingPolicy,
     ) -> Result<(Self, Option<RecordingUploadManager>, Option<Storage>)> {
-        let recording_type = policy.effective_recording_type();
-        let (s3_upload_sender, upload_manager, upload_storage) = if recording_type == RecordingType::S3
-        {
-            let endpoint = policy
-                .endpoint
-                .as_deref()
-                .map(str::trim)
-                .filter(|endpoint| !endpoint.is_empty())
-                .map(str::to_string);
-            let vendor = policy.vendor.clone().unwrap_or_default();
-            // Credentials are optional: omitting both selects anonymous/public
-            // access. `Storage::new` rejects a partial access/secret pair.
-            let access_key = policy.access_key.clone();
-            let secret_key = policy.secret_key.clone();
-            let storage = Storage::new(&StorageConfig::S3 {
-                vendor,
-                bucket: policy.bucket.clone().unwrap_or_default(),
-                region: policy.region.clone().unwrap_or_default(),
-                access_key,
-                secret_key,
-                endpoint: endpoint.clone(),
-                prefix: None,
-            })?;
+        Self::with_runtime(Arc::new(RecordingUploadRuntime::for_policy(Some(
+            policy,
+        ))))
+    }
+
+    /// Same as [`Self::new`] but attached to a shared late-bound runtime, so
+    /// the hook, the background manager and the retry worker all follow
+    /// `[recording]` policy hot-reloads.
+    pub fn with_runtime(
+        runtime: Arc<RecordingUploadRuntime>,
+    ) -> Result<(Self, Option<RecordingUploadManager>, Option<Storage>)> {
+        // Validate at startup: S3 storage construction errors must fail fast
+        // (historical behavior), and the storage clone seeds the console's
+        // presign path until the first reload.
+        let (_, upload_storage) = runtime
+            .resolve()?
+            .unwrap_or_else(|| (RecordingPolicy::default(), None));
+        let recording_type = runtime
+            .policy()
+            .unwrap_or_default()
+            .effective_recording_type();
+        let (s3_upload_sender, upload_manager) = if recording_type == RecordingType::S3 {
             let (sender, receiver) = tokio::sync::mpsc::channel(RECORDING_UPLOAD_CHANNEL_CAPACITY);
             (
                 Some(sender),
                 Some(RecordingUploadManager {
-                    policy: policy.clone(),
-                    storage: storage.clone(),
+                    runtime: runtime.clone(),
                     receiver,
                 }),
-                Some(storage),
             )
-        } else if recording_type == RecordingType::Http {
-            let storage = policy
-                .http_upload_config()
-                .map(Storage::from_http)
-                .transpose()?;
-            (None, None, storage)
         } else {
-            (None, None, None)
+            (None, None)
         };
 
         Ok((
             Self {
-                policy,
+                runtime,
                 rwi_gateway: None,
-                http_storage: upload_storage.clone(),
                 s3_upload_sender,
             },
             upload_manager,
             upload_storage,
         ))
+    }
+
+    /// Re-exported for app wiring that reports the storage type at startup.
+    pub fn runtime(&self) -> Arc<RecordingUploadRuntime> {
+        self.runtime.clone()
     }
 
     pub fn with_rwi_gateway(mut self, gw: RwiGatewayRef) -> Self {
@@ -109,11 +210,11 @@ impl RecordingUploadHook {
     /// and `recording_segments` metadata reference the final on-disk layout.
     /// Archiving only in `on_record_completed` left stale pre-archive paths
     /// in the database (downloads then 404'd on the moved files).
-    async fn archive_local_artifacts(&self, record: &mut CallRecord) {
+    async fn archive_local_artifacts(&self, policy: &RecordingPolicy, record: &mut CallRecord) {
         use crate::callrecord::{RecordingSubdir, local_archive_path};
 
-        let subdir = RecordingSubdir::parse(self.policy.subdir.as_deref());
-        let root = self.policy.recorder_path();
+        let subdir = RecordingSubdir::parse(policy.subdir.as_deref());
+        let root = policy.recorder_path();
 
         let mut renames: HashMap<String, String> = HashMap::new();
         let mut first_media_url: Option<String> = None;
@@ -235,11 +336,10 @@ impl RecordingUploadHook {
         }
     }
 
-    fn s3_url(&self, bucket: &str, key: &str) -> String {
+    fn s3_url(policy: &RecordingPolicy, bucket: &str, key: &str) -> String {
         let bucket = bucket.trim().trim_matches('/');
         let key = key.trim_start_matches('/');
-        let Some(endpoint) = self
-            .policy
+        let Some(endpoint) = policy
             .endpoint
             .as_deref()
             .map(str::trim)
@@ -248,7 +348,7 @@ impl RecordingUploadHook {
             return format!("s3://{bucket}/{key}");
         };
         let endpoint = endpoint.trim_end_matches('/');
-        if self.policy.vendor == Some(crate::storage::S3Vendor::Aliyun) {
+        if policy.vendor == Some(crate::storage::S3Vendor::Aliyun) {
             return format!("{endpoint}/{key}");
         }
         format!("{endpoint}/{bucket}/{key}")
@@ -258,7 +358,26 @@ impl RecordingUploadHook {
 impl RecordingUploadManager {
     pub async fn serve(&mut self) {
         while let Some(path) = self.receiver.recv().await {
-            let key = RecordingUploadHook::storage_key(&self.policy, &path);
+            let uploaded = match self.runtime.resolve() {
+                Ok(Some((policy, Some(storage)))) => (policy, storage),
+                Ok(_) => {
+                    warn!(
+                        path = %path.display(),
+                        "recording uploader disabled by policy reload; local file retained"
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    warn!(
+                        path = %path.display(),
+                        %err,
+                        "recording uploader storage unavailable; local file retained"
+                    );
+                    continue;
+                }
+            };
+            let (policy, storage) = uploaded;
+            let key = RecordingUploadHook::storage_key(&policy, &path);
             let data = match tokio::fs::read(&path).await {
                 Ok(data) => data,
                 Err(err) => {
@@ -278,8 +397,7 @@ impl RecordingUploadManager {
             };
             let attributes = Attributes::from_iter([(Attribute::ContentType, content_type)]);
             let started = std::time::Instant::now();
-            if let Err(err) = self
-                .storage
+            if let Err(err) = storage
                 .write_opts(
                     &key,
                     Bytes::from(data),
@@ -297,11 +415,7 @@ impl RecordingUploadManager {
                     "recording upload failed"
                 );
                 crate::metrics::recording::upload_failure("s3");
-                let address = self
-                    .policy
-                    .bucket
-                    .clone()
-                    .unwrap_or_else(|| "s3".to_string());
+                let address = policy.bucket.clone().unwrap_or_else(|| "s3".to_string());
                 if let Err(write_err) = crate::callrecord::write_upload_failed_marker_ex(
                     &path,
                     &address,
@@ -349,60 +463,71 @@ impl RecordingUploadManager {
 /// retries remote uploads (HTTP or S3). Tracks hangup→success latency against
 /// the configured SLA window (default 10 minutes).
 pub struct RecordingRetryWorker {
-    policy: RecordingPolicy,
-    storage: Option<Storage>,
+    runtime: Arc<RecordingUploadRuntime>,
 }
 
 impl RecordingRetryWorker {
-    pub fn new(policy: RecordingPolicy, storage: Option<Storage>) -> Result<Self> {
-        // Build the HTTP backend from the policy when the caller did not
-        // provide one (e.g. direct construction in tests / embedded usage).
-        let storage = match storage {
-            Some(storage) => Some(storage),
-            None if policy.effective_recording_type() == RecordingType::Http => {
-                policy.http_upload_config().map(Storage::from_http).transpose()?
-            }
-            None => None,
-        };
-        Ok(Self { policy, storage })
+    pub fn with_runtime(runtime: Arc<RecordingUploadRuntime>) -> Self {
+        Self { runtime }
     }
 
     pub async fn serve(self) {
-        let interval = self.policy.effective_retry_interval_secs();
+        let Some(policy) = self.runtime.policy() else {
+            info!("recording upload retry worker idle (no [recording] policy)");
+            return;
+        };
+        let interval = policy.effective_retry_interval_secs();
         if interval == 0 {
             info!("recording upload retry worker disabled (retry_interval_secs=0)");
             return;
         }
-        let ty = self.policy.effective_recording_type();
+        let ty = policy.effective_recording_type();
         if !matches!(ty, RecordingType::Http | RecordingType::S3) {
             info!(?ty, "recording upload retry worker idle (local/sipflow)");
             return;
         }
         info!(
             interval_secs = interval,
-            sla_secs = self.policy.effective_upload_sla_secs(),
+            sla_secs = policy.effective_upload_sla_secs(),
             "recording upload retry worker started"
         );
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval));
         loop {
             ticker.tick().await;
-            if let Err(err) = self.scan_once().await {
+            // Re-resolve per scan so policy hot-reloads take effect.
+            let resolved = match self.runtime.resolve() {
+                Ok(resolved) => resolved,
+                Err(err) => {
+                    warn!(%err, "recording upload retry storage unavailable");
+                    continue;
+                }
+            };
+            if let Err(err) = self.scan_once(resolved).await {
                 warn!(%err, "recording upload retry scan failed");
             }
         }
     }
 
-    async fn scan_once(&self) -> Result<()> {
-        let root = PathBuf::from(self.policy.recorder_path());
+    async fn scan_once(
+        &self,
+        resolved: Option<(RecordingPolicy, Option<Storage>)>,
+    ) -> Result<()> {
+        let Some((policy, _)) = resolved.as_ref() else {
+            return Ok(());
+        };
+        let root = PathBuf::from(policy.recorder_path());
         if !root.exists() {
             crate::metrics::recording::set_pending_failed(0);
             return Ok(());
         }
         let markers = collect_upload_failed_markers(&root).await?;
         crate::metrics::recording::set_pending_failed(markers.len());
-        let max_attempts = self.policy.effective_retry_max_attempts();
+        let max_attempts = policy.effective_retry_max_attempts();
         for marker_path in markers {
-            if let Err(err) = self.retry_marker(&marker_path, max_attempts).await {
+            if let Err(err) = self
+                .retry_marker(resolved.as_ref(), &marker_path, max_attempts)
+                .await
+            {
                 warn!(
                     marker = %marker_path.display(),
                     %err,
@@ -413,7 +538,16 @@ impl RecordingRetryWorker {
         Ok(())
     }
 
-    async fn retry_marker(&self, marker_path: &Path, max_attempts: u32) -> Result<()> {
+    async fn retry_marker(
+        &self,
+        resolved: Option<&(RecordingPolicy, Option<Storage>)>,
+        marker_path: &Path,
+        max_attempts: u32,
+    ) -> Result<()> {
+        let Some((policy, storage)) = resolved else {
+            return Ok(());
+        };
+        let storage = storage.as_ref();
         let source = source_path_from_marker(marker_path).ok_or_else(|| {
             anyhow!(
                 "cannot derive source path from marker {}",
@@ -428,32 +562,34 @@ impl RecordingRetryWorker {
         let marker: UploadFailedMarker =
             serde_json::from_slice(&tokio::fs::read(marker_path).await?)?;
         if marker.attempts >= max_attempts {
-            let dest = match self.policy.effective_recording_type() {
+            let dest = match policy.effective_recording_type() {
                 RecordingType::Http => "http",
                 RecordingType::S3 => "s3",
                 _ => "unknown",
             };
             if let Some(age) = marker_age_secs(&marker)
-                && age > self.policy.effective_upload_sla_secs() as f64
+                && age > policy.effective_upload_sla_secs() as f64
             {
                 crate::metrics::recording::upload_sla_breach(dest);
             }
             return Ok(());
         }
-        let dest = match self.policy.effective_recording_type() {
+        let dest = match policy.effective_recording_type() {
             RecordingType::Http => "http",
             RecordingType::S3 => "s3",
             _ => return Ok(()),
         };
         crate::metrics::recording::retry_attempt(dest);
         let started = std::time::Instant::now();
-        match self.upload_source(&source, marker.call_id.as_deref()).await {
+        match self.upload_source(policy, storage, &source, marker.call_id.as_deref())
+            .await
+        {
             Ok(()) => {
                 let latency =
                     marker_age_secs(&marker).unwrap_or_else(|| started.elapsed().as_secs_f64());
                 crate::metrics::recording::upload_success(dest);
                 crate::metrics::recording::upload_latency_seconds(latency, dest);
-                if latency > self.policy.effective_upload_sla_secs() as f64 {
+                if latency > policy.effective_upload_sla_secs() as f64 {
                     crate::metrics::recording::upload_sla_breach(dest);
                 }
                 let _ = tokio::fs::remove_file(&source).await;
@@ -481,13 +617,17 @@ impl RecordingRetryWorker {
         Ok(())
     }
 
-    async fn upload_source(&self, source: &Path, call_id: Option<&str>) -> Result<()> {
+    async fn upload_source(
+        &self,
+        policy: &RecordingPolicy,
+        storage: Option<&Storage>,
+        source: &Path,
+        call_id: Option<&str>,
+    ) -> Result<()> {
         let data = tokio::fs::read(source).await?;
-        match self.policy.effective_recording_type() {
+        match policy.effective_recording_type() {
             RecordingType::Http => {
-                let storage = self
-                    .storage
-                    .as_ref()
+                let storage = storage
                     .ok_or_else(|| anyhow!("HTTP storage unavailable for retry"))?;
                 let file_name = source
                     .file_name()
@@ -511,11 +651,9 @@ impl RecordingRetryWorker {
                 Ok(())
             }
             RecordingType::S3 => {
-                let storage = self
-                    .storage
-                    .as_ref()
+                let storage = storage
                     .ok_or_else(|| anyhow!("S3 storage unavailable for retry"))?;
-                let key = RecordingUploadHook::storage_key(&self.policy, source);
+                let key = RecordingUploadHook::storage_key(policy, source);
                 let content_type = match source.extension().and_then(|e| e.to_str()) {
                     Some(ext) if ext.eq_ignore_ascii_case("wav") => "audio/wav",
                     Some(ext) if ext.eq_ignore_ascii_case("jsonl") => "application/jsonl",
@@ -577,13 +715,13 @@ async fn collect_upload_failed_markers(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 impl RecordingUploadHook {
-    fn preconstruct_s3_urls(&self, record: &mut CallRecord) -> Result<()> {
-        let bucket = self.policy.bucket.as_deref().unwrap_or_default().trim();
+    fn preconstruct_s3_urls(policy: &RecordingPolicy, record: &mut CallRecord) -> Result<()> {
+        let bucket = policy.bucket.as_deref().unwrap_or_default().trim();
         let mut first_media_url = None;
 
         for media in &mut record.recorder {
-            let key = Self::storage_key(&self.policy, Path::new(&media.path));
-            let url = self.s3_url(bucket, &key);
+            let key = Self::storage_key(policy, Path::new(&media.path));
+            let url = Self::s3_url(policy, bucket, &key);
             let extra = media.extra.get_or_insert_with(HashMap::new);
             extra.insert("uploadUrl".to_string(), json!(url.clone()));
             if first_media_url.is_none() && media.track_id != "signaling" {
@@ -601,16 +739,14 @@ impl RecordingUploadHook {
 
     async fn upload_http(
         &self,
+        storage: &Storage,
+        policy: &RecordingPolicy,
         record: &CallRecord,
         track_id: &str,
         media_path: &str,
         data: Vec<u8>,
     ) -> Result<String> {
-        let storage = self
-            .http_storage
-            .as_ref()
-            .ok_or_else(|| anyhow!("recording http upload is not configured (missing url?)"))?;
-        let url = Self::required(&self.policy.url, "url")?;
+        let url = Self::required(&policy.url, "url")?;
         let file_name = Path::new(media_path)
             .file_name()
             .unwrap_or_else(|| std::ffi::OsStr::new("recording.wav"))
@@ -735,14 +871,17 @@ fn build_segment_recording_metadata(
 #[async_trait]
 impl CallRecordHook for RecordingUploadHook {
     async fn on_record_enrich(&self, records: &mut [CallRecord]) -> anyhow::Result<()> {
+        let Some((policy, _)) = self.runtime.resolve()? else {
+            return Ok(());
+        };
         for record in records {
-            match self.policy.effective_recording_type() {
-                RecordingType::Local => self.archive_local_artifacts(record).await,
+            match policy.effective_recording_type() {
+                RecordingType::Local => self.archive_local_artifacts(&policy, record).await,
                 RecordingType::S3 => {
                     // Move generated artifacts into their final dated layout first,
                     // then persist the remote URL before the asynchronous upload.
-                    self.archive_local_artifacts(record).await;
-                    self.preconstruct_s3_urls(record)?;
+                    self.archive_local_artifacts(&policy, record).await;
+                    Self::preconstruct_s3_urls(&policy, record)?;
                 }
                 RecordingType::Http | RecordingType::Sipflow => {}
             }
@@ -756,12 +895,15 @@ impl CallRecordHook for RecordingUploadHook {
         };
         use std::time::Instant;
 
-        let recording_type = self.policy.effective_recording_type();
+        let Some((policy, upload_storage)) = self.runtime.resolve()? else {
+            return Ok(());
+        };
+        let recording_type = policy.effective_recording_type();
         if !recording_type.is_file_media() {
             return Ok(());
         }
-        let subdir = RecordingSubdir::parse(self.policy.subdir.as_deref());
-        let root = self.policy.recorder_path();
+        let subdir = RecordingSubdir::parse(policy.subdir.as_deref());
+        let root = policy.recorder_path();
 
         for record in records {
             // File entries are finalized recording artifacts (wav + optional jsonl).
@@ -784,9 +926,9 @@ impl CallRecordHook for RecordingUploadHook {
                 }
 
                 if recording_type == RecordingType::S3 {
-                    let key = Self::storage_key(&self.policy, Path::new(&path));
-                    let bucket = self.policy.bucket.as_deref().unwrap_or_default().trim();
-                    let url = self.s3_url(bucket, &key);
+                    let key = Self::storage_key(&policy, Path::new(&path));
+                    let bucket = policy.bucket.as_deref().unwrap_or_default().trim();
+                    let url = Self::s3_url(&policy, bucket, &key);
                     match self
                         .s3_upload_sender
                         .as_ref()
@@ -891,13 +1033,16 @@ impl CallRecordHook for RecordingUploadHook {
                         }
                     }
                     RecordingType::Http => {
-                        let address = self
-                            .policy
-                            .url
-                            .clone()
-                            .unwrap_or_else(|| "http".to_string());
+                        let address = policy.url.clone().unwrap_or_else(|| "http".to_string());
                         let started = Instant::now();
-                        let upload = self.upload_http(record, &track_id, &path, data).await;
+                        let storage = upload_storage
+                            .as_ref()
+                            .ok_or_else(|| {
+                                anyhow!("recording http upload is not configured (missing url?)")
+                            })?;
+                        let upload = self
+                            .upload_http(storage, &policy, record, &track_id, &path, data)
+                            .await;
                         let elapsed_ms = started.elapsed().as_millis() as u64;
                         match upload {
                             Ok(url) => {
@@ -912,7 +1057,7 @@ impl CallRecordHook for RecordingUploadHook {
                                 if let Ok(age) = (chrono::Utc::now() - record.end_time).to_std() {
                                     let secs = age.as_secs_f64();
                                     crate::metrics::recording::upload_latency_seconds(secs, "http");
-                                    if secs > self.policy.effective_upload_sla_secs() as f64 {
+                                    if secs > policy.effective_upload_sla_secs() as f64 {
                                         crate::metrics::recording::upload_sla_breach("http");
                                     }
                                 }
@@ -1384,7 +1529,7 @@ mod tests {
             root: Some("recordings".into()),
             ..Default::default()
         };
-        let (hook, _, _) = RecordingUploadHook::new(policy).unwrap();
+        let (_hook, _, _) = RecordingUploadHook::new(policy.clone()).unwrap();
         let mut record = CallRecord {
             recorder: vec![CallRecordMedia {
                 unique_id: None,
@@ -1395,7 +1540,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        hook.preconstruct_s3_urls(&mut record).unwrap();
+        RecordingUploadHook::preconstruct_s3_urls(&policy, &mut record).unwrap();
         let raw = record.details.recording_url.unwrap();
         assert_eq!(
             raw,
@@ -1491,9 +1636,10 @@ mod tests {
             ..Default::default()
         };
         let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        let runtime = Arc::new(RecordingUploadRuntime::for_policy(Some(policy.clone())));
+        runtime.seed_storage(&policy, storage);
         let mut manager = RecordingUploadManager {
-            policy,
-            storage,
+            runtime,
             receiver,
         };
         let uploader = crate::utils::spawn(async move {
@@ -1789,8 +1935,14 @@ mod tests {
             upload_sla_secs: Some(600),
             ..Default::default()
         };
-        let worker = RecordingRetryWorker::new(policy, None).expect("worker");
-        worker.scan_once().await.expect("scan");
+        let worker =
+            RecordingRetryWorker::with_runtime(Arc::new(RecordingUploadRuntime::for_policy(
+                Some(policy),
+            )));
+        worker
+            .scan_once(worker.runtime.resolve().ok().flatten())
+            .await
+            .expect("scan");
 
         assert!(hit.load(Ordering::SeqCst), "upload endpoint hit");
         assert!(!path.exists(), "local file removed after retry success");

@@ -96,8 +96,8 @@ pub struct SipServerInner {
     pub ignore_out_of_dialog_request: bool,
     pub locator_events: Option<LocatorEventSender>,
     pub locator_event_lock: LocatorEventLock,
-    pub sipflow_config: ArcSwap<Option<SipFlowConfig>>,
-    pub recording_policy: ArcSwap<Option<RecordingPolicy>>,
+    pub sipflow_config: Arc<arc_swap::ArcSwap<Option<SipFlowConfig>>>,
+    pub recording_policy: Arc<arc_swap::ArcSwap<Option<RecordingPolicy>>>,
     pub sip_flow: Option<SipFlow>,
     pub active_call_registry: Arc<ActiveProxyCallRegistry>,
     pub frequency_limiter: Option<Arc<dyn FrequencyLimiter>>,
@@ -193,6 +193,13 @@ pub struct SipServerBuilder {
     call_record_hooks: Vec<Box<dyn crate::callrecord::CallRecordHook>>,
     storage: Option<crate::storage::Storage>,
     sipflow_config: Option<SipFlowConfig>,
+    /// Shared sipflow config slot (takes precedence over `sipflow_config`);
+    /// lets the app share one live config handle between the server, the
+    /// upload hooks and the console.
+    sipflow_config_slot: Option<crate::callrecord::sipflow_upload::SipFlowConfigSlot>,
+    /// Shared recording policy slot; the upload hook observes reloads through
+    /// the same handle the server stores to.
+    recording_policy_slot: Option<crate::callrecord::recording_upload::RecordingPolicySlot>,
     /// Pre-built SipFlow backend (takes precedence over sipflow_config).
     sipflow_backend: Option<Arc<dyn SipFlowBackend>>,
     no_bind: bool,
@@ -245,6 +252,8 @@ impl SipServerBuilder {
             call_record_hooks: Vec::new(),
             storage: None,
             sipflow_config: None,
+            sipflow_config_slot: None,
+            recording_policy_slot: None,
             sipflow_backend: None,
             no_bind: false,
             addon_registry: None,
@@ -283,6 +292,26 @@ impl SipServerBuilder {
 
     pub fn with_sipflow_config(mut self, config: Option<SipFlowConfig>) -> Self {
         self.sipflow_config = config;
+        self
+    }
+
+    /// Share a live sipflow config slot (takes precedence over
+    /// `with_sipflow_config`). Hot-reloads that store into this slot are
+    /// observed by the upload hooks and the console.
+    pub fn with_sipflow_config_slot(
+        mut self,
+        slot: crate::callrecord::sipflow_upload::SipFlowConfigSlot,
+    ) -> Self {
+        self.sipflow_config_slot = Some(slot);
+        self
+    }
+
+    /// Share a live recording policy slot with the upload hook.
+    pub fn with_recording_policy_slot(
+        mut self,
+        slot: crate::callrecord::recording_upload::RecordingPolicySlot,
+    ) -> Self {
+        self.recording_policy_slot = Some(slot);
         self
     }
 
@@ -1204,8 +1233,12 @@ impl SipServerBuilder {
             ignore_out_of_dialog_request: self.ignore_out_of_dialog_request,
             locator_events: Some(locator_events),
             locator_event_lock,
-            sipflow_config: ArcSwap::new(Arc::new(self.sipflow_config.clone())),
-            recording_policy: ArcSwap::new(Arc::new(self.config.recording.clone())),
+            sipflow_config: self.sipflow_config_slot.unwrap_or_else(|| {
+                Arc::new(ArcSwap::new(Arc::new(self.sipflow_config.clone())))
+            }),
+            recording_policy: self.recording_policy_slot.unwrap_or_else(|| {
+                Arc::new(ArcSwap::new(Arc::new(self.config.recording.clone())))
+            }),
             sip_flow,
             active_call_registry,
             frequency_limiter: self.frequency_limiter,
@@ -2611,5 +2644,53 @@ max_ring_time = 45
             msg.contains("no changes detected"),
             "expected no-op message, got: {msg}"
         );
+    }
+
+    /// The live sipflow slot is shared with the app-level upload hooks and
+    /// console: `reload_sipflow` storing the new `[sipflow.upload]` must be
+    /// visible through it, so HTTP uploaders take effect without a restart.
+    #[tokio::test]
+    async fn reload_sipflow_propagates_upload_config_to_shared_slot() {
+        use crate::proxy::tests::common::create_test_server;
+        use std::io::Write;
+
+        let (server, _) = create_test_server().await;
+        assert!(server.sipflow_config.load().as_ref().is_none());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rustpbx.toml");
+        let mut file = std::fs::File::create(&path).expect("create config file");
+        let toml = r#"
+[proxy]
+addr = "0.0.0.0"
+
+[sipflow]
+type = "local"
+root = "./config/sipflow"
+
+[sipflow.upload]
+type = "http"
+url = "https://archive.example.com/upload"
+signaling = true
+media = false
+"#;
+        file.write_all(toml.as_bytes()).expect("write config");
+        drop(file);
+
+        server
+            .reload_sipflow(path.to_str().unwrap())
+            .await
+            .expect("reload should succeed");
+
+        let cfg = server.sipflow_config.load();
+        let upload = match cfg.as_ref() {
+            Some(crate::config::SipFlowConfig::Local { upload, .. }) => upload.clone(),
+            other => panic!("expected local sipflow config, got {other:?}"),
+        };
+        let Some(crate::config::SipFlowUploadConfig::Http { url, signaling, .. }) = upload else {
+            panic!("expected http upload config after reload");
+        };
+        assert_eq!(url, "https://archive.example.com/upload");
+        assert_eq!(signaling, Some(true));
     }
 }
