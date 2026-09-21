@@ -1747,20 +1747,6 @@ impl CallModule {
 
         let mut dialplan = dialplan;
 
-        if dialplan.caller_contact.is_none()
-            && let Some(contact_uri) = self
-                .inner
-                .server
-                .contact_uri_for_transaction(tx)
-                .or_else(|| self.inner.server.default_contact_uri())
-        {
-            let contact = rsipstack::sip::typed::Contact {
-                display_name: None,
-                uri: contact_uri,
-                params: vec![],
-            };
-            dialplan = dialplan.with_caller_contact(contact);
-        }
         let inspectors: Vec<Arc<crate::proxy::routing::inspector_stack::OrderedDialplanInspector>> =
             self.inner
                 .server

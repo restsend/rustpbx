@@ -1069,12 +1069,16 @@ impl SipSession {
                 // cleared once the REFER is accepted (202) or definitively
                 // fails without fallback.
 
-                let referred_by = self
-                    .context
-                    .dialplan
-                    .caller_contact
-                    .clone()
-                    .map(|c| c.to_string())
+                let Some(server_dialog) = self.caller_dialog.as_ref() else {
+                    warn!(session_id = %self.id, "Cannot send REFER: no inbound caller dialog (UAC mode)");
+                    return Err(anyhow!(
+                        "REFER not supported without an inbound caller dialog; use B2BUA"
+                    ));
+                };
+                let referred_by = server_dialog
+                    .snapshot()
+                    .local_contact
+                    .map(|uri| uri.to_string())
                     .unwrap_or_else(|| format!("sip:{}@localhost", self.server.contact_username));
                 let refer_headers = vec![rsipstack::sip::Header::Other(
                     "Referred-By".to_string(),
@@ -1083,12 +1087,6 @@ impl SipSession {
 
                 info!(session_id = %self.id, %leg_id, target = %uri, "Sending REFER for blind transfer");
 
-                let Some(server_dialog) = self.caller_dialog.as_ref() else {
-                    warn!(session_id = %self.id, "Cannot send REFER: no inbound caller dialog (UAC mode)");
-                    return Err(anyhow!(
-                        "REFER not supported without an inbound caller dialog; use B2BUA"
-                    ));
-                };
                 match server_dialog
                     .refer(refer_to_uri.clone(), Some(refer_headers), None)
                     .await
@@ -1375,6 +1373,9 @@ impl SipSession {
             .caller_contact
             .as_ref()
             .map(|c| c.uri.clone())
+            .or_else(|| self.server.contact_uri_for_location_with_sip_contact(
+                location, self.context.dialplan.media.sip_contact.as_ref(),
+            ))
             .unwrap_or_else(|| caller.clone());
         // Carry original caller headers (X-CRM-*, X-CC-*, etc.) so header-based
         // match/rewrite rules behave like the inbound path.
@@ -1796,13 +1797,6 @@ impl SipSession {
             .caller
             .clone()
             .ok_or_else(|| anyhow!("route-point transfer has no caller identity"))?;
-        let contact = self
-            .context
-            .dialplan
-            .caller_contact
-            .as_ref()
-            .map(|contact| contact.uri.clone())
-            .unwrap_or_else(|| caller.clone());
         let realm = self.server.proxy_config.load().select_realm("");
         let target = crate::call::build_sip_uri(route_point, &realm);
         let target_uri = rsipstack::sip::Uri::try_from(target.as_str())
@@ -1825,7 +1819,7 @@ impl SipSession {
             &self.server,
             &target_uri,
             &caller,
-            &contact,
+            &caller, // Routing placeholder; this path starts an app, not a SIP leg.
             (!carry_headers.is_empty()).then_some(carry_headers),
             &self.context.dialplan.direction,
             self.context.cookie.clone(),

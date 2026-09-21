@@ -299,6 +299,9 @@ impl SipSession {
             .caller_contact
             .as_ref()
             .map(|c| c.uri.clone())
+            .or_else(|| self.server.contact_uri_for_location_with_sip_contact(
+                location, self.context.dialplan.media.sip_contact.as_ref(),
+            ))
             .unwrap_or_else(|| caller.clone());
         // Carry original caller headers (X-CRM-*, X-CC-*, etc.) so header-based
         // match/rewrite rules behave like the inbound path.
@@ -1191,12 +1194,8 @@ impl SipSession {
         let original_callee = context.original_callee.clone();
         let max_ring_time = Self::effective_ring_timeout(&context.dialplan, &server);
 
-        let local_contact = context
-            .dialplan
-            .caller_contact
-            .as_ref()
-            .map(|c| c.uri.clone())
-            .or_else(|| server.contact_uri_for_transaction(tx))
+        let local_contact = server
+            .contact_uri_for_transaction(tx)
             .or_else(|| server.default_contact_uri());
 
         let (state_tx, state_rx) = mpsc::unbounded_channel();
@@ -11158,6 +11157,9 @@ impl SipSession {
             .caller_contact
             .as_ref()
             .map(|c| c.uri.clone())
+            .or_else(|| self.server.contact_uri_for_location_with_sip_contact(
+                &location, self.context.dialplan.media.sip_contact.as_ref(),
+            ))
             .unwrap_or_else(|| caller.clone());
 
         // A reused logical leg (e.g. consult after rejection) is a new SIP call.
