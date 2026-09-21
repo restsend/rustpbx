@@ -68,10 +68,14 @@ Realm 用于划分 SIP 命名空间，并为认证提供上下文。
 # Max simultaneous transactions handled
 max_concurrency = 5000
 
-# Reject matching User-Agents
+# Reject matching User-Agents(忽略大小写的子串匹配)
 ua_black_list = ["friendly-scanner", "pplsip"]
-# Only allow specific User-Agents (if set, others are rejected)
+# Only allow specific User-Agents(设置后仅白名单命中的 UA 放行,
+# 且优先级高于两份黑名单)
 ua_white_list = []
+# 拦截常见扫描器 User-Agent(sipvicious、sipcli、sipsak 等),
+# 默认开启;详见下方 "User-Agent 过滤"
+# ua_block_scanners = true
 
 # If true, silently ignore requests to unknown users (anti-scanning)
 ensure_user = true
@@ -230,6 +234,39 @@ acl_rules = [
     "deny all",
 ]
 ```
+
+### User-Agent 过滤
+
+ACL 模块还可以根据请求的 `User-Agent` 头进行过滤。所有匹配均为**忽略大小写的子串匹配**，
+因此配置 `sipvicious` 即可同时拦截 `SIPVicious 2.0` 之类的变体。
+
+```toml
+[proxy]
+# 显式黑名单。命中的请求一律拒绝。
+# ua_black_list = ["superphone", "friendly-scanner"]
+
+# 显式白名单。非空时作为 allow-list 使用：
+# 仅白名单命中的 UA 放行，且优先级高于两份黑名单。
+# ua_white_list = ["grandstream", "yealink"]
+
+# 内置扫描器 UA 黑名单(默认: true)。拦截常见的 SIP 扫描/攻击工具
+# User-Agent:sipvicious、friendly-scanner、sipcli、sipsak、pplsip、
+# vaxsipuseragent、ozeki、sip-test、rapid7、nexpose、masscan、zmap、
+# nmap、unicornscan、sundayddr。
+# ua_block_scanners = true
+```
+
+匹配优先级:
+
+1. `ua_black_list` 命中 → 拒绝
+2. 非空 `ua_white_list` 命中 → 放行(覆盖内置黑名单)
+3. 非空 `ua_white_list` 未命中 → 拒绝(allow-list 语义)
+4. 内置扫描器命中(`ua_block_scanners` 开启时)→ 拒绝
+
+被拦截的请求会触发 `call_error` 事件(`acl.denied`,级别 `warn`),detail 中包含
+`reason: "ua_blacklist"`、`kind`(`ua_blacklist` / `ua_scanner` / `ua_not_whitelisted`)、
+`ua` 和 `matched`(命中的模式)字段。请求会被标记为 spam 并静默终止(不回 SIP 响应)。
+以上三个配置项均支持热更新。
 
 ## 呼叫处理
 

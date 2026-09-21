@@ -103,6 +103,10 @@ fn default_useragent() -> Option<String> {
     Some(crate::version::get_useragent())
 }
 
+fn default_ua_block_scanners() -> bool {
+    true
+}
+
 fn default_nat_fix() -> bool {
     true
 }
@@ -1360,6 +1364,12 @@ pub struct ProxyConfig {
     pub acl_files: Vec<String>,
     pub ua_white_list: Option<Vec<String>>,
     pub ua_black_list: Option<Vec<String>>,
+    /// Reject requests whose User-Agent matches a well-known scanner/hacking
+    /// tool (sipvicious, friendly-scanner, sipcli, ...) via case-insensitive
+    /// substring match. Enabled by default; a non-empty `ua_white_list` match
+    /// takes precedence and lets the request through.
+    #[serde(default = "default_ua_block_scanners")]
+    pub ua_block_scanners: bool,
     pub max_concurrency: Option<usize>,
     pub registrar_expires: Option<u32>,
     pub max_registrar_expires: Option<u32>,
@@ -2047,6 +2057,7 @@ impl Default for ProxyConfig {
             acl_rules: Some(vec!["allow all".to_string(), "deny all".to_string()]),
             ua_white_list: Some(vec![]),
             ua_black_list: Some(vec![]),
+            ua_block_scanners: default_ua_block_scanners(),
             addr: "0.0.0.0".to_string(),
             modules: Some(vec![
                 "acl".to_string(),

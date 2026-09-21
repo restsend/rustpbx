@@ -2063,6 +2063,7 @@ impl SipServerInner {
         }
         if old.ua_white_list != new_proxy.ua_white_list
             || old.ua_black_list != new_proxy.ua_black_list
+            || old.ua_block_scanners != new_proxy.ua_block_scanners
             || old.trusted_proxies != new_proxy.trusted_proxies
             || old.uri_max_length != new_proxy.uri_max_length
             || old.uri_reject_malformed != new_proxy.uri_reject_malformed

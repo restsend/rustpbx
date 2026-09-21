@@ -63,10 +63,14 @@ You can manage Realms in the **Web Console** under **Settings > Proxy Settings**
 # Max simultaneous transactions handled
 max_concurrency = 5000
 
-# Reject matching User-Agents
+# Reject matching User-Agents (case-insensitive substring match)
 ua_black_list = ["friendly-scanner", "pplsip"]
-# Only allow specific User-Agents (if set, others are rejected)
+# Only allow specific User-Agents (if set, others are rejected; a whitelist
+# match takes precedence over both blacklists)
 ua_white_list = []
+# Block well-known scanner User-Agents (sipvicious, sipcli, sipsak, ...)
+# enabled by default; see "User-Agent Filtering" below
+# ua_block_scanners = true
 
 # If true, silently ignore requests to unknown users (anti-scanning)
 ensure_user = true
@@ -232,6 +236,42 @@ acl_rules = [
     "deny all",
 ]
 ```
+
+### User-Agent Filtering
+
+The ACL module can also filter requests by their `User-Agent` header. All matching
+is **case-insensitive substring** based, so a pattern like `sipvicious` also blocks
+variants such as `SIPVicious 2.0`.
+
+```toml
+[proxy]
+# Explicit blacklist. Matching requests are always denied.
+# ua_black_list = ["superphone", "friendly-scanner"]
+
+# Explicit whitelist. When non-empty it acts as an allow-list:
+# only matching UAs are accepted, and a whitelist match takes
+# precedence over both blacklists.
+# ua_white_list = ["grandstream", "yealink"]
+
+# Built-in scanner UA blacklist (default: true). Blocks well-known
+# SIP scanner / hacking tool User-Agents: sipvicious, friendly-scanner,
+# sipcli, sipsak, pplsip, vaxsipuseragent, ozeki, sip-test, rapid7,
+# nexpose, masscan, zmap, nmap, unicornscan, sundayddr.
+# ua_block_scanners = true
+```
+
+Matching precedence:
+
+1. `ua_black_list` match → deny
+2. Non-empty `ua_white_list` match → allow (overrides the built-in list)
+3. Non-empty `ua_white_list` without match → deny (allow-list semantics)
+4. Built-in scanner match (when `ua_block_scanners` is on) → deny
+
+Requests denied by these checks emit a `call_error` event (`acl.denied`, severity
+`warn`) with detail fields `reason: "ua_blacklist"`, `kind`
+(`ua_blacklist` / `ua_scanner` / `ua_not_whitelisted`), `ua` and `matched` (the
+matched pattern). The request is marked as spam and aborted silently (no SIP
+response). All three options support hot reload.
 
 ## Call Handling
 

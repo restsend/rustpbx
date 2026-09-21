@@ -20,6 +20,56 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+/// Case-insensitive substring patterns for well-known SIP scanner / hacking
+/// tool User-Agents. Blocked by default (`ua_block_scanners`); requests can
+/// be exempted via a non-empty `ua_white_list` match.
+const COMMON_SCANNER_UA_PATTERNS: &[&str] = &[
+    "friendly-scanner",
+    "sipvicious",
+    "sipcli",
+    "sipsak",
+    "pplsip",
+    "vaxsipuseragent",
+    "ozeki",
+    "sip-test",
+    "rapid7",
+    "nexpose",
+    "masscan",
+    "zmap",
+    "nmap",
+    "unicornscan",
+    "sundayddr",
+];
+
+#[derive(Debug, Clone, PartialEq)]
+enum UaBlockReason {
+    /// matched an explicit `ua_black_list` pattern
+    Blacklisted(String),
+    /// matched a built-in scanner UA pattern
+    Scanner(String),
+    /// `ua_white_list` is non-empty and the UA does not match it
+    NotWhitelisted,
+}
+
+impl UaBlockReason {
+    fn kind(&self) -> &'static str {
+        match self {
+            UaBlockReason::Blacklisted(_) => "ua_blacklist",
+            UaBlockReason::Scanner(_) => "ua_scanner",
+            UaBlockReason::NotWhitelisted => "ua_not_whitelisted",
+        }
+    }
+
+    fn matched(&self) -> String {
+        match self {
+            UaBlockReason::Blacklisted(pattern) | UaBlockReason::Scanner(pattern) => {
+                pattern.clone()
+            }
+            UaBlockReason::NotWhitelisted => "not in ua_white_list".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct IpNetwork {
     network: IpAddr,
@@ -324,15 +374,43 @@ impl AclModule {
         false // Default deny if no rules match
     }
 
-    pub fn is_ua_allowed(&self, ua: &str) -> bool {
+    /// Evaluate a User-Agent against the explicit `ua_black_list`,
+    /// `ua_white_list` and the built-in scanner patterns. Matching is
+    /// case-insensitive substring based, so a configured pattern like
+    /// `sipvicious` also blocks variants such as `SIPVicious 2.0`.
+    ///
+    /// Precedence:
+    /// 1. explicit blacklist match -> deny
+    /// 2. non-empty whitelist match -> allow (overrides the scanner list)
+    /// 3. non-empty whitelist without match -> deny (allow-list semantics)
+    /// 4. built-in scanner match (when `ua_block_scanners` is on) -> deny
+    fn match_ua(&self, ua: &str) -> Option<UaBlockReason> {
         let (white, black) = self.live_ua_lists();
-        if black.contains(ua) {
-            return false;
+        let ua_lower = ua.to_lowercase();
+        if let Some(pattern) = black
+            .iter()
+            .find(|p| ua_lower.contains(&p.to_lowercase()))
+        {
+            return Some(UaBlockReason::Blacklisted(pattern.clone()));
         }
-        if white.is_empty() {
-            return true; // No whitelist means all UAs are allowed unless blacklisted
+        if !white.is_empty() {
+            if white.iter().any(|p| ua_lower.contains(&p.to_lowercase())) {
+                return None;
+            }
+            return Some(UaBlockReason::NotWhitelisted);
         }
-        white.contains(ua)
+        if !self.live_config().ua_block_scanners {
+            return None;
+        }
+        COMMON_SCANNER_UA_PATTERNS
+            .iter()
+            .copied()
+            .find(|p| ua_lower.contains(*p))
+            .map(|p| UaBlockReason::Scanner(p.to_string()))
+    }
+
+    pub fn is_ua_allowed(&self, ua: &str) -> bool {
+        self.match_ua(ua).is_none()
     }
 }
 
@@ -420,10 +498,15 @@ impl ProxyModule for AclModule {
         match tx.original.user_agent_header() {
             Some(ua_header) => {
                 let ua = ua_header.value();
-                if !self.is_ua_allowed(ua) {
+                if let Some(reason) = self.match_ua(ua) {
                     self.report_denied(
                         tx,
-                        serde_json::json!({ "reason": "ua_blacklist", "ua": ua }),
+                        serde_json::json!({
+                            "reason": "ua_blacklist",
+                            "kind": reason.kind(),
+                            "ua": ua,
+                            "matched": reason.matched(),
+                        }),
                     );
                     cookie.mark_as_spam(crate::call::cookie::SpamResult::UaBlacklist);
                     return Ok(ProxyAction::Abort);
@@ -1071,5 +1154,91 @@ mod tests {
         assert!(acl.dos_check_and_track(ip1).await.is_err()); // ip1 blocked
 
         assert!(acl.dos_check_and_track(ip2).await.is_ok()); // ip2 still allowed
+    }
+
+    // ── User-Agent blacklist unit tests ───────────────────────
+
+    #[tokio::test]
+    async fn test_ua_builtin_scanner_blocked_by_default() {
+        let acl = AclModule::new(Arc::new(ProxyConfig::default()));
+
+        for ua in [
+            "friendly-scanner",
+            "Friendly-Scanner",
+            "SIPVicious 2.0",
+            "sipcli v1.5",
+            "sipsak 0.9.7",
+            "pplsip",
+            "VaxSIPUserAgent-SDK",
+            "Ozeki VoIP SIP SDK v10",
+            "rapid7-nexpose-client",
+        ] {
+            assert!(!acl.is_ua_allowed(ua), "UA `{ua}` should be blocked");
+        }
+        assert_eq!(
+            acl.match_ua("SIPVicious 2.0"),
+            Some(UaBlockReason::Scanner("sipvicious".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ua_normal_allowed_by_default() {
+        let acl = AclModule::new(Arc::new(ProxyConfig::default()));
+
+        for ua in [
+            "rustpbx 0.5.0",
+            "Grandstream HW GXV3275 1.0.1.60",
+            "Yealink SIP-T58A 99.84.0.15",
+            "Cisco-SIPGateway/IOS-17.6.4",
+        ] {
+            assert!(acl.is_ua_allowed(ua), "UA `{ua}` should be allowed");
+            assert_eq!(acl.match_ua(ua), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ua_explicit_blacklist_substring_match() {
+        let config = Arc::new(ProxyConfig {
+            ua_black_list: Some(vec!["superphone".to_string()]),
+            ..Default::default()
+        });
+        let acl = AclModule::new(config);
+
+        assert!(!acl.is_ua_allowed("SuperPhone/1.0"));
+        assert_eq!(
+            acl.match_ua("SuperPhone/1.0"),
+            Some(UaBlockReason::Blacklisted("superphone".to_string()))
+        );
+        assert!(acl.is_ua_allowed("Yealink SIP-T58A"));
+    }
+
+    #[tokio::test]
+    async fn test_ua_whitelist_overrides_builtin_scanner_list() {
+        let config = Arc::new(ProxyConfig {
+            ua_white_list: Some(vec!["ozeki".to_string()]),
+            ..Default::default()
+        });
+        let acl = AclModule::new(config);
+
+        // explicitly whitelisted UA passes even though it matches a scanner pattern
+        assert!(acl.is_ua_allowed("Ozeki VoIP SIP SDK"));
+        assert_eq!(acl.match_ua("Ozeki VoIP SIP SDK"), None);
+        // allow-list semantics: non-matching UAs are denied
+        assert_eq!(
+            acl.match_ua("Yealink SIP-T58A"),
+            Some(UaBlockReason::NotWhitelisted)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ua_scanner_check_disabled() {
+        let config = Arc::new(ProxyConfig {
+            ua_block_scanners: false,
+            ..Default::default()
+        });
+        let acl = AclModule::new(config);
+
+        assert!(acl.is_ua_allowed("friendly-scanner"));
+        assert_eq!(acl.match_ua("sipvicious"), None);
     }
 }

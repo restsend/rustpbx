@@ -231,6 +231,15 @@ acl_rules = [
 ]
 acl_files = ["config/acl/*.toml"]
 
+# User-Agent based filtering (case-insensitive substring matching).
+# ua_black_list entries are always blocked; when ua_white_list is non-empty it
+# acts as an allow-list and takes precedence over the blacklists.
+# ua_block_scanners (default: true) blocks well-known scanner/hacking tool
+# User-Agents such as sipvicious / friendly-scanner / sipcli / sipsak.
+# ua_white_list = ["grandstream", "yealink"]
+# ua_black_list = []
+# ua_block_scanners = true
+
 [[proxy.user_backends]]
 type = "memory"
 users = [
