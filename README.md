@@ -1,7 +1,7 @@
 # RustPBX
 
 ![Crates.io License](https://img.shields.io/crates/l/rustpbx)
-![GitHub commit activity](https://img.shields.io/github/commit-activity/m/restsend/rustpbx) ![Crates.io Total Downloads](https://img.shields.io/crates/d/rustpbx) ![GitHub Repo stars](https://img.shields.io/github/stars/restsend/rustpbx) [![AtomGitStars](https://atomgit.com/rustpbx/rustpbx/star/badge.svg)](RustPBX)
+![GitHub commit activity](https://img.shields.io/github/commit-activity/m/restsend/rustpbx) ![Crates.io Total Downloads](https://img.shields.io/crates/d/rustpbx) ![GitHub Repo stars](https://img.shields.io/github/stars/restsend/rustpbx) [![AtomGitStars](https://atomgit.com/restsend/rustpbx/star/badge.svg)](RustPBX)
 
 **A high-performance, software-defined PBX built in Rust.**
 
@@ -9,7 +9,7 @@ All call control is externalized via HTTP/WebSocket/Webhook — routing, media c
 
 **[GitHub](https://github.com/restsend/rustpbx)** | **[Website](https://miuda.ai)**
 
-> 大陆用户 请访问 https://atomgit.com/rustpbx/rustpbx 
+> 中文用户请访问AtomGIT平台  https://atomgit.com/restsend/rustpbx  
 
 ---
 
