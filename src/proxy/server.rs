@@ -1422,19 +1422,40 @@ impl SipServer {
             }
         });
 
-        // Spawn active_calls Prometheus gauge sampling task
+        // Spawn Prometheus gauge sampling task. In-memory gauges (dialogs,
+        // transaction endpoint stats) are refreshed every 5s; locator-backed
+        // values (registrations, webrtc locations) every 15s since they may
+        // hit the DB.
         let registry_for_metrics = self.inner.active_call_registry.clone();
+        let locator_for_metrics = self.inner.locator.clone();
+        let endpoint_inner_for_metrics = self.inner.endpoint.inner.clone();
+        let runnings_for_metrics = self.inner.runnings_tx.clone();
         let metrics_cancel = cancel_token.clone();
         crate::utils::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut tick_count: u64 = 0;
             loop {
                 tokio::select! {
                     _ = metrics_cancel.cancelled() => break,
                     _ = interval.tick() => {
+                        tick_count += 1;
                         let count = registry_for_metrics.count();
                         crate::metrics::sip::set_active_dialogs(count);
                         crate::metrics::sip::set_draining(crate::shutdown::is_draining());
+                        let stats = endpoint_inner_for_metrics.get_stats();
+                        crate::metrics::transaction::set_endpoint_running(stats.running_transactions);
+                        crate::metrics::transaction::set_endpoint_finished(stats.finished_transactions);
+                        crate::metrics::transaction::set_endpoint_waiting_ack(stats.waiting_ack);
+                        crate::metrics::transaction::set_running(
+                            runnings_for_metrics.load(Ordering::Relaxed),
+                        );
+                        if tick_count % 3 == 0
+                            && let Ok(stats) = locator_for_metrics.online_stats().await
+                        {
+                            crate::metrics::sip::set_active_registrations(stats.online_locations);
+                            crate::metrics::sip::set_webrtc_locations(stats.webrtc_locations);
+                        }
                     }
                 }
             }
@@ -1480,20 +1501,9 @@ impl SipServer {
     }
 
     async fn handle_incoming(&self, mut incoming: TransactionReceiver) -> Result<()> {
-        let mut tx_count: u64 = 0;
         while let Some(mut tx) = incoming.recv().await {
             crate::metrics::transaction::received();
             crate::sip_telemetry::SipTelemetry::tx_received();
-            tx_count += 1;
-            if tx_count % 100 == 0 {
-                let stats = self.inner.endpoint.inner.get_stats();
-                crate::metrics::transaction::set_endpoint_running(stats.running_transactions);
-                crate::metrics::transaction::set_endpoint_finished(stats.finished_transactions);
-                crate::metrics::transaction::set_endpoint_waiting_ack(stats.waiting_ack);
-                crate::metrics::transaction::set_running(
-                    self.inner.runnings_tx.load(Ordering::Relaxed),
-                );
-            }
             let modules = self.modules.clone();
 
             let token = tx

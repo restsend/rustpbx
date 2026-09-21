@@ -45,6 +45,7 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(crate::console::handlers::presence::api_urls())
         .merge(crate::console::handlers::notifications::api_urls())
         .merge(crate::console::handlers::metrics::api_urls())
+        .merge(crate::console::handlers::reports::api_urls())
         .merge(crate::console::handlers::addons::api_urls());
 
     // Addon API routes (collected at runtime via Addon trait hooks), including

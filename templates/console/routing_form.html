@@ -878,10 +878,59 @@
                     if (this.mode === 'create' && !this.route.id) {
                         this.route.direction = '';
                     }
+                    if (this.mode === 'create') {
+                        this.applyQuickDraft();
+                    }
                     this.$nextTick(() => {
                         this.reconcileSelectValues();
                         this.syncDestSelector();
                     });
+                },
+                applyQuickDraft() {
+                    let draft = null;
+                    try {
+                        const raw = sessionStorage.getItem('rustpbx_routing_quick_draft');
+                        if (raw) {
+                            sessionStorage.removeItem('rustpbx_routing_quick_draft');
+                            draft = JSON.parse(raw);
+                        }
+                    } catch (_) {
+                        return;
+                    }
+                    if (!draft || typeof draft !== 'object') {
+                        return;
+                    }
+                    if (draft.match && typeof draft.match === 'object') {
+                        Object.entries(draft.match).forEach(([key, value]) => {
+                            if (typeof value === 'string' && value.trim().length) {
+                                this.route.match[key] = value.trim();
+                            }
+                        });
+                    }
+                    if (draft.rewrite && typeof draft.rewrite === 'object') {
+                        Object.entries(draft.rewrite).forEach(([key, value]) => {
+                            if (typeof value === 'string' && value.trim().length) {
+                                this.route.rewrite[key] = value.trim();
+                            }
+                        });
+                    }
+                    if (Array.isArray(draft.trunks) && draft.trunks.length) {
+                        this.route.action.trunks = draft.trunks
+                            .filter((name) => typeof name === 'string' && name.trim().length)
+                            .map((name) => ({ name: name.trim(), weight: 0 }));
+                    }
+                    if (typeof draft.select === 'string' && draft.select.trim().length) {
+                        this.route.action.select = this.normalizeSelectionOption(draft.select);
+                    }
+                    if (draft.direction === 'inbound' || draft.direction === 'outbound') {
+                        this.route.direction = draft.direction;
+                    }
+                    if (Number.isFinite(Number(draft.priority))) {
+                        this.route.priority = Math.max(0, Math.round(Number(draft.priority)));
+                    }
+                    if (typeof draft.name === 'string' && draft.name.trim().length) {
+                        this.route.name = draft.name.trim();
+                    }
                 },
                 reconcileSelectValues() {
                     const reconcileTrunkSelects = (container) => {

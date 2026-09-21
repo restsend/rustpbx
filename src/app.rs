@@ -734,6 +734,112 @@ impl AppStateBuilder {
             }
         }
 
+        // ── Prometheus process/media sampler ─────────────────────────────
+        // Feeds rustpbx_process_* (CPU / RSS / fds / connections / uptime),
+        // rustpbx_rtp_* and the active-bridge gauge. The /proc readers are
+        // Linux-only and no-op elsewhere; without a recorder installed the
+        // metrics facade calls are no-ops, so this is safe to always spawn.
+        crate::metrics_sampler::spawn(core.token.child_token());
+
+        // ── Daily CDR rollup (rustpbx_cdr_daily) ─────────────────────────
+        // Recomputes today + yesterday aggregates every 5 minutes so the
+        // dashboard / reports drill down without scanning raw CDRs.
+        {
+            let rollup_db = app_state.db().clone();
+            let rollup_cancel = core.token.child_token();
+            crate::utils::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                // The first interval tick fires immediately, so the loop's
+                // first iteration rolls up right after boot.
+                loop {
+                    tokio::select! {
+                        _ = rollup_cancel.cancelled() => break,
+                        _ = tick.tick() => {}
+                    }
+                    if let Err(e) =
+                        crate::report::rollup::rollup_recent_days(&rollup_db).await
+                    {
+                        tracing::warn!(error = %e, "cdr daily rollup failed");
+                    }
+                }
+            });
+        }
+
+        // ── Runtime snapshots (locator / capacity watermarks) ────────────
+        // 60s samples into rustpbx_runtime_snapshots power the locator and
+        // capacity trend charts; rows older than 30 days are pruned.
+        {
+            use crate::models::runtime_snapshot;
+            let snap_app = app_state.clone();
+            let snap_db = app_state.db().clone();
+            let snap_cancel = core.token.child_token();
+            crate::utils::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut last_prune = Option::<std::time::Instant>::None;
+                loop {
+                    tokio::select! {
+                        _ = snap_cancel.cancelled() => break,
+                        _ = tick.tick() => {}
+                    }
+                    // Prune once an hour (best-effort).
+                    if last_prune
+                        .map(|t| t.elapsed().as_secs() >= 3600)
+                        .unwrap_or(true)
+                    {
+                        last_prune = Some(std::time::Instant::now());
+                        let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+                        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+                        let _ = runtime_snapshot::Entity::delete_many()
+                            .filter(runtime_snapshot::Column::CreatedAt.lt(cutoff))
+                            .exec(&snap_db)
+                            .await;
+                    }
+                    let server = snap_app.sip_server().inner.clone();
+                    let now = chrono::Utc::now();
+                    let instance = Some(std::env::var("RUSTPBX_INSTANCE_ID").unwrap_or_default())
+                        .filter(|s| !s.is_empty());
+                    // Locator population.
+                    if let Ok(stats) = server.locator.online_stats().await {
+                        let model = runtime_snapshot::ActiveModel {
+                            id: sea_orm::NotSet,
+                            kind: sea_orm::Set("locator".to_string()),
+                            created_at: sea_orm::Set(now),
+                            num1: sea_orm::Set(stats.online_locations as i64),
+                            num2: sea_orm::Set(stats.online_users as i64),
+                            num3: sea_orm::Set(stats.webrtc_locations as i64),
+                            num4: sea_orm::Set(0.0),
+                            data: sea_orm::Set(Some(
+                                serde_json::to_value(&stats.by_transport).unwrap_or_default(),
+                            )),
+                            instance_id: sea_orm::Set(instance.clone()),
+                        };
+                        if let Err(e) = sea_orm::ActiveModelTrait::insert(model, &snap_db).await {
+                            tracing::debug!(error = %e, "locator snapshot insert failed");
+                        }
+                    }
+                    // Concurrency watermark.
+                    let model = runtime_snapshot::ActiveModel {
+                        id: sea_orm::NotSet,
+                        kind: sea_orm::Set("system_capacity".to_string()),
+                        created_at: sea_orm::Set(now),
+                        num1: sea_orm::Set(server.active_call_registry.count() as i64),
+                        num2: sea_orm::Set(
+                            server.proxy_config.load().max_concurrency.unwrap_or(0) as i64
+                        ),
+                        num3: sea_orm::Set(0),
+                        num4: sea_orm::Set(0.0),
+                        data: sea_orm::Set(None),
+                        instance_id: sea_orm::Set(instance),
+                    };
+                    if let Err(e) = sea_orm::ActiveModelTrait::insert(model, &snap_db).await {
+                        tracing::debug!(error = %e, "capacity snapshot insert failed");
+                    }
+                }
+            });
+        }
+
         // ── Wire cluster AMI sync ────────────────────────────────────────
         // Build the peer list for AMI-based cluster sync, excluding self.
         //

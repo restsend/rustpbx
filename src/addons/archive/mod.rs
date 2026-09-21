@@ -110,6 +110,8 @@ mod tests {
             tags: Some(serde_json::json!(["customer", "priority"])),
             leg_timeline: Some(serde_json::json!({"events": []})),
             metadata: Some(serde_json::json!({"account_id": "123"})),
+            hangup_reason: Some("caller".to_string()),
+            sip_status_code: Some(200),
             created_at: now,
             updated_at: now,
             archived_at: None,

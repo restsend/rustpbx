@@ -24,6 +24,7 @@ use axum::{
 };
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use sea_orm::sea_query::Order;
+use sea_orm::QuerySelect;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection, DbErr,
     EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
@@ -75,7 +76,7 @@ fn resolve_archived_artifact_path(path: &str, at: DateTime<Utc>) -> String {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-struct QueryCallRecordFilters {
+pub(crate) struct QueryCallRecordFilters {
     #[serde(default)]
     q: Option<String>,
     #[serde(default)]
@@ -178,6 +179,7 @@ pub fn api_urls() -> Router<Arc<ConsoleState>> {
             "/call-records",
             get(query_call_records).post(query_call_records),
         )
+        .route("/call-records/export", get(export_call_records_csv))
         .route(
             "/call-records/{id}",
             patch(update_call_record).delete(delete_call_record),
@@ -191,6 +193,110 @@ pub fn api_urls() -> Router<Arc<ConsoleState>> {
             "/call-records/by-session/{session_id}/artifacts",
             get(list_session_artifacts),
         )
+}
+
+/// Hard cap for a single CSV export — prevents one request from pulling the
+/// whole table through memory.
+const EXPORT_MAX_ROWS: u64 = 50_000;
+
+/// CSV export of the CDR list with the same filters as the console list
+/// view. Batched fetch (cursor by id) so a large result does not need to be
+/// materialized as sea-orm models all at once.
+pub(crate) async fn export_call_records_csv(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+    Query(filters): Query<QueryCallRecordFilters>,
+) -> Response {
+    let cdr_date = filters.date_from.as_deref();
+    let cdb = state.cdr_db(cdr_date).await;
+    let condition = build_condition(&Some(filters));
+
+    let mut csv = String::from(
+        "call_id,session_id,direction,status,started_at,ended_at,duration_secs,from_number,to_number,agent_name,queue,department_id,sip_trunk_id,hangup_reason,sip_status_code,recording_url\n",
+    );
+
+    let mut last_id: i64 = 0;
+    let mut exported: u64 = 0;
+    loop {
+        let mut selector = CallRecordEntity::find()
+            .filter(condition.clone())
+            .order_by_asc(CallRecordColumn::Id)
+            .limit(1000);
+        if last_id > 0 {
+            selector = selector.filter(CallRecordColumn::Id.gt(last_id));
+        }
+        let batch = match selector.all(&cdb).await {
+            Ok(b) => b,
+            Err(err) => {
+                warn!("failed to export call records: {}", err);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "message": err.to_string() })),
+                )
+                    .into_response();
+            }
+        };
+        if batch.is_empty() || exported >= EXPORT_MAX_ROWS {
+            break;
+        }
+        for r in &batch {
+            last_id = r.id;
+            exported += 1;
+            if exported > EXPORT_MAX_ROWS {
+                break;
+            }
+            csv.push_str(&format!(
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},\n",
+                csv_escape(&r.call_id),
+                csv_escape(r.session_id.as_deref().unwrap_or("")),
+                csv_escape(&r.direction),
+                csv_escape(&r.status),
+                csv_escape(&r.started_at.to_rfc3339()),
+                csv_escape(
+                    &r.ended_at
+                        .map(|t| t.to_rfc3339())
+                        .unwrap_or_default()
+                ),
+                r.duration_secs,
+                csv_escape(r.from_number.as_deref().unwrap_or("")),
+                csv_escape(r.to_number.as_deref().unwrap_or("")),
+                csv_escape(r.agent_name.as_deref().unwrap_or("")),
+                csv_escape(r.queue.as_deref().unwrap_or("")),
+                r.department_id.map(|v| v.to_string()).unwrap_or_default(),
+                r.sip_trunk_id.map(|v| v.to_string()).unwrap_or_default(),
+                csv_escape(r.hangup_reason.as_deref().unwrap_or("")),
+                r.sip_status_code
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+                csv_escape(r.recording_url.as_deref().unwrap_or("")),
+            ));
+        }
+        if batch.len() < 1000 {
+            break;
+        }
+    }
+
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8"),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                "attachment; filename=\"call_records.csv\"",
+            ),
+        ],
+        csv,
+    )
+        .into_response()
+}
+
+/// RFC4180: quote fields containing comma, quote, or newline; double any
+/// embedded quotes.
+fn csv_escape(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
 }
 
 async fn resolve_call_record_by_id_or_call_id(
