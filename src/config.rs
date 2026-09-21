@@ -819,13 +819,25 @@ pub fn parse_local_networks(raw: &[String]) -> Vec<IpNet> {
     raw.iter().filter_map(|s| s.trim().parse().ok()).collect()
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct SipContactConfig {
     pub sip_external_ip: Option<String>,
     pub auto_sip_external_ip: Option<String>,
     pub local_networks: Vec<IpNet>,
     pub contact_lan_use_bind: bool,
     pub sip_contact_always_bind: bool,
+}
+
+impl Default for SipContactConfig {
+    fn default() -> Self {
+        Self {
+            sip_external_ip: None,
+            auto_sip_external_ip: None,
+            local_networks: default_local_networks(),
+            contact_lan_use_bind: true,
+            sip_contact_always_bind: false,
+        }
+    }
 }
 
 /// Network egress profile (FreeSWITCH-style). Groups RTP/SDP and SIP Contact

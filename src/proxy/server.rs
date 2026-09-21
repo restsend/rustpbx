@@ -1683,23 +1683,21 @@ impl SipServerInner {
     }
 
     pub fn default_contact_uri(&self) -> Option<rsipstack::sip::Uri> {
-        self.contact_uri_for_transport(Transport::Udp, None, None)
+        self.contact_uri_for_transport(Transport::Udp, None)
     }
 
     /// Build a Contact URI using configured listener ports and platform network policy.
     pub fn contact_uri_for_transport(
         &self,
         transport: Transport,
-        port_override: Option<u16>,
         destination: Option<IpAddr>,
     ) -> Option<rsipstack::sip::Uri> {
-        self.contact_uri_for_transport_with_sip_contact(transport, port_override, destination, None)
+        self.contact_uri_for_transport_with_sip_contact(transport, destination, None)
     }
 
     pub fn contact_uri_for_transport_with_sip_contact(
         &self,
         transport: Transport,
-        port_override: Option<u16>,
         destination: Option<IpAddr>,
         sip_contact: Option<&SipContactConfig>,
     ) -> Option<rsipstack::sip::Uri> {
@@ -1713,7 +1711,6 @@ impl SipServerInner {
             &contact,
             rtp.external_ip.as_deref(),
             transport,
-            port_override,
             destination,
         )?;
         Some(build_contact_uri(
@@ -1725,45 +1722,30 @@ impl SipServerInner {
 
     /// Build a Contact URI for a response to an inbound SIP transaction.
     ///
-    /// Stream connections retain the advertised local address of the listener
-    /// that accepted the request, so using the transaction connection keeps the
-    /// Contact scheme, transport, host, and port on that same listener.
+    /// The incoming peer address selects LAN/WAN Contact advertisement.
     pub fn contact_uri_for_transaction(&self, tx: &Transaction) -> Option<rsipstack::sip::Uri> {
         let connection = tx.connection.as_ref()?;
 
-        // RustPBX's HTTP WebSocket adapter represents a client with a synthetic
-        // ChannelConnection whose address is the remote client's address. It
-        // must never be advertised as the server's Contact. Preserve the
-        // existing endpoint-level fallback for that adapter.
+        // The HTTP WebSocket adapter stores the remote client's address.
+        // Use the default listener Contact for this adapter.
         if matches!(connection, SipConnection::Channel(_)) {
             return None;
         }
 
-        let conn_addr = connection.get_addr();
         let transport = connection.transport();
-        let port = conn_addr.addr.port.map(|p| p.0);
+        let peer_ip = connection.get_remote_addr()
+            .and_then(|addr| super::sip_contact::ip_from_sip_host(&addr.addr.host.to_string()));
         let proxy = self.proxy_config.load();
-
-        // Prefer configured listener port over whatever host the transport layer
-        // advertises (may be NAT external IP or an ephemeral outbound socket).
-        let port_override = if super::sip_contact::is_configured_listener_addr(&proxy, conn_addr) {
-            port
-        } else {
-            super::sip_contact::listener_sip_addr(&proxy, transport, None)
-                .and_then(|a| a.addr.port.map(|p| p.0))
-                .or(port)
-        };
 
         // A wildcard is only a listener instruction; generate the Contact from this flow's local IP.
         let contact = self.sip_contact_config.load();
         let rtp = self.rtp_config.load();
-        let sip_addr = super::sip_contact::build_transaction_contact_sip_addr(
+        let sip_addr = super::sip_contact::build_contact_sip_addr(
             &proxy,
             &contact,
             rtp.external_ip.as_deref(),
             transport,
-            port_override,
-            conn_addr,
+            peer_ip,
         )?;
         Some(build_contact_uri(
             &self.contact_username,
@@ -1790,15 +1772,20 @@ impl SipServerInner {
             .as_ref()
             .and_then(|d| d.r#type)
             .unwrap_or(Transport::Udp);
-        let port = target
-            .destination
-            .as_ref()
-            .and_then(|d| d.addr.port.map(|p| p.0));
+        // The HTTP WebSocket adapter uses the default UDP listener Contact.
+        // This does not change the destination or the WebSocket connection.
+        let transport = if matches!(transport, Transport::Ws | Transport::Wss)
+            && self.proxy_config.load().ws_port.is_none()
+        {
+            Transport::Udp
+        } else {
+            transport
+        };
         let destination = target
             .destination
             .as_ref()
             .and_then(|d| super::sip_contact::ip_from_sip_host(&d.addr.host.to_string()));
-        self.contact_uri_for_transport_with_sip_contact(transport, port, destination, sip_contact)
+        self.contact_uri_for_transport_with_sip_contact(transport, destination, sip_contact)
     }
 
     pub fn network_profile(&self, id: &str) -> Option<NetworkProfile> {
@@ -2347,6 +2334,103 @@ mod contact_uri_tests {
     use crate::config::{ClusterPeer, SipContactConfig};
     use rsipstack::sip::HostWithPort;
 
+    #[tokio::test]
+    async fn incoming_udp_contact_uses_packet_source_and_local_network_policy() -> anyhow::Result<()> {
+        use crate::proxy::tests::common::{create_test_request, create_test_server_with_config};
+        use rsipstack::transaction::key::{TransactionKey, TransactionRole};
+        use rsipstack::transport::{TransportEvent, udp::UdpInner};
+
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+        let local = socket.local_addr()?;
+        let external = SocketAddr::new("203.0.113.10".parse()?, local.port());
+        let connection = UdpConnection::attach(
+            UdpInner { conn: socket, addr: local.into() }, Some(external), None,
+        ).await;
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+        // The SIP headers claim a public host; only the packet source is LAN.
+        let request = create_test_request(rsipstack::sip::Method::Invite, "alice", None, "198.51.100.20", None);
+        peer.send_to(request.to_string().as_bytes(), local).await?;
+        let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let event = tokio::select! {
+            result = connection.serve_loop(sender) => panic!("UDP receive loop stopped: {result:?}"),
+            event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv()) => event?.unwrap(),
+        };
+        let TransportEvent::Incoming(rsipstack::sip::SipMessage::Request(request), connection, _) = event else {
+            panic!("expected incoming UDP INVITE");
+        };
+        assert_eq!(connection.get_addr().addr.to_string(), external.to_string());
+        let (server, _) = create_test_server_with_config(ProxyConfig {
+            addr: "0.0.0.0".into(),
+            udp_port: Some(local.port()),
+            ..Default::default()
+        }).await;
+        let key = TransactionKey::from_request(&request, TransactionRole::Server)?;
+        let tx = Transaction::new_server(key, request, server.endpoint.inner.clone(), Some(connection));
+        for (always_bind, lan_enabled, expected) in [
+            (false, true, "127.0.0.1"),
+            (false, false, "203.0.113.10"),
+            (true, false, "127.0.0.1"),
+        ] {
+            server.sip_contact_config.store(Arc::new(SipContactConfig {
+                sip_external_ip: Some("203.0.113.10".into()),
+                contact_lan_use_bind: lan_enabled,
+                sip_contact_always_bind: always_bind,
+                ..Default::default()
+            }));
+            let contact = server.contact_uri_for_transaction(&tx).unwrap();
+            assert_eq!(contact.host_with_port.host.to_string(), expected);
+            assert_eq!(contact.host_with_port.port, Some(local.port().into()));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn outgoing_contact_uses_our_listener_port() -> anyhow::Result<()> {
+        use crate::proxy::tests::common::create_test_server_with_config;
+        let (server, _) = create_test_server_with_config(ProxyConfig {
+            addr: "0.0.0.0".into(),
+            udp_port: Some(15070),
+            ..Default::default()
+        }).await;
+        server.sip_contact_config.store(Arc::new(SipContactConfig {
+            sip_external_ip: Some("203.0.113.10".into()),
+            ..Default::default()
+        }));
+        for transport in [Transport::Ws, Transport::Wss] {
+            let target = crate::call::Location {
+                aor: "sip:browser@client.invalid;transport=ws".try_into()?,
+                destination: Some(sip_addr("127.0.0.1:25070", Some(transport))),
+                ..Default::default()
+            };
+            let contact = server.contact_uri_for_location(&target).unwrap();
+            assert_eq!(contact.host_with_port.to_string(), "127.0.0.1:15070");
+        }
+        server.proxy_config.store(Arc::new(ProxyConfig {
+            addr: "0.0.0.0".into(),
+            udp_port: Some(15070),
+            tcp_port: Some(15071),
+            tls_port: Some(15072),
+            ws_port: Some(15073),
+            ..Default::default()
+        }));
+        for (transport, port) in [
+            (Transport::Udp, 15070),
+            (Transport::Tcp, 15071),
+            (Transport::Tls, 15072),
+            (Transport::Ws, 15073),
+            (Transport::Wss, 15073),
+        ] {
+            let target = crate::call::Location {
+                aor: "sip:callee@127.0.0.1:25070".try_into()?,
+                destination: Some(sip_addr("127.0.0.1:25070", Some(transport))),
+                ..Default::default()
+            };
+            let contact = server.contact_uri_for_location(&target).unwrap();
+            assert_eq!(contact.host_with_port.to_string(), format!("127.0.0.1:{port}"));
+        }
+        Ok(())
+    }
+
     fn sip_addr(value: &str, transport: Option<Transport>) -> SipAddr {
         SipAddr {
             r#type: transport,
@@ -2388,7 +2472,6 @@ mod contact_uri_tests {
         };
         let contact = SipContactConfig {
             sip_external_ip: Some("203.0.113.10".to_string()),
-            local_networks: crate::config::default_local_networks(),
             contact_lan_use_bind: true,
             ..Default::default()
         };
@@ -2397,8 +2480,7 @@ mod contact_uri_tests {
             &contact,
             Some("203.0.113.10"),
             Transport::Tls,
-            None,
-            Some("192.168.0.50".parse().unwrap()),
+            Some("127.0.0.1".parse().unwrap()),
         )
         .unwrap();
         assert_eq!(addr.addr.to_string(), "192.168.10.252:5061");

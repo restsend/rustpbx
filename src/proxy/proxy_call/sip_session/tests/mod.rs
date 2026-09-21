@@ -646,7 +646,10 @@ async fn test_target_invite_call_ids_resolve_before_dialing() {
     let (state_tx, _state_rx) = mpsc::unbounded_channel();
     let server_dialog = server
         .dialog_layer
-        .get_or_create_server_invite(&tx, state_tx, None, None)
+        .get_or_create_server_invite(
+            &tx, state_tx, None,
+            Some("sip:pbx@192.0.2.77:5099".try_into().unwrap()),
+        )
         .unwrap();
     let session_id = server_dialog.id().call_id.clone();
     let context = CallContext {
@@ -688,6 +691,9 @@ async fn test_target_invite_call_ids_resolve_before_dialing() {
             .build_target_invite_option(&target, leg_id)
             .await
             .unwrap();
+        // The incoming server Contact must not leak into outgoing INVITEs.
+        assert_eq!(invite.contact, server.contact_uri_for_location_with_sip_contact(&target, None).unwrap());
+        assert_ne!(invite.contact, session.caller_dialog.as_ref().unwrap().snapshot().local_contact.unwrap());
         assert_eq!(invite.call_id.as_deref(), Some(call_id.as_str()));
         assert_ne!(call_id, session_id);
         let resolved = registry
