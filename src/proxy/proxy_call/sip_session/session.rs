@@ -299,6 +299,9 @@ impl SipSession {
             .caller_contact
             .as_ref()
             .map(|c| c.uri.clone())
+            .or_else(|| self.server.contact_uri_for_location_with_sip_contact(
+                location, self.context.dialplan.media.sip_contact.as_ref(),
+            ))
             .unwrap_or_else(|| caller.clone());
         // Carry original caller headers (X-CRM-*, X-CC-*, etc.) so header-based
         // match/rewrite rules behave like the inbound path.
@@ -516,9 +519,10 @@ impl SipSession {
     }
 
     /// Auto-start live transcription when `[proxy.transcript.remote]
-    /// auto_start = true`. Best-effort: failures (unconfigured, bypass mode,
-    /// provider errors) are logged and never fatal to the call. Holds one
-    /// transcription reference for the rest of the call.
+    /// auto_start = true` **or** the dialplan carries a per-call
+    /// [`TranscriptionPlan`] (attached by a dialplan inspector). Best-effort:
+    /// failures (bypass mode, provider errors) are logged and never fatal to
+    /// the call. Holds one transcription reference for the rest of the call.
     ///
     /// Re-entry safe: `accept_call` / `attach_caller_dialog` can run more
     /// than once per session (callee re-attach, API `Answer`, queue
@@ -530,7 +534,7 @@ impl SipSession {
         if self.live_transcription.is_some() {
             return;
         }
-        let enabled = self
+        let globally_enabled = self
             .server
             .proxy_config
             .load()
@@ -539,7 +543,13 @@ impl SipSession {
             .and_then(|t| t.remote.as_ref())
             .and_then(|r| r.auto_start)
             .unwrap_or(false);
-        if !enabled {
+        let per_call_plan = self
+            .context
+            .dialplan
+            .extensions
+            .get::<crate::call::transcription::TranscriptionPlan>()
+            .is_some();
+        if !globally_enabled && !per_call_plan {
             return;
         }
         if let Err(error) = self.start_live_transcription(None).await {
@@ -573,13 +583,81 @@ impl SipSession {
         option
     }
 
+    /// Clear the `discard` marker on the active recording segment. The
+    /// originate failure path uses this to KEEP the pre-answer ringback slice
+    /// (an unanswered call's artifact) when it stops the recorder — answered
+    /// calls instead stop while the marker is armed, deleting the file.
+    pub(crate) fn clear_active_recording_discard(&mut self) {
+        if let Some(active) = self.active_recording.as_mut() {
+            active.discard = false;
+        }
+    }
+
+    /// Close the active recording segment when the session hands control to a
+    /// successor application (transfer / queue / IVR jump). App-scoped sources
+    /// ([`crate::callrecord::RecordingSource::Ivr`]) end with their owning
+    /// app — the IVR stage's file is finalized at the hand-off ("截断") so the
+    /// agent stage records as its own segment. Policy full-call recordings
+    /// (`full`) and external segments keep rolling across the hand-off.
+    pub(crate) async fn close_app_scoped_recording(&mut self) {
+        let is_app_scoped = self
+            .active_recording
+            .as_ref()
+            .is_some_and(|a| a.source == crate::callrecord::RecordingSource::Ivr);
+        if !is_app_scoped {
+            return;
+        }
+        let outcome = self.media.recording.stop_recording().await;
+        match outcome {
+            Ok(Some(result)) => {
+                info!(
+                    session_id = %self.id,
+                    path = %result.path,
+                    "IVR recording segment closed at app hand-off"
+                );
+                self.publish_recording_complete(result);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                warn!(
+                    session_id = %self.id,
+                    %error,
+                    "Failed to close IVR recording segment at app hand-off"
+                );
+            }
+        }
+    }
+
     /// Install the recorder implementation selected for this call. Signaling
     /// call sites decide when automatic installation is allowed.
-    pub(crate) async fn set_auto_recorder(&mut self) -> Result<()> {
-        let recording = self.context.dialplan.recording.clone();
+    pub(crate) async fn set_auto_recorder(&mut self) -> Result<()> {        let recording = self.context.dialplan.recording.clone();
         if self.media.recording.has_recorder().await
         {
             return Ok(());
+        }
+
+        // Source-scoped auto start ([recording].auto_start_except): a call
+        // routed to an exempt application (e.g. IVR) installs no auto
+        // recorder — the IVR flow records only via its smart-node
+        // `record start` actions (segmented IVR/agent recordings).
+        let routed_app = match &self.context.dialplan.flow {
+            crate::call::DialplanFlow::Application { app_name, .. } => Some(app_name.as_str()),
+            _ => None,
+        };
+        {
+            let policy_guard = self.server.recording_policy.load();
+            let policy = policy_guard
+                .as_ref()
+                .as_ref()
+                .or(self.context.dialplan.recording_policy.as_ref());
+            if let Some(policy) = policy && !policy.auto_start_covers_app(routed_app) {
+                debug!(
+                    session_id = %self.id,
+                    routed_app = routed_app.unwrap_or("(none)"),
+                    "auto recorder skipped: routed app exempted by [recording].auto_start_except"
+                );
+                return Ok(());
+            }
         }
 
         if recording.uses_file_media() || recording.option.is_some() {
@@ -600,12 +678,14 @@ impl SipSession {
             self.active_recording = Some(crate::callrecord::ActiveRecording {
                 path,
                 segment_type: "full".to_string(),
+                source: crate::callrecord::RecordingSource::Full,
                 segment_id: "full".to_string(),
                 seq: 1,
                 label: "full".to_string(),
                 started_at: chrono::Utc::now(),
                 notify_app: false,
                 unique_id: uuid::Uuid::new_v4().to_string(),
+                discard: false,
             });
             debug!(session_id = %self.id, backend = "file", "auto recorder installed");
             return Ok(());
@@ -663,18 +743,35 @@ impl SipSession {
 
     /// Close out the active recording segment bookkeeping: move
     /// [`crate::callrecord::ActiveRecording`] state into a completed
-    /// [`crate::callrecord::RecordingSegment`]. Returns `(notify_app,
-    /// unique_id)` — the recording-level identifier to carry on RWI
-    /// `record_stopped` (and to reconcile with the later
-    /// `recording_metadata_available`), plus whether the running CallApp
-    /// should be notified.
+    /// [`crate::callrecord::RecordingSegment`]. Returns `None` when the
+    /// segment was flagged `discard` (e.g. an outbound pre-answer ringback
+    /// slice on an answered call): the file is deleted, nothing is
+    /// registered in the CDR, and the caller must suppress all recording
+    /// events. Otherwise returns `(notify_app, unique_id)` — the
+    /// recording-level identifier to carry on RWI `record_stopped` (and to
+    /// reconcile with the later `recording_metadata_available`), plus
+    /// whether the running CallApp should be notified.
     fn finalize_active_recording_segment(
         &mut self,
         result: &crate::media::media_recorder::RecordingResult,
-    ) -> (bool, Option<String>) {
+    ) -> Option<(bool, Option<String>)> {
         let ended_at = chrono::Utc::now();
+        let active = self.active_recording.take();
+        if active.as_ref().is_some_and(|a| a.discard) {
+            let path = std::path::Path::new(&result.path);
+            if let Err(error) = std::fs::remove_file(path) {
+                warn!(
+                    session_id = %self.id,
+                    path = %result.path,
+                    %error,
+                    "Failed to discard recording segment file"
+                );
+            }
+            let _ = std::fs::remove_file(crate::callrecord::upload_failed_marker_path(path));
+            return None;
+        }
         let (segment_type, segment_id, seq, label, started_at, unique_id, notify_app) =
-            if let Some(active) = self.active_recording.take() {
+            if let Some(active) = active {
                 (
                     active.segment_type,
                     active.segment_id,
@@ -708,7 +805,7 @@ impl SipSession {
                 duration_secs: result.duration_secs,
                 unique_id: unique_id.clone(),
             });
-        (notify_app, unique_id)
+        Some((notify_app, unique_id))
     }
 
     /// Put a leg on hold playing a file as hold music (looping).
@@ -1191,12 +1288,8 @@ impl SipSession {
         let original_callee = context.original_callee.clone();
         let max_ring_time = Self::effective_ring_timeout(&context.dialplan, &server);
 
-        let local_contact = context
-            .dialplan
-            .caller_contact
-            .as_ref()
-            .map(|c| c.uri.clone())
-            .or_else(|| server.contact_uri_for_transaction(tx))
+        let local_contact = server
+            .contact_uri_for_transaction(tx)
             .or_else(|| server.default_contact_uri());
 
         let (state_tx, state_rx) = mpsc::unbounded_channel();
@@ -3647,6 +3740,7 @@ impl SipSession {
             "record.start" => Some(CallCommand::StartRecording {
                 config: crate::call::domain::RecordConfig {
                     unique_id: None,
+                    discard: None,
                     path: params
                         .and_then(|p| p.get("path"))
                         .and_then(|v| v.as_str())
@@ -7700,7 +7794,20 @@ impl SipSession {
         &mut self,
         result: crate::media::media_recorder::RecordingResult,
     ) {
-        let (notify_app, unique_id) = self.finalize_active_recording_segment(&result);
+        let (notify_app, unique_id) = match self.finalize_active_recording_segment(&result) {
+            Some(pair) => pair,
+            None => {
+                // Discarded segment (e.g. outbound ringback slice on an
+                // answered call): the file is already gone and no CDR entry
+                // was registered — suppress every recording event.
+                info!(
+                    session_id = %self.id,
+                    path = %result.path,
+                    "Recording segment discarded; no events emitted"
+                );
+                return;
+            }
+        };
         let path = result.path;
         let duration = Duration::from_secs_f64(result.duration_secs);
         let file_size = result.file_size;
@@ -9175,7 +9282,21 @@ impl SipSession {
             CallCommand::HangupAgentLeg => {
                 // Resolve the original queue/direct agent, excluding added dial targets.
                 let agent = self.resolve_transfer_leg(LegId::from("callee"));
-                Self::ok_or_failure(self.handle_remove_leg(agent).await)
+                if !self.legs.get(&agent).is_some_and(|leg|
+                    matches!(leg.state, LegState::Connected | LegState::Hold))
+                {
+                    return CommandResult::success();
+                }
+                let mut ctx = self.session_hook_ctx();
+                if let Err(error) = self.handle_remove_leg(agent).await {
+                    return CommandResult::failure(error.to_string());
+                }
+                self.mark_transferred_with(None);
+                ctx.transferred = true;
+                for hook in self.server.session_hooks.iter() {
+                    hook.on_agent_disconnected(&ctx, &*self.app_runtime).await;
+                }
+                CommandResult::success()
             }
 
             CallCommand::ResumeMedia => {
@@ -9366,13 +9487,15 @@ impl SipSession {
                         .await?;
                     self.active_recording = Some(crate::callrecord::ActiveRecording {
                         path,
-                        segment_type,
+                        segment_type: segment_type.clone(),
+                        source: crate::callrecord::RecordingSource::classify(&segment_type),
                         segment_id,
                         seq,
                         label,
                         started_at: chrono::Utc::now(),
                         notify_app,
                         unique_id: unique_id.clone(),
+                        discard: config.discard.unwrap_or(false),
                     });
                     if config.beep {
                         self.handle_play(
@@ -11144,6 +11267,9 @@ impl SipSession {
             .caller_contact
             .as_ref()
             .map(|c| c.uri.clone())
+            .or_else(|| self.server.contact_uri_for_location_with_sip_contact(
+                &location, self.context.dialplan.media.sip_contact.as_ref(),
+            ))
             .unwrap_or_else(|| caller.clone());
 
         // A reused logical leg (e.g. consult after rejection) is a new SIP call.

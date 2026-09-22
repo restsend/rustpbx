@@ -395,7 +395,7 @@ Each completed segment is listed in the CDR
 `recording_metadata_available` RWI/webhook event is emitted **per segment**
 (`filename` / `download_url` / `file_size` describe that segment; `extra`
 carries `seq` / `label` / `segment_type` next to the call-level metadata).
-`record_end` stays a single per-call summary. Upload works the same as
+each segment notifies independently — there is no call-level summary event; `record_end` has been removed. Every event carries a first-class `source` field (`ivr` / `agent` / `consult` / `ringing` / `voicemail` / `full` / `external`). Upload works the same as
 whole-call recordings (`type = "local"|"http"|"s3"`, `.upload_failed.*`
 markers + retry worker).
 

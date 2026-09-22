@@ -1,0 +1,112 @@
+{
+  "title": "RustPBX Overview",
+  "uid": "rustpbx-overview",
+  "schemaVersion": 39,
+  "editable": true,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "tags": ["rustpbx"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Active Dialogs",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 0 },
+      "targets": [{ "expr": "rustpbx_sip_dialogs_active", "refId": "A" }]
+    },
+    {
+      "id": 2,
+      "title": "Dialogs Created (rate)",
+      "type": "timeseries",
+      "gridPos": { "h": 5, "w": 8, "x": 4, "y": 0 },
+      "targets": [{ "expr": "sum(rate(rustpbx_sip_dialogs_created_total[5m]))", "refId": "A" }]
+    },
+    {
+      "id": 3,
+      "title": "Registrations Active",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 4, "x": 12, "y": 0 },
+      "targets": [{ "expr": "rustpbx_sip_registrations_active", "refId": "A" }]
+    },
+    {
+      "id": 4,
+      "title": "Process Memory",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 6, "x": 16, "y": 0 },
+      "targets": [{ "expr": "rustpbx_process_resident_memory_bytes", "refId": "A" }]
+    },
+    {
+      "id": 5,
+      "title": "Queue Calls (by queue)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "targets": [
+        { "expr": "sum(rate(rustpbx_cc_queue_calls_total[5m])) by (queue)", "refId": "A", "legendFormat": "offered {{queue}}" },
+        { "expr": "sum(rate(rustpbx_cc_queue_calls_answered_total[5m])) by (queue)", "refId": "B", "legendFormat": "answered {{queue}}" },
+        { "expr": "sum(rate(rustpbx_cc_queue_calls_abandoned_total[5m])) by (queue)", "refId": "C", "legendFormat": "abandoned {{queue}}" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Queue Waiting / Longest Wait",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "targets": [
+        { "expr": "sum(rustpbx_cc_queue_size)", "refId": "A", "legendFormat": "waiting" },
+        { "expr": "max(rustpbx_cc_queue_longest_wait_seconds)", "refId": "B", "legendFormat": "longest wait (s)" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "SLA within target",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 13 },
+      "targets": [
+        {
+          "expr": "100 * sum(rate(rustpbx_cc_sla_answered_within_target_total[15m])) / clamp_min(sum(rate(rustpbx_cc_sla_answered_within_target_total[15m])) + sum(rate(rustpbx_cc_sla_answered_after_target_total[15m])), 0.001)",
+          "refId": "A",
+          "legendFormat": "SLA %"
+        }
+      ],
+      "fieldConfig": { "defaults": { "min": 0, "max": 100, "unit": "percent" }, "overrides": [] }
+    },
+    {
+      "id": 8,
+      "title": "Wait Time (p50/p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 13 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(rustpbx_cc_queue_wait_time_seconds_bucket[15m])) by (le))", "refId": "A", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(rustpbx_cc_queue_wait_time_seconds_bucket[15m])) by (le))", "refId": "B", "legendFormat": "p95" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "id": 9,
+      "title": "Agents by Status",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 13 },
+      "targets": [
+        { "expr": "sum(rustpbx_cc_agents_active)", "refId": "A", "legendFormat": "{{status}}" }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "RTP Packets Lost (rate)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "targets": [
+        { "expr": "rate(rustpbx_rtp_packets_sent_total[5m])", "refId": "A", "legendFormat": "sent {{codec}}" }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "CDR Pipeline (enqueue vs push)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+      "targets": [
+        { "expr": "rate(cdr_records_enqueued_total[5m])", "refId": "A", "legendFormat": "enqueued" }
+      ]
+    }
+  ]
+}

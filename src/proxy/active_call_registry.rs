@@ -81,7 +81,13 @@ impl ActiveProxyCallRegistry {
     }
 
     pub fn upsert(&self, entry: ActiveProxyCallEntry, handle: SipSessionHandle) {
-        self.entries.insert(entry.session_id.clone(), entry);
+        // Emit dialog_created only for genuinely new sessions — upsert may be
+        // called again for an existing session (e.g. media updates).
+        let direction = entry.direction.clone();
+        let is_new = self.entries.insert(entry.session_id.clone(), entry).is_none();
+        if is_new {
+            crate::metrics::sip::dialog_created(&direction);
+        }
         self.handles.insert(handle.session_id().to_string(), handle);
         self.notify_waiters();
     }
@@ -134,7 +140,9 @@ impl ActiveProxyCallRegistry {
     }
 
     pub fn remove(&self, session_id: &str) {
-        self.entries.remove(session_id);
+        if let Some((_, entry)) = self.entries.remove(session_id) {
+            crate::metrics::sip::dialog_terminated(&entry.direction, "hangup");
+        }
         self.handles.remove(session_id);
         self.context_meta.remove(session_id);
         if let Some((_, dialogs)) = self.dialog_by_session.remove(session_id) {
@@ -239,21 +247,22 @@ impl ActiveProxyCallRegistry {
         let cutoff = Utc::now()
             - chrono::Duration::from_std(max_age).unwrap_or_else(|_| chrono::Duration::hours(1));
 
-        let stale_ids: Vec<String> = self
+        let stale: Vec<(String, String)> = self
             .entries
             .iter()
             .filter(|entry| {
                 let last_activity = entry.answered_at.unwrap_or(entry.started_at);
                 last_activity < cutoff
             })
-            .map(|entry| entry.key().clone())
+            .map(|entry| (entry.key().clone(), entry.direction.clone()))
             .collect();
 
-        let count = stale_ids.len();
-        for id in stale_ids {
+        let count = stale.len();
+        for (id, direction) in stale {
             self.entries.remove(&id);
             self.handles.remove(&id);
             self.context_meta.remove(&id);
+            crate::metrics::sip::dialog_terminated(&direction, "stale_cleanup");
             if let Some((_, dialogs)) = self.dialog_by_session.remove(&id) {
                 for dialog_id in dialogs {
                     self.handles_by_dialog.remove(&dialog_id);

@@ -283,6 +283,10 @@ pub(crate) enum TransferTarget {
     Conference {
         id: String,
     },
+    /// Realtime (AI voice) app started with a `[[realtime]]` preset name.
+    Realtime {
+        preset: String,
+    },
     /// WebSocket + PCM real-time bridge.
     Bridge {
         endpoint: String,
@@ -313,6 +317,7 @@ pub(crate) fn transfer_target_type_str(target: &TransferTarget) -> Option<&'stat
         TransferTarget::RoutePoint { .. } => Some("route_point"),
         TransferTarget::Voicemail { .. } => Some("voicemail"),
         TransferTarget::Conference { .. } => Some("conference"),
+        TransferTarget::Realtime { .. } => Some("realtime"),
         TransferTarget::Bridge { .. } => Some("bridge"),
         TransferTarget::Sip { .. } => Some("sip"),
     }
@@ -525,6 +530,7 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                 TransferTarget::Voicemail { extension }
             }
             crate::call::TransferEndpoint::Conference(id) => TransferTarget::Conference { id },
+            crate::call::TransferEndpoint::Realtime(preset) => TransferTarget::Realtime { preset },
             // Plain SIP/TEL URI – ensure at least the `sip:` scheme.
             // Also extract `return_app` / `return_target` / `return_*` query
             // params and strip them from the URI before it reaches the callee
@@ -910,6 +916,13 @@ impl SipSession {
             _ => false,
         };
 
+        // Recording lifecycle: an app-scoped IVR segment ends with its owning
+        // app. Close it here — before any successor (queue / IVR / route point /
+        // SIP peer) starts — so the agent or successor stage records as its own
+        // segment. Full-call policy recordings and external segments keep
+        // rolling.
+        self.close_app_scoped_recording().await;
+
         match target {
             TransferTarget::Queue {
                 name,
@@ -996,6 +1009,10 @@ impl SipSession {
                 info!(session_id = %self.id, %leg_id, conf_id = %id, "Handling conference transfer by starting ConferenceApp");
                 self.start_conference_app(&id).await
             }
+            TransferTarget::Realtime { preset } => {
+                info!(session_id = %self.id, %leg_id, %preset, "Handling realtime transfer by starting RealtimeApp");
+                self.start_realtime_app(&preset).await
+            }
             TransferTarget::Bridge {
                 endpoint,
                 headers,
@@ -1069,12 +1086,16 @@ impl SipSession {
                 // cleared once the REFER is accepted (202) or definitively
                 // fails without fallback.
 
-                let referred_by = self
-                    .context
-                    .dialplan
-                    .caller_contact
-                    .clone()
-                    .map(|c| c.to_string())
+                let Some(server_dialog) = self.caller_dialog.as_ref() else {
+                    warn!(session_id = %self.id, "Cannot send REFER: no inbound caller dialog (UAC mode)");
+                    return Err(anyhow!(
+                        "REFER not supported without an inbound caller dialog; use B2BUA"
+                    ));
+                };
+                let referred_by = server_dialog
+                    .snapshot()
+                    .local_contact
+                    .map(|uri| uri.to_string())
                     .unwrap_or_else(|| format!("sip:{}@localhost", self.server.contact_username));
                 let refer_headers = vec![rsipstack::sip::Header::Other(
                     "Referred-By".to_string(),
@@ -1083,12 +1104,6 @@ impl SipSession {
 
                 info!(session_id = %self.id, %leg_id, target = %uri, "Sending REFER for blind transfer");
 
-                let Some(server_dialog) = self.caller_dialog.as_ref() else {
-                    warn!(session_id = %self.id, "Cannot send REFER: no inbound caller dialog (UAC mode)");
-                    return Err(anyhow!(
-                        "REFER not supported without an inbound caller dialog; use B2BUA"
-                    ));
-                };
                 match server_dialog
                     .refer(refer_to_uri.clone(), Some(refer_headers), None)
                     .await
@@ -1375,6 +1390,9 @@ impl SipSession {
             .caller_contact
             .as_ref()
             .map(|c| c.uri.clone())
+            .or_else(|| self.server.contact_uri_for_location_with_sip_contact(
+                location, self.context.dialplan.media.sip_contact.as_ref(),
+            ))
             .unwrap_or_else(|| caller.clone());
         // Carry original caller headers (X-CRM-*, X-CC-*, etc.) so header-based
         // match/rewrite rules behave like the inbound path.
@@ -1796,13 +1814,6 @@ impl SipSession {
             .caller
             .clone()
             .ok_or_else(|| anyhow!("route-point transfer has no caller identity"))?;
-        let contact = self
-            .context
-            .dialplan
-            .caller_contact
-            .as_ref()
-            .map(|contact| contact.uri.clone())
-            .unwrap_or_else(|| caller.clone());
         let realm = self.server.proxy_config.load().select_realm("");
         let target = crate::call::build_sip_uri(route_point, &realm);
         let target_uri = rsipstack::sip::Uri::try_from(target.as_str())
@@ -1825,7 +1836,7 @@ impl SipSession {
             &self.server,
             &target_uri,
             &caller,
-            &contact,
+            &caller, // Routing placeholder; this path starts an app, not a SIP leg.
             (!carry_headers.is_empty()).then_some(carry_headers),
             &self.context.dialplan.direction,
             self.context.cookie.clone(),
@@ -2151,6 +2162,16 @@ impl SipSession {
         info!(session_id = %self.id, conf_id = %conf_id, "Starting conference application");
         let params = Some(serde_json::json!({"id": conf_id}));
         self.ensure_app_running("conference", params, &format!("conference '{}'", conf_id))
+            .await
+    }
+
+    /// Start the realtime (AI voice) app with a configured `[[realtime]]`
+    /// preset. Credentials are resolved from config — the preset name is the
+    /// only thing that travels through the transfer target.
+    pub(crate) async fn start_realtime_app(&self, preset: &str) -> Result<()> {
+        info!(session_id = %self.id, preset = %preset, "Starting realtime application");
+        let params = Some(serde_json::json!({"preset": preset}));
+        self.ensure_app_running("realtime", params, &format!("realtime preset '{}'", preset))
             .await
     }
 

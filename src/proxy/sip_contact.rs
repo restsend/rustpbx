@@ -7,14 +7,11 @@ use rsipstack::transport::SipAddr;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::net::UdpSocket;
-use std::sync::Once;
 use std::sync::OnceLock;
-use tracing::warn;
 
 pub use crate::config::{default_local_networks, parse_local_networks};
 
 static LOCAL_INTERFACE_IP: OnceLock<Option<IpAddr>> = OnceLock::new();
-static WILDCARD_CONTACT_WARN: Once = Once::new();
 
 pub fn is_local_destination(ip: IpAddr, networks: &[IpNet]) -> bool {
     networks.iter().any(|net| net.contains(&ip))
@@ -56,46 +53,6 @@ pub fn detect_source_ip(destination: IpAddr) -> Option<IpAddr> {
         .filter(|ip| !ip.is_unspecified())
 }
 
-/// Two-stage replacement lookup: route probe toward the destination first,
-/// then the process-wide interface IP. Production value for
-/// [`ensure_advertisable_host_with`].
-fn wildcard_replacement(destination: Option<IpAddr>) -> Option<IpAddr> {
-    destination
-        .and_then(detect_source_ip)
-        .or_else(pick_local_interface_ip)
-}
-
-/// Returns the replacement host when `host` is an unspecified (wildcard)
-/// address; `None` means the host can be advertised unchanged.
-///
-/// `probe` encapsulates replacement discovery and is injected so tests stay
-/// deterministic; production callers pass [`wildcard_replacement`].
-fn ensure_advertisable_host_with(
-    host: &str,
-    probe: impl Fn(Option<IpAddr>) -> Option<IpAddr>,
-) -> Option<String> {
-    let advertisable = match host.parse::<IpAddr>() {
-        Ok(ip) => !ip.is_unspecified(),
-        Err(_) => true,
-    };
-    if advertisable {
-        return None;
-    }
-    probe(None).map(|ip| ip.to_string())
-}
-
-fn warn_wildcard_contact_once(host: &str, replacement: &str) {
-    WILDCARD_CONTACT_WARN.call_once(|| {
-        warn!(
-            contact_host = %host,
-            replacement = %replacement,
-            "wildcard SIP bind address with no external_ip/sip_external_ip configured; \
-             advertising the detected address in Contact instead. Configure sip_external_ip \
-             (or external_ip) so in-dialog requests such as BYE can be routed back"
-        );
-    });
-}
-
 /// Resolve the host IP to advertise in SIP Contact for the given destination.
 pub fn resolve_contact_host(
     contact: &SipContactConfig,
@@ -119,7 +76,7 @@ pub fn resolve_contact_host(
     }
 
     if let Some(rtp_ext) = rtp_external_ip.filter(|s| !s.is_empty()) {
-        return (*rtp_ext).to_string();
+        return rtp_ext.to_string();
     }
 
     bind_ip.to_string()
@@ -129,9 +86,8 @@ pub fn resolve_contact_host(
 pub fn listener_sip_addr(
     proxy: &ProxyConfig,
     transport: Transport,
-    port_override: Option<u16>,
 ) -> Option<SipAddr> {
-    let port = port_override.or_else(|| listener_port_for_transport(proxy, transport))?;
+    let port = listener_port_for_transport(proxy, transport)?;
     let host_with_port = format!("{}:{}", proxy.addr, port);
     Some(SipAddr {
         r#type: Some(transport),
@@ -149,15 +105,6 @@ fn listener_port_for_transport(proxy: &ProxyConfig, transport: Transport) -> Opt
         Transport::Ws | Transport::Wss => proxy.ws_port,
         _ => None,
     }
-}
-
-/// True when `addr` matches a configured SIP listener port on this node.
-pub fn is_configured_listener_addr(proxy: &ProxyConfig, addr: &SipAddr) -> bool {
-    let Some(port) = addr.addr.port.map(|p| p.0) else {
-        return false;
-    };
-    let transport = addr.r#type.unwrap_or(Transport::Udp);
-    listener_port_for_transport(proxy, transport) == Some(port)
 }
 
 fn replace_contact_host(addr: &SipAddr, host: &str) -> SipAddr {
@@ -181,87 +128,18 @@ pub fn build_contact_sip_addr(
     contact: &SipContactConfig,
     rtp_external_ip: Option<&str>,
     transport: Transport,
-    port_override: Option<u16>,
     destination: Option<IpAddr>,
 ) -> Option<SipAddr> {
-    build_contact_sip_addr_with_bind_ip(
-        proxy,
-        contact,
-        rtp_external_ip,
-        transport,
-        port_override,
-        destination,
-        &proxy.addr,
-    )
-}
-
-pub fn build_transaction_contact_sip_addr(
-    proxy: &ProxyConfig,
-    contact: &SipContactConfig,
-    rtp_external_ip: Option<&str>,
-    transport: Transport,
-    port_override: Option<u16>,
-    connection: &SipAddr,
-) -> Option<SipAddr> {
-    // Wildcard binds cannot be advertised; the accepted flow carries the concrete local host.
-    let actual_bind_ip = proxy
-        .addr
-        .parse::<IpAddr>()
-        .ok()
-        .filter(IpAddr::is_unspecified)
-        .map(|_| connection.addr.host.to_string());
-    build_contact_sip_addr_with_bind_ip(
-        proxy,
-        contact,
-        rtp_external_ip,
-        transport,
-        port_override,
-        None,
-        actual_bind_ip.as_deref().unwrap_or(&proxy.addr),
-    )
-}
-
-fn build_contact_sip_addr_with_bind_ip(
-    proxy: &ProxyConfig,
-    contact: &SipContactConfig,
-    rtp_external_ip: Option<&str>,
-    transport: Transport,
-    port_override: Option<u16>,
-    destination: Option<IpAddr>,
-    bind_ip: &str,
-) -> Option<SipAddr> {
-    contact_sip_addr_with_bind_ip(
-        proxy,
-        contact,
-        rtp_external_ip,
-        transport,
-        port_override,
-        destination,
-        bind_ip,
-        wildcard_replacement,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn contact_sip_addr_with_bind_ip(
-    proxy: &ProxyConfig,
-    contact: &SipContactConfig,
-    rtp_external_ip: Option<&str>,
-    transport: Transport,
-    port_override: Option<u16>,
-    destination: Option<IpAddr>,
-    bind_ip: &str,
-    probe: fn(Option<IpAddr>) -> Option<IpAddr>,
-) -> Option<SipAddr> {
-    let listener = listener_sip_addr(proxy, transport, port_override)?;
-    let host = resolve_contact_host(contact, bind_ip, rtp_external_ip, destination);
-    let host = match ensure_advertisable_host_with(&host, probe) {
-        Some(replacement) => {
-            warn_wildcard_contact_once(&host, &replacement);
-            replacement
+    let listener = listener_sip_addr(proxy, transport)?;
+    let mut host = resolve_contact_host(contact, &proxy.addr, rtp_external_ip, destination);
+    if host.parse::<IpAddr>().is_ok_and(|ip| ip.is_unspecified()) {
+        if let Some(replacement) = destination
+            .and_then(detect_source_ip)
+            .or_else(pick_local_interface_ip)
+        {
+            host = replacement.to_string();
         }
-        None => host,
-    };
+    }
     Some(replace_contact_host(&listener, &host))
 }
 
@@ -284,6 +162,29 @@ mod tests {
     use super::*;
     use crate::config::ProxyConfig;
 
+    #[test]
+    fn inbound_lan_and_wan_choose_different_contacts_with_public_listener() {
+        let proxy = sample_proxy();
+        for (peer, expected) in [("127.0.0.1", "192.168.1.10"), ("198.51.100.50", "203.0.113.10")] {
+            let addr = build_contact_sip_addr(
+                &proxy, &sample_contact(), Some("203.0.113.20"),
+                Transport::Udp, Some(peer.parse().unwrap()),
+            ).unwrap();
+            assert_eq!(addr.addr.host.to_string(), expected);
+            assert_eq!(addr.addr.port, Some(5060.into()));
+        }
+    }
+
+    #[test]
+    fn inbound_wildcard_uses_route_to_peer_instead_of_nat_advertisement() {
+        let proxy = ProxyConfig { addr: "0.0.0.0".into(), ..sample_proxy() };
+        let addr = build_contact_sip_addr(
+            &proxy, &sample_contact(), Some("203.0.113.20"),
+            Transport::Udp, Some("127.0.0.1".parse().unwrap()),
+        ).unwrap();
+        assert_eq!(addr.addr.to_string(), "127.0.0.1:5060");
+    }
+
     fn sample_proxy() -> ProxyConfig {
         ProxyConfig {
             addr: "192.168.1.10".to_string(),
@@ -303,13 +204,51 @@ mod tests {
     }
 
     #[test]
+    fn wildcard_bind_is_resolved_by_contact_builder() {
+        let peer = "127.0.0.1".parse().unwrap();
+        for always_bind in [true, false] {
+            let contact = SipContactConfig {
+                sip_contact_always_bind: always_bind,
+                ..sample_contact()
+            };
+            assert_eq!(
+                resolve_contact_host(&contact, "0.0.0.0", Some("203.0.113.20"), Some(peer)),
+                "0.0.0.0",
+            );
+            let proxy = ProxyConfig { addr: "0.0.0.0".into(), ..sample_proxy() };
+            let addr = build_contact_sip_addr(
+                &proxy, &contact, Some("203.0.113.20"),
+                Transport::Udp, Some(peer),
+            ).unwrap();
+            assert_eq!(addr.addr.to_string(), "127.0.0.1:5060");
+            assert_eq!(
+                resolve_contact_host(&contact, "192.0.2.10", None, Some(peer)),
+                "192.0.2.10",
+            );
+        }
+    }
+
+    #[test]
+    fn configured_local_networks_control_bind_selection() {
+        let peer = "127.0.0.1".parse().unwrap();
+        let mut contact = sample_contact();
+        contact.local_networks = vec!["192.168.3.0/24".parse().unwrap()];
+        assert_eq!(resolve_contact_host(&contact, "0.0.0.0", None, Some(peer)), "203.0.113.10");
+        contact.local_networks.push("127.0.0.0/8".parse().unwrap());
+        assert_eq!(resolve_contact_host(&contact, "0.0.0.0", None, Some(peer)), "0.0.0.0");
+        contact.contact_lan_use_bind = false;
+        assert_eq!(resolve_contact_host(&contact, "0.0.0.0", None, Some(peer)), "203.0.113.10");
+        assert!(SipContactConfig::default().contact_lan_use_bind);
+    }
+
+    #[test]
     fn resolve_contact_host_uses_bind_for_lan_destination() {
         let contact = sample_contact();
         let host = resolve_contact_host(
             &contact,
             "192.168.1.10",
             Some("203.0.113.10"),
-            Some("192.168.0.50".parse().unwrap()),
+            Some("127.0.0.1".parse().unwrap()),
         );
         assert_eq!(host, "192.168.1.10");
     }
@@ -361,21 +300,9 @@ mod tests {
     #[test]
     fn listener_sip_addr_uses_configured_tls_port() {
         let proxy = sample_proxy();
-        let addr = listener_sip_addr(&proxy, Transport::Tls, None).unwrap();
+        let addr = listener_sip_addr(&proxy, Transport::Tls).unwrap();
         assert_eq!(addr.addr.to_string(), "192.168.1.10:5061");
         assert_eq!(addr.r#type, Some(Transport::Tls));
-    }
-
-    #[test]
-    fn is_configured_listener_rejects_ephemeral_port() {
-        let proxy = sample_proxy();
-        let ephemeral = SipAddr {
-            r#type: Some(Transport::Tls),
-            addr: HostWithPort::try_from("192.168.1.10:43218").unwrap(),
-        };
-        assert!(!is_configured_listener_addr(&proxy, &ephemeral));
-        let listener = listener_sip_addr(&proxy, Transport::Tls, None).unwrap();
-        assert!(is_configured_listener_addr(&proxy, &listener));
     }
 
     #[test]
@@ -387,8 +314,7 @@ mod tests {
             &contact,
             Some("203.0.113.10"),
             Transport::Tls,
-            None,
-            Some("192.168.0.50".parse().unwrap()),
+            Some("127.0.0.1".parse().unwrap()),
         )
         .unwrap();
         assert_eq!(addr.addr.to_string(), "192.168.1.10:5061");
@@ -403,7 +329,6 @@ mod tests {
             &contact,
             Some("203.0.113.10"),
             Transport::Tls,
-            None,
             Some("8.8.8.8".parse().unwrap()),
         )
         .unwrap();
@@ -411,171 +336,48 @@ mod tests {
     }
 
     #[test]
-    fn build_contact_sip_addr_uses_actual_bind_ip_for_wildcard_listener() {
+    fn build_contact_sip_addr_uses_route_to_peer_for_wildcard_listener() {
         let proxy = ProxyConfig {
             addr: "0.0.0.0".to_string(),
             udp_port: Some(8060),
             ..ProxyConfig::default()
         };
         let contact = SipContactConfig {
-            local_networks: default_local_networks(),
             contact_lan_use_bind: true,
             ..Default::default()
         };
 
-        let connection = SipAddr {
-            r#type: Some(Transport::Udp),
-            addr: HostWithPort::try_from("192.0.2.10:8060").unwrap(),
-        };
-        let addr = build_transaction_contact_sip_addr(
+        let addr = build_contact_sip_addr(
             &proxy,
             &contact,
             None,
             Transport::Udp,
-            None,
-            &connection,
+            Some("127.0.0.1".parse().unwrap()),
         )
         .unwrap();
 
-        assert_eq!(addr.addr.to_string(), "192.0.2.10:8060");
+        assert_eq!(addr.addr.to_string(), "127.0.0.1:8060");
     }
 
     #[test]
-    fn build_transaction_contact_sip_addr_preserves_explicit_bind_ip() {
+    fn build_contact_sip_addr_preserves_explicit_bind_ip() {
         let proxy = ProxyConfig {
             addr: "192.0.2.20".to_string(),
             udp_port: Some(8060),
             ..ProxyConfig::default()
         };
         let contact = SipContactConfig::default();
-        let connection = SipAddr {
-            r#type: Some(Transport::Udp),
-            addr: HostWithPort::try_from("192.0.2.10:8060").unwrap(),
-        };
 
-        let addr = build_transaction_contact_sip_addr(
+        let addr = build_contact_sip_addr(
             &proxy,
             &contact,
             None,
             Transport::Udp,
             None,
-            &connection,
         )
         .unwrap();
 
         assert_eq!(addr.addr.to_string(), "192.0.2.20:8060");
-    }
-
-    fn fake_probe(_: Option<IpAddr>) -> Option<IpAddr> {
-        Some("192.0.2.77".parse().unwrap())
-    }
-
-    fn none_probe(_: Option<IpAddr>) -> Option<IpAddr> {
-        None
-    }
-
-    #[test]
-    fn unspecified_contact_host_replaced_by_probe() {
-        let replaced = ensure_advertisable_host_with("0.0.0.0", fake_probe);
-        assert_eq!(replaced.as_deref(), Some("192.0.2.77"));
-    }
-
-    #[test]
-    fn unspecified_ipv6_contact_host_replaced_by_probe() {
-        let replaced = ensure_advertisable_host_with("::", fake_probe);
-        assert_eq!(replaced.as_deref(), Some("192.0.2.77"));
-    }
-
-    #[test]
-    fn unspecified_contact_host_kept_when_probe_finds_nothing() {
-        let replaced = ensure_advertisable_host_with("0.0.0.0", none_probe);
-        assert_eq!(replaced, None);
-    }
-
-    #[test]
-    fn hostname_and_concrete_contact_hosts_are_untouched() {
-        for host in ["example.com", "192.168.1.10", "[2001:db8::5]"] {
-            let replaced = ensure_advertisable_host_with(host, fake_probe);
-            assert_eq!(replaced, None, "host {host} should stay unchanged");
-        }
-    }
-
-    #[test]
-    fn wildcard_bind_contact_uses_probed_ip() {
-        let proxy = ProxyConfig {
-            addr: "0.0.0.0".to_string(),
-            udp_port: Some(8060),
-            ..ProxyConfig::default()
-        };
-        let contact = SipContactConfig {
-            local_networks: default_local_networks(),
-            contact_lan_use_bind: true,
-            ..Default::default()
-        };
-
-        let addr = contact_sip_addr_with_bind_ip(
-            &proxy,
-            &contact,
-            None,
-            Transport::Udp,
-            None,
-            Some("8.8.8.8".parse().unwrap()),
-            "0.0.0.0",
-            fake_probe,
-        )
-        .unwrap();
-
-        assert_eq!(addr.addr.to_string(), "192.0.2.77:8060");
-    }
-
-    #[test]
-    fn always_bind_wildcard_contact_still_replaced() {
-        let proxy = ProxyConfig {
-            addr: "0.0.0.0".to_string(),
-            udp_port: Some(8060),
-            ..ProxyConfig::default()
-        };
-        let contact = SipContactConfig {
-            sip_contact_always_bind: true,
-            ..Default::default()
-        };
-
-        let addr = contact_sip_addr_with_bind_ip(
-            &proxy,
-            &contact,
-            None,
-            Transport::Udp,
-            None,
-            None,
-            "0.0.0.0",
-            fake_probe,
-        )
-        .unwrap();
-
-        assert_eq!(addr.addr.to_string(), "192.0.2.77:8060");
-    }
-
-    #[test]
-    fn explicit_bind_contact_host_untouched_by_wildcard_guard() {
-        let proxy = ProxyConfig {
-            addr: "0.0.0.0".to_string(),
-            udp_port: Some(8060),
-            ..ProxyConfig::default()
-        };
-
-        let addr = contact_sip_addr_with_bind_ip(
-            &proxy,
-            &SipContactConfig::default(),
-            None,
-            Transport::Udp,
-            None,
-            Some("8.8.8.8".parse().unwrap()),
-            "10.1.2.3",
-            fake_probe,
-        )
-        .unwrap();
-
-        assert_eq!(addr.addr.to_string(), "10.1.2.3:8060");
     }
 
     #[test]

@@ -638,6 +638,7 @@
                 <div class="mt-4">
                     {% set queue_items = forwarding_catalog.queues | default([]) %}
                     {% set ivr_items = forwarding_catalog.ivr_projects | default([]) %}
+                    {% set realtime_items = forwarding_catalog.realtime_presets | default([]) %}
                     {% include "console/_destination_selector.html" %}
                 </div>
             </div>
@@ -784,6 +785,7 @@
                         queue_file: '',
                         voicemail_extension: '',
                         ivr_file: '',
+                        realtime_preset: '',
                     },
                     policy: {
                         frequency_limit: { max_calls: null, duration: null },
@@ -818,6 +820,7 @@
                     err_queue_file_required: '{{ "routing_form.err_queue_file_required" | t }}',
                     err_voicemail_ext_required: '{{ "routing_form.err_voicemail_ext_required" | t }}',
                     err_ivr_file_required: '{{ "routing_form.err_ivr_file_required" | t }}',
+                    err_realtime_preset_required: '{{ "routing_form.err_realtime_preset_required" | t }}',
                     err_failed_save: '{{ "routing_form.err_failed_save" | t }}',
                     err_validation_failed: '{{ "routing_form.err_validation_failed" | t }}',
                     saved_successfully: '{{ "routing_form.saved_successfully" | t }}',
@@ -878,10 +881,59 @@
                     if (this.mode === 'create' && !this.route.id) {
                         this.route.direction = '';
                     }
+                    if (this.mode === 'create') {
+                        this.applyQuickDraft();
+                    }
                     this.$nextTick(() => {
                         this.reconcileSelectValues();
                         this.syncDestSelector();
                     });
+                },
+                applyQuickDraft() {
+                    let draft = null;
+                    try {
+                        const raw = sessionStorage.getItem('rustpbx_routing_quick_draft');
+                        if (raw) {
+                            sessionStorage.removeItem('rustpbx_routing_quick_draft');
+                            draft = JSON.parse(raw);
+                        }
+                    } catch (_) {
+                        return;
+                    }
+                    if (!draft || typeof draft !== 'object') {
+                        return;
+                    }
+                    if (draft.match && typeof draft.match === 'object') {
+                        Object.entries(draft.match).forEach(([key, value]) => {
+                            if (typeof value === 'string' && value.trim().length) {
+                                this.route.match[key] = value.trim();
+                            }
+                        });
+                    }
+                    if (draft.rewrite && typeof draft.rewrite === 'object') {
+                        Object.entries(draft.rewrite).forEach(([key, value]) => {
+                            if (typeof value === 'string' && value.trim().length) {
+                                this.route.rewrite[key] = value.trim();
+                            }
+                        });
+                    }
+                    if (Array.isArray(draft.trunks) && draft.trunks.length) {
+                        this.route.action.trunks = draft.trunks
+                            .filter((name) => typeof name === 'string' && name.trim().length)
+                            .map((name) => ({ name: name.trim(), weight: 0 }));
+                    }
+                    if (typeof draft.select === 'string' && draft.select.trim().length) {
+                        this.route.action.select = this.normalizeSelectionOption(draft.select);
+                    }
+                    if (draft.direction === 'inbound' || draft.direction === 'outbound') {
+                        this.route.direction = draft.direction;
+                    }
+                    if (Number.isFinite(Number(draft.priority))) {
+                        this.route.priority = Math.max(0, Math.round(Number(draft.priority)));
+                    }
+                    if (typeof draft.name === 'string' && draft.name.trim().length) {
+                        this.route.name = draft.name.trim();
+                    }
                 },
                 reconcileSelectValues() {
                     const reconcileTrunkSelects = (container) => {
@@ -939,6 +991,9 @@
                     } else if (action.target_type === 'voicemail' && action.voicemail_extension) {
                         type = 'voicemail';
                         value = action.voicemail_extension;
+                    } else if (action.target_type === 'realtime' && action.realtime_preset) {
+                        type = 'realtime';
+                        value = action.realtime_preset;
                     }
                     if (value) {
                         child.dispatchEvent(new CustomEvent('set-destination', {
@@ -1047,7 +1102,7 @@
                     const normalizeTargetType = (value) => {
                         if (typeof value === 'string') {
                             const trimmed = value.trim().toLowerCase();
-                            if (trimmed === 'queue' || trimmed === 'voicemail' || trimmed === 'ivr') {
+                            if (trimmed === 'queue' || trimmed === 'voicemail' || trimmed === 'ivr' || trimmed === 'realtime') {
                                 return trimmed;
                             }
                         }
@@ -1056,6 +1111,7 @@
                     const queueFile = this.trimString(raw?.action?.queue_file || '');
                     const voicemailExtension = this.trimString(raw?.action?.voicemail_extension || '');
                     const ivrFile = this.trimString(raw?.action?.ivr_file || '');
+                    const realtimePreset = this.trimString(raw?.action?.realtime_preset || '');
                     const normalizeSelection = (value) => this.normalizeSelectionOption(value);
                     const route = {
                         id: raw?.id ?? null,
@@ -1094,6 +1150,7 @@
                             queue_file: queueFile,
                             voicemail_extension: voicemailExtension,
                             ivr_file: ivrFile,
+                            realtime_preset: realtimePreset,
                         },
                         policy: {
                             frequency_limit: {
@@ -1153,7 +1210,7 @@
                 normalizeTargetType(value) {
                     if (typeof value === 'string') {
                         const trimmed = value.trim().toLowerCase();
-                        if (trimmed === 'queue' || trimmed === 'voicemail' || trimmed === 'ivr' || trimmed === 'dest') {
+                        if (trimmed === 'queue' || trimmed === 'voicemail' || trimmed === 'ivr' || trimmed === 'realtime' || trimmed === 'dest') {
                             return trimmed;
                         }
                     }
@@ -1291,6 +1348,9 @@
                     if (!this.isIvrTarget) {
                         this.route.action.ivr_file = '';
                     }
+                    if (!this.isRealtimeTarget) {
+                        this.route.action.realtime_preset = '';
+                    }
                 },
 
                 onDestinationChange(detail) {
@@ -1301,17 +1361,27 @@
                         this.route.action.queue_file = value;
                         this.route.action.voicemail_extension = '';
                         this.route.action.ivr_file = '';
+                        this.route.action.realtime_preset = '';
                         this.route.action.trunks = [];
                     } else if (type === 'ivr') {
                         this.route.action.target_type = 'ivr';
                         this.route.action.ivr_file = value;
                         this.route.action.queue_file = '';
                         this.route.action.voicemail_extension = '';
+                        this.route.action.realtime_preset = '';
                         this.route.action.trunks = [];
                     } else if (type === 'voicemail') {
                         this.route.action.target_type = 'voicemail';
                         this.route.action.voicemail_extension = value;
                         this.route.action.queue_file = '';
+                        this.route.action.ivr_file = '';
+                        this.route.action.realtime_preset = '';
+                        this.route.action.trunks = [];
+                    } else if (type === 'realtime') {
+                        this.route.action.target_type = 'realtime';
+                        this.route.action.realtime_preset = value;
+                        this.route.action.queue_file = '';
+                        this.route.action.voicemail_extension = '';
                         this.route.action.ivr_file = '';
                         this.route.action.trunks = [];
                     } else if (type === 'extension') {
@@ -1319,6 +1389,7 @@
                         this.route.action.voicemail_extension = value;
                         this.route.action.queue_file = '';
                         this.route.action.ivr_file = '';
+                        this.route.action.realtime_preset = '';
                         this.route.action.trunks = [];
                     } else {
                         // uri type - use as trunk target
@@ -1327,6 +1398,7 @@
                         this.route.action.queue_file = '';
                         this.route.action.ivr_file = '';
                         this.route.action.voicemail_extension = '';
+                        this.route.action.realtime_preset = '';
                     }
                 },
                 get isSipTrunkTarget() {
@@ -1340,6 +1412,9 @@
                 },
                 get isIvrTarget() {
                     return this.normalizeTargetType(this.route.action?.target_type) === 'ivr';
+                },
+                get isRealtimeTarget() {
+                    return this.normalizeTargetType(this.route.action?.target_type) === 'realtime';
                 },
                 get routeSummary() {
                     const sourceLabel = this.route.source_trunk
@@ -1387,6 +1462,12 @@
                         const ivrFile = this.trimString(this.route.action.ivr_file);
                         if (!ivrFile.length) {
                             throw new Error(this.translations.err_ivr_file_required);
+                        }
+                    }
+                    if (targetType === 'realtime') {
+                        const preset = this.trimString(this.route.action.realtime_preset);
+                        if (!preset.length) {
+                            throw new Error(this.translations.err_realtime_preset_required);
                         }
                     }
                 },
@@ -1450,6 +1531,9 @@
                     }
                     if (targetType === 'ivr') {
                         actionPayload.ivr_file = this.trimString(this.route.action.ivr_file) || null;
+                    }
+                    if (targetType === 'realtime') {
+                        actionPayload.realtime_preset = this.trimString(this.route.action.realtime_preset) || null;
                     }
 
                     const description = this.trimString(this.route.description);

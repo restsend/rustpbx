@@ -103,6 +103,10 @@ fn default_useragent() -> Option<String> {
     Some(crate::version::get_useragent())
 }
 
+fn default_ua_block_scanners() -> bool {
+    true
+}
+
 fn default_nat_fix() -> bool {
     true
 }
@@ -212,6 +216,13 @@ pub struct RecordingPolicy {
     pub callee_deny: Vec<String>,
     pub auto_start: Option<bool>,
     pub auto_start_at: Option<RecordingAutoStartAt>,
+    /// Routed applications exempt from auto recording. Only meaningful when
+    /// `auto_start` is true: the listed targets install no auto recorder.
+    /// Empty/omitted = auto-record everything (historical behaviour). With
+    /// `["ivr"]`, IVR-routed calls record only via their smart-node
+    /// `record start` actions, giving separate IVR / agent segments.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auto_start_except: Vec<String>,
     pub filename_pattern: Option<String>,
     /// Live file output rate in Hz; explicit values select resampled PCM WAV.
     pub samplerate: Option<u32>,
@@ -304,6 +315,25 @@ impl RecordingPolicy {
             ty = RecordingType::Local;
         }
         ty
+    }
+
+    /// Whether auto-start covers a call routed to `app_name`
+    /// (`dialplan.flow = Application { app_name }`); `None` for
+    /// non-application flows (plain dial / queue / bridge). `auto_start_except`
+    /// empty = everything is covered; listed targets (e.g. `"ivr"`) are
+    /// exempt from the auto recorder.
+    pub fn auto_start_covers_app(&self, app_name: Option<&str>) -> bool {
+        if self.auto_start_except.is_empty() {
+            return true;
+        }
+        // Non-application flows have no name to match — never exempt.
+        let Some(app_name) = app_name else {
+            return true;
+        };
+        !self
+            .auto_start_except
+            .iter()
+            .any(|s| s.trim().eq_ignore_ascii_case(app_name.trim()))
     }
 
     pub fn new_recording_config(&self) -> CallRecordingConfig {
@@ -1010,13 +1040,25 @@ pub fn parse_local_networks(raw: &[String]) -> Vec<IpNet> {
     raw.iter().filter_map(|s| s.trim().parse().ok()).collect()
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct SipContactConfig {
     pub sip_external_ip: Option<String>,
     pub auto_sip_external_ip: Option<String>,
     pub local_networks: Vec<IpNet>,
     pub contact_lan_use_bind: bool,
     pub sip_contact_always_bind: bool,
+}
+
+impl Default for SipContactConfig {
+    fn default() -> Self {
+        Self {
+            sip_external_ip: None,
+            auto_sip_external_ip: None,
+            local_networks: default_local_networks(),
+            contact_lan_use_bind: true,
+            sip_contact_always_bind: false,
+        }
+    }
 }
 
 /// Network egress profile (FreeSWITCH-style). Groups RTP/SDP and SIP Contact
@@ -1360,6 +1402,12 @@ pub struct ProxyConfig {
     pub acl_files: Vec<String>,
     pub ua_white_list: Option<Vec<String>>,
     pub ua_black_list: Option<Vec<String>>,
+    /// Reject requests whose User-Agent matches a well-known scanner/hacking
+    /// tool (sipvicious, friendly-scanner, sipcli, ...) via case-insensitive
+    /// substring match. Enabled by default; a non-empty `ua_white_list` match
+    /// takes precedence and lets the request through.
+    #[serde(default = "default_ua_block_scanners")]
+    pub ua_block_scanners: bool,
     pub max_concurrency: Option<usize>,
     pub registrar_expires: Option<u32>,
     pub max_registrar_expires: Option<u32>,
@@ -2047,6 +2095,7 @@ impl Default for ProxyConfig {
             acl_rules: Some(vec!["allow all".to_string(), "deny all".to_string()]),
             ua_white_list: Some(vec![]),
             ua_black_list: Some(vec![]),
+            ua_block_scanners: default_ua_block_scanners(),
             addr: "0.0.0.0".to_string(),
             modules: Some(vec![
                 "acl".to_string(),
@@ -2474,6 +2523,43 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_start_except_empty_covers_everything() {
+        let policy = RecordingPolicy::default();
+        assert!(policy.auto_start_covers_app(Some("ivr")));
+        assert!(policy.auto_start_covers_app(Some("queue")));
+        assert!(policy.auto_start_covers_app(None));
+    }
+
+    #[test]
+    fn auto_start_except_ivr_exempts_only_ivr() {
+        let policy = RecordingPolicy {
+            auto_start_except: vec!["ivr".into()],
+            ..Default::default()
+        };
+        // IVR-routed calls are exempt: the flow records via its smart-node
+        // `record start` instead of a full-call auto recorder.
+        assert!(!policy.auto_start_covers_app(Some("ivr")));
+        assert!(!policy.auto_start_covers_app(Some("IVR")));
+        assert!(!policy.auto_start_covers_app(Some(" ivr ")));
+        // Non-application flows (plain dial / queue / bridge) stay covered.
+        assert!(policy.auto_start_covers_app(None));
+        assert!(policy.auto_start_covers_app(Some("queue")));
+        assert!(policy.auto_start_covers_app(Some("voicemail")));
+    }
+
+    #[test]
+    fn auto_start_except_can_list_multiple_apps() {
+        let policy = RecordingPolicy {
+            auto_start_except: vec!["ivr".into(), "queue".into()],
+            ..Default::default()
+        };
+        assert!(!policy.auto_start_covers_app(Some("ivr")));
+        assert!(!policy.auto_start_covers_app(Some("queue")));
+        assert!(policy.auto_start_covers_app(Some("voicemail")));
+        assert!(policy.auto_start_covers_app(None));
+    }
 
     #[test]
     fn test_turn_rest_ice_servers_match_miuturn() {

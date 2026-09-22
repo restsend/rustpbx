@@ -234,6 +234,7 @@ impl IvrApp {
                 final_result: status.to_string(),
                 completion_time,
                 final_routing_target: target.map(|s| s.to_string()),
+                end: true,
                 extra: None,
             },
         );
@@ -523,6 +524,21 @@ impl IvrApp {
             let result_value = dtmf_digit
                 .map(|d| d.to_string())
                 .unwrap_or_else(|| action_type.to_string());
+            // Next-pointer / end-marker protocol: a Menu jump carries the
+            // successor menu id; terminal actions (hangup / transfer / jump /
+            // exit) end the flow — no successor, `end = true`.
+            let (next_node_id, end) = match action {
+                EntryAction::Menu { menu } => (Some(menu.clone()), None),
+                EntryAction::Transfer { .. }
+                | EntryAction::Queue { .. }
+                | EntryAction::JumpIvr { .. }
+                | EntryAction::RouteToAgent { .. }
+                | EntryAction::Hangup { .. }
+                | EntryAction::PlayAndHangup { .. }
+                | EntryAction::Voicemail { .. }
+                | EntryAction::Exit => (None, Some(true)),
+                _ => (None, None),
+            };
             self.emit_rwi_event_typed(
                 ctx,
                 &crate::rwi::IvrNodeExited {
@@ -532,9 +548,10 @@ impl IvrApp {
                     result_value: Some(result_value),
                     duration_ms: duration_ms as u32,
                     exit_time: chrono::Utc::now().to_rfc3339(),
-                    next_node_id: None,
+                    next_node_id,
                     hangup_reason: None,
                     call_result: None,
+                    end,
                     extra: Some(serde_json::json!({ "action_type": action_type })),
                 },
             );
@@ -1692,6 +1709,10 @@ impl CallApp for IvrApp {
                 next_node_id: None,
                 hangup_reason: Some(end_reason_label.to_string()),
                 call_result: Some("hangup".to_string()),
+                // The session terminated on this node — the flow's last
+                // observable step, even though the flow did not run to a
+                // terminal action.
+                end: Some(true),
                 extra: None,
             };
             crate::utils::spawn(async move {
@@ -1712,6 +1733,7 @@ impl CallApp for IvrApp {
                 final_result: end_reason_label.to_string(),
                 completion_time,
                 final_routing_target: None,
+                end: true,
                 extra: None,
             };
             crate::utils::spawn(async move {

@@ -17,6 +17,7 @@ pub mod locales;
 pub mod metrics;
 pub mod notifications;
 pub mod presence;
+pub mod reports;
 pub mod routing;
 pub mod setting;
 pub mod sip_trunk;
@@ -68,7 +69,8 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(licenses::urls())
         .merge(sipflow::urls())
         .merge(notifications::urls())
-        .merge(metrics::urls());
+        .merge(metrics::urls())
+        .merge(reports::urls());
 
     // Addon page routes (collected at runtime via Addon trait hooks).
     if let Some(app_state) = state.app_state() {

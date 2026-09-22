@@ -241,6 +241,7 @@ mod tests {
                 report_interval_secs: 10,
                 upload: Some(SipFlowUploadConfig::Http {
                     url: "http://recording-upload.invalid".to_string(),
+                    signaling_url: None,
                     headers: None,
                     method: None,
                     file_field: None,

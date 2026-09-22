@@ -31,11 +31,26 @@ CLI = os.environ.get(
 
 class RestsendAgent:
     def __init__(self, pbx, user: str, password: str = "123456",
-                 local_port: int = 25100):
+                 local_port: int = 25100,
+                 video: bool = False,
+                 device: str = "null",
+                 log_level: str = "info",
+                 enable_video: Optional[bool] = None):
+        """video: pass --video so the mock camera TX pump runs (H264 when the
+        video policy allows). device: null|tone|cpal|auto — `tone` drives a
+        synthetic 440 Hz source and logs 5 s receive-RMS windows at debug
+        level (pass log_level="debug" to capture them). enable_video:
+        explicit `init.enable_video` — the wire default is TRUE, so a plain
+        init already enables the client's video policy; pass False only to
+        force-disable."""
         self.pbx = pbx
         self.user = user
         self.password = password
         self.local_port = local_port
+        self.video = video
+        self.device = device
+        self.log_level = log_level
+        self.enable_video = enable_video
         self.proc: Optional[asyncio.subprocess.Process] = None
         self.events: list[dict] = []
         self._reader: Optional[asyncio.Task] = None
@@ -44,12 +59,15 @@ class RestsendAgent:
     async def start(self) -> None:
         if not os.path.exists(CLI):
             raise FileNotFoundError(f"restsend-cli not built: {CLI}")
-        env = dict(os.environ, RUST_LOG="info")
+        env = dict(os.environ, RUST_LOG=self.log_level)
         # stderr carries the engine's tracing log — keep it for diagnostics.
         self._stderr_path = f"/tmp/restsend-{self.user}-{self.local_port}.log"
         self._stderr_fh = open(self._stderr_path, "w")
+        args = [CLI, "--media", "rtc", "--device", self.device]
+        if self.video:
+            args.append("--video")
         self.proc = await asyncio.create_subprocess_exec(
-            CLI, "--media", "rtc", "--device", "null",
+            *args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=self._stderr_fh,
@@ -124,7 +142,10 @@ class RestsendAgent:
 
     # ── high-level ops ───────────────────────────────────────────────────
     async def register(self, expires: int = 120) -> bool:
-        await self.cmd({"cmd": "init"})
+        init_cmd: dict[str, Any] = {"cmd": "init"}
+        if self.enable_video is not None:
+            init_cmd["enable_video"] = self.enable_video
+        await self.cmd(init_cmd)
         await self.cmd({"cmd": "sip_bind",
                         "local_uri": f"sip:{self.user}@127.0.0.1:{self.local_port}"})
         await self.wait_event("sip_bound", timeout=8)
@@ -150,6 +171,14 @@ class RestsendAgent:
 
     async def hangup(self) -> None:
         await self.cmd({"cmd": "hangup"})
+
+    def stderr_text(self) -> str:
+        """The engine's tracing log (tracing writes to stderr)."""
+        try:
+            with open(self._stderr_path, encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+        except OSError:
+            return ""
 
     @property
     def rang(self) -> bool:

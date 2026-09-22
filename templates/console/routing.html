@@ -23,8 +23,9 @@
                     <span>{{ "routing.reload_scope_cluster" | t }}</span>
                 </label>
                 <button type="button"
-                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-200 focus:ring-offset-2"
+                    class="inline-flex items-center justify-center rounded-lg border border-slate-200 p-2 text-slate-600 transition hover:border-sky-300 hover:text-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-200 focus:ring-offset-2"
                     :class="[reloading ? 'cursor-wait border-slate-200 text-slate-400 hover:border-slate-200 hover:text-slate-400' : '', pendingReload && !reloading ? 'reload-glow reload-glow-accent' : '']"
+                    :title="'{{ "routing.reload_routes" | t }}'" :aria-label="'{{ "routing.reload_routes" | t }}'"
                     :disabled="reloading" @click="confirmReload()">
                     <template x-if="!reloading">
                         <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
@@ -39,17 +40,25 @@
                                 d="M12 3v3m6.364 1.636-2.121 2.121M21 12h-3m-1.636 6.364-2.121-2.121M12 21v-3m-6.364-1.636 2.121-2.121M3 12h3m1.636-6.364 2.121 2.121" />
                         </svg>
                     </template>
-                    {{ "routing.reload_routes" | t }}
                 </button>
                 <button type="button"
-                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-indigo-300 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-200 focus:ring-offset-2"
+                    class="inline-flex items-center justify-center rounded-lg border border-slate-200 p-2 text-slate-600 transition hover:border-indigo-300 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-200 focus:ring-offset-2"
+                    :title="'{{ "routing.routing_validation" | t }}'" :aria-label="'{{ "routing.routing_validation" | t }}'"
                     @click="openValidation()">
                     <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
                         <path stroke-linecap="round" stroke-linejoin="round"
                             d="M4 9a6 6 0 0 1 12 0c0 1.657-1.567 3.286-4.7 4.878l-.32.161a1 1 0 0 1-.96 0l-.32-.161C5.567 12.286 4 10.657 4 9Z" />
                         <path stroke-linecap="round" stroke-linejoin="round" d="M10 13v3m-2 0h4" />
                     </svg>
-                    {{ "routing.routing_validation" | t }}
+                </button>
+                <button type="button" x-show="activeTab === 'user-routes'" x-cloak
+                    class="inline-flex items-center gap-2 rounded-lg border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-semibold text-sky-700 transition hover:border-sky-300 hover:bg-sky-100 focus:outline-none focus:ring-2 focus:ring-sky-200 focus:ring-offset-2"
+                    @click="openQuickCreate()">
+                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                            d="M13 6a2 2 0 1 1 4 0 2 2 0 0 1-4 0Zm-2.106.598L4.5 12.5 3 17l4.5-1.5 5.902-6.394M15 4l1 1" />
+                    </svg>
+                    {{ "routing_quick.quick_create" | t }}
                 </button>
                 <a x-show="activeTab === 'user-routes'" :href="createUrl"
                     class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
@@ -1001,6 +1010,211 @@
             </div>
         </div>
 
+        <div x-show="quickOpen" x-cloak x-transition.opacity.duration.150ms
+            class="fixed inset-0 z-40 flex items-center justify-center px-4 py-12">
+            <div class="absolute inset-0 bg-slate-900/50 backdrop-blur-sm" @click="closeQuickCreate()"></div>
+            <div class="relative z-10 flex max-h-full w-full max-w-3xl origin-top flex-col rounded-2xl bg-white shadow-2xl ring-1 ring-black/10"
+                x-transition.scale.duration.150ms @keydown.escape.window="closeQuickCreate()">
+                <div class="flex items-start justify-between gap-4 border-b border-slate-100 px-6 py-4">
+                    <div>
+                        <h2 class="text-base font-semibold text-slate-900">{{ "routing_quick.quick_create_title" | t }}</h2>
+                        <p class="mt-0.5 text-xs text-slate-500">{{ "routing_quick.quick_create_desc" | t }}</p>
+                    </div>
+                    <button type="button"
+                        class="rounded-lg border border-slate-200 p-2 text-slate-500 transition hover:bg-slate-100 hover:text-slate-700"
+                        @click="closeQuickCreate()">
+                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M14 6l-8 8" />
+                        </svg>
+                    </button>
+                </div>
+                <form class="space-y-6 overflow-y-auto px-6 py-5" @submit.prevent="quickSubmit()">
+                    <section class="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+                        <h3 class="text-xs font-bold uppercase tracking-wide text-slate-500">{{ "routing_quick.quick_match_section" | t }}</h3>
+                        <div class="mt-3 grid gap-3 md:grid-cols-3">
+                            <label class="flex flex-col gap-1.5">
+                                <span class="text-xs font-semibold text-slate-500">{{ "routing_quick.quick_match_field" | t }}</span>
+                                <select x-model="quickDraft.field"
+                                    class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    <option value="to_user">{{ "routing_quick.quick_field_to_user" | t }}</option>
+                                    <option value="from_user">{{ "routing_quick.quick_field_from_user" | t }}</option>
+                                    <option value="request_uri_user">{{ "routing_quick.quick_field_request_uri_user" | t }}</option>
+                                </select>
+                            </label>
+                            <label class="flex flex-col gap-1.5">
+                                <span class="text-xs font-semibold text-slate-500">{{ "routing_quick.quick_match_type" | t }}</span>
+                                <select x-model="quickDraft.matchType" :disabled="quickMatchTypeLocked"
+                                    :class="quickMatchTypeLocked ? 'cursor-not-allowed opacity-60' : ''"
+                                    class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    <option value="starts_with">{{ "routing_quick.quick_match_starts_with" | t }}</option>
+                                    <option value="equals">{{ "routing_quick.quick_match_equals" | t }}</option>
+                                    <option value="regex">{{ "routing_quick.quick_match_regex" | t }}</option>
+                                </select>
+                            </label>
+                            <label class="flex flex-col gap-1.5">
+                                <span class="text-xs font-semibold text-slate-500">{{ "routing_quick.quick_match_value" | t }}</span>
+                                <input type="text" x-model.trim="quickDraft.value" x-ref="quickValue"
+                                    class="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="{{ "routing_quick.quick_match_value_placeholder" | t }}">
+                            </label>
+                        </div>
+                        <div class="mt-3 flex flex-wrap items-center gap-2" x-show="quickGeneratedPattern">
+                            <span class="text-xs text-slate-400">{{ "routing_quick.quick_generated_pattern" | t }}</span>
+                            <code class="rounded-md bg-slate-900 px-2 py-1 font-mono text-xs text-emerald-300"
+                                x-text="quickGeneratedPattern"></code>
+                        </div>
+                    </section>
+
+                    <section class="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+                        <h3 class="text-xs font-bold uppercase tracking-wide text-slate-500">{{ "routing_quick.quick_rewrite_section" | t }}</h3>
+                        <div class="mt-3 grid gap-3 md:grid-cols-2">
+                            <label class="flex flex-col gap-1.5">
+                                <span class="text-xs font-semibold text-slate-500">{{ "routing_quick.quick_rewrite_type" | t }}</span>
+                                <select x-model="quickDraft.rewriteType" @change="quickOnRewriteChange()"
+                                    class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    <option value="none">{{ "routing_quick.quick_rewrite_none" | t }}</option>
+                                    <option value="strip">{{ "routing_quick.quick_rewrite_strip" | t }}</option>
+                                    <option value="replace">{{ "routing_quick.quick_rewrite_replace" | t }}</option>
+                                    <option value="prepend">{{ "routing_quick.quick_rewrite_prepend" | t }}</option>
+                                </select>
+                            </label>
+                            <label class="flex flex-col gap-1.5" x-show="quickDraft.rewriteType === 'replace'">
+                                <span class="text-xs font-semibold text-slate-500">{{ "routing_quick.quick_rewrite_new_prefix" | t }}</span>
+                                <input type="text" x-model.trim="quickDraft.newPrefix"
+                                    class="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="86">
+                            </label>
+                            <label class="flex flex-col gap-1.5" x-show="quickDraft.rewriteType === 'prepend'">
+                                <span class="text-xs font-semibold text-slate-500">{{ "routing_quick.quick_rewrite_prepend_digits" | t }}</span>
+                                <input type="text" x-model.trim="quickDraft.prependDigits"
+                                    class="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="0">
+                            </label>
+                        </div>
+                        <p class="mt-2 text-xs text-slate-400" x-show="quickDraft.rewriteType === 'strip'">{{ "routing_quick.quick_rewrite_hint_strip" | t }}</p>
+                        <p class="mt-2 text-xs text-slate-400" x-show="quickDraft.rewriteType === 'replace'">{{ "routing_quick.quick_rewrite_hint_replace" | t }}</p>
+                        <div class="mt-3 flex flex-wrap items-center gap-2" x-show="quickGeneratedRewrite">
+                            <span class="text-xs text-slate-400">{{ "routing_quick.quick_generated_rewrite" | t }}</span>
+                            <code class="rounded-md bg-slate-900 px-2 py-1 font-mono text-xs text-sky-300">
+                                <span x-text="quickDraft.field"></span>&nbsp;=&nbsp;<span x-text="quickGeneratedRewrite ? quickGeneratedRewrite.value : ''"></span>
+                            </code>
+                        </div>
+                    </section>
+
+                    <section class="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+                        <h3 class="text-xs font-bold uppercase tracking-wide text-slate-500">{{ "routing_quick.quick_preview_section" | t }}</h3>
+                        <div class="mt-3 grid items-end gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
+                            <label class="flex flex-col gap-1.5">
+                                <span class="text-xs font-semibold text-slate-500">{{ "routing_quick.quick_preview_input" | t }}</span>
+                                <input type="text" x-model.trim="quickPreviewNumber"
+                                    class="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="{{ "routing_quick.quick_preview_input_placeholder" | t }}">
+                            </label>
+                            <div class="flex items-center gap-2 pb-1" x-show="quickPreview">
+                                <template x-if="quickPreview && quickPreview.matched">
+                                    <div class="flex items-center gap-2 font-mono text-sm">
+                                        <span class="text-slate-500" x-text="quickPreview.before"></span>
+                                        <svg class="h-4 w-4 text-slate-400" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 10h11m0 0-4-4m4 4-4 4" />
+                                        </svg>
+                                        <span class="font-semibold"
+                                            :class="quickPreview.changed ? 'text-emerald-600' : 'text-slate-600'"
+                                            x-text="quickPreview.after"></span>
+                                    </div>
+                                </template>
+                                <template x-if="quickPreview && !quickPreview.matched">
+                                    <span class="text-xs text-amber-600">{{ "routing_quick.quick_preview_no_match" | t }}</span>
+                                </template>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+                        <h3 class="text-xs font-bold uppercase tracking-wide text-slate-500">{{ "routing_quick.quick_delivery_section" | t }}</h3>
+                        <div class="mt-3 space-y-3">
+                            <div class="flex flex-col gap-1.5">
+                                <span class="text-xs font-semibold text-slate-500">{{ "routing_quick.quick_trunks" | t }}</span>
+                                <div class="flex flex-wrap gap-2">
+                                    <template x-for="option in trunkOptions" :key="'quick-' + option.value">
+                                        <button type="button" @click="quickToggleTrunk(option.value)"
+                                            class="inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition"
+                                            :class="quickDraft.trunks.includes(option.value)
+                                                ? 'border-sky-300 bg-sky-100 text-sky-700'
+                                                : 'border-slate-200 bg-white text-slate-600 hover:border-sky-200 hover:text-sky-600'">
+                                            <svg x-show="quickDraft.trunks.includes(option.value)" class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.2">
+                                                <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 10.5 3.5 3.5 7.5-8" />
+                                            </svg>
+                                            <span x-text="option.label"></span>
+                                        </button>
+                                    </template>
+                                </div>
+                                <p class="text-xs text-slate-400" x-show="quickDraft.trunks.length">{{ "routing_quick.quick_trunks_hint" | t }}</p>
+                                <p class="text-xs text-slate-400" x-show="!quickDraft.trunks.length">{{ "routing_quick.quick_trunks_optional" | t }}</p>
+                            </div>
+                            <div class="grid gap-3 md:grid-cols-4">
+                                <label class="flex flex-col gap-1.5">
+                                    <span class="text-xs font-semibold text-slate-500">{{ "routing_quick.quick_select_strategy" | t }}</span>
+                                    <select x-model="quickDraft.select"
+                                        class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                        <option value="rr">{{ "routing_form.sel_round_robin" | t }}</option>
+                                        <option value="weight">{{ "routing_form.sel_weighted" | t }}</option>
+                                        <option value="hash">{{ "routing_form.sel_hash" | t }}</option>
+                                    </select>
+                                </label>
+                                <label class="flex flex-col gap-1.5">
+                                    <span class="text-xs font-semibold text-slate-500">{{ "routing_quick.quick_direction" | t }}</span>
+                                    <select x-model="quickDraft.direction"
+                                        class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                        <option value="outbound">{{ "routing.outbound" | t }}</option>
+                                        <option value="inbound">{{ "routing.inbound" | t }}</option>
+                                    </select>
+                                </label>
+                                <label class="flex flex-col gap-1.5">
+                                    <span class="text-xs font-semibold text-slate-500">{{ "routing_quick.quick_priority" | t }}</span>
+                                    <input type="number" min="0" max="10000" x-model.number="quickDraft.priority"
+                                        class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                </label>
+                                <label class="flex flex-col gap-1.5">
+                                    <span class="text-xs font-semibold text-slate-500">{{ "routing_quick.quick_name" | t }}</span>
+                                    <input type="text" x-model.trim="quickDraft.name"
+                                        class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        :placeholder="quickAutoName()">
+                                </label>
+                            </div>
+                        </div>
+                    </section>
+
+                    <template x-if="quickError">
+                        <div class="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700" x-text="quickError"></div>
+                    </template>
+                    <template x-if="quickSuccess">
+                        <div class="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700" x-text="quickSuccess"></div>
+                    </template>
+
+                    <div class="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4">
+                        <button type="button" class="text-xs font-medium text-sky-600 hover:text-sky-700 hover:underline"
+                            @click="quickMoreOptions()">
+                            {{ "routing_quick.quick_more_options" | t }}
+                        </button>
+                        <div class="flex items-center gap-2">
+                            <button type="button"
+                                class="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
+                                @click="closeQuickCreate()">
+                                {{ "routing_form.cancel" | t }}
+                            </button>
+                            <button type="submit" :disabled="quickSaving"
+                                class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-wait disabled:opacity-60">
+                                <svg x-show="quickSaving" class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v3m6.364 1.636-2.121 2.121M21 12h-3m-1.636 6.364-2.121-2.121M12 21v-3m-6.364-1.636 2.121-2.121M3 12h3m1.636-6.364 2.121 2.121" />
+                                </svg>
+                                <span x-text="quickSaving ? '{{ "routing_quick.quick_submitting" | t }}' : '{{ "routing_quick.quick_submit" | t }}'"></span>
+                            </button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+
     </div>
 </div>
 
@@ -1013,7 +1227,7 @@
             createUrl: '',
             amiEndpoint: options.amiEndpoint || options.ami_path || '/ami/v1',
             filtersRaw: {},
-            forwardingCatalog: { queues: [], ivr_projects: [] },
+            forwardingCatalog: { queues: [], ivr_projects: [], realtime_presets: [] },
             routes: [],
             summary: { total_routes: 0, active_routes: 0, last_deploy: null },
             pagination: null,
@@ -1066,6 +1280,24 @@
             stackError: null,
             activeTab: 'user-routes',
             stackFetched: false,
+            quickOpen: false,
+            quickSaving: false,
+            quickError: null,
+            quickSuccess: null,
+            quickPreviewNumber: '',
+            quickDraft: {
+                field: 'to_user',
+                matchType: 'starts_with',
+                value: '',
+                rewriteType: 'none',
+                newPrefix: '',
+                prependDigits: '',
+                name: '',
+                direction: 'outbound',
+                priority: 100,
+                select: 'rr',
+                trunks: [],
+            },
 
             translations: {
                 failed_load: '{{ "routing.failed_load" | t }}',
@@ -1098,6 +1330,7 @@
                 target_queue: '{{ "routing.target_queue" | t }}',
                 target_ivr: '{{ "routing.target_ivr" | t }}',
                 target_voicemail: '{{ "routing.target_voicemail" | t }}',
+                target_realtime: '{{ "routing.target_realtime" | t }}',
                 target_default: '{{ "routing.target_default" | t }}',
                 route_unnamed: '{{ "routing.route_unnamed" | t }}',
                 status_not_handled: '{{ "routing.status_not_handled" | t }}',
@@ -1132,6 +1365,9 @@
                 stack_phase_post_route: '{{ "routing.stack_phase_post_route" | t }}',
                 stack_phase_outbound_wholesale: '{{ "routing.stack_phase_outbound_wholesale" | t }}',
                 stack_phase_session_behavior: '{{ "routing.stack_phase_session_behavior" | t }}',
+                quick_err_value_required: '{{ "routing_quick.quick_err_value_required" | t }}',
+                quick_created: '{{ "routing_quick.quick_created" | t }}',
+                quick_error_prefix: '{{ "routing_quick.quick_error_prefix" | t }}',
             },
 
             init() {
@@ -1765,6 +2001,13 @@
                     const ext = (route?.action?.voicemail_extension || '').trim();
                     return ext.length ? `${this.translations.target_voicemail} · ${ext}` : this.translations.target_voicemail;
                 }
+                if (targetType === 'realtime') {
+                    const raw = (route?.action?.realtime_preset || '').trim();
+                    const presets = this.forwardingCatalog.realtime_presets || [];
+                    const match = presets.find((p) => p.name === raw);
+                    const display = match ? match.name : raw;
+                    return display.length ? `${this.translations.target_realtime} · ${display}` : this.translations.target_realtime;
+                }
                 const targets = Array.isArray(route?.target_trunks)
                     ? route.target_trunks.filter((item) => typeof item === 'string' && item.trim().length)
                     : [];
@@ -2033,6 +2276,213 @@
             },
             closeValidation() {
                 this.validationOpen = false;
+            },
+            get quickMatchTypeLocked() {
+                return ['strip', 'replace'].includes(this.quickDraft.rewriteType);
+            },
+            quickOnRewriteChange() {
+                if (['strip', 'replace'].includes(this.quickDraft.rewriteType)) {
+                    this.quickDraft.matchType = 'starts_with';
+                }
+            },
+            quickEscapeRegex(value) {
+                return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            },
+            quickSlug(value) {
+                return String(value || '')
+                    .toLowerCase()
+                    .replace(/[^a-z0-9]+/g, '-')
+                    .replace(/^-+|-+$/g, '')
+                    .slice(0, 40);
+            },
+            get quickEffectiveMatchType() {
+                if (this.quickMatchTypeLocked) {
+                    return 'starts_with';
+                }
+                return this.quickDraft.matchType || 'starts_with';
+            },
+            get quickGeneratedPattern() {
+                const value = (this.quickDraft.value || '').trim();
+                if (!value.length) {
+                    return '';
+                }
+                const type = this.quickEffectiveMatchType;
+                if (type === 'regex') {
+                    return value;
+                }
+                if (type === 'equals') {
+                    return `^${this.quickEscapeRegex(value)}$`;
+                }
+                return `^${this.quickEscapeRegex(value)}(\\d+)$`;
+            },
+            get quickGeneratedRewrite() {
+                const type = this.quickDraft.rewriteType;
+                const field = this.quickDraft.field;
+                if (type === 'strip') {
+                    return { field, value: '{1}' };
+                }
+                if (type === 'replace') {
+                    const prefix = (this.quickDraft.newPrefix || '').trim();
+                    return { field, value: `${this.quickEscapeRegex(prefix)}{1}` };
+                }
+                if (type === 'prepend') {
+                    const digits = (this.quickDraft.prependDigits || '').trim();
+                    return { field, value: `${this.quickEscapeRegex(digits)}{0}` };
+                }
+                return null;
+            },
+            get quickPreview() {
+                const pattern = this.quickGeneratedPattern;
+                const number = (this.quickPreviewNumber || '').trim();
+                if (!pattern.length || !number.length) {
+                    return null;
+                }
+                let regex;
+                try {
+                    regex = new RegExp(pattern);
+                } catch (_) {
+                    return null;
+                }
+                const match = regex.exec(number);
+                if (!match) {
+                    return { matched: false };
+                }
+                const rewrite = this.quickGeneratedRewrite;
+                let after = number;
+                if (rewrite) {
+                    after = rewrite.value.replace(/\{(\d+)\}/g, (raw, index) => {
+                        const group = match[Number(index)];
+                        return group === undefined ? '' : group;
+                    });
+                }
+                return { matched: true, before: number, after, changed: after !== number };
+            },
+            quickAutoName() {
+                const parts = [];
+                if (this.quickDraft.rewriteType === 'strip') parts.push('strip');
+                else if (this.quickDraft.rewriteType === 'replace') parts.push('replace');
+                else if (this.quickDraft.rewriteType === 'prepend') parts.push('prepend');
+                parts.push(this.quickSlug(this.quickDraft.value) || 'rule');
+                if (this.quickDraft.trunks.length) {
+                    parts.push(`to-${this.quickSlug(this.quickDraft.trunks[0])}`);
+                }
+                return parts.join('-');
+            },
+            quickToggleTrunk(name) {
+                const index = this.quickDraft.trunks.indexOf(name);
+                if (index >= 0) {
+                    this.quickDraft.trunks.splice(index, 1);
+                } else {
+                    this.quickDraft.trunks.push(name);
+                }
+            },
+            openQuickCreate() {
+                if (this.quickSaving) {
+                    return;
+                }
+                this.quickError = null;
+                this.quickSuccess = null;
+                this.quickPreviewNumber = '';
+                this.quickOpen = true;
+                this.$nextTick(() => {
+                    this.$refs.quickValue?.focus();
+                });
+            },
+            closeQuickCreate() {
+                if (this.quickSaving) {
+                    return;
+                }
+                this.quickOpen = false;
+            },
+            quickBuildPayload() {
+                const match = {};
+                const pattern = this.quickGeneratedPattern.trim();
+                if (pattern.length) {
+                    match[this.quickDraft.field] = pattern;
+                }
+                const rewrite = {};
+                const generated = this.quickGeneratedRewrite;
+                if (generated && generated.value.length) {
+                    rewrite[generated.field] = generated.value;
+                }
+                const name = (this.quickDraft.name || '').trim() || this.quickAutoName();
+                const priority = Math.min(Math.max(Math.round(Number(this.quickDraft.priority) || 0), 0), 10000);
+                const selectMap = { rr: 'roundrobin', weight: 'weighted', hash: 'hash' };
+                return {
+                    name,
+                    description: null,
+                    owner: null,
+                    direction: this.quickDraft.direction === 'inbound' ? 'inbound' : 'outbound',
+                    priority,
+                    disabled: false,
+                    match,
+                    rewrite,
+                    action: {
+                        select: selectMap[this.quickDraft.select] || 'roundrobin',
+                        hash_key: null,
+                        trunks: this.quickDraft.trunks.map((trunk) => ({ name: trunk, weight: 0 })),
+                        target_type: 'sip_trunk',
+                    },
+                    source_trunk: null,
+                    notes: [],
+                };
+            },
+            async quickSubmit() {
+                if (this.quickSaving) {
+                    return;
+                }
+                if (!(this.quickDraft.value || '').trim().length) {
+                    this.quickError = this.translations.quick_err_value_required;
+                    return;
+                }
+                this.quickSaving = true;
+                this.quickError = null;
+                this.quickSuccess = null;
+                try {
+                    const response = await fetch(this.resolvePath(`${this.apiBase}/routing`), {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                        credentials: 'same-origin',
+                        body: JSON.stringify(this.quickBuildPayload()),
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || data?.error || `HTTP ${response.status}`);
+                    }
+                    this.quickSuccess = this.translations.quick_created;
+                    this.fetchRoutes();
+                    this.fetchPendingReload();
+                    setTimeout(() => {
+                        this.quickOpen = false;
+                    }, 1200);
+                } catch (err) {
+                    this.quickError = `${this.translations.quick_error_prefix}${err?.message || err}`;
+                } finally {
+                    this.quickSaving = false;
+                }
+            },
+            quickMoreOptions() {
+                const draft = {
+                    match: {},
+                    rewrite: {},
+                    trunks: this.quickDraft.trunks.slice(),
+                    select: this.quickDraft.select,
+                    direction: this.quickDraft.direction,
+                    priority: this.quickDraft.priority,
+                    name: (this.quickDraft.name || '').trim() || this.quickAutoName(),
+                };
+                const pattern = this.quickGeneratedPattern.trim();
+                if (pattern.length) {
+                    draft.match[this.quickDraft.field] = pattern;
+                }
+                const generated = this.quickGeneratedRewrite;
+                if (generated && generated.value.length) {
+                    draft.rewrite[generated.field] = generated.value;
+                }
+                try {
+                    sessionStorage.setItem('rustpbx_routing_quick_draft', JSON.stringify(draft));
+                } catch (_) {}
+                window.location.href = this.createUrl;
             },
             async runValidation() {
                 const callee = (this.validationInput || '').trim();

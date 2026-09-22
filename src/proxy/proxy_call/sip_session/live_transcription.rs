@@ -61,6 +61,15 @@ async fn pump_side(
 impl SipSession {
     /// Attach per-leg PCM taps and start the provider. Returns the sides
     /// that actually carry a negotiated media leg.
+    ///
+    /// The provider is resolved in this order:
+    /// 1. per-call [`TranscriptionPlan`] attached to the dialplan (by a
+    ///    dialplan inspector) — `provider` overrides the configured name;
+    /// 2. `[proxy.transcript.remote] provider` (default `deepgram`).
+    ///
+    /// A per-call plan also relaxes the `[proxy.transcript.remote]`
+    /// requirement: inspectors can enable transcription per call without any
+    /// global transcript configuration.
     pub(super) async fn start_live_transcription(
         &mut self,
         language: Option<String>,
@@ -71,19 +80,38 @@ impl SipSession {
             .load()
             .transcript
             .as_ref()
-            .and_then(|t| t.remote.clone())
-            .ok_or_else(|| {
-                anyhow!("live transcription not configured ([proxy.transcript.remote])")
-            })?;
+            .and_then(|t| t.remote.clone());
+        let per_call_plan = self
+            .context
+            .dialplan
+            .extensions
+            .get::<crate::call::transcription::TranscriptionPlan>()
+            .cloned();
+        if remote.is_none() && per_call_plan.is_none() {
+            return Err(anyhow!(
+                "live transcription not configured ([proxy.transcript.remote])"
+            ));
+        }
 
-        // Resolve the provider factory by configured name (default:
-        // "deepgram"). The factory owns provider-specific pre-flight checks
-        // (e.g. the Deepgram api_key requirement).
-        let provider_name = remote.provider_name().to_string();
+        // Resolve the provider factory: per-call override first, then the
+        // configured name (default: "deepgram"). The factory owns
+        // provider-specific pre-flight checks (e.g. the Deepgram api_key
+        // requirement).
+        let provider_name = per_call_plan
+            .as_ref()
+            .and_then(|p| p.provider.clone())
+            .unwrap_or_else(|| {
+                remote
+                    .as_ref()
+                    .map(|r| r.provider_name().to_string())
+                    .unwrap_or_else(|| "deepgram".to_string())
+            });
         let factory = crate::call::transcription::resolve_transcription_provider(&provider_name)
             .ok_or_else(|| anyhow!("unknown transcription provider '{provider_name}'"))?;
 
-        let mut remote = remote;
+        let mut remote = remote.unwrap_or_default();
+        let language = language
+            .or_else(|| per_call_plan.as_ref().and_then(|p| p.language.clone()));
         if let Some(language) = language {
             remote.language = Some(language);
         }
@@ -121,8 +149,26 @@ impl SipSession {
 
         let call_id = self.context.session_id.clone();
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<TranscriptionEvent>();
-        let provider: std::sync::Arc<dyn TranscriptionProvider> =
-            factory.create(&sides, event_tx, &serde_json::to_value(&remote)?)?;
+        let mut params = serde_json::to_value(&remote)?;
+        // Per-call WebSocket handshake headers for providers that use them
+        // (providers without header support ignore the key).
+        if let Some(headers) = per_call_plan.as_ref().and_then(|p| p.headers.as_ref()) {
+            if let Some(obj) = params.as_object_mut() {
+                obj.insert(
+                    "extra_headers".to_string(),
+                    serde_json::json!(headers),
+                );
+            }
+        }
+        let provider: std::sync::Arc<dyn TranscriptionProvider> = factory.create(
+            &crate::call::transcription::TranscriptionCallInfo {
+                call_id: call_id.clone(),
+                session_id: self.id.to_string(),
+            },
+            &sides,
+            event_tx,
+            &params,
+        )?;
 
         // PCM pump: one task per side, forwarding non-silence frames.
         let cancel = CancellationToken::new();
@@ -152,8 +198,11 @@ impl SipSession {
             let provider_name = provider_name.clone();
             tokio::spawn(async move {
                 while let Some(event) = event_rx.recv().await {
+                    // Gateway may be absent (server assembled without RWI):
+                    // keep draining so provider-side consumers (e.g. webhook
+                    // callbacks inside the provider) keep working.
                     let Some(gateway) = gateway.as_ref() else {
-                        break;
+                        continue;
                     };
                     match event {
                         TranscriptionEvent::Segment(seg) => {

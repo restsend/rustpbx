@@ -308,6 +308,10 @@ async fn build_filters(state: Arc<ConsoleState>) -> serde_json::Value {
 async fn build_forwarding_catalog(
     state: &ConsoleState,
 ) -> crate::console::catalog::ForwardingCatalog {
+    let realtime_presets = state
+        .app_state()
+        .and_then(|app| app.config().realtime.clone())
+        .unwrap_or_default();
     if let Some(proxy_config) =
         crate::console::catalog::load_proxy_config(state.app_state().as_ref())
     {
@@ -322,7 +326,12 @@ async fn build_forwarding_catalog(
                 None
             }
         });
-        crate::console::catalog::build_forwarding_catalog_opt(&proxy_config, store.as_ref()).await
+        crate::console::catalog::build_forwarding_catalog_opt(
+            &proxy_config,
+            store.as_ref(),
+            &realtime_presets,
+        )
+        .await
     } else {
         crate::console::catalog::ForwardingCatalog::empty()
     }

@@ -318,6 +318,8 @@ delegate_upload = false    # Delegate S3/HTTP upload to cluster nodes
 | `connect_timeout_ms` | Option\<u64\> | 3000 | TCP connect timeout |
 | `request_timeout_ms` | Option\<u64\> | 10000 | Total request timeout |
 | `signaling` | Option\<bool\> | `false` | Upload SIP signaling data |
+| `signaling_bucket` | Option\<String\> | falls back to `bucket` | Dedicated signaling JSONL bucket (S3): when set, the JSONL uploads to its own bucket and URLs point there |
+| `signaling_url` | Option\<String\> | falls back to `url` | Dedicated signaling upload endpoint (HTTP): when set, the JSONL POSTs to its own URL |
 | `media` | Option\<bool\> | `true` | Upload RTP media (as WAV) |
 | `force_pcm` | Option\<bool\> | `false` | Transcode to PCM before upload |
 | `pcm_sample_rate` | Option\<u32\> | 16000 | PCM sample rate when `force_pcm` is true |

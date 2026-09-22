@@ -300,6 +300,8 @@ delegate_upload = false    # Delegate S3/HTTP upload to cluster nodes
 | HTTP 字段：`url` | String | 必填 | HTTP 端点 URL |
 | `headers` | Option\<Map\> | None | 自定义 HTTP 头 |
 | `signaling` | Option\<bool\> | `false` | 上传 SIP 信令数据 |
+| `signaling_bucket` | Option\<String\> | 回退 `bucket` | 专用信令 JSONL 桶（S3）：设置后 JSONL 上传到独立桶，URL 同步指向该桶 |
+| `signaling_url` | Option\<String\> | 回退 `url` | 专用信令上传端点（HTTP）：设置后 JSONL POST 到独立地址 |
 | `media` | Option\<bool\> | `true` | 上传 RTP 媒体（WAV） |
 | `force_pcm` | Option\<bool\> | `false` | 上传前转码为 PCM |
 | `pcm_sample_rate` | Option\<u32\> | 16000 | `force_pcm` 为 true 时的 PCM 采样率 |

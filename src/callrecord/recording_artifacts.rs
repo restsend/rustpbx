@@ -33,6 +33,67 @@ impl RecordingSubdir {
     }
 }
 
+/// Canonical recording-source classification. Derived from the free-form
+/// `segment_type` tag: known values map to their source, anything else —
+/// including RWI/API custom tags — classifies as [`RecordingSource::External`].
+/// Drives the lifecycle-ownership invariants (e.g. app-scoped IVR segments
+/// are closed when the session hands off to a successor app) and the
+/// `source` field of `recording_metadata_available`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RecordingSource {
+    /// Global policy full-call recording (`[recording] auto_start`); owned by
+    /// the session for the whole call.
+    Full,
+    /// IVR smart-node segment (`record start`); lifecycle bound to the IVR
+    /// app — closed when the app hands off or exits.
+    Ivr,
+    /// Agent-side segment started when an agent answers; bound to the agent
+    /// leg.
+    Agent,
+    /// Consulted-agent segment on an attended-transfer consult leg; bound to
+    /// the consult session.
+    Consult,
+    /// Pre-answer ringback segment on outbound calls; discarded when the call
+    /// is answered, kept when it is not.
+    Ringing,
+    /// Voicemail message capture (self-terminating: the app waits for the
+    /// recording to finish).
+    Voicemail,
+    /// Anything else: custom `segment_type` values, generic `"segment"`
+    /// captures, CSAT surveys, and other app-owned recordings.
+    #[default]
+    External,
+}
+
+impl RecordingSource {
+    /// Wire/storage label (`source` in events and CDR extras).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Ivr => "ivr",
+            Self::Agent => "agent",
+            Self::Consult => "consult",
+            Self::Ringing => "ringing",
+            Self::Voicemail => "voicemail",
+            Self::External => "external",
+        }
+    }
+
+    /// Classify a free-form `segment_type` tag.
+    pub fn classify(segment_type: &str) -> Self {
+        match segment_type.trim().to_ascii_lowercase().as_str() {
+            "full" => Self::Full,
+            "ivr" => Self::Ivr,
+            "agent" => Self::Agent,
+            "consult" => Self::Consult,
+            "ringing" => Self::Ringing,
+            "voicemail" => Self::Voicemail,
+            _ => Self::External,
+        }
+    }
+}
+
 /// One completed recording segment (full-call or mid-call slice).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -67,6 +128,10 @@ pub struct RecordingSegment {
 pub struct ActiveRecording {
     pub path: String,
     pub segment_type: String,
+    /// Canonical source classification of [`Self::segment_type`] — the
+    /// lifecycle-ownership key (e.g. app-scoped closing checks for
+    /// [`RecordingSource::Ivr`]).
+    pub source: RecordingSource,
     pub segment_id: String,
     /// Sequence and file-name label resolved when the segment started.
     pub seq: u32,
@@ -79,6 +144,10 @@ pub struct ActiveRecording {
     /// (voicemail / IVR `torecord`). Mid-call `record_start` segments set
     /// this to false so a later `record_stop` does not hijack the IVR flow.
     pub notify_app: bool,
+    /// When true, stopping this segment deletes its file and suppresses all
+    /// recording events / CDR registration. Used by the outbound
+    /// pre-answer ringback segment: kept only when the call is NOT answered.
+    pub discard: bool,
 }
 
 /// Build `{session_id}_{YYYYMMDDHHMMSS}_{type}_{id}.wav` under `root`.
@@ -271,6 +340,49 @@ fn sanitize_component(raw: &str, fallback: &str) -> String {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn recording_source_classifies_known_tags() {
+        assert_eq!(RecordingSource::classify("full"), RecordingSource::Full);
+        assert_eq!(RecordingSource::classify("ivr"), RecordingSource::Ivr);
+        assert_eq!(RecordingSource::classify("agent"), RecordingSource::Agent);
+        assert_eq!(
+            RecordingSource::classify("consult"),
+            RecordingSource::Consult
+        );
+        assert_eq!(
+            RecordingSource::classify("ringing"),
+            RecordingSource::Ringing
+        );
+        assert_eq!(
+            RecordingSource::classify("voicemail"),
+            RecordingSource::Voicemail
+        );
+    }
+
+    #[test]
+    fn recording_source_classifies_unknown_and_messy_tags() {
+        // RWI custom tags fall to External, never panic.
+        assert_eq!(
+            RecordingSource::classify("my-custom-tag"),
+            RecordingSource::External
+        );
+        assert_eq!(RecordingSource::classify(""), RecordingSource::External);
+        assert_eq!(
+            RecordingSource::classify("  IVR  "),
+            RecordingSource::Ivr
+        );
+        assert_eq!(RecordingSource::classify("Full"), RecordingSource::Full);
+    }
+
+    #[test]
+    fn recording_source_labels_round_trip() {
+        for tag in ["full", "ivr", "agent", "consult", "ringing", "voicemail"] {
+            assert_eq!(RecordingSource::classify(tag).as_str(), tag);
+        }
+        assert_eq!(RecordingSource::External.as_str(), "external");
+        assert_eq!(RecordingSource::default(), RecordingSource::External);
+    }
 
     #[test]
     fn segment_path_uses_session_type_id() {

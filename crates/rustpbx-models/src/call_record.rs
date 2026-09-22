@@ -207,6 +207,17 @@ pub struct Model {
     pub tags: Option<Json>,
     pub leg_timeline: Option<Json>,
     pub metadata: Option<Json>,
+    /// Post-answer media quality on the trunk-facing leg (NULL when the call
+    /// has no RTCP report): packet-loss %, jitter and RTT in milliseconds.
+    pub media_loss_pct: Option<f64>,
+    pub media_jitter_ms: Option<f64>,
+    pub media_rtt_ms: Option<f64>,
+    /// Normalized hangup initiator/reason (caller / callee / refer / system /
+    /// autohangup / noAnswer / canceled / abandoned / ...). Promoted from the
+    /// metadata JSON so reports can group and filter without a JSON extract.
+    pub hangup_reason: Option<String>,
+    /// Final SIP response status code of the call (e.g. 200 / 486 / 487).
+    pub sip_status_code: Option<i32>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
     pub archived_at: Option<DateTimeUtc>,

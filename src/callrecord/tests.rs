@@ -1442,11 +1442,18 @@ async fn test_recording_upload_uses_sipflow_stashed_url() {
                         Some("https://s3.example.com/recordings/test.wav"),
                         "download_url should be the real stashed URL, not sipflow://{{call_id}}"
                     );
-                    // The aggregate call-level event marks the recording as complete.
+                    // The whole-call SipFlow artifact is the only recording of
+                    // this call, so the single event marks it complete.
                     assert_eq!(
                         meta["full"].as_bool(),
                         Some(true),
-                        "aggregate recording_metadata_available must be full=true"
+                        "sipflow single-artifact recording_metadata_available must be full=true"
+                    );
+                    // Canonical source classification (whole-call capture).
+                    assert_eq!(
+                        meta["source"].as_str(),
+                        Some("full"),
+                        "sipflow single-artifact event must carry source=full"
                     );
                     // The sipflow-stashed URL carries the recording file name.
                     assert_eq!(

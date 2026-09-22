@@ -1480,6 +1480,8 @@ struct RouteMetadataAction {
     voicemail_extension: Option<String>,
     #[serde(default)]
     ivr_file: Option<String>,
+    #[serde(default)]
+    realtime_preset: Option<String>,
 }
 
 async fn convert_route(
@@ -1661,6 +1663,12 @@ async fn apply_route_metadata(
                 };
                 action.app = Some("ivr".to_string());
                 action.app_params = Some(serde_json::json!({ "file": file_path }));
+            }
+        }
+        "realtime" => {
+            if let Some(preset) = sanitize_metadata_string(meta.realtime_preset) {
+                action.app = Some("realtime".to_string());
+                action.app_params = Some(serde_json::json!({ "preset": preset }));
             }
         }
         _ => {}
@@ -2303,6 +2311,7 @@ file = "db://ivr/lf-step-ivr.generated.toml"
             queue_file: Some("queues/support.toml".to_string()),
             voicemail_extension: None,
             ivr_file: None,
+            realtime_preset: None,
         };
         apply_route_metadata(&mut action, meta, None, None).await;
         assert_eq!(action.queue.as_deref(), Some("queues/support.toml"));
@@ -2316,6 +2325,7 @@ file = "db://ivr/lf-step-ivr.generated.toml"
             queue_file: None,
             voicemail_extension: Some("1001".to_string()),
             ivr_file: None,
+            realtime_preset: None,
         };
         apply_route_metadata(&mut action, meta, None, None).await;
         assert_eq!(action.app.as_deref(), Some("voicemail"));
@@ -2331,11 +2341,39 @@ file = "db://ivr/lf-step-ivr.generated.toml"
             queue_file: None,
             voicemail_extension: None,
             ivr_file: Some("config/ivr/main.toml".to_string()),
+            realtime_preset: None,
         };
         apply_route_metadata(&mut action, meta, None, None).await;
         assert_eq!(action.app.as_deref(), Some("ivr"));
         let params = action.app_params.unwrap();
         assert_eq!(params["file"], "config/ivr/main.toml");
+    }
+
+    #[tokio::test]
+    async fn route_metadata_sets_realtime_fields() {
+        let mut action = RouteAction::default();
+        let meta = RouteMetadataAction {
+            target_type: Some("realtime".to_string()),
+            queue_file: None,
+            voicemail_extension: None,
+            ivr_file: None,
+            realtime_preset: Some("support-bot".to_string()),
+        };
+        apply_route_metadata(&mut action, meta, None, None).await;
+        assert_eq!(action.app.as_deref(), Some("realtime"));
+        let params = action.app_params.unwrap();
+        assert_eq!(params["preset"], "support-bot");
+
+        // An empty preset name must not produce a broken realtime action.
+        let mut action = RouteAction::default();
+        let meta = RouteMetadataAction {
+            target_type: Some("realtime".to_string()),
+            realtime_preset: Some("   ".to_string()),
+            ..Default::default()
+        };
+        apply_route_metadata(&mut action, meta, None, None).await;
+        assert!(action.app.is_none());
+        assert!(action.app_params.is_none());
     }
 
     #[test]

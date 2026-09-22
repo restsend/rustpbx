@@ -327,6 +327,7 @@ endblock %}
                             <span x-text="tt('queue.fallback_redirect_label')"></span>
                             {% set queue_items = forwarding_catalog.queues | default([]) %}
                             {% set ivr_items = forwarding_catalog.ivr_projects | default([]) %}
+                            {% set realtime_items = forwarding_catalog.realtime_presets | default([]) %}
                             {% include "console/_destination_selector.html" %}
                         </label>
                     </div>

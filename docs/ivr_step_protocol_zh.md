@@ -597,6 +597,23 @@ curl -X POST http://localhost:8080/ivr/step \
 
 RWI 订阅者实时接收追踪条目（事件类型 `ivr_step_trace`）。
 
+#### `ivr_step_trace` 的 next / end 协议（逐节点执行标识）
+
+每个步骤事件的载荷在既有字段之上，新增三个字段，用于表达「当前节点执行完后，流程走到哪 / 是否结束」：
+
+| 字段 | 出现时机 | 说明 |
+|---|---|---|
+| `next_node_id` / `next_step_id` | 流程继续时 | 下一节点的标识（步骤模式下两者取值相同，均为后继节点的 `step_id`；提供两个名称便于消费方任选）。事件在下一节点解析完成后发出，因此**只要存在下一个节点就必带** |
+| `end` | 流程终结时 | `true` 表示该步骤是流程最后一个可观察节点：终态动作（挂机 / 转接 / 跳转 / 退出）、会话结束条目、或被主叫挂断 / 取消 / 错误打断的在途步骤 |
+
+语义约定：
+
+- **执行完一个节点 → 自动获取下一个节点**的每条步骤事件，携带 `next_node_id`/`next_step_id`，无 `end`；
+- **挂机节点或跳转节点**（无下一个节点）→ 携带 `end: true`（转接类还带 `end_reason`/`end_detail`）；
+- **用户中途挂断**：流程未走完也会发出最终通知——最后一步的 trigger 改写为 `user_hangup`，随后 `session_end` 条目携带 `end: true` + `end_reason: user_hangup`；
+- **可恢复交接**（queue/bridge 携带 return_app、jump_ivr 续流）不视为流程结束：不携带 `end`，也不发 `session_end`，续流由 `resume` 触发的后续事件接续（exactly-once）；
+- Provider `POST {url}/end`：**所有会话终结（含用户挂断 `user_hangup`）都会通知 Provider**；仅系统取消（关停）跳过。
+
 ### 参考实现
 
 `examples/unified_ivr_provider.py`：完整 Python Provider，无外部依赖。覆盖会话状态机、Prompt → DtmfMenu → Transfer/Queue/Hangup、DTMF 超时处理、无效按键重试三次后挂断，还包括 WebSocket PCM16 桥接回声服务器和 SIP INFO 请求体构造器（`ivr.exec`）。

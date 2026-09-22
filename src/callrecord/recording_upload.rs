@@ -843,6 +843,22 @@ fn build_segment_recording_metadata(
         .file_name()
         .map(|f| f.to_string_lossy().into_owned())
         .unwrap_or_else(|| format!("{}.wav", record.call_id));
+    // Canonical source, classified from the segment's `segment_type` tag.
+    // The dialplan-level whole-call artifact (`track_id = "mixed"`) has no
+    // in-session bookkeeping and classifies as `full`. Emitted only as the
+    // first-class `source` field — it must not also go into the flattened
+    // `extra` bag (duplicate JSON key).
+    let source = if media.track_id == "mixed" {
+        crate::callrecord::RecordingSource::Full
+    } else {
+        media
+            .extra
+            .as_ref()
+            .and_then(|e| e.get("segment_type"))
+            .and_then(|v| v.as_str())
+            .map(crate::callrecord::RecordingSource::classify)
+            .unwrap_or(crate::callrecord::RecordingSource::External)
+    };
     RecordingMetadata {
         // Minted by the reporter for every persisted media entry; the
         // fallback only covers exotic paths (external URLs, legacy CDRs) so
@@ -864,6 +880,7 @@ fn build_segment_recording_metadata(
         upload_time: Some(chrono::Utc::now().to_rfc3339()),
         // One slice of a (possibly) segmented recording — not the full call.
         full: false,
+        source: Some(source.as_str().to_string()),
         extra,
     }
 }
@@ -1158,36 +1175,29 @@ impl CallRecordHook for RecordingUploadHook {
                     meta.insert("recording_segments".to_string(), json!(segment_summaries));
                 }
 
-                if let Some(ref gw) = self.rwi_gateway {
+                // Single-notification contract: one `recording_metadata_available`
+                // per recording artifact. File-media calls were already notified
+                // per segment above (`emit_segment_metadata`); this call-level
+                // event now fires ONLY when the call's single artifact was
+                // captured by SipFlow (no local segment files, URL stashed by
+                // SipFlowUploadHook). The former duplicate notifications —
+                // the `full=true` aggregate on segmented calls and `record_end`
+                // — are no longer emitted.
+                let per_segment_notified =
+                    record.recorder.iter().any(|m| m.track_id != "signaling");
+                if !per_segment_notified && let Some(ref gw) = self.rwi_gateway {
                     // Same exclusion policy as the per-segment events (see
-                    // build_segment_recording_metadata). `recording_segments`
-                    // is re-added below as the documented aggregate-event
-                    // discriminator, so consumers can tell this summary apart
-                    // from the per-segment events.
-                    let mut extra = record.details.metadata.clone().map(|m| {
+                    // build_segment_recording_metadata).
+                    let extra = record.details.metadata.clone().map(|m| {
                         m.into_iter()
                             .filter(|(k, _)| !EVENT_METADATA_EXCLUDED_KEYS.contains(&k.as_str()))
                             .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
                             .collect::<HashMap<_, _>>()
                     });
-                    if !segment_summaries.is_empty() {
-                        let bag = extra.get_or_insert_with(HashMap::new);
-                        if let Ok(s) = serde_json::to_string(&segment_summaries) {
-                            bag.insert("recording_segments".to_string(), s);
-                        }
-                    }
                     let metadata = RecordingMetadata {
-                        // Mirror the file selection below (first non-signaling
-                        // artifact) so this summary id matches the per-segment
-                        // events when the call has exactly one recording.
-                        unique_id: Some(
-                            record
-                                .recorder
-                                .iter()
-                                .find(|m| m.track_id != "signaling")
-                                .and_then(|m| m.unique_id.clone())
-                                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                        ),
+                        // SipFlow capture has no local segment bookkeeping, so
+                        // the recording identifier is minted here.
+                        unique_id: Some(uuid::Uuid::new_v4().to_string()),
                         filename: recording_filename(record, url),
                         file_size: recording_file_size(record),
                         download_url: Some(url.to_string()),
@@ -1197,8 +1207,10 @@ impl CallRecordHook for RecordingUploadHook {
                         call_start_time: Some(record.start_time.to_rfc3339()),
                         call_end_time: Some(record.end_time.to_rfc3339()),
                         upload_time: Some(chrono::Utc::now().to_rfc3339()),
-                        // Call-level summary: every segment finished uploading.
+                        // The whole-call SipFlow artifact — the only
+                        // recording of this call.
                         full: true,
+                        source: Some(crate::callrecord::RecordingSource::Full.as_str().to_string()),
                         extra,
                     };
                     let gw_ref = gw.read();
@@ -1207,23 +1219,6 @@ impl CallRecordHook for RecordingUploadHook {
                         metadata,
                     });
                 }
-            }
-
-            // Emit RecordEnd with url (upload URL, local path, or sipflow reference).
-            if let Some(ref gw) = self.rwi_gateway {
-                let gw_ref = gw.read();
-                gw_ref.send_to_owner(&crate::rwi::RecordEnd {
-                    call_id: record.call_id.clone(),
-                    url: recording_url,
-                    duration_secs: (record.end_time - record.start_time).num_seconds().max(0)
-                        as u64,
-                    file_size: record
-                        .recorder
-                        .iter()
-                        .find(|m| m.track_id != "signaling")
-                        .map(|m| m.size)
-                        .unwrap_or(0),
-                });
             }
         }
 
@@ -1369,6 +1364,11 @@ mod tests {
             meta["full"].as_bool(),
             Some(false),
             "per-segment event must be marked full=false: {meta}"
+        );
+        assert_eq!(
+            meta["source"].as_str(),
+            Some("agent"),
+            "per-segment event must carry the canonical source: {meta}"
         );
         assert!(meta.get("caller_name").is_some());
 
@@ -2277,6 +2277,119 @@ mod tests {
         assert_eq!(
             record.details.recording_url, None,
             "enrich must not synthesize a recording_url when nothing moved"
+        );
+    }
+
+    /// Single-notification contract: a segmented (file-media) call must emit
+    /// exactly one `recording_metadata_available` per segment (`full=false`)
+    /// and never the former call-level `full=true` aggregate — the duplicate
+    /// notifications that consumers received under the old contract.
+    #[tokio::test]
+    async fn segmented_call_emits_only_per_segment_events() {
+        use crate::rwi::RwiGateway;
+        use parking_lot::RwLock;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let recorder_root = dir.path().join("recorders");
+        tokio::fs::create_dir_all(&recorder_root)
+            .await
+            .expect("create recorder root");
+        let seg_paths: Vec<std::path::PathBuf> = ["call_01_ivr.wav", "call_02_agent.wav"]
+            .iter()
+            .map(|name| {
+                let path = recorder_root.join(name);
+                std::fs::write(&path, b"wav").expect("write segment file");
+                path
+            })
+            .collect();
+
+        let gateway = Arc::new(RwLock::new(RwiGateway::new()));
+        let mut event_rx = gateway.read().subscribe_events();
+
+        let policy = RecordingPolicy {
+            enabled: Some(true),
+            recording_type: Some(RecordingType::Local),
+            path: Some(recorder_root.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (hook, _upload_manager, _) =
+            RecordingUploadHook::new(policy).expect("recording hook");
+        let hook = hook.with_rwi_gateway(gateway.clone());
+
+        let now = chrono::Utc::now();
+        let mk_media = |idx: usize, seg_type: &str| CallRecordMedia {
+            unique_id: Some(format!("uid-{idx}")),
+            track_id: format!("segment:{seg_type}:{idx}"),
+            path: seg_paths[idx].to_string_lossy().into_owned(),
+            size: 3,
+            extra: Some(std::collections::HashMap::from([
+                (
+                    "segment_type".to_string(),
+                    serde_json::Value::String(seg_type.to_string()),
+                ),
+                ("segment_id".to_string(), serde_json::Value::String(idx.to_string())),
+            ])),
+        };
+        let mut record = CallRecord {
+            call_id: "segmented-call".into(),
+            start_time: now,
+            end_time: now + chrono::Duration::seconds(30),
+            recorder: vec![mk_media(0, "ivr"), mk_media(1, "agent")],
+            details: CallDetails::default(),
+            ..Default::default()
+        };
+
+        hook.on_record_completed(std::slice::from_mut(&mut record))
+            .await
+            .expect("on_record_completed");
+
+        let mut per_segment = 0u32;
+        let mut aggregate = 0u32;
+        let deadline = Duration::from_millis(200);
+        let start = std::time::Instant::now();
+        loop {
+            match tokio::time::timeout(deadline.saturating_sub(start.elapsed()), event_rx.recv())
+                .await
+            {
+                Ok(Ok(entry)) => {
+                    if entry.call_id != "segmented-call" {
+                        continue;
+                    }
+                    if entry.event.event_type == "recording_metadata_available" {
+                        let full = entry.event.payload["metadata"]["full"].as_bool();
+                        if full == Some(true) {
+                            aggregate += 1;
+                        } else {
+                            per_segment += 1;
+                            let source = entry.event.payload["metadata"]["source"].as_str();
+                            assert!(
+                                source == Some("ivr") || source == Some("agent"),
+                                "per-segment events must carry their canonical source, got {source:?}"
+                            );
+                        }
+                    }
+                    assert!(
+                        entry.event.event_type != "record_end",
+                        "record_end must no longer be emitted"
+                    );
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
+                    panic!("event tap lagged by {n} messages");
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
+                Err(_timeout) => break,
+            }
+        }
+
+        assert_eq!(
+            per_segment, 2,
+            "each segment must get exactly one full=false event"
+        );
+        assert_eq!(
+            aggregate, 0,
+            "segmented calls must not receive the former full=true aggregate event"
         );
     }
 }

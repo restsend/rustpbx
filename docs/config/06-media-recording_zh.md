@@ -298,7 +298,7 @@ root = "recordings"
 
 示例：来电在主 IVR 录一段、坐席接通后录一段 → `abc123_1_main-ivr.wav`、`abc123_2_1001.wav`。
 
-每个完成的片段都会写入 CDR（`metadata.recording_segments`，每段含 `seq` / `label` / `segment_type` / `segment_id` / 起止时间）。上传成功后**每个片段各发一条** `recording_metadata_available` RWI/webhook 事件（`filename` / `download_url` / `file_size` 为该段独有，`extra` 在呼叫级元数据之外附带 `seq` / `label` / `segment_type`）；`record_end` 仍保持每通呼叫一条汇总。上传配置与整通话录音一致（`type = "local"|"http"|"s3"`，失败写 `.upload_failed.*` 标记并后台重试）。
+每个完成的片段都会写入 CDR（`metadata.recording_segments`，每段含 `seq` / `label` / `segment_type` / `segment_id` / 起止时间）。上传成功后**每个片段各发一条** `recording_metadata_available` RWI/webhook 事件（`filename` / `download_url` / `file_size` 为该段独有，`extra` 在呼叫级元数据之外附带 `seq` / `label` / `segment_type`；一等字段 `source` 标注录音来源：`ivr`/`agent`/`consult`/`ringing`/`voicemail`/`full`/`external`）。通知契约是**每个录音产物恰好一条**——分段呼叫（如 IVR 段 + 坐席段）各自独立通知，不存在呼叫级汇总事件；`record_end` 已移除。上传配置与整通话录音一致（`type = "local"|"http"|"s3"`，失败写 `.upload_failed.*` 标记并后台重试）。
 
 呼叫中心坐席段：cc.toml 支持
 

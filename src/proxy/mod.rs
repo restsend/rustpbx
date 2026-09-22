@@ -33,7 +33,7 @@ pub mod registrar;
 pub mod routing;
 pub mod server;
 pub mod sip_contact;
-#[cfg(test)]
+#[cfg(any(test, feature = "e2e-testing"))]
 pub mod tests;
 pub mod trunk_health;
 pub mod trunk_registrar;

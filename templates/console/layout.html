@@ -210,6 +210,7 @@
             apiPrefix: config.apiPrefix || '/api',
             queueItems: config.queueItems || [],
             ivrItems: config.ivrItems || [],
+            realtimeItems: config.realtimeItems || [],
             initialType: config.initialType || 'uri',
             initialValue: config.initialValue || '',
             targetType: 'uri',
@@ -230,6 +231,10 @@
             ivrOpen: false,
             ivrIndex: -1,
             ivrSelected: null,
+            rtQuery: '',
+            rtOpen: false,
+            rtIndex: -1,
+            rtSelected: null,
             get extFiltered() {
                 var q = this.extQuery.toLowerCase();
                 if (!q) return this.extItems;
@@ -252,11 +257,25 @@
                     return (i.name || '').toLowerCase().indexOf(q) !== -1;
                 });
             },
+            get realtimeAvailable() {
+                return (this.realtimeItems || []).length > 0;
+            },
+            get rtFiltered() {
+                var q = this.rtQuery.toLowerCase();
+                if (!q) return this.realtimeItems;
+                return this.realtimeItems.filter(function (i) {
+                    return (i.name || '').toLowerCase().indexOf(q) !== -1;
+                });
+            },
             init() {
                 var self = this;
                 this.allowedTypes = this.computeAllowedTypes();
-                this.targetType = this.allowedTypes.indexOf(this.initialType) !== -1
-                    ? this.initialType : (this.allowedTypes[0] || 'uri');
+                var initialAllowed = this.allowedTypes.indexOf(this.initialType) !== -1;
+                // Never land on realtime when the PBX has no [[realtime]] presets.
+                if (this.initialType === 'realtime' && !this.realtimeAvailable) {
+                    initialAllowed = false;
+                }
+                this.targetType = initialAllowed ? this.initialType : (this.allowedTypes[0] || 'uri');
                 this.targetValue = this.initialValue;
                 this.$nextTick(function () { self.restoreInitial(); });
                 if (!this.queueItems.length) this.fetchQueues();
@@ -270,7 +289,7 @@
                 });
             },
             computeAllowedTypes() {
-                var types = ['uri', 'extension', 'queue', 'ivr'];
+                var types = ['uri', 'extension', 'queue', 'ivr', 'realtime'];
                 if (window.voicemailAddonEnabled) types.push('voicemail');
                 return types;
             },
@@ -286,6 +305,11 @@
                         return i.name === this.targetValue;
                     }.bind(this)) || null;
                     if (this.ivrSelected) this.ivrQuery = this.ivrSelected.name;
+                } else if (this.targetType === 'realtime') {
+                    this.rtSelected = this.realtimeItems.find(function (i) {
+                        return i.name === this.targetValue;
+                    }.bind(this)) || null;
+                    if (this.rtSelected) this.rtQuery = this.rtSelected.name;
                 } else if (this.targetType === 'extension') {
                     if (this.targetValue) this.extQuery = this.targetValue;
                     this.fetchExtensions();
@@ -293,10 +317,11 @@
             },
             setType(type) {
                 if (this.targetType === type) return;
+                if (type === 'realtime' && !this.realtimeAvailable) return;
                 this.targetType = type;
                 this.targetValue = '';
-                this.extSelected = null; this.queueSelected = null; this.ivrSelected = null;
-                this.extQuery = ''; this.queueQuery = ''; this.ivrQuery = '';
+                this.extSelected = null; this.queueSelected = null; this.ivrSelected = null; this.rtSelected = null;
+                this.extQuery = ''; this.queueQuery = ''; this.ivrQuery = ''; this.rtQuery = '';
                 if (type === 'extension') this.fetchExtensions();
                 this.emitChange();
             },
@@ -400,6 +425,22 @@
                 this.ivrOpen = false;
                 this.emitChange();
             },
+            toggleRt() { this.rtOpen = !this.rtOpen; if (this.rtOpen) this.rtIndex = -1; },
+            selectRt(item) {
+                this.rtSelected = item;
+                this.rtQuery = item.name;
+                this.targetValue = item.name;
+                this.rtOpen = false;
+                this.emitChange();
+            },
+            clearRt() {
+                this.rtSelected = null;
+                this.rtQuery = '';
+                this.rtIndex = -1;
+                this.rtOpen = false;
+                this.targetValue = '';
+                this.emitChange();
+            },
             clearExt() {
                 this.extSelected = null;
                 this.extQuery = '';
@@ -447,6 +488,9 @@
                 } else if (field === 'ivr') {
                     open = 'ivrOpen'; idx = 'ivrIndex';
                     items = this.ivrFiltered; selectFn = 'selectIvr';
+                } else if (field === 'rt') {
+                    open = 'rtOpen'; idx = 'rtIndex';
+                    items = this.rtFiltered; selectFn = 'selectRt';
                 } else { return; }
                 if (!this[open]) { this[open] = true; return; }
                 if (e.key === 'ArrowDown') { e.preventDefault(); this[idx] = Math.min(this[idx] + 1, items.length - 1); }
@@ -602,6 +646,16 @@
                                 d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z" />
                         </svg>
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.metrics" | t }}</span>
+                    </a>
+                    <a href="{{ bp }}/reports" x-show="can('cc_reports:read') || can('dashboard:read')" x-cloak
+                        class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='reports' else 'text-slate-700' }}"
+                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ 'nav.reports' | t }}">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
+                            stroke="currentColor" class="size-5">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M3.75 3v11.25A2.25 2.25 0 0 0 6 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0 1 18 16.5h-2.25m-7.5 0h7.5m-7.5 0-1 3m8.5-3 1 3m0 0 .5 2m-19.5-4.5L3 21m18.75-4.5L21 21m-4.5-9h.008v.008h-.008V12Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" />
+                        </svg>
+                        <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.reports" | t }}</span>
                     </a>
                     <a href="{{ bp }}/addons" x-show="can('system:read')" x-cloak
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='addons' else 'text-slate-700' }}"

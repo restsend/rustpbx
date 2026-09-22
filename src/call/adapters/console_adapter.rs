@@ -110,6 +110,7 @@ pub fn console_to_call_command(
         CallCommandPayload::StartRecording { path, format } => Ok(CallCommand::StartRecording {
             config: RecordConfig {
                 unique_id: None,
+                discard: None,
                 path: path.unwrap_or_else(|| "recordings/console-recording.wav".to_string()),
                 max_duration_secs: None,
                 beep: true,

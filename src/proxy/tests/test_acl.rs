@@ -354,3 +354,60 @@ async fn test_uri_normalization_disabled_allows_long() {
         result
     );
 }
+
+fn push_user_agent(
+    mut request: rsipstack::sip::Request,
+    ua: &str,
+) -> rsipstack::sip::Request {
+    request
+        .headers
+        .push(Header::UserAgent(rsipstack::sip::headers::UserAgent::new(
+            ua.to_string(),
+        )));
+    request
+}
+
+#[tokio::test]
+async fn test_acl_module_blocks_scanner_user_agent() {
+    let config = Arc::new(ProxyConfig::default());
+    let module = AclModule::new(config);
+
+    let request = create_acl_request(rsipstack::sip::Method::Invite, "alice", "127.0.0.1");
+    let request = push_user_agent(request, "SIPVicious 2.0");
+    let (mut tx, _) = create_transaction(request).await;
+    let cookie = TransactionCookie::default();
+
+    let result = module
+        .on_transaction_begin(CancellationToken::new(), &mut tx, cookie.clone())
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(result, ProxyAction::Abort),
+        "expected Abort for scanner UA, got {:?}",
+        result
+    );
+    assert!(cookie.is_spam(), "scanner UA request should be marked spam");
+}
+
+#[tokio::test]
+async fn test_acl_module_allows_normal_user_agent() {
+    let config = Arc::new(ProxyConfig::default());
+    let module = AclModule::new(config);
+
+    let request = create_acl_request(rsipstack::sip::Method::Invite, "alice", "127.0.0.1");
+    let request = push_user_agent(request, "Grandstream HW GXV3275 1.0.1.60");
+    let (mut tx, _) = create_transaction(request).await;
+    let cookie = TransactionCookie::default();
+
+    let result = module
+        .on_transaction_begin(CancellationToken::new(), &mut tx, cookie)
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(result, ProxyAction::Continue),
+        "expected Continue for normal UA, got {:?}",
+        result
+    );
+}

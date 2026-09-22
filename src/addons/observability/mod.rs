@@ -77,6 +77,47 @@ impl ObservabilityAddon {
                 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
             ])
             .map_err(|e| anyhow::anyhow!("failed to configure Prometheus buckets: {e}"))?
+            // Duration-class overrides — the default buckets above would lump
+            // everything longer than a minute into +Inf (calls routinely run
+            // for hours) or waste every bucket above a slow DB query.
+            .set_buckets_for_metric(
+                metrics_exporter_prometheus::Matcher::Full("rustpbx_call_duration_seconds".to_string()),
+                &[1.0, 5.0, 10.0, 30.0, 60.0, 180.0, 600.0, 1800.0, 3600.0],
+            )?
+            .set_buckets_for_metric(
+                metrics_exporter_prometheus::Matcher::Full("rustpbx_call_talk_time_seconds".to_string()),
+                &[1.0, 5.0, 10.0, 30.0, 60.0, 180.0, 600.0, 1800.0, 3600.0],
+            )?
+            .set_buckets_for_metric(
+                metrics_exporter_prometheus::Matcher::Full("rustpbx_recording_upload_latency_seconds".to_string()),
+                &[1.0, 5.0, 10.0, 30.0, 60.0, 300.0, 600.0],
+            )?
+            .set_buckets_for_metric(
+                metrics_exporter_prometheus::Matcher::Full("rustpbx_cc_queue_wait_time_seconds".to_string()),
+                &[1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0],
+            )?
+            .set_buckets_for_metric(
+                metrics_exporter_prometheus::Matcher::Full("rustpbx_cc_queue_handle_time_seconds".to_string()),
+                &[10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0],
+            )?
+            .set_buckets_for_metric(
+                metrics_exporter_prometheus::Matcher::Full("rustpbx_cc_agent_talk_time_seconds".to_string()),
+                &[1.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0],
+            )?
+            .set_buckets_for_metric(
+                metrics_exporter_prometheus::Matcher::Full("rustpbx_cc_agent_wrapup_time_seconds".to_string()),
+                &[1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0],
+            )?
+            .set_buckets_for_metric(
+                metrics_exporter_prometheus::Matcher::Full("rustpbx_cc_agent_ringing_time_seconds".to_string()),
+                &[1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0],
+            )?
+            .set_buckets_for_metric(
+                metrics_exporter_prometheus::Matcher::Full("rustpbx_db_query_latency_seconds".to_string()),
+                &[
+                    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+                ],
+            )?
             .build_recorder();
 
         let handle = recorder.handle();
@@ -476,6 +517,92 @@ mod tests {
         // Second call must always succeed.
         let r2 = ObservabilityAddon::install_recorder();
         assert!(r2.is_ok(), "second install_recorder failed: {:?}", r2);
+    }
+
+    /// `rustpbx_call_duration_seconds` uses call-duration buckets (up to an
+    /// hour), not the sub-second telephony defaults — a 120s call must land
+    /// in the `le="180"` bucket, which the default set does not have.
+    #[tokio::test]
+    async fn test_call_duration_buckets_customized() {
+        ObservabilityAddon::install_recorder().ok();
+        metrics::histogram!("rustpbx_call_duration_seconds", "direction" => "test")
+            .record(120.0);
+        let Some(text) = ObservabilityAddon::render_prometheus() else {
+            return; // recorder without render handle; nothing to assert
+        };
+        assert!(
+            text.lines().any(|l| l.starts_with("rustpbx_call_duration_seconds_bucket")
+                && l.contains("le=\"180\"")),
+            "custom call-duration buckets not applied"
+        );
+    }
+
+    /// Core `metrics::cc::agent_status_changed` must zero the previous
+    /// (agent, status) series — otherwise one agent counts as being in
+    /// several states at once (Prometheus series never expire). Lives here
+    /// because asserting on rendered output requires this addon's recorder;
+    /// core must not depend on addon code, even in tests.
+    #[test]
+    fn test_agent_status_transition_zeroes_previous() {
+        ObservabilityAddon::install_recorder().ok();
+        crate::metrics::cc::agent_status_changed("metrics-test-agent", "idle");
+        crate::metrics::cc::agent_status_changed("metrics-test-agent", "busy");
+
+        let Some(text) = ObservabilityAddon::render_prometheus() else {
+            return; // recorder without render handle; nothing to assert
+        };
+        let line_for = |status: &str| {
+            text.lines()
+                .find(|l| {
+                    l.starts_with("rustpbx_cc_agent_status")
+                        && l.contains("agent=\"metrics-test-agent\"")
+                        && l.contains(&format!("status=\"{status}\""))
+                })
+                .unwrap_or_else(|| panic!("missing series for status={status}"))
+                .to_string()
+        };
+        assert!(
+            line_for("idle").ends_with(" 0"),
+            "previous status must be zeroed, got: {}",
+            line_for("idle")
+        );
+        assert!(
+            line_for("busy").ends_with(" 1"),
+            "current status must be 1, got: {}",
+            line_for("busy")
+        );
+    }
+
+    /// One sampler iteration must produce the uptime + active-bridge series
+    /// (both platform-independent); `/proc`-derived series additionally show
+    /// up on Linux. Lives here for the same reason as the agent-status test:
+    /// rendering needs this addon's recorder.
+    #[test]
+    fn test_metrics_sampler_sample_pass_renders_gauges() {
+        ObservabilityAddon::install_recorder().ok();
+        let mut prev_cpu = None;
+        let mut prev_media = crate::media::telemetry::MediaTelemetrySnapshot::default();
+        crate::metrics_sampler::sample_system(&mut prev_cpu);
+        crate::metrics_sampler::sample_media(&mut prev_media);
+
+        let Some(text) = ObservabilityAddon::render_prometheus() else {
+            return; // recorder without render handle; nothing to assert
+        };
+        assert!(
+            text.contains("rustpbx_process_uptime_seconds"),
+            "uptime gauge missing"
+        );
+        assert!(
+            text.contains("rustpbx_media_active_bridges"),
+            "active bridges gauge missing"
+        );
+        if std::path::Path::new("/proc/self/stat").exists() {
+            assert!(
+                text.contains("rustpbx_process_resident_memory_bytes"),
+                "rss gauge missing on Linux"
+            );
+            assert!(text.contains("rustpbx_process_open_fds"), "fds gauge missing");
+        }
     }
 
     /// Inbound answered call with 200 OK → emits counter + duration + talk_time.

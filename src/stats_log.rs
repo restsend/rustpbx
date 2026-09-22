@@ -158,7 +158,7 @@ impl StatsLogger {
             "cpu_pct": self.read_cpu_pct(),
             "mem": read_meminfo(),
             "load": read_loadavg(),
-            "rss_kb": read_self_rss(),
+            "rss_kb": crate::proc_stats::resident_memory_bytes().map(|b| b / 1024),
             "udp": self.read_udp_delta(),
         });
 
@@ -298,16 +298,6 @@ fn read_loadavg() -> serde_json::Value {
         .filter_map(|p| p.parse().ok())
         .collect();
     json!(vals)
-}
-
-fn read_self_rss() -> Option<u64> {
-    let Ok(text) = std::fs::read_to_string("/proc/self/status") else {
-        return None;
-    };
-    text.lines()
-        .find_map(|l| l.strip_prefix("VmRSS:"))
-        .and_then(|v| v.trim().split_whitespace().next())
-        .and_then(|p| p.parse().ok())
 }
 
 /// Cumulative media deltas over one tick.

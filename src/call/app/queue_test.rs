@@ -1572,6 +1572,17 @@ mod tests {
         // Both agents fail - ring timeout
         stack.timeout("agent_ring_timeout");
 
+        // Both outstanding INVITEs must be cancelled before fallback.
+        let first_removed = match stack.next_cmd(2000).await {
+            Some(CallCommand::LegRemove { leg_id }) => leg_id,
+            other => panic!("expected first cancellation, got {other:?}"),
+        };
+        let second_removed = match stack.next_cmd(2000).await {
+            Some(CallCommand::LegRemove { leg_id }) => leg_id,
+            other => panic!("expected second cancellation, got {other:?}"),
+        };
+        assert_ne!(first_removed, second_removed);
+
         // Should hit no-answer fallback
         stack
             .assert_cmd(2000, "FallbackHangup", |c| {
@@ -3169,25 +3180,31 @@ mod tests {
 
         // Poll #1 resolves an Idle agent → dial.
         stack.timeout("queue_retry");
-        let mut saw_dial = false;
+        let mut dialed_leg = None;
         for _ in 0..10 {
             if let Some(cmd) = stack.next_cmd(300).await {
-                if matches!(cmd, CallCommand::LegAdd { .. }) {
-                    saw_dial = true;
+                if let CallCommand::LegAdd { leg_id, .. } = cmd {
+                    dialed_leg = leg_id;
                     break;
                 }
             }
         }
-        assert!(saw_dial, "wait-retention poll must dial the resolved agent");
+        let dialed_leg = dialed_leg.expect("wait-retention poll must dial the resolved agent");
 
         // The agent never answers → ring timeout → round exhausted → the app
         // must go back to waiting (hold restarts), not hang up.
         stack.timeout("agent_ring_timeout");
+        let mut cancelled_leg = false;
         let mut hold_restarted = false;
         let mut hung_up = false;
         for _ in 0..10 {
             match stack.next_cmd(300).await {
+                Some(CallCommand::LegRemove { leg_id }) => {
+                    assert_eq!(leg_id, dialed_leg);
+                    cancelled_leg = true;
+                }
                 Some(CallCommand::Play { .. }) => {
+                    assert!(cancelled_leg, "cancel the timed-out INVITE before returning to wait retention");
                     hold_restarted = true;
                     break;
                 }

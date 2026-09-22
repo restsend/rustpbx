@@ -39,6 +39,9 @@ pub struct TestUaConfig {
     /// When true, the UA generates a real WebRTC (DTLS-SRTP) offer/answer via a
     /// rustrtc PeerConnection instead of the fake SDP strings used elsewhere.
     pub webrtc: bool,
+    /// Extra headers attached to every outgoing INVITE (e.g. X-SmartParams
+    /// for trunk-call simulations). Empty by default.
+    pub extra_invite_headers: Vec<(String, String)>,
 }
 
 /// Simplified TestUa structure with essential fields only
@@ -401,6 +404,10 @@ impl TestUa {
             (None, None)
         };
 
+        let mut extra_headers = vec![route_header];
+        for (k, v) in &self.config.extra_invite_headers {
+            extra_headers.push(rsipstack::sip::Header::Other(k.clone(), v.clone()));
+        }
         let invite_option = InviteOption {
             callee: callee_uri,
             caller: contact.clone(),
@@ -408,7 +415,7 @@ impl TestUa {
             offer,
             contact: contact.clone(),
             credential: Some(credential),
-            headers: Some(vec![route_header]),
+            headers: Some(extra_headers),
             ..Default::default()
         };
 
@@ -1234,6 +1241,7 @@ mod tests {
             realm: proxy_addr.ip().to_string(),
             local_port: port,
             proxy_addr,
+            extra_invite_headers: Vec::new(),
         };
 
         let mut ua = TestUa::new(config);
@@ -1256,6 +1264,7 @@ mod tests {
             realm: proxy_addr.ip().to_string(),
             local_port: port,
             proxy_addr,
+            extra_invite_headers: Vec::new(),
         };
 
         let mut ua = TestUa::new(config);

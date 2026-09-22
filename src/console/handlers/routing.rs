@@ -17,6 +17,7 @@ use axum::{
     routing::{get, patch, post},
 };
 use chrono::{DateTime, Utc};
+use regex::Regex;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection, DbErr,
     EntityTrait, Iterable, PaginatorTrait, QueryFilter, QueryOrder, TransactionTrait,
@@ -259,6 +260,7 @@ pub(crate) enum RouteTargetKind {
     Queue,
     Voicemail,
     Ivr,
+    Realtime,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -276,6 +278,8 @@ pub(crate) struct RouteActionDocument {
     voicemail_extension: Option<String>,
     #[serde(default)]
     ivr_file: Option<String>,
+    #[serde(default)]
+    realtime_preset: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -325,6 +329,7 @@ impl Default for RouteActionDocument {
             queue_file: None,
             voicemail_extension: None,
             ivr_file: None,
+            realtime_preset: None,
         }
     }
 }
@@ -402,6 +407,8 @@ impl RouteDocument {
         if self.name.trim().is_empty() {
             return Err(RouteError::new("Route name is required"));
         }
+        validate_match_patterns(&self.matchers)?;
+        validate_rewrite_templates(&self.rewrite, &self.matchers)?;
         match self.action.target_type {
             RouteTargetKind::SipTrunk => {}
             RouteTargetKind::Queue => {
@@ -440,6 +447,18 @@ impl RouteDocument {
                     ));
                 }
             }
+            RouteTargetKind::Realtime => {
+                let has_preset = self
+                    .action
+                    .realtime_preset
+                    .as_ref()
+                    .and_then(|value| sanitize_optional_string(Some(value.clone())));
+                if has_preset.is_none() {
+                    return Err(RouteError::new(
+                        "Realtime destination requires a [[realtime]] preset name",
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -453,12 +472,15 @@ impl RouteDocument {
         self.action.voicemail_extension =
             sanitize_optional_string(self.action.voicemail_extension.take());
         self.action.ivr_file = sanitize_optional_string(self.action.ivr_file.take());
+        self.action.realtime_preset =
+            sanitize_optional_string(self.action.realtime_preset.take());
 
         match self.action.target_type {
             RouteTargetKind::SipTrunk => {
                 self.action.queue_file = None;
                 self.action.voicemail_extension = None;
                 self.action.ivr_file = None;
+                self.action.realtime_preset = None;
             }
             RouteTargetKind::Queue => {
                 self.action.trunks.clear();
@@ -466,6 +488,7 @@ impl RouteDocument {
                 self.action.hash_key = None;
                 self.action.voicemail_extension = None;
                 self.action.ivr_file = None;
+                self.action.realtime_preset = None;
             }
             RouteTargetKind::Voicemail => {
                 self.action.trunks.clear();
@@ -473,6 +496,7 @@ impl RouteDocument {
                 self.action.hash_key = None;
                 self.action.queue_file = None;
                 self.action.ivr_file = None;
+                self.action.realtime_preset = None;
             }
             RouteTargetKind::Ivr => {
                 self.action.trunks.clear();
@@ -480,6 +504,15 @@ impl RouteDocument {
                 self.action.hash_key = None;
                 self.action.queue_file = None;
                 self.action.voicemail_extension = None;
+                self.action.realtime_preset = None;
+            }
+            RouteTargetKind::Realtime => {
+                self.action.trunks.clear();
+                self.action.select = DEFAULT_SELECTION;
+                self.action.hash_key = None;
+                self.action.queue_file = None;
+                self.action.voicemail_extension = None;
+                self.action.ivr_file = None;
             }
         }
 
@@ -635,6 +668,140 @@ fn value_from_map(map: &JsonMap<String, Value>) -> Option<Value> {
     }
 }
 
+const REGEX_HINT_CHARS: [char; 8] = ['^', '$', '*', '+', '?', '[', '(', '\\'];
+
+fn canonical_route_key(raw: &str) -> String {
+    raw.trim().to_ascii_lowercase().replace(['_', '-'], ".")
+}
+
+fn match_pattern_field(canonical: &str) -> Option<&'static str> {
+    match canonical {
+        "from.user" | "caller" | "from" => Some("from.user"),
+        "from.host" => Some("from.host"),
+        "to.user" | "callee" | "to" => Some("to.user"),
+        "to.host" => Some("to.host"),
+        "request.uri.user" => Some("request_uri.user"),
+        "request.uri.host" => Some("request_uri.host"),
+        _ => None,
+    }
+}
+
+fn matchers_by_field(matchers: &JsonMap<String, Value>) -> HashMap<&'static str, String> {
+    let mut fields = HashMap::new();
+    for (key, value) in matchers {
+        let pattern = extract_string(value.clone());
+        if pattern.is_empty() {
+            continue;
+        }
+        if let Some(field) = match_pattern_field(&canonical_route_key(key)) {
+            fields.insert(field, pattern);
+        }
+    }
+    fields
+}
+
+fn validate_match_patterns(matchers: &JsonMap<String, Value>) -> Result<(), RouteError> {
+    for (key, value) in matchers {
+        let pattern = extract_string(value.clone());
+        if pattern.is_empty() || !pattern.chars().any(|c| REGEX_HINT_CHARS.contains(&c)) {
+            continue;
+        }
+        if let Err(err) = Regex::new(&pattern) {
+            return Err(RouteError::new(format!(
+                "Invalid regex in match condition \"{}\": {}",
+                key, err
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn rewrite_capture_indexes(template: &str) -> Result<Vec<usize>, RouteError> {
+    if !template.contains('{') {
+        return Ok(Vec::new());
+    }
+    let mut indexes = Vec::new();
+    let mut chars = template.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '{' {
+            continue;
+        }
+        let mut buffer = String::new();
+        let mut closed = false;
+        while let Some(&next) = chars.peek() {
+            chars.next();
+            if next == '}' {
+                closed = true;
+                break;
+            }
+            buffer.push(next);
+        }
+        if !closed {
+            return Err(RouteError::new(format!(
+                "Unclosed capture group placeholder in rewrite template '{}'",
+                template
+            )));
+        }
+        if buffer.is_empty() {
+            return Err(RouteError::new(format!(
+                "Empty capture group placeholder in rewrite template '{}'",
+                template
+            )));
+        }
+        let index = buffer.parse::<usize>().map_err(|_| {
+            RouteError::new(format!(
+                "Invalid capture group index '{}' in rewrite template '{}'",
+                buffer, template
+            ))
+        })?;
+        indexes.push(index);
+    }
+    Ok(indexes)
+}
+
+fn explicit_group_count(pattern: &str) -> Option<usize> {
+    let regex = Regex::new(pattern).ok()?;
+    Some(regex.capture_names().count().saturating_sub(1))
+}
+
+fn validate_rewrite_templates(
+    rewrite: &JsonMap<String, Value>,
+    matchers: &JsonMap<String, Value>,
+) -> Result<(), RouteError> {
+    let matched_fields = matchers_by_field(matchers);
+    for (key, value) in rewrite {
+        let template = extract_string(value.clone());
+        if template.is_empty() {
+            continue;
+        }
+        let indexes = rewrite_capture_indexes(&template)?;
+        if indexes.is_empty() {
+            continue;
+        }
+        let canonical = canonical_route_key(key);
+        let Some(field) = match_pattern_field(&canonical) else {
+            continue;
+        };
+        let Some(pattern) = matched_fields.get(field) else {
+            continue;
+        };
+        if !pattern.chars().any(|c| REGEX_HINT_CHARS.contains(&c)) {
+            continue;
+        }
+        if let Some(groups) = explicit_group_count(pattern) {
+            for index in indexes {
+                if index > groups {
+                    return Err(RouteError::new(format!(
+                        "Rewrite \"{}\" references {{{}}} but match pattern \"{}\" only has {} capture group(s)",
+                        key, index, pattern, groups
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn value_from_trunks(trunks: &[RouteTrunkDocument]) -> Option<Value> {
     if trunks.is_empty() {
         None
@@ -650,6 +817,27 @@ fn resolve_trunk_id(lookup: &HashMap<String, i64>, name: Option<&str>) -> Option
             .copied()
             .or_else(|| lookup.get(&raw.to_ascii_lowercase()).copied())
     })
+}
+
+fn validate_target_trunks(
+    doc: &RouteDocument,
+    trunk_lookup: &HashMap<String, i64>,
+) -> Result<(), RouteError> {
+    if !matches!(doc.action.target_type, RouteTargetKind::SipTrunk) {
+        return Ok(());
+    }
+    for trunk in &doc.action.trunks {
+        if trunk.name.trim().is_empty() {
+            return Err(RouteError::new("Target trunk name cannot be empty"));
+        }
+        if resolve_trunk_id(trunk_lookup, Some(trunk.name.as_str())).is_none() {
+            return Err(RouteError::new(format!(
+                "Target trunk \"{}\" was not found",
+                trunk.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn build_trunk_name_lookup(trunks: &[SipTrunkModel]) -> HashMap<String, i64> {
@@ -702,6 +890,10 @@ async fn load_trunks(db: &DatabaseConnection) -> Result<Vec<SipTrunkModel>, DbEr
 async fn load_catalogs(state: &ConsoleState) -> crate::console::catalog::ForwardingCatalog {
     match crate::console::catalog::load_proxy_config(state.app_state().as_ref()) {
         Some(proxy_config) => {
+            let realtime_presets = state
+                .app_state()
+                .and_then(|app| app.config().realtime.clone())
+                .unwrap_or_default();
             let store = state.app_state().and_then(|app| {
                 let config = app.config();
                 if config.proxy.use_db_config() {
@@ -716,11 +908,13 @@ async fn load_catalogs(state: &ConsoleState) -> crate::console::catalog::Forward
             let catalog = crate::console::catalog::build_forwarding_catalog_opt(
                 &proxy_config,
                 store.as_ref(),
+                &realtime_presets,
             )
             .await;
             tracing::info!(
                 queue_count = catalog.queues.len(),
                 ivr_count = catalog.ivr_projects.len(),
+                realtime_count = catalog.realtime_presets.len(),
                 "load_catalogs: scanned catalogs for routing form"
             );
             catalog
@@ -781,6 +975,7 @@ fn build_route_console_payload(
             "queue_file": doc.action.queue_file.clone(),
             "voicemail_extension": doc.action.voicemail_extension.clone(),
             "ivr_file": doc.action.ivr_file.clone(),
+            "realtime_preset": doc.action.realtime_preset.clone(),
         },
         "source_trunk": doc.source_trunk.clone(),
         "target_trunks": doc.action.trunks.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
@@ -1476,6 +1671,9 @@ pub(crate) async fn create_routing(
     {
         return bad_request(format!("Source trunk \"{}\" was not found", name));
     }
+    if let Err(err) = validate_target_trunks(&doc, &trunk_lookup) {
+        return bad_request(err.message().to_string());
+    }
 
     let tx = match db.begin().await {
         Ok(tx) => tx,
@@ -1578,6 +1776,9 @@ pub(crate) async fn update_routing(
         && resolve_trunk_id(&trunk_lookup, Some(name.as_str())).is_none()
     {
         return bad_request(format!("Source trunk \"{}\" was not found", name));
+    }
+    if let Err(err) = validate_target_trunks(&doc, &trunk_lookup) {
+        return bad_request(err.message().to_string());
     }
 
     let tx = match db.begin().await {
@@ -1768,6 +1969,7 @@ mod tests {
                 description: Some("Main support queue".to_string()),
             }],
             ivr_projects: vec![],
+            realtime_presets: vec![],
         };
         assert_eq!(catalog.queues.len(), 1);
         assert_eq!(catalog.queues[0].reference, "db-42");
@@ -1803,6 +2005,7 @@ mod tests {
                 queue_file: None,
                 voicemail_extension: None,
                 ivr_file: None,
+                realtime_preset: None,
             },
             source_trunk: Some("trunk-a".into()),
             notes: vec![],
@@ -1860,6 +2063,7 @@ mod tests {
                 queue_file: None,
                 voicemail_extension: None,
                 ivr_file: None,
+                realtime_preset: None,
             },
             source_trunk: Some("trunk-a".into()),
             notes: vec![],
@@ -1872,5 +2076,252 @@ mod tests {
         assert_eq!(doc2.action.trunks[0].name, "trunk-b");
         assert_eq!(doc2.action.trunks[0].weight, 100);
         assert_eq!(doc2.action.target_type, RouteTargetKind::SipTrunk);
+    }
+
+    #[test]
+    fn realtime_document_roundtrip_and_validation() {
+        let mut doc = RouteDocument {
+            id: Some(2),
+            name: "ai-route".into(),
+            action: RouteActionDocument {
+                target_type: RouteTargetKind::Realtime,
+                realtime_preset: Some("support-bot".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        doc.validate().expect("realtime preset present should pass");
+
+        let doc2: RouteDocument = serde_json::from_value(doc.metadata_value()).unwrap();
+        assert_eq!(doc2.action.target_type, RouteTargetKind::Realtime);
+        assert_eq!(doc2.action.realtime_preset, Some("support-bot".into()));
+
+        // ensure_consistency keeps the preset and clears sibling targets.
+        doc.action.queue_file = Some("queues/leftover.toml".into());
+        doc.action.trunks.push(RouteTrunkDocument {
+            name: "trunk-x".into(),
+            weight: 10,
+        });
+        doc.ensure_consistency();
+        assert!(doc.action.queue_file.is_none());
+        assert!(doc.action.trunks.is_empty());
+        assert_eq!(
+            doc.action.realtime_preset,
+            Some("support-bot".into())
+        );
+
+        // Missing preset fails validation.
+        let mut invalid = RouteDocument {
+            name: "ai-route-broken".into(),
+            action: RouteActionDocument {
+                target_type: RouteTargetKind::Realtime,
+                realtime_preset: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        invalid.ensure_consistency();
+        let err = invalid
+            .validate()
+            .expect_err("realtime without preset must fail");
+        assert!(err.message().contains("Realtime destination requires"));
+    }
+
+    fn doc_with_match_rewrite(
+        matchers: JsonMap<String, Value>,
+        rewrite: JsonMap<String, Value>,
+    ) -> RouteDocument {
+        RouteDocument {
+            name: "validate-check".into(),
+            matchers,
+            rewrite,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validate_accepts_plain_literals_and_valid_regex() {
+        let mut matchers = JsonMap::new();
+        matchers.insert("to_user".into(), Value::String("1001".into()));
+        matchers.insert("from_user".into(), Value::String("^86(\\d+)$".into()));
+        let mut rewrite = JsonMap::new();
+        rewrite.insert("to_user".into(), Value::String("0{1}".into()));
+        doc_with_match_rewrite(matchers, rewrite)
+            .validate()
+            .expect("valid patterns should pass");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_match_regex() {
+        let mut matchers = JsonMap::new();
+        matchers.insert("to_user".into(), Value::String("^0(\\d+$".into()));
+        let err = doc_with_match_rewrite(matchers, JsonMap::new())
+            .validate()
+            .expect_err("broken regex must fail validation");
+        assert!(err.message().contains("Invalid regex"));
+    }
+
+    #[test]
+    fn validate_rejects_bad_rewrite_placeholders() {
+        let cases = [
+            ("86{1", "Unclosed capture group placeholder"),
+            ("86{}", "Empty capture group placeholder"),
+            ("86{a}", "Invalid capture group index"),
+        ];
+        for (template, expected) in cases {
+            let mut rewrite = JsonMap::new();
+            rewrite.insert("to_user".into(), Value::String(template.into()));
+            let err = doc_with_match_rewrite(JsonMap::new(), rewrite)
+                .validate()
+                .expect_err("bad placeholder must fail validation");
+            assert!(
+                err.message().contains(expected),
+                "template '{}' should report '{}', got '{}'",
+                template,
+                expected,
+                err.message()
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_rewrite_group_out_of_range() {
+        let mut matchers = JsonMap::new();
+        matchers.insert("to_user".into(), Value::String("^0(\\d+)$".into()));
+        let mut rewrite = JsonMap::new();
+        rewrite.insert("to_user".into(), Value::String("86{2}".into()));
+        let err = doc_with_match_rewrite(matchers.clone(), rewrite)
+            .validate()
+            .expect_err("out-of-range group must fail validation");
+        assert!(err.message().contains("only has 1 capture group"));
+
+        let mut ok_rewrite = JsonMap::new();
+        ok_rewrite.insert("to_user".into(), Value::String("86{1}".into()));
+        doc_with_match_rewrite(matchers, ok_rewrite)
+            .validate()
+            .expect("in-range group should pass");
+    }
+
+    #[tokio::test]
+    async fn create_routing_rejects_unknown_target_trunk() {
+        let state = setup_state().await;
+        let user = superuser();
+        let doc = RouteDocument {
+            name: "bad-target-route".into(),
+            matchers: JsonMap::new(),
+            rewrite: JsonMap::new(),
+            action: RouteActionDocument {
+                trunks: vec![RouteTrunkDocument {
+                    name: "no-such-trunk".into(),
+                    weight: 0,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resp = create_routing(State(state), AuthRequired(user), Json(doc)).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_routing_accepts_quick_create_payload() {
+        use crate::models::sip_trunk::ActiveModel as SipTrunkActiveModel;
+
+        let state = setup_state().await;
+        let db = state.db();
+        SipTrunkActiveModel {
+            name: Set("carrier-a".to_string()),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert trunk");
+
+        let payload = json!({
+            "name": "strip-00-to-carrier",
+            "description": null,
+            "owner": null,
+            "direction": "outbound",
+            "priority": 100,
+            "disabled": false,
+            "match": { "to_user": "^00(\\d+)$" },
+            "rewrite": { "to_user": "{1}" },
+            "action": {
+                "select": "roundrobin",
+                "hash_key": null,
+                "trunks": [{ "name": "carrier-a", "weight": 0 }],
+                "target_type": "sip_trunk"
+            },
+            "source_trunk": null,
+            "notes": []
+        });
+        let doc: RouteDocument =
+            serde_json::from_value(payload).expect("quick create payload should deserialize");
+        let resp = create_routing(State(state.clone()), AuthRequired(superuser()), Json(doc)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let model = RoutingEntity::find()
+            .filter(RoutingColumn::Name.eq("strip-00-to-carrier"))
+            .one(db)
+            .await
+            .expect("query route")
+            .expect("quick-created route persisted");
+        let filters: Value = model.header_filters.clone().expect("match filters stored");
+        assert_eq!(
+            filters.get("to_user").and_then(|v| v.as_str()),
+            Some("^00(\\d+)$")
+        );
+        let rewrites: Value = model.rewrite_rules.clone().expect("rewrite rules stored");
+        assert_eq!(
+            rewrites.get("to_user").and_then(|v| v.as_str()),
+            Some("{1}")
+        );
+        let trunks = model.target_trunks.expect("target trunks stored");
+        assert!(
+            serde_json::to_string(&trunks)
+                .unwrap()
+                .contains("carrier-a")
+        );
+    }
+
+    #[tokio::test]
+    async fn routing_console_page_renders_quick_create_modal() {
+        let state = setup_state().await;
+        let resp = page_routing(
+            State(state.clone()),
+            HeaderMap::new(),
+            AuthRequired(superuser()),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read routing page body");
+        let html = std::str::from_utf8(&body).expect("routing page should be utf8");
+        assert!(
+            html.contains("openQuickCreate"),
+            "quick create modal missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn routing_form_page_renders() {
+        let state = setup_state().await;
+        let resp = page_routing_create(
+            State(state.clone()),
+            HeaderMap::new(),
+            AuthRequired(superuser()),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read routing form body");
+        let html = std::str::from_utf8(&body).expect("routing form should be utf8");
+        assert!(
+            html.contains("routingForm"),
+            "routing form component missing"
+        );
     }
 }

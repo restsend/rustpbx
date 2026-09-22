@@ -231,6 +231,15 @@ acl_rules = [
 ]
 acl_files = ["config/acl/*.toml"]
 
+# User-Agent based filtering (case-insensitive substring matching).
+# ua_black_list entries are always blocked; when ua_white_list is non-empty it
+# acts as an allow-list and takes precedence over the blacklists.
+# ua_block_scanners (default: true) blocks well-known scanner/hacking tool
+# User-Agents such as sipvicious / friendly-scanner / sipcli / sipsak.
+# ua_white_list = ["grandstream", "yealink"]
+# ua_black_list = []
+# ua_block_scanners = true
+
 [[proxy.user_backends]]
 type = "memory"
 users = [
@@ -344,6 +353,13 @@ type = "extension"
 enabled = true
 auto_start = true
 auto_start_at = "media" # default; use "answer" to wait for 200
+# Routed applications exempt from auto recording (only meaningful with
+# auto_start = true). With ["ivr"], IVR-routed calls install no auto recorder;
+# the IVR flow records only via its smart-node `record start`, so the IVR
+# stage and the agent stage land in separate files with separate
+# recording_metadata_available notifications (source=ivr / source=agent).
+# Empty/omitted = auto-record everything (historical behaviour).
+# # auto_start_except = ["ivr"]
 # Media destination: "local" (default), "http", "s3", or "sipflow".
 # type = "local"
 # path = "./config/recorders"  # default when omitted or blank (file types only)
@@ -357,11 +373,14 @@ auto_start_at = "media" # default; use "answer" to wait for 200
 # carries a capture tap, so on-demand recording works even with
 # enabled = false. CDR metadata.recording_segments lists every slice, and a
 # `recording_metadata_available` event is emitted per segment on upload
-# (metadata.full = false; the call-level aggregate event carries full = true).
+# (one notification per recording artifact — segmented files each notify;
+# there is no call-level aggregate event).
 # The event payload stays lean: CDR-only keys (trace, recording_segments,
 # media_quality, self_ip, session_id) remain in the CDR metadata for the
 # console and are not repeated into the event.
-# Prefer record_stop before transfer/REFER.
+# An app-scoped IVR segment is closed automatically when the session hands
+# off (transfer / queue / IVR jump) — the agent stage records as its own
+# segment. Explicit record_stop before transfer/REFER remains supported.
 #
 # Contact-center agent segments: in cc.toml, `[recording]
 # record_on_agent_connect = true` starts a segment automatically when an
@@ -532,6 +551,10 @@ subdirs = "daily"  # "none" | "daily" | "hourly"
 # root = "recordings"
 # media = true          # upload RTP as WAV when type=sipflow (default: true)
 # signaling = true      # upload SIP signalling JSONL (recommended with [sipflow])
+# # signaling_bucket = "my-recordings-signaling"  # dedicated bucket for the
+#                     JSONL (s3 type); falls back to `bucket` when unset
+# # signaling_url = "https://archive.example.com/signaling"  # dedicated upload
+#                     endpoint for the JSONL (http type); falls back to `url`
 # signed_url_expiry_secs = 86400  # presigned download URL lifetime (24h default, max 7 days)
 
 # Remote backend (single node):

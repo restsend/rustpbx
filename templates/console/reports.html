@@ -1,0 +1,899 @@
+{% extends "console/layout.html" %}
+
+{% block title %}{{ "reports.title" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
+
+{% block content %}
+<div class="p-6">
+    <div class="mx-auto max-w-7xl space-y-6" x-data="reportsPage()" x-init="init()">
+        <!-- Page header -->
+        <div class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+                <h1 class="text-2xl font-semibold text-slate-900">{{ "reports.title" | t }}</h1>
+                <p class="mt-2 text-sm text-slate-500">{{ "reports.subtitle" | t }}</p>
+            </div>
+            <div class="flex flex-wrap items-center gap-3">
+                <a :href="exportUrl()"
+                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-200 focus:ring-offset-2">
+                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                            d="M10 3v10m0 0 3.5-3.5M10 13 6.5 9.5M4 16.5h12" />
+                    </svg>
+                    {{ "reports.export" | t }}
+                </a>
+            </div>
+        </div>
+
+        <!-- Domain tabs (routing/call-record style: carded tablist) -->
+        <div class="rounded-xl bg-white p-2 shadow-sm ring-1 ring-black/5">
+            <nav class="inline-flex w-full flex-wrap gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600"
+                role="tablist" aria-label="{{ "reports.title" | t }}">
+                <template x-for="t in tabs" :key="t.key">
+                    <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                        :class="tab === t.key ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                        :aria-selected="tab === t.key" :aria-controls="'reports-tab-' + t.key"
+                        @click="setTab(t.key)">
+                        <span class="text-sm" x-text="t.label"></span>
+                    </button>
+                </template>
+            </nav>
+        </div>
+
+        <!-- Shared filters -->
+        <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+            <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                <div class="flex flex-wrap items-end gap-4">
+                    <div>
+                        <label class="block text-xs font-medium uppercase tracking-wide text-slate-500" for="rep-from">{{ "reports.filter_from" | t }}</label>
+                        <input id="rep-from" type="date" x-model="from"
+                            class="mt-1 block rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-200" />
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium uppercase tracking-wide text-slate-500" for="rep-to">{{ "reports.filter_to" | t }}</label>
+                        <input id="rep-to" type="date" x-model="to"
+                            class="mt-1 block rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-200" />
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium uppercase tracking-wide text-slate-500" for="rep-bucket">{{ "reports.filter_bucket" | t }}</label>
+                        <select id="rep-bucket" x-model="bucket"
+                            class="mt-1 block rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <option value="hour">{{ "reports.bucket_hour" | t }}</option>
+                            <option value="day">{{ "reports.bucket_day" | t }}</option>
+                            <option value="week">{{ "reports.bucket_week" | t }}</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium uppercase tracking-wide text-slate-500" for="rep-tz">{{ "reports.filter_tz" | t }}</label>
+                        <select id="rep-tz" x-model="tz"
+                            class="mt-1 block rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <option value="0">UTC</option>
+                            <option value="8">UTC+8</option>
+                            <option value="-5">UTC-5</option>
+                            <option value="1">UTC+1</option>
+                            <option value="9">UTC+9</option>
+                        </select>
+                    </div>
+                    <div x-show="tab === 'call'">
+                        <label class="block text-xs font-medium uppercase tracking-wide text-slate-500" for="rep-dir">{{ "reports.filter_direction" | t }}</label>
+                        <select id="rep-dir" x-model="direction"
+                            class="mt-1 block rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <option value="">{{ "reports.direction_all" | t }}</option>
+                            <option value="inbound">{{ "reports.dir_inbound" | t }}</option>
+                            <option value="outbound">{{ "reports.dir_outbound" | t }}</option>
+                            <option value="internal">{{ "reports.dir_internal" | t }}</option>
+                        </select>
+                    </div>
+                    <button type="button" @click="load()"
+                        class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
+                        {{ "reports.refresh" | t }}
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ══ CALL tab ══ -->
+        <div x-show="tab === 'call'" x-cloak id="reports-tab-call" role="tabpanel" class="space-y-6" tabindex="0">
+            <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                <h2 class="mb-4 text-sm font-semibold text-slate-700">{{ "reports.call_chart" | t }}</h2>
+                <div class="relative" style="height: 320px;"><canvas id="call-chart"></canvas></div>
+            </div>
+            <div class="grid gap-4 md:grid-cols-2">
+                <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                    <h2 class="mb-3 text-sm font-semibold text-slate-700">{{ "reports.hangup_reasons" | t }}</h2>
+                    <table class="min-w-full text-sm">
+                        <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500"><tr><th class="px-4 py-3">{{ "reports.hangup_reasons" | t }}</th><th class="px-4 py-3 text-right">{{ "reports.col_count" | t }}</th></tr></thead>
+                        <tbody class="divide-y divide-slate-100 text-sm text-slate-700">
+                            <template x-for="(r, i) in callData.hangup_reasons" :key="'hr'+i">
+                                <tr class="hover:bg-slate-50/50"><td class="px-4 py-3" x-text="r.name || reasonUnknown"></td><td class="px-4 py-3 text-right" x-text="r.count"></td></tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                    <h2 class="mb-3 text-sm font-semibold text-slate-700">{{ "reports.sip_status_top" | t }}</h2>
+                    <table class="min-w-full text-sm">
+                        <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500"><tr><th class="px-4 py-3">{{ "reports.col_code" | t }}</th><th class="px-4 py-3 text-right">{{ "reports.col_count" | t }}</th></tr></thead>
+                        <tbody class="divide-y divide-slate-100 text-sm text-slate-700">
+                            <template x-for="(r, i) in callData.sip_status" :key="'ss'+i">
+                                <tr class="hover:bg-slate-50/50"><td class="px-4 py-3 font-mono" x-text="r.name || '(none)'"></td><td class="px-4 py-3 text-right" x-text="r.count"></td></tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                <h2 class="mb-3 text-sm font-semibold text-slate-700">{{ "reports.heatmap" | t }} <span class="text-xs font-normal text-slate-400">({{ "reports.heatmap_hint" | t }})</span></h2>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full min-w-[720px] text-xs">
+                        <thead>
+                            <tr class="text-slate-500">
+                                <th class="py-1 pr-2 text-left">Day \ Hour</th>
+                                <template x-for="h in 24" :key="'h'+h"><th class="px-1 py-1 text-center font-normal" x-text="h-1"></th></template>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="(row, d) in callData.heatmap" :key="'d'+d">
+                                <tr>
+                                    <td class="py-1 pr-2 font-medium text-slate-600" x-text="dow[d]"></td>
+                                    <template x-for="(v, h) in row" :key="d+'-'+h">
+                                        <td class="px-1 py-1 text-center" x-text="v || ''"
+                                            :style="v ? `background: rgba(56,189,248,${Math.min(0.15 + v / Math.max(1, heatMax()), 1)}); border-radius: 3px;` : ''"></td>
+                                    </template>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                <h2 class="mb-3 text-sm font-semibold text-slate-700">{{ "reports.call_series" | t }}</h2>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full text-sm">
+                        <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500"><tr>
+                            <th class="px-4 py-3">{{ "reports.col_bucket" | t }}</th><th class="px-4 py-3 text-right">{{ "reports.col_total" | t }}</th><th class="px-4 py-3 text-right">{{ "reports.col_answered" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_missed" | t }}</th><th class="px-4 py-3 text-right">{{ "reports.col_total_dur" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_avg_dur" | t }}</th><th class="px-4 py-3 text-right">{{ "reports.col_asr" | t }}</th>
+                        </tr></thead>
+                        <tbody class="divide-y divide-slate-100 text-sm text-slate-700">
+                            <template x-for="(r, i) in callData.series" :key="'cs'+i">
+                                <tr class="hover:bg-slate-50/50">
+                                    <td class="px-4 py-3" x-text="fmtBucket(r.bucket_start)"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.total"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.answered"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.missed"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.total_duration_secs"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.avg_duration_secs.toFixed(1)"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.asr_pct.toFixed(1)"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- ══ TRUNK tab ══ -->
+        <div x-show="tab === 'trunk'" x-cloak id="reports-tab-trunk" role="tabpanel" class="space-y-6" tabindex="0">
+            <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                <div class="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <h2 class="text-sm font-semibold text-slate-700">{{ "reports.trunk_traffic" | t }}</h2>
+                    <!-- Searchable trunk picker -->
+                    <div class="relative" @keydown.escape="trunkPickerOpen = false">
+                        <label class="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500" for="trunk-search">{{ "reports.trunk_selector" | t }}</label>
+                        <input id="trunk-search" type="text" x-model="trunkQuery" @focus="trunkPickerOpen = true" @input="trunkPickerOpen = true"
+                            class="block w-64 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-200" />
+                        <div x-show="trunkPickerOpen" x-cloak @click.outside="trunkPickerOpen = false"
+                            class="absolute z-20 mt-1 max-h-64 w-64 overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg">
+                            <button type="button" class="block w-full px-3 py-2 text-left text-sm hover:bg-sky-50"
+                                :class="selectedTrunk === '' ? 'text-sky-700 font-medium' : 'text-slate-600'"
+                                @click="selectTrunk('')">{{ "reports.trunk_all" | t }}</button>
+                            <template x-for="t in filteredTrunks()" :key="'tp'+t.trunk_id">
+                                <button type="button" class="block w-full px-3 py-2 text-left text-sm hover:bg-sky-50"
+                                    :class="selectedTrunk !== '' && String(t.trunk_id) === selectedTrunk ? 'text-sky-700 font-medium' : 'text-slate-600'"
+                                    @click="selectTrunk(String(t.trunk_id))">
+                                    <span x-text="t.name"></span>
+                                    <span class="ml-1 text-xs text-slate-400" x-text="t.carrier"></span>
+                                </button>
+                            </template>
+                            <div x-show="filteredTrunks().length === 0" class="px-3 py-2 text-sm text-slate-400">{{ "reports.trunk_no_match" | t }}</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full text-sm">
+                        <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500"><tr>
+                            <th class="px-4 py-3">{{ "reports.col_trunk" | t }}</th>
+                            <th class="px-4 py-3">{{ "reports.col_carrier" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_offered" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_answered" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_missed" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_duration" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_asr" | t }}</th>
+                        </tr></thead>
+                        <tbody class="divide-y divide-slate-100 text-sm text-slate-700">
+                            <template x-for="(r, i) in visibleTrunkRows()" :key="'tk'+i">
+                                <tr class="hover:bg-slate-50/50">
+                                    <td class="px-4 py-3 font-medium text-slate-700" x-text="r.name"></td>
+                                    <td class="px-4 py-3" x-text="r.carrier || '—'"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.offered"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.answered"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.missed"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.total_duration_secs"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.asr_pct.toFixed(1)"></td>
+                                </tr>
+                            </template>
+                            <tr x-show="visibleTrunkRows().length === 0"><td colspan="7" class="px-4 py-12 text-center text-slate-400">{{ "reports.no_trunk_traffic" | t }}</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Quality heatmaps (ringback delay / packet loss / jitter) -->
+            <div class="grid gap-4 xl:grid-cols-3 md:grid-cols-2">
+                <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                    <h2 class="mb-3 text-sm font-semibold text-slate-700">{{ "reports.trunk_heat_ring" | t }} <span class="text-xs font-normal text-slate-400">({{ "reports.trunk_heat_ring_hint" | t }})</span></h2>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full min-w-[720px] text-xs">
+                            <thead><tr class="text-slate-500">
+                                <th class="py-1 pr-2 text-left">{{ "reports.heat_dow_hour" | t }}</th>
+                                <template x-for="h in 24" :key="'rh'+h"><th class="px-1 py-1 text-center font-normal" x-text="h-1"></th></template>
+                            </tr></thead>
+                            <tbody>
+                                <template x-for="(row, d) in trunkHeat.ring" :key="'tr'+d">
+                                    <tr>
+                                        <td class="py-1 pr-2 font-medium text-slate-600" x-text="dow[d]"></td>
+                                        <template x-for="(v, h) in row" :key="'tr'+d+'-'+h">
+                                            <td class="px-1 py-1 text-center" x-text="v ? v.toFixed(0) : ''"
+                                                :style="v ? `background: rgba(56,189,248,${Math.min(0.15 + v / Math.max(1, heatMax(trunkHeat.ring)), 1)}); border-radius: 3px;` : ''"></td>
+                                        </template>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                    <h2 class="mb-3 text-sm font-semibold text-slate-700">{{ "reports.trunk_heat_loss" | t }} <span class="text-xs font-normal text-slate-400">({{ "reports.trunk_heat_loss_hint" | t }})</span></h2>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full min-w-[720px] text-xs">
+                            <thead><tr class="text-slate-500">
+                                <th class="py-1 pr-2 text-left">{{ "reports.heat_dow_hour" | t }}</th>
+                                <template x-for="h in 24" :key="'lh'+h"><th class="px-1 py-1 text-center font-normal" x-text="h-1"></th></template>
+                            </tr></thead>
+                            <tbody>
+                                <template x-for="(row, d) in trunkHeat.loss" :key="'tl'+d">
+                                    <tr>
+                                        <td class="py-1 pr-2 font-medium text-slate-600" x-text="dow[d]"></td>
+                                        <template x-for="(v, h) in row" :key="'tl'+d+'-'+h">
+                                            <td class="px-1 py-1 text-center" x-text="v ? v.toFixed(1) : ''"
+                                                :style="v ? `background: rgba(251,113,133,${Math.min(0.15 + v / Math.max(0.5, heatMax(trunkHeat.loss)), 1)}); border-radius: 3px;` : ''"></td>
+                                        </template>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                    <h2 class="mb-3 text-sm font-semibold text-slate-700">{{ "reports.trunk_heat_jitter" | t }} <span class="text-xs font-normal text-slate-400">({{ "reports.trunk_heat_jitter_hint" | t }})</span></h2>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full min-w-[720px] text-xs">
+                            <thead><tr class="text-slate-500">
+                                <th class="py-1 pr-2 text-left">{{ "reports.heat_dow_hour" | t }}</th>
+                                <template x-for="h in 24" :key="'jh'+h"><th class="px-1 py-1 text-center font-normal" x-text="h-1"></th></template>
+                            </tr></thead>
+                            <tbody>
+                                <template x-for="(row, d) in trunkHeat.jitter" :key="'tj'+d">
+                                    <tr>
+                                        <td class="py-1 pr-2 font-medium text-slate-600" x-text="dow[d]"></td>
+                                        <template x-for="(v, h) in row" :key="'tj'+d+'-'+h">
+                                            <td class="px-1 py-1 text-center" x-text="v ? v.toFixed(1) : ''"
+                                                :style="v ? `background: rgba(245,158,11,${Math.min(0.15 + v / Math.max(1, heatMax(trunkHeat.jitter)), 1)}); border-radius: 3px;` : ''"></td>
+                                        </template>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ══ ROUTE tab ══ -->
+        <div x-show="tab === 'route'" x-cloak id="reports-tab-route" role="tabpanel" class="space-y-6" tabindex="0">
+            <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                <h2 class="mb-3 text-sm font-semibold text-slate-700">{{ "reports.route_traffic" | t }}</h2>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full text-sm">
+                        <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500"><tr>
+                            <th class="px-4 py-3">{{ "reports.col_route" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_offered" | t }}</th><th class="px-4 py-3 text-right">{{ "reports.col_answered" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_missed" | t }}</th><th class="px-4 py-3 text-right">{{ "reports.col_duration" | t }}</th><th class="px-4 py-3 text-right">{{ "reports.col_asr" | t }}</th>
+                        </tr></thead>
+                        <tbody class="divide-y divide-slate-100 text-sm text-slate-700">
+                            <template x-for="(r, i) in routeRows" :key="'rt'+i">
+                                <tr class="hover:bg-slate-50/50">
+                                    <td class="px-4 py-3 font-medium text-slate-700" x-text="r.name"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.offered"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.answered"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.missed"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.total_duration_secs"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.asr_pct.toFixed(1)"></td>
+                                </tr>
+                            </template>
+                            <tr x-show="routeRows.length === 0"><td colspan="6" class="px-4 py-12 text-center text-slate-400">{{ "reports.no_route_traffic" | t }}</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- ══ VOICEMAIL tab (feature-gated) ══ -->
+        <div x-show="tab === 'voicemail'" x-cloak id="reports-tab-voicemail" role="tabpanel" class="space-y-6" tabindex="0">
+            <template x-if="!featuresVoicemail">
+                <div class="rounded-xl bg-white p-8 text-center text-slate-400 shadow-sm ring-1 ring-black/5">
+                    {{ "reports.vm_disabled" | t }}
+                </div>
+            </template>
+            <template x-if="featuresVoicemail">
+                <div class="space-y-6">
+                    <section class="grid gap-4 md:grid-cols-4">
+                        <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                            <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "reports.vm_messages" | t }}</div>
+                            <div class="mt-2 text-2xl font-semibold" x-text="vmSummary.total"></div>
+                        </div>
+                        <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                            <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "reports.vm_unread" | t }}</div>
+                            <div class="mt-2 text-2xl font-semibold text-amber-600" x-text="vmSummary.unread"></div>
+                        </div>
+                        <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                            <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "reports.vm_read_ratio" | t }}</div>
+                            <div class="mt-2 text-2xl font-semibold text-emerald-600"><span x-text="vmSummary.read_ratio_pct.toFixed(1)"></span>%</div>
+                        </div>
+                        <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                            <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "reports.vm_transcript" | t }}</div>
+                            <div class="mt-2 text-2xl font-semibold text-sky-600"><span x-text="vmSummary.transcript_coverage_pct.toFixed(1)"></span>%</div>
+                        </div>
+                    </section>
+                    <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                        <h2 class="mb-3 text-sm font-semibold text-slate-700">{{ "reports.vm_backlog" | t }}</h2>
+                        <table class="min-w-full text-sm">
+                            <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500"><tr>
+                                <th class="px-4 py-3">{{ "reports.col_extension" | t }}</th><th class="px-4 py-3 text-right">{{ "reports.vm_messages" | t }}</th><th class="px-4 py-3 text-right">{{ "reports.vm_unread" | t }}</th>
+                            </tr></thead>
+                            <tbody class="divide-y divide-slate-100 text-sm text-slate-700">
+                                <template x-for="(b, i) in vmBoxes" :key="'vb'+i">
+                                    <tr class="hover:bg-slate-50/50">
+                                        <td class="px-4 py-3 font-medium text-slate-700" x-text="b.extension"></td>
+                                        <td class="px-4 py-3 text-right" x-text="b.total"></td>
+                                        <td class="px-4 py-3 text-right" x-text="b.unread"></td>
+                                    </tr>
+                                </template>
+                                <tr x-show="vmBoxes.length === 0"><td colspan="3" class="px-4 py-12 text-center text-slate-400">{{ "reports.vm_no_messages" | t }}</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </template>
+        </div>
+
+        <!-- ══ LOCATOR tab ══ -->
+        <div x-show="tab === 'locator'" x-cloak id="reports-tab-locator" role="tabpanel" class="space-y-6" tabindex="0">
+            <section class="grid gap-4 md:grid-cols-4">
+                <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                    <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "reports.loc_online_locations" | t }}</div>
+                    <div class="mt-2 text-2xl font-semibold" x-text="locatorLive.available ? locatorLive.online_locations : '—'"></div>
+                </div>
+                <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                    <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "reports.loc_online_users" | t }}</div>
+                    <div class="mt-2 text-2xl font-semibold" x-text="locatorLive.available ? locatorLive.online_users : '—'"></div>
+                </div>
+                <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                    <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "reports.loc_webrtc" | t }}</div>
+                    <div class="mt-2 text-2xl font-semibold text-sky-600" x-text="locatorLive.available ? locatorLive.webrtc_locations : '—'"></div>
+                </div>
+                <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                    <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "reports.loc_by_transport" | t }}</div>
+                    <div class="mt-2 space-y-1 text-sm text-slate-600">
+                        <template x-for="(v, k) in locatorLive.by_transport" :key="'tr'+k">
+                            <div class="flex justify-between"><span x-text="k"></span><span class="font-medium" x-text="v"></span></div>
+                        </template>
+                        <div x-show="!locatorLive.available" class="text-slate-400">{{ "reports.loc_sip_down" | t }}</div>
+                    </div>
+                </div>
+            </section>
+            <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                <h2 class="mb-3 text-sm font-semibold text-slate-700">{{ "reports.loc_trend" | t }} <span class="text-xs font-normal text-slate-400">({{ "reports.loc_trend_hint" | t }})</span></h2>
+                <div class="relative" style="height: 280px;"><canvas id="locator-chart"></canvas></div>
+                <p x-show="locatorTrend.length === 0" class="mt-3 text-center text-sm text-slate-400">{{ "reports.loc_no_history" | t }}</p>
+            </div>
+        </div>
+
+<!-- ══ CC tab (skill-group-first) ══ -->
+        <div x-show="tab === 'cc'" x-cloak id="reports-tab-cc" role="tabpanel" class="space-y-6" tabindex="0">
+            <!-- 1. Skill-group summary -->
+            <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                <h2 class="mb-3 text-sm font-semibold text-slate-700">{{ "reports.cc_groups" | t }}</h2>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full text-sm">
+                        <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500"><tr>
+                            <th class="px-4 py-3">{{ "reports.col_queue" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_sla_target" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_offered" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_answered" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_abandoned" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_avg_wait" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_avg_handle" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_sla" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_asr" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_abandon_rate" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_csat" | t }}</th>
+                        </tr></thead>
+                        <tbody class="divide-y divide-slate-100 text-sm text-slate-700">
+                            <template x-for="(r, idx) in groupRows" :key="'gr'+idx">
+                                <tr class="hover:bg-slate-50/50">
+                                    <td class="px-4 py-3 font-medium text-slate-700" x-text="r.name"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.sla_target_secs"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.offered"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.answered"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.abandoned"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.avg_wait_secs.toFixed(1)"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.avg_handle_secs.toFixed(1)"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.sla_pct.toFixed(1)"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.asr_pct.toFixed(1)"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.abandon_rate_pct.toFixed(1)"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.csat_count ? r.csat_avg.toFixed(2) : '—'"></td>
+                                </tr>
+                            </template>
+                            <tr x-show="groupRows.length === 0"><td colspan="11" class="px-4 py-12 text-center text-slate-400">{{ "reports.no_groups" | t }}</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 2. Group trend (selector + chart + series) -->
+            <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <h2 class="text-sm font-semibold text-slate-700">{{ "reports.cc_group_series" | t }}</h2>
+                    <div class="flex items-center gap-2">
+                        <label class="text-xs font-medium uppercase tracking-wide text-slate-500" for="rep-group">{{ "reports.group_selector" | t }}</label>
+                        <select id="rep-group" x-model="selectedGroup" @change="loadCc()"
+                            class="block rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <option value="">{{ "reports.group_all" | t }}</option>
+                            <template x-for="g in groupRows" :key="'opt-'+g.skill_group_id">
+                                <option :value="g.skill_group_id" x-text="g.name"></option>
+                            </template>
+                        </select>
+                    </div>
+                </div>
+                <div class="relative" style="height: 320px;"><canvas id="queue-chart"></canvas></div>
+            </div>
+
+            <!-- 2b. Reception / queueing heatmaps -->
+            <div class="grid gap-4 md:grid-cols-2">
+                <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                    <h2 class="mb-3 text-sm font-semibold text-slate-700">{{ "reports.cc_heat_answered" | t }} <span class="text-xs font-normal text-slate-400">({{ "reports.cc_heat_answered_hint" | t }})</span></h2>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full min-w-[720px] text-xs">
+                            <thead><tr class="text-slate-500">
+                                <th class="py-1 pr-2 text-left">{{ "reports.heat_dow_hour" | t }}</th>
+                                <template x-for="h in 24" :key="'ch'+h"><th class="px-1 py-1 text-center font-normal" x-text="h-1"></th></template>
+                            </tr></thead>
+                            <tbody>
+                                <template x-for="(row, d) in ccHeat.answered" :key="'ca'+d">
+                                    <tr>
+                                        <td class="py-1 pr-2 font-medium text-slate-600" x-text="dow[d]"></td>
+                                        <template x-for="(v, h) in row" :key="'ca'+d+'-'+h">
+                                            <td class="px-1 py-1 text-center" x-text="v || ''"
+                                                :style="v ? `background: rgba(52,211,153,${Math.min(0.15 + v / Math.max(1, heatMax(ccHeat.answered)), 1)}); border-radius: 3px;` : ''"></td>
+                                        </template>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                    <h2 class="mb-3 text-sm font-semibold text-slate-700">{{ "reports.cc_heat_queue" | t }} <span class="text-xs font-normal text-slate-400">({{ "reports.cc_heat_queue_hint" | t }})</span></h2>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full min-w-[720px] text-xs">
+                            <thead><tr class="text-slate-500">
+                                <th class="py-1 pr-2 text-left">{{ "reports.heat_dow_hour" | t }}</th>
+                                <template x-for="h in 24" :key="'qh'+h"><th class="px-1 py-1 text-center font-normal" x-text="h-1"></th></template>
+                            </tr></thead>
+                            <tbody>
+                                <template x-for="(row, d) in ccHeat.wait" :key="'cw'+d">
+                                    <tr>
+                                        <td class="py-1 pr-2 font-medium text-slate-600" x-text="dow[d]"></td>
+                                        <template x-for="(v, h) in row" :key="'cw'+d+'-'+h">
+                                            <td class="px-1 py-1 text-center" x-text="v ? v.toFixed(0) : ''"
+                                                :style="v ? `background: rgba(251,113,133,${Math.min(0.15 + v / Math.max(1, heatMax(ccHeat.wait)), 1)}); border-radius: 3px;` : ''"></td>
+                                        </template>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 3. Agents (global or per-group attribution) -->
+            <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                <h2 class="mb-1 text-sm font-semibold text-slate-700">{{ "reports.cc_agents" | t }}</h2>
+                <p class="mb-3 text-xs text-slate-400" x-show="selectedGroup">{{ "reports.agents_group_hint" | t }}</p>
+                <!-- global -->
+                <div class="overflow-x-auto" x-show="!selectedGroup">
+                    <table class="min-w-full text-sm">
+                        <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500"><tr>
+                            <th class="px-4 py-3">{{ "reports.col_agent" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_calls" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_answered" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_talk" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_avg_handle" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_wrapup" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_break" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_occupancy" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_csat" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_surveys" | t }}</th>
+                        </tr></thead>
+                        <tbody class="divide-y divide-slate-100 text-sm text-slate-700">
+                            <template x-for="(r, idx) in agentRows" :key="'ag'+idx">
+                                <tr class="hover:bg-slate-50/50">
+                                    <td class="px-4 py-3" x-text="r.agent_id"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.total_calls"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.answered"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.talk_secs"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.avg_handle_secs.toFixed(1)"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.wrapup_secs"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.break_secs"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.occupancy_pct.toFixed(1)"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.csat_avg.toFixed(2)"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.csat_count"></td>
+                                </tr>
+                            </template>
+                            <tr x-show="agentRows.length === 0"><td colspan="10" class="px-4 py-12 text-center text-slate-400">{{ "reports.cc_no_agents" | t }}</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <!-- per-group attribution -->
+                <div class="overflow-x-auto" x-show="selectedGroup" x-cloak>
+                    <table class="min-w-full text-sm">
+                        <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500"><tr>
+                            <th class="px-4 py-3">{{ "reports.col_agent" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_calls" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_answered" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_talk" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_avg_handle" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_csat" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_surveys" | t }}</th>
+                        </tr></thead>
+                        <tbody class="divide-y divide-slate-100 text-sm text-slate-700">
+                            <template x-for="(r, idx) in agentGroupRows" :key="'agg'+idx">
+                                <tr class="hover:bg-slate-50/50">
+                                    <td class="px-4 py-3" x-text="r.agent_id"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.total_calls"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.answered"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.talk_secs"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.avg_handle_secs.toFixed(1)"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.csat_count ? r.csat_avg.toFixed(2) : '—'"></td>
+                                    <td class="px-4 py-3 text-right" x-text="r.csat_count"></td>
+                                </tr>
+                            </template>
+                            <tr x-show="agentGroupRows.length === 0"><td colspan="7" class="px-4 py-12 text-center text-slate-400">{{ "reports.cc_no_agents" | t }}</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+<script src="/static/cc/vendor/chart.umd.min.js" onerror="this.remove()"></script>
+<script>
+    function reportsPage() {
+        return {
+            tab: 'call',
+            tabs: [
+                { key: 'call', label: '{{ "reports.tab_call" | t }}' },
+                { key: 'trunk', label: '{{ "reports.tab_trunk" | t }}' },
+                { key: 'route', label: '{{ "reports.tab_route" | t }}' },
+                { key: 'voicemail', label: '{{ "reports.tab_voicemail" | t }}', gated: 'voicemail' },
+                { key: 'locator', label: '{{ "reports.tab_locator" | t }}' },
+                { key: 'cc', label: '{{ "reports.tab_cc" | t }}' },
+            ],
+            featuresVoicemail: false,
+            from: '',
+            to: '',
+            bucket: 'day',
+            tz: '0',
+            direction: '',
+            // per-tab state
+            callData: { series: [], hangup_reasons: [], sip_status: [], heatmap: [[], [], [], [], [], [], []] },
+            trunkRows: [],
+            trunkHeat: { ring: [[], [], [], [], [], [], []], loss: [[], [], [], [], [], [], []], jitter: [[], [], [], [], [], [], []] },
+            selectedTrunk: '',
+            trunkQuery: '',
+            trunkPickerOpen: false,
+            routeRows: [],
+            vmSummary: { total: 0, unread: 0, read_ratio_pct: 0, transcript_coverage_pct: 0 },
+            vmBoxes: [],
+            locatorLive: { available: false, online_locations: 0, online_users: 0, webrtc_locations: 0, by_transport: {} },
+            locatorTrend: [],
+            queueRows: [],
+            agentRows: [],
+            reasonUnknown: '{{ "reports.reason_unknown" | t }}',
+            groupRows: [],
+            selectedGroup: '',
+            queueSeries: [],
+            agentGroupRows: [],
+            ccHeat: { answered: [[], [], [], [], [], [], []], wait: [[], [], [], [], [], [], []] },
+            dow: ['{{ "reports.dow_mon" | t }}', '{{ "reports.dow_tue" | t }}', '{{ "reports.dow_wed" | t }}', '{{ "reports.dow_thu" | t }}', '{{ "reports.dow_fri" | t }}', '{{ "reports.dow_sat" | t }}', '{{ "reports.dow_sun" | t }}'],
+            charts: {},
+
+            init() {
+                const params = new URLSearchParams(location.search);
+                const t = params.get('tab');
+                this.featuresVoicemail = {{ features.voicemail | json | safe }};
+                this.tabs = this.tabs.filter(x => !x.gated || x.gated !== 'voicemail' || this.featuresVoicemail);
+                this.tab = (t && this.tabs.some(x => x.key === t)) ? t : 'call';
+                const today = new Date();
+                const weekAgo = new Date(Date.now() - 6 * 86400000);
+                this.to = today.toISOString().slice(0, 10);
+                this.from = weekAgo.toISOString().slice(0, 10);
+                const offset = -new Date().getTimezoneOffset() / 60;
+                const candidates = Array.from(document.querySelectorAll('#rep-tz option')).map(o => o.value);
+                this.tz = candidates.includes(String(offset)) ? String(offset) : '0';
+                this.load();
+            },
+
+            setTab(t) {
+                this.tab = t;
+                const url = new URL(location);
+                url.searchParams.set('tab', t);
+                history.replaceState(null, '', url);
+                this.load();
+            },
+
+            commonParams() {
+                const p = new URLSearchParams();
+                p.set('from', this.from);
+                p.set('to', this.to);
+                p.set('bucket', this.bucket);
+                p.set('tz', this.tz);
+                if (this.tab === 'call') p.set('direction', this.direction);
+                return p;
+            },
+
+            apiBase() { return '{{ api_prefix | safe }}/reports/v2'; },
+
+            async load() {
+                switch (this.tab) {
+                    case 'call': return this.loadCall();
+                    case 'trunk': return this.loadTrunk();
+                    case 'route': return this.loadSimple('/route', d => this.routeRows = d);
+                    case 'voicemail': return this.loadVoicemail();
+                    case 'locator': return this.loadLocator();
+                    case 'cc': return this.loadCc();
+                }
+            },
+
+            async fetchJson(path) {
+                const resp = await fetch(this.apiBase() + path, { headers: { 'Accept': 'application/json' } });
+                return resp.json();
+            },
+
+            trunkName(id) {
+                const r = this.trunkRows.find(t => String(t.trunk_id) === String(id));
+                return r ? r.name : '';
+            },
+
+            filteredTrunks() {
+                const q = this.trunkQuery.trim().toLowerCase();
+                if (!q) return this.trunkRows;
+                return this.trunkRows.filter(t =>
+                    (t.name || '').toLowerCase().includes(q) ||
+                    (t.carrier || '').toLowerCase().includes(q));
+            },
+
+            visibleTrunkRows() {
+                if (!this.selectedTrunk) return this.trunkRows;
+                return this.trunkRows.filter(t => String(t.trunk_id) === this.selectedTrunk);
+            },
+
+            selectTrunk(id) {
+                this.selectedTrunk = id;
+                this.trunkPickerOpen = false;
+                const r = this.trunkName(id);
+                this.trunkQuery = r || this.trunkQuery;
+                this.loadTrunk();
+            },
+
+            async loadTrunk() {
+                try {
+                    const heatQs = this.selectedTrunk ? `${this.commonParams()}&trunk_id=${encodeURIComponent(this.selectedTrunk)}` : this.commonParams();
+                    const [body, heat] = await Promise.all([
+                        this.fetchJson(`/trunk?${this.commonParams()}`),
+                        this.fetchJson(`/trunk/heat?${heatQs}`),
+                    ]);
+                    this.trunkRows = body.data || [];
+                    this.trunkHeat = heat.data || this.trunkHeat;
+                } catch (e) { console.error('trunk report failed', e); }
+            },
+
+            async loadSimple(path, assign) {
+                try {
+                    const body = await this.fetchJson(`${path}?${this.commonParams()}`);
+                    assign(body.data || []);
+                } catch (e) { console.error('report load failed', e); }
+            },
+
+            async loadCall() {
+                try {
+                    const body = await this.fetchJson(`/call?${this.commonParams()}`);
+                    const d = body.data || {};
+                    this.callData = {
+                        series: d.series || [],
+                        hangup_reasons: d.hangup_reasons || [],
+                        sip_status: d.sip_status || [],
+                        heatmap: d.heatmap || [[], [], [], [], [], [], []],
+                    };
+                    this.renderCallChart();
+                } catch (e) { console.error('call report failed', e); }
+            },
+
+            renderCallChart() {
+                this.renderChart('call-chart', {
+                    labels: this.callData.series.map(s => this.fmtBucket(s.bucket_start).slice(0, 16)),
+                    bars: [
+                        { label: '{{ "reports.ch_total" | t }}', data: this.callData.series.map(s => s.total), color: '#38bdf8' },
+                        { label: '{{ "reports.ch_answered" | t }}', data: this.callData.series.map(s => s.answered), color: '#34d399' },
+                        { label: '{{ "reports.ch_missed" | t }}', data: this.callData.series.map(s => s.missed), color: '#fb7185' },
+                    ],
+                    line: { label: '{{ "reports.ch_asr" | t }}', data: this.callData.series.map(s => s.asr_pct), color: '#6366f1' },
+                });
+            },
+
+            async loadVoicemail() {
+                try {
+                    const body = await this.fetchJson(`/voicemail?${this.commonParams()}`);
+                    const d = body.data || {};
+                    this.vmSummary = d.summary || this.vmSummary;
+                    this.vmBoxes = d.boxes || [];
+                } catch (e) { console.error('voicemail report failed', e); }
+            },
+
+            async loadLocator() {
+                try {
+                    const body = await this.fetchJson(`/locator?${this.commonParams()}`);
+                    const d = body.data || {};
+                    this.locatorLive = d.live || this.locatorLive;
+                    this.locatorTrend = d.trend || [];
+                    this.renderChart('locator-chart', {
+                        labels: this.locatorTrend.map(p => this.fmtBucket(p.bucket_start).slice(0, 16)),
+                        bars: [
+                            { label: '{{ "reports.ch_locations" | t }}', data: this.locatorTrend.map(p => p.online_locations), color: '#38bdf8' },
+                            { label: '{{ "reports.ch_users" | t }}', data: this.locatorTrend.map(p => p.online_users), color: '#34d399' },
+                        ],
+                        line: { label: '{{ "reports.ch_webrtc" | t }}', data: this.locatorTrend.map(p => p.webrtc_locations), color: '#f59e0b' },
+                    });
+                } catch (e) { console.error('locator report failed', e); }
+            },
+
+            async loadCc() {
+                try {
+                    const groupsP = this.fetchJson(`/cc/groups?include_empty=true&${this.commonParams()}`);
+                    if (this.selectedGroup) {
+                        const [s, a, h] = await Promise.all([
+                            this.fetchJson(`/cc/groups/series?group_id=${encodeURIComponent(this.selectedGroup)}&${this.commonParams()}`),
+                            this.fetchJson(`/cc/agents?group_id=${encodeURIComponent(this.selectedGroup)}&${this.commonParams()}`),
+                            this.fetchJson(`/cc/groups/heat?group_id=${encodeURIComponent(this.selectedGroup)}&${this.commonParams()}`),
+                        ]);
+                        this.groupRows = (await groupsP).data || [];
+                        this.queueSeries = s.data || [];
+                        this.agentGroupRows = a.data || [];
+                        this.ccHeat = (h.data || this.ccHeat);
+                        this.renderChart('queue-chart', {
+                            labels: this.queueSeries.map(p => this.fmtBucket(p.bucket_start).slice(0, 16)),
+                            bars: [
+                                { label: '{{ "reports.ch_offered" | t }}', data: this.queueSeries.map(p => p.offered), color: '#38bdf8' },
+                                { label: '{{ "reports.ch_answered" | t }}', data: this.queueSeries.map(p => p.answered), color: '#34d399' },
+                                { label: '{{ "reports.ch_abandoned" | t }}', data: this.queueSeries.map(p => p.abandoned), color: '#fb7185' },
+                            ],
+                            line: { label: '{{ "reports.ch_sla" | t }}', data: this.queueSeries.map(p => p.sla_pct), color: '#6366f1' },
+                        });
+                    } else {
+                        const [q, a, h] = await Promise.all([
+                            this.fetchJson(`/cc/queue?${this.commonParams()}`),
+                            this.fetchJson(`/cc/agents?${this.commonParams()}`),
+                            this.fetchJson(`/cc/groups/heat?${this.commonParams()}`),
+                        ]);
+                        this.groupRows = (await groupsP).data || [];
+                        this.queueRows = q.data || [];
+                        this.agentRows = a.data || [];
+                        this.ccHeat = (h.data || this.ccHeat);
+                        this.renderCcAggregateChart();
+                    }
+                } catch (e) { console.error('cc report failed', e); }
+            },
+
+            renderCcAggregateChart() {
+                const byBucket = new Map();
+                for (const r of this.queueRows) {
+                    const cur = byBucket.get(r.bucket_start) || { offered: 0, answered: 0, abandoned: 0, sla: [] };
+                    cur.offered += r.offered;
+                    cur.answered += r.answered;
+                    cur.abandoned += r.abandoned;
+                    if (r.answered > 0) cur.sla.push(r.sla_pct);
+                    byBucket.set(r.bucket_start, cur);
+                }
+                const keys = [...byBucket.keys()];
+                this.renderChart('queue-chart', {
+                    labels: keys.map(k => this.fmtBucket(k).slice(0, 16)),
+                    bars: [
+                        { label: '{{ "reports.ch_offered" | t }}', data: keys.map(k => byBucket.get(k).offered), color: '#38bdf8' },
+                        { label: '{{ "reports.ch_answered" | t }}', data: keys.map(k => byBucket.get(k).answered), color: '#34d399' },
+                        { label: '{{ "reports.ch_abandoned" | t }}', data: keys.map(k => byBucket.get(k).abandoned), color: '#fb7185' },
+                    ],
+                    line: {
+                        label: '{{ "reports.ch_sla" | t }}',
+                        data: keys.map(k => {
+                            const arr = byBucket.get(k).sla;
+                            return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+                        }),
+                        color: '#6366f1',
+                    },
+                });
+            },
+
+            exportUrl() {
+                // cc: 组汇总导出（选组时带 group_id）；其余走通用导出。
+                if (this.tab === 'cc') {
+                    const gp = this.commonParams();
+                    gp.set('include_empty', 'true');
+                    if (this.selectedGroup) gp.set('group_id', this.selectedGroup);
+                    return `{{ api_prefix | safe }}/reports/v2/cc/groups/export?${gp}`;
+                }
+                const path = { call: '/call/export', trunk: '/trunk/export', route: '/route/export', voicemail: '/voicemail/export', locator: '/locator/export' }[this.tab] || '/call/export';
+                return `${this.apiBase()}${path}?${this.commonParams()}`;
+            },
+
+            fmtBucket(rfc3339) {
+                if (!rfc3339) return '';
+                const d = new Date(rfc3339);
+                if (isNaN(d)) return rfc3339;
+                const shifted = new Date(d.getTime() + Number(this.tz || 0) * 3600000);
+                return shifted.toISOString().replace('T', ' ').slice(0, 16) + ` (UTC${Number(this.tz || 0) >= 0 ? '+' : ''}${this.tz})`;
+            },
+
+            heatMax(grid) {
+                return Math.max(1, ...(grid || this.callData.heatmap).flat());
+            },
+
+            renderChart(canvasIdOrSpec, specMaybe) {
+                const canvasId = typeof canvasIdOrSpec === 'string' ? canvasIdOrSpec : 'queue-chart';
+                const { labels, bars, line } = typeof canvasIdOrSpec === 'string' ? specMaybe : canvasIdOrSpec;
+                if (typeof Chart === 'undefined') return;
+                const ctx = document.getElementById(canvasId);
+                if (!ctx) return;
+                if (this.charts[canvasId]) { this.charts[canvasId].destroy(); }
+                this.charts[canvasId] = new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels,
+                        datasets: [
+                            ...bars.map(b => ({ label: b.label, data: b.data, backgroundColor: b.color })),
+                            { type: 'line', label: line.label, data: line.data, borderColor: line.color, backgroundColor: line.color, yAxisID: 'y1', tension: 0.3 },
+                        ],
+                    },
+                    options: {
+                        animation: false,
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            y: { beginAtZero: true, title: { display: true, text: 'Count' } },
+                            y1: { beginAtZero: true, max: 100, position: 'right', grid: { drawOnChartArea: false }, title: { display: true, text: '%' } },
+                        },
+                    },
+                });
+            },
+        };
+    }
+</script>
+{% endblock %}

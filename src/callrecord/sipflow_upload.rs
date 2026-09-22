@@ -32,6 +32,10 @@ pub type SipFlowConfigSlot = Arc<ArcSwap<Option<crate::config::SipFlowConfig>>>;
 pub struct SipFlowUploadRuntime {
     slot: SipFlowConfigSlot,
     cached: parking_lot::Mutex<(String, Option<Storage>)>,
+    /// Dedicated storage for signaling uploads, cached like the media
+    /// storage. `None` ⇒ the signaling target equals the media target and
+    /// callers reuse the media storage.
+    signaling_cached: parking_lot::Mutex<(String, Option<Storage>)>,
 }
 
 impl SipFlowUploadRuntime {
@@ -39,6 +43,7 @@ impl SipFlowUploadRuntime {
         Self {
             slot,
             cached: parking_lot::Mutex::new((String::new(), None)),
+            signaling_cached: parking_lot::Mutex::new((String::new(), None)),
         }
     }
 
@@ -82,6 +87,22 @@ impl SipFlowUploadRuntime {
             );
         }
         Ok(Some((config, cached.1.clone())))
+    }
+
+    /// Dedicated storage for signaling uploads when the configured signaling
+    /// target (`signaling_bucket` / `signaling_url`) differs from the media
+    /// target. `None` ⇒ callers reuse the media storage.
+    pub fn signaling_storage(&self) -> Result<Option<Storage>> {
+        let Some(config) = self.config() else {
+            return Ok(None);
+        };
+        let signature = format!("{config:?}");
+        let mut cached = self.signaling_cached.lock();
+        if cached.0 != signature {
+            cached.1 = build_signaling_storage(&config)?;
+            cached.0 = signature;
+        }
+        Ok(cached.1.clone())
     }
 }
 
@@ -129,6 +150,7 @@ impl CallRecordHook for SipFlowUploadHook {
         let Some((upload_config, storage)) = self.runtime.resolve()? else {
             return Ok(());
         };
+        let signaling_storage = self.runtime.signaling_storage()?;
         for record in records {
             let call_id = record.call_id.as_str();
             let signaling_call_ids = record.sip_leg_roles.keys().cloned().collect::<Vec<_>>();
@@ -156,6 +178,7 @@ impl CallRecordHook for SipFlowUploadHook {
                 &upload_config,
                 self.db.as_ref(),
                 storage.as_ref(),
+                signaling_storage.as_ref(),
                 call_id,
                 &signaling_call_ids,
                 start,
@@ -245,6 +268,7 @@ async fn do_upload(
     upload_config: &SipFlowUploadConfig,
     db: Option<&DatabaseConnection>,
     storage: Option<&Storage>,
+    signaling_storage: Option<&Storage>,
     call_id: &str,
     signaling_call_ids: &[String],
     start: DateTime<Local>,
@@ -315,6 +339,7 @@ async fn do_upload(
             &full_signaling_key,
             signaling_file_name,
             storage,
+            signaling_storage,
         )
         .await
     } else {
@@ -455,7 +480,8 @@ pub async fn upload_media(
 /// otherwise. The S3 URL is assembled from the config (matching what
 /// `preconstruct_signaling_url` stores); the HTTP URL comes from the upload
 /// response (`response_url_path`, the body when it looks like a URL, or the
-/// request URL).
+/// request URL). `signaling_storage` carries the dedicated storage for a
+/// separate signaling bucket / endpoint (`None` ⇒ reuse `storage`).
 pub async fn upload_signaling_flow(
     upload_config: &SipFlowUploadConfig,
     backend: &dyn SipFlowBackend,
@@ -466,6 +492,7 @@ pub async fn upload_signaling_flow(
     full_signaling_key: &str,
     signaling_file_name: &str,
     storage: Option<&Storage>,
+    signaling_storage: Option<&Storage>,
 ) -> Option<String> {
     let query_start = start - chrono::Duration::seconds(1);
     let query_end = end + chrono::Duration::seconds(1);
@@ -505,17 +532,19 @@ pub async fn upload_signaling_flow(
     let data = jsonl.into_bytes();
 
     let result: Result<String> = match upload_config {
-        SipFlowUploadConfig::S3 {
-            vendor,
-            bucket,
-            endpoint,
-            ..
-        } => {
-            let Some(storage) = storage else {
+        SipFlowUploadConfig::S3 { vendor, endpoint, .. } => {
+            // The signaling upload writes to the dedicated signaling storage
+            // when one is configured, and the URL must name the signaling
+            // bucket (`signaling_bucket`, falling back to the media bucket).
+            let Some(signaling_storage) = signaling_storage.or(storage) else {
                 warn!(call_id, "SipFlowUploadHook: S3 storage is not initialized");
                 return None;
             };
-            upload_s3(storage, full_signaling_key, data)
+            let Some(bucket) = upload_config.signaling_bucket() else {
+                warn!(call_id, "SipFlowUploadHook: signaling bucket is not configured");
+                return None;
+            };
+            upload_s3(signaling_storage, full_signaling_key, data)
                 .await
                 .map(|_| sipflow_s3_url(vendor, endpoint, bucket, full_signaling_key))
         }
@@ -524,7 +553,9 @@ pub async fn upload_signaling_flow(
             content_type,
             ..
         } => {
-            let Some(storage) = storage else {
+            // `signaling_storage` carries the dedicated `signaling_url`
+            // endpoint when one is configured.
+            let Some(signaling_storage) = signaling_storage.or(storage) else {
                 warn!(call_id, "SipFlowUploadHook: HTTP storage is not initialized");
                 return None;
             };
@@ -545,7 +576,7 @@ pub async fn upload_signaling_flow(
                 ]),
                 bytes: Bytes::from(data),
             };
-            storage
+            signaling_storage
                 .upload(request)
                 .await
                 .map(|uploaded| uploaded.url.unwrap_or_else(|| full_signaling_key.to_string()))
@@ -589,6 +620,71 @@ pub fn build_storage(upload_config: &SipFlowUploadConfig) -> Result<Option<Stora
             .http_upload_config()
             .map(Storage::from_http)
             .transpose()?),
+    }
+}
+
+/// Build a dedicated storage for signaling uploads when the configured
+/// signaling target (`signaling_bucket` for S3, `signaling_url` for HTTP)
+/// differs from the media target. Returns `None` when the signaling target
+/// equals the media target — callers then reuse the media storage.
+pub fn build_signaling_storage(upload_config: &SipFlowUploadConfig) -> Result<Option<Storage>> {
+    match upload_config {
+        SipFlowUploadConfig::S3 {
+            vendor,
+            bucket,
+            region,
+            access_key,
+            secret_key,
+            endpoint,
+            signaling_bucket,
+            ..
+        } => {
+            let dedicated = signaling_bucket
+                .as_deref()
+                .map(str::trim)
+                .filter(|b| !b.is_empty())
+                .filter(|b| *b != bucket.trim());
+            match dedicated {
+                Some(signaling_bucket) => Ok(Some(Storage::new(&StorageConfig::S3 {
+                    vendor: vendor.clone(),
+                    bucket: signaling_bucket.to_string(),
+                    region: region.clone(),
+                    access_key: access_key.clone(),
+                    secret_key: secret_key.clone(),
+                    endpoint: Some(endpoint.clone()),
+                    prefix: None,
+                })?)),
+                None => Ok(None),
+            }
+        }
+        SipFlowUploadConfig::Http {
+            url, signaling_url, ..
+        } => {
+            let dedicated = signaling_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|u| !u.is_empty())
+                .filter(|u| *u != url.trim());
+            match dedicated {
+                Some(signaling_url) => {
+                    let mut config = upload_config.clone();
+                    if let SipFlowUploadConfig::Http {
+                        url,
+                        signaling_url: sig,
+                        ..
+                    } = &mut config
+                    {
+                        *url = signaling_url.to_string();
+                        *sig = None;
+                    }
+                    Ok(config
+                        .http_upload_config()
+                        .map(Storage::from_http)
+                        .transpose()?)
+                }
+                None => Ok(None),
+            }
+        }
     }
 }
 
@@ -651,20 +747,27 @@ pub(crate) fn preconstruct_signaling_url(
     upload_config: &SipFlowUploadConfig,
     signaling_default: bool,
 ) {
-    let SipFlowUploadConfig::S3 {
-        vendor,
-        bucket,
-        endpoint,
-        root,
-        signaling,
-        ..
-    } = upload_config
-    else {
-        return;
+    let signaling_enabled = match upload_config {
+        SipFlowUploadConfig::S3 { signaling, .. } | SipFlowUploadConfig::Http { signaling, .. } => {
+            signaling.unwrap_or(signaling_default)
+        }
     };
-    if !signaling.unwrap_or(signaling_default) {
+    if !signaling_enabled {
         return;
     }
+    let (vendor, endpoint, root) = match upload_config {
+        SipFlowUploadConfig::S3 {
+            vendor,
+            endpoint,
+            root,
+            ..
+        } => (vendor, endpoint.as_str(), root.as_str()),
+        // HTTP upload URLs are only known from the upload response.
+        SipFlowUploadConfig::Http { .. } => return,
+    };
+    let Some(bucket) = upload_config.signaling_bucket() else {
+        return;
+    };
 
     let key = join_root(root, &format_sipflow_signaling_key(record));
     let url = sipflow_s3_url(vendor, endpoint, bucket, &key);
@@ -747,6 +850,7 @@ mod tests {
     ) -> SipFlowUploadConfig {
         SipFlowUploadConfig::Http {
             url: url.to_string(),
+            signaling_url: None,
             headers: None,
             method: None,
             file_field: None,
@@ -910,6 +1014,7 @@ file_field = "filecontent"
                 "flow.jsonl",
                 "flow.jsonl",
                 Some(&storage),
+                None,
             )
             .await
             .is_some()
@@ -943,6 +1048,7 @@ url = "{url}"
                 "flow.jsonl",
                 "flow.jsonl",
                 Some(&storage),
+                None,
             )
             .await
             .is_some()
@@ -1008,6 +1114,7 @@ url = "{url}"
         let upload_config = SipFlowUploadConfig::S3 {
             vendor: crate::config::S3Vendor::Minio,
             bucket: "recordings".to_string(),
+            signaling_bucket: None,
             region: "us-east-1".to_string(),
             access_key: Some("access".to_string()),
             secret_key: Some("secret".to_string()),
@@ -1258,6 +1365,7 @@ media = false
             "flow.jsonl",
             "flow.jsonl",
             None,
+            None,
         )
         .await;
         assert_eq!(
@@ -1286,6 +1394,7 @@ media = false
             now + chrono::Duration::seconds(1),
             "flow.jsonl",
             "flow.jsonl",
+            None,
             None,
         )
         .await;

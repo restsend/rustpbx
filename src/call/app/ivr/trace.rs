@@ -56,6 +56,23 @@ pub struct IvrTraceEntry {
     /// Companion detail for [`end_reason`](Self::end_reason) (e.g. transfer target).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_detail: Option<String>,
+    /// Identifier of the next node the flow advanced to, carried once the
+    /// successor node is known. In step mode this mirrors the successor's
+    /// `step_id` (there is no separate node id). Absent on terminal steps
+    /// and when the flow ended before a successor resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_node_id: Option<String>,
+    /// `step_id` of the next node — identical to [`Self::next_node_id`] in
+    /// step mode; both are emitted so consumers can key on either name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step_id: Option<String>,
+    /// Terminal marker: `Some(true)` on the flow's final observable step —
+    /// a node whose action ended the flow (hangup / transfer / exit), the
+    /// session-end entry, or the last step cut short by caller hangup /
+    /// cancellation / error. Absent (i.e. `false`) on steps the flow
+    /// continues from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end: Option<bool>,
 }
 
 /// A summary of a trace session.
@@ -209,6 +226,9 @@ mod tests {
             extra: None,
             end_reason: None,
             end_detail: None,
+            next_node_id: None,
+            next_step_id: None,
+            end: None,
         }
     }
 

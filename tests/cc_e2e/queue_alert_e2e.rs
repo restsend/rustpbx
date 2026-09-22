@@ -62,9 +62,14 @@ async fn queue_alert_reaches_rwi_webhook() {
 
     let db = alert_db().await;
 
-    // Queue status built by the event-driven path: 2 waiting.
-    stats_writer::adjust_calls_waiting(&db, "sg-e2e", 1).await;
-    stats_writer::adjust_calls_waiting(&db, "sg-e2e", 1).await;
+    // Queue status built by the event-driven path: 2 waiting (paired
+    // shared-queue row + counter, exactly as production writes them — the
+    // checker reconciles the counter against the shared queue).
+    for i in 0..2 {
+        stats_writer::shared_enqueue(&db, &format!("call-e2e-{i}"), "sg-e2e", "t", "100", &[], 0)
+            .await;
+        stats_writer::adjust_calls_waiting(&db, "sg-e2e", 1).await;
+    }
 
     let mut cfg = CcConfig::default();
     cfg.alerting = AlertingConfig {

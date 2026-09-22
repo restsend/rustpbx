@@ -49,6 +49,10 @@ exclude = [
 
 [features]
 cross = []
+# Expose the in-process E2E testing infrastructure (`proxy::tests`:
+# TestUa / E2eTestServer / rtp_utils / test_helpers) to downstream crates so
+# they can drive real SIP+RTP flows against their own server assembly.
+e2e-testing = ["dep:portpicker"]
 console = ["dep:minijinja"]
 addon-acme = ["instant-acme"]
 addon-wholesale = [
@@ -235,6 +239,8 @@ rustpbx-storage = { path = "crates/rustpbx-storage", version = "0.5.1" }
 rustpbx-http-util = { path = "crates/rustpbx-http-util", version = "0.5.1" }
 rustpbx-sipflow = { path = "crates/rustpbx-sipflow", version = "0.5.1" }
 rustpbx-media = { path = "crates/rustpbx-media", version = "0.5.1" }
+# Required by the `e2e-testing` feature (proxy::tests helpers pick free ports).
+portpicker = { version = "0.1.1", optional = true }
 
 
 [dev-dependencies]

@@ -131,6 +131,7 @@ impl super::TranscriptionProviderFactory for DeepgramFactory {
 
     fn create(
         &self,
+        _call: &super::TranscriptionCallInfo,
         sides: &[TranscriptSide],
         events: mpsc::UnboundedSender<TranscriptionEvent>,
         params: &serde_json::Value,
@@ -413,7 +414,9 @@ async fn side_task(
 
 /// Resample interleaved mono i16 PCM to 16 kHz with linear interpolation.
 /// Pass-through when the source is already at the target rate.
-fn resample_to_16k(samples: &[i16], from: u32) -> Vec<u8> {
+/// Exported for third-party providers (see
+/// `crate::call::transcription::resample_to_16k`).
+pub fn resample_to_16k(samples: &[i16], from: u32) -> Vec<u8> {
     if from == TARGET_SAMPLE_RATE {
         return samples.iter().flat_map(|s| s.to_le_bytes()).collect();
     }

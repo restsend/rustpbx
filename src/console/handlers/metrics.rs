@@ -10,7 +10,7 @@ pub async fn metrics_page(
     headers: HeaderMap,
     AuthRequired(user): AuthRequired,
 ) -> Response {
-    let runtime_metrics = collect_runtime_metrics(&state);
+    let runtime_metrics = collect_runtime_metrics(&state).await;
 
     // Get Prometheus metrics endpoint configuration
     let prometheus_config = get_prometheus_config(&state);
@@ -65,7 +65,7 @@ pub async fn metrics_data(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
 ) -> Json<RuntimeMetrics> {
-    Json(collect_runtime_metrics(&state))
+    Json(collect_runtime_metrics(&state).await)
 }
 
 /// Runtime metrics collected from various sources.
@@ -122,6 +122,16 @@ pub struct CallMetrics {
 pub struct MediaMetrics {
     /// WebRTC connections
     pub webrtc_connections: u64,
+    /// Live media bridges (conference / recording sessions)
+    pub active_bridges: usize,
+    /// RTP packets received (process lifetime)
+    pub rx_packets_total: u64,
+    /// RTP packets lost in receive direction
+    pub rx_packets_lost: u64,
+    /// RTP packets sent (process lifetime)
+    pub tx_packets_total: u64,
+    /// RTP packets lost in send direction (from RTCP feedback)
+    pub tx_packets_lost: u64,
 }
 
 #[derive(Clone, serde::Serialize, Default)]
@@ -146,13 +156,13 @@ pub struct TransactionMetrics {
     pub endpoint_waiting_ack: usize,
 }
 
-fn collect_runtime_metrics(state: &ConsoleState) -> RuntimeMetrics {
+async fn collect_runtime_metrics(state: &ConsoleState) -> RuntimeMetrics {
     let system = collect_system_metrics(state);
     let sip = collect_sip_metrics(state);
     let calls = collect_call_metrics(state);
     let transaction = collect_transaction_metrics(state);
-    let media = MediaMetrics::default();
-    let voicemail = VoicemailMetrics::default();
+    let media = collect_media_metrics(state).await;
+    let voicemail = collect_voicemail_metrics(state).await;
 
     RuntimeMetrics {
         system,
@@ -227,6 +237,73 @@ fn collect_transaction_metrics(state: &ConsoleState) -> TransactionMetrics {
         metrics.endpoint_waiting_ack = stats.waiting_ack;
     }
 
+    metrics
+}
+
+/// Media metrics from the process-wide telemetry aggregate and the
+/// registration locator (previously hardcoded to an empty struct, which left
+/// the metrics dashboard blind to RTP health).
+async fn collect_media_metrics(state: &ConsoleState) -> MediaMetrics {
+    let snapshot = rustpbx_media::telemetry::MediaTelemetry::snapshot();
+    let mut metrics = MediaMetrics {
+        active_bridges: snapshot.active_bridges,
+        rx_packets_total: snapshot.rx.packets_total,
+        rx_packets_lost: snapshot.rx.lost_total,
+        tx_packets_total: snapshot.tx.packets_total,
+        tx_packets_lost: snapshot.tx.lost_total,
+        ..Default::default()
+    };
+    if let Some(server) = state.sip_server()
+        && let Ok(stats) = server.locator.online_stats().await
+    {
+        metrics.webrtc_connections = stats.webrtc_locations as u64;
+    }
+    metrics
+}
+
+/// Voicemail counters read from the voicemail addon tables (best-effort: the
+/// addon may be disabled or its tables absent — defaults stay zero).
+async fn collect_voicemail_metrics(state: &ConsoleState) -> VoicemailMetrics {
+    use sea_orm::{ConnectionTrait, Statement, Value};
+
+    let mut metrics = VoicemailMetrics::default();
+    let Some(app) = state.app_state() else {
+        return metrics;
+    };
+    let db = app.db();
+    let backend = db.get_database_backend();
+    let today_start = chrono::Utc::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc();
+
+    // Parameterized COUNT queries; a missing table (addon disabled) errors
+    // and the metric stays at its default of 0.
+    if let Some(row) = db
+        .query_one_raw(Statement::from_sql_and_values(
+            backend,
+            "SELECT COUNT(*) AS c FROM rustpbx_voicemail_box",
+            [],
+        ))
+        .await
+        .ok()
+        .flatten()
+    {
+        metrics.active_mailboxes = row.try_get::<i64>("", "c").unwrap_or(0).max(0) as u32;
+    }
+    if let Some(row) = db
+        .query_one_raw(Statement::from_sql_and_values(
+            backend,
+            "SELECT COUNT(*) AS c FROM rustpbx_voicemail_message WHERE created_at >= ?",
+            [Value::ChronoDateTimeUtc(Some(today_start.clone()))],
+        ))
+        .await
+        .ok()
+        .flatten()
+    {
+        metrics.messages_today = row.try_get::<i64>("", "c").unwrap_or(0).max(0) as u64;
+    }
     metrics
 }
 

@@ -234,7 +234,7 @@ impl ConferenceMediaBridge {
                             );
                             return;
                         }
-                        crate::metrics::conference::media_injected_bytes(&conf_id, bytes_sent as u64);
+                        crate::metrics::conference::media_injected_bytes(bytes_sent as u64);
 
                         rtp_timestamp = rtp_timestamp.wrapping_add(rtp_ticks_per_frame);
                         sequence_number = sequence_number.wrapping_add(1);
@@ -386,6 +386,13 @@ impl Drop for ConferenceBridgeHandle {
         self.cancel_token.cancel();
         for task in &self._tasks {
             task.abort();
+        }
+        // Only real bridges (created by `setup_full_duplex_bridge`) carry the
+        // spawned forward/reverse tasks. Handles built elsewhere as pure
+        // cancel-token markers (`_tasks: vec![]`) are not conference bridges
+        // and must not count towards the destroyed metric.
+        if !self._tasks.is_empty() {
+            crate::metrics::conference::destroyed("bridge_closed");
         }
     }
 }
