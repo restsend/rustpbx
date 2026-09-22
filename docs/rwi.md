@@ -243,6 +243,62 @@ Some commands support aliases for convenience:
 }
 ```
 
+**Manually dial and connect legs within one session:**
+
+`call.leg_add` creates an independent outgoing SIP dialog and media peer. RWI
+controls its connection: adding or answering a leg does not automatically bridge
+it to the caller. Multiple attempts may ring or answer concurrently. Ordinary
+direct dialing, including HTTP router `forward`, retains its connection flow. All added legs require explicit bridge selection, including queue legs. There is no queue-specific automatic pairing or queue-app bridge request. Queue agent audio therefore requires an explicit bridge request from its controller. CC consult and transfer use explicit bridge commands. There is no RWI-specific leg marker.
+Existing bridges remain until explicitly changed or a member ends.
+
+```json
+{"action":"call.leg_add","action_id":"dial-b","params":{"call_id":"session-1","target":"sip:b@example.com","leg_id":"attempt-b"}}
+{"action":"call.leg_add","action_id":"dial-c","params":{"call_id":"session-1","target":"sip:c@example.com","leg_id":"attempt-c"}}
+```
+
+The command returns ordinary success without a leg ID. Omit `leg_id` to generate
+one and learn it from subsequent leg events, or provide your own ID. The session
+rejects IDs belonging to active legs. A removed leg ID may be reused; the server does not keep retired IDs. Success acknowledges
+that dialing was queued, not that setup or answer succeeded. Enqueue/validation
+errors produce `command_failed`; setup failures produce `call_hangup` with
+the supplied leg ID.
+
+Leg lifecycle handlers emit flat per-leg events to the RWI owner, independently
+of session-level events. Event delivery does not require a per-leg control flag:
+
+```json
+{"event_type":"call_hangup","call_id":"session-1","leg_id":"attempt-b","reason":"Rejected with 486","sip_status":486}
+```
+
+Leg events reuse `call_ringing` (including its `early_media` flag),
+`call_answered`, and `call_hangup` (rejection, failure, or remote hangup).
+A populated `leg_id` means only that leg is affected; session-level events omit
+`leg_id`. `reason` and `sip_status` are nullable. An unbridged outgoing attempt rejected before answer leaves the caller available
+for another `call.leg_add`. A connected leg ending follows the normal
+post-disconnect handling, including return apps and caller hangup.
+Events can arrive before the command acknowledgement; supplying IDs permits
+immediate correlation. The SIP Call-ID is separate from the local `leg_id`.
+
+After the desired leg answers, bridge by **session ID and local leg IDs**:
+
+```json
+{"action":"call.bridge","action_id":"connect-b","params":{"call_id":"session-1","leg_a":"caller","leg_b":"attempt-b"}}
+{"action":"call.leg_remove","action_id":"remove-c","params":{"call_id":"session-1","leg_id":"attempt-c"}}
+{"action":"call.unbridge","action_id":"disconnect","params":{"call_id":"session-1"}}
+```
+
+Bridge, unbridge, and removal acknowledge enqueueing rather than waiting for
+execution results. The RWI processor publishes `call_bridged` and
+`call_unbridged` after successful enqueueing, as in the existing command path;
+these events do not confirm media establishment. Explicit leg removal receives
+its command acknowledgement without an additional `call_hangup` event.
+
+Removal cancels a pending INVITE or hangs up an answered dialog, including an
+answer racing with removal. Removing an already removed RWI attempt succeeds
+without changing other legs. `call.hangup` still ends the whole call. Unbridge
+leaves the legs alive and disconnected; subsequent leg state changes do not
+select a replacement pair automatically. Caller hangup still ends the session.
+
 **Reject call:**
 
 ```json

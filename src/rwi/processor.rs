@@ -259,16 +259,6 @@ impl RwiCommandProcessor {
         &self,
         command: RwiCommandPayload,
     ) -> Result<CommandResult, CommandError> {
-        // Bridge requires both legs to exist up-front.
-        if let RwiCommandPayload::Bridge { leg_a, leg_b } = &command {
-            if self.call_registry.get_handle(leg_a).is_none() {
-                return Err(CommandError::CallNotFound(leg_a.clone()));
-            }
-            if self.call_registry.get_handle(leg_b).is_none() {
-                return Err(CommandError::CallNotFound(leg_b.clone()));
-            }
-        }
-
         // Commands handled entirely at the processor level (no session dispatch).
         match &command {
             RwiCommandPayload::Originate(req) => {
@@ -426,16 +416,15 @@ impl RwiCommandProcessor {
             );
 
             match &command {
-                RwiCommandPayload::Bridge { leg_a, leg_b } => {
+                RwiCommandPayload::Bridge { leg_a, leg_b, .. } if result.is_ok() => {
                     let gw = self.gateway.read();
                     let event = crate::rwi::CallBridged {
                         leg_a: leg_a.clone(),
                         leg_b: leg_b.clone(),
                     };
-                    gw.send_to_owner_at(leg_a, &event);
-                    gw.send_to_owner_at(leg_b, &event);
+                    gw.send_to_owner_at(&call_id.to_string(), &event);
                 }
-                RwiCommandPayload::Unbridge { call_id } => {
+                RwiCommandPayload::Unbridge { call_id } if result.is_ok() => {
                     let gw = self.gateway.read();
                     gw.send_to_owner(&crate::rwi::CallUnbridged {
                         call_id: call_id.clone(),
@@ -1225,6 +1214,7 @@ impl RwiCommandProcessor {
                     {
                         let gw = gateway.read();
                         gw.send_to_owner(&crate::rwi::CallHangup {
+                            leg_id: None,
                             call_id: call_id.clone(),
                             reason: Some(format!("media_setup_failed: {}", e)),
                             hangup_by: None,
@@ -1384,6 +1374,7 @@ impl RwiCommandProcessor {
                                         {
                                             let gw = gateway.read();
                                             gw.send_to_owner(&crate::rwi::CallRinging {
+                                                leg_id: None,
                                                 call_id: call_id.clone(),
                                                 early_media,
                                             });
@@ -1574,6 +1565,7 @@ impl RwiCommandProcessor {
                             {
                                 let gw = gateway.read();
                                 gw.send_to_owner(&crate::rwi::CallHangup {
+                                    leg_id: None,
                                     call_id: call_id.clone(),
                                     reason: Some(format!("media_setup_failed: {}", e)),
                                     hangup_by: None,
@@ -1663,6 +1655,7 @@ impl RwiCommandProcessor {
                         {
                             let gw = gateway.read();
                             gw.send_to_owner(&crate::rwi::CallAnswered {
+                                leg_id: None,
                                 call_id: call_id.clone(),
                             });
                         }
@@ -1711,6 +1704,7 @@ impl RwiCommandProcessor {
                                 });
                             } else {
                                 gw.send_to_owner(&crate::rwi::CallHangup {
+                                    leg_id: None,
                                     call_id: call_id.clone(),
                                     reason: Some("originate_failed".to_string()),
                                     hangup_by: None,
@@ -1724,6 +1718,7 @@ impl RwiCommandProcessor {
                         setup_end_reason = Some(CallRecordHangupReason::Failed);
                         let gw = gateway.read();
                         gw.send_to_owner(&crate::rwi::CallHangup {
+                            leg_id: None,
                             call_id: call_id.clone(),
                             reason: Some(e.to_string()),
                             hangup_by: None,
@@ -1737,6 +1732,7 @@ impl RwiCommandProcessor {
                         setup_end_reason = Some(CallRecordHangupReason::Canceled);
                         let gw = gateway.read();
                         gw.send_to_owner(&crate::rwi::CallHangup {
+                            leg_id: None,
                             call_id: call_id.clone(),
                             reason,
                             hangup_by: Some("system".to_string()),
@@ -1853,36 +1849,22 @@ impl RwiCommandProcessor {
     }
 
     async fn leg_add(
-        &self,
-        call_id: &str,
-        target: &str,
-        leg_id: Option<&str>,
+        &self, call_id: &str, target: &str, leg_id: Option<&str>,
     ) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
-
-        let leg_id_opt = leg_id.map(|id| crate::call::domain::LegId::new(id));
-
-        handle
-            .send_command(CallCommand::LegAdd {
-                source_leg: None,
-                target: target.to_string(),
-                leg_id: leg_id_opt,
-                headers: Vec::new(),
-            })
-            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
-
+        let leg_id = leg_id.map(str::to_owned)
+            .unwrap_or_else(|| format!("leg-{}", uuid::Uuid::new_v4()));
+        handle.send_command(CallCommand::LegAdd {
+            source_leg: None, target: target.to_string(),
+            leg_id: Some(LegId::new(&leg_id)), headers: Vec::new(),
+        }).map_err(|error| CommandError::CommandFailed(error.to_string()))?;
         Ok(CommandResult::Success)
     }
 
     async fn leg_remove(&self, call_id: &str, leg_id: &str) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
-
-        handle
-            .send_command(CallCommand::LegRemove {
-                leg_id: crate::call::domain::LegId::new(leg_id),
-            })
-            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
-
+        handle.send_command(CallCommand::LegRemove { leg_id: LegId::new(leg_id) })
+            .map_err(|error| CommandError::CommandFailed(error.to_string()))?;
         Ok(CommandResult::Success)
     }
 

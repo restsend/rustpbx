@@ -4992,6 +4992,10 @@ async fn added_second_leg_relays_audio_and_dtmf_without_mixer() {
     session.execute_command(CallCommand::LegConnected {
         leg_id: alice_id.clone(), answer_sdp: Some(answer), dialog_id: None,
     }, None).await;
+    assert!(!session.bridge.active, "answering an added leg must not connect media");
+    assert!(session.execute_command(CallCommand::Bridge {
+        leg_a: LegId::from("caller"), leg_b: alice_id.clone(), mode: crate::call::domain::P2PMode::Audio,
+    }, None).await.success);
     assert!(session.bridge().unwrap().is_bridged());
     for side in [LegSide::A, LegSide::B] {
         assert!(session.bridge().unwrap().leg(side).unwrap().egress_is_relay());
@@ -5407,6 +5411,8 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
             if scenario == "complete_from_customer" {
                 session.handle_hold(consult.clone(), None).await.unwrap();
                 session.handle_unhold(LegId::from("caller")).await.unwrap();
+                let agent = session.resolve_transfer_leg(LegId::from("callee"));
+                assert!(session.setup_bridge(LegId::from("caller"), agent).await);
                 assert!(session.bridge.contains_leg(&LegId::from("caller")));
             }
             let caller_peer = session.media_leg(&LegId::from("caller")).unwrap();
@@ -6433,7 +6439,7 @@ async fn cancel_before_queued_answer_sends_bye_to_late_dialog() {
     use rsipstack::transport::udp::UdpConnection;
     use tokio::time::timeout;
 
-    for (ignore_late_answer, teardown_before_drain) in [(true, false), (false, false), (false, true)] {
+    for (ignore_late_answer, teardown_before_drain) in [(true, false), (true, true), (false, false), (false, true)] {
         let (server, _) = create_test_server().await;
         let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let target_addr = target.local_addr().unwrap();
@@ -6457,9 +6463,10 @@ async fn cancel_before_queued_answer_sends_bye_to_late_dialog() {
         let _cancel_on_exit = cancel.clone().drop_guard();
         let (mut session, handle, mut commands) = SipSession::new_uac(server.clone(), cancel.clone(), None, context, true);
         let leg_id = LegId::from("late-target");
-        let added = session.execute_command(CallCommand::LegAdd {
+        let add = CallCommand::LegAdd {
             source_leg: None, target: format!("sip:alice@{target_addr}"), leg_id: Some(leg_id.clone()), headers: vec![],
-        }, None).await;
+        };
+        let added = session.execute_command(add, None).await;
         assert!(added.success, "{:?}", added.message);
         let mut buffer = [0u8; 65536];
         let (size, pbx_addr) = timeout(Duration::from_secs(3), target.recv_from(&mut buffer)).await.unwrap().unwrap();
@@ -6499,8 +6506,8 @@ async fn cancel_before_queued_answer_sends_bye_to_late_dialog() {
             if matches!(&command, CallCommand::LegConnected { .. }) {
                 assert!(!session.legs.contains_key(&leg_id));
                 assert!(session.pending_hangup.is_empty(), "removal did not yet know the answered dialog");
-                // Negative control: model simply ignoring a removed leg's
-                // late answer, without registering its dialog for cleanup.
+                // The dial-task guard must clean up even if the session
+                // never processes the queued answer.
                 if ignore_late_answer { continue; }
             }
             let result = session.execute_command(command, None).await;
@@ -6510,21 +6517,6 @@ async fn cancel_before_queued_answer_sends_bye_to_late_dialog() {
         if ignore_late_answer {
             assert!(session.pending_hangup.is_empty());
             assert!(!session.callee_guards.iter().any(|guard| guard.id() == &confirmed_id));
-            let unexpected_bye = timeout(Duration::from_millis(200), async {
-                loop {
-                    let (size, _) = target.recv_from(&mut buffer).await.unwrap();
-                    if let SipMessage::Request(request) = SipMessage::try_from(std::str::from_utf8(&buffer[..size]).unwrap()).unwrap() {
-                        if request.method == Method::Bye { return; }
-                    }
-                }
-            }).await;
-            assert!(unexpected_bye.is_err(), "ignoring the answer leaves no BYE cleanup");
-            assert!(!dialogs[0].state().is_terminated(), "the answered dialog remains alive");
-            // Clean up the negative control through the normal hangup drain.
-            session.pending_hangup.insert(confirmed_id.clone());
-        } else {
-            assert!(session.pending_hangup.contains(&confirmed_id), "late dialog must receive BYE");
-            assert!(session.callee_guards.iter().any(|guard| guard.id() == &confirmed_id));
         }
 
         let runner = if teardown_before_drain {
@@ -6553,6 +6545,311 @@ async fn cancel_before_queued_answer_sends_bye_to_late_dialog() {
         }
         server.endpoint.shutdown();
         serving.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn rwi_manual_parallel_retry_and_leg_cleanup() {
+    use crate::config::ProxyConfig;
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::media::leg::{LegConfig, LegInner};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
+    use crate::rwi::{RwiGateway, RwiCommandPayload};
+    use crate::rwi::processor::{RwiCommandProcessor, CommandResult as RwiResult};
+    use rsipstack::sip::{Header, Method, SipMessage, StatusCode};
+    use rsipstack::sip::prelude::HeadersExt;
+    use rsipstack::transport::{SipAddr, udp::UdpConnection};
+    use tokio::time::timeout;
+
+    let gateway = Arc::new(parking_lot::RwLock::new(RwiGateway::new()));
+    let mut events = gateway.read().subscribe_events();
+    let (ws_tx, mut ws_events) = mpsc::unbounded_channel();
+    {
+        let mut gw = gateway.write();
+        let id = gw.create_session(crate::rwi::RwiIdentity { token: "test".into(), scopes: vec!["call.control".into()] }).read().id.clone();
+        gw.set_session_event_sender(&id, ws_tx);
+        gw.claim_call_ownership(&id, "rwi-manual".into(), crate::rwi::session::OwnershipMode::Control).unwrap();
+    }
+    let (server, _) = create_test_server_with_rwi_gateway(ProxyConfig::default(), gateway.clone()).await;
+    let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = target.local_addr().unwrap();
+    server.endpoint.inner.transport_layer.del_transport(&SipAddr {
+        r#type: Some(rsipstack::sip::Transport::Udp), addr: "127.0.0.1:5060".try_into().unwrap(),
+    });
+    let transport = UdpConnection::create_connection("127.0.0.1:0".parse().unwrap(), None, None).await.unwrap();
+    server.endpoint.inner.transport_layer.add_transport(transport.into());
+    let endpoint = server.endpoint.inner.clone();
+    let serving = tokio::spawn(async move { endpoint.serve().await.unwrap(); });
+    let request = create_test_request(Method::Invite, "bob", None, "rustpbx.com", None);
+    let context = CallContext {
+        session_id: "rwi-manual".into(),
+        dialplan: Arc::new(Dialplan::new("rwi-manual".into(), request, DialDirection::Outbound)),
+        cookie: TransactionCookie::default(), start_time: Instant::now(),
+        original_caller: "sip:bob@rustpbx.com".into(), original_callee: "sip:alice@rustpbx.com".into(),
+        max_forwards: 70, created_at: chrono::Utc::now().to_rfc3339(), metadata: None,
+    };
+    let cancel = CancellationToken::new();
+    let _guard = cancel.clone().drop_guard();
+    let (mut session, handle, mut commands) = SipSession::new_uac(server.clone(), cancel.clone(), None, context, true);
+    server.active_call_registry.register_handle("rwi-manual".into(), handle);
+    let processor = Arc::new(RwiCommandProcessor::new(server.active_call_registry.clone(), gateway,
+        Arc::new(crate::call::runtime::ConferenceManager::new())));
+    let caller = LegInner::new("caller", &LegConfig::rtp_pcmu(), None).unwrap();
+    let caller_remote = LegInner::new("caller-remote", &LegConfig::rtp_pcmu(), None).unwrap();
+    let offer = caller_remote.create_offer().await.unwrap();
+    let answer = caller.apply_sdp(&offer, rustrtc::SdpType::Offer).await.unwrap();
+    caller_remote.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
+    caller.accept(); caller_remote.accept();
+    session.legs.set_media_leg(&LegId::from("caller"), caller.clone());
+    session.update_leg_state(&LegId::from("caller"), LegState::Connected);
+
+    let mut invites = Vec::new();
+    let mut buffer = [0u8; 65536];
+    // Four simultaneously pending attempts, with IDs generated by the real RWI processor.
+    for _ in 0..4 {
+        let processor = processor.clone();
+        let task = tokio::spawn(async move { processor.process_command(RwiCommandPayload::LegAdd {
+            call_id: "rwi-manual".into(), target: format!("sip:alice@{addr}"), leg_id: None,
+        }).await });
+        // Acknowledge enqueueing before the session executes the dial.
+        assert!(matches!(timeout(Duration::from_secs(3), task).await.unwrap().unwrap().unwrap(), RwiResult::Success));
+        let command = commands.recv().await.unwrap();
+        let leg_id = match &command {
+            CallCommand::LegAdd { leg_id: Some(id), .. } => id.to_string(),
+            _ => panic!("expected generated leg ID in queued command"),
+        };
+        assert!(session.execute_command(command, None).await.success);
+        let (size, pbx) = timeout(Duration::from_secs(3), target.recv_from(&mut buffer)).await.unwrap().unwrap();
+        let SipMessage::Request(invite) = SipMessage::try_from(std::str::from_utf8(&buffer[..size]).unwrap()).unwrap() else { panic!("INVITE"); };
+        assert_eq!(invite.method, Method::Invite);
+        let mut ringing = server.endpoint.inner.make_response(&invite, StatusCode::Ringing, None);
+        ringing.headers.retain(|h| !matches!(h, Header::To(_)));
+        ringing.headers.push(Header::To(format!("<sip:alice@{addr}>;tag={leg_id}").into()));
+        target.send_to(ringing.to_string().as_bytes(), pbx).await.unwrap();
+        // Drain the ringing notification before requesting the next leg.
+        let cmd = timeout(Duration::from_secs(3), commands.recv()).await.unwrap().unwrap();
+        assert!(matches!(&cmd, CallCommand::LegRinging { leg_id: id } if id.as_str() == leg_id));
+        session.execute_command(cmd, None).await;
+        invites.push((leg_id, invite, pbx));
+    }
+    let rejected = &invites[0];
+    let mut rejection = server.endpoint.inner.make_response(&rejected.1, StatusCode::BusyHere, None);
+    rejection.headers.retain(|h| !matches!(h, Header::To(_)));
+    rejection.headers.push(Header::To(format!("<sip:alice@{addr}>;tag={}", rejected.0).into()));
+    target.send_to(rejection.to_string().as_bytes(), rejected.2).await.unwrap();
+    let failed = timeout(Duration::from_secs(3), commands.recv()).await.unwrap().unwrap();
+    assert!(matches!(&failed, CallCommand::LegFailed { leg_id, .. } if leg_id.as_str() == rejected.0));
+    session.execute_command(failed, None).await;
+    assert!(!session.legs.contains_key(&LegId::new(&rejected.0)));
+    assert!(!cancel.is_cancelled());
+
+    let mut answered_peers = Vec::new();
+    for winner in [&invites[1], &invites[3]] {
+    let remote = LegInner::new("winner-remote", &LegConfig::rtp_pcmu(), None).unwrap();
+    let answer_sdp = remote.apply_sdp(std::str::from_utf8(&winner.1.body).unwrap(), rustrtc::SdpType::Offer).await.unwrap();
+    remote.accept();
+    let mut answer = server.endpoint.inner.make_response(&winner.1, StatusCode::OK, Some(answer_sdp.into_bytes()));
+    answer.headers.retain(|h| !matches!(h, Header::To(_)));
+    answer.headers.push(Header::To(format!("<sip:alice@{addr}>;tag={}", winner.0).into()));
+    answer.headers.push(Header::Contact(format!("<sip:alice@{addr}>").into()));
+    answer.headers.push(Header::ContentType("application/sdp".into()));
+    target.send_to(answer.to_string().as_bytes(), winner.2).await.unwrap();
+    let connected = timeout(Duration::from_secs(3), commands.recv()).await.unwrap().unwrap();
+    assert!(matches!(&connected, CallCommand::LegConnected { .. }));
+    assert!(session.execute_command(connected, None).await.success);
+    assert!(!session.bridge.active, "answered peer must remain isolated");
+    assert!(!caller.egress_is_relay());
+
+    answered_peers.push(remote);
+    }
+    let winner = &invites[1];
+    // Select the winner through the local-leg RWI bridge API, then remove a ringing loser.
+    for payload in [
+        RwiCommandPayload::Bridge { call_id: "rwi-manual".into(), leg_a: "caller".into(), leg_b: winner.0.clone() },
+        RwiCommandPayload::LegRemove { call_id: "rwi-manual".into(), leg_id: invites[2].0.clone() },
+    ] {
+        let processor = processor.clone();
+        let task = tokio::spawn(async move { processor.process_command(payload).await });
+        task.await.unwrap().unwrap();
+        let cmd = timeout(Duration::from_secs(3), commands.recv()).await.unwrap().unwrap();
+        assert!(session.execute_command(cmd, None).await.success);
+    }
+    assert!(caller.egress_is_relay());
+    let cancel_request = timeout(Duration::from_secs(3), async {
+        loop {
+            let (size, _) = target.recv_from(&mut buffer).await.unwrap();
+            if let SipMessage::Request(req) = SipMessage::try_from(std::str::from_utf8(&buffer[..size]).unwrap()).unwrap() {
+                if req.method == Method::Cancel { break req; }
+            }
+        }
+    }).await.expect("ringing loser receives CANCEL");
+    assert_eq!(cancel_request.call_id_header().unwrap(), invites[2].1.call_id_header().unwrap());
+    let ok = server.endpoint.inner.make_response(&cancel_request, StatusCode::OK, None);
+    target.send_to(ok.to_string().as_bytes(), invites[2].2).await.unwrap();
+    let terminated = server.endpoint.inner.make_response(&invites[2].1, StatusCode::RequestTerminated, None);
+    target.send_to(terminated.to_string().as_bytes(), invites[2].2).await.unwrap();
+
+    // Explicit unbridge must persist through later media updates.
+
+    let result = session.execute_command(CallCommand::Unbridge { leg_id: LegId::from("caller") }, None).await;
+    assert!(result.success);
+    session.update_media_path().await;
+    assert!(!session.bridge.active);
+    assert!(!caller.egress_is_relay());
+
+    // Removing an answered leg sends BYE, without ending the caller.
+
+    let result = session.execute_command(CallCommand::LegRemove { leg_id: LegId::new(&invites[3].0) }, None).await;
+    assert!(result.success);
+    let bye = timeout(Duration::from_secs(3), async {
+        loop {
+            let (size, _) = target.recv_from(&mut buffer).await.unwrap();
+            if let SipMessage::Request(req) = SipMessage::try_from(std::str::from_utf8(&buffer[..size]).unwrap()).unwrap() {
+                if req.method == Method::Bye { break req; }
+            }
+        }
+    }).await.expect("answered leg receives BYE");
+    assert_eq!(bye.call_id_header().unwrap(), invites[3].1.call_id_header().unwrap());
+    let ok = server.endpoint.inner.make_response(&bye, StatusCode::OK, None);
+    target.send_to(ok.to_string().as_bytes(), winner.2).await.unwrap();
+    assert!(!cancel.is_cancelled());
+    assert_eq!(session.legs.get(&LegId::from("caller")).unwrap().state, LegState::Connected);
+
+    // A subsequent dial to the same target gets a fresh dialog; stale failure is harmless.
+
+    let result = session.execute_command(CallCommand::LegAdd {
+        source_leg: None, target: format!("sip:alice@{addr}"), leg_id: Some(LegId::from("retry")), headers: vec![],
+    }, None).await;
+    assert_eq!(result.affected_leg, Some(LegId::from("retry")));
+    session.execute_command(CallCommand::LegFailed { leg_id: LegId::new(&rejected.0), reason: "late rejection".into() }, None).await;
+    assert!(session.legs.contains_key(&LegId::from("retry")));
+    let retry_invite = timeout(Duration::from_secs(3), async {
+        loop {
+            let (size, _) = target.recv_from(&mut buffer).await.unwrap();
+            if let SipMessage::Request(req) = SipMessage::try_from(std::str::from_utf8(&buffer[..size]).unwrap()).unwrap() {
+                if req.method == Method::Invite { break req; }
+            }
+        }
+    }).await.unwrap();
+    assert_ne!(retry_invite.call_id_header().unwrap(), rejected.1.call_id_header().unwrap());
+    assert!(session.legs.contains_key(&LegId::new(&winner.0)));
+    // Setup failure after enqueue must be observable through the same event channel.
+    let saved_sender = session.cmd_tx.take();
+    let failed = session.execute_command(CallCommand::LegAdd {
+        source_leg: None, target: format!("sip:alice@{addr}"),
+        leg_id: Some(LegId::from("setup-failure")), headers: vec![],
+    }, None).await;
+    assert!(!failed.success);
+    session.cmd_tx = saved_sender;
+    let mut leg_events = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if event.event.payload["leg_id"].is_string() && matches!(event.event.event_type, "call_ringing" | "call_answered" | "call_hangup") { leg_events.push(event.event.payload); }
+    }
+    assert!(leg_events.iter().any(|e| e["leg_id"] == rejected.0 && e["event_type"] == "call_ringing"));
+    assert!(leg_events.iter().any(|e| e["leg_id"] == rejected.0 && e["event_type"] == "call_hangup" && e["sip_status"] == 486));
+    assert!(leg_events.iter().any(|e| e["leg_id"] == "setup-failure" && e["event_type"] == "call_hangup"
+        && e["reason"].as_str().unwrap().contains("No command sender")));
+    assert!(leg_events.iter().any(|e| e["leg_id"] == winner.0 && e["event_type"] == "call_answered"));
+    assert!(!leg_events.iter().any(|e| e["leg_id"] == invites[2].0 && e["event_type"] == "call_hangup"), "explicit removal only receives its command acknowledgement");
+    let mut ws_leg_events = Vec::new();
+    while let Ok(event) = ws_events.try_recv() {
+        if event["leg_id"].is_string() && matches!(event["event_type"].as_str(), Some("call_ringing" | "call_answered" | "call_hangup")) { ws_leg_events.push(event); }
+    }
+    assert_eq!(ws_leg_events.len(), leg_events.len(), "every leg event must reach its RWI owner");
+    cancel.cancel();
+    drop(session);
+    caller_remote.stop();
+    for peer in answered_peers { peer.stop(); }
+    server.endpoint.shutdown();
+    serving.await.unwrap();
+}
+
+#[tokio::test]
+async fn added_legs_require_explicit_bridge_and_allow_removed_ids() {
+    use crate::call::{DialDirection, Dialplan, MediaConfig};
+    use crate::config::MediaProxyMode;
+    use crate::media::leg::{LegConfig, LegInner};
+    use crate::proxy::tests::common::create_test_request;
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx;
+
+    for extra_leg in [false, true] {
+        let request = create_test_request(rsipstack::sip::Method::Invite, "caller", None, "rustpbx.com", None);
+        let dialplan = Dialplan::new("rwi-mode".into(), request, DialDirection::Inbound)
+            .with_media(MediaConfig::new().with_proxy_mode(MediaProxyMode::All));
+        let (mut session, _handle, _commands) = build_session_with_cmd_rx(dialplan).await;
+        let _guard = session.cancel_token.clone().drop_guard();
+        let mut remotes = Vec::new();
+        for name in ["caller", "target"] {
+            if name == "target" {
+                let leg = crate::call::domain::Leg::new(LegId::from(name));
+                session.legs.insert(LegId::from(name), leg);
+            }
+            let peer = LegInner::new(name, &LegConfig::rtp_pcmu(), None).unwrap();
+            let remote = LegInner::new(format!("remote-{name}"), &LegConfig::rtp_pcmu(), None).unwrap();
+            let offer = remote.create_offer().await.unwrap();
+            let answer = peer.apply_sdp(&offer, rustrtc::SdpType::Offer).await.unwrap();
+            remote.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
+            peer.accept(); remote.accept();
+            session.legs.set_media_leg(&LegId::from(name), peer);
+            session.update_leg_state(&LegId::from(name), LegState::Connected);
+            remotes.push(remote);
+        }
+        // Additional connected legs must not cause implicit bridge selection.
+        let spare_id = LegId::from("rwi-spare");
+        let mut spare = crate::call::domain::Leg::new(spare_id.clone());
+        spare.state = LegState::Connected;
+        if extra_leg { session.legs.insert(spare_id, spare); }
+        session.update_media_path().await;
+        assert!(!session.bridge.active);
+        assert!(!session.media_leg(&LegId::from("caller")).unwrap().egress_is_relay());
+        assert!(session.setup_bridge(LegId::from("caller"), LegId::from("target")).await);
+        assert!(session.bridge.active);
+        session.execute_command(CallCommand::Unbridge { leg_id: LegId::from("caller") }, None).await;
+        session.update_media_path().await;
+        assert!(!session.bridge.active, "unbridge must not select another pair");
+        session.meta.queue_name = Some("sales".into());
+        session.update_media_path().await;
+        assert!(!session.bridge.active, "queue context must not implicitly select a pair");
+        session.meta.queue_name = None;
+        session.execute_command(CallCommand::Unbridge { leg_id: LegId::from("caller") }, None).await;
+
+        // Invalid/reserved/active leg IDs fail synchronously without touching existing peers.
+        for id in ["caller", "target"] {
+
+            let response = session.execute_command(CallCommand::LegAdd {
+                source_leg: None, target: "sip:alice@127.0.0.1:9".into(), leg_id: Some(LegId::from(id)), headers: vec![],
+            }, None).await;
+            assert!(!response.success, "must reject {id}");
+        }
+        // A removed ID can be dialed again, including to a different target.
+        for target in ["sip:alice@127.0.0.1:9", "sip:bob@127.0.0.1:9"] {
+
+            let response = session.execute_command(CallCommand::LegAdd {
+                source_leg: None, target: target.into(), leg_id: Some(LegId::from("reused")), headers: vec![],
+            }, None).await;
+            assert!(response.success);
+            assert_eq!(session.legs.get(&LegId::from("reused")).unwrap().endpoint.as_deref(), Some(target));
+
+            let response = session.execute_command(CallCommand::LegRemove {
+                leg_id: LegId::from("reused"),
+            }, None).await;
+            assert!(response.success);
+            assert!(!session.legs.contains_key(&LegId::from("reused")));
+        }
+        // An immediate setup failure must return the execution error, not queue success.
+        let saved_sender = session.cmd_tx.take();
+
+        let response = session.execute_command(CallCommand::LegAdd {
+            source_leg: None, target: "sip:alice@127.0.0.1:9".into(), leg_id: Some(LegId::from("bad-target")), headers: vec![],
+        }, None).await;
+        let result = response;
+        assert!(!result.success);
+        assert!(result.message.unwrap().contains("No command sender"));
+        session.cmd_tx = saved_sender;
+        assert!(!session.legs.contains_key(&LegId::from("bad-target")));
+        assert!(session.legs.contains_key(&LegId::from("caller")));
+        if let Some(bridge) = session.bridge_mut() { bridge.close(); }
+        for remote in remotes { remote.stop(); }
     }
 }
 
