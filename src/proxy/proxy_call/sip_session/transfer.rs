@@ -234,7 +234,7 @@ impl ReturnTargetSpec {
 /// executor stamps it here) — consumers derive duration as
 /// `event timestamp - step_start_time` and fall back to the envelope
 /// timestamp otherwise, which would yield end < start.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub(crate) struct BridgeTraceContext {
     pub step_id: Option<String>,
     pub step_name: Option<String>,
@@ -245,6 +245,13 @@ pub(crate) struct BridgeTraceContext {
     /// (bridge DTMF, suspended session_end) correlate with it instead of the
     /// historical hard-coded 0.
     pub step_index: Option<u32>,
+    /// True when the bridge is a resumable IVR hand-off
+    /// (`return_ivr_resume=1`): the proxy then suppresses its eager
+    /// per-digit trace, and the resumed step executor reports the bridge
+    /// step itself once the successor node resolves — so the trace can
+    /// carry `next_node_id` (single-notification protocol).
+    #[serde(default)]
+    pub resumable: bool,
 }
 
 impl BridgeTraceContext {
@@ -426,6 +433,9 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                     ep.push('?');
                     ep.push_str(&passthrough_params.join("&"));
                 }
+                trace_context.resumable = return_query
+                    .iter()
+                    .any(|(k, v)| *k == "return_ivr_resume" && v == "1");
                 return TransferTarget::Bridge {
                     endpoint: ep,
                     headers,
@@ -3313,7 +3323,7 @@ mod tests {
             "nodename": "测试啊，按1转人工，按2挂机",
         });
         let target = format!(
-            "bridge:wss://facade.example.com/ivr/tts/bridge/RI_x?samplerate=8000&timeout_ms=30000&return_app=ivr&return_target=lf-step-ivr&_rst_step_id={}&_rst_step_name={}&_rst_extra={}&_rst_step_start_time={}&_rst_step_index={}",
+            "bridge:wss://facade.example.com/ivr/tts/bridge/RI_x?samplerate=8000&timeout_ms=30000&return_app=ivr&return_target=lf-step-ivr&return_ivr_resume=1&_rst_step_id={}&_rst_step_name={}&_rst_extra={}&_rst_step_start_time={}&_rst_step_index={}",
             encode("step-1"),
             encode("菜单"),
             encode(&extra.to_string()),
@@ -3344,6 +3354,10 @@ mod tests {
                     ctx.step_index,
                     Some(2),
                     "step index must round-trip so proxy traces correlate with the executor hand-off trace"
+                );
+                assert!(
+                    ctx.resumable,
+                    "return_ivr_resume=1 marks a resumable hand-off — gates the eager DTMF trace"
                 );
             }
             other => panic!("expected Bridge, got {other:?}"),

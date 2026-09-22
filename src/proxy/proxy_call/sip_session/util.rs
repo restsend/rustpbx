@@ -246,6 +246,11 @@ pub(super) async fn trace_sip_headers(
 ///    falling back to the emission instant) alongside `step_end_time` —
 ///    consumers derive duration as `event timestamp - step_start_time`, so
 ///    an end without a start would order end < start.
+///
+///    Exception: for a RESUMABLE hand-off (`return_ivr_resume=1`) the eager
+///    per-digit trace is suppressed — the resumed step executor reports the
+///    bridge step itself once the successor node resolves, so that trace can
+///    carry `next_node_id`. The buffered digit still reaches the provider.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn forward_dtmf_event(
     digit: char,
@@ -275,6 +280,7 @@ pub(super) fn forward_dtmf_event(
         let ctx = bridge_trace_context.lock().clone();
         if let Some(gw) = rwi_gateway.as_ref()
             && let Some(ctx) = ctx
+            && !ctx.resumable
         {
             // Single clock capture: RFC3339 carries nanosecond precision, so
             // two Utc::now() calls would differ and could order end < start.

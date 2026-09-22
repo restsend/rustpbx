@@ -25,6 +25,19 @@ const IVR_LAST_ERROR_KEY: &str = "ivr_last_error";
 /// asks the provider to resolve (DtmfMenuTimeout). 0 disables the runaway guard.
 const DEFAULT_MAX_REPEAT_PROMPTS: u32 = 10;
 
+/// Originating bridge-step context injected by the proxy (`bridge_step_ctx`
+/// ivr param) when a resumable voip_bridge returns with buffered DTMF. The
+/// executor re-reports the suppressed bridge-DTMF trace from this context —
+/// see `StepIvrApp::start`'s resume branch.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct BridgeStepTraceCtx {
+    step_id: Option<String>,
+    step_name: Option<String>,
+    extra: Option<serde_json::Value>,
+    step_start_time: Option<String>,
+    step_index: Option<u32>,
+}
+
 pub struct StepIvrApp {
     provider: Box<dyn ActionProvider>,
     provider_session: Option<SessionContext>,
@@ -1302,11 +1315,17 @@ impl StepIvrApp {
         // event answers "what ran, and what runs next").
         let mut completed_pending = self.pending_take().map(|mut pending| {
             let end = std::time::Instant::now();
+            let now_str = chrono::Utc::now().to_rfc3339();
             pending.duration_ms = self
                 .pending_start_instant
                 .map(|s| end.duration_since(s).as_millis() as u64)
-                .unwrap_or(0);
-            pending.step_end_time = Some(chrono::Utc::now().to_rfc3339());
+                .unwrap_or_else(|| {
+                    // Bridge-resume pending traces have no live Instant (the
+                    // step started in a previous app instance) — derive the
+                    // duration from the stashed RFC3339 start instead.
+                    super::trace::duration_ms_between(pending.step_start_time.as_deref(), &now_str)
+                });
+            pending.step_end_time = Some(now_str);
             pending
         });
 
@@ -1733,7 +1752,8 @@ impl CallApp for StepIvrApp {
         // Reserved lifecycle keys stay out of the variable pool: they are
         // executor bookkeeping, must not reach the provider, and buffered
         // digits must not leak into provider payloads.
-        const RESERVED_IVR_PARAM_KEYS: [&str; 2] = ["ivr_resumed", "bridge_dtmf_digits"];
+        const RESERVED_IVR_PARAM_KEYS: [&str; 3] =
+            ["ivr_resumed", "bridge_dtmf_digits", "bridge_step_ctx"];
         if let Some(ref ivp) = self.ivr_params {
             for (k, v) in ivp {
                 if RESERVED_IVR_PARAM_KEYS.contains(&k.as_str()) {
@@ -1823,6 +1843,48 @@ impl CallApp for StepIvrApp {
             }
         };
         self.resumed_flow = resumed;
+
+        // Resumable bridge return with buffered digits: the proxy suppressed
+        // its eager per-digit `ivr_step_trace` for this hand-off. Rebuild the
+        // bridge step's pending trace from the stashed context —
+        // `request_next` flushes it once the successor node resolves, so it
+        // carries `next_node_id` (single-notification protocol). No context /
+        // no digits → nothing to re-report (the successor's own trace carries
+        // the `resume` trigger).
+        if let Some(first_digit) = resume_digits.first().cloned() {
+            let bridge_ctx = self
+                .ivr_params
+                .as_ref()
+                .and_then(|p| p.get("bridge_step_ctx"))
+                .and_then(|v| serde_json::from_str::<BridgeStepTraceCtx>(v).ok());
+            if let Some(ctx) = bridge_ctx {
+                self.pending_trace = Some(IvrTraceEntry {
+                    session_id: context.call_info.session_id.clone(),
+                    caller: context.call_info.caller.clone(),
+                    callee: invocation.callee.clone(),
+                    step_index: ctx.step_index.unwrap_or(0),
+                    trigger: crate::rwi::TriggerInfo::with_detail(
+                        "dtmf",
+                        serde_json::json!({ "digit": first_digit, "digits": resume_digits }),
+                    ),
+                    provider_url: None,
+                    action_type: "Bridge".to_string(),
+                    action_json: None,
+                    error: None,
+                    step_id: ctx.step_id,
+                    step_name: ctx.step_name,
+                    step_start_time: ctx.step_start_time,
+                    step_end_time: None,
+                    duration_ms: 0,
+                    extra: ctx.extra,
+                    end_reason: None,
+                    end_detail: None,
+                    next_node_id: None,
+                    next_step_id: None,
+                    end: None,
+                });
+            }
+        }
 
         let sess_ctx = SessionContext {
             session_id: context.call_info.session_id.clone(),
@@ -4457,6 +4519,101 @@ mod tests {
                 .and_then(|d| d.get("digit").and_then(|v| v.as_str())),
             Some("1")
         );
+    }
+
+    /// Resumable bridge return with stashed node context (`bridge_step_ctx`):
+    /// the proxy suppressed the eager per-digit trace for this hand-off, so
+    /// the resumed executor must report the bridge step itself — once the
+    /// successor node resolves — carrying the digit trigger AND the
+    /// successor's id as `next_node_id`/`next_step_id`.
+    #[tokio::test]
+    async fn test_bridge_return_reports_step_with_next_node_id() {
+        let mut successor = ActionNode::new(EntryAction::Transfer {
+            target: "2001".into(),
+            headers: HashMap::new(),
+            params: HashMap::new(),
+            return_app: None,
+            return_target: None,
+        });
+        successor.step_id = Some("1000141102024500020012".into());
+        let provider = MockProvider::new(vec![successor]);
+        let handle = MockProviderHandle(Arc::new(provider));
+
+        let mut app = StepIvrApp::with_provider(Box::new(MockProviderHandle(handle.0.clone())))
+            .with_name("bridge-resume-ctx-ivr")
+            .with_ivr_params(serde_json::json!({
+                "bridge_dtmf_digits": "8",
+                "ivr_resumed": "1",
+                // Serialized form, as the proxy's return-app start injects it
+                // (`with_ivr_params` keeps string values only).
+                "bridge_step_ctx": serde_json::json!({
+                    "step_id": "1000141102024500020003",
+                    "step_name": "菜单",
+                    "extra": { "nodetype": "menu_tts" },
+                    "step_start_time": "2026-01-01T00:00:00+00:00",
+                    "step_index": 2
+                }).to_string()
+            }));
+        let trace = crate::call::app::ivr::trace::IvrTraceCollector::new();
+        app.trace = Some(trace.clone());
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+
+        stack
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(
+                2000,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let entries = trace.query_by_session("test-session").await;
+        let bridge_entry = entries
+            .iter()
+            .find(|e| e.action_type == "Bridge")
+            .expect("the suppressed bridge step must be reported by the resumed executor");
+        assert_eq!(bridge_entry.step_id.as_deref(), Some("1000141102024500020003"));
+        assert_eq!(bridge_entry.step_index, 2);
+        assert_eq!(bridge_entry.trigger.r#type, "dtmf");
+        assert_eq!(
+            bridge_entry
+                .trigger
+                .detail
+                .as_ref()
+                .and_then(|d| d.get("digit").and_then(|v| v.as_str())),
+            Some("8")
+        );
+        assert_eq!(
+            bridge_entry.next_node_id.as_deref(),
+            Some("1000141102024500020012"),
+            "bridge step trace must carry the successor's step_id as next_node_id"
+        );
+        assert_eq!(
+            bridge_entry.next_step_id.as_deref(),
+            Some("1000141102024500020012")
+        );
+        assert_eq!(
+            bridge_entry.step_start_time.as_deref(),
+            Some("2026-01-01T00:00:00+00:00"),
+            "start time must come from the stashed bridge context"
+        );
+        assert!(bridge_entry.step_end_time.is_some());
+        assert!(
+            bridge_entry.duration_ms > 0,
+            "duration must derive from the stashed RFC3339 start (no live Instant on resume)"
+        );
+
+        // The successor's own entry keeps its own trigger + id, without a
+        // next pointer (terminal transfer).
+        let successor_entry = entries
+            .iter()
+            .find(|e| e.step_id.as_deref() == Some("1000141102024500020012"))
+            .expect("the successor node must be traced");
+        assert_eq!(successor_entry.trigger.r#type, "dtmf");
+        assert!(successor_entry.next_node_id.is_none());
     }
 
     #[tokio::test]

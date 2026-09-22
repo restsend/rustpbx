@@ -91,6 +91,7 @@ fn forward_dtmf_with_active_bridge_owns_digit_without_app_injection() {
         extra: Some(serde_json::json!({"nodetype": "menu_tts", "businessnodeid": "42"})),
         step_start_time: Some("2026-01-01T00:00:00+00:00".to_string()),
         step_index: Some(2),
+        resumable: false,
     })));
     let digits = Arc::new(parking_lot::Mutex::new(Vec::new()));
 
@@ -172,6 +173,67 @@ fn forward_dtmf_with_active_bridge_owns_digit_without_app_injection() {
     assert!(ev.event.payload["end_reason"].is_null());
 }
 
+/// A RESUMABLE bridge hand-off (`return_ivr_resume=1` → `resumable: true`)
+/// suppresses the eager per-digit trace: the resumed step executor reports
+/// the bridge step itself once the successor node resolves, so the trace can
+/// carry `next_node_id`. The digit must still be forwarded to the bridge and
+/// buffered for the return-app flow.
+#[test]
+fn forward_dtmf_resumable_bridge_defers_trace_to_resumed_ivr() {
+    use crate::proxy::proxy_call::sip_session::transfer::BridgeTraceContext;
+    use crate::rwi::gateway::RwiGateway;
+
+    let runtime = Arc::new(DtmfAppRuntime {
+        running: true,
+        inject_calls: AtomicUsize::new(0),
+    });
+    let app_runtime: Arc<dyn AppRuntime> = runtime.clone();
+
+    let gateway = RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let gw_ref = Arc::new(parking_lot::RwLock::new(gateway));
+
+    let (tx, mut ws_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let bridge_dtmf_tx = Arc::new(parking_lot::RwLock::new(Some(tx)));
+
+    let trace_ctx = Arc::new(parking_lot::Mutex::new(Some(BridgeTraceContext {
+        step_id: Some("step-menu-tts".to_string()),
+        step_name: Some("菜单".to_string()),
+        extra: Some(serde_json::json!({"nodetype": "menu_tts"})),
+        step_start_time: Some("2026-01-01T00:00:00+00:00".to_string()),
+        step_index: Some(2),
+        resumable: true,
+    })));
+    let digits = Arc::new(parking_lot::Mutex::new(Vec::new()));
+
+    forward_dtmf_event(
+        '8',
+        "caller",
+        "test-session",
+        &app_runtime,
+        &Some(gw_ref),
+        &bridge_dtmf_tx,
+        &trace_ctx,
+        &digits,
+        "sip:1001@x",
+        "sip:2000@x",
+        None,
+    );
+
+    // Digit still forwarded + buffered — only the eager trace is suppressed.
+    let ws_json = ws_rx.try_recv().expect("digit must reach the ws channel");
+    let v: serde_json::Value = serde_json::from_str(&ws_json).unwrap();
+    assert_eq!(v["digit"], "8");
+    assert_eq!(digits.lock().clone(), vec!["8".to_string()]);
+    assert_eq!(runtime.inject_calls.load(Ordering::SeqCst), 0);
+
+    assert!(
+        events.try_recv().is_err(),
+        "resumable hand-off must NOT emit the eager bridge DTMF trace — \
+         the resumed executor reports the step (with next_node_id) instead"
+    );
+}
+
 /// When an IVR flow dies while suspended on a bridge (caller hangup before
 /// the return app runs), the proxy must emit the compensating `session_end`
 /// `ivr_step_trace` the executor suppressed at hand-off time — carrying the
@@ -193,6 +255,7 @@ fn suspended_flow_death_emits_compensating_session_end_trace() {
         extra: Some(serde_json::json!({"nodetype": "menu_tts"})),
         step_start_time: Some("2026-01-01T00:00:00+00:00".to_string()),
         step_index: Some(3),
+        resumable: false,
     })));
 
     emit_suspended_flow_session_end(

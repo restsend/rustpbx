@@ -10536,6 +10536,16 @@ impl SipSession {
                         "bridge_dtmf_digits".to_string(),
                         serde_json::Value::String(digits.join(",")),
                     );
+                    // Originating bridge-step context (serialized —
+                    // `with_ivr_params` keeps string values only): the
+                    // resumed executor reports the suppressed bridge-DTMF
+                    // trace itself (with `next_node_id`) once the successor
+                    // node resolves.
+                    if let Some(ctx) = self.bridge_trace_context.lock().clone()
+                        && let Ok(s) = serde_json::to_string(&ctx)
+                    {
+                        ip.insert("bridge_step_ctx".to_string(), serde_json::Value::String(s));
+                    }
                 }
             }
             self.bridge.clear();
