@@ -166,6 +166,10 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
             "/call-records/{id}/sip-flow",
             get(download_call_record_sip_flow),
         )
+        .route(
+            "/call-records/{id}/cdr-json",
+            get(download_call_record_cdr_json),
+        )
         .route("/call-records/{id}/recording", get(stream_call_recording))
         .route(
             "/call-records/by-session/{session_id}/artifacts",
@@ -187,6 +191,10 @@ pub fn api_urls() -> Router<Arc<ConsoleState>> {
         .route(
             "/call-records/{id}/sip-flow",
             get(download_call_record_sip_flow),
+        )
+        .route(
+            "/call-records/{id}/cdr-json",
+            get(download_call_record_cdr_json),
         )
         .route("/call-records/{id}/recording", get(stream_call_recording))
         .route(
@@ -343,6 +351,61 @@ async fn resolve_call_record_by_id_or_call_id(
                 .into_response())
         }
     }
+}
+
+/// Download the entire CDR JSON of a call record as an attachment.
+/// The record may be addressed by numeric id or SIP Call-ID.
+///
+/// Serves the archived CDR JSON file when available; when the file is
+/// missing (e.g. `[callrecord]` storage disabled, or the artifact was
+/// pruned), falls back to synthesizing the CDR JSON from the database row.
+async fn download_call_record_cdr_json(
+    AxumPath(identifier): AxumPath<String>,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+) -> Response {
+    let record = match resolve_call_record_by_id_or_call_id(state.db(), &identifier).await {
+        Ok(record) => record,
+        Err(response) => return response,
+    };
+
+    let (raw, filename) = if let Some((raw, path, _storage)) = read_cdr_raw(&state, &record).await {
+        let filename = Path::new(&path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("cdr.json")
+            .to_string();
+        (raw, filename)
+    } else {
+        let callrecord: CallRecord = record.clone().into();
+        let raw = match serde_json::to_string_pretty(&callrecord) {
+            Ok(raw) => raw,
+            Err(err) => {
+                warn!(call_id = %record.call_id, "failed to serialize CDR from database: {}", err);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "message": format!("Failed to serialize CDR: {err}") })),
+                )
+                    .into_response();
+            }
+        };
+        let filename = crate::callrecord::default_cdr_file_name(&callrecord);
+        (raw, filename)
+    };
+
+    let disposition =
+        HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
+            .unwrap_or(HeaderValue::from_static("attachment"));
+    let content_type = HeaderValue::from_static("application/json; charset=utf-8");
+
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, content_type),
+            (axum::http::header::CONTENT_DISPOSITION, disposition),
+        ],
+        raw,
+    )
+        .into_response()
 }
 
 /// List recording + signaling artifacts for every CDR leg under a logical
@@ -2155,7 +2218,13 @@ fn strip_storage_root(state: &ConsoleState, path: &str) -> String {
     }
 }
 
-pub async fn load_cdr_data(state: &ConsoleState, record: &CallRecordModel) -> Option<CdrData> {
+/// Read the raw CDR JSON content for a record, trying the path persisted at
+/// write time first and then the path reconstructed from the current storage
+/// root. Returns `(raw_content, resolved_path, storage)`.
+async fn read_cdr_raw(
+    state: &ConsoleState,
+    record: &CallRecordModel,
+) -> Option<(String, String, Option<CdrStorage>)> {
     let app = state.app_state()?;
     let root = match app
         .config()
@@ -2227,19 +2296,22 @@ pub async fn load_cdr_data(state: &ConsoleState, record: &CallRecordModel) -> Op
 
     let cdr_path = resolved_path.unwrap_or(reconstructed);
 
-    if let Some(raw) = content {
-        match serde_json::from_str::<CallRecord>(&raw) {
-            Ok(parsed) => {
-                return Some(CdrData {
-                    record: parsed,
-                    raw_content: raw,
-                    cdr_path,
-                    storage: storage.clone(),
-                });
-            }
-            Err(err) => {
-                warn!(call_id = %record.call_id, path = %cdr_path, "failed to parse CDR file: {}", err);
-            }
+    content.map(|raw| (raw, cdr_path, storage))
+}
+
+pub async fn load_cdr_data(state: &ConsoleState, record: &CallRecordModel) -> Option<CdrData> {
+    let (raw, cdr_path, storage) = read_cdr_raw(state, record).await?;
+    match serde_json::from_str::<CallRecord>(&raw) {
+        Ok(parsed) => {
+            return Some(CdrData {
+                record: parsed,
+                raw_content: raw,
+                cdr_path,
+                storage,
+            });
+        }
+        Err(err) => {
+            warn!(call_id = %record.call_id, path = %cdr_path, "failed to parse CDR file: {}", err);
         }
     }
 
@@ -2424,6 +2496,7 @@ async fn build_detail_payload(
 
     let sip_flow_download =
         state.url_for(&format!("/call-records/{}/sip-flow?detail=true", record.id));
+    let cdr_json_download = state.url_for(&format!("/call-records/{}/cdr-json", record.id));
 
     let mut download_recording = derive_recording_download_url(state, record).await;
     if download_recording.is_none() {
@@ -2479,6 +2552,7 @@ async fn build_detail_payload(
         "actions": json!({
             "download_recording": download_recording,
             "download_sip_flow": sip_flow_download,
+            "download_cdr_json": cdr_json_download,
             "transcript_url": state.api_url_for(&format!("/call-records/{}/transcript", record.id)),
             "update_record": state.api_url_for(&format!("/call-records/{}", record.id)),
         }),

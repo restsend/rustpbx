@@ -1191,7 +1191,7 @@ child_leg_duration = "Duration (s)"
 child_leg_open = "Open"
 
 # Actions
-btn_sip_trace_json = "SIP trace JSON"
+btn_download_cdr_json = "Download CDR JSON"
 
 # Tabs
 tab_overview = "Overview"

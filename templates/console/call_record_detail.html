@@ -161,13 +161,13 @@
                 </template>
             </div>
             <div class="flex flex-wrap items-center gap-3 text-sm">
-                <a :href="actions.download_sip_flow || '#'"
+                <a :href="actions.download_cdr_json || '#'" download
                     class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
                     <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M4 4h12v12H4z" />
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 8h8M6 12h4" />
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                            d="M10 3v9m0 0l-3.5-3.5M10 12l3.5-3.5M4 15.5h12" />
                     </svg>
-                    {{ "call_record_detail.btn_sip_trace_json" | t }}
+                    {{ "call_record_detail.btn_download_cdr_json" | t }}
                 </a>
             </div>
         </header>

@@ -130,7 +130,6 @@ pub fn sum_i64(db: &impl sea_orm::ConnectionTrait, expr: SimpleExpr) -> SimpleEx
 /// Float SUM() over an aggregate expression (decodes as f64 on every
 /// backend — unlike [`sum_i64`] this never casts to an integer type).
 pub fn sum_f64(expr: SimpleExpr) -> SimpleExpr {
-    use sea_orm::ExprTrait;
     sea_orm::sea_query::Func::sum(expr).into()
 }
 
