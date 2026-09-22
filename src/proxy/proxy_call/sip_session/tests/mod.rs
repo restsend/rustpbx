@@ -6612,12 +6612,14 @@ async fn rwi_manual_parallel_retry_and_leg_cleanup() {
             call_id: "rwi-manual".into(), target: format!("sip:alice@{addr}"), leg_id: None,
         }).await });
         // Acknowledge enqueueing before the session executes the dial.
-        assert!(matches!(timeout(Duration::from_secs(3), task).await.unwrap().unwrap().unwrap(), RwiResult::Success));
+        let RwiResult::LegAdded { leg_id: returned_id } = timeout(Duration::from_secs(3), task)
+            .await.unwrap().unwrap().unwrap() else { panic!("expected leg ID in result"); };
         let command = commands.recv().await.unwrap();
         let leg_id = match &command {
             CallCommand::LegAdd { leg_id: Some(id), .. } => id.to_string(),
             _ => panic!("expected generated leg ID in queued command"),
         };
+        assert_eq!(returned_id, leg_id);
         assert!(session.execute_command(command, None).await.success);
         let (size, pbx) = timeout(Duration::from_secs(3), target.recv_from(&mut buffer)).await.unwrap().unwrap();
         let SipMessage::Request(invite) = SipMessage::try_from(std::str::from_utf8(&buffer[..size]).unwrap()).unwrap() else { panic!("INVITE"); };

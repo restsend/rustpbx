@@ -1858,7 +1858,7 @@ impl RwiCommandProcessor {
             source_leg: None, target: target.to_string(),
             leg_id: Some(LegId::new(&leg_id)), headers: Vec::new(),
         }).map_err(|error| CommandError::CommandFailed(error.to_string()))?;
-        Ok(CommandResult::Success)
+        Ok(CommandResult::LegAdded { leg_id })
     }
 
     async fn leg_remove(&self, call_id: &str, leg_id: &str) -> Result<CommandResult, CommandError> {
@@ -3088,6 +3088,8 @@ impl RwiCommandProcessor {
 
 #[derive(Debug)]
 pub enum CommandResult {
+    /// Dial request queued; progress is reported by leg lifecycle events.
+    LegAdded { leg_id: String },
     Success,
     ListCalls(Vec<CallInfo>),
     CallFound {

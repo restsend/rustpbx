@@ -256,8 +256,9 @@ Existing bridges remain until explicitly changed or a member ends.
 {"action":"call.leg_add","action_id":"dial-c","params":{"call_id":"session-1","target":"sip:c@example.com","leg_id":"attempt-c"}}
 ```
 
-The command returns ordinary success without a leg ID. Omit `leg_id` to generate
-one and learn it from subsequent leg events, or provide your own ID. The session
+The `command_completed` event returns `data: {"leg_id": "..."}` for both
+server-generated and client-supplied IDs. Omit `leg_id` to let the server generate
+one. The session
 rejects IDs belonging to active legs. A removed leg ID may be reused; the server does not keep retired IDs. Success acknowledges
 that dialing was queued, not that setup or answer succeeded. Enqueue/validation
 errors produce `command_failed`; setup failures produce `call_hangup` with
@@ -276,8 +277,8 @@ A populated `leg_id` means only that leg is affected; session-level events omit
 `leg_id`. `reason` and `sip_status` are nullable. An unbridged outgoing attempt rejected before answer leaves the caller available
 for another `call.leg_add`. A connected leg ending follows the normal
 post-disconnect handling, including return apps and caller hangup.
-Events can arrive before the command acknowledgement; supplying IDs permits
-immediate correlation. The SIP Call-ID is separate from the local `leg_id`.
+Events can arrive before the command acknowledgement; buffer them until the
+completion event supplies the leg ID, or supply an ID for immediate correlation. The SIP Call-ID is separate from the local `leg_id`.
 
 After the desired leg answers, bridge by **session ID and local leg IDs**:
 
