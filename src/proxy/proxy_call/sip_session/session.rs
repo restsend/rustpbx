@@ -1353,7 +1353,11 @@ impl SipSession {
                 hdrs
             }
         };
-        if let Some(ref gw) = server.rwi_gateway {
+        // The RWI app announces the call when it is ready, in its route context.
+        if let Some(ref gw) = server.rwi_gateway
+            && !matches!(&session.context.dialplan.flow,
+                crate::call::DialplanFlow::Application { app_name, .. } if app_name == "rwi")
+        {
             let ev = crate::rwi::CallCreated {
                 call_id: session_id.clone(),
                 context: "default".into(),
@@ -6069,6 +6073,7 @@ impl SipSession {
                                 // context.
                                 self.fire_on_call_ringing_hooks(true).await;
                                 self.emit_typed_rwi_event(&crate::rwi::CallRinging {
+                                    leg_id: None,
                                     call_id: self.context.session_id.clone(),
                                     early_media: true,
                                 });
@@ -6139,6 +6144,7 @@ impl SipSession {
                             // emit the enriched core ringing event.
                             self.fire_on_call_ringing_hooks(false).await;
                             self.emit_typed_rwi_event(&crate::rwi::CallRinging {
+                                leg_id: None,
                                 call_id: self.context.session_id.clone(),
                                 early_media: false,
                             });
@@ -6930,6 +6936,7 @@ impl SipSession {
         if !self.app_runtime.is_running() && !self.answered_event_emitted {
             self.answered_event_emitted = true;
             self.emit_typed_rwi_event(&crate::rwi::CallAnswered {
+                leg_id: None,
                 call_id: self.context.session_id.clone(),
             });
         }
@@ -8056,6 +8063,7 @@ impl SipSession {
             .map(|h| normalize_call_hangup_by(&h, queue_name.as_deref(), has_resolved_agent));
         let sip_status = self.meta.last_error.as_ref().map(|(sc, _)| sc.code());
         self.emit_typed_rwi_event(&crate::rwi::CallHangup {
+            leg_id: None,
             call_id: self.context.session_id.clone(),
             reason: hangup_reason_str,
             hangup_by,
@@ -9862,6 +9870,7 @@ impl SipSession {
 
             CallCommand::LegAdd {
                 source_leg,
+
                 target,
                 leg_id,
                 headers,
@@ -9912,6 +9921,7 @@ impl SipSession {
                         }
                     }
                     self.emit_typed_rwi_event(&crate::rwi::CallRinging {
+                        leg_id: None,
                         call_id: self.context.session_id.clone(), early_media,
                     });
                     return CommandResult::success();
@@ -9938,6 +9948,7 @@ impl SipSession {
                     );
                 }
                 self.emit_typed_rwi_event(&crate::rwi::CallRinging {
+                    leg_id: None,
                     call_id: self.context.session_id.clone(),
                     early_media: false,
                 });
@@ -10146,6 +10157,7 @@ impl SipSession {
                     if !self.answered_event_emitted {
                         self.answered_event_emitted = true;
                         self.emit_typed_rwi_event(&crate::rwi::CallAnswered {
+                            leg_id: None,
                             call_id: self.context.session_id.clone(),
                         });
                     }
@@ -10181,6 +10193,7 @@ impl SipSession {
             CallCommand::LegFailed { leg_id, reason } => {
                 warn!(%leg_id, %reason, "Leg failed async notification");
                 if !self.legs.contains_key(&leg_id) { return CommandResult::success(); }
+                self.emit_rwi_leg_hangup(&leg_id, Some(reason.clone()));
                 let result = {
                     // Bridge-based trigger (legacy): the failed leg was paired
                     // with the caller inside an armed media bridge.
@@ -10743,9 +10756,31 @@ impl SipSession {
         CommandResult::success()
     }
 
+    fn emit_rwi_leg_hangup(&self, id: &LegId, reason: Option<String>) {
+        let sip_status = reason.as_deref().and_then(|r| r.strip_prefix("Rejected with "))
+            .and_then(|s| s.parse().ok());
+        self.emit_typed_rwi_event(&crate::rwi::CallHangup {
+            call_id: self.context.session_id.clone(), leg_id: Some(id.to_string()),
+            reason, sip_status, hangup_by: None, duration_secs: None,
+        });
+    }
+
     pub(crate) fn update_leg_state(&mut self, leg_id: &LegId, new_state: LegState) -> bool {
         if let Some(leg) = self.legs.get_mut(leg_id) {
+            let changed = leg.state != new_state;
             leg.state = new_state;
+            if changed {
+                match new_state {
+                    LegState::Ringing | LegState::EarlyMedia => self.emit_typed_rwi_event(&crate::rwi::CallRinging {
+                        call_id: self.context.session_id.clone(), leg_id: Some(leg_id.to_string()),
+                        early_media: new_state == LegState::EarlyMedia,
+                    }),
+                    LegState::Connected => self.emit_typed_rwi_event(&crate::rwi::CallAnswered {
+                        call_id: self.context.session_id.clone(), leg_id: Some(leg_id.to_string()),
+                    }),
+                    _ => {}
+                }
+            }
             self.sync_state();
             true
         } else {
@@ -10991,10 +11026,14 @@ impl SipSession {
         leg_id: Option<LegId>,
         headers: Vec<rsipstack::sip::Header>,
         source_leg: Option<LegId>,
+
     ) -> Result<LegId> {
-        match self.handle_add_leg_inner(target, leg_id, headers, source_leg).await {
+        let leg_id = leg_id.unwrap_or_else(|| LegId::new(format!("leg-{}", uuid::Uuid::new_v4())));
+        let outcome = self.handle_add_leg_inner(target, Some(leg_id.clone()), headers, source_leg).await;
+        match outcome {
             Ok(id) => Ok(id),
             Err(e) => {
+                self.emit_rwi_leg_hangup(&leg_id, Some(e.to_string()));
                 let in_queue = self.in_queue_context();
                 let kind = if in_queue {
                     crate::call_errors::TraceKind::Queue
@@ -11020,6 +11059,7 @@ impl SipSession {
         leg_id: Option<LegId>,
         headers: Vec<rsipstack::sip::Header>,
         source_leg: Option<LegId>,
+
     ) -> Result<LegId> {
         let new_leg_id =
             leg_id.unwrap_or_else(|| LegId::new(format!("leg-{}", uuid::Uuid::new_v4())));
@@ -11334,6 +11374,7 @@ impl SipSession {
             let mut invitation = dialog_layer.do_invite(invite_option, state_tx).boxed();
 
             let mut result: Result<InviteDialog, String> = Err("not started".to_string());
+            let mut answered_guard = None;
             let mut state_rx_open = true;
             let deadline = tokio::time::sleep(ring_timeout.unwrap_or(Duration::from_secs(60)));
             tokio::pin!(deadline);
@@ -11365,6 +11406,10 @@ impl SipSession {
                                             None
                                         };
 
+                                        // Own the answered dialog before publishing it to the session.
+                                        // Removing the leg aborts this task, including before
+                                        // LegConnected has been processed.
+                                        answered_guard = Some(ClientDialogGuard::new(dialog_layer.clone(), dialog.id()));
                                         let _ = cmd_tx.send(CallCommand::LegConnected {
                                             leg_id: leg_id.clone(),
                                             answer_sdp,
@@ -11431,7 +11476,8 @@ impl SipSession {
             // Process dialog state changes (e.g., BYE from remote)
             if let Ok(dialog) = result {
                 let dialog_cancel = cancel_token.child_token();
-                crate::utils::spawn(async move {
+                let _guard = answered_guard;
+                {
                     loop {
                         tokio::select! {
                             biased;
@@ -11456,7 +11502,7 @@ impl SipSession {
                         }
                     }
                     let _ = dialog;
-                });
+                }
             }
         });
 
@@ -11465,7 +11511,7 @@ impl SipSession {
         Ok(())
     }
 
-    /// Keep one requested pair, or connect the only two available endpoints.
+    /// Keep only the explicitly requested pair.
     /// Additional legs wait for explicit selection; only mixer APIs create a
     /// conference.
     async fn update_media_path(&mut self) {
@@ -11479,13 +11525,7 @@ impl SipSession {
             self.setup_bridge(requested[0].clone(), requested[1].clone()).await;
             return;
         }
-        let mut connected: Vec<LegId> = self.legs.iter()
-            .filter(|(_, leg)| leg.state == LegState::Connected)
-            .map(|(id, _)| id.clone()).collect();
-        if connected.len() == 2 {
-            connected.sort_by_key(|id| (id.as_str() != "caller", id.0.clone()));
-            self.setup_bridge(connected[0].clone(), connected[1].clone()).await;
-        } else if self.bridge.active {
+        if self.bridge.active {
             self.clear_bridge().await;
         }
     }

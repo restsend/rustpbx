@@ -600,7 +600,7 @@ impl CallController {
     }
 
     /// Send a command to originate a call to an agent.
-    /// This creates a new leg and bridges it to the current call.
+    /// This creates an independent leg; the application selects its bridge explicitly.
     pub async fn originate_call(
         &self,
         target_uri: impl Into<String>,

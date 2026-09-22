@@ -100,7 +100,7 @@ pub fn rwi_to_call_command(
         // ========================================================================
         // Bridging
         // ========================================================================
-        RwiCommandPayload::Bridge { leg_a, leg_b } => Ok(CallCommand::Bridge {
+        RwiCommandPayload::Bridge { leg_a, leg_b, .. } => Ok(CallCommand::Bridge {
             leg_a: LegId::new(leg_a),
             leg_b: LegId::new(leg_b),
             mode: P2PMode::Audio,
@@ -386,6 +386,7 @@ mod tests {
     #[test]
     fn test_bridge_conversion() {
         let payload = RwiCommandPayload::Bridge {
+            call_id: String::new(),
             leg_a: "leg-a".to_string(),
             leg_b: "leg-b".to_string(),
         };

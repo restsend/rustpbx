@@ -17,7 +17,7 @@ use crate::utils::count_when;
 struct DailyAggRow {
     direction: String,
     department_id: Option<i64>,
-    sip_trunk_id: Option<i64>,
+    effective_trunk_id: Option<i64>,
     total_calls: i64,
     answered: i64,
     total_duration: Option<i64>,
@@ -52,7 +52,7 @@ where
         .select_only()
         .column_as(CdrCol::Direction, "direction")
         .column_as(CdrCol::DepartmentId, "department_id")
-        .column_as(trunk_dim.clone(), "sip_trunk_id")
+        .column_as(trunk_dim, "effective_trunk_id")
         .column_as(CdrCol::Id.count(), "total_calls")
         .column_as(count_when(CdrCol::Status.is_in(answered_status.clone())), "answered")
         .column_as(
@@ -77,7 +77,10 @@ where
         )
         .group_by(CdrCol::Direction)
         .group_by(CdrCol::DepartmentId)
-        .group_by(trunk_dim)
+        // Group by the selected expression's unambiguous alias. Repeating the
+        // CASE binds "outbound" twice; MySQL strict grouping treats those
+        // placeholders as different expressions.
+        .group_by(Expr::col(sea_orm::sea_query::Alias::new("effective_trunk_id")))
         .into_model()
         .all(conn)
         .await
@@ -101,7 +104,7 @@ where
             day: Set(day_start),
             direction: Set(r.direction.clone()),
             department_id: Set(r.department_id),
-            sip_trunk_id: Set(r.sip_trunk_id),
+            sip_trunk_id: Set(r.effective_trunk_id),
             total_calls: Set(r.total_calls),
             answered: Set(answered),
             missed: Set(std::cmp::Ord::max(r.total_calls - answered, 0)),
@@ -236,6 +239,54 @@ mod tests {
         let outbound = rows.iter().find(|r| r.direction == "outbound").unwrap();
         assert_eq!(outbound.total_calls, 1);
         assert_eq!(outbound.answered, 1);
+    }
+
+    #[tokio::test]
+    async fn rollup_groups_effective_trunks_under_strict_sql() {
+        use sea_orm::{TransactionTrait, DbBackend, IntoActiveModel};
+        // Optional dedicated test database allows exercising MySQL's strict
+        // GROUP BY validation, which SQLite does not enforce.
+        let url = std::env::var("RUSTPBX_ROLLUP_TEST_URL")
+            .unwrap_or_else(|_| "sqlite::memory:".into());
+        let db = Database::connect(url).await.unwrap();
+        crate::models::migration::Migrator::up(&db, None).await.unwrap();
+        let tx = db.begin().await.unwrap();
+        if tx.get_database_backend() == DbBackend::MySql {
+            tx.execute_unprepared(
+                "SET SESSION sql_mode = 'STRICT_TRANS_TABLES,ONLY_FULL_GROUP_BY'")
+                .await.unwrap();
+        }
+        let day = Utc.with_ymd_and_hms(2026, 9, 18, 10, 0, 0).unwrap();
+        for id in [1, 2, 7, 8] {
+            let mut trunk = crate::models::sip_trunk::Model {
+                id, name: format!("rollup-trunk-{id}"),
+                created_at: day.into(), updated_at: day.into(), ..Default::default()
+            }.into_active_model();
+            trunk.id = Set(id);
+            trunk.insert(&tx).await.unwrap();
+        }
+        for (id, direction, inbound, outbound, duration) in [
+            ("trunk-a", "outbound", Some(1), Some(7), 30),
+            ("trunk-b", "outbound", Some(2), Some(7), 60),
+            ("trunk-c", "outbound", Some(1), Some(8), 90),
+            ("trunk-d", "inbound", Some(1), Some(7), 120),
+            ("trunk-e", "outbound", Some(1), None, 15),
+        ] {
+            let mut row = cdr_row(id, direction, "answered", duration, day);
+            row.sip_trunk_id = Set(inbound);
+            row.outbound_sip_trunk_id = Set(outbound);
+            row.insert(&tx).await.unwrap();
+        }
+        for _ in 0..2 {
+            assert_eq!(rollup_cdr_daily(&tx, day_start(day)).await.unwrap(), 4);
+            let rows = cdr_daily::Entity::find().all(&tx).await.unwrap();
+            let merged = rows.iter().find(|r| r.direction == "outbound" && r.sip_trunk_id == Some(7)).unwrap();
+            assert_eq!(merged.total_calls, 2);
+            assert_eq!(merged.total_duration_secs, 90);
+            assert!(rows.iter().any(|r| r.direction == "inbound" && r.sip_trunk_id == Some(1) && r.total_duration_secs == 120));
+            assert!(rows.iter().any(|r| r.direction == "outbound" && r.sip_trunk_id.is_none() && r.total_duration_secs == 15));
+        }
+        tx.rollback().await.unwrap();
     }
 
     #[tokio::test]

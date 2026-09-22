@@ -850,6 +850,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         gw.set_session_event_sender(&sid, tx);
         gw.broadcast(&crate::rwi::CallRinging {
+            leg_id: None,
             call_id: "c1".into(),
             early_media: false,
         });
@@ -867,6 +868,7 @@ mod tests {
             .unwrap();
         gw.meta_store.insert("c1".into(), Default::default());
         gw.send_to_owner(&crate::rwi::CallAnswered {
+            leg_id: None,
             call_id: "c1".into(),
         });
         let v = rx.recv().await.unwrap();
@@ -977,6 +979,7 @@ mod tests {
         // The final SipSession event is routed before the finished
         // notification removes ownership.
         gw.send_to_owner(&crate::rwi::CallHangup {
+            leg_id: None,
             call_id: "c1".into(),
             reason: Some("normal".into()),
             hangup_by: Some("callee".into()),
@@ -1086,6 +1089,7 @@ mod tests {
 
         // A subsequent call-scoped event carries user_data via enrichment.
         gw.send_to_owner(&crate::rwi::CallAnswered {
+            leg_id: None,
             call_id: "sess-1".into(),
         });
         let event = rx.recv().await.unwrap();
@@ -1116,6 +1120,7 @@ mod tests {
 
         let flat = RwiEvent::from_spec(
             &crate::rwi::CallHangup {
+                leg_id: None,
                 call_id: "child-1".into(),
                 reason: None,
                 hangup_by: None,
@@ -1165,6 +1170,7 @@ mod tests {
             Some(serde_json::json!({ "crm_id": "C-9" })),
         );
         gw.send_to_owner(&crate::rwi::CallAnswered {
+            leg_id: None,
             call_id: "sess-1".into(),
         });
         let event = rx.recv().await.unwrap();
@@ -1172,6 +1178,7 @@ mod tests {
 
         gw.apply_remote_user_data(&"sess-1".to_string(), None);
         gw.send_to_owner(&crate::rwi::CallAnswered {
+            leg_id: None,
             call_id: "sess-1".into(),
         });
         let event = rx.recv().await.unwrap();
@@ -1188,6 +1195,7 @@ mod tests {
 
         // Event cached BEFORE user data exists.
         gw.send_to_owner(&crate::rwi::CallRinging {
+            leg_id: None,
             call_id: "sess-1".into(),
             early_media: false,
         });
@@ -1343,6 +1351,7 @@ mod tests {
 
         gw.broadcast_event(&crate::rwi::event::to_legacy_event(
             &crate::rwi::CallAnswered {
+                leg_id: None,
                 call_id: "c1".into(),
             },
             None,
@@ -1366,6 +1375,7 @@ mod tests {
 
         gw.broadcast_event(&crate::rwi::event::to_legacy_event(
             &crate::rwi::CallAnswered {
+                leg_id: None,
                 call_id: "call-unknown".into(),
             },
             None,
@@ -1404,6 +1414,7 @@ mod tests {
 
         gw.broadcast_event(&crate::rwi::event::to_legacy_event(
             &crate::rwi::CallAnswered {
+                leg_id: None,
                 call_id: "c1".into(),
             },
             None,
@@ -1440,6 +1451,7 @@ mod tests {
 
         gw.broadcast_event(&crate::rwi::event::to_legacy_event(
             &crate::rwi::CallAnswered {
+                leg_id: None,
                 call_id: "leg-child".into(),
             },
             None,
@@ -1516,6 +1528,7 @@ mod tests {
 
         gw.broadcast_event(&crate::rwi::event::to_legacy_event(
             &crate::rwi::CallAnswered {
+                leg_id: None,
                 call_id: "c1".into(),
             },
             None,
@@ -1537,6 +1550,7 @@ mod tests {
             .unwrap();
 
         gw.send_to_owner(&crate::rwi::CallRinging {
+            leg_id: None,
             call_id: "c1".into(),
             early_media: false,
         });
@@ -1555,6 +1569,7 @@ mod tests {
 
         gw.broadcast_event(&crate::rwi::event::to_legacy_event(
             &crate::rwi::CallAnswered {
+                leg_id: None,
                 call_id: "c1".into(),
             },
             None,

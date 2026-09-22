@@ -58,17 +58,22 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .table(Entity)
-                    .name("idx_runtime_snapshots_kind_time")
-                    .col(Column::Kind)
-                    .col(Column::CreatedAt)
-                    .to_owned(),
-            )
-            .await
+        // MySQL does not support CREATE INDEX IF NOT EXISTS.
+        // A previous interrupted migration may already have created the index.
+        if !manager.has_index("rustpbx_runtime_snapshots", "idx_runtime_snapshots_kind_time").await? {
+            manager
+                .create_index(
+                    Index::create()
+                        .if_not_exists()
+                        .table(Entity)
+                        .name("idx_runtime_snapshots_kind_time")
+                        .col(Column::Kind)
+                        .col(Column::CreatedAt)
+                        .to_owned(),
+                )
+                .await?;
+        }
+        Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
@@ -81,12 +86,12 @@ impl MigrationTrait for Migration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sea_orm::{ActiveModelTrait, Database, Set};
+    use sea_orm::{ActiveModelTrait, Database, NotSet, Set};
 
     #[tokio::test]
     async fn snapshot_roundtrip() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migration.up(&db).await.unwrap();
+        Migration.up(&SchemaManager::new(&db)).await.unwrap();
         ActiveModel {
             id: NotSet,
             kind: Set("locator".to_string()),

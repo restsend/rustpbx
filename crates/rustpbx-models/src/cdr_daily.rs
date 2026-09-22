@@ -57,19 +57,24 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .table(Entity)
-                    .name("idx_cdr_daily_day_dims")
-                    .col(Column::Day)
-                    .col(Column::Direction)
-                    .col(Column::DepartmentId)
-                    .col(Column::SipTrunkId)
-                    .to_owned(),
-            )
-            .await
+        // MySQL does not support CREATE INDEX IF NOT EXISTS.
+        // A previous interrupted migration may already have created the index.
+        if !manager.has_index("rustpbx_cdr_daily", "idx_cdr_daily_day_dims").await? {
+            manager
+                .create_index(
+                    Index::create()
+                        .if_not_exists()
+                        .table(Entity)
+                        .name("idx_cdr_daily_day_dims")
+                        .col(Column::Day)
+                        .col(Column::Direction)
+                        .col(Column::DepartmentId)
+                        .col(Column::SipTrunkId)
+                        .to_owned(),
+                )
+                .await?;
+        }
+        Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {

@@ -112,6 +112,19 @@ impl BuiltinAppFactory {
             }
         }
         match app_name {
+            "rwi" => {
+                let Some(gateway) = context.rwi_gateway.clone() else {
+                    *diagnostic = Some("RWI gateway is not configured".into());
+                    return None;
+                };
+                let context_name = params.as_ref()
+                    .and_then(|p| p.get("context"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("default");
+                Some(Box::new(crate::call::app::rwi::RwiApp::new(
+                    context_name.to_owned(), gateway,
+                )))
+            }
             "realtime" => {
                 // Realtime (AI voice) bridge — presets resolve from
                 // [[realtime]] config; the api_key never rides app params.

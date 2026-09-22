@@ -117,6 +117,8 @@ pub enum RwiCommandPayload {
     #[serde(rename = "call.bridge")]
     Bridge {
         #[serde(default)]
+        call_id: String,
+        #[serde(default)]
         leg_a: String,
         #[serde(default)]
         leg_b: String,
@@ -483,7 +485,7 @@ impl RwiCommandPayload {
             | RwiCommandPayload::LegAdd { call_id, .. }
             | RwiCommandPayload::LegRemove { call_id, .. }
             | RwiCommandPayload::CallResume { call_id, .. } => Some(call_id.as_str()),
-            RwiCommandPayload::Bridge { leg_a, .. } => Some(leg_a.as_str()),
+            RwiCommandPayload::Bridge { call_id, leg_a, .. } => Some(if call_id.is_empty() { leg_a.as_str() } else { call_id.as_str() }),
             RwiCommandPayload::TransferCancel {
                 consultation_call_id,
             } => Some(consultation_call_id.as_str()),

@@ -243,6 +243,63 @@ Some commands support aliases for convenience:
 }
 ```
 
+**Manually dial and connect legs within one session:**
+
+`call.leg_add` creates an independent outgoing SIP dialog and media peer. RWI
+controls its connection: adding or answering a leg does not automatically bridge
+it to the caller. Multiple attempts may ring or answer concurrently. Ordinary
+direct dialing, including HTTP router `forward`, retains its connection flow. All added legs require explicit bridge selection, including queue legs. There is no queue-specific automatic pairing or queue-app bridge request. Queue agent audio therefore requires an explicit bridge request from its controller. CC consult and transfer use explicit bridge commands. There is no RWI-specific leg marker.
+Existing bridges remain until explicitly changed or a member ends.
+
+```json
+{"action":"call.leg_add","action_id":"dial-b","params":{"call_id":"session-1","target":"sip:b@example.com","leg_id":"attempt-b"}}
+{"action":"call.leg_add","action_id":"dial-c","params":{"call_id":"session-1","target":"sip:c@example.com","leg_id":"attempt-c"}}
+```
+
+The `command_completed` event returns `data: {"leg_id": "..."}` for both
+server-generated and client-supplied IDs. Omit `leg_id` to let the server generate
+one. The session
+rejects IDs belonging to active legs. A removed leg ID may be reused; the server does not keep retired IDs. Success acknowledges
+that dialing was queued, not that setup or answer succeeded. Enqueue/validation
+errors produce `command_failed`; setup failures produce `call_hangup` with
+the supplied leg ID.
+
+Leg lifecycle handlers emit flat per-leg events to the RWI owner, independently
+of session-level events. Event delivery does not require a per-leg control flag:
+
+```json
+{"event_type":"call_hangup","call_id":"session-1","leg_id":"attempt-b","reason":"Rejected with 486","sip_status":486}
+```
+
+Leg events reuse `call_ringing` (including its `early_media` flag),
+`call_answered`, and `call_hangup` (rejection, failure, or remote hangup).
+A populated `leg_id` means only that leg is affected; session-level events omit
+`leg_id`. `reason` and `sip_status` are nullable. An unbridged outgoing attempt rejected before answer leaves the caller available
+for another `call.leg_add`. A connected leg ending follows the normal
+post-disconnect handling, including return apps and caller hangup.
+Events can arrive before the command acknowledgement; buffer them until the
+completion event supplies the leg ID, or supply an ID for immediate correlation. The SIP Call-ID is separate from the local `leg_id`.
+
+After the desired leg answers, bridge by **session ID and local leg IDs**:
+
+```json
+{"action":"call.bridge","action_id":"connect-b","params":{"call_id":"session-1","leg_a":"caller","leg_b":"attempt-b"}}
+{"action":"call.leg_remove","action_id":"remove-c","params":{"call_id":"session-1","leg_id":"attempt-c"}}
+{"action":"call.unbridge","action_id":"disconnect","params":{"call_id":"session-1"}}
+```
+
+Bridge, unbridge, and removal acknowledge enqueueing rather than waiting for
+execution results. The RWI processor publishes `call_bridged` and
+`call_unbridged` after successful enqueueing, as in the existing command path;
+these events do not confirm media establishment. Explicit leg removal receives
+its command acknowledgement without an additional `call_hangup` event.
+
+Removal cancels a pending INVITE or hangs up an answered dialog, including an
+answer racing with removal. Removing an already removed RWI attempt succeeds
+without changing other legs. `call.hangup` still ends the whole call. Unbridge
+leaves the legs alive and disconnected; subsequent leg state changes do not
+select a replacement pair automatically. Caller hangup still ends the session.
+
 **Reject call:**
 
 ```json
@@ -694,27 +751,24 @@ RWI supports multiple clients connecting simultaneously. Each connection is inde
 
 - **Context**: routing label that maps inbound calls to interested clients
 - **Ownership**: each active call has exactly one controlling client at a time. Only the owner can issue control actions.
-- **Fan-out**: `call.incoming` is delivered to all clients subscribed to the matching context. Ownership is determined by first-claim.
+- **Fan-out**: `call_created` is delivered to all clients subscribed to the matching context. Ownership is determined by first-claim.
 
 ### 8.2 Call Dispatch Flow
 
-Current implementation: incoming SIP calls emit `call_created` to clients
-subscribed to the `default` context. Receive the event, then send
-`session.attach_call` with its `call_id` and `mode: "control"` before controlling
-the call. Subscription does not claim ownership or hold the call; the configured
-dialplan continues to run. The `RwiApp` / first-answer-claims flow below describes
-the original design, not the current implementation.
+Route incoming calls to `app = "rwi"` using the normal application routing
+mechanism. Set `auto_answer = false` to let the client answer. The app waits
+without dialing the incoming destination and publishes `call_created` to the
+context in `app_params` (default: `default`).
 
-```
-1. SIP INVITE → RustPBX proxy
-2. Dialplan routing resolves: app=rwi, context="ivr_bot"
-3. RustPBX creates RwiApp for the call, holds it in ringing state
-4. RwiGateway fans out call.incoming to ALL clients subscribed to "ivr_bot"
-5. Client(s) receive call.incoming and may call.answer / call.reject to claim
-6. First valid call.answer wins → that client becomes owner
-7. If no client responds within no_answer_timeout_secs:
-   → server executes no_answer_action (hangup, transfer, or play tone)
-```
+1. Subscribe to the route's context.
+2. Receive `call_created` and use its `call_id` in `session.attach_call` with
+   `mode: "control"`.
+3. Answer or reject the call; use `call.leg_add` to dial dynamic targets and
+   `call.bridge` to select the connected pair.
+
+Subscription alone does not claim ownership. Other routes continue their normal
+dialplan and retain their `default`-context discovery events. RWI routes use the
+normal call ring timeout; there is no separate `rwi.contexts` timeout policy.
 
 ### 8.3 Outbound Call Ownership
 
@@ -742,17 +796,18 @@ scopes = ["call.control", "supervisor.control", "media.stream"]
 token = "secret-bot-token"
 scopes = ["call.control", "media.stream"]
 
-# Contexts define how inbound calls are dispatched to RWI clients
-[[rwi.contexts]]
-name = "ivr_bot"
-no_answer_timeout_secs = 10
-no_answer_action = "hangup"
+# In a route file loaded by proxy.routes_files:
+[[routes]]
+name = "rwi-incoming"
+priority = 100
+app = "rwi"
+auto_answer = false
 
-[[rwi.contexts]]
-name = "queue_agent_1"
-no_answer_timeout_secs = 30
-no_answer_action = "transfer"
-no_answer_transfer_target = "sip:voicemail@local"
+[routes.match]
+"to.user" = "^1101$"
+
+[routes.app_params]
+context = "ivr_bot"
 ```
 
 ## 10. Security

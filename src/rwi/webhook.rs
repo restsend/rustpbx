@@ -483,6 +483,7 @@ mod tests {
             call_id: "c1".into(),
             event: crate::rwi::event::to_legacy_event(
                 &crate::rwi::CallRinging {
+                    leg_id: None,
                     call_id: "c1".into(),
                     early_media: true,
                 },
@@ -524,6 +525,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         gateway.read().broadcast(&crate::rwi::CallAnswered {
+            leg_id: None,
             call_id: "swap-1".into(),
         });
         wait_for_events(&server_b.received, 1, 2000).await;
@@ -535,6 +537,7 @@ mod tests {
         restart_rwi_webhook_handler(&gateway, None);
         tokio::time::sleep(Duration::from_millis(50)).await;
         gateway.read().broadcast(&crate::rwi::CallAnswered {
+            leg_id: None,
             call_id: "swap-2".into(),
         });
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -571,6 +574,7 @@ mod tests {
         };
         let ringing = mk(crate::rwi::event::to_legacy_event(
             &crate::rwi::CallRinging {
+                leg_id: None,
                 call_id: "dedup-call".into(),
                 early_media: false,
             },
@@ -631,6 +635,7 @@ mod tests {
             call_id: "dedup-once".into(),
             event: crate::rwi::event::to_legacy_event(
                 &crate::rwi::CallRinging {
+                    leg_id: None,
                     call_id: "dedup-once".into(),
                     early_media: false,
                 },
@@ -901,6 +906,7 @@ mod tests {
             call_id: call_id.into(),
             event: crate::rwi::event::to_legacy_event(
                 &crate::rwi::CallAnswered {
+                    leg_id: None,
                     call_id: call_id.into(),
                 },
                 None,

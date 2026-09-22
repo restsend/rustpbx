@@ -190,6 +190,7 @@ async fn dispatch_bridge(
     target_leg: &str,
 ) -> DispatchOutcome {
     let cmd = RwiCommandPayload::Bridge {
+        call_id: String::new(),
         leg_a: call_id.to_string(),
         leg_b: target_leg.to_string(),
     };

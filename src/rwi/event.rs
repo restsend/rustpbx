@@ -117,6 +117,9 @@ rwi_event!(CallCreated, "call_created");
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CallRinging {
+    /// Present for an individual leg event; absent for a session event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_id: Option<String>,
     pub call_id: String,
     /// `true` when the ringing provisional response carried SDP (183 Session
     /// Progress or 180 with SDP — early media), `false` for a plain 180
@@ -129,12 +132,18 @@ rwi_event!(CallRinging, "call_ringing");
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CallAnswered {
+    /// Present for an individual leg event; absent for a session event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_id: Option<String>,
     pub call_id: String,
 }
 rwi_event!(CallAnswered, "call_answered");
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CallHangup {
+    /// Present for an individual leg event; absent for a session event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_id: Option<String>,
     pub call_id: String,
     pub reason: Option<String>,
     /// Normalized initiator: `"agent"` | `"caller"` | `"system"` | `"transfer"`
