@@ -91,6 +91,7 @@ pub mod ivr;
 pub mod ivr_config;
 pub mod queue;
 pub mod realtime;
+pub mod rwi;
 pub mod voicemail;
 
 /// Test helpers: build a mock call stack without a real SIP session.

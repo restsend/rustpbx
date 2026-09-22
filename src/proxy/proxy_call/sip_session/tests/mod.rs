@@ -6555,3 +6555,49 @@ async fn cancel_before_queued_answer_sends_bye_to_late_dialog() {
         serving.await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn rwi_route_app_waits_and_announces_to_configured_context() {
+    use crate::call::runtime::AppFactory;
+    use crate::call::app::{ApplicationContext, CallInfo, testing::MockCallStack};
+    let gateway = Arc::new(parking_lot::RwLock::new(crate::rwi::RwiGateway::new()));
+    let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (other_tx, mut other_rx) = tokio::sync::mpsc::unbounded_channel();
+    {
+        let mut gw = gateway.write();
+        for (context, tx) in [("test-router", events_tx), ("default", other_tx)] {
+            let session = gw.create_session(crate::rwi::auth::RwiIdentity {
+                token: context.into(), scopes: vec![],
+            });
+            let id = session.read().id.clone();
+            gw.set_session_event_sender(&id, tx);
+            gw.subscribe(&id, vec![context.into()], None);
+        }
+    }
+    let mut context = ApplicationContext::new(
+        sea_orm::DatabaseConnection::default(),
+        CallInfo {
+            session_id: "test-session".into(), caller: "alice".into(),
+            callee: "unregistered-entry".into(), direction: "inbound".into(),
+            started_at: chrono::Utc::now(), sip_headers: Default::default(),
+            route_name: Some("rwi-test".into()),
+        },
+        Arc::new(crate::config::Config::default()), reqwest::Client::new(),
+    );
+    let factory = BuiltinAppFactory::new(None, None);
+    assert!(factory.create_app("rwi", None, &context).await.is_err());
+    context.rwi_gateway = Some(gateway);
+    let app = factory.create_app("rwi", Some(serde_json::json!({"context":"test-router"})), &context)
+        .await.unwrap().unwrap();
+    let mut stack = MockCallStack::run_with_context(app, context);
+    let event = tokio::time::timeout(Duration::from_secs(2), events_rx.recv())
+        .await.unwrap().unwrap();
+    let event = serde_json::to_value(event).unwrap();
+    assert_eq!(event["event_type"], "call_created");
+    assert_eq!(event["call_id"], "test-session");
+    assert_eq!(event["context"], "test-router");
+    assert_eq!(event["callee"], "unregistered-entry");
+    assert!(stack.next_cmd(50).await.is_none(), "RWI app must wait without answering or dialing");
+    assert!(events_rx.try_recv().is_err());
+    assert!(other_rx.try_recv().is_err());
+}

@@ -1266,7 +1266,11 @@ impl SipSession {
                 hdrs
             }
         };
-        if let Some(ref gw) = server.rwi_gateway {
+        // The RWI app announces the call when it is ready, in its route context.
+        if let Some(ref gw) = server.rwi_gateway
+            && !matches!(&session.context.dialplan.flow,
+                crate::call::DialplanFlow::Application { app_name, .. } if app_name == "rwi")
+        {
             let ev = crate::rwi::CallCreated {
                 call_id: session_id.clone(),
                 context: "default".into(),
