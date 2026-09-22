@@ -519,9 +519,10 @@ impl SipSession {
     }
 
     /// Auto-start live transcription when `[proxy.transcript.remote]
-    /// auto_start = true`. Best-effort: failures (unconfigured, bypass mode,
-    /// provider errors) are logged and never fatal to the call. Holds one
-    /// transcription reference for the rest of the call.
+    /// auto_start = true` **or** the dialplan carries a per-call
+    /// [`TranscriptionPlan`] (attached by a dialplan inspector). Best-effort:
+    /// failures (bypass mode, provider errors) are logged and never fatal to
+    /// the call. Holds one transcription reference for the rest of the call.
     ///
     /// Re-entry safe: `accept_call` / `attach_caller_dialog` can run more
     /// than once per session (callee re-attach, API `Answer`, queue
@@ -533,7 +534,7 @@ impl SipSession {
         if self.live_transcription.is_some() {
             return;
         }
-        let enabled = self
+        let globally_enabled = self
             .server
             .proxy_config
             .load()
@@ -542,7 +543,13 @@ impl SipSession {
             .and_then(|t| t.remote.as_ref())
             .and_then(|r| r.auto_start)
             .unwrap_or(false);
-        if !enabled {
+        let per_call_plan = self
+            .context
+            .dialplan
+            .extensions
+            .get::<crate::call::transcription::TranscriptionPlan>()
+            .is_some();
+        if !globally_enabled && !per_call_plan {
             return;
         }
         if let Err(error) = self.start_live_transcription(None).await {

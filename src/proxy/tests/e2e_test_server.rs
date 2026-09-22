@@ -262,6 +262,7 @@ impl E2eTestServer {
             realm: "127.0.0.1".to_string(),
             local_port,
             proxy_addr: self.proxy_addr,
+            extra_invite_headers: Vec::new(),
         };
 
         let mut ua = TestUa::new(config);

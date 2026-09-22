@@ -18,8 +18,38 @@ use std::sync::{Arc, LazyLock, RwLock};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+
+pub use remote::resample_to_16k;
+
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TranscriptionPlan {
+    /// Provider registry key overriding `[proxy.transcript.remote] provider`
+    /// for this call (see [`TranscriptionProviderFactory::name`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Language tag overriding the provider's configured default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Extra HTTP headers attached to the provider's WebSocket handshake
+    /// (e.g. gateway auth). Provider-specific; ignored by providers that
+    /// don't use them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Vec<(String, String)>>,
+}
+
+/// Identity of the call a provider instance is created for, so third-party
+/// factories can correlate recognition output back to the originating call
+/// (e.g. webhooks keyed by call id).
+#[derive(Debug, Clone)]
+pub struct TranscriptionCallInfo {
+    /// Call id as used across call events / CDRs (normalized SIP Call-ID).
+    pub call_id: String,
+    /// Owning SIP session id.
+    pub session_id: String,
+}
 
 /// Which call participant produced the audio for a segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -127,11 +157,13 @@ pub trait TranscriptionProviderFactory: Send + Sync {
     /// Registry key, matched against `[proxy.transcript.remote] provider`.
     fn name(&self) -> &str;
 
-    /// Build one provider for a single call. `sides` lists the call legs that
-    /// actually carry negotiated media; `events` receives
-    /// [`TranscriptionEvent`]s until [`TranscriptionProvider::stop`] is called.
+    /// Build one provider for a single call. `call` identifies the call the
+    /// provider is attached to; `sides` lists the call legs that actually
+    /// carry negotiated media; `events` receives [`TranscriptionEvent`]s
+    /// until [`TranscriptionProvider::stop`] is called.
     fn create(
         &self,
+        call: &TranscriptionCallInfo,
         sides: &[TranscriptSide],
         events: mpsc::UnboundedSender<TranscriptionEvent>,
         params: &serde_json::Value,
@@ -204,6 +236,7 @@ mod tests {
         }
         fn create(
             &self,
+            _call: &TranscriptionCallInfo,
             _sides: &[TranscriptSide],
             _events: mpsc::UnboundedSender<TranscriptionEvent>,
             _params: &serde_json::Value,
@@ -241,6 +274,10 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let provider = factory
             .create(
+                &TranscriptionCallInfo {
+                    call_id: "test-call".to_string(),
+                    session_id: "test-session".to_string(),
+                },
                 &[TranscriptSide::Caller],
                 tx,
                 &serde_json::json!({ "anything": true }),
@@ -269,7 +306,15 @@ mod tests {
         let factory =
             resolve_transcription_provider("test-mock").expect("overridden factory missing");
         let (tx, _rx) = mpsc::unbounded_channel();
-        let err = match factory.create(&[], tx, &serde_json::json!({})) {
+        let err = match factory.create(
+            &TranscriptionCallInfo {
+                call_id: "test-call".to_string(),
+                session_id: "test-session".to_string(),
+            },
+            &[],
+            tx,
+            &serde_json::json!({}),
+        ) {
             Err(e) => e,
             Ok(_) => panic!("overridden factory should fail"),
         };
@@ -283,7 +328,15 @@ mod tests {
         // Only assert the failure path when DEEPGRAM_API_KEY is not set in
         // the environment (tests may run on machines that export it).
         if std::env::var("DEEPGRAM_API_KEY").is_err() {
-            let err = match factory.create(&[], tx.clone(), &serde_json::json!({})) {
+            let err = match factory.create(
+                &TranscriptionCallInfo {
+                    call_id: "test-call".to_string(),
+                    session_id: "test-session".to_string(),
+                },
+                &[],
+                tx.clone(),
+                &serde_json::json!({}),
+            ) {
                 Err(e) => e,
                 Ok(_) => panic!("missing api_key must be rejected"),
             };
@@ -292,7 +345,15 @@ mod tests {
         // Empty `sides` means no ASR connection is spawned, so this stays
         // hermetic; with a key present the provider constructs fine.
         let provider = factory
-            .create(&[], tx, &serde_json::json!({ "api_key": "test-key" }))
+            .create(
+                &TranscriptionCallInfo {
+                    call_id: "test-call".to_string(),
+                    session_id: "test-session".to_string(),
+                },
+                &[],
+                tx,
+                &serde_json::json!({ "api_key": "test-key" }),
+            )
             .expect("api_key present should construct");
         drop(provider);
     }
