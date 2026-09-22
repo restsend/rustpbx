@@ -65,7 +65,13 @@ async def test_queue_180_200_state_sequence(pbx, sipbot_pool, cdr_dir):
     completed = [c for c in cdrs if c.get("status") == "completed"]
     assert completed, "no completed CDR after queue call"
     rec = completed[-1]
-    assert "support" in str(rec.get("callee") or ""), f"CDR callee should reference queue: {rec.get('callee')}"
+    # Queue attribution: the CDR callee becomes the answered agent AOR once
+    # the queue bridges the agent leg; the queue identity lives in
+    # metadata.queue_name. Either reference proves the queue CDR.
+    md = rec.get("metadata") or {}
+    assert (
+        "support" in str(rec.get("callee") or "") or md.get("queue_name") == "support"
+    ), f"CDR should reference the queue (callee or metadata.queue_name): callee={rec.get('callee')} metadata={md}"
 
 
 @pytest.mark.asyncio

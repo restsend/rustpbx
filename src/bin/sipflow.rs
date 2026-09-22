@@ -10,7 +10,8 @@ use chrono::{Local, TimeZone, Utc};
 use clap::Parser;
 use lru::LruCache;
 use rustpbx::callrecord::sipflow_upload::{
-    SipFlowUploadRequest, SipFlowUploadResponse, build_storage, join_root, upload_media,
+    SipFlowUploadRequest, SipFlowUploadResponse, build_storage, build_signaling_storage, join_root,
+    upload_media,
     upload_signaling_flow,
 };
 use rustpbx::callrecord::{
@@ -918,6 +919,17 @@ async fn upload_handler(
             ));
         }
     };
+    // Dedicated storage for a separate signaling bucket / endpoint
+    // (`signaling_bucket` / `signaling_url`); None ⇒ reuse the media storage.
+    let signaling_storage = match build_signaling_storage(&req.upload) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Signaling storage init failed: {e}"),
+            ));
+        }
+    };
 
     let start = Local.timestamp_opt(req.start, 0).single().ok_or_else(|| {
         (
@@ -1009,6 +1021,7 @@ async fn upload_handler(
             &full_signaling_key,
             &sig_file_name,
             storage.as_ref(),
+            signaling_storage.as_ref(),
         )
         .await
     } else {

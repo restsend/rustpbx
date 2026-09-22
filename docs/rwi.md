@@ -377,16 +377,27 @@ recording counter and `label` resolves from the explicit `label` param → the
 answering agent id → the current IVR name → `segment_type`. When the
 recording finishes (explicit stop or call hangup) the owner receives
 `record_stopped`, and the CDR carries the recording file (→ `recording_url`).
-With `[recording]` enabled, `recording_metadata_available` and `record_end`
-are also emitted — one `recording_metadata_available` per segment, `record_end`
-once per call.
+With `[recording]` enabled, `recording_metadata_available` is also emitted —
+exactly one per recording artifact (one per segmented file; one for the
+whole-call SipFlow artifact). There is no call-level summary event;
+`record_end` has been removed.
 
-**Recording on originate (auto-start on media):** `call.originate` (and
+**Recording on originate (segmented: ringback + agent):** `call.originate` (and
 `POST /ami/v1/outbound/dial`) accepts a `record` object with the same shape as
-`record.start`; recording starts automatically when the first remote SDP
-establishes media (a provisional response such as 183, or the final answer).
-An empty `storage.path` uses the default location
-(`[recording].path/<call_id>.wav`):
+`record.start`. Recording runs in two segments:
+
+- **Ringback segment (system-managed)**: starts automatically when the first
+  remote SDP establishes early media (183/180+SDP), tagged `source=ringing`.
+  When the call IS answered, the segment is discarded (file deleted; no
+  events; no CDR entry) so the answered recording contains no ringback tone.
+  When the call is NOT answered (rejected / no-answer / timeout / media
+  failure), the segment is kept, uploaded, and notified normally
+  (`source=ringing`). No early media from the carrier means no ringback audio
+  to record.
+- **Agent segment (driven by your `record` config)**: starts at the final
+  answer (200 OK) using the caller-supplied configuration. An empty
+  `storage.path` uses the default location
+  (`[recording].path/<call_id>.wav`):
 
 ```json
 {
@@ -775,7 +786,7 @@ no_answer_transfer_target = "sip:voicemail@local"
 | **Session Commands** | ✅ Complete | All session commands fully implemented |
 | **Call Control** | ✅ Complete | Originate, answer, hangup, bridge, transfer all working |
 | **Media Playback** | ✅ Complete | Play, stop, hold music fully functional |
-| **Recording** | ✅ Complete | Start, pause, resume, stop implemented; inline `record` on `call.originate` / `outbound/dial` (auto-start on first remote SDP); CDR carries the file → `recording_metadata_available` + `record_end` |
+| **Recording** | ✅ Complete | Start, pause, resume, stop implemented; inline `record` on `call.originate` / `outbound/dial` (segmented: discarded ringback slice + agent slice on answer, kept ringback slice on failure); CDR carries the files → `recording_metadata_available` (one per artifact) |
 | **Queue** | ✅ Complete | Enqueue, dequeue, hold, unhold working |
 | **Supervisor** | ⚠️ Partial | Commands implemented, **actual audio mixing TODO** |
 | **Conference** | ⚠️ Partial | Create/add/remove/destroy working, **mute/unmute in mixer TODO** |

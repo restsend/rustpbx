@@ -293,6 +293,10 @@ key = "1"
 [ivr.root.entries.action]
 type = "queue"
 target = "noagent"
+# Zero-idle skill groups enter wait retention (55abce10); bound it so the
+# max_wait fallback (busy prompt → hangup) fires inside the test window.
+[ivr.root.entries.action.params]
+overflow_wait = "3"
 ''')
     # skill-group:nonexistent resolves to zero agents → app path plays
     # busy_prompt then executes fallback (hangup).
@@ -324,11 +328,11 @@ target = "noagent"
     await h.wait_rtp(caller, "caller", 15)
     # Wait for the ~2s prompt to complete and the hangup fallback to run
     # (log-driven instead of a fixed sleep).
-    await h.wait_log(pbx, r"playing busy prompt before fallback", timeout=12)
+    await h.wait_log(pbx, r"playing busy prompt or fallback", timeout=12)
     await h.wait_log(pbx, r"(?i)hangup fallback", timeout=12)
 
     log = pbx.log_file_path.read_text(encoding="utf-8", errors="replace") if pbx.log_file_path else ""
-    assert "playing busy prompt before fallback" in log, (
+    assert "playing busy prompt or fallback" in log, (
         f"expected app-path busy prompt log in PBX log:\n{log[-2000:]}"
     )
 
@@ -350,8 +354,13 @@ target = "noagent"
         micros = int((m.group(2) or "0")[:6].ljust(6, "0"))
         return datetime.fromisoformat(m.group(1)).replace(microsecond=micros)
 
+    # The busy-prompt window is bracketed by two existing log lines:
+    # "call abandoned, playing busy prompt or fallback" (emitted immediately
+    # before the prompt starts) and "play then hangup fallback" (emitted once
+    # the prompt finished and the fallback runs). The gap between them IS the
+    # prompt playback duration.
     play_started = next(
-        (_ts(l) for l in log.splitlines() if "Playback started" in l and "busy.wav" in l),
+        (_ts(l) for l in log.splitlines() if "playing busy prompt or fallback" in l),
         None,
     )
     hangup_log = next(
@@ -406,6 +415,10 @@ type = "queue"
 target = "noagent-r"
 return_app = "ivr"
 return_target = "ivr-ret-noagent"
+# Zero-idle skill groups enter wait retention (55abce10); bound it so the
+# max_wait fallback (busy prompt → return to IVR) fires inside the window.
+[ivr.root.entries.action.params]
+overflow_wait = "3"
 ''')
     # skill-group:nonexistent resolves to zero agents → queue app path plays
     # busy_prompt then executes the return_to_ivr fallback.
@@ -437,14 +450,14 @@ return_target = "ivr-ret-noagent"
     # Wait (log-driven) for the queue app to start, play the busy prompt and
     # return the caller to the IVR — instead of a fixed 9s sleep. The last
     # wait also covers the IVR restart line the ordering assert below needs.
-    await h.wait_log(pbx, r"playing busy prompt before fallback", timeout=15)
+    await h.wait_log(pbx, r"playing busy prompt or fallback", timeout=15)
     await h.wait_log(pbx, r"will return to IVR on fallback", timeout=15)
     await h.wait_log(pbx, r"Starting IVR application", timeout=15)
 
     log = pbx.log_file_path.read_text(encoding="utf-8", errors="replace") if pbx.log_file_path else ""
 
     # 1. The queue app must have started (guards the AlreadyRunning dead-air bug).
-    assert "playing busy prompt before fallback" in log, (
+    assert "playing busy prompt or fallback" in log, (
         f"expected queue app busy prompt; the call may have hit AlreadyRunning dead-air:\n{log[-3000:]}"
     )
 
@@ -468,7 +481,7 @@ return_target = "ivr-ret-noagent"
         return datetime.fromisoformat(m.group(1)).replace(microsecond=micros)
 
     busy_ts = next(
-        (_ts(l) for l in log.splitlines() if "playing busy prompt before fallback" in l),
+        (_ts(l) for l in log.splitlines() if "playing busy prompt or fallback" in l),
         None,
     )
     ivr_restart = next(

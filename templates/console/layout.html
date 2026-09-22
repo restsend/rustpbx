@@ -210,6 +210,7 @@
             apiPrefix: config.apiPrefix || '/api',
             queueItems: config.queueItems || [],
             ivrItems: config.ivrItems || [],
+            realtimeItems: config.realtimeItems || [],
             initialType: config.initialType || 'uri',
             initialValue: config.initialValue || '',
             targetType: 'uri',
@@ -230,6 +231,10 @@
             ivrOpen: false,
             ivrIndex: -1,
             ivrSelected: null,
+            rtQuery: '',
+            rtOpen: false,
+            rtIndex: -1,
+            rtSelected: null,
             get extFiltered() {
                 var q = this.extQuery.toLowerCase();
                 if (!q) return this.extItems;
@@ -252,11 +257,25 @@
                     return (i.name || '').toLowerCase().indexOf(q) !== -1;
                 });
             },
+            get realtimeAvailable() {
+                return (this.realtimeItems || []).length > 0;
+            },
+            get rtFiltered() {
+                var q = this.rtQuery.toLowerCase();
+                if (!q) return this.realtimeItems;
+                return this.realtimeItems.filter(function (i) {
+                    return (i.name || '').toLowerCase().indexOf(q) !== -1;
+                });
+            },
             init() {
                 var self = this;
                 this.allowedTypes = this.computeAllowedTypes();
-                this.targetType = this.allowedTypes.indexOf(this.initialType) !== -1
-                    ? this.initialType : (this.allowedTypes[0] || 'uri');
+                var initialAllowed = this.allowedTypes.indexOf(this.initialType) !== -1;
+                // Never land on realtime when the PBX has no [[realtime]] presets.
+                if (this.initialType === 'realtime' && !this.realtimeAvailable) {
+                    initialAllowed = false;
+                }
+                this.targetType = initialAllowed ? this.initialType : (this.allowedTypes[0] || 'uri');
                 this.targetValue = this.initialValue;
                 this.$nextTick(function () { self.restoreInitial(); });
                 if (!this.queueItems.length) this.fetchQueues();
@@ -270,7 +289,7 @@
                 });
             },
             computeAllowedTypes() {
-                var types = ['uri', 'extension', 'queue', 'ivr'];
+                var types = ['uri', 'extension', 'queue', 'ivr', 'realtime'];
                 if (window.voicemailAddonEnabled) types.push('voicemail');
                 return types;
             },
@@ -286,6 +305,11 @@
                         return i.name === this.targetValue;
                     }.bind(this)) || null;
                     if (this.ivrSelected) this.ivrQuery = this.ivrSelected.name;
+                } else if (this.targetType === 'realtime') {
+                    this.rtSelected = this.realtimeItems.find(function (i) {
+                        return i.name === this.targetValue;
+                    }.bind(this)) || null;
+                    if (this.rtSelected) this.rtQuery = this.rtSelected.name;
                 } else if (this.targetType === 'extension') {
                     if (this.targetValue) this.extQuery = this.targetValue;
                     this.fetchExtensions();
@@ -293,10 +317,11 @@
             },
             setType(type) {
                 if (this.targetType === type) return;
+                if (type === 'realtime' && !this.realtimeAvailable) return;
                 this.targetType = type;
                 this.targetValue = '';
-                this.extSelected = null; this.queueSelected = null; this.ivrSelected = null;
-                this.extQuery = ''; this.queueQuery = ''; this.ivrQuery = '';
+                this.extSelected = null; this.queueSelected = null; this.ivrSelected = null; this.rtSelected = null;
+                this.extQuery = ''; this.queueQuery = ''; this.ivrQuery = ''; this.rtQuery = '';
                 if (type === 'extension') this.fetchExtensions();
                 this.emitChange();
             },
@@ -400,6 +425,22 @@
                 this.ivrOpen = false;
                 this.emitChange();
             },
+            toggleRt() { this.rtOpen = !this.rtOpen; if (this.rtOpen) this.rtIndex = -1; },
+            selectRt(item) {
+                this.rtSelected = item;
+                this.rtQuery = item.name;
+                this.targetValue = item.name;
+                this.rtOpen = false;
+                this.emitChange();
+            },
+            clearRt() {
+                this.rtSelected = null;
+                this.rtQuery = '';
+                this.rtIndex = -1;
+                this.rtOpen = false;
+                this.targetValue = '';
+                this.emitChange();
+            },
             clearExt() {
                 this.extSelected = null;
                 this.extQuery = '';
@@ -447,6 +488,9 @@
                 } else if (field === 'ivr') {
                     open = 'ivrOpen'; idx = 'ivrIndex';
                     items = this.ivrFiltered; selectFn = 'selectIvr';
+                } else if (field === 'rt') {
+                    open = 'rtOpen'; idx = 'rtIndex';
+                    items = this.rtFiltered; selectFn = 'selectRt';
                 } else { return; }
                 if (!this[open]) { this[open] = true; return; }
                 if (e.key === 'ArrowDown') { e.preventDefault(); this[idx] = Math.min(this[idx] + 1, items.length - 1); }

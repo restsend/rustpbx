@@ -94,6 +94,14 @@ async fn build_active_model(
     // Report columns promoted out of the JSONL/metadata: hangup reason and
     // final SIP status code.
     let hangup_reason = record.hangup_reason.as_ref().map(|r| r.to_string());
+
+    // Media quality on the trunk-facing leg, from the reporter's
+    // `media_quality` metadata entry.
+    let (media_loss_pct, media_jitter_ms, media_rtt_ms) =
+        crate::callrecord::extract_trunk_media_quality(
+            record.details.metadata.as_ref().and_then(|m| m.get("media_quality")),
+            &direction,
+        );
     let sip_status_code = if record.status_code > 0 {
         Some(record.status_code as i32)
     } else {
@@ -137,6 +145,9 @@ async fn build_active_model(
         transcript_language: Set(transcript_language.clone()),
         tags: Set(tags.clone()),
         leg_timeline: Set(leg_timeline_json),
+        media_loss_pct: Set(media_loss_pct),
+        media_jitter_ms: Set(media_jitter_ms),
+        media_rtt_ms: Set(media_rtt_ms),
         hangup_reason: Set(hangup_reason),
         sip_status_code: Set(sip_status_code),
         metadata: Set({
@@ -233,6 +244,9 @@ pub(crate) async fn persist_call_records(
                     Column::Metadata,
                     Column::HangupReason,
                     Column::SipStatusCode,
+                    Column::MediaLossPct,
+                    Column::MediaJitterMs,
+                    Column::MediaRttMs,
                     Column::UpdatedAt,
                 ])
                 .to_owned(),

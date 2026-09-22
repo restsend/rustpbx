@@ -52,10 +52,11 @@ track_queue_latency = true
 # empty = all events (recommended). To allow-list, use valid event types.
 # Note: agent status is "agent_state_changed" (the old "dn_state_changed" was
 # removed); recording data (download URL, file size) is delivered via
-# "recording_metadata_available" and "record_end" — "record_stopped" alone
-# carries no recording URL.
+# "recording_metadata_available" — exactly one event per recording artifact
+# (segmented files, or the whole-call SipFlow artifact); "record_stopped" is
+# the real-time event and carries no final URL ("record_end" has been removed).
 # Example allow-list:
-# events = ["call_hangup", "record_stopped", "recording_metadata_available", "record_end", "agent_state_changed"]
+# events = ["call_hangup", "record_stopped", "recording_metadata_available", "agent_state_changed"]
 events = []
 ```
 
@@ -756,24 +757,19 @@ Triggered when the recording file upload completes, containing full metadata.
 > `download_url` / `file_size` describe that segment only, and `extra`
 > carries `seq` (per-call recording counter), `label` (agent id or IVR name),
 > `segment_type`, `segment_id`, `started_at` / `ended_at` next to the
-> call-level metadata. `record_end` remains a single per-call summary.
+> call-level metadata. Each segment notifies independently — there is no call-level summary event (see the notification contract below).
 >
 > **`full` flag**: every `recording_metadata_available` payload carries a
-> boolean `metadata.full` — `false` on per-segment events, `true` on the
-> call-level aggregate event (the one emitted once after every segment
-> finished uploading). Consumers only interested in "the call's recording is
-> fully available" filter on `metadata.full == true` and never need to
-> reconcile `segment_id`s; `segment_id` itself stays an optional `extra`
-> pass-through (per-segment events only).
+> boolean `metadata.full` — `false` on per-segment (file) events; `true` only
+> on the whole-call SipFlow artifact event (when the call has no local
+> segment files).
 >
-> **Backwards compatibility**: the pre-existing **aggregate event is still
-> emitted once per call** (N segments → N+1 events) — its
-> `extra.recording_segments` remains a JSON **string** (containing the array;
-> `JSON.parse` it), and its `filename` is the first segment's file. Old
-> subscribers keep working; consumers that only want per-segment events can
-> skip the aggregate one (`metadata.full == true`, or the event whose
-> `extra` contains the `recording_segments` key). The CDR's
-> `metadata.recording_segments` stays a native JSON array, unchanged.
+> **Notification contract (breaking change)**: each call receives exactly one
+> completion notification per recording artifact — a segmented call (e.g. an
+> IVR slice + an agent slice) emits one event per slice with no call-level
+> aggregate, and `record_end` has been removed. Consumers needing a per-call
+> rollup can read `recording_segments` from the CDR, which remains a native
+> JSON array, unchanged.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -896,23 +892,16 @@ Webhook delivery wraps the same payload in an envelope (`webhook.rs`: `rwi` /
 > `recording_segments` key on the aggregate event is unaffected (kept as
 > the aggregate-event discriminator).
 
-#### record_end
+#### record_end (removed)
 
-Dispatch: call_owner
-
-Recording finalisation event. Emitted after the recording upload completes; if no upload is configured, it fires when the local recording file is ready (using the local path as url). Also emitted after SipFlow media upload completes.
-
-> **Trigger conditions**:
-> - Regular recording: automatically emitted by `RecordingUploadHook` after `CallRecordManager` processes the record
-> - SipFlow recording: emitted after SipFlow media file upload to S3/HTTP completes
-> - **Not** triggered by the `RecordStop` command — unlike `record_started`/`record_stopped` which require an explicit command
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `call_id` | String | Call identifier |
-| `url` | Option\<String\> | Upload URL (if uploaded), local file path (no upload), or SipFlow media file URL |
-| `duration_secs` | u64 | Recording duration (seconds) |
-| `file_size` | u64 | File size (bytes) |
+> **⚠️ Breaking change (recording notification de-duplication)**: `record_end` is no longer emitted. Each call now receives exactly **one `recording_metadata_available` per recording artifact** (one per segmented file; one for the whole-call SipFlow artifact). The former call-level aggregate on segmented calls and the `record_end` summary have been removed. Consumers needing a per-call rollup should aggregate segment events by `call_id`, or read `recording_segments` from the CDR. Historical field reference:
+>
+> | Field | Type | Description |
+> |-------|------|-------------|
+> | `call_id` | String | Call identifier |
+> | `url` | Option\<String\> | Upload URL (if uploaded), local file path (no upload), or SipFlow media file URL |
+> | `duration_secs` | u64 | Recording duration (seconds) |
+> | `file_size` | u64 | File size (bytes) |
 
 ---
 
@@ -956,9 +945,10 @@ Call exits an IVR node.
 | `result_value` | Option\<String\> | User DTMF or branch result |
 | `duration_ms` | u32 | Node dwell time in milliseconds |
 | `exit_time` | String | Exit timestamp |
-| `next_node_id` | Option\<String\> | Next node ID |
+| `next_node_id` | Option\<String\> | Next node ID (populated on Menu jumps; empty on terminal nodes) |
 | `hangup_reason` | Option\<String\> | Hangup reason (on session termination: `cancelled`/`remote_hangup`/`hangup`, etc.) |
 | `call_result` | Option\<String\> | Call result |
+| `end` | Option\<bool\> | **End marker**: `true` when this node's action terminated the flow (hangup/transfer/jump/exit) or the session terminated on it; omitted when the flow continues |
 | *+ctx* | | Flat context fields |
 
 
@@ -979,6 +969,7 @@ IVR flow completes (terminal action executed: Transfer, Queue, Voicemail, Hangup
 | `final_result` | String | Final result (`transferred`, `voicemail`, `abandoned`, `cancelled`, `remote_hangup`, etc.) |
 | `completion_time` | String | Completion timestamp |
 | `final_routing_target` | Option\<String\> | Final routing target |
+| `end` | bool | Always `true` — this event IS the flow's end marker, so consumers can filter uniformly on `end` across IVR events |
 | *+ctx* | | Flat context fields |
 
 ```json
@@ -1004,7 +995,12 @@ Dispatch: fan_out_to_context
 
 Step-mode IVR trace event. Emitted on each provider round-trip or action execution completion.
 
-> **Session-end entry (`session_end`)**: when the IVR session ends (including caller hangup `RemoteHangup` and system cancel `Cancelled`), an extra trace entry with `trigger.type="session_end"` is emitted. `action_type`/`step_id`/`step_name` record the last executed node, and `end_reason`/`end_detail` describe how the whole session ended. The external provider `/end` webhook is **not** called on `RemoteHangup`/`Cancelled` (the local trace event is still emitted).
+> **Session-end entry (`session_end`)**: when the IVR session ends (including caller hangup `RemoteHangup` and system cancel `Cancelled`), an extra trace entry with `trigger.type="session_end"` is emitted. `action_type`/`step_id`/`step_name` record the last executed node, and `end_reason`/`end_detail` describe how the whole session ended. The external provider `/end` webhook is called on **every session termination — including caller hangup (`user_hangup`)**; only a system cancellation (`Cancelled`, shutdown) skips the POST, avoiding a restart storm against providers (the local trace event is always emitted).
+>
+> **next / end protocol (per-node execution markers)**: each step event answers "which node ran, where does the flow go next / did it end":
+> - A successor node exists → the event carries `next_node_id`/`next_step_id` (identical values in step mode — the successor's `step_id`; events are emitted once the successor resolves, so the pointer is always present);
+> - No successor (hangup/jump terminal node) → the step event carries `end: true`;
+> - Caller hangup mid-flow → the last step's trigger is rewritten to `user_hangup` and carries `end: true`; the following `session_end` entry carries `end: true` as well.
 >
 > **Single completion event**: each step — including waiting steps (playback, digit collection, transfer awaiting result) — emits exactly **one** trace entry upon completion. The `trigger` keeps the step's original trigger source (e.g. `phone_collected`, `dtmf`) with its detail; a non-null `step_end_time` marks completion. No intermediate or duplicate events are emitted.
 >
@@ -1035,6 +1031,9 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 | `sip_headers` | Option\<Map\<String, String\>\> | Whitelisted SIP headers of the call |
 | `end_reason` | Option\<String\> | Present on two entry kinds only: ① the `session_end` entry — the flow's final end reason (`normal`, `transfer`, `transfer_to_queue`, `hangup`, `user_hangup`, `timeout`, `error`, etc.); ② the terminal step entry of a resumable hand-off (bridge/queue with return_app, JumpIvr) — `transfer` / `transfer_to_queue` / `transfer_to_ivr` with `end_detail` carrying the hand-off target (that hand-off produces no `session_end`, see the exactly-once contract above) |
 | `end_detail` | Option\<String\> | Companion detail for `end_reason` (e.g. transfer target, error message) |
+| `next_node_id` | Option\<String\> | The successor node's `step_id` — always present while the flow continues (events are emitted once the successor resolves); omitted on terminal steps and `session_end` entries |
+| `next_step_id` | Option\<String\> | The successor node's `step_id` — identical to `next_node_id` in step mode; both names are emitted so consumers can key on either |
+| `end` | Option\<bool\> | **End marker**: `true` marks the flow's last observable step — a terminal action (hangup/transfer/jump/exit), the `session_end` entry, or a step cut short by caller hangup / cancellation / error. Resumable hand-offs (queue/bridge with return_app, JumpIvr resume) carry no `end`; the flow continues in the successor via the `resume` trigger |
 
 > **`trigger` field**:
 >

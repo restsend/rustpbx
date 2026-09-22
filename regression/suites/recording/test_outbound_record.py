@@ -89,27 +89,54 @@ async def test_outbound_originate_record_on_answer(pbx, sipbot_pool, rwi, tmp_pa
         "record_started not received — originate record option not applied"
     )
 
+    # Inject real audio: an RWI originate has no natural audio source (the
+    # echo callee only speaks after receiving audio), so play a tone into the
+    # bridge — otherwise the recording is a header-only WAV (44 bytes).
+    tone = tmp_path / "ob_tone.wav"
+    h.generate_sine_wav(tone, 440.0, 4.0, 8000, 0.4)
+    play_resp = await rwi.send_request("media.play", {
+        "call_id": call_id,
+        "source": {"type": "file", "uri": str(tone)},
+        "loop_playback": True,
+    })
+    assert play_resp.get("status") == "success", play_resp
+
     # Let some audio flow, then hang up.
-    await asyncio.sleep(2)
+    await asyncio.sleep(2.5)
     await rwi.hangup(call_id)
 
     stopped = await _wait_event_all(rwi, "record_stopped", timeout=15)
     assert stopped is not None, "record_stopped not received after hangup"
 
-    # The recording file must exist and have content.
-    assert rec_path.exists(), f"recording file missing: {rec_path}"
-    assert rec_path.stat().st_size > 1000, (
-        f"recording file too small ({rec_path.stat().st_size} bytes)"
-    )
-
     # The CDR carries the recorder entry → RecordingUploadHook (Local) emits
-    # recording_metadata_available + record_end.
+    # recording_metadata_available once the artifact is finalized. NOTE: with
+    # `[recording] type=local` the artifact is ARCHIVED into
+    # `{path}/{YYYYMMDD}/` during CDR enrichment, so the original rec_path no
+    # longer exists — assert on the metadata event's file_size and the
+    # archived file (local download_url) instead.
     meta = await _wait_event_all(rwi, "recording_metadata_available", timeout=15)
     assert meta is not None, "recording_metadata_available not received (CDR missing recorder entry?)"
     assert meta.get("call_id") == call_id, meta
-    record_end = await _wait_event_all(rwi, "record_end", timeout=10)
-    assert record_end is not None, "record_end not received"
-    assert record_end.get("call_id") == call_id, record_end
+    md = meta.get("metadata") or {}
+    assert md.get("file_size", 0) > 1000, (
+        f"recording too small ({md.get('file_size')} bytes) — no audio captured"
+    )
+    download_url = str(md.get("download_url") or "")
+    if download_url and not download_url.startswith(("http://", "https://", "s3://")):
+        # Local storage: download_url is the archived path relative to the
+        # PBX process working directory.
+        archived_file = Path(download_url)
+        if not archived_file.is_absolute():
+            archived_file = pbx.work_dir / archived_file
+        assert archived_file.exists(), f"archived recording missing: {archived_file}"
+        assert archived_file.stat().st_size > 1000, (
+            f"archived recording too small ({archived_file.stat().st_size} bytes)"
+        )
+    else:
+        # Non-local storage: fall back to the original path when it survives.
+        assert rec_path.exists() and rec_path.stat().st_size > 1000, (
+            f"recording file missing or empty: {rec_path}"
+        )
 
 
 @pytest.mark.asyncio
@@ -136,6 +163,17 @@ async def test_outbound_midcall_record_start_stop(pbx, sipbot_pool, rwi, tmp_pat
         f"mid-call record.start failed on originated call: {start_resp}"
     )
     assert await _wait_event_all(rwi, "record_started", timeout=10) is not None
+
+    # Inject real audio (see test_outbound_originate_record_on_answer) —
+    # without a source the recording is a header-only WAV.
+    tone = tmp_path / "ob_tone.wav"
+    h.generate_sine_wav(tone, 440.0, 4.0, 8000, 0.4)
+    play_resp = await rwi.send_request("media.play", {
+        "call_id": call_id,
+        "source": {"type": "file", "uri": str(tone)},
+        "loop_playback": True,
+    })
+    assert play_resp.get("status") == "success", play_resp
 
     await asyncio.sleep(2)
 

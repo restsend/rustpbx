@@ -54,6 +54,9 @@ pub(crate) struct DomainReportParams {
     /// Skill-group filter (CC domain — consumed by the addon's handlers).
     #[allow(dead_code)]
     pub group_id: Option<String>,
+    /// Trunk id filter (trunk heat — consumed by the core handler).
+    #[allow(dead_code)]
+    pub trunk_id: Option<String>,
 }
 
 impl DomainReportParams {
@@ -299,6 +302,32 @@ async fn domain_route(
     }
 }
 
+async fn domain_trunk_heat(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+    axum::extract::Query(params): axum::extract::Query<DomainReportParams>,
+) -> Response {
+    if !has_reports_access(&state, &user, false).await {
+        return crate::console::config_helpers::permission_denied();
+    }
+    let trunk_id = params
+        .trunk_id
+        .clone()
+        .filter(|g| !g.is_empty())
+        .and_then(|g| g.parse::<i64>().ok());
+    let mut q = params.resolve();
+    // Heatmaps are always weekday × hour-of-day grids.
+    q.bucket = crate::report::TimeBucket::Hour;
+    match crate::report::domain_report::trunk_heat(state.db(), &q, trunk_id).await {
+        Ok(grids) => Json(json!({
+            "data": grids,
+            "meta": {"from": q.from.to_rfc3339(), "to": q.to.to_rfc3339(), "bucket": bucket_label(&q)},
+        }))
+        .into_response(),
+        Err(e) => Json(json!({"error": format!("trunk heat failed: {e}")})).into_response(),
+    }
+}
+
 async fn domain_route_export(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
@@ -459,6 +488,7 @@ pub fn api_urls() -> Router<Arc<ConsoleState>> {
         .route("/reports/v2/call/export", get(domain_call_export))
         .route("/reports/v2/trunk", get(domain_trunk))
         .route("/reports/v2/trunk/export", get(domain_trunk_export))
+        .route("/reports/v2/trunk/heat", get(domain_trunk_heat))
         .route("/reports/v2/route", get(domain_route))
         .route("/reports/v2/route/export", get(domain_route_export))
         .route("/reports/v2/voicemail", get(domain_voicemail))

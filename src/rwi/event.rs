@@ -934,6 +934,11 @@ pub struct IvrNodeExited {
     pub next_node_id: Option<String>,
     pub hangup_reason: Option<String>,
     pub call_result: Option<String>,
+    /// Terminal marker: `true` when this node's action ended the flow
+    /// (hangup / transfer / jump / exit) or the session terminated on it.
+    /// `None` when the flow continues into a successor node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end: Option<bool>,
     pub extra: Option<serde_json::Value>,
 }
 rwi_event!(IvrNodeExited, "ivr_node_exited");
@@ -947,6 +952,9 @@ pub struct IvrFlowCompleted {
     pub final_result: String,
     pub completion_time: String,
     pub final_routing_target: Option<String>,
+    /// Always `true` — this event itself is the flow's end marker; the field
+    /// lets consumers filter uniformly on the `end` flag across IVR events.
+    pub end: bool,
     pub extra: Option<serde_json::Value>,
 }
 rwi_event!(IvrFlowCompleted, "ivr_flow_completed");
@@ -1008,6 +1016,19 @@ pub struct IvrStepTrace {
     /// Companion detail for [`end_reason`](Self::end_reason) (e.g. transfer target).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_detail: Option<String>,
+    /// Identifier of the next node the flow advanced to (the successor's
+    /// `step_id` in step mode). Carried once the successor is known; absent
+    /// on terminal steps.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_node_id: Option<String>,
+    /// `step_id` of the next node — identical to [`Self::next_node_id`] in
+    /// step mode; both are emitted so consumers can key on either name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step_id: Option<String>,
+    /// Terminal marker: `true` on the flow's final observable step
+    /// (terminal node, session end, or caller hangup mid-flow).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end: Option<bool>,
 }
 rwi_event!(IvrStepTrace, "ivr_step_trace");
 
@@ -1044,6 +1065,7 @@ mod tests {
                 next_node_id: None,
                 hangup_reason: None,
                 call_result: None,
+                end: None,
                 extra: None,
             },
             None,
@@ -1057,6 +1079,7 @@ mod tests {
                 final_result: "completed".into(),
                 completion_time: "2026-01-01T00:00:02Z".into(),
                 final_routing_target: None,
+                end: true,
                 extra: None,
             },
             None,

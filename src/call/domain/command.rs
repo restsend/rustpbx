@@ -682,6 +682,12 @@ pub struct RecordConfig {
     /// `None` the session generates one.
     #[serde(default)]
     pub unique_id: Option<String>,
+    /// Discard this segment when it stops: the file is deleted and no
+    /// recording event / CDR entry is produced. Used by the outbound
+    /// pre-answer ringback segment, which is kept only when the call is
+    /// never answered.
+    #[serde(default)]
+    pub discard: Option<bool>,
 }
 
 impl Default for RecordConfig {
@@ -698,6 +704,7 @@ impl Default for RecordConfig {
             label: None,
             notify_app: None,
             unique_id: None,
+            discard: None,
         }
     }
 }

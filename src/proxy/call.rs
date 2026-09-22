@@ -868,6 +868,21 @@ impl CallModule {
                         true,
                     ));
                 }
+                crate::call::TransferEndpoint::Realtime(preset) => {
+                    let preset_name = preset.trim();
+                    if preset_name.is_empty() {
+                        return Err(RouteError::from((
+                            anyhow!("always-forwarding realtime preset name is empty"),
+                            Some(rsipstack::sip::StatusCode::ServerInternalError),
+                        ))
+                        .with_code(&crate::proxy::error_catalog::ALWAYS_FWD_REALTIME_EMPTY));
+                    }
+                    forced_pending_app = Some((
+                        "realtime".to_string(),
+                        Some(serde_json::json!({ "preset": preset_name })),
+                        true,
+                    ));
+                }
             }
         }
 
@@ -1323,6 +1338,9 @@ impl CallModule {
                 }
                 if overrides.auto_start_at.is_some() {
                     merged.auto_start_at = overrides.auto_start_at;
+                }
+                if !overrides.auto_start_except.is_empty() {
+                    merged.auto_start_except = overrides.auto_start_except.clone();
                 }
                 if overrides.filename_pattern.is_some() {
                     merged.filename_pattern = overrides.filename_pattern.clone();

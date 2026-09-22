@@ -45,7 +45,9 @@ def _trunk_caller(sipbot_pool, pbx, *, target, hangup=8):
 
 def _cdr_dir(pbx) -> Path:
     import datetime
-    return pbx.project_root / "config" / "cdr" / datetime.date.today().strftime("%Y%m%d")
+    # The PBX writes CDRs under its working directory (the e2e run dir), not
+    # the project root — mirrors the `cdr_dir` conftest fixture.
+    return pbx.work_dir / "config" / "cdr" / datetime.date.today().strftime("%Y%m%d")
 
 
 def _pbx_log(pbx) -> str:
@@ -139,7 +141,7 @@ async def test_stage1_invalid_ivr_toml_records_parse_error(pbx, sipbot_pool):
     cue and the trace records the specific parse failure (which file + error)."""
     import json
 
-    bad_file = pbx.project_root / "bad-ivr-parse.toml"
+    bad_file = pbx.work_dir / "bad-ivr-parse.toml"
     bad_file.write_text("[ivr\nthis is not valid toml {{{", encoding="utf-8")
 
     pbx.config_builder.set_realms(["127.0.0.1"])

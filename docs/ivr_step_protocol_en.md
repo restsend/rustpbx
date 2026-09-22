@@ -600,6 +600,23 @@ Every step is recorded. View in: IVR Editor → Debug → select session. Each e
 
 RWI subscribers receive trace entries in real-time (event type: `ivr_step_trace`).
 
+#### `ivr_step_trace` next / end protocol (per-node execution markers)
+
+Each step event payload carries three additional fields that express "where the flow goes after this node / whether it ended":
+
+| Field | When present | Meaning |
+|---|---|---|
+| `next_node_id` / `next_step_id` | Flow continues | Identifier of the successor node (identical values in step mode — the successor's `step_id`; both names are emitted so consumers can key on either). Events are emitted once the successor resolves, so **whenever a next node exists, the pointer is present** |
+| `end` | Flow terminated | `true` marks the flow's last observable step: a terminal action (hangup / transfer / jump / exit), the session-end entry, or a step cut short by caller hangup / cancellation / error |
+
+Semantics:
+
+- Each per-node event of the "execute one node → auto-fetch the next" loop carries `next_node_id`/`next_step_id` and no `end`;
+- **Hangup or jump nodes** (no successor) → `end: true` (transfers also carry `end_reason`/`end_detail`);
+- **Caller hangs up mid-flow**: the final notification is still emitted — the last step's trigger is rewritten to `user_hangup`, followed by a `session_end` entry with `end: true` + `end_reason: user_hangup`;
+- **Resumable hand-offs** (queue/bridge with return_app, jump_ivr resume) do NOT end the flow: no `end` marker, no `session_end`; the resumed successor continues the event stream via the `resume` trigger (exactly-once);
+- Provider `POST {url}/end`: **every session termination notifies the provider — including caller hangup (`user_hangup`)**; only a system cancellation (shutdown) skips the POST.
+
 ### Reference Implementation
 
 `examples/unified_ivr_provider.py` — complete Python provider, zero external dependencies. Covers: session state machine, Prompt → DtmfMenu → Transfer/Queue/Hangup, DTMF timeout handling, invalid digit retry with 3-strike hangup, plus a WebSocket PCM16 bridge echo server and SIP INFO body builders (`ivr.exec`).

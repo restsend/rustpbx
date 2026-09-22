@@ -313,6 +313,19 @@ entries = []
 """,
         )
         _add_step_route(pbx, "to-ivr-jump", "ivr-jump", url)
+        # jump_ivr resolves the route point through call routing (07fccc0f):
+        # pin the realm so `sip:ivr-target` classifies as local, and add the
+        # route that hands the call to the ivr-target tree IVR config.
+        pbx.config_builder.set_realms(["127.0.0.1"])
+        pbx.config_builder.add_route(
+            "to-ivr-target",
+            match={"to.user": "ivr-target"},
+            priority=10,
+            action="application",
+            app="ivr",
+            app_params={"file": "config/ivr/ivr-target.toml"},
+            auto_answer=True,
+        )
         h.boot_pbx(pbx)
 
         agent = await _reg_callee(sipbot_pool, pbx, h.ua_port(15143), "1002")
@@ -488,7 +501,9 @@ async def test_step_ivr_await_result_not_connected(pbx, sipbot_pool, tmp_path):
         assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
 
         outcome = await _wait_transfer_result(hits)
-        assert outcome.get("outcome") == "not_connected", f"unexpected outcome: {outcome}"
+        # CPA transfer outcomes: a 486 rejection classifies as `busy` (the
+        # most precise outcome) — not the coarse `not_connected`.
+        assert outcome.get("outcome") == "busy", f"unexpected outcome: {outcome}"
 
         # The caller was never handed off and must still be alive while the IVR
         # plays the post-transfer prompt.

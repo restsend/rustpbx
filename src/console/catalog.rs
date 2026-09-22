@@ -485,6 +485,18 @@ pub async fn scan_queue_catalog_opt(
 pub struct ForwardingCatalog {
     pub queues: Vec<ForwardingQueue>,
     pub ivr_projects: Vec<ForwardingIvr>,
+    /// Configured `[[realtime]]` presets — name/protocol/model only; the
+    /// `api_key`/`url`/`instructions` never leave the server config.
+    pub realtime_presets: Vec<ForwardingRealtimePreset>,
+}
+
+/// UI-safe projection of one `[[realtime]]` preset for the destination
+/// selector. Deliberately omits credentials and endpoints.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ForwardingRealtimePreset {
+    pub name: String,
+    pub protocol: String,
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -507,22 +519,44 @@ impl ForwardingCatalog {
         Self {
             queues: Vec::new(),
             ivr_projects: Vec::new(),
+            realtime_presets: Vec::new(),
         }
+    }
+
+    /// UI-safe projections of the configured `[[realtime]]` presets.
+    pub fn realtime_entries(presets: &[crate::config::RealtimePreset]) -> Vec<ForwardingRealtimePreset> {
+        presets
+            .iter()
+            .map(|preset| ForwardingRealtimePreset {
+                name: preset.name.clone(),
+                protocol: preset
+                    .protocol
+                    .as_deref()
+                    .and_then(crate::call::realtime::RealtimeProtocolKind::parse)
+                    .unwrap_or(crate::call::realtime::RealtimeProtocolKind::OpenAi)
+                    .as_str()
+                    .to_string(),
+                model: preset.model.clone(),
+            })
+            .collect()
     }
 }
 
 pub async fn build_forwarding_catalog(proxy_config: &ProxyConfig) -> ForwardingCatalog {
-    build_forwarding_catalog_opt(proxy_config, None).await
+    build_forwarding_catalog_opt(proxy_config, None, &[]).await
 }
 
 pub async fn build_forwarding_catalog_opt(
     proxy_config: &ProxyConfig,
     store: Option<&GeneratedConfigStore>,
+    realtime_presets: &[crate::config::RealtimePreset],
 ) -> ForwardingCatalog {
     let mut catalog = ForwardingCatalog::empty();
 
     let queue_store = store.filter(|s| s.is_db());
     let ivr_store = store.filter(|s| s.is_db());
+
+    catalog.realtime_presets = ForwardingCatalog::realtime_entries(realtime_presets);
 
     catalog.queues = scan_queue_catalog_opt(
         &proxy_config.generated_queue_dir(),

@@ -8,7 +8,7 @@
 //! PostgreSQL stay consistent. Zero schema assumptions beyond tables that
 //! already exist.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, EntityTrait, ExprTrait, FromQueryResult, QueryFilter,
     QueryOrder, QuerySelect,
@@ -646,4 +646,153 @@ where
             webrtc_locations: r.avg_webrtc.unwrap_or(0.0),
         })
         .collect())
+}
+
+// ════════════════════════════════════════════════════════════════════
+// trunk heat — call-quality / ring-delay grids per weekday × hour
+// ════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct TrunkHeatGrids {
+    /// Average ring/ringback delay (s) before answer — includes early-media
+    /// ringback: answer delay = (ended − started) − talk duration.
+    pub ring: Vec<Vec<f64>>,
+    /// Average post-answer packet-loss % (trunk-facing leg, RTCP).
+    pub loss: Vec<Vec<f64>>,
+    /// Average RTCP jitter (ms) on the trunk-facing leg.
+    pub jitter: Vec<Vec<f64>>,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct TrunkHeatRow {
+    #[sea_orm(column = "bucket")]
+    bucket: i64,
+    answered: i64,
+    ring_sum: Option<f64>,
+    loss_sum: Option<f64>,
+    loss_cnt: i64,
+    jitter_sum: Option<f64>,
+    jitter_cnt: i64,
+}
+
+/// Per (weekday × hour) quality grids for one trunk (or all trunks).
+///
+/// - `ring` derives the pre-answer delay from existing timestamp columns
+///   (ended − started − talk), so ringback/early-media needs no extra data.
+/// - `loss` / `jitter` average the promoted media-quality columns (NULL when
+///   a call carried no RTCP report — those rows are excluded from averages).
+pub async fn trunk_heat<C>(
+    conn: &C,
+    q: &DomainQuery,
+    trunk_id: Option<i64>,
+) -> anyhow::Result<TrunkHeatGrids>
+where
+    C: ConnectionTrait,
+{
+    use crate::report::epoch_diff_secs_sql;
+    let backend = conn.get_database_backend();
+    let bucket_expr = bucket_index_expr(backend, "started_at", q.bucket.secs(), q.tz_offset_secs);
+    let trunk_dim: sea_orm::sea_query::SimpleExpr = Expr::case(
+        CdrCol::Direction.eq("outbound"),
+        Expr::col(CdrCol::OutboundSipTrunkId),
+    )
+    .finally(Expr::col(CdrCol::SipTrunkId))
+    .into();
+    // CAST keeps the SUM in the float domain on every backend (SQLite
+    // returns INTEGER for SUM over an integer CASE).
+    // Pre-answer delay, clamped to >= 0 (rounding can produce ±1s).
+    let ring_raw = format!(
+        "({} - {})",
+        epoch_diff_secs_sql(backend, "substr(started_at, 1, 19)", "substr(ended_at, 1, 19)"),
+        "duration_secs"
+    );
+    let ring_expr = match backend {
+        sea_orm::DatabaseBackend::Sqlite => format!("MAX(0.0, {ring_raw})"),
+        _ => format!("GREATEST(0.0, {ring_raw})"),
+    };
+    let answered_sql = "status IN ('answered', 'completed')";
+
+    let mut query = CdrEntity::find()
+        .select_only()
+        .column_as(bucket_expr, "bucket")
+        .column_as(Expr::cust(format!("CAST(SUM(CASE WHEN {answered_sql} THEN 1 ELSE 0 END) AS BIGINT)")), "answered")
+        // CAST on the aggregate output: SQLite's SUM storage follows its
+        // inputs (INTEGER here), which would fail the f64 decoder otherwise.
+        .column_as(
+            Expr::cust(format!(
+                "CAST(SUM(CASE WHEN {answered_sql} THEN {ring_expr} ELSE 0.0 END) AS DOUBLE)"
+            )),
+            "ring_sum",
+        )
+        .column_as(
+            Expr::cust(format!(
+                "CAST(SUM(CASE WHEN {answered_sql} THEN 1 ELSE 0 END) AS BIGINT)"
+            )),
+            "answered",
+        )
+        .column_as(
+            Expr::cust("CAST(SUM(media_loss_pct) AS DOUBLE)"),
+            "loss_sum",
+        )
+        .column_as(Expr::cust("COUNT(media_loss_pct)"), "loss_cnt")
+        .column_as(
+            Expr::cust("CAST(SUM(media_jitter_ms) AS DOUBLE)"),
+            "jitter_sum",
+        )
+        .column_as(Expr::cust("COUNT(media_jitter_ms)"), "jitter_cnt")
+        .filter(q.window())
+        .filter(DomainQuery::primary_legs_only())
+        .group_by(Expr::cust("bucket"))
+        .order_by_asc(Expr::cust("bucket"));
+
+    if let Some(tid) = trunk_id {
+        query = query.filter(trunk_dim.eq(tid));
+    }
+
+    let rows: Vec<TrunkHeatRow> = query
+        .into_model()
+        .all(conn)
+        .await
+        .map_err(|e| anyhow::anyhow!("trunk heat: {e}"))?;
+
+    let mut ring = [[0f64; 24]; 7];
+    let mut ring_cnt = [[0i64; 24]; 7];
+    let mut loss = [[0f64; 24]; 7];
+    let mut loss_cells = [[0i64; 24]; 7];
+    let mut jitter = [[0f64; 24]; 7];
+    let mut jitter_cells = [[0i64; 24]; 7];
+    for r in rows {
+        let start = bucket_start_utc(r.bucket, q.bucket.secs(), q.tz_offset_secs);
+        let local = start + chrono::Duration::seconds(q.tz_offset_secs);
+        use chrono::Datelike;
+        let (d, h) = (local.weekday().num_days_from_monday() as usize, local.hour() as usize);
+        if r.answered > 0 {
+            ring[d][h] += r.ring_sum.unwrap_or(0.0);
+            ring_cnt[d][h] += r.answered;
+        }
+        if r.loss_cnt > 0 {
+            loss[d][h] += r.loss_sum.unwrap_or(0.0);
+            loss_cells[d][h] += r.loss_cnt;
+        }
+        if r.jitter_cnt > 0 {
+            jitter[d][h] += r.jitter_sum.unwrap_or(0.0);
+            jitter_cells[d][h] += r.jitter_cnt;
+        }
+    }
+
+    let avg = |sum: &[[f64; 24]; 7], cnt: &[[i64; 24]; 7]| {
+        (0..7)
+            .map(|d| {
+                (0..24)
+                    .map(|h| if cnt[d][h] > 0 { sum[d][h] / cnt[d][h] as f64 } else { 0.0 })
+                    .collect::<Vec<f64>>()
+            })
+            .collect::<Vec<Vec<f64>>>()
+    };
+
+    Ok(TrunkHeatGrids {
+        ring: avg(&ring, &ring_cnt),
+        loss: avg(&loss, &loss_cells),
+        jitter: avg(&jitter, &jitter_cells),
+    })
 }

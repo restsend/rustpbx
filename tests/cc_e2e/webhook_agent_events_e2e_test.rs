@@ -183,6 +183,7 @@ async fn test_recording_metadata_webhook_carries_agent_context() {
                 call_end_time: Some("2026-01-01T00:01:00Z".to_string()),
                 upload_time: Some("2026-01-01T00:02:00Z".to_string()),
                 full: true,
+                source: Some("agent".to_string()),
                 // Addon-contributed keys are forwarded verbatim in the generic bag.
                 extra: Some(std::collections::HashMap::from([
                     ("agent_id".to_string(), "agent-42".to_string()),

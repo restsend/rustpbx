@@ -283,6 +283,10 @@ pub async fn page_queue_create(
     let forwarding_catalog = if let Some(proxy_config) =
         crate::console::catalog::load_proxy_config(state.app_state().as_ref())
     {
+        let realtime_presets = state
+            .app_state()
+            .and_then(|app| app.config().realtime.clone())
+            .unwrap_or_default();
         let store = state.app_state().and_then(|app| {
             let config = app.config();
             if config.proxy.use_db_config() {
@@ -294,7 +298,12 @@ pub async fn page_queue_create(
                 None
             }
         });
-        crate::console::catalog::build_forwarding_catalog_opt(&proxy_config, store.as_ref()).await
+        crate::console::catalog::build_forwarding_catalog_opt(
+            &proxy_config,
+            store.as_ref(),
+            &realtime_presets,
+        )
+        .await
     } else {
         crate::console::catalog::ForwardingCatalog::empty()
     };
@@ -347,6 +356,10 @@ pub async fn page_queue_edit(
     let forwarding_catalog = if let Some(proxy_config) =
         crate::console::catalog::load_proxy_config(state.app_state().as_ref())
     {
+        let realtime_presets = state
+            .app_state()
+            .and_then(|app| app.config().realtime.clone())
+            .unwrap_or_default();
         let store = state.app_state().and_then(|app| {
             let config = app.config();
             if config.proxy.use_db_config() {
@@ -358,7 +371,12 @@ pub async fn page_queue_edit(
                 None
             }
         });
-        crate::console::catalog::build_forwarding_catalog_opt(&proxy_config, store.as_ref()).await
+        crate::console::catalog::build_forwarding_catalog_opt(
+            &proxy_config,
+            store.as_ref(),
+            &realtime_presets,
+        )
+        .await
     } else {
         crate::console::catalog::ForwardingCatalog::empty()
     };

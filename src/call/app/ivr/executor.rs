@@ -293,29 +293,6 @@ impl StepIvrApp {
         self.pending_trace.take()
     }
 
-    /// Finalize the pending WaitFor trace: fill in `step_end_time` and
-    /// `duration_ms`, then emit ONE `ivr_step_trace` keeping the step's
-    /// original trigger (e.g. `phone_collected`, `dtmf`) with its detail.
-    /// Completion is observable via `step_end_time`; `session_end` stays
-    /// reserved for on_exit — with one exception: resumable hand-offs
-    /// (bridge/queue with return app, JumpIvr) suppress their session_end
-    /// entry, so the terminal step's completion entry carries the end_reason
-    /// instead (see the Terminal arm of `__exec_node`).
-    fn record_pending_session_end(&mut self) {
-        let Some(pending) = self.pending_take() else {
-            return;
-        };
-        let duration_ms = self
-            .pending_start_instant
-            .map(|start| start.elapsed().as_millis() as u64)
-            .unwrap_or(0);
-        self.record_trace(IvrTraceEntry {
-            step_end_time: Some(chrono::Utc::now().to_rfc3339()),
-            duration_ms,
-            ..pending
-        });
-    }
-
     fn record_trace(&self, entry: IvrTraceEntry) {
         if let Some(t) = self.effective_trace() {
             let ent = entry.clone();
@@ -344,6 +321,9 @@ impl StepIvrApp {
                 sip_headers: Some(self.sess.sip_headers.clone()),
                 end_reason: entry.end_reason,
                 end_detail: entry.end_detail,
+                next_node_id: entry.next_node_id,
+                next_step_id: entry.next_step_id,
+                end: entry.end,
             };
             let guard = gw.read();
             guard.fan_out(&call_id, &ev);
@@ -658,14 +638,22 @@ impl StepIvrApp {
         match result {
             Ok(action_result) => {
                 // Finalize any pending trace (from a previous WaitFor step) before
-                // recording the current step's trace.
-                if let Some(pending) = self.pending_take() {
+                // recording the current step's trace. The current node IS that
+                // step's successor — carry its id as the step's next pointer.
+                if let Some(mut pending) = self.pending_take() {
                     let end = std::time::Instant::now();
                     let duration = self
                         .pending_start_instant
                         .map(|s| end.duration_since(s).as_millis() as u64)
                         .unwrap_or(0);
                     let step_end = chrono::Utc::now().to_rfc3339();
+                    let next_id = node
+                        .step_id
+                        .clone()
+                        .or_else(|| step_id.clone())
+                        .or_else(|| node.step_name.clone());
+                    pending.next_node_id = next_id.clone();
+                    pending.next_step_id = next_id;
                     self.record_trace(IvrTraceEntry {
                         step_end_time: Some(step_end),
                         duration_ms: duration,
@@ -692,6 +680,15 @@ impl StepIvrApp {
                             }
                             _ => None,
                         };
+                        // Terminal flow marker: this step ended the flow. A
+                        // resumable hand-off (queue/bridge with a return app,
+                        // JumpIvr resume) does NOT end the logical flow — it
+                        // continues in the successor — so no `end` marker.
+                        let flow_ended = !matches!(
+                            &terminal,
+                            TerminalAction::Transfer(target)
+                                if Self::is_resumable_handoff(&node, target)
+                        );
                         self.record_trace(IvrTraceEntry {
                             session_id: session_id.clone(),
                             caller: caller.clone(),
@@ -710,6 +707,9 @@ impl StepIvrApp {
                             extra: self.extra.clone(),
                             end_reason: handoff_end.as_ref().map(|(tag, _)| tag.clone()),
                             end_detail: handoff_end.map(|(_, target)| target),
+                            next_node_id: None,
+                            next_step_id: None,
+                            end: flow_ended.then_some(true),
                         });
                         match terminal {
                             TerminalAction::Transfer(target) => {
@@ -743,6 +743,9 @@ impl StepIvrApp {
                             extra: self.extra.clone(),
                             end_reason: None,
                             end_detail: None,
+                            next_node_id: None,
+                            next_step_id: None,
+                            end: None,
                         });
                         self.current_node = Some(
                             self.request_next(Some(ProviderEvent::AudioComplete {
@@ -808,8 +811,13 @@ impl StepIvrApp {
                                 extra: self.extra.clone(),
                                 end_reason: None,
                                 end_detail: None,
+                                next_node_id: None,
+                                next_step_id: None,
+                                end: None,
                             });
-                            self.record_pending_session_end();
+                            // The pending trace is flushed by `request_next`
+                            // once the successor resolves, so this step's
+                            // event carries its next pointer.
                             self.current_node =
                                 Some(self.request_next(Some(provider_event)).await?);
                             return Box::pin(self.__exec_node(ctrl, ctx)).await;
@@ -837,6 +845,16 @@ impl StepIvrApp {
                             let _ = started;
                             self.step_index += 1;
                             self.increment_total_steps();
+                            // Resolve the successor FIRST so the record-control
+                            // step's trace can carry its next pointer.
+                            let (next_node, next_id) = if let Some(ref next) = node.next {
+                                let id = next.step_id.clone().or_else(|| next.step_name.clone());
+                                (Some(*next.clone()), id)
+                            } else {
+                                let next = self.request_next(Some(provider_event)).await?;
+                                let id = next.step_id.clone().or_else(|| next.step_name.clone());
+                                (Some(next), id)
+                            };
                             self.record_trace(IvrTraceEntry {
                                 session_id: session_id.clone(),
                                 caller: caller.clone(),
@@ -855,17 +873,13 @@ impl StepIvrApp {
                                 extra: self.extra.clone(),
                                 end_reason: None,
                                 end_detail: None,
+                                next_node_id: next_id.clone(),
+                                next_step_id: next_id,
+                                end: None,
                             });
-                            if let Some(ref next) = node.next {
-                                self.current_trigger =
-                                    Some(crate::rwi::TriggerInfo::new("record_control"));
-                                self.current_node = Some(*next.clone());
-                            } else {
-                                self.current_trigger =
-                                    Some(crate::rwi::TriggerInfo::new("record_control"));
-                                self.current_node =
-                                    Some(self.request_next(Some(provider_event)).await?);
-                            }
+                            self.current_trigger =
+                                Some(crate::rwi::TriggerInfo::new("record_control"));
+                            self.current_node = next_node;
                             return Box::pin(self.__exec_node(ctrl, ctx)).await;
                         }
 
@@ -898,6 +912,9 @@ impl StepIvrApp {
                             extra: self.extra.clone(),
                             end_reason: None,
                             end_detail: None,
+                            next_node_id: None,
+                            next_step_id: None,
+                            end: None,
                         });
                         AppAction::Continue
                     }
@@ -905,6 +922,15 @@ impl StepIvrApp {
                 Ok(app_action)
             }
             Err(e) => {
+                // Recover via /fail → IVR fallback instead of ending the session,
+                // then record the failed step with the recovery node as its next
+                // pointer.
+                let error_text = e.to_string();
+                let recovery = self.recover_from_execute_failure(e).await?;
+                let next_id = recovery
+                    .step_id
+                    .clone()
+                    .or_else(|| recovery.step_name.clone());
                 self.record_trace(IvrTraceEntry {
                     session_id,
                     caller,
@@ -914,7 +940,7 @@ impl StepIvrApp {
                     provider_url: None,
                     action_type: node_type_str,
                     action_json,
-                    error: Some(e.to_string()),
+                    error: Some(error_text),
                     step_id,
                     step_name,
                     step_start_time: self.current_step_start_time.clone(),
@@ -923,9 +949,10 @@ impl StepIvrApp {
                     extra: self.extra.clone(),
                     end_reason: None,
                     end_detail: None,
+                    next_node_id: next_id.clone(),
+                    next_step_id: next_id,
+                    end: None,
                 });
-                // Recover via /fail → IVR fallback instead of ending the session.
-                let recovery = self.recover_from_execute_failure(e).await?;
                 self.current_node = Some(recovery);
                 return Box::pin(self.__exec_node(ctrl, ctx)).await;
             }
@@ -1057,6 +1084,9 @@ impl StepIvrApp {
             extra: self.extra.clone(),
             end_reason: None,
             end_detail: None,
+            next_node_id: None,
+            next_step_id: None,
+            end: None,
         });
     }
 
@@ -1266,20 +1296,19 @@ impl StepIvrApp {
             transferred_from: self.transferred_from.clone(),
         };
 
-        // Finalize and record pending trace (WaitFor step just completed).
-        if let Some(pending) = self.pending_take() {
+        // Finalize the pending WaitFor trace's timing but HOLD it until the
+        // successor resolves, so the recorded entry can carry the successor's
+        // id as its next pointer (single-notification protocol: each step
+        // event answers "what ran, and what runs next").
+        let mut completed_pending = self.pending_take().map(|mut pending| {
             let end = std::time::Instant::now();
-            let duration = self
+            pending.duration_ms = self
                 .pending_start_instant
                 .map(|s| end.duration_since(s).as_millis() as u64)
                 .unwrap_or(0);
-            let step_end = chrono::Utc::now().to_rfc3339();
-            self.record_trace(IvrTraceEntry {
-                step_end_time: Some(step_end),
-                duration_ms: duration,
-                ..pending
-            });
-        }
+            pending.step_end_time = Some(chrono::Utc::now().to_rfc3339());
+            pending
+        });
 
         let start = std::time::Instant::now();
         let result = self.provider.next_action(ctx.clone()).await;
@@ -1394,6 +1423,22 @@ impl StepIvrApp {
             }
             None => crate::rwi::TriggerInfo::new("unknown"),
         });
+
+        // Record the completed predecessor now that the successor is known:
+        // carry the successor's id as the predecessor's next pointer, or mark
+        // the predecessor as the flow's last observable step when the provider
+        // failed and the flow drops into recovery/hangup.
+        if let Some(mut pending) = completed_pending.take() {
+            match &result {
+                Ok(node) => {
+                    let next_id = node.step_id.clone().or_else(|| node.step_name.clone());
+                    pending.next_node_id = next_id.clone();
+                    pending.next_step_id = next_id;
+                }
+                Err(_) => pending.end = Some(true),
+            }
+            self.record_trace(pending);
+        }
 
         // Fallback on provider error instead of propagating
         match result {
@@ -1939,6 +1984,9 @@ impl CallApp for StepIvrApp {
                 extra: self.extra.clone(),
                 end_reason: None,
                 end_detail: None,
+                next_node_id: None,
+                next_step_id: None,
+                end: None,
             });
             return Ok(AppAction::Continue);
         }
@@ -2050,7 +2098,8 @@ impl CallApp for StepIvrApp {
                 }
             }
             AppEvent::TransferResult { outcome } => {
-                self.record_pending_session_end();
+                // Pending trace flushes inside `request_next` with the
+                // successor attached.
                 self.current_node = Some(
                     self.request_next(Some(ProviderEvent::TransferResult { outcome }))
                         .await?,
@@ -2161,6 +2210,9 @@ impl CallApp for StepIvrApp {
                 .unwrap_or(0);
             self.pending_start_instant = None;
             let step_end = chrono::Utc::now().to_rfc3339();
+            // The session terminated while this step was in flight — it is
+            // the flow's last observable step.
+            pending.end = Some(true);
             self.record_trace(IvrTraceEntry {
                 step_end_time: Some(step_end),
                 duration_ms: duration,
@@ -2170,10 +2222,14 @@ impl CallApp for StepIvrApp {
 
         let mut end_reason_label =
             Self::end_reason_label(&reason, self.last_transfer_target.as_deref()).to_string();
-        let skip_provider_end = matches!(
-            reason,
-            crate::call::app::ExitReason::RemoteHangup(_) | crate::call::app::ExitReason::Cancelled
-        );
+        // Provider notification: caller hangup IS a session end — the provider
+        // receives `/end` with the `user_hangup` tag (protocol vocabulary)
+        // exactly like any other termination. Only a system cancellation
+        // (shutdown) skips the POST, to avoid hammering providers during a
+        // restart storm. Resumable hand-offs still notify — the flow's
+        // continuation is the successor session's concern.
+        let skip_provider_end =
+            matches!(reason, crate::call::app::ExitReason::Cancelled);
         let mut end_reason = match reason {
             crate::call::app::ExitReason::Normal => SessionEndReason {
                 reason: SessionEndTag::Normal,
@@ -2282,6 +2338,9 @@ impl CallApp for StepIvrApp {
                 extra: last_extra,
                 end_reason: Some(end_sr.reason.clone()),
                 end_detail: end_sr.detail.clone(),
+                next_node_id: None,
+                next_step_id: None,
+                end: Some(true),
             });
         }
 
@@ -6605,7 +6664,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_remote_hangup_skips_provider_session_end() {
+    async fn test_remote_hangup_notifies_provider_session_end() {
         let provider = Arc::new(MockProvider::new(vec![ActionNode::new(
             EntryAction::Prompt {
                 file: Some("hello.wav".into()),
@@ -6630,8 +6689,8 @@ mod tests {
             .expect("remote hangup exit should succeed");
 
         assert!(
-            !*provider.end_called.lock().unwrap(),
-            "remote hangup must skip provider session end"
+            *provider.end_called.lock().unwrap(),
+            "caller hangup is a session end — the provider must receive /end (user_hangup)"
         );
     }
 
@@ -6720,9 +6779,120 @@ mod tests {
             Some(crate::call::app::ivr::provider::SessionEndTag::UserHangup),
             "session_end trace must carry the end reason"
         );
+        assert_eq!(
+            session_end.end,
+            Some(true),
+            "session_end trace must carry the end marker"
+        );
         assert!(
-            !*provider.end_called.lock().unwrap(),
-            "remote hangup must skip provider session end"
+            *provider.end_called.lock().unwrap(),
+            "caller hangup is a session end — the provider must receive /end (user_hangup)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_step_traces_carry_next_pointer_and_end_marker() {
+        use crate::call::app::ivr::trace::IvrTraceCollector;
+
+        let trace = IvrTraceCollector::new();
+
+        // Provider-driven menu (empty entries): every digit forwards to the
+        // provider. Step 1 = DtmfMenu, step 2 = Transfer (terminal).
+        let menu = ActionNode::new(EntryAction::DtmfMenu {
+            greeting: Some("menu.wav".into()),
+            greeting_text: None,
+            greeting_record_list: None,
+            greeting_voice: None,
+            timeout_ms: 5000,
+            max_retries: 3,
+            entries: HashMap::new(),
+            timeout_action: None,
+            invalid_action: None,
+            greeting_api_url: None,
+        });
+        let mut transfer = ActionNode::new(EntryAction::Transfer {
+            target: "2001".into(),
+            headers: HashMap::new(),
+            params: HashMap::new(),
+            return_app: None,
+            return_target: None,
+        });
+        transfer.step_id = Some("step-transfer".to_string());
+
+        let mut app: StepIvrApp = mock_app(vec![menu, transfer]);
+        app.trace = Some(trace.clone());
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+
+        stack
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(2000, "play", |c| {
+                matches!(c, CallCommand::Play { source: crate::call::domain::MediaSource::File { path }, .. } if path == "menu.wav")
+            })
+            .await;
+        stack.audio_complete("ivr_menu_greeting");
+        let _ = stack.drain_cmds();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // The digit forwards to the provider, which returns the terminal
+        // Transfer node: the menu step's trace must carry the successor's
+        // id as its next pointer.
+        stack.dtmf("1");
+        stack
+            .assert_cmd(2000, "stop", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(
+                2000,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let entries = trace.query_by_session("test-session").await;
+
+        let menu_exit = entries
+            .iter()
+            .find(|e| e.trigger.r#type == "dtmf")
+            .expect("menu step trace must be recorded");
+        assert_eq!(
+            menu_exit.next_step_id.as_deref(),
+            Some("step-transfer"),
+            "the step's trace must carry the successor's step_id as next_step_id"
+        );
+        assert_eq!(
+            menu_exit.next_node_id.as_deref(),
+            Some("step-transfer"),
+            "next_node_id mirrors next_step_id in step mode"
+        );
+        assert_eq!(
+            menu_exit.end,
+            None,
+            "a step the flow continues from must not carry the end marker"
+        );
+
+        let transfer_exit = entries
+            .iter()
+            .find(|e| e.step_id.as_deref() == Some("step-transfer"))
+            .expect("terminal transfer step trace must be recorded");
+        assert_eq!(
+            transfer_exit.end,
+            Some(true),
+            "a terminal node's trace must carry the end marker"
+        );
+
+        let session_end = entries
+            .iter()
+            .find(|e| e.trigger.r#type == "session_end")
+            .expect("session_end trace must be recorded");
+        assert_eq!(
+            session_end.end,
+            Some(true),
+            "the session_end trace must carry the end marker"
         );
     }
 
@@ -6756,6 +6926,9 @@ mod tests {
             extra: None,
             end_reason: None,
             end_detail: None,
+            next_node_id: None,
+            next_step_id: None,
+            end: None,
         };
 
         app.record_trace(entry(
@@ -7301,11 +7474,12 @@ mod tests {
         // out (RetryConfig::timeout_ms) and the executor enters the IVR
         // fallback, which terminates the session and notifies the provider's
         // /step/end. A queued remote hangup does not abort the in-flight
-        // provider request (see the mock-level contract tests
-        // test_remote_hangup_skips_provider_session_end /
-        // test_session_end_trace_recorded_on_remote_hangup); here we pin the
-        // current deterministic loop behavior: exactly one /step call, no
-        // retry storm, and one session-end notification after fallback.
+        // provider request; once the fallback session-end has run, the hangup
+        // path delivers its own `/end` (user_hangup) — caller hangup IS a
+        // session end under the notification protocol. Here we pin the
+        // deterministic loop behavior: exactly one /step call, no retry
+        // storm, and one session-end notification per termination (fallback
+        // hangup + caller hangup) = two.
         stack.remote_hangup();
         stack
             .join()
@@ -7314,7 +7488,11 @@ mod tests {
 
         assert_eq!(state.start_calls.lock().await.len(), 1);
         assert_eq!(state.step_calls.lock().await.len(), 1);
-        assert_eq!(state.end_calls.lock().await.len(), 1);
+        assert_eq!(
+            state.end_calls.lock().await.len(),
+            2,
+            "one /end per termination: fallback session end + caller hangup"
+        );
 
         state.release_step.notify_waiters();
     }

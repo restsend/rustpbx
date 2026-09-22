@@ -57,6 +57,10 @@ struct IvrExecResultPayload {
     trace: Vec<serde_json::Value>,
     metadata: serde_json::Value,
     completion_time: String,
+    /// Always `true` — the payload is only produced on flow termination
+    /// (including caller hangup mid-flow, whose `status`/`reason` carry
+    /// `user_hangup`). Present so consumers can filter uniformly on `end`.
+    end: bool,
 }
 const RESULT_CT: &str = "application/vnd.rustpbx.result+json";
 
@@ -101,6 +105,7 @@ impl CallSessionHook for IvrExecHook {
                     trace: r.trace,
                     metadata: metadata.clone(),
                     completion_time: r.completion_time,
+                    end: true,
                 })
         }
         .unwrap_or_else(|| IvrExecResultPayload {
@@ -116,6 +121,7 @@ impl CallSessionHook for IvrExecHook {
             trace: vec![],
             metadata: metadata.clone(),
             completion_time: chrono::Utc::now().to_rfc3339(),
+            end: true,
         });
 
         // Fire-and-forget webhook POST if URL is configured.

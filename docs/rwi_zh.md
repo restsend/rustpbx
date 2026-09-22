@@ -364,9 +364,12 @@ RWI 命令使用 JSON 带标签联合格式。`action` 标识命令类型，`par
 }
 ```
 
-`record.start` 同时适用于呼入**和主动外呼**。不论拨号计划的自动录音标志如何，显式开始都会生效；即使 `[recording] enabled = false` 也可以按需开录（录音捕获通道对所有通话常备）。`storage.path` 为空时，分段文件自动命名为 `{recording_root}/{root_session_id}_{seq}_{label}.wav`：`seq` 为本通通话内录音序号，`label` 依次取显式 `label` 参数 → 当前坐席 id → 当前 IVR 名 → `segment_type`。录音结束（显式停止或挂断）时，所有者收到 `record_stopped`，CDR 携带录音文件（→ `recording_url`）。启用 `[recording]` 时，还会发出 `recording_metadata_available`（**每个分段一条**）和 `record_end`（每通呼叫一条汇总）。
+`record.start` 同时适用于呼入**和主动外呼**。不论拨号计划的自动录音标志如何，显式开始都会生效；即使 `[recording] enabled = false` 也可以按需开录（录音捕获通道对所有通话常备）。`storage.path` 为空时，分段文件自动命名为 `{recording_root}/{root_session_id}_{seq}_{label}.wav`：`seq` 为本通通话内录音序号，`label` 依次取显式 `label` 参数 → 当前坐席 id → 当前 IVR 名 → `segment_type`。录音结束（显式停止或挂断）时，所有者收到 `record_stopped`，CDR 携带录音文件（→ `recording_url`）。启用 `[recording]` 时，还会发出 `recording_metadata_available`（**每个录音产物恰好一条**：分段文件各一条、SipFlow 整通产物一条；不存在呼叫级汇总事件，`record_end` 已移除）。
 
-**外呼时录音（媒体建立时自动开始）：** `call.originate`（以及 `POST /ami/v1/outbound/dial`）接受与 `record.start` 形状相同的 `record` 对象。第一个远端 SDP 建立媒体时自动开始录音（例如 183 临时响应或最终应答）。空 `storage.path` 使用默认位置（`[recording].path/<call_id>.wav`）：
+**外呼时录音（媒体建立时自动开始）：** `call.originate`（以及 `POST /ami/v1/outbound/dial`）接受与 `record.start` 形状相同的 `record` 对象。录音分两段：
+
+- **振铃段（系统管理）**：第一个远端 SDP 建立早媒体时（183/180+SDP）自动开始 `source=ringing` 段。**接通后该段被丢弃**（文件删除、不产生事件、不进 CDR），保证接通录音不含振铃音；**未接通**（拒接/无应答/超时/媒体失败）时该段保留并正常上传通知（`source=ringing`）。运营商不送早媒体时无振铃音可录。
+- **坐席段（使用 `record` 配置）**：接通（200 OK）后以调用方的 `record` 配置启动。空 `storage.path` 使用默认位置（`[recording].path/<call_id>.wav`）。
 
 ```json
 {

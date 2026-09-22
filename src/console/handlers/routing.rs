@@ -260,6 +260,7 @@ pub(crate) enum RouteTargetKind {
     Queue,
     Voicemail,
     Ivr,
+    Realtime,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -277,6 +278,8 @@ pub(crate) struct RouteActionDocument {
     voicemail_extension: Option<String>,
     #[serde(default)]
     ivr_file: Option<String>,
+    #[serde(default)]
+    realtime_preset: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,6 +329,7 @@ impl Default for RouteActionDocument {
             queue_file: None,
             voicemail_extension: None,
             ivr_file: None,
+            realtime_preset: None,
         }
     }
 }
@@ -443,6 +447,18 @@ impl RouteDocument {
                     ));
                 }
             }
+            RouteTargetKind::Realtime => {
+                let has_preset = self
+                    .action
+                    .realtime_preset
+                    .as_ref()
+                    .and_then(|value| sanitize_optional_string(Some(value.clone())));
+                if has_preset.is_none() {
+                    return Err(RouteError::new(
+                        "Realtime destination requires a [[realtime]] preset name",
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -456,12 +472,15 @@ impl RouteDocument {
         self.action.voicemail_extension =
             sanitize_optional_string(self.action.voicemail_extension.take());
         self.action.ivr_file = sanitize_optional_string(self.action.ivr_file.take());
+        self.action.realtime_preset =
+            sanitize_optional_string(self.action.realtime_preset.take());
 
         match self.action.target_type {
             RouteTargetKind::SipTrunk => {
                 self.action.queue_file = None;
                 self.action.voicemail_extension = None;
                 self.action.ivr_file = None;
+                self.action.realtime_preset = None;
             }
             RouteTargetKind::Queue => {
                 self.action.trunks.clear();
@@ -469,6 +488,7 @@ impl RouteDocument {
                 self.action.hash_key = None;
                 self.action.voicemail_extension = None;
                 self.action.ivr_file = None;
+                self.action.realtime_preset = None;
             }
             RouteTargetKind::Voicemail => {
                 self.action.trunks.clear();
@@ -476,6 +496,7 @@ impl RouteDocument {
                 self.action.hash_key = None;
                 self.action.queue_file = None;
                 self.action.ivr_file = None;
+                self.action.realtime_preset = None;
             }
             RouteTargetKind::Ivr => {
                 self.action.trunks.clear();
@@ -483,6 +504,15 @@ impl RouteDocument {
                 self.action.hash_key = None;
                 self.action.queue_file = None;
                 self.action.voicemail_extension = None;
+                self.action.realtime_preset = None;
+            }
+            RouteTargetKind::Realtime => {
+                self.action.trunks.clear();
+                self.action.select = DEFAULT_SELECTION;
+                self.action.hash_key = None;
+                self.action.queue_file = None;
+                self.action.voicemail_extension = None;
+                self.action.ivr_file = None;
             }
         }
 
@@ -860,6 +890,10 @@ async fn load_trunks(db: &DatabaseConnection) -> Result<Vec<SipTrunkModel>, DbEr
 async fn load_catalogs(state: &ConsoleState) -> crate::console::catalog::ForwardingCatalog {
     match crate::console::catalog::load_proxy_config(state.app_state().as_ref()) {
         Some(proxy_config) => {
+            let realtime_presets = state
+                .app_state()
+                .and_then(|app| app.config().realtime.clone())
+                .unwrap_or_default();
             let store = state.app_state().and_then(|app| {
                 let config = app.config();
                 if config.proxy.use_db_config() {
@@ -874,11 +908,13 @@ async fn load_catalogs(state: &ConsoleState) -> crate::console::catalog::Forward
             let catalog = crate::console::catalog::build_forwarding_catalog_opt(
                 &proxy_config,
                 store.as_ref(),
+                &realtime_presets,
             )
             .await;
             tracing::info!(
                 queue_count = catalog.queues.len(),
                 ivr_count = catalog.ivr_projects.len(),
+                realtime_count = catalog.realtime_presets.len(),
                 "load_catalogs: scanned catalogs for routing form"
             );
             catalog
@@ -939,6 +975,7 @@ fn build_route_console_payload(
             "queue_file": doc.action.queue_file.clone(),
             "voicemail_extension": doc.action.voicemail_extension.clone(),
             "ivr_file": doc.action.ivr_file.clone(),
+            "realtime_preset": doc.action.realtime_preset.clone(),
         },
         "source_trunk": doc.source_trunk.clone(),
         "target_trunks": doc.action.trunks.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
@@ -1932,6 +1969,7 @@ mod tests {
                 description: Some("Main support queue".to_string()),
             }],
             ivr_projects: vec![],
+            realtime_presets: vec![],
         };
         assert_eq!(catalog.queues.len(), 1);
         assert_eq!(catalog.queues[0].reference, "db-42");
@@ -1967,6 +2005,7 @@ mod tests {
                 queue_file: None,
                 voicemail_extension: None,
                 ivr_file: None,
+                realtime_preset: None,
             },
             source_trunk: Some("trunk-a".into()),
             notes: vec![],
@@ -2024,6 +2063,7 @@ mod tests {
                 queue_file: None,
                 voicemail_extension: None,
                 ivr_file: None,
+                realtime_preset: None,
             },
             source_trunk: Some("trunk-a".into()),
             notes: vec![],
@@ -2036,6 +2076,56 @@ mod tests {
         assert_eq!(doc2.action.trunks[0].name, "trunk-b");
         assert_eq!(doc2.action.trunks[0].weight, 100);
         assert_eq!(doc2.action.target_type, RouteTargetKind::SipTrunk);
+    }
+
+    #[test]
+    fn realtime_document_roundtrip_and_validation() {
+        let mut doc = RouteDocument {
+            id: Some(2),
+            name: "ai-route".into(),
+            action: RouteActionDocument {
+                target_type: RouteTargetKind::Realtime,
+                realtime_preset: Some("support-bot".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        doc.validate().expect("realtime preset present should pass");
+
+        let doc2: RouteDocument = serde_json::from_value(doc.metadata_value()).unwrap();
+        assert_eq!(doc2.action.target_type, RouteTargetKind::Realtime);
+        assert_eq!(doc2.action.realtime_preset, Some("support-bot".into()));
+
+        // ensure_consistency keeps the preset and clears sibling targets.
+        doc.action.queue_file = Some("queues/leftover.toml".into());
+        doc.action.trunks.push(RouteTrunkDocument {
+            name: "trunk-x".into(),
+            weight: 10,
+        });
+        doc.ensure_consistency();
+        assert!(doc.action.queue_file.is_none());
+        assert!(doc.action.trunks.is_empty());
+        assert_eq!(
+            doc.action.realtime_preset,
+            Some("support-bot".into())
+        );
+
+        // Missing preset fails validation.
+        let mut invalid = RouteDocument {
+            name: "ai-route-broken".into(),
+            action: RouteActionDocument {
+                target_type: RouteTargetKind::Realtime,
+                realtime_preset: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        invalid.ensure_consistency();
+        let err = invalid
+            .validate()
+            .expect_err("realtime without preset must fail");
+        assert!(err.message().contains("Realtime destination requires"));
     }
 
     fn doc_with_match_rewrite(

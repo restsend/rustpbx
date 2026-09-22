@@ -212,6 +212,7 @@ mod tests {
         let cmd = CallCommand::StartRecording {
             config: crate::call::domain::RecordConfig {
                 unique_id: None,
+                discard: None,
                 path: "/tmp/rec.wav".to_string(),
                 max_duration_secs: None,
                 beep: false,
@@ -241,6 +242,7 @@ mod tests {
         let cmd = CallCommand::StartRecording {
             config: crate::call::domain::RecordConfig {
                 unique_id: None,
+                discard: None,
                 path: "/tmp/rec.wav".to_string(),
                 max_duration_secs: None,
                 beep: false,

@@ -71,6 +71,11 @@ pub enum SipFlowUploadConfig {
         vendor: S3Vendor,
         #[serde(default)]
         bucket: String,
+        /// Dedicated bucket for signaling JSONL uploads. When unset (or
+        /// empty) the signaling flow is uploaded to the same `bucket` as
+        /// the media WAV — the historical behaviour.
+        #[serde(default)]
+        signaling_bucket: Option<String>,
         #[serde(default)]
         region: String,
         /// Omit (or leave empty) together with `secret_key` for anonymous /
@@ -99,6 +104,11 @@ pub enum SipFlowUploadConfig {
     },
     Http {
         url: String,
+        /// Dedicated upload endpoint for signaling JSONL. When unset the
+        /// signaling flow is POSTed to the same `url` as the media WAV —
+        /// the historical behaviour.
+        #[serde(default)]
+        signaling_url: Option<String>,
         headers: Option<std::collections::HashMap<String, String>>,
         /// HTTP method (default `POST`).
         #[serde(default)]
@@ -144,6 +154,45 @@ pub enum SipFlowUploadConfig {
 }
 
 impl SipFlowUploadConfig {
+    /// Bucket the media WAV is uploaded to (`type = "s3"` only).
+    pub fn media_bucket(&self) -> Option<&str> {
+        match self {
+            SipFlowUploadConfig::S3 { bucket, .. } => Some(bucket.trim()),
+            SipFlowUploadConfig::Http { .. } => None,
+        }
+    }
+
+    /// Bucket used for signaling JSONL uploads: `signaling_bucket` when set
+    /// (non-blank), else the media `bucket` — the historical single-bucket
+    /// behaviour.
+    pub fn signaling_bucket(&self) -> Option<&str> {
+        match self {
+            SipFlowUploadConfig::S3 {
+                bucket,
+                signaling_bucket,
+                ..
+            } => signaling_bucket
+                .as_deref()
+                .map(str::trim)
+                .filter(|b| !b.is_empty())
+                .or(Some(bucket.trim())),
+            SipFlowUploadConfig::Http { .. } => None,
+        }
+    }
+
+    /// Upload endpoint for signaling JSONL (`type = "http"` only):
+    /// `signaling_url` when set (non-blank), else the media `url`.
+    pub fn signaling_http_url(&self) -> Option<&str> {
+        match self {
+            SipFlowUploadConfig::Http { url, signaling_url, .. } => signaling_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|u| !u.is_empty())
+                .or(Some(url.trim())),
+            SipFlowUploadConfig::S3 { .. } => None,
+        }
+    }
+
     /// Lifetime of on-demand presigned download URLs for S3-uploaded flows,
     /// clamped to the SigV4 7-day maximum
     /// ([`rustpbx_storage::MAX_PRESIGN_EXPIRY_SECS`]). Returns `None` for
@@ -271,6 +320,75 @@ pub enum SipFlowConfig {
 #[cfg(test)]
 mod tests {
     use super::SipFlowConfig;
+
+    #[test]
+    fn signaling_bucket_falls_back_to_media_bucket() {
+        let config: super::SipFlowUploadConfig = serde_json::from_value(serde_json::json!({
+            "type": "s3",
+            "vendor": "minio",
+            "bucket": "recordings",
+            "endpoint": "http://127.0.0.1:9000",
+            "root": "sipflow"
+        }))
+        .expect("s3 upload config");
+        assert_eq!(config.media_bucket(), Some("recordings"));
+        assert_eq!(
+            config.signaling_bucket(),
+            Some("recordings"),
+            "unset signaling_bucket must fall back to the media bucket"
+        );
+    }
+
+    #[test]
+    fn signaling_bucket_overrides_media_bucket() {
+        let config: super::SipFlowUploadConfig = serde_json::from_value(serde_json::json!({
+            "type": "s3",
+            "vendor": "minio",
+            "bucket": "recordings",
+            "signaling_bucket": "recordings-signaling",
+            "endpoint": "http://127.0.0.1:9000",
+            "root": "sipflow"
+        }))
+        .expect("s3 upload config");
+        assert_eq!(config.media_bucket(), Some("recordings"));
+        assert_eq!(config.signaling_bucket(), Some("recordings-signaling"));
+    }
+
+    #[test]
+    fn signaling_bucket_blank_override_falls_back() {
+        let config: super::SipFlowUploadConfig = serde_json::from_value(serde_json::json!({
+            "type": "s3",
+            "vendor": "minio",
+            "bucket": "recordings",
+            "signaling_bucket": "  ",
+            "endpoint": "http://127.0.0.1:9000",
+            "root": "sipflow"
+        }))
+        .expect("s3 upload config");
+        assert_eq!(
+            config.signaling_bucket(),
+            Some("recordings"),
+            "a blank signaling_bucket must fall back to the media bucket"
+        );
+    }
+
+    #[test]
+    fn signaling_http_url_falls_back_to_media_url() {
+        let config: super::SipFlowUploadConfig = serde_json::from_value(serde_json::json!({
+            "type": "http",
+            "url": "http://gift/upload"
+        }))
+        .expect("http upload config");
+        assert_eq!(config.signaling_http_url(), Some("http://gift/upload"));
+
+        let config: super::SipFlowUploadConfig = serde_json::from_value(serde_json::json!({
+            "type": "http",
+            "url": "http://gift/upload",
+            "signaling_url": "http://gift2/signaling"
+        }))
+        .expect("http upload config");
+        assert_eq!(config.signaling_http_url(), Some("http://gift2/signaling"));
+    }
 
     #[test]
     fn local_config_accepts_retired_flowdb_options_as_sqlite_config() {

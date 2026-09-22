@@ -310,6 +310,9 @@ pub(super) fn forward_dtmf_event(
                 sip_headers,
                 end_reason: None,
                 end_detail: None,
+                next_node_id: None,
+                next_step_id: None,
+                end: None,
             };
             gw.read().fan_out(session_id, &ev);
         }
@@ -404,6 +407,9 @@ pub(super) fn emit_suspended_flow_session_end(
         sip_headers,
         end_reason: Some(end_reason.reason),
         end_detail: end_reason.detail,
+        next_node_id: None,
+        next_step_id: None,
+        end: Some(true),
     };
     gw.read().fan_out(session_id, &ev);
 }

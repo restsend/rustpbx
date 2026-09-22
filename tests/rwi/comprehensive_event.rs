@@ -298,6 +298,9 @@ async fn test_comprehensive_core_event_structs() {
                 sip_headers: None,
                 end_reason: None,
                 end_detail: None,
+                next_node_id: Some("step-2".into()),
+                next_step_id: Some("step-2".into()),
+                end: None,
             },
         );
         gw.fan_out(
@@ -328,6 +331,7 @@ async fn test_comprehensive_core_event_structs() {
                 next_node_id: Some("node-2".into()),
                 hangup_reason: None,
                 call_result: None,
+                end: None,
                 extra: None,
             },
         );
@@ -341,6 +345,7 @@ async fn test_comprehensive_core_event_structs() {
                 final_result: "completed".into(),
                 completion_time: now,
                 final_routing_target: Some("support".into()),
+                end: true,
                 extra: None,
             },
         );

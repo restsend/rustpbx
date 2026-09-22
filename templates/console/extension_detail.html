@@ -264,6 +264,7 @@
                             <div class="space-y-3 text-sm font-medium text-slate-700">
                                 {% set queue_items = forwarding_catalog.queues | default([]) %}
                                 {% set ivr_items = forwarding_catalog.ivr_projects | default([]) %}
+                                {% set realtime_items = forwarding_catalog.realtime_presets | default([]) %}
                                 {% include "console/_destination_selector.html" %}
                             </div>
                             <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
@@ -544,6 +545,7 @@
                 const catalog = {
                     queues: [],
                     ivr_projects: [],
+                    realtime_presets: [],
                 };
                 if (raw && Array.isArray(raw.queues)) {
                     catalog.queues = raw.queues
@@ -566,6 +568,15 @@
                         .map((ivr) => ({
                             name: ivr.name,
                             description: ivr.description || null,
+                        }));
+                }
+                if (raw && Array.isArray(raw.realtime_presets)) {
+                    catalog.realtime_presets = raw.realtime_presets
+                        .filter((preset) => preset && preset.name)
+                        .map((preset) => ({
+                            name: preset.name,
+                            protocol: preset.protocol || 'openai',
+                            model: preset.model || null,
                         }));
                 }
                 return catalog;
@@ -745,6 +756,9 @@
                         this.forwardingTargetValue = value;
                     } else if (type === 'voicemail') {
                         this.forwardingTargetType = 'voicemail';
+                        this.forwardingTargetValue = value;
+                    } else if (type === 'realtime') {
+                        this.forwardingTargetType = 'realtime';
                         this.forwardingTargetValue = value;
                     } else {
                         this.forwardingTargetType = 'uri';
@@ -1062,6 +1076,9 @@
                     } else if (lower.startsWith('voicemail:')) {
                         this.forwardingTargetType = 'voicemail';
                         this.forwardingTargetValue = destination.slice(10);
+                    } else if (lower.startsWith('realtime:')) {
+                        this.forwardingTargetType = 'realtime';
+                        this.forwardingTargetValue = destination.slice(9);
                     } else if (lower.startsWith('sip:') && /^\d+$/.test(destination.slice(4))) {
                         this.forwardingTargetType = 'extension';
                         this.forwardingTargetValue = destination.slice(4);
@@ -1071,7 +1088,7 @@
                     }
                 },
                 setForwardingTargetType(type) {
-                    const allowed = ['uri', 'queue', 'ivr', 'voicemail'];
+                    const allowed = ['uri', 'queue', 'ivr', 'voicemail', 'realtime'];
                     const normalized = allowed.includes(type) ? type : 'uri';
                     if (this.forwardingTargetType === normalized) {
                         return;
@@ -1087,7 +1104,9 @@
                         this.forwardingTargetValue = dest.slice(4);
                     } else if (normalized === 'voicemail' && lower.startsWith('voicemail:')) {
                         this.forwardingTargetValue = dest.slice(10);
-                    } else if (normalized === 'uri' && !lower.startsWith('queue:') && !lower.startsWith('ivr:') && !lower.startsWith('voicemail:')) {
+                    } else if (normalized === 'realtime' && lower.startsWith('realtime:')) {
+                        this.forwardingTargetValue = dest.slice(9);
+                    } else if (normalized === 'uri' && !lower.startsWith('queue:') && !lower.startsWith('ivr:') && !lower.startsWith('voicemail:') && !lower.startsWith('realtime:')) {
                         this.forwardingTargetValue = dest;
                     } else {
                         this.forwardingTargetValue = '';
@@ -1106,6 +1125,8 @@
                         // Default to own extension's mailbox when the field is left empty
                         const ext = value || this.form.extension || '';
                         this.form.call_forwarding_destination = ext ? `voicemail:${ext}` : '';
+                    } else if (this.forwardingTargetType === 'realtime') {
+                        this.form.call_forwarding_destination = value ? `realtime:${value}` : '';
                     } else {
                         this.form.call_forwarding_destination = value;
                     }

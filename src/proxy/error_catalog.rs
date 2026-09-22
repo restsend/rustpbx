@@ -152,6 +152,17 @@ pub const ALWAYS_FWD_CONFERENCE_EMPTY: CallErrInfo = CallErrInfo {
     remediation_key: None,
 };
 
+pub const ALWAYS_FWD_REALTIME_EMPTY: CallErrInfo = CallErrInfo {
+    app: APP,
+    code: "proxy.always_forwarding_realtime_empty",
+    message: "Always-forwarding realtime preset name is empty",
+    sip_status: Some(500),
+    hangup_reason: CallRecordHangupReason::ServerUnavailable,
+    severity: ErrSeverity::Error,
+    locale_key: "errors.proxy.always_forwarding_realtime_empty",
+    remediation_key: None,
+};
+
 pub const ROUTE_PREVIEW_ERROR: CallErrInfo = CallErrInfo {
     app: APP,
     code: "proxy.route_preview_error",
@@ -211,6 +222,7 @@ pub const CATALOG: &[CallErrInfo] = &[
     ALWAYS_FWD_IVR_EMPTY,
     ALWAYS_FWD_VOICEMAIL_EMPTY,
     ALWAYS_FWD_CONFERENCE_EMPTY,
+    ALWAYS_FWD_REALTIME_EMPTY,
     ROUTE_PREVIEW_ERROR,
     ROUTE_ABORTED,
     ROUTE_FAILED,

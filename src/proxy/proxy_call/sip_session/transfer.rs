@@ -283,6 +283,10 @@ pub(crate) enum TransferTarget {
     Conference {
         id: String,
     },
+    /// Realtime (AI voice) app started with a `[[realtime]]` preset name.
+    Realtime {
+        preset: String,
+    },
     /// WebSocket + PCM real-time bridge.
     Bridge {
         endpoint: String,
@@ -313,6 +317,7 @@ pub(crate) fn transfer_target_type_str(target: &TransferTarget) -> Option<&'stat
         TransferTarget::RoutePoint { .. } => Some("route_point"),
         TransferTarget::Voicemail { .. } => Some("voicemail"),
         TransferTarget::Conference { .. } => Some("conference"),
+        TransferTarget::Realtime { .. } => Some("realtime"),
         TransferTarget::Bridge { .. } => Some("bridge"),
         TransferTarget::Sip { .. } => Some("sip"),
     }
@@ -525,6 +530,7 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
                 TransferTarget::Voicemail { extension }
             }
             crate::call::TransferEndpoint::Conference(id) => TransferTarget::Conference { id },
+            crate::call::TransferEndpoint::Realtime(preset) => TransferTarget::Realtime { preset },
             // Plain SIP/TEL URI – ensure at least the `sip:` scheme.
             // Also extract `return_app` / `return_target` / `return_*` query
             // params and strip them from the URI before it reaches the callee
@@ -910,6 +916,13 @@ impl SipSession {
             _ => false,
         };
 
+        // Recording lifecycle: an app-scoped IVR segment ends with its owning
+        // app. Close it here — before any successor (queue / IVR / route point /
+        // SIP peer) starts — so the agent or successor stage records as its own
+        // segment. Full-call policy recordings and external segments keep
+        // rolling.
+        self.close_app_scoped_recording().await;
+
         match target {
             TransferTarget::Queue {
                 name,
@@ -995,6 +1008,10 @@ impl SipSession {
             TransferTarget::Conference { id } => {
                 info!(session_id = %self.id, %leg_id, conf_id = %id, "Handling conference transfer by starting ConferenceApp");
                 self.start_conference_app(&id).await
+            }
+            TransferTarget::Realtime { preset } => {
+                info!(session_id = %self.id, %leg_id, %preset, "Handling realtime transfer by starting RealtimeApp");
+                self.start_realtime_app(&preset).await
             }
             TransferTarget::Bridge {
                 endpoint,
@@ -2145,6 +2162,16 @@ impl SipSession {
         info!(session_id = %self.id, conf_id = %conf_id, "Starting conference application");
         let params = Some(serde_json::json!({"id": conf_id}));
         self.ensure_app_running("conference", params, &format!("conference '{}'", conf_id))
+            .await
+    }
+
+    /// Start the realtime (AI voice) app with a configured `[[realtime]]`
+    /// preset. Credentials are resolved from config — the preset name is the
+    /// only thing that travels through the transfer target.
+    pub(crate) async fn start_realtime_app(&self, preset: &str) -> Result<()> {
+        info!(session_id = %self.id, preset = %preset, "Starting realtime application");
+        let params = Some(serde_json::json!({"preset": preset}));
+        self.ensure_app_running("realtime", params, &format!("realtime preset '{}'", preset))
             .await
     }
 

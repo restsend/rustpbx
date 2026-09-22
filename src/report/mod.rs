@@ -52,13 +52,34 @@ impl TimeBucket {
     }
 }
 
+/// SQL fragment yielding `(to_col - from_col)` in whole seconds for the
+/// given backend (used for ring-duration derivation from timestamps).
+pub fn epoch_diff_secs_sql(backend: sea_orm::DatabaseBackend, from_col: &str, to_col: &str) -> String {
+    match backend {
+        sea_orm::DatabaseBackend::Sqlite => format!(
+            "CAST((julianday({to_col}) - julianday({from_col})) * 86400 AS INTEGER)"
+        ),
+        sea_orm::DatabaseBackend::MySql => format!(
+            "TIMESTAMPDIFF(SECOND, {from_col}, {to_col})"
+        ),
+        sea_orm::DatabaseBackend::Postgres => format!(
+            "CAST(EXTRACT(EPOCH FROM ({to_col} - {from_col})) AS BIGINT)"
+        ),
+        _ => "0".to_string(),
+    }
+}
+
 /// Raw SQL fragment of [`bucket_index_expr`] (for hand-built statements).
 pub fn bucket_index_sql(backend: sea_orm::DatabaseBackend, column_sql: &str, bucket_secs: i64, tz_offset_secs: i64) -> String {
     match backend {
         // SQLite `/` on integers is already floor-division for positive
         // epochs (and there is no FLOOR function), so plain CAST is exact.
+        // substr(...,1,19): CDR timestamps are RFC-3339 with T/space
+        // separator, sub-second digits and a timezone suffix — SQLite's
+        // parser rejects >3 fractional digits, so truncate to whole seconds
+        // (UTC) before the epoch conversion.
         sea_orm::DatabaseBackend::Sqlite => format!(
-            "CAST((CAST(strftime('%s', {column_sql}) AS INTEGER) + {tz_offset_secs}) / {bucket_secs} AS INTEGER)"
+            "CAST((CAST(strftime('%s', substr({column_sql}, 1, 19)) AS INTEGER) + {tz_offset_secs}) / {bucket_secs} AS INTEGER)"
         ),
         sea_orm::DatabaseBackend::MySql => format!(
             "CAST(FLOOR((UNIX_TIMESTAMP({column_sql}) + {tz_offset_secs}) / {bucket_secs}) AS SIGNED)"
@@ -104,6 +125,13 @@ pub fn sum_i64(db: &impl sea_orm::ConnectionTrait, expr: SimpleExpr) -> SimpleEx
         _ => "BIGINT",
     };
     SimpleExpr::from(sea_orm::sea_query::Func::sum(expr)).cast_as(Alias::new(cast_type))
+}
+
+/// Float SUM() over an aggregate expression (decodes as f64 on every
+/// backend — unlike [`sum_i64`] this never casts to an integer type).
+pub fn sum_f64(expr: SimpleExpr) -> SimpleExpr {
+    use sea_orm::ExprTrait;
+    sea_orm::sea_query::Func::sum(expr).into()
 }
 
 /// AVG() CASTed to a float type so all backends decode as f64.

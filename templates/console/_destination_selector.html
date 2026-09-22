@@ -2,6 +2,7 @@
     apiPrefix: {{ api_prefix | default("/api") | tojson }},
     queueItems: {{ queue_items | default([]) | tojson }},
     ivrItems: {{ ivr_items | default([]) | tojson }},
+    realtimeItems: {{ realtime_items | default([]) | tojson }},
     initialType: {{ initial_type | default("uri") | tojson }},
     initialValue: {{ initial_value | default("") | tojson }}
 })' class="space-y-3">
@@ -41,6 +42,15 @@
       <input type="radio" class="h-4 w-4 border-slate-300 text-sky-600"
         :checked="targetType === 'uri'" @change="setType('uri')">
       <span>{{ "destination_selector.uri" | t }}</span>
+    </label>
+    <label x-show="allowedTypes.includes('realtime')"
+      class="inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-slate-600 transition"
+      :class="targetType === 'realtime' ? 'border-sky-200 bg-sky-50 text-sky-700 shadow-sm' : (realtimeAvailable ? 'border-slate-200 hover:border-slate-300 cursor-pointer' : 'opacity-40 cursor-not-allowed border-slate-200')"
+      :title="realtimeAvailable ? '' : {{ 'destination_selector.realtime_not_configured' | t | tojson }}">
+      <input type="radio" class="h-4 w-4 border-slate-300 text-sky-600"
+        :checked="targetType === 'realtime'" :disabled="!realtimeAvailable"
+        @change="setType('realtime')">
+      <span>{{ "destination_selector.realtime" | t }}</span>
     </label>
   </div>
 
@@ -168,6 +178,49 @@
       <template x-if="ivrOpen && ivrFiltered.length === 0">
         <div class="absolute z-30 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-400 shadow-lg"
           :class="dropdownUp($refs.ivrRoot) ? 'bottom-full mb-1' : 'top-full mt-1'">
+          {{ "destination_selector.no_results" | t }}
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- Realtime (AI app): searchable preset dropdown -->
+  <div x-show="targetType === 'realtime'" x-cloak>
+    <div class="relative" @click.outside="rtOpen = false" x-ref="rtRoot">
+      <div class="relative">
+        <input type="text" x-model="rtQuery"
+          @focus="rtOpen = true"
+          @input="rtIndex = -1; rtSelected = null; targetValue = ''; emitChange()"
+          @keydown="handleKeydown($event, 'rt')"
+          class="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 pr-8 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+          placeholder="{{ "destination_selector.select_realtime" | default("Select realtime app...") | t }}">
+        <button type="button" x-show="rtSelected" @click.stop="clearRt()"
+          class="absolute right-1.5 top-1.5 flex h-5 w-5 items-center justify-center rounded text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+          title="{{ "destination_selector.clear" | default("Clear") | t }}" tabindex="-1">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 6L6 18M6 6l12 12"></path>
+          </svg>
+        </button>
+        <svg x-show="!rtSelected" @click="toggleRt()" class="absolute right-2.5 top-2.5 h-4 w-4 cursor-pointer text-slate-400" viewBox="0 0 20 20" fill="currentColor">
+          <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd"/>
+        </svg>
+      </div>
+      <template x-if="rtOpen && rtFiltered.length">
+        <ul class="absolute z-30 max-h-48 w-full overflow-auto rounded-lg border border-slate-200 bg-white py-1 shadow-lg"
+          :class="dropdownUp($refs.rtRoot) ? 'bottom-full mb-1' : 'top-full mt-1'">
+          <template x-for="(item, i) in rtFiltered" :key="item.name || i">
+            <li @click="selectRt(item)"
+              class="cursor-pointer px-3 py-2 text-sm"
+              :class="rtIndex === i ? 'bg-sky-50 text-sky-700' : 'text-slate-700 hover:bg-slate-50'">
+              <span x-text="item.name" class="font-medium"></span>
+              <span class="ml-1 text-xs text-slate-400" x-text="'(' + (item.protocol || 'openai') + (item.model ? ' · ' + item.model : '') + ')'"></span>
+            </li>
+          </template>
+        </ul>
+      </template>
+      <template x-if="rtOpen && !rtFiltered.length">
+        <div class="absolute z-30 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-400 shadow-lg"
+          :class="dropdownUp($refs.rtRoot) ? 'bottom-full mb-1' : 'top-full mt-1'">
           {{ "destination_selector.no_results" | t }}
         </div>
       </template>

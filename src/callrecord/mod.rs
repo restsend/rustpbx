@@ -43,7 +43,7 @@ pub mod storage;
 mod tests;
 
 pub use recording_artifacts::{
-    ActiveRecording, RecordingSegment, RecordingSubdir, UploadFailedMarker,
+    ActiveRecording, RecordingSegment, RecordingSource, RecordingSubdir, UploadFailedMarker,
     is_direct_child_of_root, local_archive_path, preview_archive_path, segment_wav_path,
     segmented_wav_path, upload_failed_marker_path, write_upload_failed_marker,
     write_upload_failed_marker_ex,
@@ -950,6 +950,9 @@ pub(crate) struct CallRecordRow {
     pub metadata: Option<Value>,
     pub hangup_reason: Option<String>,
     pub sip_status_code: Option<i32>,
+    pub media_loss_pct: Option<f64>,
+    pub media_jitter_ms: Option<f64>,
+    pub media_rtt_ms: Option<f64>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }
@@ -1011,6 +1014,10 @@ impl CallRecordRow {
 
         let caller_uri = crate::models::call_record::normalize_endpoint_uri(&record.caller);
         let callee_uri = crate::models::call_record::normalize_endpoint_uri(&record.callee);
+        let media_quality = crate::callrecord::extract_trunk_media_quality(
+            metadata.as_ref(),
+            &direction,
+        );
 
         Self {
             call_id: record.call_id.clone(),
@@ -1049,6 +1056,9 @@ impl CallRecordRow {
             } else {
                 None
             },
+            media_loss_pct: media_quality.0,
+            media_jitter_ms: media_quality.1,
+            media_rtt_ms: media_quality.2,
             created_at: record.start_time,
             updated_at: record.end_time,
         }
@@ -1215,6 +1225,9 @@ fn call_record_columns() -> Vec<Alias> {
         Alias::new("archived_at"),
         Alias::new("hangup_reason"),
         Alias::new("sip_status_code"),
+        Alias::new("media_loss_pct"),
+        Alias::new("media_jitter_ms"),
+        Alias::new("media_rtt_ms"),
     ]
 }
 
@@ -1261,6 +1274,9 @@ fn build_call_record_values(row: &CallRecordRow) -> Vec<sea_orm::sea_query::Simp
         None::<String>.into(),
         row.hangup_reason.clone().into(),
         SimpleExpr::from(row.sip_status_code),
+        SimpleExpr::from(row.media_loss_pct),
+        SimpleExpr::from(row.media_jitter_ms),
+        SimpleExpr::from(row.media_rtt_ms),
     ]
 }
 
@@ -1319,6 +1335,9 @@ pub(crate) async fn create_call_record_table(
         .col(timestamp_null(Alias::new("archived_at")))
         .col(string_len_null(Alias::new("hangup_reason"), 64))
         .col(integer_null(Alias::new("sip_status_code")))
+        .col(double_null(Alias::new("media_loss_pct")))
+        .col(double_null(Alias::new("media_jitter_ms")))
+        .col(double_null(Alias::new("media_rtt_ms")))
         .to_owned();
 
     db.execute_raw(db.get_database_backend().build(&create))
@@ -1370,6 +1389,9 @@ pub(crate) async fn ensure_session_id_column(db: &DatabaseConnection, table_name
         ("session_id", ColumnDef::new(Alias::new("session_id")).string_len(255).null().to_owned()),
         ("hangup_reason", ColumnDef::new(Alias::new("hangup_reason")).string_len(64).null().to_owned()),
         ("sip_status_code", ColumnDef::new(Alias::new("sip_status_code")).integer().null().to_owned()),
+        ("media_loss_pct", ColumnDef::new(Alias::new("media_loss_pct")).double().null().to_owned()),
+        ("media_jitter_ms", ColumnDef::new(Alias::new("media_jitter_ms")).double().null().to_owned()),
+        ("media_rtt_ms", ColumnDef::new(Alias::new("media_rtt_ms")).double().null().to_owned()),
     ];
     for (_, col) in columns {
         let alter = Table::alter()
@@ -1622,5 +1644,42 @@ impl From<rustpbx_models::call_record::Model> for CallRecord {
             details,
             extensions: http::Extensions::new(),
         }
+    }
+}
+
+/// Trunk-facing media quality extracted from a CDR's `media_quality` JSON
+/// (`[{"side":"A","loss_pct":..,"jitter_us":..,"rtt_us":..}, ..]`).
+///
+/// The trunk-facing leg is A (caller) for inbound calls and B (callee) for
+/// outbound calls — the carrier side of the conversation. Returns `None`
+/// when the report array is missing or no leg entry exists.
+pub fn extract_trunk_media_quality(
+    media_quality: Option<&serde_json::Value>,
+    direction: &str,
+) -> (Option<f64>, Option<f64>, Option<f64>) {
+    let Some(arr) = media_quality.and_then(|v| v.as_array()) else {
+        return (None, None, None);
+    };
+    let preferred = if direction.eq_ignore_ascii_case("outbound") {
+        "B"
+    } else {
+        "A"
+    };
+    let pick = |want: &str| {
+        arr.iter()
+            .find(|leg| leg.get("side").and_then(|s| s.as_str()) == Some(want))
+    };
+    let leg = pick(preferred).or_else(|| pick(if preferred == "B" { "A" } else { "B" }));
+    match leg {
+        Some(leg) => {
+            let loss = leg.get("loss_pct").and_then(|v| v.as_f64());
+            let jitter = leg
+                .get("jitter_us")
+                .and_then(|v| v.as_f64())
+                .map(|us| us / 1000.0);
+            let rtt = leg.get("rtt_us").and_then(|v| v.as_f64()).map(|us| us / 1000.0);
+            (loss, jitter, rtt)
+        }
+        None => (None, None, None),
     }
 }

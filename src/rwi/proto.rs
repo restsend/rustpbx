@@ -184,6 +184,13 @@ pub struct RecordingMetadata {
     /// segment ids.
     #[serde(default)]
     pub full: bool,
+    /// Canonical recording source: `ivr` / `agent` / `consult` / `ringing` /
+    /// `voicemail` / `full` / `external`. Classified from the segment's
+    /// free-form `segment_type` tag (`external` covers custom RWI/API tags
+    /// and generic captures). `full` also marks the single whole-call
+    /// artifact produced by SipFlow-based capture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// Generic metadata bag, populated from `CallDetails.metadata`. Addons
     /// write flat string keys (e.g. `agent_id`, `queue_id`, `tenant_id`)
     /// that the core passes through without naming — external consumers

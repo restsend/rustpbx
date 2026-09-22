@@ -51,10 +51,11 @@ retries = 2
 track_queue_latency = true
 # 空 = 全部事件(推荐)。如需白名单过滤,请使用有效的事件类型。
 # 注意:坐席状态是 "agent_state_changed"(旧的 "dn_state_changed" 已废弃移除);
-# 录音数据(下载 URL、文件大小)通过 "recording_metadata_available" 和
-# "record_end" 投递 —— 仅 "record_stopped" 不带录音 URL。
+# 录音数据(下载 URL、文件大小)通过 "recording_metadata_available" 投递 ——
+# 每个录音产物(分段文件或 SipFlow 整通产物)恰好一条;
+# "record_stopped" 为实时事件,不带最终录音 URL("record_end" 已移除)。
 # 白名单示例:
-# events = ["call_hangup", "record_stopped", "recording_metadata_available", "record_end", "agent_state_changed"]
+# events = ["call_hangup", "record_stopped", "recording_metadata_available", "agent_state_changed"]
 events = []
 ```
 
@@ -719,11 +720,11 @@ CC addon 的独立呼叫生命周期事件已移除。坐席归因改由核心�
 
 录音文件上传完成后触发，包含完整元数据。
 
-> **分段录音**：通话内每段录音（IVR 段、坐席段等）上传成功后**各自触发一条**本事件——`filename` / `download_url` / `file_size` 为该段独有，`extra` 在呼叫级元数据之外附带 `seq`（本通通话内序号）、`label`（坐席 id 或 IVR 名）、`segment_type`、`segment_id`、`started_at` / `ended_at`。`record_end` 仍保持每通呼叫一条汇总。
+> **分段录音**：通话内每段录音（IVR 段、坐席段等）上传成功后**各自触发一条**本事件——`filename` / `download_url` / `file_size` 为该段独有，`extra` 在呼叫级元数据之外附带 `seq`（本通通话内序号）、`label`（坐席 id 或 IVR 名）、`segment_type`、`segment_id`、`started_at` / `ended_at`。每段独立通知——不存在呼叫级汇总事件(见下"通知契约")。
 >
-> **`full` 标志**：每条 `recording_metadata_available` 的 `metadata` 均携带布尔字段 `full`——分段事件为 `false`，呼叫级聚合事件（所有分片上传完成后发的那条）为 `true`。只关心"整通录音已就绪"的消费方直接按 `metadata.full == true` 过滤即可，无需再对账 `segment_id`；`segment_id` 本身保持为可选的 `extra` 透传字段（仅分段事件携带）。
+> **`full` 标志**：每条 `recording_metadata_available` 的 `metadata` 均携带布尔字段 `full`——分段文件事件为 `false`；`true` 仅出现在 SipFlow 整通产物（无本地分段文件）的那条事件上。
 >
-> **兼容**：改造前的**聚合事件仍然每通呼叫发一条**（共 N+1 条）——其 `extra.recording_segments` 依旧是一个 JSON **字符串**（内容为数组，需 `JSON.parse`），`filename` 取第一段文件。只按 `filename` 去重的新旧订阅方均可正常工作；只想要分段事件的消费方可忽略聚合事件（`metadata.full == true`，或 `extra` 中含 `recording_segments` 键的那条）。CDR 的 `metadata.recording_segments` 保持原生 JSON 数组不变。
+> **通知契约（破坏性变更）**：每通电话只存在「每个录音产物一条」完成通知——多分段呼叫（如 IVR 段 + 坐席段）各自发一条、不再有呼叫级聚合事件；`record_end` 亦已移除。CDR 的 `metadata.recording_segments` 保持原生 JSON 数组，供需要整通汇总的消费方读取。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -814,27 +815,20 @@ Webhook 投递使用信封（`webhook.rs`：`rwi` / `event_id` 幂等键 / `time
 }
 ```
 
-> 上面是坐席段的真实序列化输出（`cargo test segment_metadata_wire_shape -- --nocapture`）：文件名 `filename` 中 seq 为两位零填充（`_02_`）；`extra` 内所有值均为字符串（`seq` 数字同样序列化为 `"2"`）；`extra` 键序不定（HashMap）；typed 字段为 `None` 时整个键不出现（如无主被叫信息时没有 `caller_name`/`callee_name`）。`download_url`：`type=local` 为归档路径（`{path}/{YYYYMMDD}/{filename}`），`type=http`/`s3` 为上传返回/预构造的 URL。addon 透传键（wholesale 的 `switch_flag` 等）原样附加；不存在 `unique_id` typed 字段。无分段录音时（整通话录制 / SipFlow）事件保持原有单条形态，`metadata` 不含 `seq` / `label` / `segment_*` 键，仅携带 typed 的 `full: true` 标志（呼叫级聚合）。
+> 上面是坐席段的真实序列化输出（`cargo test segment_metadata_wire_shape -- --nocapture`）：文件名 `filename` 中 seq 为两位零填充（`_02_`）；`extra` 内所有值均为字符串（`seq` 数字同样序列化为 `"2"`）；`extra` 键序不定（HashMap）；typed 字段为 `None` 时整个键不出现（如无主被叫信息时没有 `caller_name`/`callee_name`）。`download_url`：`type=local` 为归档路径（`{path}/{YYYYMMDD}/{filename}`），`type=http`/`s3` 为上传返回/预构造的 URL。addon 透传键（wholesale 的 `switch_flag` 等）原样附加；不存在 `unique_id` typed 字段。无分段录音时（整通文件录制 / SipFlow）事件保持单条形态，`metadata` 不含 `seq` / `label` / `segment_*` 键；SipFlow 整通产物的那条携带 `full: true` 与 `source: "full"`。
 >
-> **CDR-only 键不进入事件载荷**：`trace`（console 时间线）、`recording_segments`（完整分段数组，见下）、`media_quality`（RTP 质量统计）、`self_ip`（节点 IP，事件层由 gateway 注入 `node_ip`）、`session_id`（与事件层 `session_id` 上下文字段重复）只保留在 CDR `metadata` 中供 console 使用，`metadata` 透传袋会将其剔除。聚合条事件中的 `recording_segments` 键不受此影响（作为聚合事件的标识保留）。
+> **CDR-only 键不进入事件载荷**：`trace`（console 时间线）、`recording_segments`（完整分段数组，见下）、`media_quality`（RTP 质量统计）、`self_ip`（节点 IP，事件层由 gateway 注入 `node_ip`）、`session_id`（与事件层 `session_id` 上下文字段重复）只保留在 CDR `metadata` 中供 console 使用，`metadata` 透传袋会将其剔除。一等字段 `source`（录音来源：`ivr`/`agent`/`consult`/`ringing`/`voicemail`/`full`/`external`）随每条事件携带。
 
-#### record_end
+#### record_end（已移除）
 
-分发：call_owner
-
-录音终结事件。在录音上传完成后触发；若无上传配置则在录音文件就绪后触发（使用本地文件路径）。SipFlow 媒体上传完成后也会触发。
-
-> **触发条件**：
-> - 普通录音：`CallRecordManager` 处理完录音记录后，`RecordingUploadHook` 自动触发
-> - SipFlow 录音：SipFlow 媒体文件上传到 S3/HTTP 完成后自动触发
-> - **不**需要通过 `RecordStop` 命令触发，与 `record_started`/`record_stopped` 由 command 触发的模式不同
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `call_id` | String | 呼叫标识 |
-| `url` | Option\<String\> | 上传 URL（有上传时）或本地文件路径（无上传时），SipFlow 场景为媒体文件 URL |
-| `duration_secs` | u64 | 录音时长（秒） |
-| `file_size` | u64 | 文件大小（字节） |
+> **⚠️ 破坏性变更（录音通知去重）**：`record_end` 事件已不再发送。每通电话的录音完成通知现在只有**每个录音产物一条** `recording_metadata_available`（分段文件各一条、SipFlow 整通产物一条）；此前多分段呼叫收到的呼叫级聚合事件与 `record_end` 汇总均已删除。需要整通汇总的消费方按 `call_id` 聚合分段事件，或读取 CDR 的 `recording_segments`。历史字段文档保留如下以供迁移参考。
+>
+> | 字段 | 类型 | 说明 |
+> |------|------|------|
+> | `call_id` | String | 呼叫标识 |
+> | `url` | Option\<String\> | 上传 URL（有上传时）或本地文件路径（无上传时），SipFlow 场景为媒体文件 URL |
+> | `duration_secs` | u64 | 录音时长（秒） |
+> | `file_size` | u64 | 文件大小（字节） |
 
 #### transcript_started / transcript_segment / transcript_error / transcript_ended
 
@@ -933,9 +927,10 @@ Webhook 投递使用信封（`webhook.rs`：`rwi` / `event_id` 幂等键 / `time
 | `result_value` | Option\<String\> | 用户按键或分支结果 |
 | `duration_ms` | u32 | 节点停留时长（毫秒） |
 | `exit_time` | String | 退出时间 |
-| `next_node_id` | Option\<String\> | 下一个节点 ID |
+| `next_node_id` | Option\<String\> | 下一个节点 ID（Menu 跳转时填充；终态节点为空） |
 | `hangup_reason` | Option\<String\> | 挂机原因（会话终止时取值：`cancelled`/`remote_hangup`/`hangup` 等） |
 | `call_result` | Option\<String\> | 通话结果 |
+| `end` | Option\<bool\> | **结束标识**：该节点动作终结了流程（挂机/转接/跳转/退出）或会话在其上被终止时为 `true`；流程继续时省略 |
 | *+ctx* | | 扁平化上下文 |
 
 
@@ -956,6 +951,7 @@ IVR 流程完成（执行了终止动作：转接、排队、留言、挂机）�
 | `final_result` | String | 最终结果（`transferred`、`voicemail`、`abandoned`、`cancelled`、`remote_hangup` 等） |
 | `completion_time` | String | 完成时间 |
 | `final_routing_target` | Option\<String\> | 最终路由目标 |
+| `end` | bool | 恒为 `true` —— 本事件即流程结束标识，便于消费方在各 IVR 事件上按 `end` 统一过滤 |
 | *+ctx* | | 扁平化上下文 |
 
 ```json
@@ -981,7 +977,12 @@ IVR 流程完成（执行了终止动作：转接、排队、留言、挂机）�
 
 Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时产生。
 
-> **会话终止条目（`session_end`）**：当 IVR 会话结束（含主叫挂机 `RemoteHangup`、系统取消 `Cancelled`）时，会额外 emit 一条 `trigger.type="session_end"` 的跟踪事件，`action_type`/`step_id`/`step_name` 记录最后执行的节点，并填充 `end_reason`/`end_detail` 表示整个会话的结束原因。外部 provider 的 `/end` webhook 在 `RemoteHangup`/`Cancelled` 时不会被调用（本地跟踪事件照常发出）。
+> **会话终止条目（`session_end`）**：当 IVR 会话结束（含主叫挂机 `RemoteHangup`、系统取消 `Cancelled`）时，会额外 emit 一条 `trigger.type="session_end"` 的跟踪事件，`action_type`/`step_id`/`step_name` 记录最后执行的节点，并填充 `end_reason`/`end_detail` 表示整个会话的结束原因。外部 provider 的 `/end` webhook 在**所有会话终结时都会调用——包括主叫挂机（`user_hangup`）**；仅系统取消（`Cancelled`，进程关停）跳过，避免重启风暴冲击 provider（本地跟踪事件在任何情况下照常发出）。
+>
+> **next / end 协议（逐节点执行标识）**：每条步骤事件回答"执行了什么节点、接下来去哪 / 流程是否结束"：
+> - 存在下一个节点 → 事件携带 `next_node_id`/`next_step_id`（步骤模式下取值相同，均为后继节点 `step_id`；事件在后继节点解析后发出，保证必带）；
+> - 无下一个节点（挂机/跳转等终态节点）→ 该步骤事件携带 `end: true`；
+> - 主叫挂断等会话终止 → 最后一步的 trigger 改写为 `user_hangup` 且携带 `end: true`，随后的 `session_end` 条目亦携带 `end: true`。
 >
 > **单条完成事件**：每个步骤（含等待类：播放、收号、转接等待结果）只在完成时发出**一条**跟踪事件。`trigger` 保留触发该步骤的原始来源（如 `phone_collected`、`dtmf`）及 detail，以 `step_end_time` 有值作为完成标记；不发送任何中间态或重复事件。
 >
@@ -1012,6 +1013,9 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 | `sip_headers` | Option\<Map\<String, String\>\> | 呼叫的白名单 SIP 头 |
 | `end_reason` | Option\<String\> | 仅两类条目有值：① `session_end` 条目——整个 IVR 会话的最终结束原因（`normal`、`transfer`、`transfer_to_queue`、`hangup`、`user_hangup`、`timeout`、`error` 等）；② 可恢复交接的终端步骤条目（bridge/queue 带 return_app、JumpIvr）——`transfer` / `transfer_to_queue` / `transfer_to_ivr` + `end_detail` 携带交接目标（该交接不产生 `session_end`，见上方 exactly-once 契约） |
 | `end_detail` | Option\<String\> | 与 `end_reason` 配套的详情（如转接目标、错误信息） |
+| `next_node_id` | Option\<String\> | 下一个节点的 `step_id`——流程继续时必带（事件在后继节点解析后发出）；终态步骤与 `session_end` 条目省略 |
+| `next_step_id` | Option\<String\> | 下一个节点的 `step_id`——步骤模式下与 `next_node_id` 取值相同，两个名称均提供，消费方任选 |
+| `end` | Option\<bool\> | **结束标识**：`true` 表示该步骤是流程最后一个可观察节点——终态动作（挂机/转接/跳转/退出）、`session_end` 条目、或被主叫挂断/取消/错误打断的在途步骤。可恢复交接（queue/bridge 带 return_app、JumpIvr 续流）不携带 `end`，流程由后继会话的 `resume` 触发接续 |
 
 > **`trigger` 字段说明**：
 >

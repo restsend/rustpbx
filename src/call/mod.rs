@@ -271,6 +271,8 @@ pub enum TransferEndpoint {
     Voicemail(String),
     /// Conference room identified by ID.
     Conference(String),
+    /// Start the realtime (AI voice) app with a `[[realtime]]` preset name.
+    Realtime(String),
 }
 
 impl TransferEndpoint {
@@ -283,15 +285,16 @@ impl TransferEndpoint {
             TransferEndpoint::Ivr(_) => "ivr",
             TransferEndpoint::Voicemail(_) => "voicemail",
             TransferEndpoint::Conference(_) => "conference",
+            TransferEndpoint::Realtime(_) => "realtime",
         }
     }
 
     /// Parse a prefix‑based destination string.
     ///
-    /// Handles `queue:`, `toivr:`, `ivr:`, `voicemail:`, `conference:`.
-    /// Plain strings (no recognised prefix) are returned as `Uri(String)`.
-    /// Does **not** add a `sip:` scheme – callers that need it should use
-    /// [`build_sip_uri`] afterwards.
+    /// Handles `queue:`, `toivr:`, `ivr:`, `voicemail:`, `conference:`,
+    /// `realtime:`. Plain strings (no recognised prefix) are returned as
+    /// `Uri(String)`. Does **not** add a `sip:` scheme – callers that need it
+    /// should use [`build_sip_uri`] afterwards.
     pub fn parse(value: &str) -> Option<Self> {
         let trimmed = value.trim();
         if trimmed.is_empty() {
@@ -304,6 +307,7 @@ impl TransferEndpoint {
             ("ivr:", |v| TransferEndpoint::Ivr(v)),
             ("voicemail:", |v| TransferEndpoint::Voicemail(v)),
             ("conference:", |v| TransferEndpoint::Conference(v)),
+            ("realtime:", |v| TransferEndpoint::Realtime(v)),
         ];
 
         for (prefix, ctor) in prefixes {
@@ -330,6 +334,7 @@ impl std::fmt::Display for TransferEndpoint {
             TransferEndpoint::Ivr(name) => write!(f, "ivr:{}", name),
             TransferEndpoint::Voicemail(ext) => write!(f, "voicemail:{}", ext),
             TransferEndpoint::Conference(id) => write!(f, "conference:{}", id),
+            TransferEndpoint::Realtime(preset) => write!(f, "realtime:{}", preset),
         }
     }
 }
@@ -1496,6 +1501,29 @@ mod tests {
         let endpoint = TransferEndpoint::parse("toivr:39230").expect("route point must parse");
 
         assert_eq!(endpoint.to_string(), "toivr:39230");
+    }
+
+    #[test]
+    fn realtime_transfer_endpoint_roundtrip() {
+        let endpoint = TransferEndpoint::parse("realtime:support-bot")
+            .expect("realtime target must parse");
+        assert_eq!(endpoint, TransferEndpoint::Realtime("support-bot".into()));
+        assert_eq!(endpoint.kind(), "realtime");
+        assert_eq!(endpoint.to_string(), "realtime:support-bot");
+
+        // Case-insensitive prefix, trimmed value.
+        let endpoint = TransferEndpoint::parse("  Realtime: Sales-Bot ").unwrap();
+        assert_eq!(endpoint, TransferEndpoint::Realtime("Sales-Bot".into()));
+
+        // Empty preset name is rejected (falls into the empty-name guard).
+        assert!(TransferEndpoint::parse("realtime:").is_none());
+        assert!(TransferEndpoint::parse("realtime:  ").is_none());
+
+        // Plain strings still parse as URIs.
+        assert_eq!(
+            TransferEndpoint::parse("sip:1001@pbx.local"),
+            Some(TransferEndpoint::Uri("sip:1001@pbx.local".into()))
+        );
     }
 
     // ── QueuePlan::from_app_params ─────────────────────────────────────────

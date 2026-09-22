@@ -1247,6 +1247,7 @@ impl RwiCommandProcessor {
                 };
                 let config = crate::call::domain::RecordConfig {
                     unique_id: None,
+                    discard: None,
                     path: path.clone(),
                     max_duration_secs: rec.max_duration_secs,
                     beep: rec.beep.unwrap_or(false),
@@ -1309,6 +1310,33 @@ impl RwiCommandProcessor {
 
             let mut caller_early_sdp: Option<String> = None;
             let mut originate_recording_started = false;
+            // Pre-answer ringback segment (system-managed): records the
+            // early-media ringback so an unanswered outbound call keeps an
+            // audible artifact. When the call IS answered, the segment is
+            // discarded (file deleted; no events; no CDR entry) before the
+            // agent-side segment — driven by the caller's `record` option —
+            // starts. The `discard` marker is cleared on the failure path so
+            // an unanswered call's ringback slice is kept and uploaded.
+            let originate_ringing_config = record_on_media.as_ref().map(|_| {
+                crate::call::domain::RecordConfig {
+                    unique_id: None,
+                    discard: Some(true),
+                    path: default_originate_recorder_path(
+                        &server,
+                        &format!("{call_id}-ringing"),
+                    ),
+                    max_duration_secs: None,
+                    beep: false,
+                    format: None,
+                    channels: record_channels,
+                    mono_caller_only: Some(false),
+                    segment_type: Some("ringing".to_string()),
+                    segment_id: None,
+                    label: None,
+                    notify_app: Some(false),
+                }
+            });
+            let mut originate_ringing_active = false;
             let mut pending_commands = VecDeque::new();
             let mut setup_hangup: Option<(Option<String>, Option<u16>)> = None;
             // `call_ringing` session hooks fire once, on the FIRST provisional
@@ -1413,8 +1441,12 @@ impl RwiCommandProcessor {
                                                         caller_early_sdp = Some(sdp);
 
                                                         if !originate_recording_started
-                                                            && let Some((path, config)) = originate_recording.as_ref()
+                                                            && let Some(config) = originate_ringing_config.as_ref()
                                                         {
+                                                            // Start the system-managed ringback
+                                                            // segment. Discarded on answer; kept
+                                                            // (via the failure path's marker
+                                                            // clear) when the call never connects.
                                                             let result = session
                                                                 .execute_command(
                                                                     CallCommand::StartRecording {
@@ -1424,7 +1456,8 @@ impl RwiCommandProcessor {
                                                                 )
                                                                 .await;
                                                             if result.success {
-                                                                record_files.insert(call_id.clone(), path.clone());
+                                                                record_files.insert(call_id.clone(), config.path.clone());
+                                                                originate_ringing_active = true;
                                                                 originate_recording_started = true;
                                                                 let unique_id = result
                                                                     .data
@@ -1442,7 +1475,7 @@ impl RwiCommandProcessor {
                                                                 tracing::warn!(
                                                                     call_id = %call_id,
                                                                     error = %result.message.unwrap_or_else(|| "unknown error".to_string()),
-                                                                    "originate record option: failed to start at early media"
+                                                                    "originate record option: failed to start ringback segment at early media"
                                                                 );
                                                             }
                                                         }
@@ -1497,6 +1530,9 @@ impl RwiCommandProcessor {
                                             originate_recording_started = true;
                                         } else if stops_recording {
                                             originate_recording_started = false;
+                                            // An explicit pre-answer stop also ends
+                                            // the ringback segment if it was the one rolling.
+                                            originate_ringing_active = false;
                                         }
                                     } else {
                                         tracing::warn!(
@@ -1591,6 +1627,18 @@ impl RwiCommandProcessor {
                         // (agent Ringing/Idle → Busy) for agent originates.
                         session.fire_on_call_connected_hooks().await;
 
+                        // Answered: the pre-answer ringback segment is
+                        // discarded (its file is deleted; no events; no CDR
+                        // entry — that is the `discard` marker's job), then the
+                        // agent-side segment starts from the caller's `record`
+                        // configuration. An answered call's recording therefore
+                        // contains no ringback tone.
+                        if originate_ringing_active {
+                            originate_recording_started = false;
+                            let _ = session
+                                .execute_command(CallCommand::StopRecording, None)
+                                .await;
+                        }
                         if !originate_recording_started
                             && let Some((path, config)) = originate_recording.as_ref()
                         {
@@ -1764,6 +1812,14 @@ impl RwiCommandProcessor {
                 .fire_on_call_ended_hooks(setup_end_reason.as_ref(), 0)
                 .await;
 
+            // Failed setup (rejected / no-answer / timeout): the ringback
+            // recording is the artifact to KEEP — clear its provisional
+            // discard marker so the stop below finalizes it as a normal,
+            // uploaded segment with events.
+            if originate_ringing_active {
+                originate_recording_started = false;
+                session.clear_active_recording_discard();
+            }
             if originate_recording_started {
                 let _ = session
                     .execute_command(CallCommand::StopRecording, None)
@@ -2344,6 +2400,7 @@ impl RwiCommandProcessor {
                     label: req.label.clone(),
                     notify_app: Some(false),
                     unique_id: Some(unique_id.clone()),
+                    discard: None,
                 },
             })
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;

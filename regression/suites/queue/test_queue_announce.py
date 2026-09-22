@@ -40,17 +40,6 @@ COMFORT_HZ = 800.0
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    reason="comfort prompts are scheduled but never audible: queue.rs "
-           "on_audio_complete plays the comfort prompt and immediately "
-           "restarts the hold loop concurrently; the media layer delivers "
-           "neither — Goertzel analysis of the caller recording shows only "
-           "hold-music 300 Hz for ~4.5s and then DIGITAL SILENCE (the hold "
-           "loop dies too), with zero 800 Hz comfort energy. Logs claim "
-           "'playing comfort prompt', so the bug is below the app layer. "
-           "Turns XPASS when fixed.",
-    strict=True,
-)
 async def test_queue_comfort_prompt_plays_while_waiting(
     pbx, pbx_config, sipbot_pool, tmp_path
 ):

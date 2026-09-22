@@ -123,7 +123,7 @@
             <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
                 <h2 class="mb-3 text-sm font-semibold text-slate-700">{{ "reports.heatmap" | t }} <span class="text-xs font-normal text-slate-400">({{ "reports.heatmap_hint" | t }})</span></h2>
                 <div class="overflow-x-auto">
-                    <table class="min-w-full text-xs">
+                    <table class="min-w-full min-w-[720px] text-xs">
                         <thead>
                             <tr class="text-slate-500">
                                 <th class="py-1 pr-2 text-left">Day \ Hour</th>
@@ -174,16 +174,43 @@
         <!-- ══ TRUNK tab ══ -->
         <div x-show="tab === 'trunk'" x-cloak id="reports-tab-trunk" role="tabpanel" class="space-y-6" tabindex="0">
             <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
-                <h2 class="mb-3 text-sm font-semibold text-slate-700">{{ "reports.trunk_traffic" | t }}</h2>
+                <div class="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <h2 class="text-sm font-semibold text-slate-700">{{ "reports.trunk_traffic" | t }}</h2>
+                    <!-- Searchable trunk picker -->
+                    <div class="relative" @keydown.escape="trunkPickerOpen = false">
+                        <label class="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500" for="trunk-search">{{ "reports.trunk_selector" | t }}</label>
+                        <input id="trunk-search" type="text" x-model="trunkQuery" @focus="trunkPickerOpen = true" @input="trunkPickerOpen = true"
+                            class="block w-64 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-200" />
+                        <div x-show="trunkPickerOpen" x-cloak @click.outside="trunkPickerOpen = false"
+                            class="absolute z-20 mt-1 max-h-64 w-64 overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg">
+                            <button type="button" class="block w-full px-3 py-2 text-left text-sm hover:bg-sky-50"
+                                :class="selectedTrunk === '' ? 'text-sky-700 font-medium' : 'text-slate-600'"
+                                @click="selectTrunk('')">{{ "reports.trunk_all" | t }}</button>
+                            <template x-for="t in filteredTrunks()" :key="'tp'+t.trunk_id">
+                                <button type="button" class="block w-full px-3 py-2 text-left text-sm hover:bg-sky-50"
+                                    :class="selectedTrunk !== '' && String(t.trunk_id) === selectedTrunk ? 'text-sky-700 font-medium' : 'text-slate-600'"
+                                    @click="selectTrunk(String(t.trunk_id))">
+                                    <span x-text="t.name"></span>
+                                    <span class="ml-1 text-xs text-slate-400" x-text="t.carrier"></span>
+                                </button>
+                            </template>
+                            <div x-show="filteredTrunks().length === 0" class="px-3 py-2 text-sm text-slate-400">{{ "reports.trunk_no_match" | t }}</div>
+                        </div>
+                    </div>
+                </div>
                 <div class="overflow-x-auto">
                     <table class="min-w-full text-sm">
                         <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500"><tr>
-                            <th class="px-4 py-3">{{ "reports.col_trunk" | t }}</th><th class="px-4 py-3">{{ "reports.col_carrier" | t }}</th>
-                            <th class="px-4 py-3 text-right">{{ "reports.col_offered" | t }}</th><th class="px-4 py-3 text-right">{{ "reports.col_answered" | t }}</th>
-                            <th class="px-4 py-3 text-right">{{ "reports.col_missed" | t }}</th><th class="px-4 py-3 text-right">{{ "reports.col_duration" | t }}</th><th class="px-4 py-3 text-right">{{ "reports.col_asr" | t }}</th>
+                            <th class="px-4 py-3">{{ "reports.col_trunk" | t }}</th>
+                            <th class="px-4 py-3">{{ "reports.col_carrier" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_offered" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_answered" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_missed" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_duration" | t }}</th>
+                            <th class="px-4 py-3 text-right">{{ "reports.col_asr" | t }}</th>
                         </tr></thead>
                         <tbody class="divide-y divide-slate-100 text-sm text-slate-700">
-                            <template x-for="(r, i) in trunkRows" :key="'tk'+i">
+                            <template x-for="(r, i) in visibleTrunkRows()" :key="'tk'+i">
                                 <tr class="hover:bg-slate-50/50">
                                     <td class="px-4 py-3 font-medium text-slate-700" x-text="r.name"></td>
                                     <td class="px-4 py-3" x-text="r.carrier || '—'"></td>
@@ -194,9 +221,79 @@
                                     <td class="px-4 py-3 text-right" x-text="r.asr_pct.toFixed(1)"></td>
                                 </tr>
                             </template>
-                            <tr x-show="trunkRows.length === 0"><td colspan="7" class="px-4 py-12 text-center text-slate-400">{{ "reports.no_trunk_traffic" | t }}</td></tr>
+                            <tr x-show="visibleTrunkRows().length === 0"><td colspan="7" class="px-4 py-12 text-center text-slate-400">{{ "reports.no_trunk_traffic" | t }}</td></tr>
                         </tbody>
                     </table>
+                </div>
+            </div>
+
+            <!-- Quality heatmaps (ringback delay / packet loss / jitter) -->
+            <div class="grid gap-4 xl:grid-cols-3 md:grid-cols-2">
+                <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                    <h2 class="mb-3 text-sm font-semibold text-slate-700">{{ "reports.trunk_heat_ring" | t }} <span class="text-xs font-normal text-slate-400">({{ "reports.trunk_heat_ring_hint" | t }})</span></h2>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full min-w-[720px] text-xs">
+                            <thead><tr class="text-slate-500">
+                                <th class="py-1 pr-2 text-left">{{ "reports.heat_dow_hour" | t }}</th>
+                                <template x-for="h in 24" :key="'rh'+h"><th class="px-1 py-1 text-center font-normal" x-text="h-1"></th></template>
+                            </tr></thead>
+                            <tbody>
+                                <template x-for="(row, d) in trunkHeat.ring" :key="'tr'+d">
+                                    <tr>
+                                        <td class="py-1 pr-2 font-medium text-slate-600" x-text="dow[d]"></td>
+                                        <template x-for="(v, h) in row" :key="'tr'+d+'-'+h">
+                                            <td class="px-1 py-1 text-center" x-text="v ? v.toFixed(0) : ''"
+                                                :style="v ? `background: rgba(56,189,248,${Math.min(0.15 + v / Math.max(1, heatMax(trunkHeat.ring)), 1)}); border-radius: 3px;` : ''"></td>
+                                        </template>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                    <h2 class="mb-3 text-sm font-semibold text-slate-700">{{ "reports.trunk_heat_loss" | t }} <span class="text-xs font-normal text-slate-400">({{ "reports.trunk_heat_loss_hint" | t }})</span></h2>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full min-w-[720px] text-xs">
+                            <thead><tr class="text-slate-500">
+                                <th class="py-1 pr-2 text-left">{{ "reports.heat_dow_hour" | t }}</th>
+                                <template x-for="h in 24" :key="'lh'+h"><th class="px-1 py-1 text-center font-normal" x-text="h-1"></th></template>
+                            </tr></thead>
+                            <tbody>
+                                <template x-for="(row, d) in trunkHeat.loss" :key="'tl'+d">
+                                    <tr>
+                                        <td class="py-1 pr-2 font-medium text-slate-600" x-text="dow[d]"></td>
+                                        <template x-for="(v, h) in row" :key="'tl'+d+'-'+h">
+                                            <td class="px-1 py-1 text-center" x-text="v ? v.toFixed(1) : ''"
+                                                :style="v ? `background: rgba(251,113,133,${Math.min(0.15 + v / Math.max(0.5, heatMax(trunkHeat.loss)), 1)}); border-radius: 3px;` : ''"></td>
+                                        </template>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+                    <h2 class="mb-3 text-sm font-semibold text-slate-700">{{ "reports.trunk_heat_jitter" | t }} <span class="text-xs font-normal text-slate-400">({{ "reports.trunk_heat_jitter_hint" | t }})</span></h2>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full min-w-[720px] text-xs">
+                            <thead><tr class="text-slate-500">
+                                <th class="py-1 pr-2 text-left">{{ "reports.heat_dow_hour" | t }}</th>
+                                <template x-for="h in 24" :key="'jh'+h"><th class="px-1 py-1 text-center font-normal" x-text="h-1"></th></template>
+                            </tr></thead>
+                            <tbody>
+                                <template x-for="(row, d) in trunkHeat.jitter" :key="'tj'+d">
+                                    <tr>
+                                        <td class="py-1 pr-2 font-medium text-slate-600" x-text="dow[d]"></td>
+                                        <template x-for="(v, h) in row" :key="'tj'+d+'-'+h">
+                                            <td class="px-1 py-1 text-center" x-text="v ? v.toFixed(1) : ''"
+                                                :style="v ? `background: rgba(245,158,11,${Math.min(0.15 + v / Math.max(1, heatMax(trunkHeat.jitter)), 1)}); border-radius: 3px;` : ''"></td>
+                                        </template>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
         </div>
@@ -376,7 +473,7 @@
                 <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
                     <h2 class="mb-3 text-sm font-semibold text-slate-700">{{ "reports.cc_heat_answered" | t }} <span class="text-xs font-normal text-slate-400">({{ "reports.cc_heat_answered_hint" | t }})</span></h2>
                     <div class="overflow-x-auto">
-                        <table class="min-w-full text-xs">
+                        <table class="min-w-full min-w-[720px] text-xs">
                             <thead><tr class="text-slate-500">
                                 <th class="py-1 pr-2 text-left">{{ "reports.heat_dow_hour" | t }}</th>
                                 <template x-for="h in 24" :key="'ch'+h"><th class="px-1 py-1 text-center font-normal" x-text="h-1"></th></template>
@@ -398,7 +495,7 @@
                 <div class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
                     <h2 class="mb-3 text-sm font-semibold text-slate-700">{{ "reports.cc_heat_queue" | t }} <span class="text-xs font-normal text-slate-400">({{ "reports.cc_heat_queue_hint" | t }})</span></h2>
                     <div class="overflow-x-auto">
-                        <table class="min-w-full text-xs">
+                        <table class="min-w-full min-w-[720px] text-xs">
                             <thead><tr class="text-slate-500">
                                 <th class="py-1 pr-2 text-left">{{ "reports.heat_dow_hour" | t }}</th>
                                 <template x-for="h in 24" :key="'qh'+h"><th class="px-1 py-1 text-center font-normal" x-text="h-1"></th></template>
@@ -510,6 +607,10 @@
             // per-tab state
             callData: { series: [], hangup_reasons: [], sip_status: [], heatmap: [[], [], [], [], [], [], []] },
             trunkRows: [],
+            trunkHeat: { ring: [[], [], [], [], [], [], []], loss: [[], [], [], [], [], [], []], jitter: [[], [], [], [], [], [], []] },
+            selectedTrunk: '',
+            trunkQuery: '',
+            trunkPickerOpen: false,
             routeRows: [],
             vmSummary: { total: 0, unread: 0, read_ratio_pct: 0, transcript_coverage_pct: 0 },
             vmBoxes: [],
@@ -565,7 +666,7 @@
             async load() {
                 switch (this.tab) {
                     case 'call': return this.loadCall();
-                    case 'trunk': return this.loadSimple('/trunk', d => this.trunkRows = d);
+                    case 'trunk': return this.loadTrunk();
                     case 'route': return this.loadSimple('/route', d => this.routeRows = d);
                     case 'voicemail': return this.loadVoicemail();
                     case 'locator': return this.loadLocator();
@@ -576,6 +677,44 @@
             async fetchJson(path) {
                 const resp = await fetch(this.apiBase() + path, { headers: { 'Accept': 'application/json' } });
                 return resp.json();
+            },
+
+            trunkName(id) {
+                const r = this.trunkRows.find(t => String(t.trunk_id) === String(id));
+                return r ? r.name : '';
+            },
+
+            filteredTrunks() {
+                const q = this.trunkQuery.trim().toLowerCase();
+                if (!q) return this.trunkRows;
+                return this.trunkRows.filter(t =>
+                    (t.name || '').toLowerCase().includes(q) ||
+                    (t.carrier || '').toLowerCase().includes(q));
+            },
+
+            visibleTrunkRows() {
+                if (!this.selectedTrunk) return this.trunkRows;
+                return this.trunkRows.filter(t => String(t.trunk_id) === this.selectedTrunk);
+            },
+
+            selectTrunk(id) {
+                this.selectedTrunk = id;
+                this.trunkPickerOpen = false;
+                const r = this.trunkName(id);
+                this.trunkQuery = r || this.trunkQuery;
+                this.loadTrunk();
+            },
+
+            async loadTrunk() {
+                try {
+                    const heatQs = this.selectedTrunk ? `${this.commonParams()}&trunk_id=${encodeURIComponent(this.selectedTrunk)}` : this.commonParams();
+                    const [body, heat] = await Promise.all([
+                        this.fetchJson(`/trunk?${this.commonParams()}`),
+                        this.fetchJson(`/trunk/heat?${heatQs}`),
+                    ]);
+                    this.trunkRows = body.data || [];
+                    this.trunkHeat = heat.data || this.trunkHeat;
+                } catch (e) { console.error('trunk report failed', e); }
             },
 
             async loadSimple(path, assign) {

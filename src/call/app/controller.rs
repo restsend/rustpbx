@@ -445,6 +445,7 @@ impl CallController {
         let p = path.into();
         let config = crate::call::domain::RecordConfig {
             unique_id: None,
+            discard: None,
             path: p.clone(),
             max_duration_secs: max_duration.map(|d| d.as_secs() as u32),
             beep,
@@ -473,6 +474,7 @@ impl CallController {
     ) -> anyhow::Result<()> {
         let config = crate::call::domain::RecordConfig {
             unique_id: None,
+            discard: None,
             path: String::new(),
             max_duration_secs: max_duration.map(|d| d.as_secs() as u32),
             beep,
