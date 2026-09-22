@@ -9540,6 +9540,35 @@ impl SipSession {
                 }
             }
 
+            CallCommand::StopRecordingSegment { label } => {
+                // Ownership check runs HERE, inside the session loop — the
+                // sender (CC hook, inline in `on_agent_disconnected`) cannot
+                // probe first without deadlocking against this very loop.
+                // Only the agent segment we started ourselves
+                // (`segment_type = "agent"`, label = agent id) is stopped; a
+                // foreign recorder that happens to be active (policy
+                // full-call recording, manual RWI record, survey segment)
+                // is never touched. The core hangup finalize remains the
+                // backstop when this hook never fires.
+                let ours = self.active_recording.as_ref().is_some_and(|active| {
+                    active.segment_type == "agent" && active.label == label
+                });
+                if !ours {
+                    debug!(session_id = %self.id, %label,
+                        "StopRecordingSegment: active recorder is not our agent segment — leaving it alone");
+                    return CommandResult::success();
+                }
+                let outcome = self.media.recording.stop_recording().await;
+                match outcome {
+                    Ok(Some(result)) => {
+                        self.publish_recording_complete(result);
+                        CommandResult::success()
+                    }
+                    Ok(None) => CommandResult::success(),
+                    Err(error) => CommandResult::failure(error.to_string()),
+                }
+            }
+
             CallCommand::QueryRecorderStatus { reply } => {
                 tracing::debug!(session_id = %self.id, "QueryRecorderStatus: handler entered");
                 let result = self.media.recording.recorder_status().await;

@@ -251,6 +251,22 @@ pub enum CallCommand {
     /// Stop recording
     StopRecording,
 
+    /// Stop a recording segment only if the active segment is an agent
+    /// segment started with the given label (agent id). The ownership check
+    /// runs inside the session loop, so any other active recorder (policy
+    /// full-call recording, manual RWI record, survey segment) is left
+    /// untouched.
+    ///
+    /// Fire-and-forget by design: this is sent from session hooks that run
+    /// INLINE inside the session command loop
+    /// (`handle_start_return_app` → `on_agent_disconnected`), so it must
+    /// never wait for a reply — a probe-style round trip deadlocks against
+    /// the very loop that would answer it.
+    StopRecordingSegment {
+        /// The label the segment was started with (agent id).
+        label: String,
+    },
+
     /// Query the session-owned media bridge for its current recorder state.
     /// This is an internal request/reply command and is never serialized.
     #[serde(skip)]
