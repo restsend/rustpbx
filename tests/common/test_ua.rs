@@ -57,11 +57,25 @@ pub struct TestUa {
     received_offer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
     /// Store negotiated answer SDP received by caller side after INVITE 200 OK
     negotiated_answer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
-    /// Real WebRTC PeerConnection used when `config.webrtc` is set.
+    /// Real rustrtc PeerConnection used when the UA runs with live media
+    /// (`MediaMode::WebRtc` or `MediaMode::Srtp`).
     webrtc_pc: Option<Arc<rustrtc::PeerConnection>>,
+    /// Which transport the PeerConnection uses (DTLS-SRTP vs SDES-SRTP).
+    media_mode: MediaMode,
     /// Inbound RTP collector (plaintext, post-SRTP-unprotect) for the
-    /// WebRTC PeerConnection. Attached via [`TestUa::attach_webrtc_rx_tap`].
+    /// PeerConnection. Attached via [`TestUa::attach_webrtc_rx_tap`].
     webrtc_rx: Option<Arc<WebRtcRxTap>>,
+}
+
+/// Media transport mode for a [`TestUa`] with a real rustrtc PeerConnection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaMode {
+    /// No PeerConnection (fake SDP strings only).
+    None,
+    /// DTLS-SRTP over full ICE (browsers).
+    WebRtc,
+    /// SDES-SRTP over direct RTP (RFC 4568 `a=crypto`).
+    Srtp,
 }
 
 /// One inbound RTP packet observed on a WebRTC PeerConnection after SRTP
@@ -159,7 +173,7 @@ pub enum TestUaEvent {
 
 impl TestUa {
     pub fn new(config: TestUaConfig) -> Self {
-        Self::new_inner(config, None)
+        Self::new_inner(config, None, MediaMode::None)
     }
 
     /// Create a WebRTC UA whose PeerConnection advertises only `audio_caps`
@@ -169,15 +183,38 @@ impl TestUa {
         config: TestUaConfig,
         audio_caps: Vec<rustrtc::config::AudioCapability>,
     ) -> Self {
-        Self::new_inner(config, Some(audio_caps))
+        Self::new_inner(config, Some(audio_caps), MediaMode::WebRtc)
+    }
+
+    /// Create an SDES-SRTP UA (RFC 4568): the PeerConnection offers/answers
+    /// `RTP/SAVP` + `a=crypto` and the SDP carries no ICE/DTLS attributes.
+    /// Loopback only: the c-line is pinned to 127.0.0.1.
+    pub fn new_srtp_with_caps(
+        mut config: TestUaConfig,
+        audio_caps: Vec<rustrtc::config::AudioCapability>,
+    ) -> Self {
+        config.webrtc = false; // no DTLS offer; SDES offers `RTP/SAVP` + a=crypto
+        Self::new_inner(config, Some(audio_caps), MediaMode::Srtp)
     }
 
     fn new_inner(
         config: TestUaConfig,
         webrtc_audio_caps: Option<Vec<rustrtc::config::AudioCapability>>,
+        media_mode: MediaMode,
     ) -> Self {
-        let webrtc_pc = if config.webrtc {
+        let webrtc_pc = if media_mode != MediaMode::None {
             let mut rtc_config = rustrtc::RtcConfiguration::default();
+            rtc_config.transport_mode = match media_mode {
+                MediaMode::WebRtc => rustrtc::TransportMode::WebRtc,
+                MediaMode::Srtp => rustrtc::TransportMode::Srtp,
+                MediaMode::None => rustrtc::TransportMode::Rtp,
+            };
+            if media_mode == MediaMode::Srtp {
+                // SDES direct mode: pin the advertised c-line/bind address so
+                // loopback e2e media can flow without ICE.
+                rtc_config.external_ip = Some("127.0.0.1".to_string());
+                rtc_config.bind_ip = Some("127.0.0.1".to_string());
+            }
             if let Some(caps) = webrtc_audio_caps {
                 let mut media_caps = rustrtc::MediaCapabilities::default();
                 media_caps.audio = caps;
@@ -205,6 +242,7 @@ impl TestUa {
             received_offer_sdps: Arc::new(Mutex::new(HashMap::new())),
             negotiated_answer_sdps: Arc::new(Mutex::new(HashMap::new())),
             webrtc_pc,
+            media_mode,
             webrtc_rx,
         }
     }
@@ -352,11 +390,11 @@ impl TestUa {
     /// Make a call with optional SDP
     pub async fn make_call(&self, callee: &str, sdp_offer: Option<String>) -> Result<DialogId> {
         tokio::time::timeout(
-            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(30),
             self.make_call_with_sdp(callee, sdp_offer),
         )
         .await
-        .map_err(|_| anyhow!("make_call timed out after 15s for callee '{}'", callee))?
+        .map_err(|_| anyhow!("make_call timed out after 30s for callee '{}'", callee))?
     }
 
     /// Make a call with optional SDP (internal implementation)
@@ -364,6 +402,33 @@ impl TestUa {
         &self,
         callee: &str,
         sdp_offer: Option<String>,
+    ) -> Result<DialogId> {
+        self.make_call_inner(callee, sdp_offer, None).await
+    }
+
+    /// Make a call whose PC-generated SDP offer advertises `fake_ip` in the
+    /// `c=` line instead of the real address (NAT simulation: the advertised
+    /// address is unreachable, so the remote can only reach us via
+    /// symmetric-RTP latching). The PeerConnection still sends from its real
+    /// socket.
+    pub async fn make_call_spoofed_cline(
+        &self,
+        callee: &str,
+        fake_ip: &str,
+    ) -> Result<DialogId> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.make_call_inner(callee, None, Some(fake_ip.to_string())),
+        )
+        .await
+        .map_err(|_| anyhow!("make_call_spoofed_cline timed out after 30s for callee '{callee}'"))?
+    }
+
+    async fn make_call_inner(
+        &self,
+        callee: &str,
+        sdp_offer: Option<String>,
+        spoof_cline_ip: Option<String>,
     ) -> Result<DialogId> {
         let dialog_layer = self
             .dialog_layer
@@ -403,12 +468,14 @@ impl TestUa {
         let (content_type, offer) = if let Some(sdp) = sdp_offer {
             (Some("application/sdp".to_string()), Some(sdp.into_bytes()))
         } else if let Some(pc) = self.webrtc_pc.as_ref() {
-            // Real WebRTC (DTLS-SRTP) offer from the UA's PeerConnection.
+            // Real SDP offer from the UA's PeerConnection (DTLS-SRTP or SDES).
             let _ = pc
                 .create_offer()
                 .await
                 .map_err(|e| anyhow!("create_offer failed: {}", e))?;
-            pc.wait_for_gathering_complete().await;
+            if self.media_mode == MediaMode::WebRtc {
+                pc.wait_for_gathering_complete().await;
+            }
             let mut offer = pc
                 .create_offer()
                 .await
@@ -416,12 +483,27 @@ impl TestUa {
             offer.sdp_type = rustrtc::SdpType::Offer;
             // Set the local description so the PC enters have-local-offer and
             // can later apply the remote answer (ICE + DTLS role negotiation).
-            pc.set_local_description(offer.clone())
-                .map_err(|e| anyhow!("set_local_description(offer) failed: {}", e))?;
-            (
-                Some("application/sdp".to_string()),
-                Some(offer.to_sdp_string().into_bytes()),
-            )
+            if let Some(ref ip) = spoof_cline_ip {
+                // NAT simulation: advertise the unreachable address but keep
+                // the PC's local description in sync (as a parsed SDP) so the
+                // remote answer can still be applied.
+                let spoofed = offer.to_sdp_string().replace("IN IP4 127.0.0.1", &format!("IN IP4 {ip}"));
+                let desc = rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, &spoofed)
+                    .map_err(|e| anyhow!("parse spoofed offer failed: {}", e))?;
+                pc.set_local_description(desc)
+                    .map_err(|e| anyhow!("set_local_description(spoofed offer) failed: {}", e))?;
+                (
+                    Some("application/sdp".to_string()),
+                    Some(spoofed.into_bytes()),
+                )
+            } else {
+                pc.set_local_description(offer.clone())
+                    .map_err(|e| anyhow!("set_local_description(offer) failed: {}", e))?;
+                (
+                    Some("application/sdp".to_string()),
+                    Some(offer.to_sdp_string().into_bytes()),
+                )
+            }
         } else {
             (None, None)
         };
@@ -480,18 +562,32 @@ impl TestUa {
         self.webrtc_pc.clone()
     }
 
-    /// Wait until ICE + DTLS are connected, i.e. SRTP keying material is
-    /// ready on both sides. Fails after `timeout`.
+    /// Wait until the media path is ready: ICE + DTLS connected for WebRtc
+    /// UAs, or the direct RTP/SRTP transport armed for Srtp (SDES) UAs.
+    /// Fails after `timeout`.
     #[allow(dead_code)]
     pub async fn wait_webrtc_connected(&self, timeout: std::time::Duration) -> Result<()> {
         let pc = self
             .webrtc_pc
             .as_ref()
             .ok_or_else(|| anyhow!("not a webrtc UA"))?;
-        tokio::time::timeout(timeout, pc.wait_for_connected())
-            .await
-            .map_err(|_| anyhow!("webrtc ICE/DTLS not connected within {:?}", timeout))?
-            .map_err(|e| anyhow!("webrtc connection failed: {:?}", e))
+        if self.media_mode == MediaMode::Srtp {
+            tokio::time::timeout(timeout, pc.wait_for_rtp_transport_ready(timeout))
+                .await
+                .map_err(|_| anyhow!("sdes RTP transport not ready within {:?}", timeout))?
+                .map_err(|e| anyhow!("sdes connection failed: {:?}", e))
+        } else {
+            tokio::time::timeout(timeout, pc.wait_for_connected())
+                .await
+                .map_err(|_| anyhow!("webrtc ICE/DTLS not connected within {:?}", timeout))?
+                .map_err(|e| anyhow!("webrtc connection failed: {:?}", e))
+        }
+    }
+
+    /// The UA's media transport mode.
+    #[allow(dead_code)]
+    pub fn media_mode(&self) -> MediaMode {
+        self.media_mode
     }
 
     /// Attach the inbound RTP tap to the PeerConnection. Must be called after
@@ -620,8 +716,9 @@ impl TestUa {
             .as_ref()
             .ok_or_else(|| anyhow!("TestUa not started"))?;
 
-        // If this is a WebRTC UA and no explicit answer was supplied, derive
-        // one from the received offer via the PeerConnection (real DTLS-SRTP).
+        // If this is a media UA and no explicit answer was supplied, derive
+        // one from the received offer via the PeerConnection (real DTLS-SRTP
+        // or SDES-SRTP depending on the UA's mode).
         let sdp_answer = match sdp_answer {
             Some(s) => Some(s),
             None if self.webrtc_pc.is_some() => {
@@ -642,7 +739,9 @@ impl TestUa {
                     .create_answer()
                     .await
                     .map_err(|e| anyhow!("create_answer failed: {}", e))?;
-                pc.wait_for_gathering_complete().await;
+                if self.media_mode == MediaMode::WebRtc {
+                    pc.wait_for_gathering_complete().await;
+                }
                 let mut answer = pc
                     .create_answer()
                     .await

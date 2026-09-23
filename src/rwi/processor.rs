@@ -5,6 +5,7 @@ use crate::call::sip::ClientDialogGuard;
 use crate::call::runtime::ConferenceId;
 use crate::call::runtime::ConferenceManager;
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
+use crate::config::RecordingPolicy;
 use crate::proxy::proxy_call::sip_session::SipSessionHandle;
 use crate::proxy::server::SipServerRef;
 use crate::rwi::RwiGatewayRef;
@@ -995,6 +996,14 @@ impl RwiCommandProcessor {
         let caller_display = req.caller_id.unwrap_or_else(|| caller_str.clone());
         let callee_display = req.destination.clone();
         let record_on_media = req.record.clone();
+        // `[recording].record_ringing`: system-managed ringback stage. When
+        // enabled, every originate call records its pre-answer slice (no
+        // `record` option required) and the slice is KEPT on answer as a
+        // first-class `ringing` segment (own upload target + CDR entry).
+        let record_ringing_enabled = {
+            let policy_guard = server.recording_policy.load();
+            originate_ringing_requested(record_on_media.is_some(), policy_guard.as_ref().as_ref())
+        };
         let record_channels = record_on_media
             .as_ref()
             .map(RecordStartRequest::channels)
@@ -1301,31 +1310,33 @@ impl RwiCommandProcessor {
             let mut caller_early_sdp: Option<String> = None;
             let mut originate_recording_started = false;
             // Pre-answer ringback segment (system-managed): records the
-            // early-media ringback so an unanswered outbound call keeps an
-            // audible artifact. When the call IS answered, the segment is
-            // discarded (file deleted; no events; no CDR entry) before the
-            // agent-side segment — driven by the caller's `record` option —
-            // starts. The `discard` marker is cleared on the failure path so
-            // an unanswered call's ringback slice is kept and uploaded.
-            let originate_ringing_config = record_on_media.as_ref().map(|_| {
-                crate::call::domain::RecordConfig {
-                    unique_id: None,
-                    discard: Some(true),
-                    path: default_originate_recorder_path(
-                        &server,
-                        &format!("{call_id}-ringing"),
-                    ),
-                    max_duration_secs: None,
-                    beep: false,
-                    format: None,
-                    channels: record_channels,
-                    mono_caller_only: Some(false),
-                    segment_type: Some("ringing".to_string()),
-                    segment_id: None,
-                    label: None,
-                    notify_app: Some(false),
-                }
-            });
+            // early-media ringback. Started when the caller's originate
+            // request carries a `record` option, or unconditionally with
+            // `[recording].record_ringing`. The `discard` marker is cleared
+            // on the failure path so an unanswered call's ringback slice is
+            // kept and uploaded; with `record_ringing` it is also cleared on
+            // the ANSWERED path, keeping the ringback as a first-class
+            // `ringing` artifact.
+            let originate_ringing_config = (record_on_media.is_some() || record_ringing_enabled)
+                .then(|| {
+                    crate::call::domain::RecordConfig {
+                        unique_id: None,
+                        discard: Some(true),
+                        path: default_originate_recorder_path(
+                            &server,
+                            &format!("{call_id}-ringing"),
+                        ),
+                        max_duration_secs: None,
+                        beep: false,
+                        format: None,
+                        channels: record_channels,
+                        mono_caller_only: Some(false),
+                        segment_type: Some("ringing".to_string()),
+                        segment_id: None,
+                        label: None,
+                        notify_app: Some(false),
+                    }
+                });
             let mut originate_ringing_active = false;
             let mut pending_commands = VecDeque::new();
             let mut setup_hangup: Option<(Option<String>, Option<u16>)> = None;
@@ -1468,8 +1479,8 @@ impl RwiCommandProcessor {
                                                                     error = %result.message.unwrap_or_else(|| "unknown error".to_string()),
                                                                     "originate record option: failed to start ringback segment at early media"
                                                                 );
-                                                            }
-                                                        }
+    }
+}
                                                     }
                                                     Err(error) => {
                                                         tracing::warn!(
@@ -1619,14 +1630,22 @@ impl RwiCommandProcessor {
                         // (agent Ringing/Idle → Busy) for agent originates.
                         session.fire_on_call_connected_hooks().await;
 
-                        // Answered: the pre-answer ringback segment is
-                        // discarded (its file is deleted; no events; no CDR
-                        // entry — that is the `discard` marker's job), then the
-                        // agent-side segment starts from the caller's `record`
-                        // configuration. An answered call's recording therefore
-                        // contains no ringback tone.
+                        // Answered: without `[recording].record_ringing` the
+                        // pre-answer ringback segment is discarded (its file
+                        // is deleted; no events; no CDR entry — that is the
+                        // `discard` marker's job), then the agent-side
+                        // segment starts from the caller's `record`
+                        // configuration, so an answered call's recording
+                        // contains no ringback tone. With the flag, the
+                        // discard marker is cleared first: the ringback slice
+                        // finalizes as a normal `ringing` segment (events +
+                        // CDR + its own upload target) before the agent-side
+                        // segment starts.
                         if originate_ringing_active {
                             originate_recording_started = false;
+                            if record_ringing_enabled {
+                                session.clear_active_recording_discard();
+                            }
                             let _ = session
                                 .execute_command(CallCommand::StopRecording, None)
                                 .await;
@@ -3217,6 +3236,15 @@ fn default_originate_recorder_path(server: &SipServerRef, call_id: &str) -> Stri
     let mut file = root.join(crate::utils::sanitize_id(call_id));
     file.set_extension("wav");
     file.to_string_lossy().to_string()
+}
+
+/// Whether an originate call installs the system-managed ringback segment:
+/// the request carries a `record` option, or `[recording].record_ringing`
+/// opts every outbound call in. With `record_ringing` the answered path also
+/// KEEPS the ringback slice; without it the historical discard-on-answer
+/// behavior applies.
+fn originate_ringing_requested(has_record_option: bool, policy: Option<&RecordingPolicy>) -> bool {
+    has_record_option || policy.is_some_and(|policy| policy.record_ringing_enabled())
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

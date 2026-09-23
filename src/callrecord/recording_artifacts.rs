@@ -280,6 +280,12 @@ pub struct UploadFailedMarker {
     pub attempts: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_id: Option<String>,
+    /// Canonical source tag (`agent` / `ivr` / …) the upload was routed to,
+    /// so the retry worker re-uploads into the same per-source bucket.
+    /// Absent on markers written before per-source routing existed — those
+    /// retry into the default bucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 fn default_attempts() -> u32 {
@@ -292,15 +298,17 @@ pub async fn write_upload_failed_marker(
     duration_ms: u64,
     error: &str,
 ) -> std::io::Result<()> {
-    write_upload_failed_marker_ex(source, address, duration_ms, error, None).await
+    write_upload_failed_marker_ex(source, address, duration_ms, error, None, None).await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn write_upload_failed_marker_ex(
     source: &Path,
     address: &str,
     duration_ms: u64,
     error: &str,
     call_id: Option<&str>,
+    recording_source: Option<&str>,
 ) -> std::io::Result<()> {
     let path = upload_failed_marker_path(source);
     let prior = tokio::fs::read(&path)
@@ -322,6 +330,9 @@ pub async fn write_upload_failed_marker_ex(
         call_id: call_id
             .map(|s| s.to_string())
             .or_else(|| prior.as_ref().and_then(|m| m.call_id.clone())),
+        source: recording_source
+            .map(|s| s.to_string())
+            .or_else(|| prior.as_ref().and_then(|m| m.source.clone())),
     };
     let body = serde_json::to_vec_pretty(&marker).unwrap_or_default();
     tokio::fs::write(path, body).await

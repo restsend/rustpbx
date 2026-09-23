@@ -9,6 +9,9 @@ mod test_transcoding_e2e;
 #[path = "proxy_flow/test_webrtc_interop_e2e.rs"]
 mod test_webrtc_interop_e2e;
 
+#[path = "proxy_flow/test_sdes_interop_e2e.rs"]
+mod test_sdes_interop_e2e;
+
 #[path = "proxy_flow/test_ringback_e2e.rs"]
 mod test_ringback_e2e;
 

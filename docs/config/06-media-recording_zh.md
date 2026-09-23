@@ -280,6 +280,61 @@ root = "recordings"
 
 使用 `[recording] type = "http"` 或 `type = "s3"` 时，CDR 可能在媒体上传结束前写入。上传成功后更新数据库中的 `recording_url`。本地 CDR JSON 在 `recordingUrl` 中保留本地录音路径，在 `recorder[]` 中保留录音器元数据。
 
+### 按录音来源分发到不同桶（sources）
+
+`type = "s3"` 时可通过 `[recording.sources.<source>]` 把不同来源的录音上传到不同的 S3 兼容桶。`<source>` 是规范化来源标签：`full`（整通）/ `ivr` / `agent`（坐席）/ `consult`（咨询转接）/ `ringing`（外呼回铃）/ `voicemail`（预留，当前留言走 `[voicemail.storage]`）/ `external`（自定义 `segment_type` 及 CSAT 等兜底来源）。
+
+每个条目是**完全独立**的 S3 目标（自带 vendor/endpoint/密钥/前缀，不从主配置继承）。没有映射到的来源，以及条目构建失败的来源，上传到主 `[recording]` 配置的默认桶。每条录音实际命中的桶记录在 CDR `recorder[].extra.uploadUrl` 与 `recording_metadata_available` 事件的 `download_url` 中。
+
+```toml
+[recording]
+type = "s3"
+bucket = "default-recordings"     # 默认桶：未映射来源都进这里
+endpoint = "http://minio:9000"
+access_key = "..."
+secret_key = "..."
+
+[recording.sources.agent]         # 坐席录音 → 独立平台的 isc_sr 桶
+bucket = "isc_sr"
+endpoint = "https://v2-isc.example.com"
+access_key = "..."
+secret_key = "..."
+root = "agent"                    # 可选：对象键前缀（独立于主 root）
+
+[recording.sources.ivr]           # IVR 录音 → test1 桶
+bucket = "test1"
+
+[recording.sources.ringing]       # 外呼回铃段 → test2 桶
+bucket = "test2"
+```
+
+说明：
+
+- 仅 `type = "s3"` 时生效；`local`/`http` 模式配置 `sources` 会被忽略并记录告警。
+- console 录音页下载/回放对每个桶分别预签名，无需额外配置。
+- 上传失败的 `.upload_failed.*` 标记记录了来源标签，重试时仍写回各自的桶。
+- 配置支持热更新（console 保存或重载配置后所有桶的 Storage 自动重建）。
+
+### 外呼回铃段录音（record_ringing）
+
+`[recording].record_ringing = true` 启用系统管理的外呼回铃段：
+
+- **每个外呼**（`call.originate`）在收到早期媒体（180/183）时自动开始一段 `segment_type = "ringing"` 的录音，不再要求请求携带 `record` 选项。
+- **被接听后保留**回铃段（历史行为是接听即删除，仅未接通呼叫保留）：回铃段作为独立产物收尾——发 `record_stopped` / `recording_metadata_available`（`source = "ringing"`）、写入 CDR `recorder[]`，随后通话段照常启动。配合 `[recording.sources.ringing]` 可将回铃段单独送入专属桶。
+- 未接通（拒接 / 超时 / 取消）行为不变：回铃段保留并上传。
+
+```toml
+[recording]
+type = "s3"
+bucket = "recordings"
+record_ringing = true
+
+[recording.sources.ringing]
+bucket = "ringings"
+```
+
+未配置 `record_ringing`（默认 false）时行为与历史版本完全一致：仅携带 `record` 选项的外呼录制回铃，且接听后删除。
+
 ### 按需分段录音
 
 每个媒体 leg 都带有录音捕获通道，任何通话都可以**通话中**随时开始/停止录音——即使 `[recording] enabled = false`、路由策略未命中也是如此。用于"只录 IVR 阶段"、"坐席接通后才录"等分阶段录音场景，无需开启整通话录音。

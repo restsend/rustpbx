@@ -3,6 +3,7 @@ use crate::callrecord::storage;
 use crate::callrecord::storage::CdrStorage;
 use crate::console::config_helpers::{bad_request, find_or_404, internal_error};
 use crate::console::{ConsoleState, handlers::forms, middleware::AuthRequired};
+use crate::storage::Storage;
 use crate::models::{
     call_record::{
         ActiveModel as CallRecordActiveModel, Column as CallRecordColumn,
@@ -1954,44 +1955,40 @@ async fn presign_artifact_url(state: &ConsoleState, raw_url: &str) -> Option<Str
 
     // Resolve live storages + expiries from the late-bound upload runtimes so
     // hot-reloaded `[recording]` / `[sipflow.upload]` configs are honored.
-    let recording = core.recording_upload.as_ref().and_then(|rt| {
-        rt.resolve()
-            .ok()
-            .flatten()
-            .and_then(|(policy, storage)| {
-                storage.map(|s| (s, policy.effective_signed_url_expiry_secs()))
-            })
-    });
-    let sipflow = core.sipflow_upload.as_ref().and_then(|rt| {
+    // Recording candidates cover the default bucket AND every
+    // `[recording.sources.*]` per-source bucket, each presigned with its own
+    // credentials.
+    let mut candidates: Vec<(Storage, Duration)> = Vec::new();
+    if let Some(recording) = core
+        .recording_upload
+        .as_ref()
+        .and_then(|rt| rt.resolve_targets().ok().flatten())
+    {
+        let expiry = Duration::from_secs(recording.0.effective_signed_url_expiry_secs());
+        for target in recording.1.s3_targets() {
+            candidates.push((target.storage.clone(), expiry));
+        }
+    }
+    if let Some(sipflow) = core.sipflow_upload.as_ref().and_then(|rt| {
         rt.resolve()
             .ok()
             .flatten()
             .and_then(|(policy, storage)| storage.map(|s| (s, policy.signed_url_expiry_secs())))
-    });
+    }) {
+        candidates.push((
+            sipflow.0,
+            Duration::from_secs(sipflow.1.unwrap_or(FALLBACK_SIGNED_URL_EXPIRY_SECS)),
+        ));
+    }
 
-    let candidates = [
-        recording
-            .as_ref()
-            .map(|(storage, expiry)| (storage, *expiry)),
-        sipflow.as_ref().map(|(storage, expiry)| {
-            (
-                storage,
-                expiry.unwrap_or(FALLBACK_SIGNED_URL_EXPIRY_SECS),
-            )
-        }),
-    ];
-
-    for (storage, expiry_secs) in candidates.into_iter().flatten() {
+    for (storage, expiry_secs) in candidates.iter() {
         if !storage.supports_presign() {
             continue;
         }
         let Some(key) = storage.object_key_from_url(raw_url) else {
             continue;
         };
-        return match storage
-            .presign_read_url(&key, Duration::from_secs(expiry_secs))
-            .await
-        {
+        return match storage.presign_read_url(&key, *expiry_secs).await {
             Ok(signed) => Some(signed),
             Err(err) => {
                 debug!(%err, "failed to presign artifact URL");

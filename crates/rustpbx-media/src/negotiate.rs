@@ -4,13 +4,17 @@ use std::collections::{HashMap, HashSet};
 
 /// Detect the transport mode implied by an SDP body.
 ///
-/// A DTLS fingerprint (`a=fingerprint`) or an explicit `a=setup:` attribute
-/// indicates WebRTC (DTLS/SRTP over ICE); otherwise the session is treated as
-/// plain RTP. Used by [`crate::leg::Leg`] construction to pick the right
+/// - `a=fingerprint` / `a=setup:` → WebRtc (DTLS/SRTP over ICE)
+/// - `RTP/SAVP` profile or an `a=crypto` line → Srtp (SDES-SRTP, direct RTP)
+/// - otherwise → Rtp (plain `RTP/AVP`)
+///
+/// Used by [`crate::leg::Leg`] construction to pick the right
 /// `RtcConfiguration.transport_mode` before the PeerConnection is created.
 pub fn detect_transport(sdp: &str) -> TransportMode {
     if sdp.contains("a=fingerprint") || sdp.contains("a=setup:") {
         TransportMode::WebRtc
+    } else if sdp.contains("RTP/SAVP") || sdp.contains("a=crypto") {
+        TransportMode::Srtp
     } else {
         TransportMode::Rtp
     }

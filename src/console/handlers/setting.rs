@@ -1688,6 +1688,25 @@ enum CallRecordStoragePayload {
     },
 }
 
+/// One `[recording.sources.<tag>]` entry submitted from the console UI.
+/// Mirrors [`crate::config::RecordingS3Target`]; `bucket` is required.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct RecordingSourceTargetPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    pub bucket: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct RecordingPolicyPayload {
     #[serde(default)]
@@ -1725,6 +1744,28 @@ pub(crate) struct RecordingPolicyPayload {
     /// only, capped at 7 days by SigV4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     signed_url_expiry_secs: Option<u64>,
+    /// System-managed outbound ringback stage (record + keep on answer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    record_ringing: Option<bool>,
+    /// Default S3 target fields (main bucket). Only meaningful with
+    /// `type = "s3"`; omitted keys are cleared by the save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    vendor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bucket: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    region: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    access_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    secret_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    root: Option<String>,
+    /// Per-source S3 bucket overrides keyed by canonical source tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sources: Option<HashMap<String, RecordingSourceTargetPayload>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2203,6 +2244,55 @@ fn serialize_to_item<T: Serialize>(val: &T, field: &str) -> Result<Item, Respons
     Ok(new_doc.as_item().clone())
 }
 
+/// Field names understood by [`RecordingPolicyPayload`]. The console save
+/// replaces the whole `[recording]` table with the payload's projection, so
+/// every other key in the existing table is operator-managed (retry tuning,
+/// HTTP upload fields, `subdir`, …) and must survive the save.
+const RECORDING_POLICY_PAYLOAD_FIELDS: &[&str] = &[
+    "enabled",
+    "directions",
+    "caller_allow",
+    "caller_deny",
+    "callee_allow",
+    "callee_deny",
+    "auto_start",
+    "auto_start_at",
+    "filename_pattern",
+    "samplerate",
+    "ptime",
+    "path",
+    "format",
+    "force_file",
+    "type",
+    "signed_url_expiry_secs",
+    "record_ringing",
+    "vendor",
+    "bucket",
+    "region",
+    "access_key",
+    "secret_key",
+    "endpoint",
+    "root",
+    "sources",
+];
+
+/// Copy operator-managed keys from the previous `[recording]` table into the
+/// serialized payload projection before it replaces the table, so a console
+/// save never silently drops hand-written settings it does not model.
+fn preserve_unmanaged_recording_keys(doc: &DocumentMut, item: &mut Item) {
+    let Some(existing) = doc.get("recording").and_then(|field| field.as_table()) else {
+        return;
+    };
+    let Some(table) = item.as_table_mut() else {
+        return;
+    };
+    for (key, value) in existing.iter() {
+        if !RECORDING_POLICY_PAYLOAD_FIELDS.contains(&key) && table.get(key).is_none() {
+            table.insert(key, value.clone());
+        }
+    }
+}
+
 pub(crate) async fn update_proxy_settings(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
@@ -2429,7 +2519,10 @@ pub(crate) async fn update_storage_settings(
     if let Some(policy_opt) = payload.recording_policy {
         match policy_opt {
             Some(policy_payload) => match serialize_to_item(&policy_payload, "recording_policy") {
-                Ok(item) => doc["recording"] = item,
+                Ok(mut item) => {
+                    preserve_unmanaged_recording_keys(&doc, &mut item);
+                    doc["recording"] = item;
+                }
                 Err(resp) => return resp,
             },
             None => {
@@ -4164,5 +4257,199 @@ mod tests {
             .expect("default database profile");
         assert_eq!(profile["config"]["type"], "database");
         assert_eq!(profile["config"]["table_name"], "rustpbx_call_records");
+    }
+
+    #[test]
+    fn console_save_preserves_unmanaged_recording_keys() {
+        // A console save replaces the whole `[recording]` table with the
+        // payload's projection. Operator-managed keys the payload does not
+        // model (retry tuning, HTTP upload fields, subdir, …) must be
+        // carried over instead of being silently dropped.
+        let mut doc: DocumentMut = r#"
+[recording]
+enabled = true
+path = "./rec"
+retry_interval_secs = 30
+subdir = "daily"
+"#
+        .parse()
+        .expect("parse doc");
+
+        let payload = RecordingPolicyPayload {
+            enabled: Some(true),
+            directions: None,
+            caller_allow: None,
+            caller_deny: None,
+            callee_allow: None,
+            callee_deny: None,
+            auto_start: Some(true),
+            auto_start_at: None,
+            filename_pattern: None,
+            samplerate: None,
+            ptime: None,
+            path: Some(Some("./new-rec".into())),
+            format: None,
+            force_file: None,
+            recording_type: None,
+            signed_url_expiry_secs: None,
+            record_ringing: Some(true),
+            vendor: Some("aws".into()),
+            bucket: Some("default-recordings".into()),
+            region: None,
+            access_key: None,
+            secret_key: None,
+            endpoint: None,
+            root: None,
+            sources: Some(HashMap::from([(
+                "ringing".to_string(),
+                RecordingSourceTargetPayload {
+                    vendor: None,
+                    bucket: "test2".to_string(),
+                    region: None,
+                    access_key: None,
+                    secret_key: None,
+                    endpoint: None,
+                    root: None,
+                },
+            )])),
+        };
+        let mut item = serialize_to_item(&payload, "recording_policy").expect("serialize");
+        preserve_unmanaged_recording_keys(&doc, &mut item);
+        doc["recording"] = item;
+
+        let recording = &doc["recording"];
+        // Payload-managed fields take their new values.
+        assert_eq!(
+            recording["path"].as_str(),
+            Some("./new-rec"),
+            "payload value wins"
+        );
+        assert_eq!(recording["auto_start"].as_bool(), Some(true));
+        assert_eq!(recording["record_ringing"].as_bool(), Some(true));
+        assert_eq!(recording["bucket"].as_str(), Some("default-recordings"));
+        assert_eq!(recording["vendor"].as_str(), Some("aws"));
+        assert_eq!(
+            recording["sources"]["ringing"]["bucket"].as_str(),
+            Some("test2")
+        );
+        // Operator-managed keys survive the wholesale replacement.
+        assert_eq!(recording["retry_interval_secs"].as_integer(), Some(30));
+        assert_eq!(recording["subdir"].as_str(), Some("daily"));
+    }
+
+    #[test]
+    fn console_save_without_prior_table_starts_clean() {
+        // No existing `[recording]` table (first save): nothing to preserve.
+        let doc: DocumentMut = "".parse().expect("empty doc");
+        let payload = RecordingPolicyPayload {
+            enabled: Some(false),
+            directions: None,
+            caller_allow: None,
+            caller_deny: None,
+            callee_allow: None,
+            callee_deny: None,
+            auto_start: None,
+            auto_start_at: None,
+            filename_pattern: None,
+            samplerate: None,
+            ptime: None,
+            path: None,
+            format: None,
+            force_file: None,
+            recording_type: None,
+            signed_url_expiry_secs: None,
+            record_ringing: None,
+            vendor: None,
+            bucket: None,
+            region: None,
+            access_key: None,
+            secret_key: None,
+            endpoint: None,
+            root: None,
+            sources: None,
+        };
+        let mut item = serialize_to_item(&payload, "recording_policy").expect("serialize");
+        preserve_unmanaged_recording_keys(&doc, &mut item);
+        assert!(item.is_table());
+    }
+
+    #[test]
+    fn console_save_sources_replace_and_clear() {
+        // Sources are payload-managed: rows present in the payload replace
+        // the previous table; omitting the key clears all overrides.
+        let mut doc: DocumentMut = r#"
+[recording.sources.agent]
+bucket = "isc_sr"
+endpoint = "https://v2-isc.example.com"
+"#
+        .parse()
+        .expect("parse doc");
+
+        let empty = || RecordingPolicyPayload {
+            enabled: Some(true),
+            directions: None,
+            caller_allow: None,
+            caller_deny: None,
+            callee_allow: None,
+            callee_deny: None,
+            auto_start: None,
+            auto_start_at: None,
+            filename_pattern: None,
+            samplerate: None,
+            ptime: None,
+            path: None,
+            format: None,
+            force_file: None,
+            recording_type: None,
+            signed_url_expiry_secs: None,
+            record_ringing: None,
+            vendor: None,
+            bucket: None,
+            region: None,
+            access_key: None,
+            secret_key: None,
+            endpoint: None,
+            root: None,
+            sources: None,
+        };
+
+        // Omitting sources → the override table is removed.
+        let mut item = serialize_to_item(&empty(), "recording_policy").expect("serialize");
+        preserve_unmanaged_recording_keys(&doc, &mut item);
+        doc["recording"] = item;
+        assert!(
+            doc["recording"].get("sources").is_none(),
+            "omitting sources must clear per-source overrides"
+        );
+
+        // Saving a sources map writes the sub-tables.
+        let mut payload = empty();
+        payload.sources = Some(HashMap::from([(
+            "agent".to_string(),
+            RecordingSourceTargetPayload {
+                vendor: Some("aliyun".to_string()),
+                bucket: "isc_sr".to_string(),
+                region: None,
+                access_key: Some("a2".to_string()),
+                secret_key: Some("s2".to_string()),
+                endpoint: Some("https://v2-isc.example.com".to_string()),
+                root: Some("agent".to_string()),
+            },
+        )]));
+        let mut item = serialize_to_item(&payload, "recording_policy").expect("serialize");
+        preserve_unmanaged_recording_keys(&doc, &mut item);
+        doc["recording"] = item;
+        assert_eq!(
+            doc["recording"]["sources"]["agent"]["bucket"].as_str(),
+            Some("isc_sr")
+        );
+        assert_eq!(
+            doc["recording"]["sources"]["agent"]["vendor"].as_str(),
+            Some("aliyun")
+        );
+        assert_eq!(
+            doc["recording"]["sources"]["agent"]["root"].as_str(),
+            Some("agent")
+        );
     }
 }

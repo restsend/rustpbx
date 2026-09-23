@@ -1458,12 +1458,18 @@
                         </div>
                         <div x-show="storageDraft.recording_enabled" x-cloak
                             class="border-t border-slate-200 pt-4 space-y-4">
-                            <div class="grid gap-4 sm:grid-cols-2">
+                            <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                                 <label class="flex items-center gap-2 text-sm font-semibold text-slate-600">
                                     <input type="checkbox"
                                         class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
                                         x-model="storageDraft.recording_auto_start" :disabled="storageProcessing">
                                     <span>{{ "settings_page.auto_start" | t }}</span>
+                                </label>
+                                <label class="flex items-center gap-2 text-sm font-semibold text-slate-600">
+                                    <input type="checkbox"
+                                        class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                                        x-model="storageDraft.recording_record_ringing" :disabled="storageProcessing">
+                                    <span>{{ "settings_page.record_ringing" | t }}</span>
                                 </label>
                                 <label class="block text-sm font-semibold text-slate-600">
                                     <span class="mb-1 block">Recording type</span>
@@ -1475,6 +1481,156 @@
                                         <option value="sipflow">sipflow (RTP → SipFlow)</option>
                                     </select>
                                 </label>
+                            </div>
+                            <p x-show="storageDraft.recording_record_ringing" class="text-[11px] text-slate-400 -mt-2"
+                                x-cloak>{{ "settings_page.record_ringing_desc" | t }}</p>
+                            <div x-show="storageDraft.recording_type === 's3'" x-cloak class="space-y-4 rounded-lg border border-slate-200 bg-slate-50/60 p-4">
+                                <div>
+                                    <h4 class="text-sm font-semibold text-slate-700">{{ "settings_page.recording_s3_default" | t }}</h4>
+                                    <p class="mt-0.5 text-[11px] text-slate-500">{{ "settings_page.recording_s3_default_desc" | t }}</p>
+                                </div>
+                                <div class="grid gap-4 md:grid-cols-2">
+                                    <div>
+                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Vendor</label>
+                                        <select x-model="storageDraft.recording_s3_vendor" :disabled="storageProcessing"
+                                            class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                            <option value="aws">AWS S3</option>
+                                            <option value="gcp">Google Cloud Storage</option>
+                                            <option value="azure">Azure Blob Storage</option>
+                                            <option value="minio">MinIO</option>
+                                            <option value="digitalocean">DigitalOcean Spaces</option>
+                                            <option value="aliyun">Aliyun OSS</option>
+                                            <option value="tencent">Tencent COS</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Bucket</label>
+                                        <input type="text" x-model="storageDraft.recording_s3_bucket" :disabled="storageProcessing"
+                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                            placeholder="default-recordings">
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Region</label>
+                                        <input type="text" x-model="storageDraft.recording_s3_region" :disabled="storageProcessing"
+                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                            placeholder="us-east-1">
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Endpoint (optional)</label>
+                                        <input type="text" x-model="storageDraft.recording_s3_endpoint" :disabled="storageProcessing"
+                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                            placeholder="http://minio:9000">
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Access Key</label>
+                                        <input type="password" x-model="storageDraft.recording_s3_access_key" :disabled="storageProcessing"
+                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Secret Key</label>
+                                        <input type="password" x-model="storageDraft.recording_s3_secret_key" :disabled="storageProcessing"
+                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Object Prefix (optional)</label>
+                                        <input type="text" x-model="storageDraft.recording_s3_root" :disabled="storageProcessing"
+                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                            placeholder="recordings">
+                                    </div>
+                                </div>
+                                <p class="text-[11px] text-slate-400">{{ "settings_page.recording_s3_credentials_hint" | t }}</p>
+
+                                <div class="border-t border-slate-200 pt-4">
+                                    <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                                        <div>
+                                            <h4 class="text-sm font-semibold text-slate-700">{{ "settings_page.recording_sources" | t }}</h4>
+                                            <p class="mt-0.5 text-[11px] text-slate-500">{{ "settings_page.recording_sources_desc" | t }}</p>
+                                        </div>
+                                        <button type="button" @click="addRecordingSourceRow()" :disabled="storageProcessing"
+                                            class="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 shadow-sm transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                            + {{ "settings_page.add_source_target" | t }}
+                                        </button>
+                                    </div>
+                                    <div class="mt-3 space-y-3">
+                                        <template x-for="(row, rowIndex) in storageDraft.recording_sources" :key="rowIndex">
+                                            <div class="rounded-lg border border-slate-200 bg-white p-3">
+                                                <div class="flex items-center justify-between">
+                                                    <span class="text-xs font-semibold uppercase tracking-wide text-slate-400"
+                                                        x-text="`${row.source || 'source'} → ${row.bucket || '?'}`"></span>
+                                                    <button type="button" @click="removeRecordingSourceRow(rowIndex)" :disabled="storageProcessing"
+                                                        class="text-xs font-semibold text-rose-500 hover:text-rose-600">
+                                                        {{ "common.delete" | t }}
+                                                    </button>
+                                                </div>
+                                                <div class="mt-2 grid gap-3 md:grid-cols-2">
+                                                    <div>
+                                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Source</label>
+                                                        <select x-model="row.source" :disabled="storageProcessing"
+                                                            class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                                            <option value="full">full</option>
+                                                            <option value="ivr">ivr</option>
+                                                            <option value="agent">agent</option>
+                                                            <option value="consult">consult</option>
+                                                            <option value="ringing">ringing</option>
+                                                            <option value="external">external</option>
+                                                        </select>
+                                                    </div>
+                                                    <div>
+                                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Bucket</label>
+                                                        <input type="text" x-model="row.bucket" :disabled="storageProcessing"
+                                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                            placeholder="isc_sr">
+                                                    </div>
+                                                    <div>
+                                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Vendor</label>
+                                                        <select x-model="row.vendor" :disabled="storageProcessing"
+                                                            class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                                            <option value="aws">AWS S3</option>
+                                                            <option value="gcp">Google Cloud Storage</option>
+                                                            <option value="azure">Azure Blob Storage</option>
+                                                            <option value="minio">MinIO</option>
+                                                            <option value="digitalocean">DigitalOcean Spaces</option>
+                                                            <option value="aliyun">Aliyun OSS</option>
+                                                            <option value="tencent">Tencent COS</option>
+                                                        </select>
+                                                    </div>
+                                                    <div>
+                                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Region</label>
+                                                        <input type="text" x-model="row.region" :disabled="storageProcessing"
+                                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                            placeholder="us-east-1">
+                                                    </div>
+                                                    <div>
+                                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Endpoint</label>
+                                                        <input type="text" x-model="row.endpoint" :disabled="storageProcessing"
+                                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                            placeholder="https://v2-isc.example.com">
+                                                    </div>
+                                                    <div>
+                                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Object Prefix</label>
+                                                        <input type="text" x-model="row.root" :disabled="storageProcessing"
+                                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                            placeholder="agent">
+                                                    </div>
+                                                    <div>
+                                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Access Key</label>
+                                                        <input type="password" x-model="row.access_key" :disabled="storageProcessing"
+                                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                                    </div>
+                                                    <div>
+                                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Secret Key</label>
+                                                        <input type="password" x-model="row.secret_key" :disabled="storageProcessing"
+                                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                                    </div>
+                                                </div>
+                                                <p class="mt-2 text-[11px] text-slate-400">{{ "settings_page.recording_source_independent_hint" | t }}</p>
+                                            </div>
+                                        </template>
+                                        <p x-show="!storageDraft.recording_sources.length" class="text-[11px] text-slate-400">
+                                            {{ "settings_page.recording_sources_empty" | t }}
+                                        </p>
+                                    </div>
+                                </div>
                             </div>
                             <div>
                                 <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{
@@ -3249,6 +3405,7 @@
                 recording_auto_start: true,
                 recording_force_file: false,
                 recording_type: 'local',
+                recording_record_ringing: false,
                 recording_direction_inbound: true,
                 recording_direction_outbound: true,
                 recording_direction_internal: true,
@@ -3259,6 +3416,14 @@
                 recording_samplerate: '',
                 recording_ptime: '',
                 recording_filename_pattern: '',
+                recording_s3_vendor: 'aws',
+                recording_s3_bucket: '',
+                recording_s3_region: '',
+                recording_s3_endpoint: '',
+                recording_s3_access_key: '',
+                recording_s3_secret_key: '',
+                recording_s3_root: '',
+                recording_sources: [],
             },
             storageProcessing: false,
             recordingMode: 'sipflow',
@@ -5835,6 +6000,20 @@
                 const crConfig = crProfile?.config || {};
                 const crType = crConfig?.type || meta?.mode || 'database';
 
+                // Per-source S3 overrides: object map → editable row array.
+                const recordingSourcesRaw = recording?.sources && typeof recording.sources === 'object'
+                    ? recording.sources : {};
+                const recordingSources = Object.entries(recordingSourcesRaw).map(([tag, target]) => ({
+                    source: tag,
+                    vendor: target?.vendor || 'aws',
+                    bucket: target?.bucket || '',
+                    region: target?.region || '',
+                    endpoint: target?.endpoint || '',
+                    access_key: target?.access_key || '',
+                    secret_key: target?.secret_key || '',
+                    root: target?.root || '',
+                }));
+
                 this.storageDraft = {
                     recorder_path: recorderPath,
                     recorder_format: recorderFormat || 'wav',
@@ -5854,6 +6033,7 @@
                     recording_auto_start: recording?.auto_start !== undefined ? !!recording.auto_start : true,
                     recording_force_file: !!recording?.force_file,
                     recording_type: recording?.type || (recording?.force_file ? 'local' : (this.sipflowSettings?.backend_type && this.sipflowSettings.backend_type !== 'none' ? 'sipflow' : 'local')),
+                    recording_record_ringing: !!recording?.record_ringing,
                     recording_direction_inbound: directionInbound,
                     recording_direction_outbound: directionOutbound,
                     recording_direction_internal: directionInternal,
@@ -5864,7 +6044,33 @@
                     recording_samplerate: recording?.samplerate ? String(recording.samplerate) : '',
                     recording_ptime: recording?.ptime ? String(recording.ptime) : '',
                     recording_filename_pattern: recording?.filename_pattern || '',
+                    // Main S3 fields round-trip so a save never silently drops
+                    // the default bucket credentials (the GET payload already
+                    // carries them).
+                    recording_s3_vendor: recording?.vendor || 'aws',
+                    recording_s3_bucket: recording?.bucket || '',
+                    recording_s3_region: recording?.region || '',
+                    recording_s3_endpoint: recording?.endpoint || '',
+                    recording_s3_access_key: recording?.access_key || '',
+                    recording_s3_secret_key: recording?.secret_key || '',
+                    recording_s3_root: recording?.root || '',
+                    recording_sources: recordingSources,
                 };
+            },
+            addRecordingSourceRow() {
+                this.storageDraft.recording_sources.push({
+                    source: 'agent',
+                    vendor: 'aws',
+                    bucket: '',
+                    region: '',
+                    endpoint: '',
+                    access_key: '',
+                    secret_key: '',
+                    root: '',
+                });
+            },
+            removeRecordingSourceRow(index) {
+                this.storageDraft.recording_sources.splice(index, 1);
             },
             resetStorageDraft() {
                 this.initStorageDraft();
@@ -5912,6 +6118,7 @@
                     enabled: !!this.storageDraft.recording_enabled,
                     auto_start: !!this.storageDraft.recording_auto_start,
                     type: this.storageDraft.recording_type || 'local',
+                    record_ringing: !!this.storageDraft.recording_record_ringing,
                     caller_allow: this.listFromTextarea(this.storageDraft.recording_caller_allow),
                     caller_deny: this.listFromTextarea(this.storageDraft.recording_caller_deny),
                     callee_allow: this.listFromTextarea(this.storageDraft.recording_callee_allow),
@@ -5920,6 +6127,79 @@
                     ptime: this.normalizeOptionalNumber(this.storageDraft.recording_ptime),
                     filename_pattern: this.normalizeOptionalString(this.storageDraft.recording_filename_pattern),
                 };
+                // S3 destination: main bucket fields + per-source overrides.
+                // Fields are always sent (blank → cleared) so the payload is
+                // the authoritative projection of the form.
+                if ((this.storageDraft.recording_type || 'local') === 's3') {
+                    const mainVendor = this.normalizeOptionalString(this.storageDraft.recording_s3_vendor) || 'aws';
+                    const mainBucket = this.normalizeOptionalString(this.storageDraft.recording_s3_bucket);
+                    if (!mainBucket) {
+                        this.$dispatch('toast', {
+                            title: 'Missing bucket',
+                            message: 'Bucket is required for S3 recording uploads.',
+                        });
+                        return;
+                    }
+                    const mainAccessKey = this.normalizeOptionalString(this.storageDraft.recording_s3_access_key);
+                    const mainSecretKey = this.normalizeOptionalString(this.storageDraft.recording_s3_secret_key);
+                    if ((mainAccessKey && !mainSecretKey) || (!mainAccessKey && mainSecretKey)) {
+                        this.$dispatch('toast', {
+                            title: 'Incomplete credentials',
+                            message: 'Provide both access key and secret key for the default bucket, or leave both blank.',
+                        });
+                        return;
+                    }
+                    recordingPayload.vendor = mainVendor;
+                    recordingPayload.bucket = mainBucket;
+                    recordingPayload.region = this.normalizeOptionalString(this.storageDraft.recording_s3_region);
+                    recordingPayload.endpoint = this.normalizeOptionalString(this.storageDraft.recording_s3_endpoint);
+                    recordingPayload.access_key = mainAccessKey;
+                    recordingPayload.secret_key = mainSecretKey;
+                    recordingPayload.root = this.normalizeOptionalString(this.storageDraft.recording_s3_root);
+
+                    const sourceRows = Array.isArray(this.storageDraft.recording_sources)
+                        ? this.storageDraft.recording_sources : [];
+                    const sourceMap = {};
+                    for (const row of sourceRows) {
+                        const tag = this.normalizeOptionalString(row?.source);
+                        const bucket = this.normalizeOptionalString(row?.bucket);
+                        if (!bucket) {
+                            this.$dispatch('toast', {
+                                title: 'Missing bucket',
+                                message: `Bucket is required for the "${tag}" source target.`,
+                            });
+                            return;
+                        }
+                        if (!tag || sourceMap[tag]) {
+                            this.$dispatch('toast', {
+                                title: 'Duplicate or missing source',
+                                message: 'Each source target needs a unique source tag.',
+                            });
+                            return;
+                        }
+                        const accessKey = this.normalizeOptionalString(row?.access_key);
+                        const secretKey = this.normalizeOptionalString(row?.secret_key);
+                        if ((accessKey && !secretKey) || (!accessKey && secretKey)) {
+                            this.$dispatch('toast', {
+                                title: 'Incomplete credentials',
+                                message: `Provide both access and secret keys for the "${tag}" target, or leave both blank.`,
+                            });
+                            return;
+                        }
+                        sourceMap[tag] = {
+                            bucket,
+                            vendor: this.normalizeOptionalString(row?.vendor),
+                            region: this.normalizeOptionalString(row?.region),
+                            endpoint: this.normalizeOptionalString(row?.endpoint),
+                            access_key: accessKey,
+                            secret_key: secretKey,
+                            root: this.normalizeOptionalString(row?.root),
+                        };
+                    }
+                    if (Object.keys(sourceMap).length) {
+                        recordingPayload.sources = sourceMap;
+                    }
+                }
                 if (recordingDirections.length && recordingDirections.length < 3) {
                     recordingPayload.directions = recordingDirections;
                 }

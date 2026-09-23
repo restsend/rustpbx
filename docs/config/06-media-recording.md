@@ -358,6 +358,86 @@ rewritten. Other vendors retain their existing addressing behavior.
 
 When `[recording] type = "http"` or `type = "s3"` is used, the CDR may be written before the media upload finishes. The database `recording_url` is updated after the upload succeeds. The local CDR JSON keeps the local recorder path in `recordingUrl` and the recorder metadata in `recorder[]`.
 
+### Per-Source Upload Targets (sources)
+
+With `type = "s3"`, `[recording.sources.<source>]` routes recordings from
+different sources to different S3-compatible buckets. `<source>` is the
+canonical source tag: `full` (whole-call) / `ivr` / `agent` / `consult`
+(attended transfer) / `ringing` (outbound ringback) / `voicemail` (reserved;
+voicemail keeps using `[voicemail.storage]`) / `external` (custom
+`segment_type` tags, CSAT, and other catch-alls).
+
+Each entry is a fully independent S3 target (its own vendor/endpoint/
+credentials/prefix — nothing is inherited from the main section). Sources
+without a mapping, and entries whose storage fails to build, upload to the
+default bucket configured by the main `[recording]` fields. The bucket each
+recording actually landed in is visible in the CDR `recorder[].extra.uploadUrl`
+and the `recording_metadata_available` event's `download_url`.
+
+```toml
+[recording]
+type = "s3"
+bucket = "default-recordings"     # default bucket for unmapped sources
+endpoint = "http://minio:9000"
+access_key = "..."
+secret_key = "..."
+
+[recording.sources.agent]         # agent recordings → isc_sr on a separate platform
+bucket = "isc_sr"
+endpoint = "https://v2-isc.example.com"
+access_key = "..."
+secret_key = "..."
+root = "agent"                    # optional object-key prefix (independent of main root)
+
+[recording.sources.ivr]           # IVR recordings → test1
+bucket = "test1"
+
+[recording.sources.ringing]       # outbound ringback segments → test2
+bucket = "test2"
+```
+
+Notes:
+
+- Only effective with `type = "s3"`; `sources` under `local`/`http` modes is
+  ignored with a warning.
+- The console recording page presigns downloads against each bucket
+  individually — no extra configuration needed.
+- `.upload_failed.*` markers record the source tag so retries target the same
+  per-source bucket.
+- Hot-reload friendly: saving from the console (or reloading the config)
+  rebuilds the Storage of every bucket.
+
+### Outbound Ringback Recording (record_ringing)
+
+`[recording].record_ringing = true` enables the system-managed outbound
+ringback stage:
+
+- **Every originate call** starts a `segment_type = "ringing"` recording as
+  soon as early media (180/183) arrives — no per-request `record` option
+  required.
+- The ringback segment is **kept when the call is answered** (historically it
+  was deleted on answer and only survived for unanswered calls): the slice
+  finalizes as a first-class artifact — `record_stopped` /
+  `recording_metadata_available` events (`source = "ringing"`) plus a CDR
+  `recorder[]` entry — and the conversation segment starts afterwards. Pair it
+  with `[recording.sources.ringing]` to send ringback audio to its own bucket.
+- Unanswered calls (reject / timeout / cancel) behave exactly as before: the
+  ringback slice is kept and uploaded.
+
+```toml
+[recording]
+type = "s3"
+bucket = "recordings"
+record_ringing = true
+
+[recording.sources.ringing]
+bucket = "ringings"
+```
+
+Without `record_ringing` (default false) the behavior is unchanged from
+previous versions: ringback is captured only for originates carrying a
+`record` option, and the slice is deleted when the call is answered.
+
 ### On-Demand Segmented Recording
 
 Every media leg carries a recording capture tap, so any call can start/stop

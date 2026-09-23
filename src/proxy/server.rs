@@ -1515,6 +1515,12 @@ impl SipServer {
 
             let runnings_tx = self.inner.runnings_tx.clone();
 
+            let source_ip = tx
+                .connection
+                .as_ref()
+                .and_then(|conn| conn.get_remote_addr())
+                .and_then(crate::proxy::routing::source_addr_ip);
+
             if let Some(max_concurrency) = self.inner.proxy_config.load().max_concurrency
                 && runnings_tx.load(Ordering::Relaxed) >= max_concurrency
             {
@@ -1580,11 +1586,6 @@ impl SipServer {
                         .map(|ip| ip.to_string())
                         .unwrap_or_else(|| "unknown".to_string());
                     if tx.original.method == rsipstack::sip::Method::Options {
-                        let source_ip = tx
-                            .connection
-                            .as_ref()
-                            .and_then(|conn| conn.get_remote_addr())
-                            .and_then(crate::proxy::routing::source_addr_ip);
                         let from_trusted_proxy = source_ip.is_some_and(|ip| {
                             self.inner
                                 .proxy_config
@@ -1626,10 +1627,10 @@ impl SipServer {
                         let final_status = tx.last_response.as_ref().map(|r| r.status_code());
                         match r {
                             Ok(_) => {
-                                debug!(key = %tx.key, ?final_status, "transaction processed in {:?}", start_time.elapsed());
+                                debug!(key = %tx.key, ?source_ip, ?final_status, "transaction processed in {:?}", start_time.elapsed());
                             },
                             Err(e) => {
-                                warn!(key = %tx.key, ?final_status, "failed to process transaction: {} in {:?}", e, start_time.elapsed());
+                                warn!(key = %tx.key, ?source_ip, ?final_status, "failed to process transaction: {} in {:?}", e, start_time.elapsed());
                             }
                         }
                     }

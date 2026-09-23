@@ -613,9 +613,12 @@ impl LegInner {
         // RTP-mode transports bind to the SDP-declared media address, which a
         // NAT'd peer cannot receive on (its SDP carries a private/reflexive
         // address). Honor the leg's latching config so egress follows the
-        // observed packet source instead (symmetric RTP); WebRTC legs resolve
-        // their address via ICE and are excluded.
-        if self.pc.config().transport_mode == rustrtc::TransportMode::Rtp
+        // observed packet source instead (symmetric RTP) — SDES legs are
+        // direct UDP like plain RTP and their SRTP packets keep the clear
+        // RTP header, so latching works identically there. WebRTC legs
+        // resolve their address via ICE and are excluded.
+        if (self.pc.config().transport_mode == rustrtc::TransportMode::Rtp
+            || self.pc.config().transport_mode == rustrtc::TransportMode::Srtp)
             && self.pc.config().enable_latching
         {
             for transceiver in self.pc.get_transceivers() {
@@ -1731,6 +1734,17 @@ mod tests {
                 "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=fingerprint:sha-256 XX\r\n"
             ),
             TransportMode::WebRtc
+        );
+        // SDES-SRTP: RTP/SAVP profile or a bare a=crypto line, without ICE/DTLS.
+        assert_eq!(
+            negotiate::detect_transport(
+                "m=audio 1234 RTP/SAVP 0 8 101\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:abc|2^31|1:1\r\n"
+            ),
+            TransportMode::Srtp
+        );
+        assert_eq!(
+            negotiate::detect_transport("m=audio 1234 RTP/AVP 0\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:abc\r\n"),
+            TransportMode::Srtp
         );
     }
 

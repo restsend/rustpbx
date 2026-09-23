@@ -109,11 +109,17 @@ impl E2eTestServer {
 
     /// Start a new E2E test server with specified MediaProxy mode
     pub async fn start_with_mode(mode: MediaProxyMode) -> Result<Self> {
+        Self::start_with_mode_and_latching(mode, false).await
+    }
+
+    /// Like [`Self::start_with_mode`] but with explicit symmetric-RTP
+    /// latching control (needed for SDES NAT-latching scenarios).
+    pub async fn start_with_mode_and_latching(mode: MediaProxyMode, latching: bool) -> Result<Self> {
         let mut proxy_config =
             test_helpers::test_proxy_config(portpicker::pick_unused_port().unwrap_or(15060));
         proxy_config.media_proxy = mode;
         proxy_config.ensure_user = Some(false);
-        proxy_config.enable_latching = false;
+        proxy_config.enable_latching = latching;
 
         Self::start_with_config_and_inject(
             proxy_config,
@@ -216,7 +222,9 @@ impl E2eTestServer {
             config.useragent = base.useragent;
             config.modules = base.modules;
             config.ensure_user = Some(false);
-            config.enable_latching = false;
+            // Latching: keep the caller's value (ProxyConfig::default() is
+            // enabled; constructors that need it off set it explicitly
+            // before calling).
 
             let mode = config.media_proxy;
             let (builder, cdr_capture, cancel_token) = Self::base_builder(config, &inject).await?;

@@ -3048,6 +3048,117 @@ a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5
     drop(session);
 }
 
+/// Regression test for issue #281: a Groundwire-style SDES-SRTP offer
+/// (`RTP/SAVP` + `a=crypto`) must get an Srtp caller leg and an answer with
+/// the matching `RTP/SAVP` profile and `a=crypto` — not a plain `RTP/AVP`
+/// downgrade (strict SRTP clients refuse to flow media on a downgraded
+/// answer). The callee transport hint must also stay untouched: it belongs to
+/// the callee-creation paths, not `ensure_caller_leg`.
+#[tokio::test]
+async fn ensure_caller_leg_answers_sdes_srtp_offer_with_crypto() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server, create_transaction,
+    };
+
+    let (server, _) = create_test_server().await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let (tx, _) = create_transaction(request.clone()).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let server_dialog = server
+        .dialog_layer
+        .get_or_create_server_invite(&tx, state_tx, None, None)
+        .expect("failed to create server dialog");
+
+    let context = CallContext {
+        session_id: "sdes-caller-leg".to_string(),
+        dialplan: Arc::new(Dialplan::new(
+            "sdes-caller-leg".to_string(),
+            request,
+            DialDirection::Inbound,
+        )),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".to_string(),
+        original_callee: "sip:bob@rustpbx.com".to_string(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+
+    let (mut session, _handle, _cmd_rx) = SipSession::new(
+        server.clone(),
+        CancellationToken::new(),
+        None,
+        context,
+        server_dialog,
+        true,
+    );
+
+    let caller_offer = concat!(
+        "v=0\r\n",
+        "o=- 8444426914 10545 IN IP4 198.51.100.7\r\n",
+        "s=groundwire\r\n",
+        "c=IN IP4 198.51.100.7\r\n",
+        "t=0 0\r\n",
+        "m=audio 36786 RTP/SAVP 103 9 0 8 101\r\n",
+        "a=rtpmap:101 telephone-event/8000\r\n",
+        "a=rtpmap:103 opus/48000/2\r\n",
+        "a=fmtp:101 0-15\r\n",
+        "a=fmtp:103 maxplaybackrate=16000;maxaveragebitrate=24000;useinbandfec=1;usedtx=1\r\n",
+        "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:9oRSAVGxHLG/AcJhSTwRec00TTSEfGy5gndS0De8\r\n",
+        "a=crypto:2 AES_CM_128_HMAC_SHA1_32 inline:89V4GlaGoakgb7PsBmJewbHgseDfcgDmwPqSeSte\r\n",
+        "a=ptime:20\r\n",
+        "a=sendrecv\r\n",
+    );
+    session.media.caller_offer = Some(caller_offer.to_string());
+    session
+        .ensure_caller_leg()
+        .await
+        .expect("caller leg must be created");
+
+    // The caller leg PC must run SDES-SRTP, not plain RTP.
+    let caller_leg = session
+        .media_leg(&LegId::from("caller"))
+        .expect("caller media leg");
+    assert_eq!(
+        caller_leg.pc().config().transport_mode,
+        rustrtc::TransportMode::Srtp,
+        "SAVP offer must produce an Srtp caller leg"
+    );
+
+    // The answer must keep the SAVP profile and carry a crypto line.
+    let answer = session
+        .media
+        .answer
+        .clone()
+        .expect("caller answer must be generated");
+    assert!(
+        answer.contains("m=audio") && answer.contains("RTP/SAVP"),
+        "answer must keep the RTP/SAVP profile:\n{answer}"
+    );
+    assert!(
+        answer.contains("a=crypto:"),
+        "answer must carry a=crypto for an SDES offer:\n{answer}"
+    );
+
+    // ensure_caller_leg must not clobber the callee hint ("opposite of
+    // caller" guess); callee-creation paths set it themselves.
+    assert_eq!(
+        session.legs.get_transport(&LegId::from("callee")),
+        None,
+        "callee transport hint must not be set by ensure_caller_leg"
+    );
+
+    drop(session);
+}
+
 /// `video_policy = "strip"` must disable video on the media path entirely:
 /// the caller leg config carries no video capabilities, so the answer has
 /// no video m-line (audio-only).

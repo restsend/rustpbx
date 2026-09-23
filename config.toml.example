@@ -400,11 +400,36 @@ auto_start_at = "media" # default; use "answer" to wait for 200
 # subdir = "daily"   # default — {path}/YYYYMMDD/{file}
 # # subdir = "hourly"  # {path}/YYYYMMDD/HH/{file}
 #
+# Outbound ringback stage (system-managed): when true, every originate call
+# records its pre-answer slice (segment_type "ringing") without needing the
+# per-request `record` option, and the slice is KEPT when the call is
+# answered (own CDR segment + recording_metadata_available event). Unset or
+# false keeps the historical behavior: ringback is captured only with a
+# `record` option and deleted on answer.
+# # record_ringing = true
+#
 # S3 mode: recording URLs stored in call records point to the object, and the
 # console generates a presigned download URL on demand (works with private
 # buckets). signed_url_expiry_secs controls how long each presigned URL stays
 # valid; default 86400 (24h), capped at 7 days (604800) by the S3 SigV4 spec.
 # # signed_url_expiry_secs = 86400
+#
+# Per-source S3 buckets (only with type = "s3"): route recordings from
+# different sources to different S3-compatible buckets. Keys are canonical
+# source tags (full / ivr / agent / consult / ringing / external); each entry
+# is a fully independent target (own vendor/endpoint/credentials — nothing is
+# inherited from the main section). Unmapped sources upload to the main
+# bucket fields above; console downloads presign each bucket individually.
+# [recording.sources.agent]
+# bucket = "isc_sr"
+# endpoint = "https://v2-isc.example.com"
+# access_key = "..."
+# secret_key = "..."
+# root = "agent"                 # optional object-key prefix
+# [recording.sources.ivr]
+# bucket = "test1"
+# [recording.sources.ringing]
+# bucket = "test2"
 #
 # HTTP mode: a generic, configurable multipart uploader. Defaults preserve the
 # historical wire format (POST, multipart field "recording", file name = local

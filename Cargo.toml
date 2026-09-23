@@ -134,9 +134,9 @@ rand = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
 hex = { version = "0.4.3", optional = true }
-rsipstack = "0.6.10"
+rsipstack = "0.6.11"
 audio-codec = "0.4.7"
-rustrtc = "0.3.138"
+rustrtc = "0.3.139"
 reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
     "stream",

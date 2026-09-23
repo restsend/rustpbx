@@ -304,6 +304,45 @@ pub struct RecordingPolicy {
     /// Default 600 (10 minutes). Breaches increment a Prometheus counter.
     #[serde(default)]
     pub upload_sla_secs: Option<u64>,
+    /// System-managed outbound ringback stage: when true, every originate
+    /// call records its pre-answer slice (`segment_type = "ringing"`) without
+    /// needing the per-request `record` option, and the slice is KEPT when the
+    /// call is answered (own upload target via `[recording.sources.ringing]`,
+    /// own CDR segment). Unset/false preserves the historical behavior:
+    /// ringback is captured only with a `record` option and deleted on answer.
+    #[serde(default)]
+    pub record_ringing: Option<bool>,
+    /// Per-source S3 upload target overrides, keyed by canonical source tag
+    /// (`full` / `ivr` / `agent` / `consult` / `ringing` / `voicemail` /
+    /// `external`). Effective only when `type = "s3"`; each entry is an
+    /// independent bucket (own vendor/endpoint/credentials). Media whose
+    /// source has no entry uploads to the main bucket fields above.
+    #[serde(default)]
+    pub sources: Option<HashMap<String, RecordingS3Target>>,
+}
+
+/// One `[recording.sources.<tag>]` entry: an independent S3-compatible upload
+/// target for a single recording source. `bucket` is required; every other
+/// field is per-entry (a source target does NOT inherit the main `[recording]`
+/// credentials/endpoint — specify what the target bucket needs).
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct RecordingS3Target {
+    pub bucket: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<crate::storage::S3Vendor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    /// Omitted/empty together selects anonymous/public access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// Optional object-key prefix for this source's uploads (independent of
+    /// the main `[recording].root`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
 }
 
 impl RecordingPolicy {
@@ -413,6 +452,13 @@ impl RecordingPolicy {
     /// Hangup/fail → upload-success SLA window (default 10 minutes).
     pub fn effective_upload_sla_secs(&self) -> u64 {
         self.upload_sla_secs.unwrap_or(600).max(1)
+    }
+
+    /// Whether the system-managed outbound ringback stage should be recorded
+    /// (`[recording].record_ringing`): captured for every originate call and
+    /// kept even when the call is answered.
+    pub fn record_ringing_enabled(&self) -> bool {
+        self.record_ringing.unwrap_or(false)
     }
 
     pub fn ensure_defaults(&mut self) -> bool {
@@ -2523,6 +2569,60 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recording_policy_parses_sources_and_record_ringing() {
+        let raw = r#"
+[recording]
+enabled = true
+type = "s3"
+bucket = "default-recordings"
+endpoint = "http://minio:9000"
+record_ringing = true
+
+[recording.sources.agent]
+bucket = "isc_sr"
+endpoint = "https://v2-isc.example.com"
+access_key = "ak"
+secret_key = "sk"
+
+[recording.sources.ivr]
+bucket = "test1"
+
+[recording.sources.ringing]
+bucket = "test2"
+"#;
+        let doc: toml::Value = toml::from_str(raw).expect("parse recording config");
+        let policy: RecordingPolicy = doc["recording"].clone().try_into().expect("policy");
+        assert!(policy.record_ringing_enabled());
+        let sources = policy.sources.expect("sources");
+        assert_eq!(sources.len(), 3);
+        assert_eq!(sources["agent"].bucket, "isc_sr");
+        assert_eq!(
+            sources["agent"].endpoint.as_deref(),
+            Some("https://v2-isc.example.com")
+        );
+        // bucket is required per entry; every other field is optional.
+        assert_eq!(sources["ivr"].bucket, "test1");
+        assert!(sources["ivr"].endpoint.is_none());
+        assert_eq!(sources["ringing"].bucket, "test2");
+    }
+
+    #[test]
+    fn recording_policy_without_new_fields_keeps_defaults() {
+        let raw = r#"
+[recording]
+enabled = true
+type = "s3"
+bucket = "default-recordings"
+"#;
+        let doc: toml::Value = toml::from_str(raw).expect("parse minimal recording config");
+        let policy: RecordingPolicy = doc["recording"].clone().try_into().expect("policy");
+        // Unset flag → historical behavior (discard-on-answer, record option
+        // gated); no sources → everything uploads to the main bucket.
+        assert!(!policy.record_ringing_enabled());
+        assert!(policy.sources.is_none());
+    }
 
     #[test]
     fn auto_start_except_empty_covers_everything() {

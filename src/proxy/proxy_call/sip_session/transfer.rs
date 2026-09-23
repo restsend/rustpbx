@@ -85,6 +85,31 @@ fn take_bridge_pcm_frame(
     None
 }
 
+/// Classify a reverse-pump failure (`ws_write` send / track recv error) so
+/// end-of-call races do not surface as warnings: the WS peer frequently
+/// closes just before local teardown fires the cancel token, so a failure
+/// that is joined by cancellation within a short grace window means the
+/// bridge was already closing — log at debug. A failure while the bridge
+/// is still healthy (no cancellation in the window) is a genuine mid-call
+/// drop and stays at warn.
+async fn log_bridge_reverse_failure(
+    reverse_cancel: &tokio_util::sync::CancellationToken,
+    session_id: &str,
+    leg_id: impl std::fmt::Display,
+    message: &str,
+) {
+    let tearing_down = tokio::select! {
+        biased;
+        _ = reverse_cancel.cancelled() => true,
+        _ = tokio::time::sleep(Duration::from_secs(1)) => false,
+    };
+    if tearing_down {
+        tracing::debug!(session_id = %session_id, %leg_id, "{message} (bridge closing)");
+    } else {
+        tracing::warn!(session_id = %session_id, %leg_id, "{message}");
+    }
+}
+
 /// Bridge forward loop: WS PCM16 messages → bridge sink.
 ///
 /// Extracted from `SipSession::connect_bridge` so the close→flush wiring
@@ -2389,7 +2414,7 @@ impl SipSession {
                                         _ = reverse_cancel.cancelled() => break,
                                         result = ws_write.send(Message::Text(json.into())) => {
                                             if result.is_err() {
-                                                warn!(session_id = %session_id, %leg_id, "Bridge WS DTMF json write failed");
+                                                log_bridge_reverse_failure(&reverse_cancel, &session_id, &leg_id, "Bridge WS DTMF json write failed").await;
                                                 break;
                                             }
                                         }
@@ -2423,7 +2448,7 @@ impl SipSession {
                                             _ = reverse_cancel.cancelled() => break,
                                             result = ws_write.send(Message::Binary(bytes.into())) => {
                                                 if result.is_err() {
-                                                    warn!(session_id = %session_id, %leg_id, "Bridge reverse audio write failed");
+                                                    log_bridge_reverse_failure(&reverse_cancel, &session_id, &leg_id, "Bridge reverse audio write failed").await;
                                                     break;
                                                 }
                                             }
@@ -2432,7 +2457,7 @@ impl SipSession {
                                 }
                                 Ok(_) => {}
                                 Err(e) => {
-                                    warn!(session_id = %session_id, %leg_id, "Bridge reverse track error: {}", e);
+                                    log_bridge_reverse_failure(&reverse_cancel, &session_id, &leg_id, &format!("Bridge reverse track error: {e}")).await;
                                     break;
                                 }
                             }

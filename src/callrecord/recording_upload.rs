@@ -27,13 +27,117 @@ use crate::{
 /// so upload paths observe the current policy without a restart.
 pub type RecordingPolicySlot = Arc<ArcSwap<Option<RecordingPolicy>>>;
 
+/// One resolved S3 upload target: the live [`Storage`] plus the URL/key
+/// parameters (bucket, endpoint, vendor, key prefix) it was built from.
+/// The default target is derived from the main `[recording]` fields; a
+/// per-source target from its `[recording.sources.<tag>]` entry.
+#[derive(Clone)]
+pub struct S3TargetSpec {
+    pub storage: Storage,
+    pub bucket: String,
+    pub endpoint: Option<String>,
+    pub vendor: Option<crate::storage::S3Vendor>,
+    pub root: Option<String>,
+}
+
+impl S3TargetSpec {
+    /// Remote URL of `key` in this target (virtual-host style for Aliyun,
+    /// path style otherwise; `s3://{bucket}/{key}` without an endpoint).
+    pub fn s3_url(&self, key: &str) -> String {
+        RecordingUploadHook::s3_url_str(
+            self.endpoint.as_deref(),
+            self.vendor.as_ref() == Some(&crate::storage::S3Vendor::Aliyun),
+            &self.bucket,
+            key,
+        )
+    }
+}
+
+/// Upload targets derived from one `[recording]` policy revision: the
+/// default S3/HTTP storage plus optional per-source S3 overrides. Media is
+/// routed by its canonical source tag (see [`media_source_tag`]); tags
+/// without an override (or whose override failed to build) fall back to the
+/// default target.
+#[derive(Default)]
+pub struct RecordingTargets {
+    recording_type: RecordingType,
+    /// Default target: S3 spec in `s3` mode.
+    default: Option<S3TargetSpec>,
+    /// HTTP uploader in `http` mode (per-source overrides unsupported).
+    http: Option<Storage>,
+    /// Per-source S3 overrides keyed by normalized canonical source tag.
+    by_tag: HashMap<String, S3TargetSpec>,
+}
+
+impl RecordingTargets {
+    pub fn recording_type(&self) -> RecordingType {
+        self.recording_type
+    }
+
+    /// Target for a media entry tagged `tag` (canonical source name); `None`
+    /// tags and unmapped/failed tags resolve to the default target.
+    pub fn spec_for_tag(&self, tag: Option<&str>) -> Option<&S3TargetSpec> {
+        let normalized = tag
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(|tag| tag.to_ascii_lowercase());
+        normalized
+            .and_then(|tag| self.by_tag.get(&tag))
+            .or(self.default.as_ref())
+    }
+
+    /// Primary upload storage: the default S3 target in `s3` mode or the
+    /// HTTP uploader in `http` mode; `None` for local/sipflow.
+    pub fn default_storage(&self) -> Option<Storage> {
+        match (&self.default, &self.http) {
+            (Some(spec), _) => Some(spec.storage.clone()),
+            (None, Some(http)) => Some(http.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn http_storage(&self) -> Option<&Storage> {
+        self.http.as_ref()
+    }
+
+    /// All S3 targets (default first, then per-source overrides) — the
+    /// presign candidate set for on-demand download URLs.
+    pub fn s3_targets(&self) -> impl Iterator<Item = &S3TargetSpec> {
+        self.default
+            .iter()
+            .chain(self.by_tag.values())
+    }
+}
+
+/// Canonical source tag used to route a media entry to its upload target:
+/// the segment's `segment_type` extra classified through
+/// [`crate::callrecord::RecordingSource`]. The dialplan-level whole-call
+/// artifact (`track_id = "mixed"`) has no segment bookkeeping and maps to
+/// `full`; entries without a tag do too. Custom tags classify as `external`.
+pub(crate) fn media_source_tag(media: &CallRecordMedia) -> String {
+    let raw_tag = if media.track_id == "mixed" {
+        None
+    } else {
+        media
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.get("segment_type"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+    };
+    crate::callrecord::RecordingSource::classify(raw_tag.unwrap_or("full"))
+        .as_str()
+        .to_string()
+}
+
 /// Late-bound `[recording]` policy + derived upload storage, shared between
 /// the upload hook, the background S3 uploader, the retry worker and the
 /// console (on-demand presigned URLs). The storage is rebuilt lazily whenever
 /// the slot content changes.
 pub struct RecordingUploadRuntime {
     slot: RecordingPolicySlot,
-    cached: parking_lot::Mutex<(String, Option<Storage>)>,
+    cached: parking_lot::Mutex<(String, Option<Arc<RecordingTargets>>)>,
 }
 
 impl RecordingUploadRuntime {
@@ -56,18 +160,18 @@ impl RecordingUploadRuntime {
         self.slot.load().as_ref().clone()
     }
 
-    /// Current policy + upload storage, rebuilding the storage when the
-    /// policy changed since the last call. Returns `None` when the recording
-    /// section is absent or the mode needs no uploads (local/sipflow).
-    pub fn resolve(&self) -> Result<Option<(RecordingPolicy, Option<Storage>)>> {
+    /// Current policy + full upload target set, rebuilding when the policy
+    /// changed since the last call. Returns `None` when the recording section
+    /// is absent or the mode needs no uploads (local/sipflow).
+    pub fn resolve_targets(&self) -> Result<Option<(RecordingPolicy, Arc<RecordingTargets>)>> {
         let Some(policy) = self.policy() else {
             return Ok(None);
         };
         let signature = format!("{policy:?}");
         let mut cached = self.cached.lock();
         if cached.0 != signature {
-            let storage = match build_recording_storage(&policy) {
-                Ok(storage) => storage,
+            let targets = match build_recording_targets(&policy) {
+                Ok(targets) => Arc::new(targets),
                 Err(err) => {
                     tracing::error!(%err, "failed to rebuild recording upload storage");
                     return Err(err);
@@ -78,53 +182,172 @@ impl RecordingUploadRuntime {
             } else {
                 info!("recording upload storage rebuilt after policy reload");
             }
-            cached.1 = storage;
+            cached.1 = Some(targets);
             cached.0 = signature;
         }
-        Ok(Some((policy, cached.1.clone())))
+        Ok(cached.1.clone().map(|targets| (policy, targets)))
     }
 
-    /// Test-only: pre-seed the storage cache so `resolve()` returns the given
-    /// storage for this policy signature without deriving it from the mode
-    /// (unit tests drive the manager with a local object store).
+    /// Current policy + primary upload storage (default S3 target / HTTP
+    /// uploader), for callers that do not care about per-source routing.
+    pub fn resolve(&self) -> Result<Option<(RecordingPolicy, Option<Storage>)>> {
+        Ok(self
+            .resolve_targets()?
+            .map(|(policy, targets)| (policy, targets.default_storage())))
+    }
+
+    /// Test-only: pre-seed the targets cache so `resolve()` returns the given
+    /// storage as the default target for this policy signature without
+    /// deriving it from the mode (unit tests drive the manager with a local
+    /// object store).
     #[cfg(test)]
     pub(crate) fn seed_storage(&self, policy: &RecordingPolicy, storage: Storage) {
+        self.seed_targets(
+            policy,
+            RecordingTargets {
+                recording_type: RecordingType::S3,
+                default: Some(S3TargetSpec {
+                    storage,
+                    bucket: policy.bucket.clone().unwrap_or_default(),
+                    endpoint: policy.endpoint.clone(),
+                    vendor: policy.vendor.clone(),
+                    root: policy.root.clone(),
+                }),
+                http: None,
+                by_tag: HashMap::new(),
+            },
+        );
+    }
+
+    /// Test-only: pre-seed the full targets cache (default + per-source).
+    #[cfg(test)]
+    pub(crate) fn seed_targets(&self, policy: &RecordingPolicy, targets: RecordingTargets) {
         let mut cached = self.cached.lock();
         cached.0 = format!("{policy:?}");
-        cached.1 = Some(storage);
+        cached.1 = Some(Arc::new(targets));
     }
 }
 
-/// Build the upload storage described by a policy: S3 object storage, or the
-/// generic HTTP uploader. `None` for local/sipflow modes (no remote upload).
-fn build_recording_storage(policy: &RecordingPolicy) -> Result<Option<Storage>> {
-    match policy.effective_recording_type() {
+/// Build one S3 target spec from its parameters. `Storage::new` rejects a
+/// partial access/secret pair; omitting both selects anonymous/public access.
+#[allow(clippy::too_many_arguments)]
+fn build_s3_spec(
+    vendor: Option<crate::storage::S3Vendor>,
+    bucket: String,
+    region: Option<String>,
+    access_key: Option<String>,
+    secret_key: Option<String>,
+    endpoint: Option<String>,
+    root: Option<String>,
+) -> Result<S3TargetSpec> {
+    let endpoint = endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|endpoint| !endpoint.is_empty())
+        .map(str::to_string);
+    let storage = Storage::new(&StorageConfig::S3 {
+        vendor: vendor.clone().unwrap_or_default(),
+        bucket: bucket.clone(),
+        region: region.unwrap_or_default(),
+        access_key,
+        secret_key,
+        endpoint: endpoint.clone(),
+        prefix: None,
+    })?;
+    Ok(S3TargetSpec {
+        storage,
+        bucket,
+        endpoint,
+        vendor,
+        root,
+    })
+}
+
+fn normalize_source_tag(tag: &str) -> String {
+    tag.trim().to_ascii_lowercase()
+}
+
+/// Build the upload target set described by a policy: the default S3/HTTP
+/// storage from the main section fields plus per-source S3 overrides. A
+/// default-target construction error fails the build (historical behavior:
+/// `Storage::new` errors fail fast); a per-source entry that fails to build
+/// is dropped with an error log and its source falls back to the default
+/// target. Per-source overrides apply only in `s3` mode.
+fn build_recording_targets(policy: &RecordingPolicy) -> Result<RecordingTargets> {
+    let mut targets = RecordingTargets {
+        recording_type: policy.effective_recording_type(),
+        ..Default::default()
+    };
+    match targets.recording_type {
         RecordingType::S3 => {
-            let endpoint = policy
-                .endpoint
-                .as_deref()
-                .map(str::trim)
-                .filter(|endpoint| !endpoint.is_empty())
-                .map(str::to_string);
-            // Credentials are optional: omitting both selects anonymous/public
-            // access. `Storage::new` rejects a partial access/secret pair.
-            let storage = Storage::new(&StorageConfig::S3 {
-                vendor: policy.vendor.clone().unwrap_or_default(),
-                bucket: policy.bucket.clone().unwrap_or_default(),
-                region: policy.region.clone().unwrap_or_default(),
-                access_key: policy.access_key.clone(),
-                secret_key: policy.secret_key.clone(),
-                endpoint,
-                prefix: None,
-            })?;
-            Ok(Some(storage))
+            targets.default = Some(build_s3_spec(
+                policy.vendor.clone(),
+                policy.bucket.clone().unwrap_or_default(),
+                policy.region.clone(),
+                policy.access_key.clone(),
+                policy.secret_key.clone(),
+                policy.endpoint.clone(),
+                policy.root.clone(),
+            )?);
+            let Some(sources) = policy.sources.as_ref().filter(|sources| !sources.is_empty())
+            else {
+                return Ok(targets);
+            };
+            for (tag, source_target) in sources {
+                let normalized = normalize_source_tag(tag);
+                match build_s3_spec(
+                    source_target.vendor.clone(),
+                    source_target.bucket.clone(),
+                    source_target.region.clone(),
+                    source_target.access_key.clone(),
+                    source_target.secret_key.clone(),
+                    source_target.endpoint.clone(),
+                    source_target.root.clone(),
+                ) {
+                    Ok(spec) => {
+                        targets.by_tag.insert(normalized, spec);
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            tag = %tag,
+                            %err,
+                            "failed to build [recording.sources] target; \
+                             this source falls back to the default bucket"
+                        );
+                    }
+                }
+            }
         }
-        RecordingType::Http => policy
-            .http_upload_config()
-            .map(Storage::from_http)
-            .transpose(),
-        _ => Ok(None),
+        RecordingType::Http => {
+            if policy.sources.as_ref().is_some_and(|sources| !sources.is_empty()) {
+                warn!(
+                    "[recording].sources requires type = \"s3\"; ignoring per-source targets"
+                );
+            }
+            targets.http = policy
+                .http_upload_config()
+                .map(Storage::from_http)
+                .transpose()?;
+        }
+        RecordingType::Local | RecordingType::Sipflow => {
+            if policy.sources.as_ref().is_some_and(|sources| !sources.is_empty()) {
+                warn!(
+                    ty = ?targets.recording_type,
+                    "[recording].sources requires type = \"s3\"; ignoring per-source targets"
+                );
+            }
+        }
     }
+    Ok(targets)
+}
+
+/// One queued background S3 upload: the local file plus the canonical source
+/// tag selecting its target bucket (`[recording].sources` override or the
+/// default).
+#[derive(Debug, Clone)]
+pub(crate) struct PendingRecordingUpload {
+    pub path: PathBuf,
+    pub source_tag: String,
 }
 
 pub struct RecordingUploadHook {
@@ -132,12 +355,12 @@ pub struct RecordingUploadHook {
     /// batch so config hot-reloads take effect without a restart.
     runtime: Arc<RecordingUploadRuntime>,
     rwi_gateway: Option<RwiGatewayRef>,
-    s3_upload_sender: Option<tokio::sync::mpsc::Sender<PathBuf>>,
+    s3_upload_sender: Option<tokio::sync::mpsc::Sender<PendingRecordingUpload>>,
 }
 
 pub struct RecordingUploadManager {
     runtime: Arc<RecordingUploadRuntime>,
-    receiver: tokio::sync::mpsc::Receiver<PathBuf>,
+    receiver: tokio::sync::mpsc::Receiver<PendingRecordingUpload>,
 }
 
 const RECORDING_UPLOAD_CHANNEL_CAPACITY: usize = 65_536;
@@ -308,7 +531,14 @@ impl RecordingUploadHook {
             .ok_or_else(|| anyhow!("recording.{name} is required"))
     }
 
-    fn storage_key(policy: &RecordingPolicy, media_path: &Path) -> String {
+    /// Object key for `media_path`: its path relative to the recorder root,
+    /// optionally prefixed by the target's `root` (main `[recording].root`
+    /// for the default target, per-entry for source overrides).
+    fn storage_key_with_prefix(
+        policy: &RecordingPolicy,
+        key_root: Option<&str>,
+        media_path: &Path,
+    ) -> String {
         let recorder_root = policy.recorder_path();
         let relative = media_path
             .strip_prefix(Path::new(&recorder_root))
@@ -325,9 +555,7 @@ impl RecordingUploadHook {
             .map(|component| component.as_os_str().to_string_lossy())
             .collect::<Vec<_>>()
             .join("/");
-        match policy
-            .root
-            .as_deref()
+        match key_root
             .map(str::trim)
             .filter(|root| !root.is_empty())
         {
@@ -336,19 +564,20 @@ impl RecordingUploadHook {
         }
     }
 
-    fn s3_url(policy: &RecordingPolicy, bucket: &str, key: &str) -> String {
+    /// URL rendering shared by the default target and per-source targets.
+    fn s3_url_str(
+        endpoint: Option<&str>,
+        aliyun_virtual_host_style: bool,
+        bucket: &str,
+        key: &str,
+    ) -> String {
         let bucket = bucket.trim().trim_matches('/');
         let key = key.trim_start_matches('/');
-        let Some(endpoint) = policy
-            .endpoint
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        else {
+        let Some(endpoint) = endpoint.map(str::trim).filter(|s| !s.is_empty()) else {
             return format!("s3://{bucket}/{key}");
         };
         let endpoint = endpoint.trim_end_matches('/');
-        if policy.vendor == Some(crate::storage::S3Vendor::Aliyun) {
+        if aliyun_virtual_host_style {
             return format!("{endpoint}/{key}");
         }
         format!("{endpoint}/{bucket}/{key}")
@@ -357,32 +586,53 @@ impl RecordingUploadHook {
 
 impl RecordingUploadManager {
     pub async fn serve(&mut self) {
-        while let Some(path) = self.receiver.recv().await {
-            let uploaded = match self.runtime.resolve() {
-                Ok(Some((policy, Some(storage)))) => (policy, storage),
-                Ok(_) => {
-                    warn!(
-                        path = %path.display(),
-                        "recording uploader disabled by policy reload; local file retained"
-                    );
-                    continue;
-                }
+        while let Some(pending) = self.receiver.recv().await {
+            let resolved = match self.runtime.resolve_targets() {
+                Ok(Some((policy, targets))) => Some((policy, targets)),
+                Ok(None) => None,
                 Err(err) => {
                     warn!(
-                        path = %path.display(),
+                        path = %pending.path.display(),
                         %err,
                         "recording uploader storage unavailable; local file retained"
                     );
                     continue;
                 }
             };
-            let (policy, storage) = uploaded;
-            let key = RecordingUploadHook::storage_key(&policy, &path);
-            let data = match tokio::fs::read(&path).await {
+            let Some((policy, targets)) = resolved else {
+                warn!(
+                    path = %pending.path.display(),
+                    "recording uploader disabled by policy reload; local file retained"
+                );
+                continue;
+            };
+            if targets.recording_type() != RecordingType::S3 {
+                warn!(
+                    path = %pending.path.display(),
+                    ty = ?targets.recording_type(),
+                    "recording uploader disabled by policy reload; local file retained"
+                );
+                continue;
+            }
+            // Target selection: the queued source tag's override, or the
+            // default bucket when unmapped / its override failed to build.
+            let Some(spec) = targets.spec_for_tag(Some(&pending.source_tag)) else {
+                warn!(
+                    path = %pending.path.display(),
+                    "recording uploader has no S3 target; local file retained"
+                );
+                continue;
+            };
+            let key = RecordingUploadHook::storage_key_with_prefix(
+                &policy,
+                spec.root.as_deref(),
+                &pending.path,
+            );
+            let data = match tokio::fs::read(&pending.path).await {
                 Ok(data) => data,
                 Err(err) => {
                     warn!(
-                        path = %path.display(),
+                        path = %pending.path.display(),
                         %err,
                         "recording uploader failed to read local media"
                     );
@@ -390,14 +640,16 @@ impl RecordingUploadManager {
                 }
             };
             let bytes = data.len();
-            let content_type = match path.extension().and_then(|extension| extension.to_str()) {
+            let content_type = match pending.path.extension().and_then(|extension| extension.to_str())
+            {
                 Some(extension) if extension.eq_ignore_ascii_case("wav") => "audio/wav",
                 Some(extension) if extension.eq_ignore_ascii_case("jsonl") => "application/jsonl",
                 _ => "application/octet-stream",
             };
             let attributes = Attributes::from_iter([(Attribute::ContentType, content_type)]);
             let started = std::time::Instant::now();
-            if let Err(err) = storage
+            if let Err(err) = spec
+                .storage
                 .write_opts(
                     &key,
                     Bytes::from(data),
@@ -409,24 +661,30 @@ impl RecordingUploadManager {
                 .await
             {
                 warn!(
-                    path = %path.display(),
+                    path = %pending.path.display(),
                     key,
+                    bucket = %spec.bucket,
                     %err,
                     "recording upload failed"
                 );
                 crate::metrics::recording::upload_failure("s3");
-                let address = policy.bucket.clone().unwrap_or_else(|| "s3".to_string());
+                let address = if spec.bucket.trim().is_empty() {
+                    "s3".to_string()
+                } else {
+                    spec.bucket.clone()
+                };
                 if let Err(write_err) = crate::callrecord::write_upload_failed_marker_ex(
-                    &path,
+                    &pending.path,
                     &address,
                     started.elapsed().as_millis() as u64,
                     &err.to_string(),
                     None,
+                    Some(&pending.source_tag),
                 )
                 .await
                 {
                     warn!(
-                        path = %path.display(),
+                        path = %pending.path.display(),
                         %write_err,
                         "failed to write upload failure marker"
                     );
@@ -434,8 +692,10 @@ impl RecordingUploadManager {
                 continue;
             }
             info!(
-                path = %path.display(),
+                path = %pending.path.display(),
                 key,
+                bucket = %spec.bucket,
+                source = %pending.source_tag,
                 bytes,
                 content_type,
                 "recording uploaded"
@@ -445,14 +705,14 @@ impl RecordingUploadManager {
                 started.elapsed().as_secs_f64(),
                 "s3",
             );
-            if let Err(err) = tokio::fs::remove_file(&path).await {
+            if let Err(err) = tokio::fs::remove_file(&pending.path).await {
                 warn!(
-                    path = %path.display(),
+                    path = %pending.path.display(),
                     %err,
                     "failed to remove local recording after upload"
                 );
             } else {
-                let marker = crate::callrecord::upload_failed_marker_path(&path);
+                let marker = crate::callrecord::upload_failed_marker_path(&pending.path);
                 let _ = tokio::fs::remove_file(marker).await;
             }
         }
@@ -495,7 +755,7 @@ impl RecordingRetryWorker {
         loop {
             ticker.tick().await;
             // Re-resolve per scan so policy hot-reloads take effect.
-            let resolved = match self.runtime.resolve() {
+            let resolved = match self.runtime.resolve_targets() {
                 Ok(resolved) => resolved,
                 Err(err) => {
                     warn!(%err, "recording upload retry storage unavailable");
@@ -510,7 +770,7 @@ impl RecordingRetryWorker {
 
     async fn scan_once(
         &self,
-        resolved: Option<(RecordingPolicy, Option<Storage>)>,
+        resolved: Option<(RecordingPolicy, Arc<RecordingTargets>)>,
     ) -> Result<()> {
         let Some((policy, _)) = resolved.as_ref() else {
             return Ok(());
@@ -540,14 +800,13 @@ impl RecordingRetryWorker {
 
     async fn retry_marker(
         &self,
-        resolved: Option<&(RecordingPolicy, Option<Storage>)>,
+        resolved: Option<&(RecordingPolicy, Arc<RecordingTargets>)>,
         marker_path: &Path,
         max_attempts: u32,
     ) -> Result<()> {
-        let Some((policy, storage)) = resolved else {
+        let Some((policy, targets)) = resolved else {
             return Ok(());
         };
-        let storage = storage.as_ref();
         let source = source_path_from_marker(marker_path).ok_or_else(|| {
             anyhow!(
                 "cannot derive source path from marker {}",
@@ -581,7 +840,14 @@ impl RecordingRetryWorker {
         };
         crate::metrics::recording::retry_attempt(dest);
         let started = std::time::Instant::now();
-        match self.upload_source(policy, storage, &source, marker.call_id.as_deref())
+        match self
+            .upload_source(
+                policy,
+                targets,
+                &source,
+                marker.call_id.as_deref(),
+                marker.source.as_deref(),
+            )
             .await
         {
             Ok(()) => {
@@ -610,6 +876,7 @@ impl RecordingRetryWorker {
                     started.elapsed().as_millis() as u64,
                     &err.to_string(),
                     marker.call_id.as_deref(),
+                    marker.source.as_deref(),
                 )
                 .await;
             }
@@ -620,14 +887,16 @@ impl RecordingRetryWorker {
     async fn upload_source(
         &self,
         policy: &RecordingPolicy,
-        storage: Option<&Storage>,
+        targets: &RecordingTargets,
         source: &Path,
         call_id: Option<&str>,
+        source_tag: Option<&str>,
     ) -> Result<()> {
         let data = tokio::fs::read(source).await?;
         match policy.effective_recording_type() {
             RecordingType::Http => {
-                let storage = storage
+                let storage = targets
+                    .http_storage()
                     .ok_or_else(|| anyhow!("HTTP storage unavailable for retry"))?;
                 let file_name = source
                     .file_name()
@@ -651,16 +920,24 @@ impl RecordingRetryWorker {
                 Ok(())
             }
             RecordingType::S3 => {
-                let storage = storage
+                // Retry the source's own target; markers written before the
+                // per-source routing existed (no `source` field) retry into
+                // the default bucket.
+                let spec = targets
+                    .spec_for_tag(source_tag)
                     .ok_or_else(|| anyhow!("S3 storage unavailable for retry"))?;
-                let key = RecordingUploadHook::storage_key(policy, source);
+                let key = RecordingUploadHook::storage_key_with_prefix(
+                    policy,
+                    spec.root.as_deref(),
+                    source,
+                );
                 let content_type = match source.extension().and_then(|e| e.to_str()) {
                     Some(ext) if ext.eq_ignore_ascii_case("wav") => "audio/wav",
                     Some(ext) if ext.eq_ignore_ascii_case("jsonl") => "application/jsonl",
                     _ => "application/octet-stream",
                 };
                 let attributes = Attributes::from_iter([(Attribute::ContentType, content_type)]);
-                storage
+                spec.storage
                     .write_opts(
                         &key,
                         Bytes::from(data),
@@ -715,13 +992,29 @@ async fn collect_upload_failed_markers(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 impl RecordingUploadHook {
-    fn preconstruct_s3_urls(policy: &RecordingPolicy, record: &mut CallRecord) -> Result<()> {
-        let bucket = policy.bucket.as_deref().unwrap_or_default().trim();
+    /// Pre-build the remote URL for every media entry from its own upload
+    /// target (per-source override or the default bucket), before the
+    /// asynchronous upload runs.
+    fn preconstruct_s3_urls(
+        policy: &RecordingPolicy,
+        targets: &RecordingTargets,
+        record: &mut CallRecord,
+    ) -> Result<()> {
         let mut first_media_url = None;
 
         for media in &mut record.recorder {
-            let key = Self::storage_key(policy, Path::new(&media.path));
-            let url = Self::s3_url(policy, bucket, &key);
+            let source_tag = media_source_tag(media);
+            // No override and no default (unexpected in S3 mode): keep the
+            // entry untouched rather than misattributing its URL.
+            let Some(spec) = targets.spec_for_tag(Some(&source_tag)) else {
+                continue;
+            };
+            let key = Self::storage_key_with_prefix(
+                policy,
+                spec.root.as_deref(),
+                Path::new(&media.path),
+            );
+            let url = spec.s3_url(&key);
             let extra = media.extra.get_or_insert_with(HashMap::new);
             extra.insert("uploadUrl".to_string(), json!(url.clone()));
             if first_media_url.is_none() && media.track_id != "signaling" {
@@ -888,7 +1181,7 @@ fn build_segment_recording_metadata(
 #[async_trait]
 impl CallRecordHook for RecordingUploadHook {
     async fn on_record_enrich(&self, records: &mut [CallRecord]) -> anyhow::Result<()> {
-        let Some((policy, _)) = self.runtime.resolve()? else {
+        let Some((policy, targets)) = self.runtime.resolve_targets()? else {
             return Ok(());
         };
         for record in records {
@@ -898,7 +1191,7 @@ impl CallRecordHook for RecordingUploadHook {
                     // Move generated artifacts into their final dated layout first,
                     // then persist the remote URL before the asynchronous upload.
                     self.archive_local_artifacts(&policy, record).await;
-                    Self::preconstruct_s3_urls(&policy, record)?;
+                    Self::preconstruct_s3_urls(&policy, &targets, record)?;
                 }
                 RecordingType::Http | RecordingType::Sipflow => {}
             }
@@ -912,7 +1205,7 @@ impl CallRecordHook for RecordingUploadHook {
         };
         use std::time::Instant;
 
-        let Some((policy, upload_storage)) = self.runtime.resolve()? else {
+        let Some((policy, targets)) = self.runtime.resolve_targets()? else {
             return Ok(());
         };
         let recording_type = policy.effective_recording_type();
@@ -928,9 +1221,13 @@ impl CallRecordHook for RecordingUploadHook {
             let mut segment_summaries = Vec::new();
 
             for index in 0..record.recorder.len() {
-                let (track_id, path) = {
+                let (track_id, path, source_tag) = {
                     let media = &record.recorder[index];
-                    (media.track_id.clone(), media.path.clone())
+                    (
+                        media.track_id.clone(),
+                        media.path.clone(),
+                        media_source_tag(media),
+                    )
                 };
                 if !Path::new(&path).exists() {
                     warn!(
@@ -943,20 +1240,40 @@ impl CallRecordHook for RecordingUploadHook {
                 }
 
                 if recording_type == RecordingType::S3 {
-                    let key = Self::storage_key(&policy, Path::new(&path));
-                    let bucket = policy.bucket.as_deref().unwrap_or_default().trim();
-                    let url = Self::s3_url(&policy, bucket, &key);
+                    // Route this entry to its own target: the source tag's
+                    // override bucket, or the default bucket when unmapped /
+                    // its override failed to build.
+                    let Some(spec) = targets.spec_for_tag(Some(&source_tag)) else {
+                        warn!(
+                            call_id = %record.call_id,
+                            track_id,
+                            path,
+                            "recording upload skipped: no S3 target available"
+                        );
+                        continue;
+                    };
+                    let key = Self::storage_key_with_prefix(
+                        &policy,
+                        spec.root.as_deref(),
+                        Path::new(&path),
+                    );
+                    let url = spec.s3_url(&key);
                     match self
                         .s3_upload_sender
                         .as_ref()
                         .ok_or_else(|| anyhow!("recording S3 uploader is not initialized"))?
-                        .try_send(PathBuf::from(&path))
+                        .try_send(PendingRecordingUpload {
+                            path: PathBuf::from(&path),
+                            source_tag: source_tag.clone(),
+                        })
                     {
                         Ok(()) => info!(
                             call_id = %record.call_id,
                             track_id,
                             path,
                             key,
+                            bucket = %spec.bucket,
+                            source = %source_tag,
                             "recording queued for upload"
                         ),
                         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => warn!(
@@ -1052,8 +1369,8 @@ impl CallRecordHook for RecordingUploadHook {
                     RecordingType::Http => {
                         let address = policy.url.clone().unwrap_or_else(|| "http".to_string());
                         let started = Instant::now();
-                        let storage = upload_storage
-                            .as_ref()
+                        let storage = targets
+                            .http_storage()
                             .ok_or_else(|| {
                                 anyhow!("recording http upload is not configured (missing url?)")
                             })?;
@@ -1124,6 +1441,7 @@ impl CallRecordHook for RecordingUploadHook {
                                     elapsed_ms,
                                     &err.to_string(),
                                     Some(record.call_id.as_str()),
+                                    Some(&source_tag),
                                 )
                                 .await
                                 {
@@ -1530,6 +1848,7 @@ mod tests {
             ..Default::default()
         };
         let (_hook, _, _) = RecordingUploadHook::new(policy.clone()).unwrap();
+        let targets = build_recording_targets(&policy).unwrap();
         let mut record = CallRecord {
             recorder: vec![CallRecordMedia {
                 unique_id: None,
@@ -1540,7 +1859,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        RecordingUploadHook::preconstruct_s3_urls(&policy, &mut record).unwrap();
+        RecordingUploadHook::preconstruct_s3_urls(&policy, &targets, &mut record).unwrap();
         let raw = record.details.recording_url.unwrap();
         assert_eq!(
             raw,
@@ -1646,9 +1965,18 @@ mod tests {
             manager.serve().await;
         });
 
-        sender.send(missing).await.expect("queue missing path");
         sender
-            .send(recording.clone())
+            .send(PendingRecordingUpload {
+                path: missing,
+                source_tag: "full".to_string(),
+            })
+            .await
+            .expect("queue missing path");
+        sender
+            .send(PendingRecordingUpload {
+                path: recording.clone(),
+                source_tag: "full".to_string(),
+            })
             .await
             .expect("queue recording");
         drop(sender);
@@ -1940,7 +2268,7 @@ mod tests {
                 Some(policy),
             )));
         worker
-            .scan_once(worker.runtime.resolve().ok().flatten())
+            .scan_once(worker.runtime.resolve_targets().ok().flatten())
             .await
             .expect("scan");
 
@@ -2391,5 +2719,348 @@ mod tests {
             aggregate, 0,
             "segmented calls must not receive the former full=true aggregate event"
         );
+    }
+
+    fn source_media(path: &Path, track_id: &str, segment_type: &str) -> CallRecordMedia {
+        CallRecordMedia {
+            unique_id: None,
+            track_id: track_id.to_string(),
+            path: path.to_string_lossy().into_owned(),
+            size: 1,
+            extra: Some(std::collections::HashMap::from([(
+                "segment_type".to_string(),
+                json!(segment_type),
+            )])),
+        }
+    }
+
+    #[test]
+    fn media_source_tag_classifies_entries() {
+        let base = Path::new("/tmp/x.wav");
+        let tag = |media: CallRecordMedia| media_source_tag(&media);
+        // Dialplan-level whole-call artifact → full.
+        assert_eq!(
+            tag(CallRecordMedia {
+                unique_id: None,
+                track_id: "mixed".into(),
+                path: base.to_string_lossy().into_owned(),
+                size: 0,
+                extra: None,
+            }),
+            "full"
+        );
+        // Segment extras drive the canonical tag.
+        assert_eq!(tag(source_media(base, "segment:agent:1", "agent")), "agent");
+        assert_eq!(
+            tag(source_media(base, "segment:ringing:1", "ringing")),
+            "ringing"
+        );
+        // Custom tags classify as external; missing tag → full.
+        assert_eq!(
+            tag(source_media(base, "segment:csat:1", "csat")),
+            "external"
+        );
+        assert_eq!(
+            tag(CallRecordMedia {
+                unique_id: None,
+                track_id: "segment:ivr:1".into(),
+                path: base.to_string_lossy().into_owned(),
+                size: 0,
+                extra: None,
+            }),
+            "full"
+        );
+    }
+
+    fn s3_policy_with_sources() -> RecordingPolicy {
+        RecordingPolicy {
+            enabled: Some(true),
+            recording_type: Some(RecordingType::S3),
+            path: Some("/tmp/recorders".into()),
+            vendor: Some(crate::storage::S3Vendor::Minio),
+            bucket: Some("default-bucket".into()),
+            region: Some("us-east-1".into()),
+            access_key: Some("ak".into()),
+            secret_key: Some("sk".into()),
+            endpoint: Some("http://default:9000".into()),
+            root: Some("base".into()),
+            sources: Some(std::collections::HashMap::from([
+                (
+                    "agent".to_string(),
+                    crate::config::RecordingS3Target {
+                        bucket: "isc_sr".into(),
+                        vendor: Some(crate::storage::S3Vendor::Aliyun),
+                        region: None,
+                        access_key: Some("a2".into()),
+                        secret_key: Some("s2".into()),
+                        endpoint: Some("http://v2:9000".into()),
+                        root: Some("agent".into()),
+                    },
+                ),
+                (
+                    "Ringing".to_string(),
+                    crate::config::RecordingS3Target {
+                        bucket: "test2".into(),
+                        vendor: None,
+                        region: None,
+                        access_key: None,
+                        secret_key: None,
+                        endpoint: None,
+                        root: None,
+                    },
+                ),
+            ])),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn build_recording_targets_maps_sources_and_falls_back() {
+        let policy = s3_policy_with_sources();
+        let targets = build_recording_targets(&policy).expect("targets");
+
+        // Key normalization: config keys are case/space insensitive.
+        assert_eq!(
+            targets.spec_for_tag(Some("agent")).unwrap().bucket,
+            "isc_sr"
+        );
+        assert_eq!(
+            targets
+                .spec_for_tag(Some("agent"))
+                .unwrap()
+                .root
+                .as_deref(),
+            Some("agent")
+        );
+        assert_eq!(
+            targets.spec_for_tag(Some("RINGING")).unwrap().bucket,
+            "test2"
+        );
+        // Unmapped sources and missing tags resolve to the default bucket.
+        assert_eq!(
+            targets.spec_for_tag(Some("ivr")).unwrap().bucket,
+            "default-bucket"
+        );
+        assert_eq!(
+            targets.spec_for_tag(Some("full")).unwrap().bucket,
+            "default-bucket"
+        );
+        assert_eq!(targets.spec_for_tag(None).unwrap().bucket, "default-bucket");
+        // The default target carries the main section's key prefix.
+        assert_eq!(
+            targets.spec_for_tag(None).unwrap().root.as_deref(),
+            Some("base")
+        );
+        // All S3 targets are presign candidates: the default bucket first,
+        // then the per-source overrides (HashMap order).
+        let buckets: Vec<&str> = targets
+            .s3_targets()
+            .map(|spec| spec.bucket.as_str())
+            .collect();
+        assert_eq!(buckets.first(), Some(&"default-bucket"));
+        assert_eq!(buckets.len(), 3);
+        assert!(buckets.contains(&"isc_sr") && buckets.contains(&"test2"));
+    }
+
+    #[test]
+    fn broken_source_target_degrades_to_default_bucket() {
+        // R3: a per-source entry with a partial credential pair fails its
+        // Storage build but must not poison the whole target set.
+        let mut policy = s3_policy_with_sources();
+        policy.sources.as_mut().unwrap().insert(
+            "ivr".to_string(),
+            crate::config::RecordingS3Target {
+                bucket: "test1".into(),
+                access_key: Some("only-access-key".into()),
+                secret_key: None,
+                ..Default::default()
+            },
+        );
+        let targets = build_recording_targets(&policy).expect("targets still build");
+        assert_eq!(
+            targets.spec_for_tag(Some("ivr")).unwrap().bucket,
+            "default-bucket",
+            "broken ivr override must fall back to the default bucket"
+        );
+        assert_eq!(
+            targets.spec_for_tag(Some("agent")).unwrap().bucket,
+            "isc_sr",
+            "healthy overrides must be unaffected"
+        );
+    }
+
+    #[test]
+    fn preconstruct_s3_urls_routes_per_source() {
+        let policy = s3_policy_with_sources();
+        let targets = build_recording_targets(&policy).expect("targets");
+        let mut record = CallRecord {
+            call_id: "multi".into(),
+            start_time: chrono::Utc::now(),
+            end_time: chrono::Utc::now() + chrono::Duration::seconds(10),
+            recorder: vec![
+                source_media(Path::new("/tmp/recorders/a.wav"), "segment:agent:1", "agent"),
+                source_media(Path::new("/tmp/recorders/r.wav"), "segment:ringing:1", "ringing"),
+                CallRecordMedia {
+                    unique_id: None,
+                    track_id: "mixed".into(),
+                    path: "/tmp/recorders/full.wav".into(),
+                    size: 1,
+                    extra: None,
+                },
+            ],
+            details: CallDetails::default(),
+            ..Default::default()
+        };
+
+        RecordingUploadHook::preconstruct_s3_urls(&policy, &targets, &mut record)
+            .expect("preconstruct");
+
+        let url = |index: usize| {
+            record.recorder[index]
+                .extra
+                .as_ref()
+                .unwrap()
+                .get("uploadUrl")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        // agent → v2/isc_sr with its own prefix; ringing → test2 (no prefix,
+        // no endpoint of its own → bare s3:// URL); full → default bucket
+        // with the main root prefix. Per-entry fields are independent — the
+        // ringing target does NOT inherit the main endpoint. The Aliyun
+        // vendor renders virtual-host style URLs (no bucket path segment).
+        assert_eq!(url(0), "http://v2:9000/agent/a.wav");
+        assert_eq!(url(1), "s3://test2/r.wav");
+        assert_eq!(url(2), "http://default:9000/default-bucket/base/full.wav");
+        // The call-level recording URL is the first non-signaling media URL.
+        assert_eq!(
+            record.details.recording_url.as_deref(),
+            Some("http://v2:9000/agent/a.wav")
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_routes_uploads_by_source_tag() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let recorder_root = dir.path().join("recorders");
+        tokio::fs::create_dir_all(&recorder_root)
+            .await
+            .expect("create recorder root");
+        let agent_wav = recorder_root.join("agent.wav");
+        let full_wav = recorder_root.join("full.wav");
+        tokio::fs::write(&agent_wav, b"agent").await.expect("write");
+        tokio::fs::write(&full_wav, b"full").await.expect("write");
+
+        let default_objects = dir.path().join("objects-default");
+        let agent_objects = dir.path().join("objects-agent");
+        let policy = RecordingPolicy {
+            path: Some(recorder_root.to_string_lossy().into_owned()),
+            root: Some("base".into()),
+            ..Default::default()
+        };
+        let runtime = Arc::new(RecordingUploadRuntime::for_policy(Some(policy.clone())));
+        runtime.seed_targets(
+            &policy,
+            RecordingTargets {
+                recording_type: RecordingType::S3,
+                default: Some(S3TargetSpec {
+                    storage: Storage::new(&StorageConfig::Local {
+                        path: default_objects.to_string_lossy().into_owned(),
+                    })
+                    .expect("default storage"),
+                    bucket: "default-bucket".into(),
+                    endpoint: None,
+                    vendor: None,
+                    root: Some("base".into()),
+                }),
+                http: None,
+                by_tag: std::collections::HashMap::from([(
+                    "agent".to_string(),
+                    S3TargetSpec {
+                        storage: Storage::new(&StorageConfig::Local {
+                            path: agent_objects.to_string_lossy().into_owned(),
+                        })
+                        .expect("agent storage"),
+                        bucket: "isc_sr".into(),
+                        endpoint: None,
+                        vendor: None,
+                        root: Some("agent".into()),
+                    },
+                )]),
+            },
+        );
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        let mut manager = RecordingUploadManager {
+            runtime,
+            receiver,
+        };
+        let uploader = crate::utils::spawn(async move { manager.serve().await });
+        sender
+            .send(PendingRecordingUpload {
+                path: agent_wav.clone(),
+                source_tag: "agent".to_string(),
+            })
+            .await
+            .expect("queue agent");
+        sender
+            .send(PendingRecordingUpload {
+                path: full_wav.clone(),
+                source_tag: "ivr".to_string(),
+            })
+            .await
+            .expect("queue unmapped tag → default");
+        drop(sender);
+        uploader.await.expect("uploader task");
+
+        // agent tag → per-source bucket + prefix; unmapped tag → default.
+        assert_eq!(
+            tokio::fs::read(agent_objects.join("agent/agent.wav"))
+                .await
+                .expect("agent object"),
+            b"agent"
+        );
+        assert_eq!(
+            tokio::fs::read(default_objects.join("base/full.wav"))
+                .await
+                .expect("default object"),
+            b"full"
+        );
+        assert!(!agent_wav.exists() && !full_wav.exists());
+    }
+
+    #[test]
+    fn upload_failed_marker_carries_source_and_reads_legacy_markers() {
+        // Legacy marker (pre per-source routing): no `source` field → None →
+        // retries into the default bucket.
+        let legacy: UploadFailedMarker = serde_json::from_str(
+            r#"{
+                "time": "2026-01-01T00:00:00Z",
+                "address": "s3://old-bucket/k",
+                "duration_ms": 10,
+                "error": "boom",
+                "attempts": 2,
+                "call_id": "c1"
+            }"#,
+        )
+        .expect("legacy marker parses");
+        assert_eq!(legacy.source, None);
+        assert_eq!(legacy.attempts, 2);
+
+        // New markers round-trip the source tag.
+        let marker = UploadFailedMarker {
+            time: "2026-01-01T00:00:00Z".into(),
+            address: "s3://isc_sr/k".into(),
+            duration_ms: 5,
+            error: "boom".into(),
+            attempts: 1,
+            call_id: Some("c1".into()),
+            source: Some("agent".into()),
+        };
+        let json = serde_json::to_value(&marker).expect("serialize");
+        assert_eq!(json["source"], "agent");
+        let parsed: UploadFailedMarker = serde_json::from_value(json).expect("round-trip");
+        assert_eq!(parsed.source.as_deref(), Some("agent"));
     }
 }
