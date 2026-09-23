@@ -18,7 +18,7 @@ rand = "0.10"
 rustpbx-http-util = { path = "../rustpbx-http-util", version = "0.5.1" }
 rustpbx-sipflow = { path = "../rustpbx-sipflow", version = "0.5.1" }
 rustpbx-record-common = { path = "../rustpbx-record-common", version = "0.5.1" }
-rustrtc = "0.3.139"
+rustrtc = "0.3.140"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1.53", features = ["fs", "io-util", "sync"] }
 tokio-util = "0.7.18"
