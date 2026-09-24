@@ -392,6 +392,7 @@ async fn test_leg_timeline_via_call_resume() {
             ),
             rustpbx::rwi::event::to_legacy_event(
                 &rustpbx::rwi::CallAnswered {
+                    leg_id: None,
                     call_id: "timeline-call".to_string(),
                 },
                 None,

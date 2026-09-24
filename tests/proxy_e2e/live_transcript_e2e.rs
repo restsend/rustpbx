@@ -64,6 +64,7 @@ impl TranscriptionProviderFactory for MockEmitterFactory {
 
     fn create(
         &self,
+        _call: &rustpbx::call::transcription::TranscriptionCallInfo,
         _sides: &[TranscriptSide],
         events: mpsc::UnboundedSender<TranscriptionEvent>,
         _params: &serde_json::Value,

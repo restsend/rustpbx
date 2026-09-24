@@ -5,8 +5,7 @@
 //! the state machines dispatch the right `CallCommand`s that production SIP
 //! sessions will execute on the owning node.
 
-use rustpbx::addons::cc::supervisor::{MonitorType, SupervisorManager};
-use rustpbx::addons::cc::transfer::{ConsultTransferManager, TransferState};
+use rustpbx::addons::cc::transfer::ConsultTransferManager;
 use rustpbx::call::domain::{CallCommand, LegId};
 use rustpbx::call::runtime::{ConferenceManager, SessionId};
 use rustpbx::proxy::active_call_registry::{

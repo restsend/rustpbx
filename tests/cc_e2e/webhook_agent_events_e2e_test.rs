@@ -274,6 +274,7 @@ async fn test_cc_call_event_webhook_carries_context() {
 
     // Emit the unified core call_answered for the agent call.
     gateway.read().send_to_owner(&rustpbx::rwi::CallAnswered {
+        leg_id: None,
         call_id: "call-cc-1".to_string(),
     });
 

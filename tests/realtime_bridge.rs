@@ -10,7 +10,7 @@
 
 use futures::{SinkExt, StreamExt};
 use rustpbx::call::realtime::bridge::{
-    BridgeEndReason, BridgeIo, BridgeOutput, BridgeRun, Playout, UplinkPcm, run_realtime_bridge,
+    BridgeEndReason, BridgeIo, BridgeOutput, BridgeRun, Playout, run_realtime_bridge,
 };
 use rustpbx::call::realtime::{RealtimeParams, RealtimeProtocolKind, openai::OpenAiRealtime};
 use tokio::net::TcpListener;
@@ -78,7 +78,7 @@ struct MockServer {
     /// `session.update` received after connect, if any.
     session_update: mpsc::Receiver<String>,
     /// base64 audio chunks received from the client (uplink).
-    uplink: mpsc::Receiver<String>,
+    _uplink: mpsc::Receiver<String>,
     /// `response.cancel` seen?
     cancelled: mpsc::Receiver<()>,
 }
@@ -96,7 +96,7 @@ async fn spawn_mock(steps: Vec<MockStep>) -> (u16, MockServer) {
 
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept");
-        let ws = tokio_tungstenite::accept_hdr_async(stream, |req: &Request<()>, mut resp| {
+        let ws = tokio_tungstenite::accept_hdr_async(stream, |req: &Request<()>, resp| {
             let _ = path_tx.try_send(
                 req.uri()
                     .path_and_query()
@@ -168,7 +168,7 @@ async fn spawn_mock(steps: Vec<MockStep>) -> (u16, MockServer) {
             path: path_rx,
             auth: auth_rx,
             session_update: session_rx,
-            uplink: uplink_rx,
+            _uplink: uplink_rx,
             cancelled: cancel_rx,
         },
     )
@@ -269,7 +269,7 @@ async fn auth_url_and_handshake_then_disconnect() {
 async fn downlink_audio_transcript_and_function_call_reach_outputs() {
     let cancel = CancellationToken::new();
     let audio_b64 = b64(&[100i16, -100, 5]);
-    let (mut mock, run_rx, mut out_rx, mut written, _mutes) = start_bridge(
+    let (mock, run_rx, mut out_rx, mut written, _mutes) = start_bridge(
         vec![
             MockStep::Send(
                 serde_json::json!({"type":"response.audio.delta","delta":audio_b64}).to_string(),

@@ -54,6 +54,7 @@ async fn test_full_session_resume_flow() {
             gw.fan_out(
                 "resume-test",
                 &rustpbx::rwi::CallRinging {
+                    leg_id: None,
                     call_id: "resume-call-1".to_string(),
                     early_media: false,
                 },
@@ -61,6 +62,7 @@ async fn test_full_session_resume_flow() {
             gw.fan_out(
                 "resume-test",
                 &rustpbx::rwi::CallAnswered {
+                    leg_id: None,
                     call_id: "resume-call-1".to_string(),
                 },
             );
@@ -137,6 +139,7 @@ async fn test_call_resume_filters_by_call_id() {
             &"call-a".to_string(),
             &rustpbx::rwi::event::to_legacy_event(
                 &rustpbx::rwi::CallRinging {
+                    leg_id: None,
                     call_id: "call-a".to_string(),
                     early_media: false,
                 },
@@ -147,6 +150,7 @@ async fn test_call_resume_filters_by_call_id() {
             &"call-a".to_string(),
             &rustpbx::rwi::event::to_legacy_event(
                 &rustpbx::rwi::CallAnswered {
+                    leg_id: None,
                     call_id: "call-a".to_string(),
                 },
                 None,
@@ -158,6 +162,7 @@ async fn test_call_resume_filters_by_call_id() {
             &"call-b".to_string(),
             &rustpbx::rwi::event::to_legacy_event(
                 &rustpbx::rwi::CallRinging {
+                    leg_id: None,
                     call_id: "call-b".to_string(),
                     early_media: false,
                 },

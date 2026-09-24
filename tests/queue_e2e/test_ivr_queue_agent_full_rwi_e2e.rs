@@ -148,12 +148,12 @@ struct FullChainHarness {
     server: E2eTestServer,
     /// Shared CC registry — flip `bob` to Idle to trigger assignment.
     cc_registry: Arc<CcAgentRegistry>,
-    sg_rx: tokio::sync::mpsc::UnboundedReceiver<SkillGroupEvent>,
+    _sg_rx: tokio::sync::mpsc::UnboundedReceiver<SkillGroupEvent>,
 }
 
 /// Server + skill-group + adapter drained into the shared RWI gateway whose
 /// webhook handler forwards every chain event to `capture`.
-async fn start_harness(port: u16, capture: &WebhookCapture) -> Result<FullChainHarness> {
+async fn start_harness(capture: &WebhookCapture) -> Result<FullChainHarness> {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     rustpbx::addons::cc::migration::Migrator::up(&db, None)
         .await
@@ -290,7 +290,7 @@ async fn start_harness(port: u16, capture: &WebhookCapture) -> Result<FullChainH
     Ok(FullChainHarness {
         server,
         cc_registry: harness_registry,
-        sg_rx: mirror_rx,
+        _sg_rx: mirror_rx,
     })
 }
 
@@ -384,8 +384,7 @@ async fn test_full_chain_ivr_queue_agent_rwi_webhook_events() -> Result<()> {
     let _ = tracing_subscriber::fmt().try_init();
 
     let capture = WebhookCapture::start().await;
-    let port = portpicker::pick_unused_port().unwrap_or(17100);
-    let harness = start_harness(port, &capture).await?;
+    let harness = start_harness(&capture).await?;
     let proxy_addr = harness.server.proxy_addr;
 
     // ── Agent leg ────────────────────────────────────────────────────────
