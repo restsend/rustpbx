@@ -622,16 +622,18 @@ mod tests {
             .expect("should exit after agent connected");
     }
 
-    /// Test autonomous routing with DbRegistry.
+    /// Test agent ring timeout handling (wait-retention dial path): the
+    /// no-answer event fires, the agent is moved to Wrapup, and the call
+    /// returns to wait retention instead of hanging up.
     #[tokio::test]
-    async fn test_autonomous_routing_with_agent_registry() {
-        use crate::call::app::agent_registry::{PresenceState, RoutingStrategy, db::DbRegistry};
+    async fn test_agent_ring_timeout() {
         use std::sync::Arc;
-
-        // Create a DbRegistry and register an agent
-        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
-        let agent_registry = Arc::new(DbRegistry::new(db));
-        agent_registry
+        let registry = Arc::new(
+            HookRecordingRegistry::new()
+                .with_resolve_uris(vec![vec!["sip:agent1@example.com".to_string()]]),
+        );
+        registry
+            .inner
             .register(
                 "agent-001".to_string(),
                 "Alice".to_string(),
@@ -641,171 +643,75 @@ mod tests {
             )
             .await
             .unwrap();
-        agent_registry
-            .update_presence("agent-001", PresenceState::Idle)
+        registry
+            .inner
+            .update_presence(
+                "agent-001",
+                crate::call::app::agent_registry::PresenceState::Idle,
+            )
             .await
             .unwrap();
 
-        // Build queue config with autonomous routing enabled
+        // Build queue config with short ring timeout
         let mut config = build_simple_queue_config();
-        config.autonomous_routing = true;
         config.skill_routing_enabled = true;
-        config.required_skills = vec!["support".to_string()];
-        config.routing_strategy = RoutingStrategy::LongestIdle;
-        config.agents = vec![]; // No static agents, using dynamic routing
+        config.skill_group = Some("support".to_string());
+        config.ring_timeout = Some(Duration::from_millis(100));
+        config.agents = vec![];
         config.strategy = DialStrategy::Sequential(vec![]);
+        config.hold = None;
 
         let plan = config.to_plan();
         let mut queue = QueueApp::new(plan, config);
-        queue = queue.with_agent_registry(agent_registry.clone());
+        queue = queue.with_agent_registry(registry.clone());
         queue = queue.with_call_id("call-001".to_string());
 
         let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
 
-        // Enter queue - should auto-select agent and originate call
+        // Enter queue — agents resolve from the registry, sequential mode.
         stack.enter().await;
 
-        // Should answer immediately
+        // Should answer
         stack
             .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
 
-        // Should start hold music
-        stack
-            .assert_cmd(2000, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
-            .await;
-
-        // Should originate call to agent
+        // Kick the sequential dial of the resolved agent
+        stack.custom("dial_next_agent", serde_json::json!({}));
         stack
             .assert_cmd(2000, "OriginateCall", |c| {
                 matches!(c, CallCommand::LegAdd { target, .. } if target == "sip:agent1@example.com")
             })
             .await;
 
-        // Should notify external systems
-        stack
-            .assert_cmd(2000, "NotifyEvent", |c| {
-                matches!(c, CallCommand::InjectAppEvent { .. })
-            })
-            .await;
+        // Let the dial settle, then trigger the ring timeout
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        stack.timeout("agent_ring_timeout");
+        tokio::time::sleep(Duration::from_millis(200)).await;
 
-        // Verify agent state is ringing
-        let agent = agent_registry.get_agent("agent-001").await.unwrap();
-        assert!(matches!(
-            agent.presence,
-            PresenceState::Ringing { call_id: Some(_) }
-        ));
+        // Drain any pending commands (the timeout handler may send multiple)
+        let cmds = stack.drain_cmds();
 
-        // Simulate agent connected
-        stack.custom(
-            "agent_connected",
-            serde_json::json!({"agent_uri": "sip:agent1@example.com", "agent_id": "agent-001"}),
+        // Should have NotifyEvent for no-answer
+        let has_no_answer = cmds
+            .iter()
+            .any(|c| matches!(c, CallCommand::InjectAppEvent { .. }));
+        assert!(has_no_answer, "Expected queue.agent_no_answer event");
+
+        // After a ring timeout the agent must be left NON-idle (wrapup),
+        // not silently returned to Idle.
+        let agent = registry.inner.get_agent("agent-001").await.unwrap();
+        assert!(
+            matches!(
+                agent.presence,
+                crate::call::app::agent_registry::PresenceState::Wrapup { .. }
+            ),
+            "ring timeout must move the agent to Wrapup (non-idle), got {:?}",
+            agent.presence
         );
-        stack.assert_cmd(2000, "Bridge winner", |c| {
-            matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
-        }).await;
 
-        // Should connect (app exits cleanly)
-        stack
-            .join()
-            .await
-            .expect("should exit after agent connected");
-
-        // Queue no longer drives presence/call-count on connect — the
-        // call-session hooks own the agent lifecycle (see the agent_connected
-        // handler; calling start_call here double-counted capacity). Presence
-        // therefore stays Ringing and the call count is untouched.
-        let agent = agent_registry.get_agent("agent-001").await.unwrap();
-        assert!(matches!(
-            agent.presence,
-            PresenceState::Ringing { call_id: Some(_) }
-        ));
-        assert_eq!(agent.current_calls, 0);
-
-        // Note: no stack.join() here — agent registry checks happen after app exit
-    }
-
-    /// Test autonomous routing with no available agents.
-    #[tokio::test]
-    async fn test_autonomous_routing_no_agents() {
-        use crate::call::app::agent_registry::db::DbRegistry;
-        use std::sync::Arc;
-
-        // Create empty DbRegistry
-        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
-        let agent_registry = Arc::new(DbRegistry::new(db));
-
-        // Build queue config with autonomous routing enabled
-        let mut config = build_simple_queue_config();
-        config.autonomous_routing = true;
-        config.skill_routing_enabled = true;
-        config.required_skills = vec!["support".to_string()];
-        config.agents = vec![];
-        config.strategy = DialStrategy::Sequential(vec![]);
-
-        let plan = config.to_plan();
-        let mut queue = QueueApp::new(plan, config);
-        queue = queue.with_agent_registry(agent_registry);
-
-        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
-
-        // Enter queue - should fallback immediately since no agents available
-        stack.enter().await;
-
-        // Should fallback (hangup) without answering first since no agents
-        stack
-            .assert_cmd(480, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
-            .await;
-
-        let result: anyhow::Result<()> = stack.join().await;
-        result.expect("should complete successfully");
-    }
-
-    /// Test autonomous routing with all agents busy plays busy prompt before fallback.
-    #[tokio::test]
-    async fn test_autonomous_routing_all_agents_busy_plays_busy_prompt() {
-        use crate::call::app::agent_registry::db::DbRegistry;
-        use std::sync::Arc;
-
-        // Create empty DbRegistry (no available agents)
-        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
-        let agent_registry = Arc::new(DbRegistry::new(db));
-
-        // Build queue config with autonomous routing + busy prompt configured
-        let mut config = build_simple_queue_config();
-        config.autonomous_routing = true;
-        config.skill_routing_enabled = false;
-        config.voice_prompts = Some(VoicePrompts::zh());
-        config.hold = None;
-
-        let plan = config.to_plan();
-        let mut queue = QueueApp::new(plan, config);
-        queue = queue.with_agent_registry(agent_registry);
-
-        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
-
-        stack.enter().await;
-
-        // Should answer the call (from accept_immediately)
-        stack
-            .assert_cmd(2000, "AcceptCall", |c| {
-                matches!(c, CallCommand::Answer { .. })
-            })
-            .await;
-
-        // Should play the busy prompt since all agents are busy/unavailable
-        let busy_cmd = stack.next_cmd(2000).await.expect("busy prompt Play");
-
-        stack.audio_complete(play_track_id(&busy_cmd));
-
-        // Should then execute fallback (hangup)
-        stack
-            .assert_cmd(2000, "Hangup-auto", |c| matches!(c, CallCommand::Hangup(_)))
-            .await;
-
-        stack.join().await.expect("should complete successfully");
+        stack.cancel();
+        let _ = stack.join().await;
     }
 
     /// Test skill routing with no resolved agents plays busy prompt before fallback.
@@ -847,98 +753,6 @@ mod tests {
             .await;
 
         stack.join().await.expect("should complete successfully");
-    }
-
-    /// Test agent ring timeout handling.
-    #[tokio::test]
-    async fn test_agent_ring_timeout() {
-        use crate::call::app::agent_registry::{PresenceState, RoutingStrategy, db::DbRegistry};
-        use std::sync::Arc;
-
-        // Create a DbRegistry and register an agent
-        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
-        let agent_registry = Arc::new(DbRegistry::new(db));
-        agent_registry
-            .register(
-                "agent-001".to_string(),
-                "Alice".to_string(),
-                "sip:agent1@example.com".to_string(),
-                vec!["support".to_string()],
-                1,
-            )
-            .await
-            .unwrap();
-        agent_registry
-            .update_presence("agent-001", PresenceState::Idle)
-            .await
-            .unwrap();
-
-        // Build queue config with short ring timeout
-        let mut config = build_simple_queue_config();
-        config.autonomous_routing = true;
-        config.skill_routing_enabled = true;
-        config.required_skills = vec!["support".to_string()];
-        config.routing_strategy = RoutingStrategy::LongestIdle;
-        config.ring_timeout = Some(Duration::from_millis(100));
-        config.agents = vec![];
-        config.strategy = DialStrategy::Sequential(vec![]);
-
-        let plan = config.to_plan();
-        let mut queue = QueueApp::new(plan, config);
-        queue = queue.with_agent_registry(agent_registry.clone());
-        queue = queue.with_call_id("call-001".to_string());
-
-        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
-
-        // Enter queue
-        stack.enter().await;
-
-        // Should answer and start hold music
-        stack
-            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
-            .await;
-        stack
-            .assert_cmd(2000, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
-            .await;
-
-        // Should originate call
-        stack
-            .assert_cmd(2000, "OriginateCall", |c| {
-                matches!(c, CallCommand::LegAdd { target, .. } if target == "sip:agent1@example.com")
-            })
-            .await;
-
-        // Wait for ring timeout
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        // Trigger timeout
-        stack.timeout("agent_ring_timeout");
-
-        // Drain any pending commands (the timeout handler may send multiple)
-        let cmds = stack.drain_cmds();
-
-        // Should have NotifyEvent for no-answer and Hangup
-        let has_no_answer = cmds
-            .iter()
-            .any(|c| matches!(c, CallCommand::InjectAppEvent { .. }));
-        assert!(has_no_answer, "Expected queue.agent_no_answer event");
-
-        let has_hangup = cmds.iter().any(|c| matches!(c, CallCommand::Hangup(_)));
-        assert!(has_hangup, "Expected Hangup after timeout");
-
-        // After a ring timeout the agent must be left NON-idle (wrapup),
-        // not silently returned to Idle.
-        let agent = agent_registry.get_agent("agent-001").await.unwrap();
-        assert!(
-            matches!(agent.presence, PresenceState::Wrapup { .. }),
-            "ring timeout must move the agent to Wrapup (non-idle), got {:?}",
-            agent.presence
-        );
-
-        let result: anyhow::Result<()> = stack.join().await;
-        result.expect("should complete successfully");
     }
 
     fn build_queue_config_with_prompts() -> QueueConfig {
@@ -1882,14 +1696,6 @@ mod tests {
             new_state: crate::call::app::agent_registry::PresenceState,
         ) -> anyhow::Result<()> {
             self.inner.update_presence(agent_id, new_state).await
-        }
-
-        async fn start_call(&self, agent_id: &str) -> anyhow::Result<()> {
-            self.inner.start_call(agent_id).await
-        }
-
-        async fn end_call(&self, agent_id: &str, talk_time_secs: u64) -> anyhow::Result<()> {
-            self.inner.end_call(agent_id, talk_time_secs).await
         }
 
         async fn find_available_agents(
@@ -3403,7 +3209,10 @@ mod tests {
         gw.set_session_event_sender(&sid, gws_tx);
         let gw = Arc::new(parking_lot::RwLock::new(gw));
 
-        let registry = Arc::new(HookRecordingRegistry::new());
+        let registry = Arc::new(
+            HookRecordingRegistry::new()
+                .with_resolve_uris(vec![vec!["sip:agent1@example.com".to_string()]]),
+        );
         registry
             .inner
             .register(
@@ -3426,8 +3235,7 @@ mod tests {
 
         let mut config = build_simple_queue_config();
         config.skill_routing_enabled = true;
-        config.autonomous_routing = true;
-        config.required_skills = vec!["support".to_string()];
+        config.skill_group = Some("support".to_string());
         config.agents = vec![];
         config.strategy = DialStrategy::Sequential(vec![]);
         config.hold = None;
@@ -3456,10 +3264,12 @@ mod tests {
         let mut stack = MockCallStack::run_with_context(Box::new(queue), ctx);
         stack.enter().await;
 
-        // accept_immediately → Answer first, then autonomous dial of the agent.
+        // accept_immediately → Answer first, then the sequential dial kick
+        // originates to the registry-resolved agent.
         stack
             .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
+        stack.custom("dial_next_agent", serde_json::json!({}));
         stack
             .assert_cmd(2000, "OriginateCall", |c| {
                 matches!(c, CallCommand::LegAdd { .. })

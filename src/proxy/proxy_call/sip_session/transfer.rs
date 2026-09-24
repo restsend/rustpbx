@@ -1455,14 +1455,11 @@ impl SipSession {
             None => return Ok(BlindTransferRoute::Dial(location.clone(), None)),
         };
         let contact = self
-            .context
-            .dialplan
-            .caller_contact
-            .as_ref()
-            .map(|c| c.uri.clone())
-            .or_else(|| self.server.contact_uri_for_location_with_sip_contact(
-                location, self.context.dialplan.media.sip_contact.as_ref(),
-            ))
+            .server
+            .contact_uri_for_location_with_sip_contact(
+                location,
+                self.context.dialplan.media.sip_contact.as_ref(),
+            )
             .unwrap_or_else(|| caller.clone());
         // Carry original caller headers (X-CRM-*, X-CC-*, etc.) so header-based
         // match/rewrite rules behave like the inbound path.

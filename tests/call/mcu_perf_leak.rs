@@ -5,16 +5,12 @@
 //! - Cancellation propagates within a bounded time
 //! - Many participants / rapid churn do not panic or accumulate state
 //! - Channels exert backpressure (bounded, no OOM)
-//! - P2P ↔ MCU transitions complete within latency bounds
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use rustpbx::call::domain::LegId;
-use rustpbx::call::runtime::{
-    ConferenceId, ConferenceManager, ConferenceServer, ConferenceStrategy, LegMediaBridger,
-    MediaPathContext, MediaPathDecision, SessionId,
-};
+use rustpbx::call::runtime::{ConferenceId, ConferenceManager};
 use rustpbx::media::conference_mixer::AudioFrame;
 
 fn new_manager() -> Arc<ConferenceManager> {
@@ -259,100 +255,4 @@ async fn test_channel_backpressure_no_oom() {
     );
 
     manager.destroy_conference(&"bp-conf".into()).await.unwrap();
-}
-
-// ── Strategy / transition latency ─────────────────────────────────────────
-
-struct MockSession {
-    server: Arc<ConferenceServer>,
-    bridged: std::sync::Arc<std::sync::Mutex<Vec<LegId>>>,
-}
-
-#[async_trait::async_trait]
-impl LegMediaBridger for MockSession {
-    async fn bridge_into(&mut self, conf_id: &str, leg_id: &LegId) -> anyhow::Result<()> {
-        self.server
-            .add_participant(&ConferenceId::from(conf_id), leg_id.clone())
-            .await?;
-        self.bridged.lock().unwrap().push(leg_id.clone());
-        Ok(())
-    }
-    async fn unbridge(&mut self, conf_id: &str, leg_id: &LegId) -> anyhow::Result<()> {
-        let _ = self.server.leave_conference(conf_id, leg_id).await;
-        self.bridged.lock().unwrap().retain(|l| l != leg_id);
-        Ok(())
-    }
-}
-
-fn strategy_ctx(sid: &str, legs: Vec<LegId>) -> MediaPathContext {
-    MediaPathContext {
-        session_id: SessionId::from(sid),
-        active_legs: legs,
-    }
-}
-
-#[tokio::test]
-async fn test_p2p_to_mcu_transition_latency() {
-    let manager = new_manager();
-    let server = Arc::new(ConferenceServer::new(manager.clone()));
-    let strategy = ConferenceStrategy::new(server.clone());
-    let mut session = MockSession {
-        server: server.clone(),
-        bridged: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-    };
-
-    let c2 = strategy_ctx("latency-s", vec![LegId::new("a"), LegId::new("b")]);
-    assert_eq!(
-        strategy.decide(&c2.active_legs).unwrap(),
-        MediaPathDecision::Direct(vec![LegId::new("a"), LegId::new("b")])
-    );
-
-    let c3 = strategy_ctx(
-        "latency-s",
-        vec![LegId::new("a"), LegId::new("b"), LegId::new("c")],
-    );
-    let start = std::time::Instant::now();
-    strategy.apply_multi_party(&c3, &mut session).await.unwrap();
-    let apply_elapsed = start.elapsed();
-    assert!(
-        apply_elapsed < Duration::from_millis(100),
-        "apply_multi_party took {apply_elapsed:?}"
-    );
-
-    // New participant's audio reaches an existing participant quickly.
-    let ch_c = manager
-        .get_participant_channels(&LegId::new("c"))
-        .await
-        .unwrap();
-    ch_c.input_tx
-        .send(AudioFrame::new(vec![1000i16; 160], 8000))
-        .await
-        .unwrap();
-    let start_audio = std::time::Instant::now();
-    let mut rx_a = manager
-        .take_participant_output_rx(&LegId::new("a"))
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_millis(500), rx_a.recv())
-        .await
-        .expect("audio transition timeout")
-        .expect("receiver closed");
-    let audio_elapsed = start_audio.elapsed();
-    assert!(
-        audio_elapsed < Duration::from_millis(80),
-        "first mixed audio took {audio_elapsed:?}"
-    );
-
-    // Teardown back to 2 legs is also fast.
-    let c2b = strategy_ctx("latency-s", vec![LegId::new("a"), LegId::new("b")]);
-    let start = std::time::Instant::now();
-    strategy
-        .leave_multi_party(&c2b, &mut session)
-        .await
-        .unwrap();
-    let teardown = start.elapsed();
-    assert!(
-        teardown < Duration::from_millis(100),
-        "leave_multi_party took {teardown:?}"
-    );
 }

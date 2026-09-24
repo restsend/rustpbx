@@ -94,24 +94,6 @@ pub fn effective_return_app<'a>(
     }
 }
 
-pub fn resolve_audio_path(
-    file: Option<&str>,
-    tts_text: Option<&str>,
-    tts_voice: Option<&str>,
-) -> Option<String> {
-    if let Some(f) = file.filter(|f| !f.is_empty()) {
-        return Some(f.to_string());
-    }
-    if let Some(text) = tts_text.filter(|t| !t.is_empty()) {
-        let mut uri = format!("tts://{}", text);
-        if let Some(voice) = tts_voice.filter(|v| !v.is_empty()) {
-            uri.push_str(&format!("?voice={}", voice));
-        }
-        return Some(uri);
-    }
-    None
-}
-
 /// A TTS resolution failure that the caller should report through the unified
 /// `call_error` pipeline (`CallController::report_call_error("tts", ...)`).
 pub struct AudioFailure {
@@ -941,18 +923,6 @@ mod tests {
         assert_eq!(effective_return_app(&Some("".into()), &None), None);
         assert_eq!(effective_return_app(&None, &Some("".into())), None);
         assert_eq!(effective_return_app(&None, &None), None);
-    }
-
-    #[test]
-    fn test_resolve_audio_path_file() {
-        let result = resolve_audio_path(Some("welcome.wav"), None, None);
-        assert_eq!(result, Some("welcome.wav".into()));
-    }
-
-    #[test]
-    fn test_resolve_audio_path_tts() {
-        let result = resolve_audio_path(None, Some("你好世界"), Some("zh-CN-XiaoxiaoNeural"));
-        assert!(result.unwrap().starts_with("tts://"));
     }
 
     #[test]

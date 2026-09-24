@@ -59,15 +59,6 @@ pub struct ConferenceParticipant {
 }
 
 impl ConferenceParticipant {
-    pub fn new(leg_id: LegId) -> Self {
-        Self {
-            leg_id,
-            muted: false,
-            role: ParticipantRole::Member,
-            joined_at: std::time::Instant::now(),
-        }
-    }
-
     pub fn with_role(leg_id: LegId, role: ParticipantRole) -> Self {
         Self {
             leg_id,
@@ -109,11 +100,6 @@ impl ConferenceRoom {
     pub fn with_max_duration(mut self, secs: u64) -> Self {
         self.max_duration_secs = Some(secs);
         self
-    }
-
-    /// Add a participant to the conference
-    pub fn add_participant(&mut self, leg_id: LegId) -> Result<()> {
-        self.add_participant_with_role(leg_id, ParticipantRole::Member)
     }
 
     /// Add a participant with an explicit role
@@ -258,10 +244,6 @@ impl ConferenceManager {
         host_leg_id: Option<LegId>,
         max_duration_secs: Option<u64>,
     ) -> Result<ConferenceRoom> {
-        if self.conferences.contains_key(&conf_id) {
-            return Err(anyhow!("Conference {} already exists", conf_id.0));
-        }
-
         let mut conference = ConferenceRoom::new(conf_id.clone(), max_participants);
         if let Some(ref host) = host_leg_id {
             conference = conference.with_host(host.clone());
@@ -269,7 +251,19 @@ impl ConferenceManager {
         if let Some(dur) = max_duration_secs {
             conference = conference.with_max_duration(dur);
         }
-        self.conferences.insert(conf_id.clone(), conference.clone());
+
+        // Atomically claim the id: a racing creator must fail here instead of
+        // overwriting a room whose mixer may already be running (a leaked
+        // permanently-running task).
+        use dashmap::mapref::entry::Entry;
+        match self.conferences.entry(conf_id.clone()) {
+            Entry::Vacant(e) => {
+                e.insert(conference.clone());
+            }
+            Entry::Occupied(_) => {
+                return Err(anyhow!("Conference {} already exists", conf_id.0));
+            }
+        }
 
         let mixer = Arc::new(ConferenceAudioMixer::new(conf_id.0.clone(), 8000));
         mixer.start();
@@ -397,7 +391,7 @@ impl ConferenceManager {
 
     /// Remove a participant from a conference.
     /// Returns the number of remaining participants.
-    /// If 0 or 1 remain, the conference is auto-destroyed.
+    /// When 0 remain, the conference is auto-destroyed.
     pub async fn remove_participant(
         &self,
         conf_id: &ConferenceId,
@@ -454,9 +448,10 @@ impl ConferenceManager {
             conference.mute_participant(leg_id)?;
         }
 
-        // Update local audio mixer
-        if let Some(mixer) = self.audio_mixers.get(conf_id) {
-            let mixer = mixer.value().clone();
+        // Update local audio mixer. Clone the mixer out of the map first —
+        // the DashMap shard guard must not be held across the `.await`.
+        let mixer = self.audio_mixers.get(conf_id).map(|m| m.value().clone());
+        if let Some(mixer) = mixer {
             mixer.set_muted(leg_id, true).await?;
         }
 
@@ -474,9 +469,10 @@ impl ConferenceManager {
             conference.unmute_participant(leg_id)?;
         }
 
-        // Update local audio mixer
-        if let Some(mixer) = self.audio_mixers.get(conf_id) {
-            let mixer = mixer.value().clone();
+        // Update local audio mixer. Clone the mixer out of the map first —
+        // the DashMap shard guard must not be held across the `.await`.
+        let mixer = self.audio_mixers.get(conf_id).map(|m| m.value().clone());
+        if let Some(mixer) = mixer {
             mixer.set_muted(leg_id, false).await?;
         }
 
@@ -563,15 +559,15 @@ impl ConferenceManager {
             ));
         }
 
-        let removed = participant_ids.clone();
+        let removed_count = participant_ids.len();
         self.destroy_conference(conf_id).await?;
         info!(
             conf_id = %conf_id.0,
             host_leg_id = %host_leg_id,
-            removed_count = removed.len(),
+            removed_count,
             "Host ended conference"
         );
-        Ok(removed)
+        Ok(participant_ids)
     }
 }
 

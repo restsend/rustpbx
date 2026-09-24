@@ -67,9 +67,15 @@ pub fn shared_keepalive_client() -> &'static reqwest::Client {
     })
 }
 
+/// Default timeout applied when a caller passes `None`. Call-path HTTP
+/// requests (routing webhooks, provider hooks, …) must never hang forever on
+/// a dead peer.
+pub const DEFAULT_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Debug, Clone, Default)]
 pub struct HttpFetchOptions {
     pub headers: HashMap<String, String>,
+    /// Per-request timeout. `None` → [`DEFAULT_FETCH_TIMEOUT`].
     pub timeout: Option<Duration>,
 }
 
@@ -94,6 +100,17 @@ impl HttpFetchOptions {
     }
 }
 
+/// Effective timeout: the caller's explicit value, or the default.
+pub fn effective_timeout(timeout: Option<Duration>) -> Duration {
+    timeout.unwrap_or(DEFAULT_FETCH_TIMEOUT)
+}
+
+/// Send a request and return the response once the headers arrive.
+///
+/// The timeout bounds the request through the response **headers only**;
+/// reading the body afterwards is unbounded. Use the helpers below
+/// ([`fetch_json`], [`fetch_text`], …) when the body read must be bounded
+/// too.
 pub async fn execute_request(
     mut request: reqwest::RequestBuilder,
     headers: &HashMap<String, String>,
@@ -103,15 +120,12 @@ pub async fn execute_request(
         request = request.header(key, value);
     }
 
+    let t = effective_timeout(timeout);
     let send_fut = request.send();
-    let resp = if let Some(t) = timeout {
-        tokio::time::timeout(t, send_fut)
-            .await
-            .map_err(|_| anyhow!("HTTP request timed out after {:?}", t))?
-    } else {
-        send_fut.await
-    }
-    .map_err(|e| anyhow!("HTTP request failed: {}", e))?;
+    let resp = tokio::time::timeout(t, send_fut)
+        .await
+        .map_err(|_| anyhow!("HTTP request timed out after {:?}", t))?
+        .map_err(|e| anyhow!("HTTP request failed: {}", e))?;
 
     if !resp.status().is_success() {
         return Err(anyhow!("HTTP returned {}", resp.status()));
@@ -119,14 +133,27 @@ pub async fn execute_request(
     Ok(resp)
 }
 
+/// Read the response body within `timeout`. The body read (and the response
+/// it consumes) must be passed as the `read` future.
+pub async fn read_body_with_timeout<T, F>(timeout: Duration, read: F) -> Result<T>
+where
+    F: std::future::Future<Output = reqwest::Result<T>>,
+{
+    tokio::time::timeout(timeout, read)
+        .await
+        .map_err(|_| anyhow!("HTTP response body timed out after {:?}", timeout))?
+        .map_err(|e| anyhow!("Failed to read response body: {}", e))
+}
+
 pub async fn fetch_json(
     client: &reqwest::Client,
     url: &str,
     options: &HttpFetchOptions,
 ) -> Result<serde_json::Value> {
+    let t = effective_timeout(options.timeout);
     let req = client.get(url);
     let resp = execute_request(req, &options.headers, options.timeout).await?;
-    resp.json()
+    read_body_with_timeout(t, resp.json())
         .await
         .map_err(|e| anyhow!("Failed to parse JSON response: {}", e))
 }
@@ -137,9 +164,10 @@ pub async fn post_json(
     body: &serde_json::Value,
     options: &HttpFetchOptions,
 ) -> Result<serde_json::Value> {
+    let t = effective_timeout(options.timeout);
     let req = client.post(url).json(body);
     let resp = execute_request(req, &options.headers, options.timeout).await?;
-    resp.json()
+    read_body_with_timeout(t, resp.json())
         .await
         .map_err(|e| anyhow!("Failed to parse JSON response: {}", e))
 }
@@ -150,11 +178,10 @@ pub async fn fetch_bytes(
     url: &str,
     options: &HttpFetchOptions,
 ) -> Result<bytes::Bytes> {
+    let t = effective_timeout(options.timeout);
     let req = client.request(method, url);
     let resp = execute_request(req, &options.headers, options.timeout).await?;
-    resp.bytes()
-        .await
-        .map_err(|e| anyhow!("Failed to read response body: {}", e))
+    read_body_with_timeout(t, resp.bytes()).await
 }
 
 /// Download a body with a hard size cap so oversized responses can never
@@ -163,7 +190,9 @@ pub async fn fetch_bytes(
 ///
 /// The advertised `Content-Length` is checked up-front; when it is missing or
 /// larger than the cap, the body is still streamed and aborted as soon as the
-/// accumulated size exceeds `max_bytes`.
+/// accumulated size exceeds `max_bytes`. Each chunk read is bounded by the
+/// effective timeout, so a stalled peer aborts the transfer instead of
+/// hanging it forever.
 pub async fn fetch_audio_bytes(
     client: &reqwest::Client,
     method: reqwest::Method,
@@ -171,6 +200,7 @@ pub async fn fetch_audio_bytes(
     options: &HttpFetchOptions,
     max_bytes: u64,
 ) -> Result<(bytes::Bytes, reqwest::header::HeaderMap)> {
+    let t = effective_timeout(options.timeout);
     let req = client.request(method, url);
     let resp = execute_request(req, &options.headers, options.timeout).await?;
 
@@ -188,7 +218,10 @@ pub async fn fetch_audio_bytes(
     let mut body: Vec<u8> = Vec::new();
     let mut stream = resp.bytes_stream();
     use futures::StreamExt;
-    while let Some(chunk) = stream.next().await {
+    while let Some(chunk) = tokio::time::timeout(t, stream.next())
+        .await
+        .map_err(|_| anyhow!("HTTP response body timed out after {:?}", t))?
+    {
         let chunk = chunk.map_err(|e| anyhow!("Failed to read response chunk: {}", e))?;
         if body.len() as u64 + chunk.len() as u64 > max_bytes {
             return Err(anyhow!(
@@ -209,12 +242,16 @@ pub async fn fetch_to_writer<W: tokio::io::AsyncWrite + Unpin>(
     options: &HttpFetchOptions,
     writer: &mut W,
 ) -> Result<u64> {
+    let t = effective_timeout(options.timeout);
     let req = client.request(method, url);
     let resp = execute_request(req, &options.headers, options.timeout).await?;
     let mut total = 0u64;
     let mut stream = resp.bytes_stream();
     use futures::StreamExt;
-    while let Some(chunk) = stream.next().await {
+    while let Some(chunk) = tokio::time::timeout(t, stream.next())
+        .await
+        .map_err(|_| anyhow!("HTTP response body timed out after {:?}", t))?
+    {
         let chunk = chunk.map_err(|e| anyhow!("Failed to read response chunk: {}", e))?;
         writer
             .write_all(&chunk)
@@ -234,9 +271,8 @@ pub async fn fetch_text(
     url: &str,
     options: &HttpFetchOptions,
 ) -> Result<String> {
+    let t = effective_timeout(options.timeout);
     let req = client.get(url);
     let resp = execute_request(req, &options.headers, options.timeout).await?;
-    resp.text()
-        .await
-        .map_err(|e| anyhow!("Failed to read response text: {}", e))
+    read_body_with_timeout(t, resp.text()).await
 }

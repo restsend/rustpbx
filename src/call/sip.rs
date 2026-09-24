@@ -144,11 +144,15 @@ impl Drop for ClientDialogGuard {
             return;
         }
 
-        crate::utils::spawn(async move {
-            if let Err(e) = dlg.hangup().await {
-                warn!(id=%dlg.id(), "error hanging up client dialog on drop: {}", e);
-            }
-        });
+        // Guard like the sibling Drop impls: `tokio::spawn` panics outside a
+        // runtime (unit tests, process teardown ordering).
+        if tokio::runtime::Handle::try_current().is_ok() {
+            crate::utils::spawn(async move {
+                if let Err(e) = dlg.hangup().await {
+                    warn!(id=%dlg.id(), "error hanging up client dialog on drop: {}", e);
+                }
+            });
+        }
     }
 }
 

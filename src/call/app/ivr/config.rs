@@ -487,6 +487,17 @@ impl EntryAction {
             return_target: None,
         }
     }
+
+    /// A plain hangup with no prompt and no delays.
+    pub fn hangup_none() -> Self {
+        EntryAction::Hangup {
+            prompt: None,
+            prompt_text: None,
+            prompt_voice: None,
+            delay_before_ms: 0,
+            delay_after_ms: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

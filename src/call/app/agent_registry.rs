@@ -1,25 +1,18 @@
 //! Agent Registry - Unified Agent Registry and Presence Management
 //!
-//! Provides a centralized registry for agent management with multiple backend implementations:
-//! - MemoryRegistry: In-memory storage (single node, testing)
-//! - DbRegistry: SeaORM database persistence
-//! - HttpRegistry: External HTTP API integration
+//! Production backends live in addons (e.g. the CC addon's
+//! `CcAgentRegistryAdapter`). The in-core [`MemoryRegistry`] is a test
+//! stub (`#[cfg(test)]`).
 //!
 //! All implementations share the same AgentRegistry trait for consistent behavior.
 
 use async_trait::async_trait;
-use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-// Re-export submodules
-pub mod db;
-pub mod http;
+// Test-only in-memory registry stub.
+#[cfg(test)]
 pub mod memory;
-
-// Re-export types
-pub use db::DbRegistry;
-pub use http::HttpRegistry;
+#[cfg(test)]
 pub use memory::MemoryRegistry;
 
 // ===================================================================
@@ -60,14 +53,6 @@ impl PresenceState {
     /// Check if agent can receive calls
     pub fn can_receive_calls(&self) -> bool {
         matches!(self, PresenceState::Idle)
-    }
-
-    /// Check if agent is in a call-related state
-    pub fn is_call_active(&self) -> bool {
-        matches!(
-            self,
-            PresenceState::Ringing { .. } | PresenceState::Busy { .. }
-        )
     }
 
     /// Get the away/break detail if in Away state.
@@ -129,25 +114,6 @@ impl PresenceState {
             }
         }
     }
-
-    /// Get display name for UI
-    pub fn display_name(&self) -> String {
-        match self {
-            PresenceState::Offline => "Offline".to_string(),
-            PresenceState::Away(detail) => {
-                if detail.is_empty() {
-                    "Away".to_string()
-                } else {
-                    format!("Away ({})", detail)
-                }
-            }
-            PresenceState::Idle => "Idle".to_string(),
-            PresenceState::Ringing { .. } => "Ringing".to_string(),
-            PresenceState::Busy { .. } => "Busy".to_string(),
-            PresenceState::Wrapup { .. } => "Wrap-up".to_string(),
-            PresenceState::Dnd => "Do Not Disturb".to_string(),
-        }
-    }
 }
 
 // ===================================================================
@@ -168,7 +134,6 @@ pub struct AgentRecord {
     pub total_calls_handled: u64,
     pub total_talk_time_secs: u64,
     pub last_call_end: Option<Instant>,
-    pub custom_data: HashMap<String, String>,
 }
 
 impl AgentRecord {
@@ -252,6 +217,15 @@ pub trait AgentRegistry: Send + Sync {
     /// Get agent by ID
     async fn get_agent(&self, agent_id: &str) -> Option<AgentRecord>;
 
+    /// Resolve the agent record behind a dialed URI. The default scans
+    /// `list_agents()`; backends with a URI index should override.
+    async fn find_agent_by_uri(&self, uri: &str) -> Option<AgentRecord> {
+        self.list_agents()
+            .await
+            .into_iter()
+            .find(|a| a.uri == uri)
+    }
+
     /// List all agents
     async fn list_agents(&self) -> Vec<AgentRecord>;
 
@@ -275,12 +249,6 @@ pub trait AgentRegistry: Send + Sync {
             )
             .await;
     }
-
-    /// Increment call count when agent receives call
-    async fn start_call(&self, agent_id: &str) -> anyhow::Result<()>;
-
-    /// Decrement call count and update stats when call ends
-    async fn end_call(&self, agent_id: &str, talk_time_secs: u64) -> anyhow::Result<()>;
 
     /// Find available agents matching criteria
     async fn find_available_agents(&self, required_skills: &[String]) -> Vec<AgentRecord>;
@@ -440,12 +408,6 @@ pub trait AgentRegistry: Send + Sync {
         uris
     }
 
-    /// Get agents available for ACD routing with full snapshots.
-    /// Returns all agents that can receive calls with their current state.
-    async fn get_acd_snapshots(&self) -> Vec<AgentRecord> {
-        self.find_available_agents(&[]).await
-    }
-
     /// Notify the dispatcher that a queued call was abandoned by the caller
     /// before any agent answered. Default no-op; addon implementations (e.g. CC)
     /// use it to emit skill-group lifecycle events (`skill_group_call_abandoned`).
@@ -501,81 +463,6 @@ pub trait AgentRegistry: Send + Sync {
     /// owns it). Returns `true` when a state change was applied.
     async fn release_call(&self, _agent_id: &str, _call_id: &str) -> bool {
         false
-    }
-
-    /// Check if state transition is valid
-    fn is_valid_transition(from: &PresenceState, to: &PresenceState) -> bool
-    where
-        Self: Sized,
-    {
-        match (from, to) {
-            // Any state can go to Offline
-            (_, PresenceState::Offline) => true,
-
-            // Can go to Idle from any non-active state
-            (
-                PresenceState::Away(_) | PresenceState::Wrapup { .. } | PresenceState::Dnd,
-                PresenceState::Idle,
-            ) => true,
-
-            // Can go to Ringing only from Idle
-            (PresenceState::Idle, PresenceState::Ringing { .. }) => true,
-
-            // Can go to Busy only from Ringing
-            (PresenceState::Ringing { .. }, PresenceState::Busy { .. }) => true,
-
-            // Can go to Wrapup only from Busy
-            (PresenceState::Busy { .. }, PresenceState::Wrapup { .. }) => true,
-
-            // Can go to Away/Dnd from Idle
-            (PresenceState::Idle, PresenceState::Away(_) | PresenceState::Dnd) => true,
-
-            // Can change break reason: Away(_) → Away(_)
-            (PresenceState::Away(_), PresenceState::Away(_)) => true,
-
-            // Can switch between Away and Dnd
-            (PresenceState::Away(_), PresenceState::Dnd) => true,
-            (PresenceState::Dnd, PresenceState::Away(_)) => true,
-
-            // Wrapup can go to Away/Dnd (after-call break)
-            (PresenceState::Wrapup { .. }, PresenceState::Away(_) | PresenceState::Dnd) => true,
-
-            // Same state is valid (no-op)
-            (a, b) if a == b => true,
-
-            // Everything else is invalid
-            _ => false,
-        }
-    }
-}
-
-/// Factory for creating registry instances
-pub enum RegistryType {
-    /// In-memory registry (single node, testing)
-    Memory,
-    /// Database-backed registry (persistent)
-    Db { connection_string: String },
-    /// HTTP API registry (external system)
-    Http {
-        base_url: String,
-        api_key: Option<String>,
-    },
-}
-
-impl RegistryType {
-    /// Create a registry instance based on configuration
-    pub async fn create(&self) -> anyhow::Result<Arc<dyn AgentRegistry>> {
-        match self {
-            RegistryType::Memory => Ok(Arc::new(MemoryRegistry::new())),
-            RegistryType::Db { connection_string } => {
-                let db = sea_orm::Database::connect(connection_string).await?;
-                Ok(Arc::new(DbRegistry::new(db)))
-            }
-            RegistryType::Http { base_url, api_key } => Ok(Arc::new(HttpRegistry::new(
-                base_url.clone(),
-                api_key.clone(),
-            ))),
-        }
     }
 }
 

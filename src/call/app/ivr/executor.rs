@@ -178,8 +178,7 @@ struct PendingMenu {
 }
 
 impl StepIvrApp {
-    pub fn new(url: impl Into<String>, http_client: reqwest::Client) -> Self {
-        let provider = Box::new(super::provider::StepProvider::new(url, http_client));
+    pub fn with_provider(provider: Box<dyn ActionProvider>) -> Self {
         Self {
             provider,
             provider_session: None,
@@ -226,51 +225,12 @@ impl StepIvrApp {
         }
     }
 
-    pub fn with_provider(provider: Box<dyn ActionProvider>) -> Self {
-        Self {
-            provider,
-            provider_session: None,
-            current_node: None,
-            sess: SessionData::default(),
-            pending_menu: None,
-            current_track_id: None,
-            interrupt_on_dtmf: false,
-            ignore_prompt_dtmf: false,
-            awaiting_dtmf: false,
-            tts_service: None,
-            trace: None,
-            step_index: 0,
-            ivr_name: None,
-            rwi_gateway: None,
-            route_name: None,
-            custom_data: None,
-            extra: None,
-            step_prev_start_time: None,
-            step_prev_duration_ms: 0,
-            transferred_from: None,
-            last_transfer_target: None,
-            timeout_induced: false,
-            current_step_start_time: None,
-            step_start_instant: None,
-            pending_start_instant: None,
-            pending_trace: None,
-            current_step_id: None,
-            current_step_name: None,
-            current_trigger: None,
-            runtime_vars: None,
-            ivr_params: None,
-            session_extensions: None,
-            pending_dtmf: VecDeque::new(),
-            max_repeat_prompts: DEFAULT_MAX_REPEAT_PROMPTS,
-            no_input_prompts: 0,
-            probe_pending: false,
-            ivr_fallback: None,
-            pending_audio_delay_ms: 0,
-            resumed_flow: false,
-            session_handle: None,
-            max_flow_restarts: DEFAULT_MAX_FLOW_RESTARTS,
-            reentry_window_secs: DEFAULT_REENTRY_WINDOW_SECS,
-        }
+    /// Test-only convenience: build with a default `StepProvider` for `url`.
+    /// Production code uses [`StepIvrApp::with_provider`].
+    #[cfg(test)]
+    pub fn new(url: impl Into<String>, http_client: reqwest::Client) -> Self {
+        let provider = Box::new(super::provider::StepProvider::new(url, http_client));
+        Self::with_provider(provider)
     }
 
     pub fn with_tts(mut self, tts: Option<crate::tts::TtsConfig>) -> Self {
@@ -361,6 +321,47 @@ impl StepIvrApp {
 
     fn pending_take(&mut self) -> Option<IvrTraceEntry> {
         self.pending_trace.take()
+    }
+
+    /// Seed an `IvrTraceEntry` with the fields common to every trace site
+    /// (identity, current step, timings zeroed, no end markers). Callers
+    /// override the per-site fields (step end time, duration, end markers,
+    /// successor ids) via struct-update syntax.
+    #[allow(clippy::too_many_arguments)]
+    fn trace_entry(
+        &self,
+        session_id: &str,
+        caller: &str,
+        callee: &str,
+        trigger: crate::rwi::TriggerInfo,
+        action_type: &str,
+        action_json: Option<String>,
+        error: Option<String>,
+        step_id: Option<String>,
+        step_name: Option<String>,
+    ) -> IvrTraceEntry {
+        IvrTraceEntry {
+            session_id: session_id.to_string(),
+            caller: caller.to_string(),
+            callee: callee.to_string(),
+            step_index: self.step_index,
+            trigger,
+            provider_url: None,
+            action_type: action_type.to_string(),
+            action_json,
+            error,
+            step_id,
+            step_name,
+            step_start_time: self.current_step_start_time.clone(),
+            step_end_time: None,
+            duration_ms: 0,
+            extra: self.extra.clone(),
+            end_reason: None,
+            end_detail: None,
+            next_node_id: None,
+            next_step_id: None,
+            end: None,
+        }
     }
 
     fn record_trace(&self, entry: IvrTraceEntry) {
@@ -638,7 +639,11 @@ impl StepIvrApp {
         ctrl: &mut CallController,
         ctx: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
-        let node = self.current_node.as_ref().unwrap().clone();
+        let node = self
+            .current_node
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("IVR executor: no current node to execute"))?;
 
         // Publish the current node into the session-extensions string bag so
         // session-side snapshots (transfer source recording, queue dispatch
@@ -760,26 +765,22 @@ impl StepIvrApp {
                                 if Self::is_resumable_handoff(&node, target)
                         );
                         self.record_trace(IvrTraceEntry {
-                            session_id: session_id.clone(),
-                            caller: caller.clone(),
-                            callee: callee.clone(),
-                            step_index: self.step_index,
-                            trigger: trigger.clone(),
-                            provider_url: None,
-                            action_type: node_type_str,
-                            action_json,
-                            error: None,
-                            step_id: step_id.clone(),
-                            step_name: step_name.clone(),
-                            step_start_time: self.current_step_start_time.clone(),
                             step_end_time: Some(step_end),
                             duration_ms: elapsed_ms,
-                            extra: self.extra.clone(),
                             end_reason: handoff_end.as_ref().map(|(tag, _)| tag.clone()),
                             end_detail: handoff_end.map(|(_, target)| target),
-                            next_node_id: None,
-                            next_step_id: None,
                             end: flow_ended.then_some(true),
+                            ..self.trace_entry(
+                                &session_id,
+                                &caller,
+                                &callee,
+                                trigger.clone(),
+                                &node_type_str,
+                                action_json,
+                                None,
+                                step_id.clone(),
+                                step_name.clone(),
+                            )
                         });
                         match terminal {
                             TerminalAction::Transfer(target) => {
@@ -795,28 +796,17 @@ impl StepIvrApp {
                     ActionResult::ImmediateAudioComplete => {
                         // Reuse pending-trace completion so the no-media Prompt remains observable.
                         self.pending_start_instant = self.step_start_instant;
-                        self.pending_trace = Some(IvrTraceEntry {
-                            session_id: session_id.clone(),
-                            caller: caller.clone(),
-                            callee: callee.clone(),
-                            step_index: self.step_index,
-                            trigger: trigger.clone(),
-                            provider_url: None,
-                            action_type: node_type_str,
+                        self.pending_trace = Some(self.trace_entry(
+                            &session_id,
+                            &caller,
+                            &callee,
+                            trigger.clone(),
+                            &node_type_str,
                             action_json,
-                            error: None,
-                            step_id: step_id.clone(),
-                            step_name: step_name.clone(),
-                            step_start_time: self.current_step_start_time.clone(),
-                            step_end_time: None,
-                            duration_ms: 0,
-                            extra: self.extra.clone(),
-                            end_reason: None,
-                            end_detail: None,
-                            next_node_id: None,
-                            next_step_id: None,
-                            end: None,
-                        });
+                            None,
+                            step_id.clone(),
+                            step_name.clone(),
+                        ));
                         self.current_node = Some(
                             self.request_next(Some(ProviderEvent::AudioComplete {
                                 interrupted: false,
@@ -860,31 +850,29 @@ impl StepIvrApp {
                                     ProviderEvent::DtmfTimeout,
                                     crate::rwi::TriggerInfo::new("dtmf_timeout"),
                                 ),
-                                _ => unreachable!(),
+                                other => {
+                                    tracing::warn!(
+                                        "InputPhone wait produced an unexpected event; treating as dtmf_timeout"
+                                    );
+                                    let _ = other;
+                                    (
+                                        ProviderEvent::DtmfTimeout,
+                                        crate::rwi::TriggerInfo::new("dtmf_timeout"),
+                                    )
+                                }
                             };
                             self.pending_start_instant = self.step_start_instant;
-                            self.pending_trace = Some(IvrTraceEntry {
-                                session_id: session_id.clone(),
-                                caller: caller.clone(),
-                                callee: callee.clone(),
-                                step_index: self.step_index,
-                                trigger: step_trigger,
-                                provider_url: None,
-                                action_type: node_type_str,
+                            self.pending_trace = Some(self.trace_entry(
+                                &session_id,
+                                &caller,
+                                &callee,
+                                step_trigger,
+                                &node_type_str,
                                 action_json,
-                                error: None,
-                                step_id: step_id.clone(),
-                                step_name: step_name.clone(),
-                                step_start_time: self.current_step_start_time.clone(),
-                                step_end_time: None,
-                                duration_ms: 0,
-                                extra: self.extra.clone(),
-                                end_reason: None,
-                                end_detail: None,
-                                next_node_id: None,
-                                next_step_id: None,
-                                end: None,
-                            });
+                                None,
+                                step_id.clone(),
+                                step_name.clone(),
+                            ));
                             // The pending trace is flushed by `request_next`
                             // once the successor resolves, so this step's
                             // event carries its next pointer.
@@ -926,26 +914,21 @@ impl StepIvrApp {
                                 (Some(next), id)
                             };
                             self.record_trace(IvrTraceEntry {
-                                session_id: session_id.clone(),
-                                caller: caller.clone(),
-                                callee: callee.clone(),
-                                step_index: self.step_index,
-                                trigger: trigger.clone(),
-                                provider_url: None,
-                                action_type: node_type_str,
-                                action_json,
-                                error: None,
-                                step_id: step_id.clone(),
-                                step_name: step_name.clone(),
-                                step_start_time: self.current_step_start_time.clone(),
                                 step_end_time: Some(step_end),
                                 duration_ms: elapsed_ms,
-                                extra: self.extra.clone(),
-                                end_reason: None,
-                                end_detail: None,
                                 next_node_id: next_id.clone(),
                                 next_step_id: next_id,
-                                end: None,
+                                ..self.trace_entry(
+                                    &session_id,
+                                    &caller,
+                                    &callee,
+                                    trigger.clone(),
+                                    &node_type_str,
+                                    action_json,
+                                    None,
+                                    step_id.clone(),
+                                    step_name.clone(),
+                                )
                             });
                             self.current_trigger =
                                 Some(crate::rwi::TriggerInfo::new("record_control"));
@@ -964,28 +947,17 @@ impl StepIvrApp {
                             _ => trigger.clone(),
                         };
                         self.pending_start_instant = self.step_start_instant;
-                        self.pending_trace = Some(IvrTraceEntry {
-                            session_id: session_id.clone(),
-                            caller: caller.clone(),
-                            callee: callee.clone(),
-                            step_index: self.step_index,
-                            trigger: step_trigger,
-                            provider_url: None,
-                            action_type: node_type_str,
+                        self.pending_trace = Some(self.trace_entry(
+                            &session_id,
+                            &caller,
+                            &callee,
+                            step_trigger,
+                            &node_type_str,
                             action_json,
-                            error: None,
-                            step_id: step_id.clone(),
-                            step_name: step_name.clone(),
-                            step_start_time: self.current_step_start_time.clone(),
-                            step_end_time: None,
-                            duration_ms: 0,
-                            extra: self.extra.clone(),
-                            end_reason: None,
-                            end_detail: None,
-                            next_node_id: None,
-                            next_step_id: None,
-                            end: None,
-                        });
+                            None,
+                            step_id.clone(),
+                            step_name.clone(),
+                        ));
                         AppAction::Continue
                     }
                 };
@@ -1002,26 +974,21 @@ impl StepIvrApp {
                     .clone()
                     .or_else(|| recovery.step_name.clone());
                 self.record_trace(IvrTraceEntry {
-                    session_id,
-                    caller,
-                    callee,
-                    step_index: self.step_index,
-                    trigger,
-                    provider_url: None,
-                    action_type: node_type_str,
-                    action_json,
-                    error: Some(error_text),
-                    step_id,
-                    step_name,
-                    step_start_time: self.current_step_start_time.clone(),
                     step_end_time: Some(step_end),
                     duration_ms: elapsed_ms,
-                    extra: self.extra.clone(),
-                    end_reason: None,
-                    end_detail: None,
                     next_node_id: next_id.clone(),
                     next_step_id: next_id,
-                    end: None,
+                    ..self.trace_entry(
+                        &session_id,
+                        &caller,
+                        &callee,
+                        trigger,
+                        &node_type_str,
+                        action_json,
+                        Some(error_text),
+                        step_id,
+                        step_name,
+                    )
                 });
                 self.current_node = Some(recovery);
                 return Box::pin(self.__exec_node(ctrl, ctx)).await;
@@ -1038,42 +1005,50 @@ impl StepIvrApp {
     }
 
     fn provider_session_context(&self) -> SessionContext {
-        self.provider_session
-            .clone()
-            .unwrap_or_else(|| SessionContext {
-                session_id: self
-                    .sess
-                    .variables
-                    .get("session_id")
-                    .cloned()
-                    .unwrap_or_default(),
-                app_execution_id: 0,
-                caller: self
-                    .sess
-                    .variables
-                    .get("caller")
-                    .cloned()
-                    .unwrap_or_default(),
-                callee: self
-                    .sess
-                    .variables
-                    .get("callee")
-                    .cloned()
-                    .unwrap_or_default(),
-                direction: self
-                    .sess
-                    .variables
-                    .get("direction")
-                    .cloned()
-                    .unwrap_or_default(),
-                tenant_id: self.sess.variables.get("tenant_id").cloned(),
-                ivr_id: self.sess.variables.get("ivr_id").cloned(),
-                variables: self.sess.variables.clone(),
-                sip_headers: self.get_sip_headers(),
-                route_name: self.route_name.clone(),
-                custom_data: self.custom_data.clone(),
-                transferred_from: self.transferred_from.clone(),
-            })
+        match self.provider_session.clone() {
+            Some(ctx) => ctx,
+            None => self.build_session_context_from_vars(),
+        }
+    }
+
+    /// Build a [`SessionContext`] from the executor's session state. Shared by
+    /// `provider_session_context` (no provider session yet) and the provider
+    /// failure path.
+    fn build_session_context_from_vars(&self) -> SessionContext {
+        SessionContext {
+            session_id: self
+                .sess
+                .variables
+                .get("session_id")
+                .cloned()
+                .unwrap_or_default(),
+            app_execution_id: 0,
+            caller: self
+                .sess
+                .variables
+                .get("caller")
+                .cloned()
+                .unwrap_or_default(),
+            callee: self
+                .sess
+                .variables
+                .get("callee")
+                .cloned()
+                .unwrap_or_default(),
+            direction: self
+                .sess
+                .variables
+                .get("direction")
+                .cloned()
+                .unwrap_or_default(),
+            tenant_id: self.sess.variables.get("tenant_id").cloned(),
+            ivr_id: self.sess.variables.get("ivr_id").cloned(),
+            variables: self.sess.variables.clone(),
+            sip_headers: self.get_sip_headers(),
+            route_name: self.route_name.clone(),
+            custom_data: self.custom_data.clone(),
+            transferred_from: self.transferred_from.clone(),
+        }
     }
 
     fn fallback_already_used(&self) -> bool {
@@ -1111,13 +1086,7 @@ impl StepIvrApp {
                 delay_before_ms: 0,
                 delay_after_ms: 0,
             },
-            ActionNode::new(EntryAction::Hangup {
-                prompt: None,
-                prompt_text: None,
-                prompt_voice: None,
-                delay_before_ms: 0,
-                delay_after_ms: 0,
-            }),
+            ActionNode::new(EntryAction::hangup_none()),
         )
     }
 
@@ -1393,13 +1362,7 @@ impl StepIvrApp {
             tracing::warn!("StepIvrApp: provider ignored DtmfMenuTimeout probe, hanging up");
             self.probe_pending = false;
             self.no_input_prompts = 0;
-            return Ok(ActionNode::new(EntryAction::Hangup {
-                prompt: None,
-                prompt_text: None,
-                prompt_voice: None,
-                delay_before_ms: 0,
-                delay_after_ms: 0,
-            }));
+            return Ok(ActionNode::new(EntryAction::hangup_none()));
         }
         match &event {
             Some(ProviderEvent::AudioComplete { .. }) => {
@@ -1802,13 +1765,7 @@ impl StepIvrApp {
             return Some(*ta);
         }
         if next_retry >= max_retries {
-            return Some(ActionNode::new(EntryAction::Hangup {
-                prompt: None,
-                prompt_text: None,
-                prompt_voice: None,
-                delay_before_ms: 0,
-                delay_after_ms: 0,
-            }));
+            return Some(ActionNode::new(EntryAction::hangup_none()));
         }
         self.pending_menu = Some(PendingMenu {
             retry_count: next_retry,
@@ -2316,16 +2273,6 @@ impl CallApp for StepIvrApp {
         context: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
         match event {
-            AppEvent::HttpResponse { body } => {
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
-                    let event = ProviderEvent::ApiResponse {
-                        status: 200,
-                        body: value,
-                    };
-                    self.current_node = Some(self.request_next(Some(event)).await?);
-                    return self.__exec_node(ctrl, context).await;
-                }
-            }
             AppEvent::TransferResult { outcome } => {
                 // Pending trace flushes inside `request_next` with the
                 // successor attached.
@@ -2338,7 +2285,6 @@ impl CallApp for StepIvrApp {
             AppEvent::Custom { name, data: _ } => {
                 tracing::debug!(event = %name, "StepIvrApp custom event");
             }
-            _ => {}
         }
         Ok(AppAction::Continue)
     }
@@ -2970,14 +2916,7 @@ mod tests {
         }
         transfer.step_id = Some("transfer-step".into());
         transfer.extra = Some(serde_json::json!({"nodetype": "transfer"}));
-        let hangup = ActionNode::new(EntryAction::Hangup {
-            prompt: None,
-            prompt_text: None,
-            prompt_voice: None,
-
-            delay_before_ms: 0,
-            delay_after_ms: 0,
-        });
+        let hangup = ActionNode::new(EntryAction::hangup_none());
         let gateway = RwiGateway::new();
         let mut events = gateway.subscribe_events();
         let mut app = mock_app(vec![transfer, hangup]);
@@ -5008,13 +4947,7 @@ mod tests {
     #[tokio::test]
     async fn test_hangup_no_prompt() {
         let mut stack = MockCallStack::run(
-            Box::new(mock_app(vec![ActionNode::new(EntryAction::Hangup {
-                prompt: None,
-                prompt_text: None,
-                prompt_voice: None,
-                delay_before_ms: 0,
-                delay_after_ms: 0,
-            })])),
+            Box::new(mock_app(vec![ActionNode::new(EntryAction::hangup_none())])),
             "1001",
             "2000",
         );
@@ -5104,13 +5037,7 @@ mod tests {
                 timeout_ms: None,
                 return_app: Some("ivr".into()),
                 return_target: Some("main".into()),
-                success: Some(Box::new(ActionNode::new(EntryAction::Hangup {
-                    prompt: None,
-                    prompt_text: None,
-                    prompt_voice: None,
-                    delay_before_ms: 0,
-                    delay_after_ms: 0,
-                }))),
+                success: Some(Box::new(ActionNode::new(EntryAction::hangup_none()))),
                 failure: None,
             })])),
             "1001",
@@ -6539,14 +6466,7 @@ mod tests {
         });
         // Fallback provider node — would be executed only if the bug forwarded
         // the stray digit to the provider.
-        let hangup = ActionNode::new(EntryAction::Hangup {
-            prompt: None,
-            prompt_text: None,
-            prompt_voice: None,
-
-            delay_before_ms: 0,
-            delay_after_ms: 0,
-        });
+        let hangup = ActionNode::new(EntryAction::hangup_none());
 
         let mut stack = MockCallStack::run(Box::new(mock_app(vec![menu, hangup])), "1001", "2000");
         stack
@@ -6627,14 +6547,7 @@ mod tests {
             invalid_action: None,
             greeting_api_url: None,
         });
-        let hangup = ActionNode::new(EntryAction::Hangup {
-            prompt: None,
-            prompt_text: None,
-            prompt_voice: None,
-
-            delay_before_ms: 0,
-            delay_after_ms: 0,
-        });
+        let hangup = ActionNode::new(EntryAction::hangup_none());
 
         let mut stack = MockCallStack::run(Box::new(mock_app(vec![menu, hangup])), "1001", "2000");
         stack
@@ -8097,14 +8010,7 @@ mod tests {
             delay_before_ms: 0,
             delay_after_ms: 0,
         });
-        let hangup = ActionNode::new(EntryAction::Hangup {
-            prompt: None,
-            prompt_text: None,
-            prompt_voice: None,
-
-            delay_before_ms: 0,
-            delay_after_ms: 0,
-        });
+        let hangup = ActionNode::new(EntryAction::hangup_none());
 
         let mut stack = MockCallStack::run(
             Box::new(mock_app(vec![start, prompt, hangup])),
@@ -8442,13 +8348,7 @@ mod tests {
                         return_target: None,
                     }))
                 }
-                _ => Ok(ActionNode::new(EntryAction::Hangup {
-                    prompt: None,
-                    prompt_text: None,
-                    prompt_voice: None,
-                    delay_before_ms: 0,
-                    delay_after_ms: 0,
-                })),
+                _ => Ok(ActionNode::new(EntryAction::hangup_none())),
             }
         }
 

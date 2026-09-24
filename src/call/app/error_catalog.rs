@@ -92,17 +92,6 @@ pub const CONFERENCE_START_FAILED: CallErrInfo = CallErrInfo {
     remediation_key: None,
 };
 
-pub const APP_RUNTIME_ERROR: CallErrInfo = CallErrInfo {
-    app: "app",
-    code: "app.runtime_error",
-    message: "Application runtime error",
-    sip_status: Some(500),
-    hangup_reason: CallRecordHangupReason::Failed,
-    severity: ErrSeverity::Error,
-    locale_key: "errors.app.runtime_error",
-    remediation_key: None,
-};
-
 // ── Step-mode IVR (provider `/step`, `/fail`, node execution) ──────────────
 
 pub const IVR_STEP_NEXT_FAILED: CallErrInfo = CallErrInfo {
@@ -182,7 +171,6 @@ pub const CATALOG: &[CallErrInfo] = &[
     IVR_TIMEOUT,
     VOICEMAIL_START_FAILED,
     CONFERENCE_START_FAILED,
-    APP_RUNTIME_ERROR,
     IVR_STEP_NEXT_FAILED,
     IVR_STEP_FAIL_FAILED,
     IVR_STEP_EXECUTE_FAILED,

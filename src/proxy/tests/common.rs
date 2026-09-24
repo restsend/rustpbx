@@ -183,7 +183,6 @@ async fn create_test_server_with_dependencies(
         cluster_self_addr: None,
         session_registry: Arc::new(crate::call::runtime::NoopSessionRegistry),
         session_registry_heartbeat: None,
-        media_policy: Arc::new(crate::call::DefaultMediaPolicy),
         trunk_health: None,
         session_hooks: Arc::new(session_hooks),
         contact_username: "rustpbx".to_string(),

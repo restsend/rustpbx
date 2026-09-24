@@ -223,7 +223,7 @@ impl RwiCommandProcessor {
         call_id: &str,
         command: RwiCommandPayload,
     ) -> Option<Result<CommandResult, CommandError>> {
-        use crate::call::runtime::dispatch_rwi_command;
+        use crate::call::runtime::{CommandFailureKind, dispatch_rwi_command};
 
         match dispatch_rwi_command(&self.call_registry, Some(call_id), command) {
             Ok(result) => {
@@ -234,14 +234,16 @@ impl RwiCommandProcessor {
                         .message
                         .unwrap_or_else(|| "command failed".to_string());
 
-                    if msg.contains("not supported") || msg.contains("not implemented") {
-                        return None;
-                    }
-
-                    if msg.to_lowercase().contains("not found") {
-                        Some(Err(CommandError::CallNotFound(call_id.to_string())))
-                    } else {
-                        Some(Err(CommandError::CommandFailed(msg)))
+                    match result.failure_kind {
+                        // Not convertible to the unified path — let the
+                        // legacy handler deal with it.
+                        Some(CommandFailureKind::NotSupported) => None,
+                        Some(CommandFailureKind::SessionNotFound) => {
+                            Some(Err(CommandError::CallNotFound(call_id.to_string())))
+                        }
+                        Some(CommandFailureKind::DispatchFailed)
+                        | Some(CommandFailureKind::MediaDenied)
+                        | None => Some(Err(CommandError::CommandFailed(msg))),
                     }
                 }
             }

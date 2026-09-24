@@ -421,71 +421,91 @@ impl PolicyGuard {
     }
 }
 
-// Mock implementation for now
-pub struct MockFrequencyLimiter;
-
-#[async_trait]
-impl FrequencyLimiter for MockFrequencyLimiter {
-    async fn check_and_increment(
-        &self,
-        _policy_id: &str,
-        _scope: &str,
-        _scope_value: &str,
-        _limit: u32,
-        _window_hours: u32,
-    ) -> Result<bool> {
-        // Always allow in mock
-        Ok(true)
+/// Shared window check for limiters: expired window → reset to 1 with the
+/// new window end; at/over limit → reject; otherwise increment. Returns
+/// whether the call is allowed.
+fn evaluate_window(
+    count: &mut u32,
+    window_end: &mut i64,
+    now: i64,
+    new_window_end: i64,
+    limit: u32,
+) -> bool {
+    if now > *window_end {
+        // Window expired, reset
+        *count = 1;
+        *window_end = new_window_end;
+        true
+    } else if *count >= limit {
+        false
+    } else {
+        *count += 1;
+        true
     }
+}
 
-    async fn check_daily_limit(
-        &self,
-        _policy_id: &str,
-        _scope: &str,
-        _scope_value: &str,
-        _limit: u32,
-    ) -> Result<bool> {
-        Ok(true)
+/// Shared ticker loop for limiter backends: run `cleanup` every 60s until
+/// the cancel token fires.
+async fn run_limiter_cleanup<F, Fut>(cancel_token: CancellationToken, cleanup: F)
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(60));
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                if let Err(e) = cleanup().await {
+                    error!("Error during frequency limiter cleanup: {}", e);
+                }
+            }
+            _ = cancel_token.cancelled() => break,
+        }
     }
+}
 
-    async fn check_concurrency(
-        &self,
-        _policy_id: &str,
-        _scope: &str,
-        _scope_value: &str,
-        _max_concurrency: u32,
-    ) -> Result<bool> {
-        Ok(true)
-    }
+/// Parse an in-memory limiter key. The scope value may itself contain `:`
+/// (e.g. a SIP URI), so split into AT MOST 4 parts and let the scope value
+/// absorb any extra colons.
+fn parse_limit_key(key: &str) -> Option<(&str, &str, &str, &str)> {
+    let mut parts = key.splitn(4, ':');
+    Some((
+        parts.next()?,
+        parts.next()?,
+        parts.next()?,
+        parts.next()?,
+    ))
+}
 
-    async fn release_concurrency(
-        &self,
-        _policy_id: &str,
-        _scope: &str,
-        _scope_value: &str,
-    ) -> Result<()> {
-        Ok(())
+/// Apply the optional list/clear filters to a parsed key.
+fn key_matches_filters(
+    (p_id, s, s_val, l_type): (&str, &str, &str, &str),
+    policy_id: Option<&str>,
+    scope: Option<&str>,
+    scope_value: Option<&str>,
+    limit_type: Option<&str>,
+) -> bool {
+    if let Some(pid) = policy_id
+        && pid != p_id
+    {
+        return false;
     }
-
-    async fn list_limits(
-        &self,
-        _policy_id: Option<String>,
-        _scope: Option<String>,
-        _scope_value: Option<String>,
-        _limit_type: Option<String>,
-    ) -> Result<Vec<crate::models::frequency_limit::Model>> {
-        Ok(vec![])
+    if let Some(sc) = scope
+        && sc != s
+    {
+        return false;
     }
-
-    async fn clear_limits(
-        &self,
-        _policy_id: Option<String>,
-        _scope: Option<String>,
-        _scope_value: Option<String>,
-        _limit_type: Option<String>,
-    ) -> Result<u64> {
-        Ok(0)
+    if let Some(sv) = scope_value
+        && sv != s_val
+    {
+        return false;
     }
+    if let Some(lt) = limit_type
+        && lt != l_type
+    {
+        return false;
+    }
+    true
 }
 
 pub struct InMemoryFrequencyLimiter {
@@ -501,17 +521,14 @@ impl InMemoryFrequencyLimiter {
         })
     }
     pub async fn run_cleanup_loop(self: Arc<Self>, cancel_token: CancellationToken) {
-        let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        loop {
-            tokio::select! {
-                _ = ticker.tick() => {
-                    self.cleanup();
-                }
-                _ = cancel_token.cancelled() => {
-                    break;
-                }
+        run_limiter_cleanup(cancel_token, || {
+            let this = self.clone();
+            async move {
+                this.cleanup();
+                Ok(())
             }
-        }
+        })
+        .await;
     }
 
     pub fn start_cleanup(self: Arc<Self>, cancel_token: CancellationToken) {
@@ -547,19 +564,13 @@ impl FrequencyLimiter for InMemoryFrequencyLimiter {
         let mut entry = self.counts.entry(key).or_insert((0, 0));
         let (count, window_end) = &mut *entry;
 
-        if now > *window_end {
-            // Window expired, reset
-            *count = 1;
-            *window_end = now + (window_hours as i64 * 3600);
-            Ok(true)
-        } else {
-            if *count >= limit {
-                Ok(false)
-            } else {
-                *count += 1;
-                Ok(true)
-            }
-        }
+        Ok(evaluate_window(
+            count,
+            window_end,
+            now,
+            now + (window_hours as i64 * 3600),
+            limit,
+        ))
     }
 
     async fn check_daily_limit(
@@ -574,27 +585,20 @@ impl FrequencyLimiter for InMemoryFrequencyLimiter {
         let today_end = now
             .date_naive()
             .and_hms_opt(23, 59, 59)
-            .unwrap()
-            .and_local_timezone(Utc)
-            .unwrap()
+            .expect("23:59:59 is a valid time")
+            .and_utc()
             .timestamp();
 
         let mut entry = self.counts.entry(key).or_insert((0, 0));
         let (count, window_end) = &mut *entry;
 
-        if now.timestamp() > *window_end {
-            // New day (or first time)
-            *count = 1;
-            *window_end = today_end;
-            Ok(true)
-        } else {
-            if *count >= limit {
-                Ok(false)
-            } else {
-                *count += 1;
-                Ok(true)
-            }
-        }
+        Ok(evaluate_window(
+            count,
+            window_end,
+            now.timestamp(),
+            today_end,
+            limit,
+        ))
     }
 
     async fn check_concurrency(
@@ -644,33 +648,16 @@ impl FrequencyLimiter for InMemoryFrequencyLimiter {
         let mut results = Vec::new();
         for entry in self.counts.iter() {
             let (count, window_end) = entry.value();
-            let parts: Vec<&str> = entry.key().split(':').collect();
-            if parts.len() != 4 {
+            let Some((p_id, s, s_val, l_type)) = parse_limit_key(entry.key()) else {
                 continue;
-            }
-            let p_id = parts[0];
-            let s = parts[1];
-            let s_val = parts[2];
-            let l_type = parts[3];
-
-            if let Some(ref pid) = policy_id
-                && pid != p_id
-            {
-                continue;
-            }
-            if let Some(ref sc) = scope
-                && sc != s
-            {
-                continue;
-            }
-            if let Some(ref sv) = scope_value
-                && sv != s_val
-            {
-                continue;
-            }
-            if let Some(ref lt) = limit_type
-                && lt != l_type
-            {
+            };
+            if !key_matches_filters(
+                (p_id, s, s_val, l_type),
+                policy_id.as_deref(),
+                scope.as_deref(),
+                scope_value.as_deref(),
+                limit_type.as_deref(),
+            ) {
                 continue;
             }
 
@@ -703,37 +690,16 @@ impl FrequencyLimiter for InMemoryFrequencyLimiter {
             .counts
             .iter()
             .filter(|entry| {
-                let key = entry.key();
-                let parts: Vec<&str> = key.split(':').collect();
-                if parts.len() != 4 {
+                let Some(parts) = parse_limit_key(entry.key()) else {
                     return false;
-                }
-                let p_id = parts[0];
-                let s = parts[1];
-                let s_val = parts[2];
-                let l_type = parts[3];
-
-                if let Some(ref pid) = policy_id
-                    && pid != p_id
-                {
-                    return false;
-                }
-                if let Some(ref sc) = scope
-                    && sc != s
-                {
-                    return false;
-                }
-                if let Some(ref sv) = scope_value
-                    && sv != s_val
-                {
-                    return false;
-                }
-                if let Some(ref lt) = limit_type
-                    && lt != l_type
-                {
-                    return false;
-                }
-                true // Remove
+                };
+                key_matches_filters(
+                    parts,
+                    policy_id.as_deref(),
+                    scope.as_deref(),
+                    scope_value.as_deref(),
+                    limit_type.as_deref(),
+                )
             })
             .map(|entry| entry.key().clone())
             .collect();
@@ -756,19 +722,11 @@ impl DbFrequencyLimiter {
     }
 
     pub async fn run_cleanup_loop(self: Arc<Self>, cancel_token: CancellationToken) {
-        let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        loop {
-            tokio::select! {
-                _ = ticker.tick() => {
-                    if let Err(e) = self.cleanup().await {
-                        error!("Error during frequency limiter cleanup: {}", e);
-                    }
-                }
-                _ = cancel_token.cancelled() => {
-                    break;
-                }
-            }
-        }
+        run_limiter_cleanup(cancel_token, || {
+            let this = self.clone();
+            async move { this.cleanup().await }
+        })
+        .await;
     }
 
     pub fn start_cleanup(self: Arc<Self>, cancel_token: CancellationToken) {
@@ -881,61 +839,76 @@ impl FrequencyLimiter for DbFrequencyLimiter {
         let today_end = now
             .date_naive()
             .and_hms_opt(23, 59, 59)
-            .unwrap()
-            .and_local_timezone(Utc)
-            .unwrap();
+            .expect("23:59:59 is a valid time")
+            .and_utc();
 
-        let record = frequency_limit::Entity::find()
-            .filter(frequency_limit::Column::PolicyId.eq(policy_id))
-            .filter(frequency_limit::Column::Scope.eq(scope))
-            .filter(frequency_limit::Column::ScopeValue.eq(scope_value))
-            .filter(frequency_limit::Column::LimitType.eq("daily"))
-            .one(&self.db)
-            .await?;
+        let policy_id = policy_id.to_string();
+        let scope = scope.to_string();
+        let scope_value = scope_value.to_string();
 
-        if let Some(model) = record {
-            if let Some(window_end) = model.window_end {
-                if now > window_end {
-                    let mut active: frequency_limit::ActiveModel = model.into();
-                    active.count = Set(1);
-                    active.window_end = Set(Some(today_end));
-                    active.updated_at = Set(now);
-                    active.update(&self.db).await?;
-                    Ok(true)
-                } else {
-                    if model.count >= limit {
-                        Ok(false)
+        let result = self
+            .db
+            .transaction::<_, bool, anyhow::Error>(|txn| {
+                let policy_id = policy_id.clone();
+                let scope = scope.clone();
+                let scope_value = scope_value.clone();
+                Box::pin(async move {
+                    let record = frequency_limit::Entity::find()
+                        .filter(frequency_limit::Column::PolicyId.eq(&policy_id))
+                        .filter(frequency_limit::Column::Scope.eq(&scope))
+                        .filter(frequency_limit::Column::ScopeValue.eq(&scope_value))
+                        .filter(frequency_limit::Column::LimitType.eq("daily"))
+                        .one(txn)
+                        .await?;
+
+                    if let Some(model) = record {
+                        if let Some(window_end) = model.window_end {
+                            if now > window_end {
+                                let mut active: frequency_limit::ActiveModel = model.into();
+                                active.count = Set(1);
+                                active.window_end = Set(Some(today_end));
+                                active.updated_at = Set(now);
+                                active.update(txn).await?;
+                                Ok(true)
+                            } else {
+                                if model.count >= limit {
+                                    Ok(false)
+                                } else {
+                                    let count = model.count;
+                                    let mut active: frequency_limit::ActiveModel = model.into();
+                                    active.count = Set(count + 1);
+                                    active.updated_at = Set(now);
+                                    active.update(txn).await?;
+                                    Ok(true)
+                                }
+                            }
+                        } else {
+                            let mut active: frequency_limit::ActiveModel = model.into();
+                            active.count = Set(1);
+                            active.window_end = Set(Some(today_end));
+                            active.updated_at = Set(now);
+                            active.update(txn).await?;
+                            Ok(true)
+                        }
                     } else {
-                        let count = model.count;
-                        let mut active: frequency_limit::ActiveModel = model.into();
-                        active.count = Set(count + 1);
-                        active.updated_at = Set(now);
-                        active.update(&self.db).await?;
+                        let active = frequency_limit::ActiveModel {
+                            policy_id: Set(policy_id),
+                            scope: Set(scope),
+                            scope_value: Set(scope_value),
+                            limit_type: Set("daily".to_string()),
+                            count: Set(1),
+                            window_end: Set(Some(today_end)),
+                            updated_at: Set(now),
+                            ..Default::default()
+                        };
+                        active.insert(txn).await?;
                         Ok(true)
                     }
-                }
-            } else {
-                let mut active: frequency_limit::ActiveModel = model.into();
-                active.count = Set(1);
-                active.window_end = Set(Some(today_end));
-                active.updated_at = Set(now);
-                active.update(&self.db).await?;
-                Ok(true)
-            }
-        } else {
-            let active = frequency_limit::ActiveModel {
-                policy_id: Set(policy_id.to_string()),
-                scope: Set(scope.to_string()),
-                scope_value: Set(scope_value.to_string()),
-                limit_type: Set("daily".to_string()),
-                count: Set(1),
-                window_end: Set(Some(today_end)),
-                updated_at: Set(now),
-                ..Default::default()
-            };
-            active.insert(&self.db).await?;
-            Ok(true)
-        }
+                })
+            })
+            .await?;
+
+        Ok(result)
     }
 
     async fn check_concurrency(
@@ -947,40 +920,55 @@ impl FrequencyLimiter for DbFrequencyLimiter {
     ) -> Result<bool> {
         use crate::models::frequency_limit;
         let now = Utc::now();
+        let policy_id = policy_id.to_string();
+        let scope = scope.to_string();
+        let scope_value = scope_value.to_string();
 
-        let record = frequency_limit::Entity::find()
-            .filter(frequency_limit::Column::PolicyId.eq(policy_id))
-            .filter(frequency_limit::Column::Scope.eq(scope))
-            .filter(frequency_limit::Column::ScopeValue.eq(scope_value))
-            .filter(frequency_limit::Column::LimitType.eq("concurrency"))
-            .one(&self.db)
+        let result = self
+            .db
+            .transaction::<_, bool, anyhow::Error>(|txn| {
+                let policy_id = policy_id.clone();
+                let scope = scope.clone();
+                let scope_value = scope_value.clone();
+                Box::pin(async move {
+                    let record = frequency_limit::Entity::find()
+                        .filter(frequency_limit::Column::PolicyId.eq(&policy_id))
+                        .filter(frequency_limit::Column::Scope.eq(&scope))
+                        .filter(frequency_limit::Column::ScopeValue.eq(&scope_value))
+                        .filter(frequency_limit::Column::LimitType.eq("concurrency"))
+                        .one(txn)
+                        .await?;
+
+                    if let Some(model) = record {
+                        if model.count >= max_concurrency {
+                            Ok(false)
+                        } else {
+                            let count = model.count;
+                            let mut active: frequency_limit::ActiveModel = model.into();
+                            active.count = Set(count + 1);
+                            active.updated_at = Set(now);
+                            active.update(txn).await?;
+                            Ok(true)
+                        }
+                    } else {
+                        let active = frequency_limit::ActiveModel {
+                            policy_id: Set(policy_id),
+                            scope: Set(scope),
+                            scope_value: Set(scope_value),
+                            limit_type: Set("concurrency".to_string()),
+                            count: Set(1),
+                            window_end: Set(None), // No window for concurrency
+                            updated_at: Set(now),
+                            ..Default::default()
+                        };
+                        active.insert(txn).await?;
+                        Ok(true)
+                    }
+                })
+            })
             .await?;
 
-        if let Some(model) = record {
-            if model.count >= max_concurrency {
-                Ok(false)
-            } else {
-                let count = model.count;
-                let mut active: frequency_limit::ActiveModel = model.into();
-                active.count = Set(count + 1);
-                active.updated_at = Set(now);
-                active.update(&self.db).await?;
-                Ok(true)
-            }
-        } else {
-            let active = frequency_limit::ActiveModel {
-                policy_id: Set(policy_id.to_string()),
-                scope: Set(scope.to_string()),
-                scope_value: Set(scope_value.to_string()),
-                limit_type: Set("concurrency".to_string()),
-                count: Set(1),
-                window_end: Set(None), // No window for concurrency
-                updated_at: Set(now),
-                ..Default::default()
-            };
-            active.insert(&self.db).await?;
-            Ok(true)
-        }
+        Ok(result)
     }
 
     async fn release_concurrency(
@@ -991,24 +979,40 @@ impl FrequencyLimiter for DbFrequencyLimiter {
     ) -> Result<()> {
         use crate::models::frequency_limit;
         let now = Utc::now();
+        let policy_id = policy_id.to_string();
+        let scope = scope.to_string();
+        let scope_value = scope_value.to_string();
 
-        let record = frequency_limit::Entity::find()
-            .filter(frequency_limit::Column::PolicyId.eq(policy_id))
-            .filter(frequency_limit::Column::Scope.eq(scope))
-            .filter(frequency_limit::Column::ScopeValue.eq(scope_value))
-            .filter(frequency_limit::Column::LimitType.eq("concurrency"))
-            .one(&self.db)
+        // Transactional decrement so a concurrent release can never drive the
+        // counter below zero and a read-then-write race cannot lose releases.
+        self.db
+            .transaction::<_, (), anyhow::Error>(|txn| {
+                let policy_id = policy_id.clone();
+                let scope = scope.clone();
+                let scope_value = scope_value.clone();
+                Box::pin(async move {
+                    let record = frequency_limit::Entity::find()
+                        .filter(frequency_limit::Column::PolicyId.eq(&policy_id))
+                        .filter(frequency_limit::Column::Scope.eq(&scope))
+                        .filter(frequency_limit::Column::ScopeValue.eq(&scope_value))
+                        .filter(frequency_limit::Column::LimitType.eq("concurrency"))
+                        .one(txn)
+                        .await?;
+
+                    if let Some(model) = record
+                        && model.count > 0
+                    {
+                        let count = model.count;
+                        let mut active: frequency_limit::ActiveModel = model.into();
+                        active.count = Set(count - 1);
+                        active.updated_at = Set(now);
+                        active.update(txn).await?;
+                    }
+                    Ok(())
+                })
+            })
             .await?;
 
-        if let Some(model) = record
-            && model.count > 0
-        {
-            let count = model.count;
-            let mut active: frequency_limit::ActiveModel = model.into();
-            active.count = Set(count - 1);
-            active.updated_at = Set(now);
-            active.update(&self.db).await?;
-        }
         Ok(())
     }
 

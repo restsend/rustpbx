@@ -148,10 +148,6 @@ pub async fn resolve_owner_and_session(
 pub enum RegistryError {
     #[error("registry unavailable: {0}")]
     Unavailable(String),
-    #[error("session {0} not found")]
-    NotFound(String),
-    #[error("serialization error: {0}")]
-    Serialize(String),
 }
 
 /// Backend-agnostic session location registry.
@@ -187,18 +183,6 @@ pub trait SessionRegistry: Send + Sync + 'static {
 
     /// Full session info for `call_id`.
     async fn lookup(&self, call_id: &str) -> Option<SessionInfo>;
-
-    /// All active sessions, newest first, capped at `limit`.
-    async fn list_all(&self, limit: usize) -> Vec<SessionInfo>;
-
-    /// Call ids owned by `node_id`.
-    async fn list_by_node(&self, node_id: &str) -> Vec<String>;
-
-    /// Number of active sessions.
-    async fn active_count(&self) -> usize;
-
-    /// Backend health probe.
-    async fn health_check(&self) -> Result<(), RegistryError>;
 }
 
 /// A cheap, Send+Sync, clonable reference to any [`SessionRegistry`].
@@ -233,17 +217,12 @@ impl SessionRegistry for NoopSessionRegistry {
     async fn lookup(&self, _call_id: &str) -> Option<SessionInfo> {
         None
     }
-    async fn list_all(&self, _limit: usize) -> Vec<SessionInfo> {
-        Vec::new()
-    }
-    async fn list_by_node(&self, _node_id: &str) -> Vec<String> {
-        Vec::new()
-    }
-    async fn active_count(&self) -> usize {
+}
+
+#[cfg(test)]
+impl NoopSessionRegistry {
+    pub(crate) async fn active_count(&self) -> usize {
         0
-    }
-    async fn health_check(&self) -> Result<(), RegistryError> {
-        Ok(())
     }
 }
 
@@ -440,8 +419,8 @@ mod tests {
         let info = SessionInfo::new("call-1", "node-1");
         reg.register(&info).await.unwrap();
         assert!(reg.lookup_owner("call-1").await.is_none());
+        assert!(reg.lookup("call-1").await.is_none());
         assert_eq!(reg.active_count().await, 0);
-        assert!(reg.list_all(10).await.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -690,18 +669,6 @@ mod tests {
             }
             async fn lookup(&self, call_id: &str) -> Option<SessionInfo> {
                 self.inner.lookup(call_id).await
-            }
-            async fn list_all(&self, limit: usize) -> Vec<SessionInfo> {
-                self.inner.list_all(limit).await
-            }
-            async fn list_by_node(&self, node_id: &str) -> Vec<String> {
-                self.inner.list_by_node(node_id).await
-            }
-            async fn active_count(&self) -> usize {
-                self.inner.active_count().await
-            }
-            async fn health_check(&self) -> Result<(), RegistryError> {
-                self.inner.health_check().await
             }
         }
 

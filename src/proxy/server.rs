@@ -142,8 +142,6 @@ pub struct SipServerInner {
     pub session_registry: crate::call::runtime::SessionRegistryRef,
     /// Keeps the owning node's sessions alive (single batch update per tick).
     pub session_registry_heartbeat: Option<crate::call::runtime::NodeHeartbeat>,
-    /// Media policy for deciding when to anchor media.
-    pub media_policy: Arc<dyn crate::call::MediaPolicy>,
     /// Trunk health check states (populated by trunk_health background loop).
     pub trunk_health: Option<crate::proxy::trunk_health::HealthStateMap>,
     /// Session lifecycle hooks (connected, held, unheld, ended).
@@ -223,7 +221,6 @@ pub struct SipServerBuilder {
     /// address at build time for `home_proxy` stamping.
     cluster_config: Option<ClusterConfig>,
     /// Media policy for deciding when to anchor media.
-    media_policy: Option<Arc<dyn crate::call::MediaPolicy>>,
     /// Trunk health check states (shared map populated by background loop).
     trunk_health: Option<crate::proxy::trunk_health::HealthStateMap>,
     /// Session lifecycle hooks registered via [`SipServerBuilder::with_session_hook`].
@@ -270,7 +267,6 @@ impl SipServerBuilder {
             skip_migrate: false,
             cluster_peers: Vec::new(),
             cluster_config: None,
-            media_policy: None,
             trunk_health: None,
             session_hooks: Vec::new(),
         }
@@ -278,11 +274,6 @@ impl SipServerBuilder {
 
     pub fn with_trunk_health(mut self, health: crate::proxy::trunk_health::HealthStateMap) -> Self {
         self.trunk_health = Some(health);
-        self
-    }
-
-    pub fn with_media_policy(mut self, policy: Arc<dyn crate::call::MediaPolicy>) -> Self {
-        self.media_policy = Some(policy);
         self
     }
 
@@ -1280,9 +1271,6 @@ impl SipServerBuilder {
             cluster_self_addr,
             session_registry,
             session_registry_heartbeat,
-            media_policy: self
-                .media_policy
-                .unwrap_or_else(|| Arc::new(crate::call::DefaultMediaPolicy)),
             trunk_health: self.trunk_health.clone(),
             session_hooks: Arc::new(self.session_hooks),
             contact_username: self

@@ -178,6 +178,11 @@ impl ConferenceMediaBridge {
         let samples_per_frame = (sample_rate * interval_ms as u32 / 1000) as usize;
         let rtp_ticks_per_frame = clock_rate * interval_ms as u32 / 1000;
 
+        // Reusable buffers — this loop runs every 20ms per participant, so
+        // per-frame `Vec` allocations are worth avoiding.
+        let mut pcm_buf: Vec<i16> = Vec::with_capacity(samples_per_frame * 4);
+        let mut frame_buf: Vec<i16> = vec![0i16; samples_per_frame];
+
         loop {
             tokio::select! {
                 biased;
@@ -190,29 +195,22 @@ impl ConferenceMediaBridge {
                     break;
                 }
                 Some(frame) = output_rx.recv() => {
-                    // Resample to 8kHz if needed using linear interpolation
-                    let pcm_samples = if frame.sample_rate == sample_rate {
-                        frame.samples
+                    // Resample to the encoder rate if needed (linear interpolation)
+                    if frame.sample_rate == sample_rate {
+                        pcm_buf.clear();
+                        pcm_buf.extend_from_slice(&frame.samples);
                     } else {
-                        resample_linear(
-                            &frame.samples,
-                            frame.sample_rate,
-                            sample_rate,
-                        )
-                    };
+                        resample_linear_into(&frame.samples, frame.sample_rate, sample_rate, &mut pcm_buf);
+                    }
 
                     // Process in chunks of samples_per_frame
-                    for chunk in pcm_samples.chunks(samples_per_frame) {
-                        let chunk_to_encode = if chunk.len() < samples_per_frame {
-                            // Pad with silence if needed
-                            let mut padded = vec![0i16; samples_per_frame];
-                            padded[..chunk.len()].copy_from_slice(chunk);
-                            padded
-                        } else {
-                            chunk.to_vec()
-                        };
+                    for chunk in pcm_buf.chunks(samples_per_frame) {
+                        // Copy into the persistent frame buffer, padding the
+                        // tail with silence for a partial final chunk.
+                        frame_buf[..chunk.len()].copy_from_slice(chunk);
+                        frame_buf[chunk.len()..].fill(0);
 
-                        let encoded = encoder.encode(&chunk_to_encode);
+                        let encoded = encoder.encode(&frame_buf);
                         let rtc_frame = RtcAudioFrame {
                             rtp_timestamp,
                             clock_rate: clock_rate,
@@ -225,7 +223,7 @@ impl ConferenceMediaBridge {
                             source_addr: None,
                         };
 
-                        let bytes_sent = chunk_to_encode.len() * 2; // i16 = 2 bytes
+                        let bytes_sent = chunk.len() * 2; // i16 = 2 bytes
                         if let Err(e) = audio_sender.send(MediaSample::Audio(rtc_frame)).await {
                             warn!(
                                 leg_id = %leg_id,
@@ -242,7 +240,7 @@ impl ConferenceMediaBridge {
 
                     trace!(
                         leg_id = %leg_id,
-                        samples = pcm_samples.len(),
+                        samples = pcm_buf.len(),
                         original_sample_rate = frame.sample_rate,
                         "Encoded and sent mixed audio frame from conference"
                     );
@@ -339,15 +337,24 @@ impl ConferenceMediaBridge {
     }
 }
 
-/// Resample audio using linear interpolation.
-pub(crate) fn resample_linear(samples: &[i16], src_rate: u32, dst_rate: u32) -> Vec<i16> {
+/// Resample audio using linear interpolation into `out` (reused across
+/// frames to avoid per-frame allocation in audio hot paths).
+pub(crate) fn resample_linear_into(
+    samples: &[i16],
+    src_rate: u32,
+    dst_rate: u32,
+    out: &mut Vec<i16>,
+) {
     if src_rate == dst_rate {
-        return samples.to_vec();
+        out.clear();
+        out.extend_from_slice(samples);
+        return;
     }
 
     let ratio = src_rate as f32 / dst_rate as f32;
     let new_len = (samples.len() as f32 / ratio) as usize;
-    let mut result = Vec::with_capacity(new_len);
+    out.clear();
+    out.reserve(new_len);
 
     for i in 0..new_len {
         let src_idx = i as f32 * ratio;
@@ -362,10 +369,15 @@ pub(crate) fn resample_linear(samples: &[i16], src_rate: u32, dst_rate: u32) -> 
             let s1 = samples[src_idx_ceil] as f32;
             (s0 + frac * (s1 - s0)) as i16
         };
-        result.push(sample);
+        out.push(sample);
     }
+}
 
-    result
+/// Resample audio using linear interpolation.
+pub(crate) fn resample_linear(samples: &[i16], src_rate: u32, dst_rate: u32) -> Vec<i16> {
+    let mut out = Vec::new();
+    resample_linear_into(samples, src_rate, dst_rate, &mut out);
+    out
 }
 
 /// Handle to control a conference media bridge.

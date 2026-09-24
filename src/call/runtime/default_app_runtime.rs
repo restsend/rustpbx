@@ -81,6 +81,20 @@ impl DefaultAppRuntime {
         self.app_factory = Some(factory);
         self
     }
+
+    /// Undo a reserved `running` slot after a failed `start_app`: clear the
+    /// reservation (only when still ours) and the event sender, so the slot
+    /// never stays wedged in a state that blocks future `start_app` calls
+    /// with `AlreadyRunning` while no event loop is running.
+    async fn rollback_reservation(&self, generation: u64) {
+        {
+            let mut running = self.running.write().await;
+            if running.as_ref().map(|app| app.generation) == Some(generation) {
+                *running = None;
+            }
+        }
+        self.handle.set_app_event_sender(None);
+    }
 }
 
 impl Drop for DefaultAppRuntime {
@@ -140,16 +154,6 @@ impl AppRuntime for DefaultAppRuntime {
         auto_answer: bool,
         route_context: crate::call::app::AppRouteContext,
     ) -> AppResult<()> {
-        // Check if already running
-        {
-            let running = self.running.read().await;
-            if let Some(current) = running.as_ref() {
-                // Report the app that actually occupies the slot — callers
-                // (e.g. the CSAT hook) branch on this name.
-                return Err(AppRuntimeError::AlreadyRunning(current.name.clone()));
-            }
-        }
-
         // Claim the next generation *before* installing the event sender.
         // Transfer → stop_app → start_app races with the predecessor event-loop
         // teardown: if we only bump after `create_app` awaits, the predecessor
@@ -167,6 +171,27 @@ impl AppRuntime for DefaultAppRuntime {
         invocation_context.invocation = Some(invocation.clone());
         let invocation_context = Arc::new(invocation_context);
 
+        let cancel_token = CancellationToken::new();
+
+        // Reserve the running slot: the AlreadyRunning check and the install
+        // happen under ONE write lock, so concurrent start_app calls
+        // serialize instead of both installing (the loser's event loop would
+        // run unreferenced and both would consume session events).
+        {
+            let mut running = self.running.write().await;
+            if let Some(current) = running.as_ref() {
+                // Report the app that actually occupies the slot — callers
+                // (e.g. the CSAT hook) branch on this name.
+                return Err(AppRuntimeError::AlreadyRunning(current.name.clone()));
+            }
+            *running = Some(RunningApp {
+                name: app_name.to_string(),
+                cancel_token: cancel_token.clone(),
+                generation,
+                invocation: invocation.clone(),
+            });
+        }
+
         // Create event channel for app events (DTMF, hangup, etc.)
         let (event_tx, event_rx) = mpsc::unbounded_channel::<ControllerEvent>();
 
@@ -176,9 +201,6 @@ impl AppRuntime for DefaultAppRuntime {
         // Register the event sender with the session so SipSession can forward
         // DTMF / hangup / audio-complete events to the running app.
         self.handle.set_app_event_sender(Some(event_tx.clone()));
-
-        // Create cancel token
-        let cancel_token = CancellationToken::new();
 
         // Get the app from factory
         let app = if let Some(factory) = &self.app_factory {
@@ -190,7 +212,7 @@ impl AppRuntime for DefaultAppRuntime {
                 // The app is known but failed to start (e.g. missing IVR config).
                 // Surface the specific reason instead of a generic "unknown app".
                 Err(e) => {
-                    self.handle.set_app_event_sender(None);
+                    self.rollback_reservation(generation).await;
                     return Err(AppRuntimeError::ConfigError(e.to_string()));
                 }
             }
@@ -201,48 +223,22 @@ impl AppRuntime for DefaultAppRuntime {
         let app = match app {
             Some(app) => app,
             None => {
-                self.handle.set_app_event_sender(None);
+                self.rollback_reservation(generation).await;
                 return Err(AppRuntimeError::UnknownApp(app_name.to_string()));
             }
         };
         *self.last_invocation.write() = Some(invocation.clone());
 
-        if app_name == "ivr" {
-            if let Some(file) = params
-                .as_ref()
-                .and_then(|p| p.get("file"))
-                .and_then(|v| v.as_str())
-            {
-                crate::call::app::ivr::exec::remember_ivr_start_file(
-                    invocation_context.as_ref(),
-                    file,
-                );
-            }
-            if let Some(csat) = params.as_ref().and_then(|p| p.get("csat_params")) {
-                invocation_context.set_var(
-                    crate::call::app::ivr::builtin::CSAT_PARAMS_KEY,
-                    csat.to_string(),
-                );
-            }
-        }
-
-        {
-            let mut running = self.running.write().await;
-            *running = Some(RunningApp {
-                name: app_name.to_string(),
-                cancel_token: cancel_token.clone(),
-                generation,
-                invocation,
-            });
-        }
-
         // Auto-answer if requested
         if auto_answer {
-            self.handle
-                .send_command(CallCommand::Answer {
-                    leg_id: crate::call::domain::LegId::from("caller"),
-                })
-                .map_err(|e| AppRuntimeError::StartFailed(e.to_string()))?;
+            if let Err(e) = self.handle.send_command(CallCommand::Answer {
+                leg_id: crate::call::domain::LegId::from("caller"),
+            }) {
+                // The event loop below would never run against a dead
+                // channel — release the slot instead of wedging it.
+                self.rollback_reservation(generation).await;
+                return Err(AppRuntimeError::StartFailed(e.to_string()));
+            }
         }
 
         // Spawn the event loop

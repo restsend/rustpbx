@@ -33,7 +33,7 @@
 //!           └─ HoldMusic ◄───┘ (while waiting)
 //! ```
 
-use super::agent_registry::{AgentRegistry, PresenceState, RoutingStrategy};
+use super::agent_registry::{AgentRecord, AgentRegistry, PresenceState, RoutingStrategy};
 use super::{AppAction, ApplicationContext, CallApp, CallAppType, CallController, PlaybackToken};
 use crate::call::{
     DialStrategy, FailureAction, Location, QueueFallbackAction, QueueHoldConfig, QueuePlan,
@@ -54,25 +54,6 @@ use tracing::{debug, info, warn};
 // ===================================================================
 // Queue Configuration Extensions
 // ===================================================================
-
-/// No-answer action for CC queues (business policy; executed by CC addon).
-///
-/// Kept on [`QueueConfig`] so the executor can surface the configured action
-/// to hooks; selection of which action applies belongs to CC / ACD policy.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub enum NoAnswerAction {
-    /// Transfer to voicemail.
-    #[default]
-    Voicemail,
-    /// Hangup the call.
-    Hangup,
-    /// Create a callback task.
-    Callback,
-    /// Fallback to another skill group.
-    FallbackSkill,
-    /// Go back to IVR.
-    BackToIvr,
-}
 
 /// Extended queue configuration.
 ///
@@ -99,28 +80,14 @@ pub struct QueueConfig {
     pub skill_routing_enabled: bool,
     /// Required skills for this queue.
     pub required_skills: Vec<String>,
-    /// SLA threshold in seconds.
-    pub sla_threshold_secs: u64,
     /// Max wait time before fallback.
     pub max_wait_secs: u64,
     /// Enable queue position announcements.
     pub announce_position: bool,
     /// Retry interval for no-answer.
     pub retry_interval_secs: u64,
-    /// Max retry attempts.
-    pub max_retries: u32,
-    /// Enable autonomous routing (auto-assign agents).
-    pub autonomous_routing: bool,
     /// Routing strategy for agent selection.
     pub routing_strategy: RoutingStrategy,
-    /// No-answer action.
-    pub no_answer_action: NoAnswerAction,
-    /// Fallback skill group.
-    pub fallback_skill_group: Option<String>,
-    /// Enable SLA monitoring.
-    pub sla_monitoring: bool,
-    /// Enable metrics collection.
-    pub metrics_enabled: bool,
     /// Built-in voice prompts for queue events.
     pub voice_prompts: Option<VoicePrompts>,
     // ── Escalation ──
@@ -204,17 +171,10 @@ impl Default for QueueConfig {
             ring_timeout: Some(Duration::from_secs(30)),
             skill_routing_enabled: false,
             required_skills: Vec::new(),
-            sla_threshold_secs: 20,
             max_wait_secs: 7200,
             announce_position: false,
             retry_interval_secs: 5,
-            max_retries: 2,
-            autonomous_routing: false,
             routing_strategy: RoutingStrategy::LongestIdle,
-            no_answer_action: NoAnswerAction::Voicemail,
-            fallback_skill_group: None,
-            sla_monitoring: false,
-            metrics_enabled: false,
             voice_prompts: None,
             escalation_mode: EscalationMode::Replace,
             escalation_timeline: Vec::new(),
@@ -603,13 +563,27 @@ impl QueueApp {
     /// Resolve the registry agent_id behind a dialed URI (falls back to the
     /// URI user part).
     async fn agent_id_for_uri(&self, uri: &str) -> String {
-        if let Some(ref registry) = self.agent_registry {
-            let agents = registry.list_agents().await;
-            if let Some(a) = agents.iter().find(|a| a.uri == uri) {
-                return a.agent_id.clone();
-            }
+        if let Some(ref registry) = self.agent_registry
+            && let Some(a) = registry.find_agent_by_uri(uri).await
+        {
+            return a.agent_id.clone();
         }
         extract_sip_username(uri).unwrap_or_else(|| uri.to_string())
+    }
+
+    /// Report "no agents available" and run the busy-prompt/fallback
+    /// cascade. Answers first when a busy prompt is configured (it needs the
+    /// media path). Callers check wait retention BEFORE reaching this.
+    async fn report_no_agents_and_fallback(
+        &mut self,
+        ctrl: &mut CallController,
+        info: &'static crate::call_errors::CallErrInfo,
+        detail: serde_json::Value,
+    ) -> anyhow::Result<AppAction> {
+        ctrl.report_call_error("queue", info, Some(detail));
+        self.answer_if_busy_prompt(ctrl).await?;
+        self.play_unavailable_prompt_and_then_fallback(ctrl, AgentUnavailableReason::Busy)
+            .await
     }
 
     /// Release phantom agent states bound to THIS call (never-connected
@@ -756,12 +730,20 @@ impl QueueApp {
         );
         ctrl.cancel_timeout("queue_retry");
 
+        // Skip URIs the SIP stack cannot parse — dialing an empty Uri would
+        // only fail later with a confusing error.
         let locations: Vec<Location> = uris
             .iter()
-            .map(|uri| Location {
-                aor: uri.parse().unwrap_or_default(),
-                contact_raw: Some(uri.clone()),
-                ..Default::default()
+            .filter_map(|uri| match uri.parse::<rsipstack::sip::Uri>() {
+                Ok(aor) => Some(Location {
+                    aor,
+                    contact_raw: Some(uri.clone()),
+                    ..Default::default()
+                }),
+                Err(e) => {
+                    warn!(uri = %uri, error = %e, "Queue: skipping unparseable agent URI");
+                    None
+                }
             })
             .collect();
         self.dynamic_agents = Some(locations);
@@ -925,42 +907,42 @@ impl QueueApp {
         )
     }
 
+    /// Availability decision for a known agent record (pure — see
+    /// [`Self::agent_availability`] for the registry-resolving wrapper):
+    /// dialable when `Idle` with spare concurrency, or reserved FOR THIS
+    /// CALL (resolve-time reservation moves the primary agent Idle →
+    /// Ringing).
+    fn record_availability(agent: &AgentRecord, own_call_id: &str) -> bool {
+        if agent.has_capacity() && matches!(agent.presence, PresenceState::Idle) {
+            return true;
+        }
+        matches!(
+            &agent.presence,
+            PresenceState::Ringing {
+                call_id: Some(reserved_for),
+            } if reserved_for == own_call_id
+        )
+    }
+
     /// Check via the agent registry whether the agent behind `uri` can still
     /// receive this call. An agent is dialable when it is `Idle` with spare
     /// concurrency, or when it was reserved FOR THIS CALL (resolve-time
     /// reservation moves the primary agent `Idle → Ringing`). Returns `None`
     /// when availability cannot be determined (no registry attached, or the
     /// agent cannot be identified) so callers keep the legacy dial behavior.
+    /// Registry-resolving wrapper kept for tests: production dial paths use
+    /// the roster-snapshot + [`Self::record_availability`] combination.
+    #[cfg(test)]
     pub(crate) async fn agent_availability(
         registry: &dyn AgentRegistry,
         uri: &str,
         own_call_id: &str,
     ) -> Option<bool> {
-        let agents = registry.list_agents().await;
-        let agent_id = agents
-            .iter()
-            .find(|a| a.uri == uri)
-            .map(|a| a.agent_id.clone())
-            .or_else(|| extract_sip_username(uri))?;
-        let agent = registry.get_agent(&agent_id).await?;
-        // Schedulable = capacity AND actually Idle. The queue's sequential
-        // target list is a snapshot resolved at dispatch start; an agent that
-        // moved to Wrapup (no-answer cooldown / just finished), Away, Dnd or
-        // Offline since then must NOT be re-dialled from the stale list —
-        // presence changed, the resolve-time Idle filter no longer holds.
-        // (Ringing reserved for OUR call = our own in-flight reservation.)
-        if agent.has_capacity() && matches!(agent.presence, PresenceState::Idle) {
-            return Some(true);
-        }
-        if matches!(
-            &agent.presence,
-            PresenceState::Ringing {
-                call_id: Some(reserved_for),
-            } if reserved_for == own_call_id
-        ) {
-            return Some(true);
-        }
-        Some(false)
+        let agent = match registry.find_agent_by_uri(uri).await {
+            Some(agent) => agent,
+            None => registry.get_agent(&extract_sip_username(uri)?).await?,
+        };
+        Some(Self::record_availability(&agent, own_call_id))
     }
 
     /// Resolve agents dynamically if agent registry is available.
@@ -971,12 +953,20 @@ impl QueueApp {
 
             let agents = registry.find_available_agents(skills).await;
             if !agents.is_empty() {
+                // Skip URIs the SIP stack cannot parse — dialing an empty Uri
+                // would only fail later with a confusing error.
                 let locations: Vec<Location> = agents
                     .into_iter()
-                    .map(|agent| Location {
-                        aor: agent.uri.parse().unwrap_or_default(),
-                        contact_raw: Some(agent.uri),
-                        ..Default::default()
+                    .filter_map(|agent| match agent.uri.parse::<rsipstack::sip::Uri>() {
+                        Ok(aor) => Some(Location {
+                            aor,
+                            contact_raw: Some(agent.uri),
+                            ..Default::default()
+                        }),
+                        Err(e) => {
+                            warn!(agent_id = %agent.agent_id, error = %e, "Queue: skipping agent with unparseable URI");
+                            None
+                        }
                     })
                     .collect();
 
@@ -1288,11 +1278,18 @@ impl QueueApp {
             );
             return Ok(AppAction::Continue);
         }
+        // One registry scan per dial round: the availability skip-loop and
+        // the attempted-agent attribution below both resolve against this
+        // roster snapshot (each used to re-fetch the full agent list).
+        let roster = match self.agent_registry.as_ref() {
+            Some(registry) => Some(registry.list_agents().await),
+            None => None,
+        };
         // Skip agents that became unavailable since this queue's target list
         // was resolved (e.g. reserved by or busy on another concurrent call)
         // so sequential fallback never INVITEs an agent already on a call.
         // Without a registry (static agent lists) keep the legacy behavior.
-        if let Some(ref registry) = self.agent_registry {
+        if let Some(roster) = roster.as_ref() {
             loop {
                 let Some(next_uri) = self
                     .get_agents()
@@ -1301,10 +1298,12 @@ impl QueueApp {
                 else {
                     break;
                 };
-                if matches!(
-                    Self::agent_availability(registry.as_ref(), &next_uri, &self.call_id).await,
-                    Some(false)
-                ) {
+                // Unknown to the registry → legacy dial behavior (never skip).
+                let skip = match roster.iter().find(|a| a.uri == next_uri) {
+                    Some(record) => !Self::record_availability(record, &self.call_id),
+                    None => false,
+                };
+                if skip {
                     info!(agent = %next_uri, "Queue: skipping agent (no longer available)");
                     self.current_agent_idx += 1;
                     self.dial_attempts += 1;
@@ -1346,7 +1345,11 @@ impl QueueApp {
             "Queue: dialing next agent {} (idx={})",
             uri, self.current_agent_idx
         );
-        let attempt_agent_id = self.agent_id_for_uri(&uri).await;
+        let attempt_agent_id = roster
+            .as_ref()
+            .and_then(|r| r.iter().find(|a| a.uri == uri))
+            .map(|a| a.agent_id.clone())
+            .unwrap_or_else(|| extract_sip_username(&uri).unwrap_or_else(|| uri.clone()));
         self.record_attempted_agent(attempt_agent_id.clone());
         // In sequential mode only one agent rings at a time; clear stale
         // entries so the ring-timeout handler sees the correct agent.
@@ -1467,9 +1470,23 @@ impl QueueApp {
         }
         let wait_secs = self.stage_wait_secs();
 
-        for step in self.config.escalation_timeline.clone() {
-            if wait_secs >= step.threshold_secs
-                && !self.escalated_groups.contains(&step.add_skill_group)
+        // Snapshot only the steps TRIGGERING this tick (usually none) — the
+        // loop body needs `&mut self`, and cloning the whole timeline on
+        // every 1-10s timer fire was pure waste.
+        let triggered_steps: Vec<EscalationStep> = self
+            .config
+            .escalation_timeline
+            .iter()
+            .filter(|step| {
+                wait_secs >= step.threshold_secs
+                    && !self.escalated_groups.contains(&step.add_skill_group)
+            })
+            .cloned()
+            .collect();
+        // Only the FIRST triggering step escalates per check (legacy
+        // single-escalation-per-tick behavior); the rest wait for the next
+        // timer fire.
+        if let Some(step) = triggered_steps.first() {
             {
                 info!(
                     queue = %self.config.name,
@@ -1599,7 +1616,6 @@ impl QueueApp {
                 }
 
                 self.escalated_groups.push(step.add_skill_group.clone());
-                break; // Only trigger one escalation step per check
             }
         }
 
@@ -1862,15 +1878,12 @@ impl CallApp for QueueApp {
             if self.allows_wait_retention() {
                 return self.enter_waiting_for_agent(ctrl).await;
             }
-            ctrl.report_call_error(
-                "queue",
-                &crate::proxy::proxy_call::error_catalog::QUEUE_NO_AGENTS,
-                Some(serde_json::json!({ "queue": self.config.name })),
-            );
-            // Answer first if we need to play a busy prompt (needs media path)
-            self.answer_if_busy_prompt(ctrl).await?;
             return self
-                .play_unavailable_prompt_and_then_fallback(ctrl, AgentUnavailableReason::Busy)
+                .report_no_agents_and_fallback(
+                    ctrl,
+                    &crate::proxy::proxy_call::error_catalog::QUEUE_NO_AGENTS,
+                    serde_json::json!({ "queue": self.config.name }),
+                )
                 .await;
         }
 
@@ -1894,100 +1907,25 @@ impl CallApp for QueueApp {
             self.arm_max_wait_timeout(ctrl);
         }
 
-        // Start dialing agents if autonomous routing is enabled
-        if self.config.autonomous_routing
-            && let Some(ref registry) = self.agent_registry
-        {
-            let skills = &self.config.required_skills;
-            let strategy = self.config.routing_strategy;
-
-            if let Some(agent) = registry
-                .select_agent_with_policy(skills, strategy, None, &self.call_id)
-                .await
-            {
-                info!(agent_id = %agent.agent_id, uri = %agent.uri, "Queue: auto-selecting agent");
-
-                // Update agent presence to ringing
-                let _ = registry
-                    .update_presence(
-                        &agent.agent_id,
-                        PresenceState::Ringing {
-                            call_id: Some(self.call_id.clone()),
-                        },
-                    )
-                    .await;
-
-                // Originate call to agent
-                let call_id = ctrl
-                    .originate_call(&agent.uri, Some(self.call_id.clone()))
-                    .await?;
-
-                self.record_attempted_agent(agent.agent_id.clone());
-                self.pending_agents.push((agent.uri.clone(), call_id));
-
-                self.maybe_start_transfer_prompt(ctrl).await?;
-
-                // Notify external systems
-                ctrl.notify_event(
-                    "queue.agent_ringing",
-                    serde_json::json!({
-                        "call_id": self.call_id,
-                        "agent_id": agent.agent_id,
-                        "agent_uri": agent.uri,
-                        "queue_id": queue_id,
-                    }),
-                )
-                .await?;
-
-                // Emit RWI queue lifecycle event: an agent is being offered.
-                self.emit_rwi(&crate::rwi::event::QueueAgentOffered {
-                    call_id: self.call_id.clone(),
-                    queue_id: queue_id.clone(),
-                    agent_id: agent.agent_id.clone(),
-                });
-
-                self.state = QueueState::DialingAgents { attempt: 1 };
-                self.dial_attempts = 1;
-
-                // Set timeout for agent answer
-                self.arm_ring_timeout(ctrl);
-
-                return Ok(AppAction::Continue);
-            } else if self.allows_wait_retention() {
-                warn!("Queue: no available agents for skill routing — wait retention");
-                return self.enter_waiting_for_agent(ctrl).await;
-            } else {
-                ctrl.report_call_error(
-                    "queue",
-                    &crate::proxy::proxy_call::error_catalog::QUEUE_NO_AGENTS_SKILL,
-                    Some(serde_json::json!({
-                        "queue": self.config.name,
-                        "skills": self.config.required_skills,
-                    })),
-                );
-                // Answer first if we need to play a busy prompt (needs media path)
-                self.answer_if_busy_prompt(ctrl).await?;
-                return self
-                    .play_unavailable_prompt_and_then_fallback(ctrl, AgentUnavailableReason::Busy)
-                    .await;
-            }
-        }
-
         // Parallel mode: originate calls to ALL static agents concurrently.
         // When the first agent answers via agent_connected event, the rest
         // are cancelled via remove_legs.
         if self.is_parallel() {
             let mut agents: Vec<&Location> = self.get_agents();
             // Filter out agents that are no longer available (reserved by or
-            // busy on another concurrent call) when a registry is attached.
+            // busy on another concurrent call) when a registry is attached —
+            // resolved against a single roster snapshot.
             if let Some(ref registry) = self.agent_registry {
+                let roster = registry.list_agents().await;
                 let mut filtered = Vec::with_capacity(agents.len());
                 for agent in agents {
                     let uri = agent.aor.to_string();
-                    if matches!(
-                        Self::agent_availability(registry.as_ref(), &uri, &self.call_id).await,
-                        Some(false)
-                    ) {
+                    // Unknown to the registry → legacy dial behavior (keep).
+                    let available = match roster.iter().find(|a| a.uri == uri) {
+                        Some(record) => Self::record_availability(record, &self.call_id),
+                        None => true,
+                    };
+                    if !available {
                         info!(agent = %uri, "Queue: parallel dial skips unavailable agent");
                         continue;
                     }
@@ -2000,17 +1938,15 @@ impl CallApp for QueueApp {
                     warn!("Queue: no available parallel agents — wait retention");
                     return self.enter_waiting_for_agent(ctrl).await;
                 }
-                ctrl.report_call_error(
-                    "queue",
-                    &crate::proxy::proxy_call::error_catalog::QUEUE_NO_AGENTS,
-                    Some(serde_json::json!({
-                        "queue": self.config.name,
-                        "mode": "parallel",
-                    })),
-                );
-                self.answer_if_busy_prompt(ctrl).await?;
                 return self
-                    .play_unavailable_prompt_and_then_fallback(ctrl, AgentUnavailableReason::Busy)
+                    .report_no_agents_and_fallback(
+                        ctrl,
+                        &crate::proxy::proxy_call::error_catalog::QUEUE_NO_AGENTS,
+                        serde_json::json!({
+                            "queue": self.config.name,
+                            "mode": "parallel",
+                        }),
+                    )
                     .await;
             }
             if !agents.is_empty() {

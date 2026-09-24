@@ -10,9 +10,6 @@ use std::collections::HashMap;
 
 pub const URI_PREFIX: &str = "builtin://";
 
-/// Session var: JSON params for the next `csat_survey` `start_app` (set by CC hook).
-pub const CSAT_PARAMS_KEY: &str = "_csat_survey_params";
-
 /// Return `Some(name)` when `file` is a built-in URI (`builtin://post_call_csat`).
 pub fn parse_uri(file: &str) -> Option<&str> {
     file.strip_prefix(URI_PREFIX).filter(|s| !s.is_empty())

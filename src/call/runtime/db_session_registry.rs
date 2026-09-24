@@ -19,10 +19,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use sea_orm::sea_query::{Expr, OnConflict};
-use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set,
-};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect, Set};
+#[cfg(test)]
+use sea_orm::{PaginatorTrait, QueryOrder};
 use tokio::task::JoinHandle;
 
 use super::{RegistryError, SessionInfo, SessionRegistry, SessionRegistryRef};
@@ -194,28 +193,38 @@ impl SessionRegistry for DbSessionRegistry {
     }
 
     async fn lookup_owner(&self, call_id: &str) -> Option<String> {
-        Entity::find()
+        match Entity::find()
             .select_only()
             .column(Column::NodeId)
             .filter(Column::CallId.eq(call_id))
             .into_tuple::<(String,)>()
             .one(&self.db)
             .await
-            .ok()
-            .flatten()
-            .map(|(node_id,)| node_id)
+        {
+            Ok(row) => row.map(|(node_id,)| node_id),
+            // A DB outage must be distinguishable from "not found" — surface
+            // it loudly instead of silently reporting no owner.
+            Err(e) => {
+                tracing::error!(call_id, error = %e, "session registry lookup_owner failed");
+                None
+            }
+        }
     }
 
     async fn lookup(&self, call_id: &str) -> Option<SessionInfo> {
-        Entity::find_by_id(call_id)
-            .one(&self.db)
-            .await
-            .ok()
-            .flatten()
-            .map(from_model)
+        match Entity::find_by_id(call_id).one(&self.db).await {
+            Ok(row) => row.map(from_model),
+            Err(e) => {
+                tracing::error!(call_id, error = %e, "session registry lookup failed");
+                None
+            }
+        }
     }
+}
 
-    async fn list_all(&self, limit: usize) -> Vec<SessionInfo> {
+#[cfg(test)]
+impl DbSessionRegistry {
+    pub(crate) async fn list_all(&self, limit: usize) -> Vec<SessionInfo> {
         Entity::find()
             .order_by_desc(Column::StartedAt)
             .limit(limit as u64)
@@ -227,7 +236,7 @@ impl SessionRegistry for DbSessionRegistry {
             .collect()
     }
 
-    async fn list_by_node(&self, node_id: &str) -> Vec<String> {
+    pub(crate) async fn list_by_node(&self, node_id: &str) -> Vec<String> {
         Entity::find()
             .select_only()
             .column(Column::CallId)
@@ -241,11 +250,11 @@ impl SessionRegistry for DbSessionRegistry {
             .collect()
     }
 
-    async fn active_count(&self) -> usize {
+    pub(crate) async fn active_count(&self) -> usize {
         Entity::find().count(&self.db).await.unwrap_or(0) as usize
     }
 
-    async fn health_check(&self) -> Result<(), RegistryError> {
+    pub(crate) async fn health_check(&self) -> Result<(), RegistryError> {
         self.db
             .ping()
             .await

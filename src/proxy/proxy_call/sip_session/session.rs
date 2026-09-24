@@ -294,14 +294,11 @@ impl SipSession {
             None => return Ok((location.clone(), None)),
         };
         let contact = self
-            .context
-            .dialplan
-            .caller_contact
-            .as_ref()
-            .map(|c| c.uri.clone())
-            .or_else(|| self.server.contact_uri_for_location_with_sip_contact(
-                location, self.context.dialplan.media.sip_contact.as_ref(),
-            ))
+            .server
+            .contact_uri_for_location_with_sip_contact(
+                location,
+                self.context.dialplan.media.sip_contact.as_ref(),
+            )
             .unwrap_or_else(|| caller.clone());
         // Carry original caller headers (X-CRM-*, X-CC-*, etc.) so header-based
         // match/rewrite rules behave like the inbound path.
@@ -3284,17 +3281,11 @@ impl SipSession {
         let content_type = offer.as_ref().map(|_| "application/sdp".to_string());
 
         let contact_uri = self
-            .context
-            .dialplan
-            .caller_contact
-            .as_ref()
-            .map(|c| c.uri.clone())
-            .or_else(|| {
-                self.server.contact_uri_for_location_with_sip_contact(
-                    target,
-                    self.context.dialplan.media.sip_contact.as_ref(),
-                )
-            })
+            .server
+            .contact_uri_for_location_with_sip_contact(
+                target,
+                self.context.dialplan.media.sip_contact.as_ref(),
+            )
             .unwrap_or_else(|| caller.clone());
 
         let callee_call_id = self.context.dialplan.call_id.clone().unwrap_or_else(|| {
@@ -9209,7 +9200,10 @@ impl SipSession {
         match capability_check {
             MediaCapabilityCheck::Denied { reason } => {
                 warn!(session_id = %self.id, reason = %reason, "Media capability denied");
-                return CommandResult::success();
+                return CommandResult::failure_with_kind(
+                    format!("media capability denied: {reason}"),
+                    CommandFailureKind::MediaDenied,
+                );
             }
             MediaCapabilityCheck::Degraded { reason } => {
                 warn!(session_id = %self.id, reason = %reason, "Executing in degraded mode");
@@ -9235,8 +9229,7 @@ impl SipSession {
     }
 
     fn check_capability(&self, command: &CallCommand) -> MediaCapabilityCheck {
-        let ctx = ExecutionContext::new(&self.id.0).with_media_profile(self.media_profile.clone());
-        ctx.check_media_capability(command)
+        crate::call::runtime::check_media_capability(&self.media_profile, command)
     }
 
     async fn process_command(
@@ -9581,6 +9574,7 @@ impl SipSession {
                         message: None,
                         affected_leg: None,
                         data: Some(serde_json::json!({ "unique_id": unique_id })),
+                        failure_kind: None,
                     },
                     Err(e) => CommandResult::failure(e.to_string()),
                 }
@@ -11399,14 +11393,11 @@ impl SipSession {
             .or_else(|| self.context.dialplan.caller.clone())
             .unwrap_or_else(|| callee_uri.clone());
         let contact = self
-            .context
-            .dialplan
-            .caller_contact
-            .as_ref()
-            .map(|c| c.uri.clone())
-            .or_else(|| self.server.contact_uri_for_location_with_sip_contact(
-                &location, self.context.dialplan.media.sip_contact.as_ref(),
-            ))
+            .server
+            .contact_uri_for_location_with_sip_contact(
+                &location,
+                self.context.dialplan.media.sip_contact.as_ref(),
+            )
             .unwrap_or_else(|| caller.clone());
 
         // A reused logical leg (e.g. consult after rejection) is a new SIP call.
@@ -11631,36 +11622,6 @@ impl SipSession {
         if self.bridge.active {
             self.clear_bridge().await;
         }
-    }
-
-}
-
-/// Bridges a session's legs into a multi-party conference. Delegates the
-/// per-leg audio wiring to the session's existing media-bridge glue and lets
-/// [`crate::call::runtime::ConferenceServer`] own the participant lifecycle.
-#[async_trait::async_trait]
-impl crate::call::runtime::LegMediaBridger for SipSession {
-    async fn bridge_into(&mut self, conf_id: &str, leg_id: &LegId) -> Result<()> {
-        self.try_start_and_store_bridge(conf_id, leg_id, "automatic conference bridge")
-            .await
-    }
-
-    async fn unbridge(&mut self, conf_id: &str, leg_id: &LegId) -> Result<()> {
-        let prefix = format!("{}-", self.id);
-        let local_leg = LegId::from(
-            leg_id
-                .as_str()
-                .strip_prefix(&prefix)
-                .unwrap_or(leg_id.as_str()),
-        );
-        drop(self.legs.remove_conference_bridge_handle(&local_leg));
-        let _ = self
-            .server
-            .conference_server
-            .leave_conference(conf_id, &self.participant_leg(&local_leg))
-            .await;
-
-        Ok(())
     }
 }
 

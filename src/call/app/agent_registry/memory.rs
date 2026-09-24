@@ -1,14 +1,12 @@
 //! Memory Registry - In-memory agent registry implementation
 //!
-//! Suitable for:
-//! - Single-node deployments
-//! - Testing and development
-//! - Scenarios where persistence is not required
+//! Test stub: the production registry is the CC addon's
+//! `CcAgentRegistryAdapter`. This backend exists so queue/registry tests can
+//! run without an addon or database.
 
 use super::{AgentRecord, AgentRegistry, PresenceState, RoutingStrategy, select_best_agent};
 use async_trait::async_trait;
 use dashmap::DashMap;
-use std::collections::HashMap;
 use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::info;
@@ -64,7 +62,6 @@ impl AgentRegistry for MemoryRegistry {
             total_calls_handled: 0,
             total_talk_time_secs: 0,
             last_call_end: None,
-            custom_data: HashMap::new(),
         };
 
         self.agents.insert(agent_id.clone(), record.clone());
@@ -110,44 +107,6 @@ impl AgentRegistry for MemoryRegistry {
             new = %agent.presence.as_str(),
             "Presence updated in memory"
         );
-
-        drop(agent);
-
-        Ok(())
-    }
-
-    async fn start_call(&self, agent_id: &str) -> anyhow::Result<()> {
-        let mut agent = self
-            .agents
-            .get_mut(agent_id)
-            .ok_or_else(|| anyhow::anyhow!("Agent {} not found", agent_id))?;
-
-        agent.current_calls += 1;
-        agent.presence = PresenceState::Busy { call_id: None };
-        agent.last_state_change = Instant::now();
-
-        drop(agent);
-
-        Ok(())
-    }
-
-    async fn end_call(&self, agent_id: &str, talk_time_secs: u64) -> anyhow::Result<()> {
-        let mut agent = self
-            .agents
-            .get_mut(agent_id)
-            .ok_or_else(|| anyhow::anyhow!("Agent {} not found", agent_id))?;
-
-        if agent.current_calls > 0 {
-            agent.current_calls -= 1;
-        }
-        agent.total_calls_handled += 1;
-        agent.total_talk_time_secs += talk_time_secs;
-        agent.last_call_end = Some(Instant::now());
-
-        // Auto-transition to Available if no more calls
-        if agent.current_calls == 0 {
-            agent.presence = PresenceState::Wrapup { call_id: None };
-        }
 
         drop(agent);
 

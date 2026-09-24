@@ -45,33 +45,6 @@ pub struct AppInvocationContext {
     pub variables: HashMap<String, String>,
 }
 
-pub struct AppSharedState {
-    /// Arbitrary typed data, keyed by string.
-    ///
-    /// Use this to share state between addons (e.g., conference rooms, queue stats).
-    pub custom_data: Arc<DashMap<String, Box<dyn std::any::Any + Send + Sync>>>,
-}
-
-impl AppSharedState {
-    pub fn new() -> Self {
-        Self {
-            custom_data: Arc::new(DashMap::new()),
-        }
-    }
-}
-
-impl Default for AppSharedState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Debug for AppSharedState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AppSharedState").finish()
-    }
-}
-
 /// The application context, providing access to shared resources.
 ///
 /// Passed (by reference) to every [`CallApp`] event handler. Contains the database
@@ -496,13 +469,6 @@ mod tests {
         let json = serde_json::to_string(&info).unwrap();
         assert!(json.contains("test-session-1"));
         assert!(json.contains("alice"));
-    }
-
-    #[test]
-    fn test_shared_state_default() {
-        let state = AppSharedState::default();
-        let debug = format!("{:?}", state);
-        assert!(debug.contains("AppSharedState"));
     }
 
     #[tokio::test]

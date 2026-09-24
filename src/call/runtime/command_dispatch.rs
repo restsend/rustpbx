@@ -21,7 +21,7 @@
 use crate::call::adapters::console_to_call_command;
 use crate::call::adapters::rwi_to_call_command;
 use crate::call::domain::CallCommand;
-use crate::call::runtime::CommandResult;
+use crate::call::runtime::{CommandFailureKind, CommandResult};
 #[cfg(feature = "console")]
 use crate::console::handlers::call_control::CallCommandPayload;
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
@@ -41,12 +41,13 @@ pub fn dispatch_rwi_command(
     let command = match rwi_to_call_command(payload, session_id) {
         Ok(cmd) => cmd,
         Err(e) => {
-            // Some RWI commands are not convertible to CallCommand (session management, etc.)
-            // Return a special result indicating the command should be handled by legacy path
-            return Ok(CommandResult::failure(format!(
-                "command not supported by unified path: {}",
-                e
-            )));
+            // Some RWI commands are not convertible to CallCommand (session
+            // management, etc.) — flagged so the caller falls back to its
+            // legacy handler instead of reporting an error.
+            return Ok(CommandResult::failure_with_kind(
+                format!("command not supported by unified path: {}", e),
+                CommandFailureKind::NotSupported,
+            ));
         }
     };
 
@@ -71,15 +72,18 @@ fn dispatch_command(
     command: CallCommand,
 ) -> anyhow::Result<CommandResult> {
     let Some(handle) = registry.get_handle(session_id) else {
-        return Ok(CommandResult::failure(format!(
-            "session {} not found",
-            session_id
-        )));
+        return Ok(CommandResult::failure_with_kind(
+            format!("session {session_id} not found"),
+            CommandFailureKind::SessionNotFound,
+        ));
     };
 
     // Send the command to the session's event loop
     match handle.send_command(command) {
         Ok(_) => Ok(CommandResult::success()),
-        Err(e) => Ok(CommandResult::failure(format!("failed to dispatch: {}", e))),
+        Err(e) => Ok(CommandResult::failure_with_kind(
+            format!("failed to dispatch: {}", e),
+            CommandFailureKind::DispatchFailed,
+        )),
     }
 }

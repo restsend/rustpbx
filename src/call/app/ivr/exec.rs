@@ -120,21 +120,6 @@ pub async fn prepare_start_app(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("app factory not available for start_app"))?;
 
-    let mut params = params;
-    if app == "csat_survey" {
-        let needs_merge = params
-            .as_ref()
-            .map(|p| p.is_null() || p.as_object().is_some_and(|o| o.is_empty()))
-            .unwrap_or(true);
-        if needs_merge {
-            if let Some(raw) = ctx.get_var(super::builtin::CSAT_PARAMS_KEY) {
-                if let Ok(merged) = serde_json::from_str::<serde_json::Value>(&raw) {
-                    params = Some(merged);
-                }
-            }
-        }
-    }
-
     match factory.create_app(app, params, ctx).await {
         Ok(Some(sub_app)) => Ok(sub_app),
         Ok(None) => anyhow::bail!("unknown application: {app}"),

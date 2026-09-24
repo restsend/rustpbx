@@ -29,7 +29,6 @@ pub mod cookie;
 pub mod cps_limiter;
 pub mod domain;
 pub mod policy;
-pub mod queue_config;
 pub mod realtime;
 pub mod runtime;
 pub mod session_id;
@@ -43,22 +42,6 @@ pub use cookie::{
 };
 pub use user::SipUser;
 
-pub struct RouteContext<'a> {
-    pub caller: rsipstack::sip::Uri,
-    pub callee: rsipstack::sip::Uri,
-    pub original_request: &'a rsipstack::sip::Request,
-    pub captures: &'a std::collections::HashMap<String, Vec<String>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CallFailureType {
-    NoAnswer,
-    Busy,
-    Declined,
-    Offline,
-    Timeout,
-}
-
 /// Default hold audio that ships with config/sounds, relocated in Dockerfile to /app/sounds.
 pub const DEFAULT_QUEUE_HOLD_AUDIO: &str = "sounds/phone-calling.wav";
 /// Default prompt played when a queue cannot find an available agent.
@@ -67,16 +50,10 @@ pub const DEFAULT_QUEUE_FAILURE_AUDIO: &str = "sounds/unavailable-phone.wav";
 // --- Built-in voice prompts for queue events ---
 
 pub const DEFAULT_QUEUE_TRANSFER_PROMPT_ZH: &str = "sounds/queue-transfer-zh.wav";
-pub const DEFAULT_QUEUE_TRANSFER_PROMPT_EN: &str = "sounds/queue-transfer-en.wav";
 pub const DEFAULT_QUEUE_BUSY_PROMPT_ZH: &str = "sounds/queue-busy-zh.wav";
-pub const DEFAULT_QUEUE_BUSY_PROMPT_EN: &str = "sounds/queue-busy-en.wav";
-pub const DEFAULT_QUEUE_OFF_HOURS_PROMPT_ZH: &str = "sounds/queue-off-hours-zh.wav";
-pub const DEFAULT_QUEUE_OFF_HOURS_PROMPT_EN: &str = "sounds/queue-off-hours-en.wav";
 pub const DEFAULT_QUEUE_NO_ANSWER_PROMPT_ZH: &str = "sounds/queue-no-answer-zh.wav";
-pub const DEFAULT_QUEUE_NO_ANSWER_PROMPT_EN: &str = "sounds/queue-no-answer-en.wav";
-/// Played to the caller only, right after the agent connects.
+
 pub const DEFAULT_QUEUE_SERVICE_PROMPT_ZH: &str = "sounds/queue-service-zh.wav";
-pub const DEFAULT_QUEUE_SERVICE_PROMPT_EN: &str = "sounds/queue-service-en.wav";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VoicePrompts {
@@ -121,12 +98,12 @@ fn default_comfort_interval() -> u32 {
 }
 
 impl VoicePrompts {
-    pub fn zh() -> Self {
+    fn for_lang(suffix: &str) -> Self {
         Self {
-            transfer_prompt: Some(DEFAULT_QUEUE_TRANSFER_PROMPT_ZH.to_string()),
-            busy_prompt: Some(DEFAULT_QUEUE_BUSY_PROMPT_ZH.to_string()),
-            off_hours_prompt: Some(DEFAULT_QUEUE_OFF_HOURS_PROMPT_ZH.to_string()),
-            no_answer_prompt: Some(DEFAULT_QUEUE_NO_ANSWER_PROMPT_ZH.to_string()),
+            transfer_prompt: Some(format!("sounds/queue-transfer-{suffix}.wav")),
+            busy_prompt: Some(format!("sounds/queue-busy-{suffix}.wav")),
+            off_hours_prompt: Some(format!("sounds/queue-off-hours-{suffix}.wav")),
+            no_answer_prompt: Some(format!("sounds/queue-no-answer-{suffix}.wav")),
             position_prompt: None,
             final_destination_prompt: None,
             comfort_prompts: Vec::new(),
@@ -134,17 +111,12 @@ impl VoicePrompts {
         }
     }
 
+    pub fn zh() -> Self {
+        Self::for_lang("zh")
+    }
+
     pub fn en() -> Self {
-        Self {
-            transfer_prompt: Some(DEFAULT_QUEUE_TRANSFER_PROMPT_EN.to_string()),
-            busy_prompt: Some(DEFAULT_QUEUE_BUSY_PROMPT_EN.to_string()),
-            off_hours_prompt: Some(DEFAULT_QUEUE_OFF_HOURS_PROMPT_EN.to_string()),
-            no_answer_prompt: Some(DEFAULT_QUEUE_NO_ANSWER_PROMPT_EN.to_string()),
-            position_prompt: None,
-            final_destination_prompt: None,
-            comfort_prompts: Vec::new(),
-            service_prompt: None,
-        }
+        Self::for_lang("en")
     }
 }
 
@@ -182,8 +154,12 @@ pub struct Location {
 impl std::fmt::Display for Location {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let is_webrtc = if self.supports_webrtc { ",webrtc" } else { "" };
-        let fallback = self.aor.to_string();
-        let contact = self.contact_raw.as_deref().unwrap_or(fallback.as_str());
+        // Fall back to the AOR only when no raw contact is present — avoid
+        // materializing the string on every log line otherwise.
+        let contact: std::borrow::Cow<'_, str> = match self.contact_raw.as_deref() {
+            Some(raw) => std::borrow::Cow::Borrowed(raw),
+            None => std::borrow::Cow::Owned(self.aor.to_string()),
+        };
         let home = self
             .home_proxy
             .as_ref()
@@ -560,10 +536,6 @@ impl Default for QueuePlan {
 }
 
 impl QueuePlan {
-    pub fn dial_strategy(&self) -> Option<&DialStrategy> {
-        self.dial_strategy.as_ref()
-    }
-
     /// Display id for queue lifecycle events (`queue_joined`, `queue_left`,
     /// ...) — the label when present, otherwise the queue name. MUST stay in
     /// sync with the `QueueConfig::name` the queue app factory builds from
@@ -572,15 +544,6 @@ impl QueuePlan {
         self.label
             .clone()
             .unwrap_or_else(|| self.queue_name.clone())
-    }
-
-    pub fn passthrough_ringback(&self) -> bool {
-        self.passthrough_ringback
-    }
-
-    pub fn with_label(mut self, label: impl Into<String>) -> Self {
-        self.label = Some(label.into());
-        self
     }
 
     /// Build a single-target plan from `StartApp("queue", params)` app params.
@@ -674,13 +637,6 @@ impl DialplanFlow {
         }
     }
 
-    pub fn get_queue_plan_recursive(&self) -> Option<QueuePlan> {
-        match self {
-            DialplanFlow::Queue { plan, .. } => Some(plan.clone()),
-            _ => None,
-        }
-    }
-
     fn all_webrtc_target(&self) -> bool {
         match self {
             DialplanFlow::Targets(strategy) => match strategy {
@@ -712,32 +668,6 @@ impl DialplanFlow {
             },
             DialplanFlow::Queue { next, .. } => next.find_targets(),
             DialplanFlow::Application { .. } => None,
-        }
-    }
-
-    fn is_parallel(&self) -> bool {
-        match self {
-            DialplanFlow::Targets(DialStrategy::Parallel(_)) => true,
-            DialplanFlow::Queue { next, .. } => next.is_parallel(),
-            _ => false,
-        }
-    }
-
-    fn has_queue(&self) -> bool {
-        matches!(self, DialplanFlow::Queue { .. })
-    }
-
-    fn has_queue_hold_audio(&self) -> bool {
-        match self {
-            DialplanFlow::Queue { plan, next } => {
-                let hold_audio = plan
-                    .hold
-                    .as_ref()
-                    .and_then(|hold| hold.audio_file.as_ref())
-                    .is_some();
-                hold_audio || next.has_queue_hold_audio()
-            }
-            _ => false,
         }
     }
 }
@@ -780,15 +710,6 @@ impl CallRecordingConfig {
 
     pub fn uses_file_media(&self) -> bool {
         self.recording_type.is_file_media()
-    }
-
-    pub fn uses_sipflow_media(&self) -> bool {
-        self.recording_type == RecordingType::Sipflow
-    }
-
-    pub fn enabled(mut self) -> Self {
-        self.enabled = true;
-        self
     }
 
     pub fn with_config(mut self, config: RecorderOption) -> Self {
@@ -1028,7 +949,6 @@ pub struct Dialplan {
     /// outgoing leg. Plain P2P extension dialling keeps this `false` — no
     /// Session-ID is generated or injected (legacy behaviour).
     pub session_id_enabled: bool,
-    pub caller_contact: Option<rsipstack::sip::typed::Contact>,
     pub caller_display_name: Option<String>,
     pub caller: Option<rsipstack::sip::Uri>,
     pub flow: DialplanFlow,
@@ -1141,7 +1061,6 @@ impl Dialplan {
             original: Arc::new(original),
             caller_display_name: None,
             caller: None,
-            caller_contact: None,
             flow: DialplanFlow::Targets(DialStrategy::Sequential(vec![])),
             max_ring_time: None,
             recording: CallRecordingConfig::default(),
@@ -1217,17 +1136,6 @@ impl Dialplan {
         self
     }
 
-    /// Set RTP timeout per direction
-    pub fn with_rtp_timeout(mut self, timeout: Duration) -> Self {
-        self.rtp_timeout = Some(timeout);
-        self
-    }
-
-    /// Set max ring time. `None` (or `Duration::ZERO`) disables the timeout.
-    pub fn with_max_ring_time(mut self, duration: Duration) -> Self {
-        self.max_ring_time = (!duration.is_zero()).then_some(duration);
-        self
-    }
     pub fn with_route_invite(mut self, route: Box<dyn RouteInvite>) -> Self {
         self.route_invite = Some(route);
         self
@@ -1261,11 +1169,6 @@ impl Dialplan {
         self
     }
 
-    pub fn with_audio_profile(mut self, profile: crate::proxy::routing::RingbackAudio) -> Self {
-        self.audio_profile = Some(profile);
-        self
-    }
-
     pub fn with_queue(mut self, queue: QueuePlan) -> Self {
         let current = std::mem::replace(
             &mut self.flow,
@@ -1275,11 +1178,6 @@ impl Dialplan {
             plan: queue,
             next: Box::new(current),
         };
-        self
-    }
-
-    pub fn with_caller_contact(mut self, contact: rsipstack::sip::typed::Contact) -> Self {
-        self.caller_contact = Some(contact);
         self
     }
 
@@ -1295,24 +1193,6 @@ impl Dialplan {
 
     pub fn first_target(&self) -> Option<&Location> {
         self.get_all_targets().and_then(|targets| targets.first())
-    }
-
-    /// Check if using parallel dialing strategy
-    pub fn is_parallel_strategy(&self) -> bool {
-        self.flow.is_parallel()
-    }
-
-    pub fn has_queue(&self) -> bool {
-        self.flow.has_queue()
-    }
-
-    pub fn has_queue_hold_audio(&self) -> bool {
-        self.flow.has_queue_hold_audio()
-    }
-
-    /// Check if recording is enabled
-    pub fn is_recording_enabled(&self) -> bool {
-        self.recording.enabled
     }
 
     fn set_terminal_flow(&mut self, new_terminal: DialplanFlow) {
@@ -1346,28 +1226,31 @@ impl Dialplan {
             | Header::Supported(_)
             | Header::RecordRoute(_) => false,
             Header::Other(name, _) => {
-                let lower = name.to_ascii_lowercase();
-                !matches!(
-                    lower.as_str(),
-                    "via"
-                        | "from"
-                        | "to"
-                        | "contact"
-                        | "call-id"
-                        | "cseq"
-                        | "max-forwards"
-                        | "content-length"
-                        | "content-type"
-                        | "route"
-                        | "record-route"
-                        | "authorization"
-                        | "proxy-authorization"
-                        | "proxy-authenticate"
-                        | "www-authenticate"
-                        | "user-agent"
-                        | "allow"
-                        | "supported"
-                )
+                // Avoid the lowercase allocation on every header of every leg:
+                // compare case-insensitively against the constant list.
+                const BLOCKED: &[&str] = &[
+                    "via",
+                    "from",
+                    "to",
+                    "contact",
+                    "call-id",
+                    "cseq",
+                    "max-forwards",
+                    "content-length",
+                    "content-type",
+                    "route",
+                    "record-route",
+                    "authorization",
+                    "proxy-authorization",
+                    "proxy-authenticate",
+                    "www-authenticate",
+                    "user-agent",
+                    "allow",
+                    "supported",
+                ];
+                !BLOCKED
+                    .iter()
+                    .any(|b| name.eq_ignore_ascii_case(b))
             }
             _ => true,
         }
@@ -1399,37 +1282,6 @@ impl Dialplan {
             selected.push(header.clone());
         }
         selected
-    }
-}
-
-/// Determines whether media should be anchored (go through the media proxy)
-/// for a given dialplan. Each addon can provide its own policy.
-pub trait MediaPolicy: Send + Sync {
-    fn requires_anchored(&self, dialplan: &Dialplan, mode: &MediaProxyMode) -> bool;
-}
-
-/// Default media policy used when no addon overrides it.
-/// Logic:
-/// - Recording always anchors media
-/// - App/Queue flows anchor media in Auto/NAT mode
-/// - All mode always anchors
-/// - None mode never anchors
-pub struct DefaultMediaPolicy;
-
-impl MediaPolicy for DefaultMediaPolicy {
-    fn requires_anchored(&self, dialplan: &Dialplan, mode: &MediaProxyMode) -> bool {
-        if dialplan.recording.enabled {
-            return true;
-        }
-        let app_or_queue = matches!(
-            dialplan.flow,
-            DialplanFlow::Application { .. } | DialplanFlow::Queue { .. }
-        );
-        match mode {
-            MediaProxyMode::All => true,
-            MediaProxyMode::Auto | MediaProxyMode::Nat => app_or_queue,
-            MediaProxyMode::None | MediaProxyMode::Bypass => false,
-        }
     }
 }
 
