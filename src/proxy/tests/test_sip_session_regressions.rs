@@ -3819,12 +3819,12 @@ async fn record_stopped_event_path_predicts_archived_layout() {
         .join("call-1.wav")
         .to_string_lossy()
         .into_owned();
-    assert_eq!(session.preview_recording_event_path(&recorded), expected);
+    assert_eq!(session.predicted_recording_event_path(&recorded), expected);
 
     // Operator-supplied custom path outside the root is never archived and
     // must stay untouched.
     let custom = "/data/ob/custom.wav";
-    assert_eq!(session.preview_recording_event_path(custom), custom);
+    assert_eq!(session.predicted_recording_event_path(custom), custom);
 }
 
 #[tokio::test]
@@ -3845,7 +3845,7 @@ async fn record_stopped_event_path_unchanged_for_sipflow_media() {
     // Sipflow media never archives local WAVs, so the address must not
     // gain a date segment.
     let recorded = dir.path().join("call-2.wav").to_string_lossy().into_owned();
-    assert_eq!(session.preview_recording_event_path(&recorded), recorded);
+    assert_eq!(session.predicted_recording_event_path(&recorded), recorded);
 }
 
 #[tokio::test]
@@ -3857,7 +3857,7 @@ async fn record_stopped_event_path_unchanged_without_policy() {
 
     // No [recording] policy → no archiver → the original path stays valid.
     let recorded = dir.path().join("call-3.wav").to_string_lossy().into_owned();
-    assert_eq!(session.preview_recording_event_path(&recorded), recorded);
+    assert_eq!(session.predicted_recording_event_path(&recorded), recorded);
 }
 
 #[tokio::test]

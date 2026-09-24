@@ -210,6 +210,18 @@ impl BuiltinAppFactory {
                     {
                         app = app.with_max_repeat_prompts(repeat as u32);
                     }
+                    if let Some(max_restarts) = params
+                        .as_ref()
+                        .and_then(|p| p.get("max_flow_restarts").and_then(|v| v.as_u64()))
+                    {
+                        app = app.with_max_flow_restarts(max_restarts as u32);
+                    }
+                    if let Some(window) = params
+                        .as_ref()
+                        .and_then(|p| p.get("reentry_window_secs").and_then(|v| v.as_u64()))
+                    {
+                        app = app.with_reentry_window_secs(window);
+                    }
                     if let Some(tts_value) = params.as_ref()?.get("tts")
                         && let Ok(tts_cfg) =
                             serde_json::from_value::<crate::tts::TtsConfig>(tts_value.clone())
@@ -322,6 +334,18 @@ impl BuiltinAppFactory {
                             .and_then(|p| p.get("max_repeat_prompts").and_then(|v| v.as_u64()))
                         {
                             app = app.with_max_repeat_prompts(repeat as u32);
+                        }
+                        if let Some(max_restarts) = params
+                            .as_ref()
+                            .and_then(|p| p.get("max_flow_restarts").and_then(|v| v.as_u64()))
+                        {
+                            app = app.with_max_flow_restarts(max_restarts as u32);
+                        }
+                        if let Some(window) = params
+                            .as_ref()
+                            .and_then(|p| p.get("reentry_window_secs").and_then(|v| v.as_u64()))
+                        {
+                            app = app.with_reentry_window_secs(window);
                         }
                         if let Some(tts_value) = params.as_ref()?.get("tts")
                             && let Ok(tts_cfg) =

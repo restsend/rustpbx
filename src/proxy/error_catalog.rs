@@ -163,21 +163,21 @@ pub const ALWAYS_FWD_REALTIME_EMPTY: CallErrInfo = CallErrInfo {
     remediation_key: None,
 };
 
-pub const ROUTE_PREVIEW_ERROR: CallErrInfo = CallErrInfo {
+pub const ROUTE_RESOLUTION_ERROR: CallErrInfo = CallErrInfo {
     app: APP,
-    code: "proxy.route_preview_error",
-    message: "Route preview failed",
+    code: "proxy.route_resolution_error",
+    message: "Route resolution failed",
     sip_status: Some(500),
     hangup_reason: CallRecordHangupReason::ServerUnavailable,
     severity: ErrSeverity::Error,
-    locale_key: "errors.proxy.route_preview_error",
+    locale_key: "errors.proxy.route_resolution_error",
     remediation_key: None,
 };
 
 pub const ROUTE_ABORTED: CallErrInfo = CallErrInfo {
     app: APP,
     code: "proxy.route_aborted",
-    message: "Route aborted during preview",
+    message: "Route aborted",
     sip_status: None,
     hangup_reason: CallRecordHangupReason::Failed,
     severity: ErrSeverity::Warn,
@@ -223,7 +223,7 @@ pub const CATALOG: &[CallErrInfo] = &[
     ALWAYS_FWD_VOICEMAIL_EMPTY,
     ALWAYS_FWD_CONFERENCE_EMPTY,
     ALWAYS_FWD_REALTIME_EMPTY,
-    ROUTE_PREVIEW_ERROR,
+    ROUTE_RESOLUTION_ERROR,
     ROUTE_ABORTED,
     ROUTE_FAILED,
     CREATE_ROUTE_INVITE_FAILED,

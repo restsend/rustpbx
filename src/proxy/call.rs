@@ -225,6 +225,17 @@ pub struct QueueEnrichContext<'a> {
     pub caller_headers: &'a [rsipstack::sip::Header],
 }
 
+/// Resolves CC quick-route feature codes (`*81<skill-group-id>` /
+/// `*82<ivr-name>`) into internal transfer targets
+/// (`queue:skill-group:<id>` / `ivr:<name>`). Consulted by the inbound-REFER
+/// hand-off *before* the route table so the codes reach the ACD / IVR with
+/// zero route configuration. Unknown user parts return `None` and fall
+/// through to normal routing.
+#[async_trait::async_trait]
+pub trait QuickRouteResolver: Send + Sync {
+    async fn resolve_quick_target(&self, user: &str) -> Option<String>;
+}
+
 /// Hook called by the queue executor after agent locations are resolved but
 /// *before* dialing begins, allowing addons to inject extra SIP headers
 /// (screen-pop context, CRM correlation IDs, etc.) into each target location.
@@ -295,51 +306,6 @@ impl RouteInvite for DefaultRouteInvite {
         )
         .await
     }
-
-    async fn preview_route(
-        &self,
-        option: InviteOption,
-        origin: &rsipstack::sip::Request,
-        direction: &DialDirection,
-        cookie: &TransactionCookie,
-    ) -> Result<RouteResult> {
-        let (trunks_snapshot, routes_snapshot, source_trunk) =
-            self.build_context(direction, cookie);
-
-        let resource_lookup = self.data_context.as_ref() as &dyn RouteResourceLookup;
-        // Check debug routes before standard routing (preview mode)
-        if let Some(callee_user) = origin.uri.user() {
-            if let Some(entry) = self.data_context.debug_routes.get(callee_user) {
-                let (app_name, app_params) = entry.value();
-                return Ok(RouteResult::Application {
-                    option,
-                    app_name: app_name.clone(),
-                    app_params: app_params.clone(),
-                    auto_answer: true,
-                    hints: None,
-                });
-            }
-        }
-        match_invite(
-            if trunks_snapshot.is_empty() {
-                None
-            } else {
-                Some(&trunks_snapshot)
-            },
-            if routes_snapshot.is_empty() {
-                None
-            } else {
-                Some(&routes_snapshot)
-            },
-            Some(resource_lookup),
-            option,
-            origin,
-            source_trunk.as_ref(),
-            self.routing_state.clone(),
-            direction,
-        )
-        .await
-    }
 }
 
 /// Try a primary [`RouteInvite`]; on `NotHandled`, delegate to a fallback
@@ -360,28 +326,16 @@ impl ChainedRouteInvite {
         origin: &rsipstack::sip::Request,
         direction: &DialDirection,
         cookie: &TransactionCookie,
-        preview: bool,
     ) -> Result<RouteResult> {
-        let primary_result = if preview {
-            self.primary
-                .preview_route(option, origin, direction, cookie)
-                .await?
-        } else {
-            self.primary
-                .route_invite(option, origin, direction, cookie)
-                .await?
-        };
+        let primary_result = self
+            .primary
+            .route_invite(option, origin, direction, cookie)
+            .await?;
         match primary_result {
             RouteResult::NotHandled(option, _) => {
-                if preview {
-                    self.fallback
-                        .preview_route(option, origin, direction, cookie)
-                        .await
-                } else {
-                    self.fallback
-                        .route_invite(option, origin, direction, cookie)
-                        .await
-                }
+                self.fallback
+                    .route_invite(option, origin, direction, cookie)
+                    .await
             }
             other => Ok(other),
         }
@@ -397,18 +351,7 @@ impl RouteInvite for ChainedRouteInvite {
         direction: &DialDirection,
         cookie: &TransactionCookie,
     ) -> Result<RouteResult> {
-        self.dispatch(option, origin, direction, cookie, false)
-            .await
-    }
-
-    async fn preview_route(
-        &self,
-        option: InviteOption,
-        origin: &rsipstack::sip::Request,
-        direction: &DialDirection,
-        cookie: &TransactionCookie,
-    ) -> Result<RouteResult> {
-        self.dispatch(option, origin, direction, cookie, true).await
+        self.dispatch(option, origin, direction, cookie).await
     }
 }
 
@@ -739,7 +682,7 @@ impl CallModule {
             Some(crate::call::CallForwardingMode::Always)
         );
 
-        let mut forced_preview_forward: Option<InviteOption> = None;
+        let mut forced_forward: Option<InviteOption> = None;
         let mut forced_pending_queue: Option<crate::call::QueuePlan> = None;
         let mut forced_pending_app: Option<(String, Option<serde_json::Value>, bool)> = None;
         let mut forced_route_point: Option<String> = None;
@@ -759,7 +702,7 @@ impl CallModule {
                             ))
                             .with_code(&crate::proxy::error_catalog::ALWAYS_FWD_URI_INVALID)
                         })?;
-                    forced_preview_forward = Some(InviteOption {
+                    forced_forward = Some(InviteOption {
                         callee: forwarded_uri,
                         ..Default::default()
                     });
@@ -943,7 +886,7 @@ impl CallModule {
                 })?,
         };
 
-        let mut preview_option = InviteOption {
+        let mut route_option = InviteOption {
             callee: callee_uri.clone(),
             caller: caller_uri.clone(),
             contact: caller_uri.clone(),
@@ -963,7 +906,7 @@ impl CallModule {
                 ))
                 .with_code(&crate::proxy::error_catalog::ALWAYS_FWD_URI_INVALID)
             })?;
-            preview_option.callee = target_uri.clone();
+            route_option.callee = target_uri.clone();
 
             // Route points are new routing identities, so every matcher view must see the target.
             let mut synthetic_origin = original.clone();
@@ -983,18 +926,18 @@ impl CallModule {
         }
 
         let mut routed_headers: Option<Vec<rsipstack::sip::Header>> = None;
-        let (preview_forward, pending_queue, pending_app, dialplan_hints) =
+        let (routed_forward, pending_queue, pending_app, dialplan_hints) =
             if always_forwarding && forced_route_point.is_none() {
                 (
-                    forced_preview_forward,
+                    forced_forward,
                     forced_pending_queue,
                     forced_pending_app,
                     None,
                 )
             } else {
-                let mut preview_outcome = route_invite
-                    .preview_route(
-                        preview_option,
+                let mut route_outcome = route_invite
+                    .route_invite(
+                        route_option,
                         route_origin.as_ref().unwrap_or(original),
                         &direction,
                         cookie,
@@ -1005,17 +948,17 @@ impl CallModule {
                             anyhow::anyhow!(e),
                             Some(rsipstack::sip::StatusCode::ServerInternalError),
                         ))
-                        .with_code(&crate::proxy::error_catalog::ROUTE_PREVIEW_ERROR)
+                        .with_code(&crate::proxy::error_catalog::ROUTE_RESOLUTION_ERROR)
                     })?;
 
                 if forced_route_point.is_some()
                     && !matches!(
-                        &preview_outcome,
+                        &route_outcome,
                         RouteResult::Application { .. } | RouteResult::Abort(_, _)
                     )
                 {
                     // Rejecting a non-application result must release policy slots acquired by routing.
-                    let hints = match &mut preview_outcome {
+                    let hints = match &mut route_outcome {
                         RouteResult::Queue { hints, .. }
                         | RouteResult::Forward(_, hints)
                         | RouteResult::NotHandled(_, hints) => hints.as_mut(),
@@ -1035,17 +978,16 @@ impl CallModule {
                         anyhow!("always-forwarding route point did not resolve to an application"),
                         Some(rsipstack::sip::StatusCode::ServerInternalError),
                     ))
-                    .with_code(&crate::proxy::error_catalog::ROUTE_PREVIEW_ERROR));
+                    .with_code(&crate::proxy::error_catalog::ROUTE_RESOLUTION_ERROR));
                 }
 
-                match preview_outcome {
+                match route_outcome {
                     RouteResult::Queue { queue, hints, .. } => (None, Some(queue), None, hints),
                     RouteResult::Forward(option, hints) => (Some(option), None, None, hints),
                     RouteResult::NotHandled(_, hints) => (None, None, None, hints),
                     RouteResult::Abort(code, reason) => {
-                        let err = anyhow::anyhow!(
-                            reason.unwrap_or_else(|| "route aborted during preview".to_string())
-                        );
+                        let err =
+                            anyhow::anyhow!(reason.unwrap_or_else(|| "route aborted".to_string()));
                         return Err(RouteError::from((err, Some(code)))
                             .with_code(&crate::proxy::error_catalog::ROUTE_ABORTED));
                     }
@@ -1069,7 +1011,7 @@ impl CallModule {
             DialStrategy::Sequential(vec![])
         } else if let Some(queue_targets) = queue_targets {
             queue_targets
-        } else if let Some(option) = preview_forward.as_ref() {
+        } else if let Some(option) = routed_forward.as_ref() {
             let target = Location {
                 aor: option.callee.clone(),
                 destination: option.destination.clone(),
@@ -1126,7 +1068,7 @@ impl CallModule {
         let session_id_enabled = !(direction == DialDirection::Internal
             && pending_app.is_none()
             && pending_queue.is_none()
-            && preview_forward.is_none());
+            && routed_forward.is_none());
         let session_id = if session_id_enabled {
             crate::call::session_id::normalize_or_generate(&dialog_id)
         } else {
@@ -1135,7 +1077,7 @@ impl CallModule {
         let mut dialplan = Dialplan::new(session_id.clone(), original.clone(), direction)
             .with_session_id_enabled(session_id_enabled)
             .with_caller(
-                preview_forward
+                routed_forward
                     .as_ref()
                     .map(|option| option.caller.clone())
                     .unwrap_or(caller_uri),
@@ -2360,7 +2302,7 @@ impl CallModule {
         let original_handle = original_handle.unwrap();
         let original_session_id = original_handle.session_id().to_string();
         let user = cookie.get_user().clone();
-        // Fresh cookie for the route preview (carries no transaction state —
+        // Fresh cookie for the route lookup (carries no transaction state —
         // see `try_execute_refer_app_handoff`).
         let route_cookie = crate::call::cookie::TransactionCookie::from(&tx.key);
 
@@ -2606,6 +2548,51 @@ impl CallModule {
         cookie: &crate::call::cookie::TransactionCookie,
         dialog_id: &DialogId,
     ) -> Result<ReferExecution, (u16, String)> {
+        // CC quick-route feature codes (`*81<sg-id>` / `*82<ivr-name>`) are
+        // internal-by-construction and resolve to a transfer target without
+        // any route/queue configuration — checked before the
+        // route-originated gate so zero-config deployments can REFER into
+        // the ACD / an IVR.
+        if let Some(resolver) = server.quick_route_resolver.as_ref() {
+            let parsed = rsipstack::sip::Uri::try_from(target_uri).ok();
+            let user = parsed.as_ref().and_then(|u| u.user().map(|u| u.to_string()));
+            if let Some(user) = user
+                && let Some(target) = resolver.resolve_quick_target(&user).await
+            {
+                info!(
+                    user = %user,
+                    target = %target,
+                    "REFER hand-off via quick-route feature code"
+                );
+                let leg_id = {
+                    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                    original_handle
+                        .send_command(crate::call::domain::CallCommand::QueryLegByDialog {
+                            dialog_id: dialog_id.to_string(),
+                            reply: reply_tx,
+                        })
+                        .map_err(|e| (500u16, format!("failed to query transferor leg: {}", e)))?;
+                    match tokio::time::timeout(std::time::Duration::from_secs(2), reply_rx).await {
+                        Ok(Ok(Some(leg))) => leg,
+                        Ok(Ok(None)) => crate::call::domain::LegId::from("caller"),
+                        Err(_) => {
+                            return Err((500, "transferor leg resolution timed out".to_string()));
+                        }
+                        Ok(Err(_)) => {
+                            return Err((500, "session closed before leg resolution".to_string()));
+                        }
+                    }
+                };
+                original_handle
+                    .send_command(crate::call::domain::CallCommand::Transfer {
+                        leg_id,
+                        target,
+                        attended: false,
+                    })
+                    .map_err(|e| (500u16, format!("quick-route transfer failed: {}", e)))?;
+                return Ok(ReferExecution::Done);
+            }
+        }
         if !server.proxy_config.load().route_originated_calls {
             return Ok(ReferExecution::FallThrough);
         }
@@ -2616,8 +2603,8 @@ impl CallModule {
         let Some(user) = parsed.user().map(|u| u.to_string()) else {
             return Ok(ReferExecution::FallThrough);
         };
-        // Caller identity for the route preview: the original call's caller
-        // as recorded in the RWI meta store. Without it the preview could
+        // Caller identity for the route lookup: the original call's caller
+        // as recorded in the RWI meta store. Without it the lookup could
         // not run caller-sensitive match rules — fall through to the raw
         // originate rather than guess.
         let Some(caller_str) = server.rwi_gateway.as_ref().and_then(|gw| {
@@ -2640,7 +2627,7 @@ impl CallModule {
             cookie.clone(),
         )
         .await
-        .map_err(|e| (500, format!("route preview failed: {}", e)))?;
+        .map_err(|e| (500, format!("route lookup failed: {}", e)))?;
 
         // Map queue/application routes onto the in-session transfer targets
         // (`handle_blind_transfer_inner` vocabulary). Everything else —
@@ -3267,14 +3254,14 @@ mod tests {
         };
         let cookie = TransactionCookie::default();
         let result = chained
-            .preview_route(
+            .route_invite(
                 InviteOption::default(),
                 &request,
                 &DialDirection::Outbound,
                 &cookie,
             )
             .await
-            .expect("chained preview");
+            .expect("chained fallback");
         match result {
             RouteResult::Application { app_name, .. } => assert_eq!(app_name, "ivr"),
             _ => panic!("expected fallback application route"),

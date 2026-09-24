@@ -771,9 +771,9 @@ mod tests {
         }
     }
 
-    /// preview_route 失败时也必须设置 wholesale billing context，失败 CDR 才能归到 wholesale。
+    /// route_invite 失败时也必须设置 wholesale billing context，失败 CDR 才能归到 wholesale。
     #[tokio::test]
-    async fn preview_concurrent_limit_sets_tenant_context() {
+    async fn concurrent_limit_sets_tenant_context() {
         let db = setup_db().await;
         let state = WholesaleState::new();
         let (ri, tenant_id, inbound_trunk_id) =
@@ -787,7 +787,7 @@ mod tests {
         let (req, opt) = make_invite("123456", "caller");
 
         let result = ri
-            .preview_route(opt, &req, &DialDirection::Outbound, &cookie)
+            .route_invite(opt, &req, &DialDirection::Outbound, &cookie)
             .await
             .unwrap();
 
@@ -846,29 +846,22 @@ mod tests {
         };
         crate::wholesale_helpers::load_runtime_routing_profiles(&ri.state, &db).await;
 
-        for use_preview in [false, true] {
-            let cookie = make_cookie(inbound.id);
-            let (req, opt) = make_invite("123456", "caller");
-            let result = if use_preview {
-                ri.preview_route(opt, &req, &DialDirection::Outbound, &cookie)
-                    .await
-                    .unwrap()
-            } else {
-                ri.route_invite(opt, &req, &DialDirection::Outbound, &cookie)
-                    .await
-                    .unwrap()
-            };
+        let cookie = make_cookie(inbound.id);
+        let (req, opt) = make_invite("123456", "caller");
+        let result = ri
+            .route_invite(opt, &req, &DialDirection::Outbound, &cookie)
+            .await
+            .unwrap();
 
-            assert!(matches!(
-                result,
-                RouteResult::Abort(rsipstack::sip::StatusCode::ServiceUnavailable, _)
-            ));
-            let billing_ctx = cookie
-                .get_extension::<WholesaleBillingContext>()
-                .expect("billing context in cookie");
-            assert_eq!(billing_ctx.tenant_id, tenant.id);
-            assert_eq!(billing_ctx.carrier_id, None);
-        }
+        assert!(matches!(
+            result,
+            RouteResult::Abort(rsipstack::sip::StatusCode::ServiceUnavailable, _)
+        ));
+        let billing_ctx = cookie
+            .get_extension::<WholesaleBillingContext>()
+            .expect("billing context in cookie");
+        assert_eq!(billing_ctx.tenant_id, tenant.id);
+        assert_eq!(billing_ctx.carrier_id, None);
     }
 
     /// CPS 限制为 1，同一秒第 2 次调用应返回 503 Service Unavailable。

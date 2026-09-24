@@ -533,6 +533,7 @@ async fn test_guest_call_allowed_extension() {
         conference_server: conf_server,
         agent_registry: None,
         queue_location_enricher: None,
+        quick_route_resolver: None,
         transfer_notify_subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         cluster_event_hub: None,
         cluster_peer_ips: vec![],

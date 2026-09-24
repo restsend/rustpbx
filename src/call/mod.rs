@@ -1442,16 +1442,6 @@ pub trait RouteInvite: Sync + Send {
         direction: &DialDirection,
         cookie: &TransactionCookie,
     ) -> Result<RouteResult>;
-
-    async fn preview_route(
-        &self,
-        option: InviteOption,
-        origin: &rsipstack::sip::Request,
-        direction: &DialDirection,
-        cookie: &TransactionCookie,
-    ) -> Result<RouteResult> {
-        self.route_invite(option, origin, direction, cookie).await
-    }
 }
 
 /// Routing state for managing stateful load balancing

@@ -251,6 +251,41 @@ impl ReturnTargetSpec {
     }
 }
 
+/// Apply a `return_app` spec as the queue plan's failure fallback — shared by
+/// the configured-queue path and the `queue:skill-group:` synthesised path so
+/// both behave identically ("on queue failure the caller is transferred back
+/// to the return app").
+fn apply_return_app_fallback(queue_plan: &mut crate::call::QueuePlan, spec: &ReturnTargetSpec) {
+    let fallback_endpoint = match spec.app_name.as_str() {
+        "ivr" => {
+            let ivr_name = spec.target.as_deref().unwrap_or("");
+            crate::call::TransferEndpoint::Ivr(ivr_name.to_string())
+        }
+        "voicemail" => {
+            let ext = spec.target.as_deref().unwrap_or("");
+            crate::call::TransferEndpoint::Voicemail(ext.to_string())
+        }
+        "queue" => {
+            let name = spec.target.as_deref().unwrap_or("");
+            crate::call::TransferEndpoint::Queue(name.to_string())
+        }
+        "conference" => {
+            let id = spec.target.as_deref().unwrap_or("");
+            crate::call::TransferEndpoint::Conference(id.to_string())
+        }
+        _ => {
+            // Generic app — use IVR as the fallback endpoint with the
+            // app name so it re-enters routing.  This is a best-effort
+            // path for non-standard apps.
+            let target = spec.target.as_deref().unwrap_or(&spec.app_name);
+            crate::call::TransferEndpoint::Ivr(target.to_string())
+        }
+    };
+    queue_plan.fallback = Some(crate::call::QueueFallbackAction::Failure(
+        crate::call::FailureAction::Transfer(fallback_endpoint),
+    ));
+}
+
 /// Node identity attached by the step-IVR executor to a `bridge:` target (via
 /// `_rst_*` query params) so DTMF pressed during the WebSocket bridge can be
 /// reported as an `ivr_step_trace` carrying the originating node context.
@@ -1436,7 +1471,7 @@ impl SipSession {
             .as_ref()
             .map(|d| d.initial_request().headers.iter().cloned().collect())
             .unwrap_or_default();
-        let routed_preview = super::util::route_outbound_leg(
+        let routed_target = super::util::route_outbound_leg(
             &self.server,
             &location.aor,
             &caller,
@@ -1449,7 +1484,7 @@ impl SipSession {
             self.context.cookie.clone(),
         )
         .await?;
-        match routed_preview {
+        match routed_target {
             Some(crate::config::RouteResult::Forward(option, hints)) => {
                 let mut routed = location.clone();
                 routed.aor = option.callee.clone();
@@ -1615,6 +1650,41 @@ impl SipSession {
         target_overrides: Vec<String>,
         overflow_overrides: Option<crate::call::app::QueueOverflowOverrides>,
     ) -> Result<()> {
+        // `queue:skill-group:<id>` — direct ACD hand-off without a queue
+        // definition: synthesise the plan from the skill group (mirrors
+        // `QueuePlan::from_app_params`), so blind transfers can reach a
+        // skill group with zero route/queue configuration.
+        if let Some(sg_id) = queue_name
+            .strip_prefix("skill-group:")
+            .filter(|id| !id.trim().is_empty())
+        {
+            tracing::info!(
+                skill_group = %sg_id,
+                "handle_queue_transfer: synthesising queue plan from skill group"
+            );
+            let (mut queue_plan, _priority) =
+                crate::call::QueuePlan::from_app_params(&serde_json::json!({
+                    "queue": format!("skill-group:{sg_id}")
+                }))?;
+            if let Some(spec) = &return_app {
+                apply_return_app_fallback(&mut queue_plan, spec);
+            }
+            if let Err(e) = self.start_queue_app(queue_plan, overflow_overrides).await {
+                warn!(session_id = %self.id, skill_group = %sg_id, error = %e, "Skill-group queue app failed to start; applying graceful fallback");
+                return self
+                    .handle_queue_failure_fallback(
+                        queue_name,
+                        &format!("start failed ({})", e),
+                        "queue.start_failed",
+                        return_app.as_ref(),
+                    )
+                    .await;
+            }
+            self.meta.transfer_return_app = self.resolve_return_app(return_app).await;
+            Self::annotate_queue_return_origin(&mut self.meta.transfer_return_app, queue_name);
+            return Ok(());
+        }
+
         let queue_config = self
             .server
             .data_context
