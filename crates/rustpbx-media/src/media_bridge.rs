@@ -1397,6 +1397,21 @@ fn spawn_bridge_stats_task(
                             tx_idrop = 0u64,
                             "bridge media quality anomaly [5s]"
                         );
+                    } else if rx_packets_d + tx_packets_d > 0 {
+                        // Healthy interval: log the reconciliation counters
+                        // anyway. This is the per-call evidence trail for
+                        // disputes — five-second proof that every packet
+                        // received on one leg was emitted on the peer.
+                        info!(
+                            bridge_id = %session_id,
+                            relay = relay_mode,
+                            a_ingress = da.ingress, a_egress = da.egress,
+                            b_ingress = db.ingress, b_egress = db.egress,
+                            rx_idrop = rx_idrop_d,
+                            rx_loss = format!("{:.2}%", rx_loss_pct),
+                            tx_loss = format!("{:.2}%", tx_loss_pct),
+                            "bridge media quality [5s]"
+                        );
                     }
 
                     // ── media health snapshot (call-trace diagnostics) ──
