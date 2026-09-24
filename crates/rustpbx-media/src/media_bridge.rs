@@ -364,6 +364,17 @@ impl MediaBridge {
         }
     }
 
+    /// Release the selected pair without stopping registry-owned peers.
+    /// A lone caller can continue application playback after this.
+    pub async fn clear_selection(&mut self) -> Result<()> {
+        self.unbridge().await?;
+        self.leg_a = None;
+        self.leg_b = None;
+        self.detached_for_playback = false;
+        *self.legs_shared.lock() = (None, None);
+        Ok(())
+    }
+
     /// Select two existing peers without closing either displaced peer.
     /// Their lifetime belongs to the call's leg registry, not the route.
     pub async fn select_pair(&mut self, a: Leg, b: Leg) -> Result<()> {
@@ -1883,6 +1894,12 @@ mod tests {
         peers[0].play(Box::new(crate::audio_source::ToneAudioSource::new(
             440, Duration::from_secs(1), 8000,
         ).unwrap()), true, Some(Arc::new(move |_| { flag.store(true, Ordering::SeqCst); }))).await.unwrap();
+        bridge.clear_selection().await.unwrap();
+        assert!(bridge.leg(LegSide::A).is_none() && bridge.leg(LegSide::B).is_none());
+        assert!(!bridge.detached_for_playback());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!interrupted.load(Ordering::SeqCst), "Clearing selection interrupted caller playback");
+        assert!(remotes[0].pc().received_rtp_packets() > 0, "Caller playback needs no selected pair");
         bridge.select_pair(peers[1].clone(), peers[2].clone()).await.unwrap();
         bridge.bridge().await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;

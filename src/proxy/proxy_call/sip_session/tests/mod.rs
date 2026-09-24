@@ -5238,7 +5238,7 @@ async fn added_second_leg_relays_audio_and_dtmf_without_mixer() {
     // Signaling and media operations resolve by leg identity even when the
     // caller is no longer selected in either bridge slot.
     assert!(Arc::ptr_eq(&local, &session.media_leg(&LegId::from("caller")).unwrap()));
-    let caller_pc = session.get_local_reinvite_pc(DialogSide::Caller).await.unwrap();
+    let caller_pc = session.get_local_reinvite_pc(&LegId::from("caller")).await.unwrap();
     assert_eq!(caller_pc.local_description().unwrap().to_sdp_string(),
         local.pc().local_description().unwrap().to_sdp_string());
     let mut third_observer = MediaBridge::new("third-observer");
@@ -5427,6 +5427,8 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
             *transfer_container.write().await = Some(manager.clone());
             manager
         };
+        let callee = LegId::from("callee");
+        session.legs.insert(callee.clone(), Leg::new(callee));
         let mut bridge = MediaBridge::new("consult-media");
         let mut remote_legs = Vec::new();
         for (side, name) in [(LegSide::A, "caller"), (LegSide::B, "callee")] {
@@ -5606,7 +5608,7 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
             if scenario == "complete_from_customer" {
                 session.handle_hold(consult.clone(), None).await.unwrap();
                 session.handle_unhold(LegId::from("caller")).await.unwrap();
-                let agent = session.resolve_transfer_leg(LegId::from("callee"));
+                let agent = session.resolve_transfer_leg();
                 assert!(session.setup_bridge(LegId::from("caller"), agent).await);
                 assert!(session.bridge.contains_leg(&LegId::from("caller")));
             }
@@ -6410,6 +6412,8 @@ async fn reinvite_hold_resume_restores_both_relay_directions() {
             .with_media(MediaConfig::new().with_proxy_mode(MediaProxyMode::All));
         let (mut session, _handle, _commands) = build_session_with_cmd_rx(dialplan).await;
         let _guard = session.cancel_token.clone().drop_guard();
+        let callee = LegId::from("callee");
+        session.legs.insert(callee.clone(), Leg::new(callee));
         let mut remotes = Vec::new();
         for name in ["caller", "callee"] {
             let local = LegInner::new(name, &LegConfig::rtp_pcmu(), None).unwrap();
@@ -6432,9 +6436,10 @@ async fn reinvite_hold_resume_restores_both_relay_directions() {
                 let offer = remote.create_offer().await.unwrap();
                 let offer = rustrtc::modify_sdp_direction(&offer, direction);
                 let parsed = rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, &offer).unwrap();
-                let answer = session.build_local_dialog_answer(side, rsipstack::sip::Method::Invite, &offer).await.unwrap();
+                let leg_id = LegId::from(if matches!(side, DialogSide::Caller) { "caller" } else { "callee" });
+                let answer = session.build_local_dialog_answer(side, &leg_id, rsipstack::sip::Method::Invite, &offer).await.unwrap();
                 remote.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
-                session.apply_reinvite_hold_transition(side, &parsed, &[]).await;
+                session.apply_reinvite_hold_transition(side, &leg_id, &parsed, &[]).await;
                 let resumed = direction == "sendrecv";
                 if !resumed {
                     // Playback completion / unmute while held must preserve the
@@ -7141,4 +7146,75 @@ async fn rwi_route_app_waits_and_announces_to_configured_context() {
     assert!(stack.next_cmd(50).await.is_none(), "RWI app must wait without answering or dialing");
     assert!(events_rx.try_recv().is_err());
     assert!(other_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn unpaired_leg_confirmation_and_bye_preserve_selected_pair() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{create_test_request, create_test_server, create_transaction};
+
+    let (server, _) = create_test_server().await;
+    let request = create_test_request(rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None);
+    let (tx, _) = create_transaction(request.clone()).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let dialog = server.dialog_layer.get_or_create_server_invite(&tx, state_tx, None, None).unwrap();
+    let context = CallContext {
+        session_id: "refer-source-guard".into(),
+        dialplan: Arc::new(Dialplan::new("refer-source-guard".into(), request, DialDirection::Inbound)),
+        cookie: TransactionCookie::default(), start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".into(), original_callee: "sip:bob@rustpbx.com".into(),
+        max_forwards: 70, created_at: chrono::Utc::now().to_rfc3339(), metadata: None,
+    };
+    let (mut session, _handle, _commands) = SipSession::new(
+        server, CancellationToken::new(), None, context, dialog, false,
+    );
+    let b = LegId::from("callee");
+    session.legs.insert(b.clone(), Leg::new(b.clone()));
+    let c = LegId::from("target");
+    let b_dialog = DialogId { call_id: "bob".into(), local_tag: "local".into(), remote_tag: "remote".into() };
+    session.callee_dialogs.insert(b_dialog.clone(), ());
+    session.legs.insert(c.clone(), crate::call::domain::Leg::new(c.clone()));
+    session.update_leg_state(&c, LegState::Connected);
+    session.update_leg_state(&b, LegState::Ringing);
+    session.bridge = BridgeConfig::bridge(LegId::from("caller"), c.clone());
+
+    // Being outside A-C is not evidence that B completed a REFER.
+    session.handle_callee_state(DialogState::Confirmed(b_dialog.clone(), rsipstack::sip::Response::default())).await.unwrap();
+    assert_eq!(session.legs.get(&b).unwrap().state, LegState::Connected);
+
+    // A confirmation must preserve B's negotiated hold, and even stale
+    // connected-dialog metadata must not override the selected A-C pair.
+    session.update_leg_state(&b, LegState::Hold);
+    session.meta.connected_callee_dialog_id = Some(b_dialog.clone());
+    session.handle_callee_state(DialogState::Confirmed(b_dialog.clone(), rsipstack::sip::Response::default())).await.unwrap();
+    assert_eq!(session.legs.get(&b).unwrap().state, LegState::Hold);
+    assert!(session.callee_dialogs.contains_key(&b_dialog));
+
+    session.handle_callee_state(DialogState::Terminated(b_dialog.clone(), TerminatedReason::UasBye)).await.unwrap();
+    assert!(!session.legs.contains_key(&b));
+    assert!(!session.callee_dialogs.contains_key(&b_dialog));
+    assert!(session.legs.contains_key(&c));
+    assert_eq!(session.bridge.legs, vec![LegId::from("caller"), c]);
+    assert!(!session.pending_hangup.contains(&session.caller_dialog_id()));
+}
+
+#[tokio::test]
+async fn dynamic_leg_rejects_known_unregistered_user_before_dialing() {
+    use crate::call::{DialDirection, Dialplan, SipUser};
+    use crate::proxy::tests::common::create_test_request;
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx;
+
+    let request = create_test_request(rsipstack::sip::Method::Invite, "caller", None, "rustpbx.com", None);
+    let dialplan = Dialplan::new("offline-transfer".into(), request, DialDirection::Inbound);
+    let (mut session, _handle, _commands) = build_session_with_cmd_rx(dialplan).await;
+    session.server.user_backend.create_user(SipUser {
+        username: "offline".into(), realm: Some("rustpbx.com".into()),
+        ..Default::default()
+    }).await.unwrap();
+    let target = LegId::from("offline-target");
+    let error = session.handle_add_leg_inner("sip:offline@rustpbx.com".into(),
+        Some(target.clone()), vec![], Some(LegId::from("caller"))).await.unwrap_err();
+    assert_eq!(error.downcast_ref::<transfer::BlindTransferDialError>().unwrap().code, 480);
+    assert!(!session.legs.contains_key(&target), "Offline resolution must finish before creating a SIP leg");
+    assert!(session.callee_dialogs.is_empty());
 }
