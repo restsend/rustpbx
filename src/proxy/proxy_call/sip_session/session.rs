@@ -9282,6 +9282,10 @@ impl SipSession {
             }
 
             CallCommand::Unbridge { .. } => {
+                // An explicit unbridge wins over any pending playback restore.
+                if let Some(mb) = self.bridge_mut() {
+                    mb.clear_detached_for_playback();
+                }
                 self.clear_bridge().await;
                 CommandResult::success()
             }
@@ -9317,6 +9321,51 @@ impl SipSession {
             }
 
             CallCommand::ResumeMedia => {
+                // Root-cause fix for "both sides deaf after insert-play"
+                // (production incident 2026-09-24, session h3cehgd8sme1ucv0t8m1):
+                // the restore path keys off `self.bridge.legs`, but a bridge can
+                // be established through paths that never populate the logical
+                // pair (direct dialing selected the media pair directly;
+                // pre-2bcd07e8 builds never set it). Recover the pair from the
+                // MediaBridge — but ONLY when playback itself tore down an
+                // active route (`detached_for_playback`): an explicit `Unbridge`
+                // must stay unbridged.
+                if self.bridge.legs.is_empty() && self.media.bridge.is_some() {
+                    let (recoverable, pair): (bool, Vec<LegId>) = {
+                        let mb = self.media.bridge.as_ref().unwrap();
+                        let pair: Vec<LegId> = [mb.leg(LegSide::A), mb.leg(LegSide::B)]
+                            .into_iter()
+                            .flatten()
+                            .map(|leg| leg.id().clone())
+                            .collect();
+                        (mb.detached_for_playback() && pair.len() == 2, pair)
+                    };
+                    if recoverable {
+                        info!(
+                            session_id = %self.id,
+                            leg_a = %pair[0], leg_b = %pair[1],
+                            "ResumeMedia: logical bridge pair missing — recovered from media bridge selection"
+                        );
+                        self.bridge = BridgeConfig::bridge(pair[0].clone(), pair[1].clone());
+                    }
+                }
+                // Diagnosability: a restore that cannot re-bridge leaves the
+                // call deaf until hangup. Surface it instead of failing
+                // silently.
+                let requested = self.bridge.legs.clone();
+                let bridgeable = requested.len() == 2
+                    && requested.iter().all(|id| {
+                        self.legs.get(id).is_some_and(|leg| {
+                            !matches!(leg.state, LegState::Ending | LegState::Ended)
+                        })
+                    });
+                if !bridgeable && self.media.bridge.is_some() {
+                    warn!(
+                        session_id = %self.id,
+                        requested = ?requested,
+                        "ResumeMedia cannot restore the media route: no bridgeable leg pair configured (call stays unbridged)"
+                    );
+                }
                 self.update_media_path().await;
                 CommandResult::success()
             }
@@ -11843,6 +11892,12 @@ impl SipSession {
             });
         }
         let _ = handle_for_restore.send_command(CallCommand::ResumeMedia);
+        info!(
+            session_id = %session_id,
+            track_id = %track_id,
+            interrupted,
+            "media.play finished; requested media route restore (ResumeMedia)"
+        );
     }
 
     pub(crate) async fn handle_play(
@@ -11867,6 +11922,14 @@ impl SipSession {
         };
 
         let target = leg_id.clone().unwrap_or_else(|| LegId::from("caller"));
+        info!(
+            session_id = %self.id,
+            target = %target,
+            source = %file_path,
+            loop_playback,
+            await_completion,
+            "media.play command accepted"
+        );
         let in_ivr_exec = self.extensions.read()
             .get::<crate::proxy::proxy_call::ivr_exec_hook::IvrExecState>().is_some();
         let single_peer = in_ivr_exec || options.as_ref().is_some_and(|o| o.side_only);
@@ -11879,7 +11942,18 @@ impl SipSession {
                 peers.push(peer);
             }
         } else {
-            peers.push(self.media_leg(&target).ok_or_else(|| anyhow!("No media peer for {}", target))?);
+            // Resolve the target through the BRIDGE's leg first (fall back to
+            // the registry): the fast-path relay is armed on the bridge's leg
+            // objects, and the registry can hold a stale clone with the same
+            // id — playing to it silently never reaches the wire (production
+            // incident 2026-09-24: default-leg play was inaudible while the
+            // `both` path, which always uses the bridge pair, worked).
+            let target_peer = self
+                .bridge()
+                .and_then(|mb| mb.leg_for_id(&target))
+                .or_else(|| self.media_leg(&target))
+                .ok_or_else(|| anyhow!("No media peer for {}", target))?;
+            peers.push(target_peer);
             if !single_peer && self.media_side_for_leg(&target).is_some() {
                 if let Some(other) = self.bridge().and_then(|mb| {
                     mb.side_for_leg(&target).and_then(|side| mb.leg(side.opposite()))
@@ -11888,20 +11962,42 @@ impl SipSession {
         }
         if peers.is_empty() { return Err(anyhow!("No media peer for playback")); }
         // Load sources before changing the active connection.
+        let load_started = std::time::Instant::now();
         let mut sources = Vec::new();
         for _ in &peers {
             sources.push(crate::media::audio_source::FileAudioSource::new(file_path.clone(), loop_playback).await?);
         }
+        info!(
+            session_id = %self.id,
+            peers = peers.len(),
+            decode_ms = load_started.elapsed().as_millis() as u64,
+            "playback sources loaded"
+        );
         if peers.iter().any(|peer| self.media_side_for_leg(peer.id()).is_some()) {
             if let Some(mb) = self.bridge_mut() {
-                if single_peer { mb.invalidate_route_cache(); }
-                else { mb.unbridge().await?; }
+                if single_peer {
+                    mb.invalidate_route_cache();
+                } else {
+                    // Force-detach (not `unbridge()`): the fast-path relay is
+                    // armed at the transport level and must come off the wire
+                    // even if the route bookkeeping has drifted, or the prompt
+                    // never reaches the call.
+                    mb.detach_route().await?;
+                }
             }
         }
+        let peer_ids: Vec<String> = peers.iter().map(|peer| peer.id().to_string()).collect();
         let mut handles = Vec::new();
         for (peer, audio) in peers.into_iter().zip(sources) {
             handles.push(peer.play_media(Box::new(audio), loop_playback).await?);
         }
+        info!(
+            session_id = %self.id,
+            track_id = %track_id,
+            legs = ?peer_ids,
+            loop_playback,
+            "media.play started"
+        );
         let events = self.app_event_bridge.clone();
         let gateway = self.server.rwi_gateway.clone();
         let session_id = self.id.clone();

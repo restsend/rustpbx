@@ -62,6 +62,11 @@ pub struct MediaBridge {
     leg_a: Option<Leg>,
     leg_b: Option<Leg>,
     route_active: bool,
+    /// Set by [`Self::detach_route`] when playback tears an ACTIVE route down,
+    /// cleared when the route is re-armed or explicitly unbridged. Lets the
+    /// session's `ResumeMedia` restore only routes that playback itself broke
+    /// (an explicit `Unbridge` must stay unbridged).
+    detached_for_playback: bool,
     dtmf_bus: broadcast::Sender<(crate::leg_id::LegId, DtmfEvent)>,
     /// Root cancel token for all spawned sub-tasks (DTMF forwarders).
     root_cancel: CancellationToken,
@@ -152,6 +157,7 @@ impl MediaBridge {
             leg_a: None,
             leg_b: None,
             route_active: false,
+            detached_for_playback: false,
             dtmf_bus,
             root_cancel: cancel,
             leg_wire_cancels: HashMap::new(),
@@ -664,8 +670,21 @@ impl MediaBridge {
         }
 
         self.route_active = true;
+        self.detached_for_playback = false;
         *self.health.route_activated_at.lock() = Some(std::time::Instant::now());
         Ok(())
+    }
+
+    /// Whether [`Self::detach_route`] tore down an active route that has not
+    /// been re-armed yet. `ResumeMedia` may restore only such routes.
+    pub fn detached_for_playback(&self) -> bool {
+        self.detached_for_playback
+    }
+
+    /// Forget a pending playback-detach restore (e.g. an explicit `Unbridge`
+    /// arrived while the prompt was playing — it wins over the restore).
+    pub fn clear_detached_for_playback(&mut self) {
+        self.detached_for_playback = false;
     }
 
     /// Break the route: both legs' egress → [`EgressSource::Silence`] and any
@@ -680,11 +699,41 @@ impl MediaBridge {
         if let Some(old) = self.rtcp_cancel.take() {
             old.cancel();
         }
+        info!(session = %self.session_id, "media bridge route detached (unbridge)");
         if let Some(la) = self.leg_a.as_ref() {
             la.set_egress_source(EgressSource::Silence).await?;
         }
         if let Some(lb) = self.leg_b.as_ref() {
             lb.set_egress_source(EgressSource::Silence).await?;
+        }
+        Ok(())
+    }
+
+    /// Unconditionally tear down the route and any transport-level rewrite
+    /// relay before playback takes the legs' egress.
+    ///
+    /// Unlike [`Self::unbridge`], this does NOT trust the `route_active`
+    /// bookkeeping: the fast-path relay is armed on the transports and must be
+    /// cleared even when the route flag has drifted (production incident
+    /// 2026-09-24: play on a fast-path call left the armed relay untouched and
+    /// the prompt never reached the wire). Both teardown mechanisms are applied
+    /// — the explicit transport clear and the egress-source switch (which also
+    /// re-anchors the egress timeline via `was_relay`) — so exactly one of them
+    /// is effective regardless of the bookkeeping state.
+    pub async fn detach_route(&mut self) -> Result<()> {
+        self.route_active = false;
+        self.last_bridged = None;
+        *self.health.route_activated_at.lock() = None;
+        if let Some(old) = self.rtcp_cancel.take() {
+            old.cancel();
+        }
+        self.detached_for_playback = true;
+        info!(session = %self.session_id, "media route force-detached for playback");
+        for leg in [self.leg_a.as_ref(), self.leg_b.as_ref()].into_iter().flatten() {
+            // Belt and braces: clear the transport-level relay directly in case
+            // the leg's `was_relay` flag no longer reflects the armed state.
+            leg.pc().clear_rtp_rewrite_bridge();
+            leg.set_egress_source(EgressSource::Silence).await?;
         }
         Ok(())
     }
