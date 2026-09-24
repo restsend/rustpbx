@@ -28,7 +28,7 @@ use crate::common::webhook_capture::WebhookCapture;
 /// Scenario:
 /// 1. Alice registers and calls Bob via PBX
 /// 2. Bob answers
-/// 3. Alice sends REFER to PBX, targeting Charlie (sipbot)
+/// 3. Bob sends REFER on the outbound callee dialog, targeting Charlie
 /// 4. PBX returns 202 Accepted, then originates to Charlie
 /// 5. Charlie answers
 /// 6. PBX bridges the calls
@@ -160,19 +160,43 @@ async fn test_inbound_refer_success() {
 
     sleep(Duration::from_millis(300)).await;
 
-    // Alice sends REFER to PBX
-    let refer_status = alice
-        .send_refer(&alice_dialog_id, &charlie_uri)
+    // Dialog tags are local/remote from each endpoint's perspective.
+    let bob_dialog = bob_dialog_id.as_ref().unwrap();
+    let mut pbx_dialog = rsipstack::dialog::DialogId {
+        call_id: bob_dialog.call_id.clone(),
+        local_tag: bob_dialog.remote_tag.clone(),
+        remote_tag: bob_dialog.local_tag.clone(),
+    };
+    let registry = &server.server_ref.active_call_registry;
+    let owner = registry.get_handle_by_dialog(&format!("{}-{}", pbx_dialog.call_id, pbx_dialog.local_tag))
+        .expect("confirmed B-leg Call-ID and local tag must resolve for REFER");
+    assert_ne!(owner.session_id(), pbx_dialog.call_id);
+    assert_eq!(
+        registry.get_handle_by_dialog(&pbx_dialog.call_id).unwrap().session_id(),
+        owner.session_id(),
+        "CTI Call-ID alias must still resolve to the same session",
+    );
+    pbx_dialog.remote_tag.clear();
+    assert_eq!(registry.get_handle_by_dialog(&format!("{}-{}", pbx_dialog.call_id, pbx_dialog.local_tag)).unwrap().session_id(), owner.session_id(),
+        "remote tag is not part of the registry key");
+    pbx_dialog.local_tag.push_str("-wrong");
+    assert!(registry.get_handle_by_dialog(&format!("{}-{}", pbx_dialog.call_id, pbx_dialog.local_tag)).is_none(),
+        "wrong local tag must not resolve through the Call-ID alias");
+
+    // Bob sends REFER on the B-leg dialog, whose Call-ID differs from the
+    // session ID. Registering only its bare Call-ID previously returned 481.
+    let refer_status = bob
+        .send_refer(bob_dialog_id.as_ref().unwrap(), &charlie_uri)
         .await
         .expect("send_refer failed");
 
     assert_eq!(refer_status, 202, "REFER should be accepted with 202");
 
-    // Process Alice's dialog events (including NOTIFY from PBX) so the REFER subscription can proceed
-    let alice_clone = alice.clone();
-    let alice_event_handle = rustpbx::utils::spawn(async move {
+    // Process the transferor's NOTIFY requests so the subscription can proceed.
+    let bob_clone = bob.clone();
+    let bob_event_handle = rustpbx::utils::spawn(async move {
         for _ in 0..100 {
-            let _ = alice_clone.process_dialog_events().await;
+            let _ = bob_clone.process_dialog_events().await;
             sleep(Duration::from_millis(50)).await;
         }
     });
@@ -187,7 +211,7 @@ async fn test_inbound_refer_success() {
         "Charlie should receive and answer the transfer call"
     );
 
-    alice_event_handle.abort();
+    bob_event_handle.abort();
 
     // Blind inbound REFERs execute INSIDE the original session by default
     // (`inbound_refer_in_session`): the B leg is swapped in place — Charlie

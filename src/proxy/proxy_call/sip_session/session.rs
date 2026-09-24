@@ -1341,7 +1341,7 @@ impl SipSession {
 
         server
             .active_call_registry
-            .register_dialog(server_dialog.id().to_string(), handle.clone());
+            .register_dialog(format!("{}-{}", server_dialog.id().call_id, server_dialog.id().local_tag), handle.clone());
 
         // Publish this session's owning node in the cluster session registry
         // (no-op backend in single-node mode).
@@ -2184,6 +2184,12 @@ impl SipSession {
         info!(session_id = %self.id, %dialog_id, "Attaching callee dialog to UAC session");
 
         self.callee_dialogs.insert(dialog_id.clone(), ());
+        // In-dialog REFER and Replaces lookups use Call-ID plus the local tag;
+        // the bare Call-ID alias registered for CTI is not sufficient.
+        let registry = &self.server.active_call_registry;
+        if let Some(handle) = registry.get_handle(&self.context.session_id) {
+            registry.register_dialog(format!("{}-{}", dialog_id.call_id, dialog_id.local_tag), handle);
+        }
 
         // Register the callee leg with a real dialog.
         let callee_id = LegId::from("callee");
@@ -6323,6 +6329,12 @@ impl SipSession {
 
         self.meta.connected_callee_dialog_id = Some(dialog_id.clone());
         self.callee_dialogs.insert(dialog_id.clone(), ());
+        // In-dialog REFER and Replaces lookups use Call-ID plus the local tag;
+        // the bare Call-ID alias registered for CTI is not sufficient.
+        let registry = &self.server.active_call_registry;
+        if let Some(handle) = registry.get_handle(&self.context.session_id) {
+            registry.register_dialog(format!("{}-{}", dialog_id.call_id, dialog_id.local_tag), handle);
+        }
         self.callee_guards.push(callee_guard);
 
         self.accept_call(Some(callee_uri.to_string()), caller_answer)
@@ -10278,6 +10290,10 @@ impl SipSession {
                         .next()
                     {
                         let dlg_id = invite.id();
+                        let registry = &self.server.active_call_registry;
+                        if let Some(handle) = registry.get_handle(&self.context.session_id) {
+                            registry.register_dialog(format!("{}-{}", dlg_id.call_id, dlg_id.local_tag), handle);
+                        }
                         self.legs.set_dialog(
                             leg_id.clone(),
                             rsipstack::dialog::dialog::Dialog::Invite(invite),

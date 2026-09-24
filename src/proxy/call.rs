@@ -1890,7 +1890,7 @@ impl CallModule {
                     local_tag: replaces_to_tag.clone(),
                     remote_tag: replaces_from_tag.clone(),
                 };
-                registry.get_handle_by_dialog(&dialog_id.to_string())
+                registry.get_handle_by_dialog(&format!("{}-{}", dialog_id.call_id, dialog_id.local_tag))
             };
 
             if let Some(ref old_handle) = old_handle {
@@ -2274,7 +2274,7 @@ impl CallModule {
             .inner
             .server
             .active_call_registry
-            .get_handle_by_dialog(&dialog_id.to_string());
+            .get_handle_by_dialog(&format!("{}-{}", dialog_id.call_id, dialog_id.local_tag));
 
         if original_handle.is_none() {
             warn!(dialog_id = %dialog_id, "No active session found for REFER dialog");

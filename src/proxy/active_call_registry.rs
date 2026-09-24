@@ -432,6 +432,45 @@ mod tests {
     }
 
     #[test]
+    fn dialog_ownership_uses_call_id_and_local_tag() {
+        let registry = ActiveProxyCallRegistry::new();
+        let first = make_handle("first-session");
+        let second = make_handle("second-session");
+        let mut dialog = rsipstack::dialog::DialogId {
+            call_id: "shared-call-id".into(),
+            local_tag: "pbx-tag".into(),
+            remote_tag: String::new(),
+        };
+        registry.register_dialog(dialog.call_id.clone(), first.clone());
+        assert!(registry.get_handle_by_dialog(&format!("{}-{}", dialog.call_id, dialog.local_tag)).is_none(), "bare alias is not a dialog registration");
+        registry.register_dialog(format!("{}-{}", dialog.call_id, dialog.local_tag), first.clone());
+        dialog.remote_tag = "phone-tag".into();
+        assert_eq!(registry.get_handle_by_dialog(&format!("{}-{}", dialog.call_id, dialog.local_tag)).unwrap().session_id(), "first-session");
+        registry.register_dialog(format!("{}-{}", dialog.call_id, dialog.local_tag), first);
+        assert_eq!(registry.handles_by_dialog_count(), 2,
+            "early and confirmed registrations must share one dialog key, plus the CTI alias");
+
+        let mut other = dialog.clone();
+        other.local_tag = "another-pbx-tag".into();
+        assert!(registry.get_handle_by_dialog(&format!("{}-{}", other.call_id, other.local_tag)).is_none());
+        registry.register_dialog(format!("{}-{}", other.call_id, other.local_tag), second);
+        assert_eq!(registry.get_handle_by_dialog(&format!("{}-{}", other.call_id, other.local_tag)).unwrap().session_id(), "second-session");
+        let mut different_call = dialog.clone();
+        different_call.call_id = "another-call-id".into();
+        assert!(registry.get_handle_by_dialog(&format!("{}-{}", different_call.call_id, different_call.local_tag)).is_none());
+
+        registry.unregister_dialog(&format!("{}-{}", dialog.call_id, dialog.local_tag));
+        assert!(registry.get_handle_by_dialog(&format!("{}-{}", dialog.call_id, dialog.local_tag)).is_none());
+        assert!(registry.get_handle_by_dialog(&dialog.call_id).is_some());
+        assert!(registry.get_handle_by_dialog(&format!("{}-{}", other.call_id, other.local_tag)).is_some());
+        registry.remove("first-session");
+        assert!(registry.get_handle_by_dialog(&dialog.call_id).is_none());
+        registry.remove("second-session");
+        assert!(registry.get_handle_by_dialog(&format!("{}-{}", other.call_id, other.local_tag)).is_none());
+        assert_eq!(registry.handles_by_dialog_count(), 0);
+    }
+
+    #[test]
     fn test_context_meta_set_get_remove() {
         let registry = ActiveProxyCallRegistry::new();
         let session = "session-ctx";
