@@ -356,7 +356,7 @@ async fn bridge_play_pcm_streams_and_fires_on_end() {
         });
 
     // 20ms @ 8kHz = 160 samples per frame; stream 10 frames (200ms) then drop.
-    let mut tx = mb
+    let tx = mb
         .bridge_play_pcm(LegSide::A, 8000, Some(on_end))
         .await
         .expect("bridge_play_pcm");

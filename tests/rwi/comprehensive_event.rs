@@ -220,6 +220,7 @@ async fn test_comprehensive_core_event_structs() {
         gw.fan_out(
             "default",
             &rustpbx::rwi::CallRinging {
+                leg_id: None,
                 call_id: call_id.into(),
                 early_media: false,
             },
@@ -227,6 +228,7 @@ async fn test_comprehensive_core_event_structs() {
         gw.fan_out(
             "default",
             &rustpbx::rwi::CallAnswered {
+                leg_id: None,
                 call_id: call_id.into(),
             },
         );
@@ -390,6 +392,7 @@ async fn test_comprehensive_core_event_structs() {
         gw.fan_out(
             "default",
             &rustpbx::rwi::CallHangup {
+                leg_id: None,
                 call_id: call_id.into(),
                 reason: Some("normal".into()),
                 hangup_by: None,
@@ -492,6 +495,7 @@ async fn test_new_api_event_structs() {
     {
         let gw = ctx.gw();
         gw.broadcast(&rustpbx::rwi::CallRinging {
+            leg_id: None,
             call_id: call_id.into(),
             early_media: false,
         });
@@ -504,6 +508,7 @@ async fn test_new_api_event_structs() {
     {
         let gw = ctx.gw();
         gw.broadcast(&rustpbx::rwi::CallHangup {
+            leg_id: None,
             call_id: call_id.into(),
             reason: Some("normal".into()),
             hangup_by: None,
@@ -521,6 +526,7 @@ async fn test_new_api_event_structs() {
         gw.fan_out(
             "default",
             &rustpbx::rwi::CallAnswered {
+                leg_id: None,
                 call_id: call_id.into(),
             },
         );

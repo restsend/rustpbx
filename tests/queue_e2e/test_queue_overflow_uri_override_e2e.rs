@@ -292,7 +292,6 @@ action = {{ type = "transfer", target = "{queue_target}" }}
         })
     }
 
-    const AGENT_SALES_SDP_PORT: u32 = 30101;
     const AGENT_L2_SDP_PORT: u32 = 30102;
 
     fn answer_sdp(owner: &str, port: u32) -> String {
@@ -387,7 +386,7 @@ action = {{ type = "transfer", target = "{queue_target}" }}
         );
 
         // agent_l2 answers → connected.
-        let TestUaEvent::IncomingCall(l2_dialog, offer) = l2_invite else {
+        let TestUaEvent::IncomingCall(l2_dialog, _offer) = l2_invite else {
             unreachable!("matcher guarantees IncomingCall");
         };
         agent_l2

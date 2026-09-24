@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use rsipstack::dialog::DialogId;
 use rsipstack::dialog::authenticate::Credential;
-use rsipstack::dialog::dialog::{Dialog, DialogState, DialogStateReceiver, DialogStateSender};
+use rsipstack::dialog::dialog::{Dialog, DialogState, DialogStateSender};
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::dialog::registration::Registration;

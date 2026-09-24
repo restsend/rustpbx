@@ -35,7 +35,6 @@ use rustpbx::addons::cc::skill_group::CreateSkillGroupRequest;
 use rustpbx::call::user::SipUser;
 use rustpbx::config::{LocatorWebhookConfig, ProxyConfig};
 use rustpbx::proxy::active_call_registry::ActiveProxyCallRegistry;
-use rustpbx::proxy::proxy_call::session_hooks::CallSessionHook;
 use rustpbx::proxy::routing::{
     MatchConditions, QueueDialMode, RouteAction, RouteQueueConfig, RouteQueueStrategyConfig,
     RouteQueueTargetConfig, RouteRule,
@@ -128,7 +127,7 @@ struct HangupFirstHarness {
 
 /// Server + CC registry + CC session hook armed with the production
 /// recording default (`record_on_agent_connect = true`).
-async fn start_harness(port: u16, capture: &WebhookCapture) -> Result<HangupFirstHarness> {
+async fn start_harness(capture: &WebhookCapture) -> Result<HangupFirstHarness> {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     rustpbx::addons::cc::migration::Migrator::up(&db, None)
         .await
@@ -341,8 +340,7 @@ async fn test_agent_hangup_first_propagates_bye_and_stops_recording() -> Result<
     let _ = tracing_subscriber::fmt().try_init();
 
     let capture = WebhookCapture::start().await;
-    let port = portpicker::pick_unused_port().unwrap_or(17300);
-    let harness = start_harness(port, &capture).await?;
+    let harness = start_harness(&capture).await?;
     let proxy_addr = harness.server.proxy_addr;
     let epoch = Instant::now();
 
@@ -372,7 +370,7 @@ async fn test_agent_hangup_first_propagates_bye_and_stops_recording() -> Result<
         portpicker::pick_unused_port().unwrap_or(31200),
         false,
     );
-    let call = {
+    {
         let ua = caller.clone();
         tokio::spawn(async move { ua.make_call(QUEUE_NUMBER, Some(offer)).await });
     };

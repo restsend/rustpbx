@@ -2085,11 +2085,8 @@ async fn test_second_call_dispatch_after_wrapup_releases_capacity() {
 // integration through the REAL adapter → engine → registry path.
 // ═══════════════════════════════════════════════════════════════════
 
-use rustpbx::addons::cc::acd::{
-    AcdPolicy, BusinessHours, PresenceStateKind, ScheduleConfig, StrategyConfig,
-};
+use rustpbx::addons::cc::acd::{AcdPolicy, BusinessHours, ScheduleConfig};
 use rustpbx::addons::cc::skill_group::get_skill_group;
-use sea_orm_migration::MigratorTrait as _;
 use std::collections::HashMap;
 
 async fn sg_db() -> sea_orm::DatabaseConnection {

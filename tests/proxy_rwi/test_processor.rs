@@ -439,6 +439,7 @@ async fn test_bridge_not_found_leg_a() {
     let (processor, _cm) = create_test_processor();
     let result = processor
         .process_command(RwiCommandPayload::Bridge {
+            call_id: String::new(),
             leg_a: "missing-a".into(),
             leg_b: "missing-b".into(),
         })
@@ -455,6 +456,7 @@ async fn test_bridge_not_found_leg_b() {
 
     let result = processor
         .process_command(RwiCommandPayload::Bridge {
+            call_id: String::new(),
             leg_a: "leg-a".into(),
             leg_b: "leg-b-missing".into(),
         })
@@ -472,6 +474,7 @@ async fn test_bridge_both_legs_exist_sends_bridgeto() {
 
     let result = processor
         .process_command(RwiCommandPayload::Bridge {
+            call_id: String::new(),
             leg_a: "leg-a".into(),
             leg_b: "leg-b".into(),
         })
@@ -1540,6 +1543,7 @@ async fn test_bridge_emits_event_to_gateway() {
 
     let result = processor
         .process_command(RwiCommandPayload::Bridge {
+            call_id: String::new(),
             leg_a: "leg-a".into(),
             leg_b: "leg-b".into(),
         })
@@ -1643,6 +1647,7 @@ async fn test_bridge_sends_bridge_to_to_leg_a() {
 
     let result = processor
         .process_command(RwiCommandPayload::Bridge {
+            call_id: String::new(),
             leg_a: "leg-a2".into(),
             leg_b: "leg-b2".into(),
         })

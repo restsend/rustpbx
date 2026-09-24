@@ -11,7 +11,7 @@
 use crate::call::domain::{CallCommand, LegId};
 use crate::config::ProxyConfig;
 use crate::proxy::call::CallModule;
-use crate::proxy::tests::common::{create_test_request, create_test_server};
+use crate::proxy::tests::common::create_test_request;
 use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx;
 use rsipstack::dialog::DialogId;
 use rsipstack::sip::Method;
