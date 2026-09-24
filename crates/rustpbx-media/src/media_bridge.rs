@@ -207,6 +207,12 @@ impl MediaBridge {
         leg.pcm_stream(self.root_cancel.child_token())
     }
 
+    /// A selected peer's output was overridden (for example by mute or playback).
+    /// Keep the pair and other direction alive, but rebuild routing on the next bridge request.
+    pub fn invalidate_route_cache(&mut self) {
+        self.last_bridged = None;
+    }
+
     /// True when a P2P route is currently active between A and B.
     pub fn is_bridged(&self) -> bool {
         self.route_active

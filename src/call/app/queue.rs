@@ -2199,10 +2199,27 @@ impl CallApp for QueueApp {
         match event {
             super::AppEvent::Custom { name, data } => match name.as_str() {
                 "agent_connected" => {
+                    if self.call_already_connected() {
+                        return Ok(AppAction::Continue);
+                    }
                     if let Some(agent_uri) = data.get("agent_uri").and_then(|v| v.as_str()) {
+                        let agent_leg = data.get("leg_id").and_then(|v| v.as_str())
+                            .or_else(|| self.pending_agents.iter()
+                                .find(|(uri, _)| uri == agent_uri).map(|(_, id)| id.as_str()));
+                        let Some(agent_leg) = agent_leg.map(str::to_owned) else {
+                            warn!(agent = %agent_uri, "Queue: ignoring answer without an agent leg ID");
+                            return Ok(AppAction::Continue);
+                        };
+                        // Select the winner before prompts or cleanup can resume media.
+                        if !self.answered {
+                            ctrl.answer().await?;
+                            self.answered = true;
+                        }
+                        ctrl.bridge(crate::call::domain::LegId::from("caller"),
+                            crate::call::domain::LegId::from(agent_leg.clone()))?;
                         info!(agent = %agent_uri, "Queue: agent connected");
-                        // SipSession replaces queue playback when it bridges
-                        // the answered agent. A queued stop could run after
+                        // The requested bridge replaces queue playback.
+                        // A queued stop could run after
                         // that switch and interrupt the connected media.
                         self.hold_playback = None;
                         self.transfer_token = None;
@@ -2223,8 +2240,8 @@ impl CallApp for QueueApp {
                         if !self.pending_agents.is_empty() {
                             let mut other_legs: Vec<String> = Vec::new();
                             let all = std::mem::take(&mut self.pending_agents);
-                            for (u, cid) in all {
-                                if u != agent_uri {
+                            for (_, cid) in all {
+                                if cid != agent_leg {
                                     other_legs.push(cid);
                                 }
                             }
@@ -2279,8 +2296,7 @@ impl CallApp for QueueApp {
                             },
                         });
 
-                        // The agent is already connected via LegAdd/LegConnected and
-                        // the media bridge is set up by SipSession. Play the
+                        // The winner's bridge command precedes playback. Play the
                         // caller-only service prompt if configured, then exit.
                         return self
                             .play_service_prompt_or_exit(ctrl, agent_uri.to_string())

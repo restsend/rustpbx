@@ -248,7 +248,7 @@ Some commands support aliases for convenience:
 `call.leg_add` creates an independent outgoing SIP dialog and media peer. RWI
 controls its connection: adding or answering a leg does not automatically bridge
 it to the caller. Multiple attempts may ring or answer concurrently. Ordinary
-direct dialing, including HTTP router `forward`, retains its connection flow. All added legs require explicit bridge selection, including queue legs. There is no queue-specific automatic pairing or queue-app bridge request. Queue agent audio therefore requires an explicit bridge request from its controller. CC consult and transfer use explicit bridge commands. There is no RWI-specific leg marker.
+direct dialing, including HTTP router `forward`, retains its connection flow. All added legs require explicit bridge selection. QueueApp selects the winning agent with a bridge command; direct dialing records its caller–callee pair. Transfer cancellation restores the caller–agent pair. Hold, mute, and playback restoration use only the selected pair. There is no RWI-specific leg marker.
 Existing bridges remain until explicitly changed or a member ends.
 
 ```json
