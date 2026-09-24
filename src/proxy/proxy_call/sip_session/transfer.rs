@@ -2695,18 +2695,24 @@ impl SipSession {
         info!(session_id = %self.id, %consult_leg, "Canceling attended transfer");
 
         self.require_leg(&consult_leg)?;
-        self.update_leg_state(&consult_leg, LegState::Ending);
-
-        let original_leg = self
-            .legs
-            .iter()
-            .find(|(_, leg)| leg.state == LegState::Hold)
-            .map(|(id, _)| id.clone());
-
-        if let Some(original_leg) = original_leg {
-            self.handle_unhold(original_leg.clone()).await?;
-            info!(session_id = %self.id, "Attended transfer canceled, original call resumed");
+        let caller = LegId::from("caller");
+        let agent = self.resolve_transfer_leg(LegId::from("callee"));
+        self.require_leg(&caller)?;
+        self.require_leg(&agent)?;
+        if consult_leg == caller || consult_leg == agent {
+            return Err(anyhow!("Consult leg must differ from the original caller and agent"));
         }
+
+        self.handle_leave_mixer().await?;
+        // Select the original conversation before removal/unhold refreshes media.
+        self.bridge = crate::call::runtime::BridgeConfig::bridge(caller.clone(), agent.clone());
+        self.handle_remove_leg(consult_leg).await?;
+        self.handle_unhold(caller.clone()).await?;
+        self.handle_unhold(agent.clone()).await?;
+        if !self.setup_bridge(caller, agent).await {
+            return Err(anyhow!("Failed to restore caller-agent media"));
+        }
+        info!(session_id = %self.id, "Attended transfer canceled, original call resumed");
 
         Ok(())
     }

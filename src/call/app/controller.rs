@@ -637,6 +637,16 @@ impl CallController {
         Ok(call_id)
     }
 
+    /// Select the two legs whose live audio should be connected and restored.
+    pub fn bridge(&self, leg_a: LegId, leg_b: LegId) -> anyhow::Result<()> {
+        self.session.send_command(CallCommand::Bridge {
+            leg_a,
+            leg_b,
+            mode: crate::call::domain::P2PMode::Audio,
+        })?;
+        Ok(())
+    }
+
     /// Send a custom event to notify external systems (e.g., WebSocket, RWI).
     pub async fn notify_event(
         &self,

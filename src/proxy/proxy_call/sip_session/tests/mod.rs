@@ -3508,6 +3508,8 @@ async fn media_bridge_caller_answer_follows_callee_answer_codec() {
         .expect("prepare caller answer")
         .expect("caller answer");
 
+    assert_eq!(session.bridge.legs, vec![LegId::from("caller"), LegId::from("callee")],
+        "direct dialing must record the pair for hold/playback restoration");
     let caller_answer_profile = MediaNegotiator::extract_leg_profile(&caller_answer);
     assert_eq!(
         caller_answer_profile
@@ -5362,6 +5364,8 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
         "timeout",
         "cancel_ringing",
         "cancel_answered",
+        "core_cancel_ringing",
+        "core_cancel_answered",
         "private_hangup",
         "complete",
         "complete_from_customer",
@@ -5490,6 +5494,14 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
             LegState::Connected
         );
         assert!(session.conference_bridge.conf_id.is_none());
+        if scenario == "core_cancel_ringing" {
+            assert!(session.execute_command(CallCommand::TransferCancel { consult_leg: consult.clone() }, None).await.success);
+            assert!(!session.legs.contains_key(&consult));
+            assert_eq!(session.bridge.legs, vec![LegId::from("caller"), LegId::from("callee")]);
+            assert!(session.bridge().unwrap().is_bridged());
+            assert_eq!(session.legs.get(&LegId::from("caller")).unwrap().state, LegState::Connected);
+            continue;
+        }
         if matches!(scenario, "reject" | "timeout" | "cancel_ringing") {
             session
                 .execute_command(
@@ -5581,6 +5593,15 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
             session.legs.get(&LegId::from("caller")).unwrap().state,
             LegState::Hold
         );
+        if scenario == "core_cancel_answered" {
+            assert!(session.execute_command(CallCommand::TransferCancel { consult_leg: consult.clone() }, None).await.success);
+            assert!(!session.legs.contains_key(&consult));
+            assert_eq!(session.bridge.legs, vec![LegId::from("caller"), LegId::from("callee")]);
+            for name in ["caller", "callee"] {
+                assert!(session.media_leg(&LegId::from(name)).unwrap().egress_is_relay());
+            }
+            continue;
+        }
         if scenario == "complete" || scenario == "complete_from_customer" {
             if scenario == "complete_from_customer" {
                 session.handle_hold(consult.clone(), None).await.unwrap();
@@ -6415,6 +6436,13 @@ async fn reinvite_hold_resume_restores_both_relay_directions() {
                 remote.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
                 session.apply_reinvite_hold_transition(side, &parsed, &[]).await;
                 let resumed = direction == "sendrecv";
+                if !resumed {
+                    // Playback completion / unmute while held must preserve the
+                    // intended pair without resuming live media prematurely.
+                    session.execute_command(CallCommand::ResumeMedia, None).await;
+                    session.handle_unmute_track("caller".into()).await.unwrap();
+                    assert_eq!(session.bridge.legs, vec![LegId::from("caller"), LegId::from("callee")]);
+                }
                 assert_eq!(session.bridge().unwrap().is_bridged(), resumed);
                 if resumed {
                     for name in ["caller", "callee"] {
@@ -6952,7 +6980,7 @@ async fn added_legs_require_explicit_bridge_and_allow_removed_ids() {
         let request = create_test_request(rsipstack::sip::Method::Invite, "caller", None, "rustpbx.com", None);
         let dialplan = Dialplan::new("rwi-mode".into(), request, DialDirection::Inbound)
             .with_media(MediaConfig::new().with_proxy_mode(MediaProxyMode::All));
-        let (mut session, _handle, _commands) = build_session_with_cmd_rx(dialplan).await;
+        let (mut session, _handle, mut commands) = build_session_with_cmd_rx(dialplan).await;
         let _guard = session.cancel_token.clone().drop_guard();
         let mut remotes = Vec::new();
         for name in ["caller", "target"] {
@@ -6980,6 +7008,38 @@ async fn added_legs_require_explicit_bridge_and_allow_removed_ids() {
         assert!(!session.media_leg(&LegId::from("caller")).unwrap().egress_is_relay());
         assert!(session.setup_bridge(LegId::from("caller"), LegId::from("target")).await);
         assert!(session.bridge.active);
+        session.handle_mute_track("caller".into()).await.unwrap();
+        assert!(!session.media_leg(&LegId::from("caller")).unwrap().egress_is_relay());
+        session.handle_unmute_track("caller".into()).await.unwrap();
+        assert!(session.media_leg(&LegId::from("caller")).unwrap().egress_is_relay());
+
+        for (side_only, unbridge_during_playback) in [(false, false), (true, false), (true, true)] {
+            let path = format!("{}/fixtures/sample.wav", env!("CARGO_MANIFEST_DIR"));
+            session.handle_play(Some(LegId::from("caller")),
+                crate::call::domain::MediaSource::File { path },
+                Some(crate::call::domain::PlayOptions { side_only, ..Default::default() })).await.unwrap();
+            assert!(!session.media_leg(&LegId::from("caller")).unwrap().egress_is_relay());
+            if unbridge_during_playback {
+                session.execute_command(CallCommand::Unbridge { leg_id: LegId::from("caller") }, None).await;
+            } else {
+                session.handle_stop_playback(None).await.unwrap();
+            }
+            // Process the real playback completion's restore command.
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let command = commands.recv().await.unwrap();
+                    let restored = matches!(command, CallCommand::ResumeMedia);
+                    session.execute_command(command, None).await;
+                    if restored { break; }
+                }
+            }).await.expect("playback must request media restoration");
+            assert_eq!(session.bridge.active, !unbridge_during_playback);
+            for name in ["caller", "target"] {
+                assert_eq!(session.media_leg(&LegId::from(name)).unwrap().egress_is_relay(), !unbridge_during_playback);
+            }
+        }
+        session.handle_unmute_track("caller".into()).await.unwrap();
+        assert!(!session.bridge.active, "unmute must not invent a pair after explicit unbridge");
         session.execute_command(CallCommand::Unbridge { leg_id: LegId::from("caller") }, None).await;
         session.update_media_path().await;
         assert!(!session.bridge.active, "unbridge must not select another pair");

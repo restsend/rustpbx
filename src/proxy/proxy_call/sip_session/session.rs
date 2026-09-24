@@ -6403,6 +6403,8 @@ impl SipSession {
                     .ok_or_else(|| anyhow!("Missing callee media peer"))?;
                 if self.media.bridge.is_none() { self.media.bridge = Some(MediaBridge::new(self.id.to_string())); }
                 self.bridge_mut().unwrap().select_pair(caller, callee).await?;
+                // Direct dialing owns this selection; later media resume restores it.
+                self.bridge = BridgeConfig::bridge(LegId::from("caller"), LegId::from("callee"));
                 let cmd_tx = self.cmd_tx.clone();
                 let session_id = self.context.session_id.clone();
                 // Once the callee answers, normalize caller audio to the
@@ -11566,8 +11568,14 @@ impl SipSession {
         }
         let requested = self.bridge.legs.clone();
         if requested.len() == 2 && requested.iter().all(|id| self.legs.get(id).is_some_and(|leg| {
-            !matches!(leg.state, LegState::Hold | LegState::Ending | LegState::Ended)
+            !matches!(leg.state, LegState::Ending | LegState::Ended)
         })) {
+            // Hold changes audio output, not the selected conversation partner.
+            // A playback completion or unmute while held must neither reconnect
+            // media nor discard the pair needed by the subsequent unhold.
+            if requested.iter().any(|id| self.legs.get(id).is_some_and(|leg| leg.state == LegState::Hold)) {
+                return;
+            }
             self.setup_bridge(requested[0].clone(), requested[1].clone()).await;
             return;
         }
@@ -11884,8 +11892,11 @@ impl SipSession {
         for _ in &peers {
             sources.push(crate::media::audio_source::FileAudioSource::new(file_path.clone(), loop_playback).await?);
         }
-        if !single_peer && peers.iter().any(|peer| self.media_side_for_leg(peer.id()).is_some()) {
-            if let Some(mb) = self.bridge_mut() { mb.unbridge().await?; }
+        if peers.iter().any(|peer| self.media_side_for_leg(peer.id()).is_some()) {
+            if let Some(mb) = self.bridge_mut() {
+                if single_peer { mb.invalidate_route_cache(); }
+                else { mb.unbridge().await?; }
+            }
         }
         let mut handles = Vec::new();
         for (peer, audio) in peers.into_iter().zip(sources) {
@@ -12127,6 +12138,9 @@ impl SipSession {
         }).cloned().ok_or_else(|| anyhow!("Unknown media track: {}", track_id))?;
         let peer = self.media_leg(&id).ok_or_else(|| anyhow!("No media for leg {}", id))?;
         if muted {
+            if let Some(mb) = self.bridge_mut() {
+                if mb.side_for_leg(&id).is_some() { mb.invalidate_route_cache(); }
+            }
             peer.set_egress_source(crate::media::egress::EgressSource::Silence).await?;
         } else {
             self.update_media_path().await;

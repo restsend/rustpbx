@@ -337,8 +337,11 @@ mod tests {
         // Simulate agent connected event
         stack.custom(
             "agent_connected",
-            serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
+            serde_json::json!({"agent_uri": "sip:agent1@example.com", "leg_id": "answered-agent"}),
         );
+        stack.assert_cmd(2000, "Bridge winner", |c| {
+            matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
+        }).await;
 
         // Should connect (app exits cleanly)
         stack
@@ -388,6 +391,9 @@ mod tests {
             "agent_connected",
             serde_json::json!({"agent_uri": "sip:agent2@example.com"}),
         );
+        stack.assert_cmd(2000, "Bridge winner", |c| {
+            matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
+        }).await;
 
         // Should connect (app exits cleanly)
         stack
@@ -603,6 +609,9 @@ mod tests {
             "agent_connected",
             serde_json::json!({"agent_uri": "sip:agent3@example.com"}),
         );
+        stack.assert_cmd(2000, "Bridge winner", |c| {
+            matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
+        }).await;
 
         // The session bridge replaces hold music; the app must not stop it afterward.
         assert!(stack.next_cmd(2000).await.is_none(), "connect must not queue playback cleanup");
@@ -694,6 +703,9 @@ mod tests {
             "agent_connected",
             serde_json::json!({"agent_uri": "sip:agent1@example.com", "agent_id": "agent-001"}),
         );
+        stack.assert_cmd(2000, "Bridge winner", |c| {
+            matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
+        }).await;
 
         // Should connect (app exits cleanly)
         stack
@@ -974,6 +986,9 @@ mod tests {
             "agent_connected",
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
+        stack.assert_cmd(2000, "Bridge winner", |c| {
+            matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
+        }).await;
         let service_cmd = stack.next_cmd(2000).await.expect("service prompt Play");
         assert!(
             play_path(&service_cmd).ends_with("queue-service-zh.wav"),
@@ -984,6 +999,12 @@ mod tests {
             "service prompt must be caller-only"
         );
         let service_tid = play_track_id(&service_cmd);
+
+        // A second answer during the service prompt must not replace the winner.
+        stack.custom("agent_connected", serde_json::json!({
+            "agent_uri": "sip:agent2@example.com", "leg_id": "late-agent",
+        }));
+        assert!(stack.next_cmd(100).await.is_none(), "late answer must not rebridge or restart the prompt");
 
         // Late natural completion of the cut transfer prompt must be ignored.
         stack.audio_complete(transfer_tid);
@@ -1033,6 +1054,9 @@ mod tests {
             "agent_connected",
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
+        stack.assert_cmd(2000, "Bridge winner", |c| {
+            matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
+        }).await;
         let service_cmd = stack.next_cmd(2000).await.expect("service prompt Play");
         let service_tid = play_track_id(&service_cmd);
         stack.audio_complete(service_tid);
@@ -1079,6 +1103,9 @@ mod tests {
             "agent_connected",
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
+        stack.assert_cmd(2000, "Bridge winner", |c| {
+            matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
+        }).await;
         assert!(stack.next_cmd(2000).await.is_none(),
             "agent answer must not enqueue a stop after the session has bridged the call");
 
@@ -1111,8 +1138,11 @@ mod tests {
 
         stack.custom(
             "agent_connected",
-            serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
+            serde_json::json!({"agent_uri": "sip:agent1@example.com", "leg_id": "answered-agent"}),
         );
+        stack.assert_cmd(2000, "Bridge winner", |c| {
+            matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
+        }).await;
 
         stack
             .join()
@@ -1243,6 +1273,9 @@ mod tests {
             "agent_connected",
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
+        stack.assert_cmd(2000, "Bridge winner", |c| {
+            matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
+        }).await;
         let service_cmd = stack.next_cmd(2000).await.expect("service prompt Play");
         assert!(
             play_path(&service_cmd).ends_with("queue-service-en.wav"),
@@ -1490,7 +1523,7 @@ mod tests {
 
         // Should originate calls to ALL agents in parallel
         let cmd0 = stack.next_cmd(2000).await.expect("LegAdd for agent1");
-        let _leg_id_0 = match &cmd0 {
+        let leg_id_0 = match &cmd0 {
             CallCommand::LegAdd { leg_id, .. } => {
                 leg_id.clone().expect("LegAdd should have leg_id")
             }
@@ -1508,8 +1541,11 @@ mod tests {
         // Simulate agent 1 answering first
         stack.custom(
             "agent_connected",
-            serde_json::json!({"agent_uri": "sip:agent1@example.com", "agent_id": "agent-001"}),
+            serde_json::json!({"agent_uri": "sip:agent1@example.com", "agent_id": "agent-001", "leg_id": leg_id_0.to_string()}),
         );
+        stack.assert_cmd(2000, "Bridge winner", |c| {
+            matches!(c, CallCommand::Bridge { leg_a, leg_b, .. } if leg_a.as_str() == "caller" && leg_b == &leg_id_0)
+        }).await;
 
         // Bridging replaces hold music; only the losing agent needs cleanup.
         // Should cancel agent 2's leg via LegRemove (NOT agent 1's leg)
@@ -3578,6 +3614,9 @@ mod tests {
             "agent_connected",
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
+        stack.assert_cmd(2000, "Bridge winner", |c| {
+            matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
+        }).await;
         let service_cmd = stack
             .next_cmd(2000)
             .await
@@ -3710,8 +3749,11 @@ mod tests {
     async fn drive_to_service_prompt(stack: &mut MockCallStack) -> CallCommand {
         stack.custom(
             "agent_connected",
-            serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
+            serde_json::json!({"agent_uri": "sip:agent1@example.com", "leg_id": "answered-agent"}),
         );
+        stack.assert_cmd(2000, "Bridge winner", |c| {
+            matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
+        }).await;
         stack
             .next_cmd(2000)
             .await
@@ -3920,6 +3962,9 @@ mod tests {
             "agent_connected",
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
+        stack.assert_cmd(2000, "Bridge winner", |c| {
+            matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
+        }).await;
         stack
             .assert_cmd(2000, "LegRemove-agent2", |c| {
                 matches!(c, CallCommand::LegRemove { .. })
