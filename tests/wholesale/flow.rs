@@ -347,7 +347,7 @@ async fn enrich_hook_injects_wholesale_reject_code() {
                 ),
                 (
                     "error_message".to_string(),
-                    serde_json::Value::String("Route aborted during preview".to_string()),
+                    serde_json::Value::String("Route aborted".to_string()),
                 ),
             ])),
             ..Default::default()

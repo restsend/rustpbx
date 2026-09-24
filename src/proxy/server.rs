@@ -116,6 +116,10 @@ pub struct SipServerInner {
     /// Optional hook for enriching resolved agent locations before dialing (e.g. injecting
     /// CC / CRM headers for screen-pop).  Registered by the cc addon via proxy_server_hook.
     pub queue_location_enricher: Option<Arc<dyn crate::proxy::call::QueueLocationEnricher>>,
+    /// CC quick-route feature-code resolver (`*81<sg-id>` / `*82<ivr-name>` →
+    /// internal transfer targets). Consulted by the inbound-REFER hand-off.
+    pub quick_route_resolver:
+        Option<Arc<dyn crate::proxy::call::QuickRouteResolver>>,
     /// Subscribers for REFER NOTIFY events from SipSession.
     pub transfer_notify_subscribers:
         Arc<tokio::sync::Mutex<Vec<crate::call::domain::ReferNotifyTx>>>,
@@ -211,6 +215,7 @@ pub struct SipServerBuilder {
     /// AgentRegistry for agent management and presence state.
     agent_registry: Option<Arc<dyn crate::call::app::agent_registry::AgentRegistry>>,
     queue_location_enricher: Option<Arc<dyn crate::proxy::call::QueueLocationEnricher>>,
+    quick_route_resolver: Option<Arc<dyn crate::proxy::call::QuickRouteResolver>>,
     skip_migrate: bool,
     /// Cluster peer SocketAddrs for inter-node sync (derived from Config.cluster).
     cluster_peers: Vec<SocketAddr>,
@@ -261,6 +266,7 @@ impl SipServerBuilder {
             ivr_trace: None,
             agent_registry: None,
             queue_location_enricher: None,
+            quick_route_resolver: None,
             skip_migrate: false,
             cluster_peers: Vec::new(),
             cluster_config: None,
@@ -506,6 +512,14 @@ impl SipServerBuilder {
         enricher: Arc<dyn crate::proxy::call::QueueLocationEnricher>,
     ) -> Self {
         self.queue_location_enricher = Some(enricher);
+        self
+    }
+
+    pub fn with_quick_route_resolver(
+        mut self,
+        resolver: Arc<dyn crate::proxy::call::QuickRouteResolver>,
+    ) -> Self {
+        self.quick_route_resolver = Some(resolver);
         self
     }
 
@@ -1254,6 +1268,7 @@ impl SipServerBuilder {
             conference_server,
             agent_registry: self.agent_registry,
             queue_location_enricher: self.queue_location_enricher,
+            quick_route_resolver: self.quick_route_resolver,
             transfer_notify_subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             cluster_event_hub,
             cluster_peer_ips,

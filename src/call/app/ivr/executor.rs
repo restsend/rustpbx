@@ -25,6 +25,36 @@ const IVR_LAST_ERROR_KEY: &str = "ivr_last_error";
 /// asks the provider to resolve (DtmfMenuTimeout). 0 disables the runaway guard.
 const DEFAULT_MAX_REPEAT_PROMPTS: u32 = 10;
 
+/// Session var holding the per-IVR re-entry bookkeeping (JSON map) for the
+/// re-entry loop guard. Lives in shared session vars so the counter survives
+/// across app restarts within one call; never forwarded to the provider
+/// (filtered in `on_enter`).
+const IVR_REENTRY_STATE_KEY: &str = "_ivr_reentry_state";
+
+/// Default number of times the SAME IVR flow may be (re)started within the
+/// re-entry window without real caller input before the executor diverts to
+/// the IVR fallback (or hangs up) instead of POSTing another /start cycle.
+/// Guards against a provider flow whose last node never terminates the call
+/// (e.g. queue/transfer back into this IVR): each restart is a fresh
+/// start→step→end cycle that a stateless provider repeats forever.
+/// 0 disables the guard.
+const DEFAULT_MAX_FLOW_RESTARTS: u32 = 3;
+
+/// Default window (seconds) in which consecutive re-entries of the same IVR
+/// flow are counted as a loop. Re-entries spaced further apart reset the
+/// counter, so legitimate queue round-trips (ringing + wait) are not
+/// misjudged as restart storms.
+const DEFAULT_REENTRY_WINDOW_SECS: u64 = 60;
+
+/// Per-flow re-entry bookkeeping persisted under [`IVR_REENTRY_STATE_KEY`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct IvrReentryEntry {
+    /// (Re)entries of this flow within the current window.
+    count: u32,
+    /// RFC3339 timestamp of the last (re)entry.
+    ts: String,
+}
+
 /// Originating bridge-step context injected by the proxy (`bridge_step_ctx`
 /// ivr param) when a resumable voip_bridge returns with buffered DTMF. The
 /// executor re-reports the suppressed bridge-DTMF trace from this context —
@@ -129,6 +159,12 @@ pub struct StepIvrApp {
     /// through the unified `CallCommand::ReportCallError` path (log + RWI +
     /// CDR trace). `None` in unit tests that drive the app without a session.
     session_handle: Option<crate::proxy::proxy_call::sip_session::SipSessionHandle>,
+    /// Re-entry loop guard: how many times the SAME IVR flow may restart
+    /// within `reentry_window_secs` without real caller input before the app
+    /// diverts to the IVR fallback / hangs up. 0 disables the guard.
+    max_flow_restarts: u32,
+    /// Re-entry loop guard window in seconds.
+    reentry_window_secs: u64,
 }
 
 #[derive(Clone)]
@@ -185,6 +221,8 @@ impl StepIvrApp {
             pending_audio_delay_ms: 0,
             resumed_flow: false,
             session_handle: None,
+            max_flow_restarts: DEFAULT_MAX_FLOW_RESTARTS,
+            reentry_window_secs: DEFAULT_REENTRY_WINDOW_SECS,
         }
     }
 
@@ -230,6 +268,8 @@ impl StepIvrApp {
             pending_audio_delay_ms: 0,
             resumed_flow: false,
             session_handle: None,
+            max_flow_restarts: DEFAULT_MAX_FLOW_RESTARTS,
+            reentry_window_secs: DEFAULT_REENTRY_WINDOW_SECS,
         }
     }
 
@@ -293,6 +333,23 @@ impl StepIvrApp {
     /// if it is still ignored. `0` disables the guard.
     pub fn with_max_repeat_prompts(mut self, n: u32) -> Self {
         self.max_repeat_prompts = n;
+        self
+    }
+
+    /// Configure the re-entry loop guard: when the same IVR flow is restarted
+    /// more than `n` times within [`Self::with_reentry_window_secs`] without
+    /// real caller input, the next entry diverts to the IVR fallback (or hangs
+    /// up) instead of POSTing another `/start` cycle. `0` disables the guard.
+    pub fn with_max_flow_restarts(mut self, n: u32) -> Self {
+        self.max_flow_restarts = n;
+        self
+    }
+
+    /// Re-entry loop guard window in seconds (see
+    /// [`Self::with_max_flow_restarts`]). Re-entries spaced further apart
+    /// reset the counter.
+    pub fn with_reentry_window_secs(mut self, secs: u64) -> Self {
+        self.reentry_window_secs = secs;
         self
     }
 
@@ -1064,6 +1121,91 @@ impl StepIvrApp {
         )
     }
 
+    /// Identity used by the re-entry loop guard: the IVR name when known,
+    /// else the route name, else a shared bucket so unnamed flows still
+    /// count against one counter.
+    fn reentry_identity(&self) -> String {
+        self.ivr_name
+            .clone()
+            .or_else(|| self.route_name.clone())
+            .unwrap_or_else(|| "step_ivr".to_string())
+    }
+
+    /// Clear the re-entry guard bookkeeping — called when the caller provides
+    /// real input (DTMF), proving the flow is making progress.
+    fn clear_reentry_state(&self, context: &ApplicationContext) {
+        context.session_vars.remove(IVR_REENTRY_STATE_KEY);
+    }
+
+    /// Session-level re-entry loop guard.
+    ///
+    /// Counts (re)entries of the same IVR flow within `reentry_window_secs`
+    /// using shared session vars so the counter survives across app restarts
+    /// (a restart creates a fresh `StepIvrApp`, which would otherwise reset
+    /// every in-app counter). Returns the fallback [`ActionNode`] once the
+    /// count exceeds `max_flow_restarts`; `None` lets the entry proceed.
+    fn check_reentry_loop(&mut self, context: &ApplicationContext) -> Option<ActionNode> {
+        if self.max_flow_restarts == 0 {
+            return None;
+        }
+        let ivr_key = self.reentry_identity();
+        let now = chrono::Utc::now();
+        let window = chrono::Duration::seconds(self.reentry_window_secs.max(1) as i64);
+
+        let mut state: HashMap<String, IvrReentryEntry> = context
+            .session_vars
+            .get(IVR_REENTRY_STATE_KEY)
+            .and_then(|e| serde_json::from_str(e.value()).ok())
+            .unwrap_or_default();
+
+        let count = match state.get_mut(&ivr_key) {
+            Some(entry) => {
+                let last = entry.ts.parse::<chrono::DateTime<chrono::Utc>>().ok();
+                let within_window = last
+                    .map(|t| now.signed_duration_since(t) < window)
+                    .unwrap_or(false);
+                if within_window {
+                    entry.count += 1;
+                    entry.ts = now.to_rfc3339();
+                    entry.count
+                } else {
+                    // Outside the window this is a fresh, legitimate entry.
+                    entry.count = 1;
+                    entry.ts = now.to_rfc3339();
+                    1
+                }
+            }
+            None => {
+                state.insert(
+                    ivr_key.clone(),
+                    IvrReentryEntry {
+                        count: 1,
+                        ts: now.to_rfc3339(),
+                    },
+                );
+                1
+            }
+        };
+
+        context.session_vars.insert(
+            IVR_REENTRY_STATE_KEY.to_string(),
+            serde_json::to_string(&state).unwrap_or_default(),
+        );
+
+        if count <= self.max_flow_restarts {
+            return None;
+        }
+
+        tracing::warn!(
+            ivr = %ivr_key,
+            count,
+            max_restarts = self.max_flow_restarts,
+            window_secs = self.reentry_window_secs,
+            "StepIvrApp: IVR re-entry loop detected — diverting to ivr_fallback/hangup instead of restarting the flow"
+        );
+        Some(self.enter_ivr_fallback_node("reentry_loop"))
+    }
+
     /// Record a trace entry + RWI `ivr_step_trace` event for a fallback decision.
     fn record_fallback_trace(&self, reason: &str, target: Option<&str>) {
         let provider_session = self.provider_session_context();
@@ -1739,6 +1881,11 @@ impl CallApp for StepIvrApp {
         self.sess.sip_headers = headers.clone();
 
         for variable in context.session_vars.iter() {
+            // Internal guard bookkeeping is executor-private and must never
+            // reach the provider payload (`ProviderContext.variables`).
+            if variable.key() == IVR_REENTRY_STATE_KEY {
+                continue;
+            }
             self.sess
                 .variables
                 .insert(variable.key().clone(), variable.value().clone());
@@ -1902,6 +2049,21 @@ impl CallApp for StepIvrApp {
         };
         self.provider_session = Some(sess_ctx.clone());
         self.set_runtime_status(context, "provider_start");
+
+        // Re-entry loop guard: a provider flow whose last node does not
+        // terminate the call (queue/transfer back into this IVR, `exit`, …)
+        // makes the session restart the flow — each restart POSTs a fresh
+        // /start, so a stateless provider repeats its "last node" forever.
+        // The guard counts entries of the same flow within the window (via
+        // shared session vars) and, once exceeded, routes the call to the IVR
+        // fallback (or hangs up) instead. It runs BEFORE `/start` and the
+        // session-start trace so a blocked cycle never reaches the provider.
+        if let Some(fallback_node) = self.check_reentry_loop(context) {
+            self.set_runtime_end_reason_shared("ivr_reentry_loop");
+            self.current_node = Some(fallback_node);
+            return self.__exec_node(ctrl, context).await;
+        }
+
         self.provider.on_session_start(&sess_ctx).await.ok();
 
         self.step_prev_start_time = Some(chrono::Utc::now().to_rfc3339());
@@ -1945,6 +2107,11 @@ impl CallApp for StepIvrApp {
             tracing::info!("StepIvrApp: ignoring DTMF during non-interruptible prompt");
             return Ok(AppAction::Continue);
         }
+
+        // Real caller input proves the flow is progressing — clear the
+        // re-entry loop guard so legitimate user-driven re-entries (queue
+        // round-trips, menu navigation) are not misjudged as a restart loop.
+        self.clear_reentry_state(context);
 
         // DTMF received — clear any stale timeout flag so a later hangup is
         // not misclassified as timeout-induced.
@@ -8646,5 +8813,241 @@ mod tests {
             EntryAction::Prompt { file: Some(f), .. } => assert_eq!(f, "sounds/error.wav"),
             other => panic!("expected error hangup chain, got {other:?}"),
         }
+    }
+
+    // ── Re-entry loop guard ──────────────────────────────────────────────────
+
+    fn reentry_app(name: &str, max_restarts: u32) -> StepIvrApp {
+        StepIvrApp::with_provider(Box::new(MockProvider::new(vec![])))
+            .with_name(name)
+            .with_max_flow_restarts(max_restarts)
+    }
+
+    #[tokio::test]
+    async fn test_step_ivr_reentry_guard_triggers_after_threshold() {
+        let ctx = make_test_context();
+        let mut app = reentry_app("main", 3);
+        for cycle in 1..=3 {
+            assert!(
+                app.check_reentry_loop(&ctx).is_none(),
+                "entry {cycle} within the threshold must pass"
+            );
+        }
+        let node = app
+            .check_reentry_loop(&ctx)
+            .expect("entry beyond the threshold must trigger the guard");
+        // No ivr_fallback configured → error-tone + hangup chain.
+        match node.action {
+            EntryAction::Prompt { file: Some(f), .. } => assert_eq!(f, "sounds/error.wav"),
+            other => panic!("expected error-tone hangup chain, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_step_ivr_reentry_guard_resets_outside_window() {
+        let ctx = make_test_context();
+        let mut app = reentry_app("main", 3);
+        for _ in 0..3 {
+            assert!(app.check_reentry_loop(&ctx).is_none());
+        }
+        // Backdate the last entry beyond the window — the next entry is a
+        // fresh, legitimate one (counter resets to 1).
+        let backdated = serde_json::json!({
+            "main": {
+                "count": 3,
+                "ts": (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339(),
+            }
+        });
+        ctx.session_vars
+            .insert(IVR_REENTRY_STATE_KEY.to_string(), backdated.to_string());
+        assert!(
+            app.check_reentry_loop(&ctx).is_none(),
+            "an entry outside the window must reset the counter"
+        );
+        assert!(app.check_reentry_loop(&ctx).is_none());
+        assert!(app.check_reentry_loop(&ctx).is_none());
+        assert!(
+            app.check_reentry_loop(&ctx).is_some(),
+            "guard must trigger again after another run of in-window entries"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_step_ivr_reentry_guard_counts_per_ivr_identity() {
+        let ctx = make_test_context();
+        let mut a = reentry_app("ivr-a", 3);
+        let mut b = reentry_app("ivr-b", 3);
+        for _ in 0..3 {
+            assert!(a.check_reentry_loop(&ctx).is_none());
+        }
+        // A different flow is not affected by ivr-a's counter.
+        assert!(b.check_reentry_loop(&ctx).is_none());
+        assert!(
+            a.check_reentry_loop(&ctx).is_some(),
+            "ivr-a must trigger on its own threshold breach"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_step_ivr_reentry_guard_disabled_with_zero() {
+        let ctx = make_test_context();
+        let mut app = reentry_app("main", 0);
+        for _ in 0..10 {
+            assert!(
+                app.check_reentry_loop(&ctx).is_none(),
+                "max_flow_restarts=0 must disable the guard"
+            );
+        }
+        assert!(ctx.session_vars.get(IVR_REENTRY_STATE_KEY).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_step_ivr_reentry_guard_cleared_by_dtmf() {
+        let ctx = make_test_context();
+        let mut app = reentry_app("main", 3);
+        assert!(app.check_reentry_loop(&ctx).is_none());
+        assert!(app.check_reentry_loop(&ctx).is_none());
+        // Real caller input proves the flow is progressing — the guard resets.
+        app.clear_reentry_state(&ctx);
+        assert!(ctx.session_vars.get(IVR_REENTRY_STATE_KEY).is_none());
+        assert!(app.check_reentry_loop(&ctx).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_step_ivr_reentry_guard_diverts_to_ivr_fallback_once() {
+        let ctx = make_test_context();
+        let mk_fb = || {
+            Arc::new(crate::config::IvrFallbackConfig {
+                default: Some("default_ivr".into()),
+                rules: vec![],
+            })
+        };
+        let mut app = StepIvrApp::with_provider(Box::new(MockProvider::new(vec![])))
+            .with_name("main")
+            .with_max_flow_restarts(1)
+            .with_ivr_fallback(Some(mk_fb()));
+        // on_enter shares the session-vars map with the app instance.
+        app.runtime_vars = Some(ctx.session_vars.clone());
+
+        assert!(app.check_reentry_loop(&ctx).is_none());
+        let node = app
+            .check_reentry_loop(&ctx)
+            .expect("entry beyond the threshold must trigger the guard");
+        match node.action {
+            EntryAction::Transfer { target, .. } => assert_eq!(target, "ivr:default_ivr"),
+            other => panic!("expected direct IVR fallback transfer, got {other:?}"),
+        }
+
+        // One-shot: the NEXT restart's guard sees the fallback marker (shared
+        // via session vars) and hangs up instead of transferring again.
+        let mut restart = StepIvrApp::with_provider(Box::new(MockProvider::new(vec![])))
+            .with_name("main")
+            .with_max_flow_restarts(1)
+            .with_ivr_fallback(Some(mk_fb()));
+        restart.runtime_vars = Some(ctx.session_vars.clone());
+        let node = restart
+            .check_reentry_loop(&ctx)
+            .expect("guard must trigger again after the restart");
+        match node.action {
+            EntryAction::Prompt { file: Some(f), .. } => assert_eq!(f, "sounds/error.wav"),
+            other => {
+                panic!("expected error-tone hangup chain after one-shot fallback, got {other:?}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_step_ivr_reentry_state_not_forwarded_to_provider() {
+        let ctx = make_test_context();
+
+        // Cycle 1 writes the guard state into shared session vars.
+        {
+            let provider = Arc::new(MockProvider::new(vec![ActionNode::new(EntryAction::Exit)]));
+            let app = StepIvrApp::with_provider(Box::new(MockProviderHandle(provider.clone())))
+                .with_name("loop-ivr")
+                .with_max_flow_restarts(5);
+            let mut stack = MockCallStack::run_with_context(Box::new(app), ctx.clone());
+            stack
+                .assert_cmd(2000, "answer", |c| matches!(c, CallCommand::Answer { .. }))
+                .await;
+            stack.join().await.unwrap();
+        }
+        assert!(
+            ctx.session_vars.contains_key(IVR_REENTRY_STATE_KEY),
+            "guard state must persist in shared session vars"
+        );
+
+        // Cycle 2 must NOT leak the guard state into ProviderContext.variables.
+        let provider = Arc::new(MockProvider::new(vec![ActionNode::new(EntryAction::Exit)]));
+        let app = StepIvrApp::with_provider(Box::new(MockProviderHandle(provider.clone())))
+            .with_name("loop-ivr")
+            .with_max_flow_restarts(5);
+        let mut stack = MockCallStack::run_with_context(Box::new(app), ctx.clone());
+        stack
+            .assert_cmd(2000, "answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack.join().await.unwrap();
+
+        let contexts = provider.contexts.lock().unwrap();
+        assert!(!contexts.is_empty(), "cycle 2 must have called /step");
+        for ctx in contexts.iter() {
+            assert!(
+                !ctx.variables.contains_key(IVR_REENTRY_STATE_KEY),
+                "guard bookkeeping must never reach the provider payload"
+            );
+        }
+    }
+
+    /// The reported bug: a provider flow whose last node never terminates the
+    /// call (`exit` here — same class as queue/transfer back into this IVR)
+    /// makes the session restart the IVR forever. Each restart is a fresh
+    /// start→step→end cycle. The guard must break the cycle on the entry
+    /// after the threshold WITHOUT reaching the provider.
+    #[tokio::test]
+    async fn test_step_ivr_reentry_loop_hangs_up_without_provider_start() {
+        let ctx = make_test_context();
+
+        // Cycles 1-3: each restart runs a full flow (start → step → exit/end).
+        for cycle in 1..=3 {
+            let provider = Arc::new(MockProvider::new(vec![ActionNode::new(EntryAction::Exit)]));
+            let app = StepIvrApp::with_provider(Box::new(MockProviderHandle(provider.clone())))
+                .with_name("loop-ivr")
+                .with_max_flow_restarts(3);
+            let mut stack = MockCallStack::run_with_context(Box::new(app), ctx.clone());
+            stack
+                .assert_cmd(2000, "answer", |c| matches!(c, CallCommand::Answer { .. }))
+                .await;
+            stack.join().await.expect("cycle must complete cleanly");
+            assert!(
+                *provider.start_called.lock().unwrap(),
+                "cycle {cycle} must reach /start"
+            );
+        }
+
+        // Cycle 4: the guard fires BEFORE /start — error tone + hangup.
+        let provider = Arc::new(MockProvider::new(vec![]));
+        let app = StepIvrApp::with_provider(Box::new(MockProviderHandle(provider.clone())))
+            .with_name("loop-ivr")
+            .with_max_flow_restarts(3);
+        let mut stack = MockCallStack::run_with_context(Box::new(app), ctx.clone());
+        stack
+            .assert_cmd(2000, "answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(2000, "error-tone", |c| play_file_cmd(c, "sounds/error.wav"))
+            .await;
+        stack.audio_complete("ivr_prompt");
+        stack
+            .assert_cmd(2000, "hangup", |c| matches!(c, CallCommand::Hangup { .. }))
+            .await;
+        stack.join().await.unwrap();
+        assert!(
+            !*provider.start_called.lock().unwrap(),
+            "guard must block the provider /start on the looping entry"
+        );
+        assert!(
+            provider.contexts.lock().unwrap().is_empty(),
+            "guard must also block the first /step"
+        );
     }
 }

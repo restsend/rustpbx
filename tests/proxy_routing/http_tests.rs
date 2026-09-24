@@ -25,18 +25,6 @@ mod tests {
                 None,
             ))
         }
-        async fn preview_route(
-            &self,
-            _: rsipstack::dialog::invitation::InviteOption,
-            _: &rsipstack::sip::Request,
-            _: &rustpbx::call::DialDirection,
-            _: &TransactionCookie,
-        ) -> anyhow::Result<rustpbx::config::RouteResult> {
-            Ok(rustpbx::config::RouteResult::NotHandled(
-                rsipstack::dialog::invitation::InviteOption::default(),
-                None,
-            ))
-        }
     }
 
     /// Resolve a routing decision for a synthetic INVITE against a stub
@@ -177,18 +165,6 @@ mod tests {
                     None,
                 ))
             }
-            async fn preview_route(
-                &self,
-                _: rsipstack::dialog::invitation::InviteOption,
-                _: &rsipstack::sip::Request,
-                _: &rustpbx::call::DialDirection,
-                _: &TransactionCookie,
-            ) -> anyhow::Result<rustpbx::config::RouteResult> {
-                Ok(rustpbx::config::RouteResult::NotHandled(
-                    rsipstack::dialog::invitation::InviteOption::default(),
-                    None,
-                ))
-            }
         }
 
         let route_invite = Box::new(DummyRouteInvite);
@@ -272,18 +248,6 @@ mod tests {
         #[async_trait::async_trait]
         impl rustpbx::call::RouteInvite for DummyRouteInvite {
             async fn route_invite(
-                &self,
-                _: rsipstack::dialog::invitation::InviteOption,
-                _: &rsipstack::sip::Request,
-                _: &rustpbx::call::DialDirection,
-                _: &TransactionCookie,
-            ) -> anyhow::Result<rustpbx::config::RouteResult> {
-                Ok(rustpbx::config::RouteResult::NotHandled(
-                    rsipstack::dialog::invitation::InviteOption::default(),
-                    None,
-                ))
-            }
-            async fn preview_route(
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
                 _: &rsipstack::sip::Request,
@@ -460,18 +424,6 @@ mod tests {
                     None,
                 ))
             }
-            async fn preview_route(
-                &self,
-                _: rsipstack::dialog::invitation::InviteOption,
-                _: &rsipstack::sip::Request,
-                _: &rustpbx::call::DialDirection,
-                _: &TransactionCookie,
-            ) -> anyhow::Result<rustpbx::config::RouteResult> {
-                Ok(rustpbx::config::RouteResult::NotHandled(
-                    rsipstack::dialog::invitation::InviteOption::default(),
-                    None,
-                ))
-            }
         }
 
         let route_invite = Box::new(DummyRouteInvite);
@@ -575,18 +527,6 @@ mod tests {
                     None,
                 ))
             }
-            async fn preview_route(
-                &self,
-                _: rsipstack::dialog::invitation::InviteOption,
-                _: &rsipstack::sip::Request,
-                _: &rustpbx::call::DialDirection,
-                _: &TransactionCookie,
-            ) -> anyhow::Result<rustpbx::config::RouteResult> {
-                Ok(rustpbx::config::RouteResult::NotHandled(
-                    rsipstack::dialog::invitation::InviteOption::default(),
-                    None,
-                ))
-            }
         }
 
         let result = router
@@ -676,18 +616,6 @@ mod tests {
                     None,
                 ))
             }
-            async fn preview_route(
-                &self,
-                _: rsipstack::dialog::invitation::InviteOption,
-                _: &rsipstack::sip::Request,
-                _: &rustpbx::call::DialDirection,
-                _: &TransactionCookie,
-            ) -> anyhow::Result<rustpbx::config::RouteResult> {
-                Ok(rustpbx::config::RouteResult::NotHandled(
-                    rsipstack::dialog::invitation::InviteOption::default(),
-                    None,
-                ))
-            }
         }
 
         let result = router
@@ -759,18 +687,6 @@ mod tests {
         #[async_trait::async_trait]
         impl rustpbx::call::RouteInvite for DummyRouteInvite {
             async fn route_invite(
-                &self,
-                _: rsipstack::dialog::invitation::InviteOption,
-                _: &rsipstack::sip::Request,
-                _: &rustpbx::call::DialDirection,
-                _: &TransactionCookie,
-            ) -> anyhow::Result<rustpbx::config::RouteResult> {
-                Ok(rustpbx::config::RouteResult::NotHandled(
-                    rsipstack::dialog::invitation::InviteOption::default(),
-                    None,
-                ))
-            }
-            async fn preview_route(
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
                 _: &rsipstack::sip::Request,
@@ -986,18 +902,6 @@ mod tests {
                     None,
                 ))
             }
-            async fn preview_route(
-                &self,
-                _: rsipstack::dialog::invitation::InviteOption,
-                _: &rsipstack::sip::Request,
-                _: &rustpbx::call::DialDirection,
-                _: &TransactionCookie,
-            ) -> anyhow::Result<rustpbx::config::RouteResult> {
-                Ok(rustpbx::config::RouteResult::NotHandled(
-                    rsipstack::dialog::invitation::InviteOption::default(),
-                    None,
-                ))
-            }
         }
 
         let dialplan = router
@@ -1081,18 +985,6 @@ mod tests {
         #[async_trait::async_trait]
         impl rustpbx::call::RouteInvite for DummyRouteInvite {
             async fn route_invite(
-                &self,
-                _: rsipstack::dialog::invitation::InviteOption,
-                _: &rsipstack::sip::Request,
-                _: &rustpbx::call::DialDirection,
-                _: &TransactionCookie,
-            ) -> anyhow::Result<rustpbx::config::RouteResult> {
-                Ok(rustpbx::config::RouteResult::NotHandled(
-                    rsipstack::dialog::invitation::InviteOption::default(),
-                    None,
-                ))
-            }
-            async fn preview_route(
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
                 _: &rsipstack::sip::Request,

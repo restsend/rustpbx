@@ -247,6 +247,7 @@ pub fn default_priority_for_id(id: &str) -> i32 {
         "core.emergency" => 9999,
         "core.number_pool" => 8900,
         "voicemail.check" => 8500,
+        "cc.quick_route" => 8450,
         "cc.monitor" => 8400,
         _ => 100,
     }
@@ -255,7 +256,7 @@ pub fn default_priority_for_id(id: &str) -> i32 {
 pub fn default_phase_for_id(id: &str) -> RoutingPhase {
     match id {
         "core.emergency" | "core.number_pool" | "cc.monitor" => RoutingPhase::PreRoute,
-        "voicemail.check" => RoutingPhase::PostRoute,
+        "voicemail.check" | "cc.quick_route" => RoutingPhase::PostRoute,
         _ => RoutingPhase::PreRoute,
     }
 }
@@ -446,7 +447,7 @@ pub fn core_routing_contributions(config: &Config) -> Vec<RoutingContribution> {
         priority: 50,
         priority_direction: PriorityDirection::HigherFirst,
         enabled: true,
-        match_summary: "same-realm callee, route preview NotHandled".to_string(),
+        match_summary: "same-realm callee, route NotHandled".to_string(),
         target_summary: "registered SIP contact(s)".to_string(),
         eval_mode: None,
         editable: false,

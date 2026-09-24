@@ -223,7 +223,7 @@ pub fn local_archive_path(
 /// i.e. it is a pipeline-generated artifact name like `{root}/{file}.wav`.
 /// Operator-supplied custom paths (e.g. an RWI `record` option pointing
 /// outside the root) are never archived, so both the renamer and the
-/// event-address preview must agree on this predicate.
+/// event-address prediction must agree on this predicate.
 pub fn is_direct_child_of_root(root: &str, path: &Path) -> bool {
     let normalize = |p: &Path| -> Vec<String> {
         p.components()
@@ -243,7 +243,7 @@ pub fn is_direct_child_of_root(root: &str, path: &Path) -> bool {
 /// operator-supplied custom locations. Call-site invariant: `at` must be the
 /// call's start time — the renamer (`archive_local_artifacts`) derives the
 /// date directory from `record.start_time`, not from the recording moment.
-pub fn preview_archive_path(
+pub fn predicted_archive_path(
     root: &str,
     path: &Path,
     subdir: RecordingSubdir,
@@ -472,27 +472,27 @@ mod tests {
     }
 
     #[test]
-    fn preview_matches_local_archive_path_for_pipeline_artifacts() {
+    fn predicted_matches_local_archive_path_for_pipeline_artifacts() {
         let at = Utc.with_ymd_and_hms(2026, 9, 7, 8, 0, 0).unwrap();
         let root = "/sipflow";
         let src = Path::new("/sipflow/call-1.wav");
         let expected = local_archive_path(root, src, RecordingSubdir::Daily, at);
         assert_eq!(
-            preview_archive_path(root, src, RecordingSubdir::Daily, at),
+            predicted_archive_path(root, src, RecordingSubdir::Daily, at),
             expected.to_string_lossy()
         );
         assert_eq!(
-            preview_archive_path(root, src, RecordingSubdir::Daily, at),
+            predicted_archive_path(root, src, RecordingSubdir::Daily, at),
             "/sipflow/20260907/call-1.wav"
         );
     }
 
     #[test]
-    fn preview_keeps_custom_paths_untouched() {
+    fn predicted_keeps_custom_paths_untouched() {
         let at = Utc.with_ymd_and_hms(2026, 9, 7, 8, 0, 0).unwrap();
         let custom = "/data/ob/call.wav";
         assert_eq!(
-            preview_archive_path("/rec", Path::new(custom), RecordingSubdir::Daily, at),
+            predicted_archive_path("/rec", Path::new(custom), RecordingSubdir::Daily, at),
             custom
         );
     }

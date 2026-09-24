@@ -7779,7 +7779,7 @@ impl SipSession {
     /// is active, the media type never archives (`http`/`sipflow`), or the
     /// call start time cannot be resolved — in every fallback the renamer
     /// also leaves the file in place, so the address stays valid.
-    pub(crate) fn preview_recording_event_path(&self, path: &str) -> String {
+    pub(crate) fn predicted_recording_event_path(&self, path: &str) -> String {
         let policy_guard = self.server.recording_policy.load();
         let Some(policy) = policy_guard.as_ref() else {
             return path.to_string();
@@ -7796,7 +7796,7 @@ impl SipSession {
             return path.to_string();
         };
         let subdir = crate::callrecord::RecordingSubdir::parse(policy.subdir.as_deref());
-        crate::callrecord::preview_archive_path(
+        crate::callrecord::predicted_archive_path(
             &policy.recorder_path(),
             Path::new(path),
             subdir,
@@ -7843,7 +7843,7 @@ impl SipSession {
                 Some(ref meta) => (meta.caller_name.clone(), meta.callee_name.clone()),
                 None => (None, None),
             };
-            let reported_path = self.preview_recording_event_path(&info.path);
+            let reported_path = self.predicted_recording_event_path(&info.path);
             gateway.read().send_to_owner(&crate::rwi::RecordStopped {
                 call_id: call_id.clone(),
                 duration_secs: Some(info.duration.as_secs()),

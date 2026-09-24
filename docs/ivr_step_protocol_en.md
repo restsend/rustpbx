@@ -543,6 +543,14 @@ When a `prompt` action contains `tts_text` but no TTS service is configured:
 | `retry.delay_ms` | u64 | `100` | Delay between failed attempts in **milliseconds** |
 | `retry.fallback` | ActionNode | `{"type":"hangup","prompt":"sounds/error.wav"}` | Same-session action when `/step` retries fail **and** `[proxy.ivr_fallback]` is not configured |
 | `name` | string | `"step_ivr"` | Display name for tracing |
+| `max_flow_restarts` | u32 | `3` | Re-entry loop guard: how many times the **same** IVR flow may restart within `reentry_window_secs` without real caller input before the call is diverted to `[proxy.ivr_fallback]` (or hung up). `0` disables the guard |
+| `reentry_window_secs` | u64 | `60` | Window in which consecutive re-entries of the same flow are counted as a restart loop. Re-entries spaced further apart reset the counter |
+
+#### Flow termination contract & re-entry loop guard
+
+Every provider flow **must** end with a terminal action that takes the call somewhere else (`hangup` / `play_and_hangup` / `transfer` / `queue` / `bridge`). A flow that ends with a non-terminal node (or a plain `exit`) leaves the call up, and the session may re-enter the same IVR (queue `return_to_ivr`, route-point hops, `start_app` returns). Because each re-entry POSTs a fresh `/start`, a **stateless** provider would repeat its last node forever — producing endless `start → step → end` cycles.
+
+RustPBX guards against this: if the same IVR flow is re-entered more than `max_flow_restarts` times within `reentry_window_secs` without any real DTMF input (real input resets the counter), the next entry is blocked **before** `/start` and the call is routed to `[proxy.ivr_fallback]` (at most once, like any other fallback), else `sounds/error.wav` plays and the call hangs up. The trace carries an `ivr_fallback` entry with `reason="reentry_loop"` and `ivr_end_reason=ivr_reentry_loop` is published.
 
 ### Published step.json (IVR Editor creates this, for reference)
 

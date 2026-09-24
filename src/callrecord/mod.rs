@@ -44,7 +44,7 @@ mod tests;
 
 pub use recording_artifacts::{
     ActiveRecording, RecordingSegment, RecordingSource, RecordingSubdir, UploadFailedMarker,
-    is_direct_child_of_root, local_archive_path, preview_archive_path, segment_wav_path,
+    is_direct_child_of_root, local_archive_path, predicted_archive_path, segment_wav_path,
     segmented_wav_path, upload_failed_marker_path, write_upload_failed_marker,
     write_upload_failed_marker_ex,
 };

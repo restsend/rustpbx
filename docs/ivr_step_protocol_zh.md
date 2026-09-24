@@ -540,6 +540,14 @@ RustPBX 通过 `toivr:{target}` 跳转，并设置 `ivr_fallback_used=1`，确�
 | `retry.delay_ms` | u64 | `100` | 失败尝试之间的间隔，单位为**毫秒** |
 | `retry.fallback` | ActionNode | `{"type":"hangup","prompt":"sounds/error.wav"}` | `/step` 重试失败**且**未配置 `[proxy.ivr_fallback]` 时，在同一会话中执行的动作 |
 | `name` | string | `"step_ivr"` | 用于追踪的显示名称 |
+| `max_flow_restarts` | u32 | `3` | 重入防环：同一 IVR 流程在 `reentry_window_secs` 内无真实按键输入地反复重启超过该次数后，呼叫转至 `[proxy.ivr_fallback]`（或挂断）。`0` 表示禁用 |
+| `reentry_window_secs` | u64 | `60` | 重入计数的统计窗口（秒）。窗口之外的重入会重置计数，合法的 queue 往返不会误判 |
+
+#### 流程终结约定与重入防环
+
+每个 Provider 流程**必须**以将呼叫带离当前 IVR 的终端动作结束（`hangup` / `play_and_hangup` / `transfer` / `queue` / `bridge`）。若流程以非终端节点（或普通 `exit`）收尾，通话会保持并可能重新进入同一 IVR（queue 的 `return_to_ivr`、路由点跳转、`start_app` 返回等）。由于每次重入都会重新 POST `/start`，**无状态** Provider 会永远重复其"最后一个节点"——形成无限的 `start → step → end` 循环。
+
+RustPBX 对此有防环保护：同一 IVR 流程在 `reentry_window_secs` 内无任何真实 DTMF 输入（真实输入会重置计数）地重入超过 `max_flow_restarts` 次后，下一次重入会在 `/start` 之前被拦截，呼叫转至 `[proxy.ivr_fallback]`（与其他回退一样每通电话最多一次），未配置则播放 `sounds/error.wav` 后挂断。追踪中会记录 `reason="reentry_loop"` 的 `ivr_fallback` 条目，并发布 `ivr_end_reason=ivr_reentry_loop`。
 
 ### 发布后的 step.json（由 IVR 编辑器创建，供参考）
 
