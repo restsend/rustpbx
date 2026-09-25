@@ -8847,6 +8847,34 @@ impl SipSession {
                 let peer = self.media_leg(&id)?;
                 Some(peer.quality_report(side))
             }).collect();
+        // Relay reconciliation: packets received on one leg but never emitted
+        // on the peer leg. Only meaningful on same-codec relays (mirrors the
+        // bridge monitor's `relay_mode` guard — transcode paths run at
+        // different packet rates). `relay_drop == 0` on both legs is the
+        // per-call "nothing dropped inside the bridge" receipt.
+        let mut legs = legs;
+        if legs.len() == 2 {
+            let same_codec = match (legs[0].codec.as_ref(), legs[1].codec.as_ref()) {
+                (Some(a), Some(b)) => a == b,
+                _ => false,
+            };
+            if same_codec {
+                let pick = |side: &str| {
+                    legs.iter().find(|l| l.side == side)
+                        .map(|l| (l.ingress_packets, l.egress_packets))
+                        .unwrap_or((0, 0))
+                };
+                let (a_ing, a_eg) = pick("A");
+                let (b_ing, b_eg) = pick("B");
+                for leg in legs.iter_mut() {
+                    leg.relay_drop = Some(if leg.side == "A" {
+                        a_ing.saturating_sub(b_eg)
+                    } else {
+                        b_ing.saturating_sub(a_eg)
+                    });
+                }
+            }
+        }
         // Answered but a leg never delivered a single media packet — the
         // "silent leg" (browser ICE/DTLS never completed, one-way NAT/UDP
         // filtering, muted softphone, carrier answering without media).
