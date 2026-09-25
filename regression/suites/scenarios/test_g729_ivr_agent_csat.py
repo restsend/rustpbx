@@ -241,13 +241,16 @@ async def test_g729_ivr_queue_agent_pcmu_csat(
         assert answered, f"call never answered:\n{caller.output[-1500:]}"
 
         # ── 5. Queue dispatched the PCMU agent.                             ─
-        ringing = await event_checker.webhook.wait_for_event("call_ringing", timeout=20)
-        assert ringing is not None, (
-            f"no call_ringing — queue did not dispatch. events: "
-            f"{event_checker.webhook.event_types()}"
+        # Since 86b53308 (independent dial legs) the agent leg's 180 also
+        # emits a per-leg `call_ringing` (leg_id set, no agent attribution)
+        # ~2ms BEFORE the CC hook publishes the attributed one — wait for the
+        # AGENT-ATTRIBUTED event, not just the first call_ringing.
+        ringing = await event_checker.webhook.wait_for_event(
+            "call_ringing", timeout=20, match={"payload.agent_id": AGENT},
         )
-        assert ringing.payload.get("agent_id") == AGENT, (
-            f"queue dispatched {ringing.payload.get('agent_id')!r}, want {AGENT}"
+        assert ringing is not None, (
+            f"no call_ringing attributed to {AGENT} — queue did not dispatch. "
+            f"events: {event_checker.webhook.event_types()}"
         )
         call_id = ringing.call_id
         answered_ev = await event_checker.webhook.wait_for_event(
@@ -270,7 +273,10 @@ async def test_g729_ivr_queue_agent_pcmu_csat(
         # queue fan-out events may already be buffered while the webhook
         # awaits above ran — verify the ordered sequence over the FULL WS
         # buffer, waiting for the tail event to arrive.
-        await rwi.wait_for_event("queue_agent_connected", timeout=20)
+        agent_connected = await rwi.wait_for_event("queue_agent_connected", timeout=20)
+        assert agent_connected is not None, (
+            "queue_agent_connected never reached the RWI WS stream"
+        )
         ws_types = [e.get("event_type") for e in rwi.events]
         it = iter(ws_types)
         ok = all(any(t == want for t in it) for want in
@@ -476,11 +482,17 @@ async def test_g729_ivr_queue_restsend_video_agent_audio(
         answered = await caller.wait_output_async(r"200 OK|Call established", timeout=25)
         assert answered, f"call never answered:\n{caller.output[-1500:]}"
 
-        ringing = await event_checker.webhook.wait_for_event("call_ringing", timeout=30)
-        assert ringing is not None, (
-            f"queue did not dispatch. events: {event_checker.webhook.event_types()}"
+        # Since 86b53308 (independent dial legs) the agent leg's 180 also
+        # emits a per-leg `call_ringing` (leg_id set, no agent attribution)
+        # ~2ms BEFORE the CC hook publishes the attributed one — wait for the
+        # AGENT-ATTRIBUTED event, not just the first call_ringing.
+        ringing = await event_checker.webhook.wait_for_event(
+            "call_ringing", timeout=30, match={"payload.agent_id": AGENT},
         )
-        assert ringing.payload.get("agent_id") == AGENT
+        assert ringing is not None, (
+            f"queue did not dispatch {AGENT}. events: "
+            f"{event_checker.webhook.event_types()}"
+        )
         call_id = ringing.call_id
         answered_ev = await event_checker.webhook.wait_for_event(
             "call_answered", timeout=40,

@@ -14,18 +14,35 @@ import asyncio
 import logging
 import uuid
 
+import numpy as np
 import pytest
 
+import helpers as h
+from helpers import (
+    compute_rms_db,
+    find_dominant_frequency,
+    generate_sine_wav,
+    read_wav_mono,
+)
 from helpers.config_reload import apply_config
 
 pytestmark = [pytest.mark.tier3, pytest.mark.verification]
 
+MIN_RMS_DB_HOLD = -40.0
+
 logger = logging.getLogger(__name__)
+
+
+def _window_dbfreq(samples, sr, t0: float, t1: float):
+    """RMS dB + dominant frequency of samples[t0:t1] (seconds).
+    Delegates to the shared :func:`helpers.window_rms_db`."""
+    return h.window_rms_db(samples, sr, t0, t1)
 
 
 async def _inbound_call(pbx, sipbot_pool, event_checker, *,
                         caller="1001", callee="1002", port=0,
-                        hangup=30):
+                        hangup=30, caller_play=None,
+                        callee_record=None, caller_record=None):
     """Place an INBOUND SIP call (sipbot→pbx) and return the pbx call_id.
 
     The call_id is extracted from the webhook event (not known ahead of time
@@ -36,11 +53,18 @@ async def _inbound_call(pbx, sipbot_pool, event_checker, *,
         username=callee, password="123456",
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo", hangup_after=hangup,
+        record_file=str(callee_record) if callee_record else None,
     )
     await asyncio.sleep(3)
+    caller_kwargs = {}
+    if caller_play:
+        caller_kwargs["play_file"] = str(caller_play)
+    if caller_record:
+        caller_kwargs["record_file"] = str(caller_record)
     caller_ua = sipbot_pool.caller(
         target=f"sip:{callee}@{pbx.sip_addr}",
         username=caller, password="123456", hangup=hangup,
+        **caller_kwargs,
     )
     ok = await caller_ua.wait_output_async(r"200 OK|Call established", timeout=20)
     assert ok, f"Inbound call did not connect. Output:\n{caller_ua.output[-400:]}"
@@ -270,10 +294,19 @@ async def test_blind_transfer_inbound_real(pbx, sipbot_pool, api, event_checker)
 
 
 @pytest.mark.asyncio
-async def test_conference_3way_real_media(pbx, sipbot_pool, api, event_checker):
+async def test_conference_3way_real_media(
+    pbx, sipbot_pool, api, event_checker, tmp_path
+):
     """3-way conference: configure a conference route → 3 sipbot callers dial in
     → verify pbx creates a conference mixer + all 3 have bidirectional RTP.
+
+    Content gate: each caller transmits a DISTINCT tone (440/560/680 Hz) and
+    records its mixdown. After the mixing window every recording must carry
+    the OTHER TWO tones at comparable levels — `has_audio` alone cannot tell
+    real mixed audio from CNG/noise.
     """
+    conf_tones = (440.0, 560.0, 680.0)
+
     # Register 3 agents
     for i, ext in enumerate(["1001", "1002", "1003"]):
         sipbot_pool.callee(
@@ -301,13 +334,20 @@ async def test_conference_3way_real_media(pbx, sipbot_pool, api, event_checker):
     # ("unexpected argument '--wait'"), which is why this test historically
     # reported 0/3 connected. Stagger via spawn delay instead.
     callers = []
+    rec_files = []
     for i, ext in enumerate(["1001", "1002", "1003"]):
         if i:
             await asyncio.sleep(1.0)
+        tone = tmp_path / f"conf_tone_{i}.wav"
+        generate_sine_wav(tone, conf_tones[i], 40.0, 8000, 0.4)
+        rec = tmp_path / f"conf_rx_{i}.wav"
+        rec_files.append(rec)
         c = sipbot_pool.caller(
             target=f"sip:{rp}@{pbx.sip_addr}",
             username=ext, password="123456", hangup=30,
             audio_quality=True,
+            play_file=str(tone),
+            record_file=str(rec),
         )
         callers.append(c)
 
@@ -357,6 +397,55 @@ async def test_conference_3way_real_media(pbx, sipbot_pool, api, event_checker):
         f"Conference 3-way: participants without received audio: {audio_failures}"
     )
 
+    # ── Content gate: each mixdown must carry the OTHER TWO tones ──────
+    # (mixer N-1 mix; the bot's own tone also appears via its TX side).
+    # Callers self-exit at hangup=30, flushing their recordings.
+    import time as _time
+
+    rec_deadline = _time.monotonic() + 45
+    resolved = [None] * 3
+    while _time.monotonic() < rec_deadline:
+        for i, rec in enumerate(rec_files):
+            if resolved[i] is None:
+                hits = sorted(rec.parent.glob(rec.stem + "*.wav"))
+                resolved[i] = hits[-1] if hits else None
+        if all(resolved):
+            break
+        await asyncio.sleep(1.0)
+    missing = [i for i, r in enumerate(resolved) if r is None]
+    assert not missing, (
+        f"conference mixdown recordings never flushed for callers {missing}"
+    )
+    for i, resolved_path in enumerate(resolved):
+        samples, sr = read_wav_mono(resolved_path)
+        seg = samples[-10 * sr:].astype(float)
+        if seg.size < sr:
+            seg = samples.astype(float)
+        spec = np.abs(np.fft.rfft(seg * np.hanning(seg.size)))
+        freqs = np.fft.rfftfreq(seg.size, 1 / sr)
+
+        def band_db(center: float, width: float = 15.0) -> float:
+            mask = (freqs >= center - width) & (freqs <= center + width)
+            return float(20 * np.log10(spec[mask].max() + 1e-9))
+
+        others = [band_db(conf_tones[j]) for j in range(3) if j != i]
+        valley = band_db((conf_tones[i] + 560.0) / 2 if i != 1 else 500.0)
+        assert min(others) >= -40.0, (
+            f"caller {i} ({conf_tones[i]:.0f}Hz) mixdown: other-participant "
+            f"tones absent ({others[0]:.1f}/{others[1]:.1f}dB) — mixer did "
+            "not deliver their audio"
+        )
+        assert abs(others[0] - others[1]) <= 15.0, (
+            f"caller {i} mixdown: other tones unbalanced "
+            f"({others[0]:.1f}/{others[1]:.1f}dB) — mixer mix skewed"
+        )
+        assert min(others) >= valley - 6.0, (
+            f"caller {i} mixdown: other tones not a local peak over the "
+            f"valley ({min(others):.1f} vs {valley:.1f}dB)"
+        )
+        print(f"[conf3way] caller {i} mixdown: others "
+              f"{others[0]:.1f}/{others[1]:.1f}dB valley {valley:.1f}dB")
+
     # Structural: exactly one room, 3 participants joined it.
     joined = [e for e in event_checker.webhook.all_events()
               if e.event_type == "conference_joined"]
@@ -371,14 +460,26 @@ async def test_conference_3way_real_media(pbx, sipbot_pool, api, event_checker):
 
 
 @pytest.mark.asyncio
-async def test_hold_unhold_rtp_deep(pbx, sipbot_pool, api, event_checker):
-    """Deep hold verification: measure RTP packet rate before vs during hold.
+async def test_hold_unhold_rtp_deep(pbx, sipbot_pool, api, event_checker, tmp_path):
+    """Deep hold verification — packet rate AND audio content, per window.
 
-    If hold works: callee's RX packet rate should drop to ~0 during hold
-    (the pbx sends sendonly SDP, so the callee stops receiving).
+    Timeline (callee recording is windowed against the call timeline):
+      [0 .. 3s)   baseline — caller plays a 620 Hz tone, callee echoes it
+      [3 .. 6s)   HOLD    — the held party must still HEAR hold audio
+                            (session.rs resolve_hold_music: "the held party
+                            always hears hold audio instead of silence")
+      [6 .. 9s)   UNHOLD  — the 620 Hz call audio returns
+
+    The old packet-rate check (rx_during_hold < rx_after_unhold) is kept as
+    a supporting signal; the CONTENT assertions below are the real gate —
+    packet counters cannot tell hold music from dead air.
     """
+    caller_tone = tmp_path / "hold_caller620.wav"
+    generate_sine_wav(caller_tone, 620.0, 40.0, 8000, 0.4)
+    callee_record = tmp_path / "hold_callee_rx.wav"
     call_id, caller_ua, callee_ua = await _inbound_call(
-        pbx, sipbot_pool, event_checker, caller="1001", callee="1002", hangup=40)
+        pbx, sipbot_pool, event_checker, caller="1001", callee="1002", hangup=40,
+        caller_play=caller_tone, callee_record=callee_record)
 
     # Baseline: count callee RX packets over 3 seconds
     await asyncio.sleep(3)
@@ -422,6 +523,138 @@ async def test_hold_unhold_rtp_deep(pbx, sipbot_pool, api, event_checker):
         f"(rx_during_hold={rx_during_hold}) must be far below the resumed "
         f"post-unhold rate (rx_after_unhold={rx_after_unhold}). "
         f"rx_before={rx_before}."
+    )
+
+    # ── Content gate: window the callee's mixdown recording ─────────────
+    # Wait for the bot to self-exit (flushes the recording), then require
+    # that the HELD party actually HEARD audio during the hold window —
+    # session.rs plays hold music through the held leg's egress; dead air
+    # here is a real product defect (保持音乐 must be audible).
+    rec_deadline = asyncio.get_event_loop().time() + 40
+    resolved = None
+    while asyncio.get_event_loop().time() < rec_deadline:
+        hits = sorted(callee_record.parent.glob(callee_record.stem + "*.wav"))
+        if hits:
+            resolved = hits[-1]
+            break
+        await asyncio.sleep(1.0)
+    assert resolved, (
+        f"callee mixdown recording never flushed: {callee_record}"
+    )
+    samples, sr = read_wav_mono(resolved)
+    need = int(9.5 * sr)
+    assert samples.size >= need, (
+        f"callee recording too short for windowing: {samples.size/sr:.1f}s"
+    )
+    pre_rms, pre_dom = _window_dbfreq(samples, sr, 0.8, 2.8)
+    hold_rms, hold_dom = _window_dbfreq(samples, sr, 3.8, 5.8)
+    post_rms, post_dom = _window_dbfreq(samples, sr, 6.8, 8.8)
+    logger.info(
+        "hold windows: pre(rms=%s dom=%s) hold(rms=%s dom=%s) "
+        "post(rms=%s dom=%s)", pre_rms, pre_dom, hold_rms, hold_dom,
+        post_rms, post_dom,
+    )
+    assert pre_rms is not None and pre_rms >= MIN_RMS_DB_HOLD, (
+        f"baseline window silent (rms={pre_rms}) — caller tone never arrived"
+    )
+    assert pre_dom is not None and abs(pre_dom - 620.0) <= 15, (
+        f"baseline window dominant {pre_dom}Hz, want 620Hz"
+    )
+    assert post_rms is not None and post_rms >= MIN_RMS_DB_HOLD, (
+        f"post-unhold window silent (rms={post_rms}) — call audio did not resume"
+    )
+    assert post_dom is not None and abs(post_dom - 620.0) <= 15, (
+        f"post-unhold dominant {post_dom}Hz, want 620Hz"
+    )
+    assert hold_rms is not None and hold_rms >= MIN_RMS_DB_HOLD, (
+        f"HOLD WINDOW IS SILENT (rms={hold_rms}dB vs baseline {pre_rms}dB) — "
+        "the held party hears dead air (resolve_hold_music guarantees hold "
+        f"audio). Pre/hold/post windows: ({pre_rms}, {hold_rms}, {post_rms}) dB"
+    )
+    # KNOWN GAP (measured 2026-09-24): during hold the held party keeps
+    # hearing the CALLER (620 Hz still dominant, only ~6.7 dB ducked) —
+    # the hold music never reaches them and the bridge is not torn down.
+    # Tracked with evidence in test_hold_music_replaces_caller_audio.
+
+
+@pytest.mark.xfail(
+    reason="known_gap (updated 2026-09-25): root cause was the hold-music "
+    "ASSET being invisible in isolated work-dir runs — config/sounds is now "
+    "mirrored by PbxServer and the held party DOES hear the hold audio "
+    "(hold window dominant 425 Hz = phone-calling.wav spectrum, no longer "
+    "silence). Remaining residual: the caller's 620 Hz is not fully ducked "
+    "(still audible under the music) — the strict >=12 dB duck assertion "
+    "below still fails. Tracked so the residual duck/mix level gets tuned.",
+    strict=False,
+)
+@pytest.mark.asyncio
+async def test_hold_music_replaces_caller_audio(
+    pbx, sipbot_pool, api, event_checker, tmp_path
+):
+    """The held party must HEAR HOLD MUSIC, not a quietly-attenuated caller.
+
+    Windows the callee's mixdown recording around a hold:
+      - 620 Hz caller-tone band must duck ≥12 dB in the hold window;
+      - a music spectrum must be present (non-silence, dominant ≠ 620 Hz).
+    """
+    caller_tone = tmp_path / "hm_caller620.wav"
+    generate_sine_wav(caller_tone, 620.0, 40.0, 8000, 0.4)
+    callee_record = tmp_path / "hm_callee_rx.wav"
+    call_id, caller_ua, callee_ua = await _inbound_call(
+        pbx, sipbot_pool, event_checker, caller="1001", callee="1002", hangup=40,
+        caller_play=caller_tone, callee_record=callee_record)
+
+    await asyncio.sleep(3)
+    status, _ = await api.raw_request(
+        "POST", f"/api/cc/calls/{call_id}/hold", {})
+    assert status == 200, f"hold failed: {status}"
+    await asyncio.sleep(3)
+    status2, _ = await api.raw_request(
+        "POST", f"/api/cc/calls/{call_id}/unhold", {})
+    assert status2 == 200, f"unhold failed: {status2}"
+    await asyncio.sleep(3)
+    try:
+        await event_checker.rwi.hangup(call_id)
+    except Exception as _e:
+        logger.debug("cleanup: %s", _e)
+
+    rec_deadline = asyncio.get_event_loop().time() + 40
+    resolved = None
+    while asyncio.get_event_loop().time() < rec_deadline:
+        hits = sorted(callee_record.parent.glob(callee_record.stem + "*.wav"))
+        if hits:
+            resolved = hits[-1]
+            break
+        await asyncio.sleep(1.0)
+    assert resolved, "callee mixdown recording never flushed"
+    samples, sr = read_wav_mono(resolved)
+    assert samples.size >= int(9.5 * sr), "recording too short to window"
+
+    spec = np.abs(np.fft.rfft(
+        samples[int(3.8 * sr):int(5.8 * sr)] * np.hanning(int(2 * sr))))
+    freqs = np.fft.rfftfreq(int(2 * sr), 1 / sr)
+
+    def band_db(center: float, width: float = 15.0) -> float:
+        mask = (freqs >= center - width) & (freqs <= center + width)
+        return float(20 * np.log10(spec[mask].max() + 1e-9))
+
+    pre_spec = np.abs(np.fft.rfft(
+        samples[int(0.8 * sr):int(2.8 * sr)] * np.hanning(int(2 * sr))))
+    pre_mask = (freqs >= 605) & (freqs <= 635)
+    pre_620_db = float(20 * np.log10(pre_spec[pre_mask].max() + 1e-9))
+    hold_620_db = band_db(620.0)
+
+    assert hold_620_db <= pre_620_db - 12.0, (
+        f"caller tone not ducked during hold: 620Hz band {hold_620_db:.1f}dB "
+        f"vs pre-hold {pre_620_db:.1f}dB (must drop ≥12dB) — held party "
+        "keeps hearing the caller instead of hold music"
+    )
+    music_rms, music_dom = _window_dbfreq(samples, sr, 3.8, 5.8)
+    assert music_rms is not None and music_rms >= -40.0, (
+        "hold window silent — no hold music delivered"
+    )
+    assert music_dom is None or abs(music_dom - 620.0) > 25, (
+        f"hold window still dominated by caller tone ({music_dom:.0f}Hz)"
     )
     assert rx_after_unhold > 0, (
         f"No media after unhold: rx_after_unhold={rx_after_unhold} "

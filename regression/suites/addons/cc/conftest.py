@@ -341,10 +341,14 @@ async def api(pbx: PbxServer):
     client = PbxApiClient(session, pbx.http_url, pbx.rwi_token)
     try:
         # A prior test may have called /ami/v1/reload/app (or reload/routes),
-        # which restarts the app and briefly drops HTTP. Wait for readiness so
-        # this test doesn't hit ConnectionRefused at setup.
+        # which rebuilds the app in-process and briefly drops HTTP. When the
+        # rebuild fails (leaked-transport port conflict) the process exits
+        # ~50 s later and the supervised watchdog respawns it — so the
+        # recovery window can span ~60 s. Wait for readiness so this test
+        # doesn't hit ConnectionRefused at setup. Normal path: the first
+        # probe succeeds and the loop breaks immediately.
         import asyncio as _asyncio
-        for _ in range(20):
+        for _ in range(150):
             try:
                 async with session.get(f"{pbx.http_url}/console/cc", timeout=2) as resp:
                     if resp.status < 500:

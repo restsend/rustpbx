@@ -64,13 +64,16 @@ async def _wait_caller_audio(ua, label: str, min_frames: int = 50, timeout: floa
     raise AssertionError(f"{label}: no audio frames: {ua.get_audio_quality()}")
 
 
-async def _setup_call(pbx, sipbot_pool, rwi):
+async def _setup_call(pbx, sipbot_pool, rwi, *,
+                      caller_play=None, sup_record=None):
     await h.connect_rwi(rwi)
     await _reg(sipbot_pool, pbx, h.ua_port(15504), "1002")
-    await _reg(sipbot_pool, pbx, h.ua_port(15505), "1003", audio_quality=True)
+    await _reg(sipbot_pool, pbx, h.ua_port(15505), "1003", audio_quality=True,
+               record_file=str(sup_record) if sup_record else None)
     caller = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456",
         hangup=30, audio_quality=True,
+        play_file=str(caller_play) if caller_play else None,
     )
     assert await caller.wait_output_async(r"200 OK|Call established", timeout=20), (
         caller.output
@@ -124,12 +127,24 @@ async def test_supervisor_mode_lifecycle(pbx, sipbot_pool, rwi,
 
 @pytest.mark.asyncio
 async def test_supervisor_takeover_kicks_agent_keeps_customer(
-    pbx, sipbot_pool, rwi, webhook_server, webhook_session
+    pbx, sipbot_pool, rwi, webhook_server, webhook_session, tmp_path
 ):
     """Takeover (forced release): the agent leg is kicked (real SIP BYE) while the
-    customer and supervisor legs survive in the takeover conference."""
+    customer and supervisor legs survive in the takeover conference.
+
+    2026-09 content gate: the customer keeps playing its 620 Hz tone and the
+    supervisor UA records its mixdown — after the takeover the supervisor
+    must HEAR the customer (that is the entire purpose of a forced takeover).
+    """
+    import pathlib
+    sup_record = tmp_path / "sup_rx.wav"
+    caller_tone = tmp_path / "cust620.wav"
+    from helpers import generate_sine_wav
+    generate_sine_wav(caller_tone, 620.0, 40.0, 8000, 0.4)
+
     h.boot_pbx(pbx, webhook_url=webhook_server.url)
-    caller, session_id, sup_call = await _setup_call(pbx, sipbot_pool, rwi)
+    caller, session_id, sup_call = await _setup_call(
+        pbx, sipbot_pool, rwi, caller_play=caller_tone, sup_record=sup_record)
 
     def _bot(name: str):
         for p in sipbot_pool._procs:
@@ -162,7 +177,30 @@ async def test_supervisor_takeover_kicks_agent_keeps_customer(
     assert caller.is_alive, "customer call died during takeover"
     assert sup_bot.is_alive, "supervisor call died during takeover"
 
-    await rwi.hangup(session_id)
+    # ── CONTENT gate: 拆后客户音必须桥到管理者 ──────────────────────────
+    # The customer keeps playing its 620 Hz tone; the supervisor UA's
+    # mixdown (flushed at hangup) must carry it post-takeover — takeover
+    # that leaves the supervisor deaf is a silent failure the old
+    # bots-alive assertion could not see.
+    await rwi.hangup(sup_call)
+    try:
+        await rwi.hangup(session_id)
+    except Exception as exc:  # noqa: BLE001 — customer leg may already be gone
+        print(f"[takeover] session hangup ignored: {exc}")
+    sup_rec = sup_record.parent / "sup_rx.wav"
+    from helpers import wait_recording_async, read_wav_mono, goertzel_timeline
+    resolved = await wait_recording_async(sup_rec, timeout=15)
+    assert resolved is not None, (
+        f"supervisor mixdown never flushed: {sup_rec}"
+    )
+    samples, sr = read_wav_mono(resolved)
+    timeline = goertzel_timeline(samples, sr, 620.0, window_s=0.25, step_s=0.25)
+    assert max(timeline, default=0.0) > 0.0, (
+        "supervisor heard NO customer audio after takeover — the takeover "
+        "bridge never delivered the customer leg (silent takeover)"
+    )
+    print(f"\n[takeover] supervisor heard customer tone: peak "
+          f"{max(timeline):.1f}")
 
 
 @pytest.mark.asyncio

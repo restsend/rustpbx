@@ -52,8 +52,11 @@ class ConfigBuilder:
         # "telemetry" mounts the /metrics + /healthz routers (addon id under
         # the contact-center build; the community build uses "observability").
         # Without it the observability acceptance tests (L020/L297/L298/L300)
-        # get empty bodies.
-        self.addons = addons or ["cc", "telemetry"]
+        # get empty bodies. NOTE (2026-09-24): the telemetry addon no longer
+        # exists in the registry — the observability addon (id
+        # "observability") is what actually mounts /metrics + /healthz now,
+        # so it must be in the list or every health/metrics test fails.
+        self.addons = addons or ["cc", "telemetry", "observability"]
         self.licenses: dict[str, str] = {}
         self.trunks: dict[str, dict] = {}
         self.routes: list[dict] = {}

@@ -28,11 +28,13 @@ def _call_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
-async def _registered_echo_callee(sipbot_pool, pbx, port, username="1002"):
+async def _registered_echo_callee(sipbot_pool, pbx, port, username="1002",
+                                  record_file=None):
     ua = sipbot_pool.callee(
         host=pbx.host, port=port, username=username, password="123456",
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
         ring_secs=1, answer_mode="echo", audio_quality=True,
+        record_file=str(record_file) if record_file else None,
     )
     await h.wait_registered(ua)
     return ua
@@ -51,12 +53,14 @@ async def _wait_event_all(rwi, event_type: str, timeout: float = 10.0):
     return None
 
 
-async def _setup_call(sipbot_pool, pbx, rwi, port, call_prefix, tmp_path=None):
+async def _setup_call(sipbot_pool, pbx, rwi, port, call_prefix, tmp_path=None,
+                      record_file=None):
     """Common setup: boot pbx with media_proxy=all, register echo callee, originate."""
     pbx.config_builder.media_proxy = "all"
     h.boot_pbx(pbx)
     await h.connect_rwi(rwi)
-    callee = await _registered_echo_callee(sipbot_pool, pbx, port)
+    callee = await _registered_echo_callee(sipbot_pool, pbx, port,
+                                           record_file=record_file)
     call_id = _call_id(call_prefix)
     resp = await rwi.originate(call_id, f"sip:1002@{pbx.sip_addr}", "sip:rwi@pbx", "default")
     assert resp.get("status") == "success", resp
@@ -84,13 +88,29 @@ async def _assert_rtp_resumes(ua, label: str):
 
 @pytest.mark.asyncio
 async def test_media_play_file_loop_then_stop(pbx, sipbot_pool, rwi, tmp_path):
-    """media.play(file, loop=True) -> started -> stop -> finished(interrupted=True)."""
-    from helpers import generate_sine_wav
+    """media.play(file, loop=True) -> started -> stop -> finished(interrupted=True).
+
+    3D gate (2026-09 audit — the old version asserted only events + packet
+    counts, so playing SILENCE passed):
+      content  — the callee's mixdown carries the 440 Hz tone SUSTAINED for
+                 the whole play window (loop really loops) and the tone is
+                 GONE after stop (stop really stops it);
+      format   — anchored MediaBridge implied by media_proxy=all + PCM WAV
+                 decode on the recording;
+      quantity — the sustained-tone run ≥ the played window length.
+    """
+    from helpers import (
+        generate_sine_wav, read_wav_mono, goertzel_timeline,
+        longest_above_run, wait_recording_async, compute_rms_db,
+    )
 
     tone = tmp_path / "tone_440.wav"
     generate_sine_wav(tone, 440.0, 2.0, 8000, 0.5)
+    callee_record = tmp_path / "play_callee_rx.wav"
 
-    callee, call_id = await _setup_call(sipbot_pool, pbx, rwi, h.ua_port(15083), "media")
+    callee, call_id = await _setup_call(
+        sipbot_pool, pbx, rwi, h.ua_port(15083), "media",
+        record_file=callee_record)
 
     rwi.clear_events()
     resp = await rwi.media_play(call_id, "file", str(tone), loop=True)
@@ -99,7 +119,7 @@ async def test_media_play_file_loop_then_stop(pbx, sipbot_pool, rwi, tmp_path):
     assert started is not None, "media_play_started not received"
     assert started.get("call_id") == call_id
 
-    await asyncio.sleep(2)
+    await asyncio.sleep(4)  # ≥2 loop iterations of the 2 s file
 
     rwi.clear_events()
     assert (await rwi.media_stop(call_id)).get("status") == "success"
@@ -108,19 +128,51 @@ async def test_media_play_file_loop_then_stop(pbx, sipbot_pool, rwi, tmp_path):
     assert finished.get("interrupted") is True, f"expected interrupted=True, got: {finished}"
 
     await _assert_rtp_resumes(callee, "callee after loop stop")
-
     await rwi.hangup(call_id)
+
+    # ── CONTENT gate on the callee's mixdown (flushed at call end) ─────
+    resolved = await wait_recording_async(callee_record, timeout=15)
+    assert resolved is not None, (
+        f"callee mixdown recording never flushed: {callee_record}"
+    )
+    samples, sr = read_wav_mono(resolved)
+    assert compute_rms_db(samples) > -45.0, "callee recording silent"
+    timeline = goertzel_timeline(samples, sr, 440.0, window_s=0.25, step_s=0.125)
+    assert max(timeline, default=0.0) > 0.0, "no 440 Hz energy at all — play never audible"
+    thr = 0.25 * max(timeline)
+    start, end, dur = longest_above_run(timeline, thr, step_s=0.125)
+    assert dur >= 3.5, (
+        f"sustained 440Hz run {dur:.2f}s < 3.5s — loop did NOT keep the "
+        f"2s file looping (run bounds {start}..{end} windows). "
+        "The tone stopped early: loop playback broken."
+    )
+    tail = timeline[end:]
+    assert all(m < thr for m in tail), (
+        "440Hz energy present after media_stop — stop did not stop the audio"
+    )
+    print(f"\n[media-play] loop sustained {dur:.2f}s then stopped cleanly")
 
 
 @pytest.mark.asyncio
 async def test_media_play_natural_finish(pbx, sipbot_pool, rwi, tmp_path):
-    """media.play(file, loop=False) with a short file -> finished(interrupted=False)."""
-    from helpers import generate_sine_wav
+    """media.play(file, loop=False) with a short file -> finished(interrupted=False).
+
+    3D gate: the 0.3 s 800 Hz beep is AUDIBLE in the callee's mixdown for
+    ≈0.3 s (quantity: play window matches the file length) and is GONE
+    after EOF (no loop residue).
+    """
+    from helpers import (
+        generate_sine_wav, read_wav_mono, goertzel_timeline,
+        longest_above_run, wait_recording_async,
+    )
 
     short = tmp_path / "short_beep.wav"
     generate_sine_wav(short, 800.0, 0.3, 8000, 0.5)
+    callee_record = tmp_path / "beep_callee_rx.wav"
 
-    callee, call_id = await _setup_call(sipbot_pool, pbx, rwi, h.ua_port(15084), "beep")
+    callee, call_id = await _setup_call(
+        sipbot_pool, pbx, rwi, h.ua_port(15084), "beep",
+        record_file=callee_record)
 
     rwi.clear_events()
     resp = await rwi.media_play(call_id, "file", str(short), loop=False)
@@ -133,8 +185,26 @@ async def test_media_play_natural_finish(pbx, sipbot_pool, rwi, tmp_path):
     assert finished.get("interrupted") is False, f"expected interrupted=False, got: {finished}"
 
     await _assert_rtp_resumes(callee, "callee after natural EOF")
-
     await rwi.hangup(call_id)
+
+    resolved = await wait_recording_async(callee_record, timeout=15)
+    assert resolved is not None, (
+        f"callee mixdown recording never flushed: {callee_record}"
+    )
+    samples, sr = read_wav_mono(resolved)
+    timeline = goertzel_timeline(samples, sr, 800.0, window_s=0.125, step_s=0.0625)
+    assert max(timeline, default=0.0) > 0.0, "800Hz beep never audible"
+    thr = 0.25 * max(timeline)
+    start, end, dur = longest_above_run(timeline, thr, step_s=0.0625)
+    assert 0.05 <= dur <= 0.9, (
+        f"beep audible run {dur:.2f}s, want ≈0.3s (the file length) — "
+        "playback duration does not match the source (quantity violation)"
+    )
+    tail = timeline[end:]
+    assert all(m < thr for m in tail), (
+        "800Hz energy after natural EOF — playback did not stop at EOF"
+    )
+    print(f"\n[media-play] beep audible {dur:.2f}s (file 0.3s), clean EOF")
 
 
 @pytest.mark.xfail(reason="silence source_type event delivery not reaching RWI client; file source works")
