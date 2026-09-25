@@ -27,7 +27,7 @@ pub enum OwnershipMode {
     Barge,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", content = "params")]
 pub enum RwiCommandPayload {
     #[serde(rename = "session.subscribe", alias = "Subscribe")]
@@ -519,7 +519,7 @@ impl RwiCommandPayload {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OriginateRequest {
     #[serde(default)]
     pub call_id: String,
@@ -555,7 +555,7 @@ pub struct OriginateRequest {
     pub record: Option<RecordStartRequest>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MediaSource {
     #[serde(default, alias = "type")]
     pub source_type: String,
@@ -563,7 +563,7 @@ pub struct MediaSource {
     pub looped: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaPlayRequest {
     #[serde(default)]
     pub call_id: String,
@@ -579,7 +579,7 @@ pub struct MediaPlayRequest {
 }
 
 /// Request to collect DTMF digits from a call leg.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DtmfCollectRequest {
     #[serde(default)]
     pub call_id: String,
@@ -660,7 +660,7 @@ impl Default for RecordStorage {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueEnqueueRequest {
     #[serde(default)]
     pub call_id: String,
@@ -669,7 +669,7 @@ pub struct QueueEnqueueRequest {
     pub priority: Option<u32>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConferenceCreateRequest {
     #[serde(default, alias = "conference_id")]
     pub conf_id: String,
@@ -678,20 +678,20 @@ pub struct ConferenceCreateRequest {
     pub max_duration_secs: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConferenceMemberRequest {
     #[serde(alias = "conference_id")]
     pub conf_id: Option<String>,
     pub call_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConferenceDestroyRequest {
     #[serde(alias = "conference_id")]
     pub conf_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConferenceMergeRequest {
     #[serde(alias = "conference_id")]
     pub conf_id: Option<String>,
@@ -699,7 +699,7 @@ pub struct ConferenceMergeRequest {
     pub consultation_call_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConferenceSeatReplaceRequest {
     #[serde(alias = "conference_id")]
     pub conf_id: Option<String>,
@@ -775,7 +775,7 @@ impl RwiCommandPayload {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RwiRequest {
     pub action_id: String,
     #[serde(flatten)]

@@ -400,6 +400,10 @@ impl AppRuntime for DefaultAppRuntime {
             None
         }
     }
+
+    fn has_started_app(&self) -> bool {
+        self.app_generation.load(Ordering::SeqCst) > 0
+    }
 }
 
 /// Parse a JSON event into a ControllerEvent

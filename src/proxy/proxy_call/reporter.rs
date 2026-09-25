@@ -23,6 +23,24 @@ pub struct CallReporter {
 
 impl CallReporter {
     pub(super) fn report(&self, snapshot: CallSessionRecordSnapshot) {
+        self.report_with_rwi_guard(snapshot, None);
+    }
+
+    /// Like [`Self::report`], but lets the caller supply the RWI cleanup
+    /// guard that goes into the record.
+    ///
+    /// The session teardown path clones its own handle of this guard and
+    /// holds it until every final call event (`call_hangup`, leg hangups…)
+    /// has been emitted.  Without that, a dropped record — the call-record
+    /// channel is bounded, so on `Full`/`Closed` the record (and its guard)
+    /// drops SYNCHRONOUSLY — wipes gateway state (`user_data`, `CallMeta`)
+    /// before the final events are dispatched, silently stripping `user_data`
+    /// and call context from them.
+    pub(super) fn report_with_rwi_guard(
+        &self,
+        snapshot: CallSessionRecordSnapshot,
+        rwi_guard: Option<crate::rwi::RwiCallRecordGuard>,
+    ) {
         let now = Utc::now();
         let start_time =
             now - Duration::from_std(self.context.start_time.elapsed()).unwrap_or_default();
@@ -349,12 +367,10 @@ impl CallReporter {
         // call-record completion hook has finished. Dropping the record (also
         // on channel failure or task cancellation) performs the cleanup.
         if let Some(ref gateway) = self.server.rwi_gateway {
-            record
-                .extensions
-                .insert(crate::rwi::RwiCallRecordGuard::new(
-                    gateway,
-                    record.call_id.clone(),
-                ));
+            let guard = rwi_guard.unwrap_or_else(|| {
+                crate::rwi::RwiCallRecordGuard::new(gateway, record.call_id.clone())
+            });
+            record.extensions.insert(guard);
         }
 
         if let Some(ref sender) = self.call_record_sender {

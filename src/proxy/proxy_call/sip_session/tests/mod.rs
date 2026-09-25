@@ -6947,18 +6947,26 @@ async fn rwi_manual_parallel_retry_and_leg_cleanup() {
     session.cmd_tx = saved_sender;
     let mut leg_events = Vec::new();
     while let Ok(event) = events.try_recv() {
-        if event.event.payload["leg_id"].is_string() && matches!(event.event.event_type, "call_ringing" | "call_answered" | "call_hangup") { leg_events.push(event.event.payload); }
+        if event.event.payload["leg_id"].is_string() && matches!(event.event.event_type, "call_ringing" | "call_hangup") { leg_events.push(event.event.payload); }
     }
     assert!(leg_events.iter().any(|e| e["leg_id"] == rejected.0 && e["event_type"] == "call_ringing"));
     assert!(leg_events.iter().any(|e| e["leg_id"] == rejected.0 && e["event_type"] == "call_hangup" && e["sip_status"] == 486));
     assert!(leg_events.iter().any(|e| e["leg_id"] == "setup-failure" && e["event_type"] == "call_hangup"
         && e["reason"].as_str().unwrap().contains("No command sender")));
-    assert!(leg_events.iter().any(|e| e["leg_id"] == winner.0 && e["event_type"] == "call_answered"));
     assert!(!leg_events.iter().any(|e| e["leg_id"] == invites[2].0 && e["event_type"] == "call_hangup"), "explicit removal only receives its command acknowledgement");
     let mut ws_leg_events = Vec::new();
     while let Ok(event) = ws_events.try_recv() {
-        if event["leg_id"].is_string() && matches!(event["event_type"].as_str(), Some("call_ringing" | "call_answered" | "call_hangup")) { ws_leg_events.push(event); }
+        if event["leg_id"].is_string() && matches!(event["event_type"].as_str(), Some("call_ringing" | "call_hangup")) { ws_leg_events.push(event); }
     }
+    // Session-level-only `call_answered` policy: leg transitions — including
+    // the winner's connect and the manual caller-leg mark above — must not
+    // emit the event with a `leg_id`; it fires once per session with
+    // `leg_id: None` from the session-level emit sites instead.
+    assert!(
+        leg_events.iter().chain(ws_leg_events.iter())
+            .all(|e| e["event_type"] != "call_answered"),
+        "no leg-level call_answered may be emitted"
+    );
     assert_eq!(ws_leg_events.len(), leg_events.len(), "every leg event must reach its RWI owner");
     cancel.cancel();
     drop(session);

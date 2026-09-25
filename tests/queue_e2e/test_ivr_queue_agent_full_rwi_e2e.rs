@@ -493,6 +493,18 @@ async fn test_full_chain_ivr_queue_agent_rwi_webhook_events() -> Result<()> {
     wait_webhook_event(&capture, "queue_agent_connected", Duration::from_secs(10))
         .await
         .expect("bob answers automatically → queue_agent_connected");
+
+    // Session-level-only `call_answered`: exactly one per call, emitted at the
+    // queue-agent connect with no `leg_id`. The IVR pickup and the agent-leg
+    // connect must NOT produce their own answered events.
+    let answered = wait_webhook_event(&capture, "call_answered", Duration::from_secs(10))
+        .await
+        .expect("webhook must receive the session-level call_answered at agent connect");
+    assert!(
+        answered["event"]["leg_id"].is_null(),
+        "call_answered must be session-level (no leg_id), got: {answered}"
+    );
+
     let left = wait_webhook_event(&capture, "queue_left", Duration::from_secs(10))
         .await
         .expect("webhook must receive queue_left");
@@ -549,6 +561,18 @@ async fn test_full_chain_ivr_queue_agent_rwi_webhook_events() -> Result<()> {
         let connected =
             pos("queue_agent_connected").expect("queue_agent_connected must be present");
         let left_pos = pos("queue_left").expect("queue_left must be present");
+
+        // Exactly ONE session-level call_answered across the whole chain.
+        let answered_count = types.iter().filter(|t| **t == "call_answered").count();
+        assert_eq!(
+            answered_count, 1,
+            "exactly one session-level call_answered expected: {types:?}"
+        );
+        let answered_pos = pos("call_answered").expect("call_answered must be present");
+        assert!(
+            joined < answered_pos,
+            "call_answered must fire at agent connect (after queue_joined), not at IVR pickup: {types:?}"
+        );
 
         assert!(
             created < node_entered,

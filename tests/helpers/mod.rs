@@ -15,5 +15,6 @@ fn init_rustls_crypto_provider() {
         .expect("Failed to install rustls crypto provider for integration tests");
 }
 
+pub mod cluster_harness;
 pub mod test_server;
 pub mod ws_harness;

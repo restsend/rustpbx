@@ -36,6 +36,10 @@ TYPE_EXTRAS: dict[str, tuple[str, ...]] = {
 # Canonical ordering constraints used by assert_event_flow().
 LIFECYCLE_ORDER = ("call_created", "call_ringing", "call_answered", "call_hangup")
 
+# `call_answered` is session-scoped: exactly one per call_id, with NO `leg_id`
+# in the payload (leg transitions no longer emit their own answered events).
+# Suites must not wait for per-leg answered events.
+
 
 def event_type(ev) -> str:
     if isinstance(ev, str):

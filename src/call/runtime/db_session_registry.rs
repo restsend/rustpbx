@@ -193,6 +193,16 @@ impl SessionRegistry for DbSessionRegistry {
     }
 
     async fn lookup_owner(&self, call_id: &str) -> Option<String> {
+        match self.lookup_owner_checked(call_id).await {
+            Ok(row) => row,
+            Err(_) => None, // already logged by `lookup_owner_checked`
+        }
+    }
+
+    /// DB-backed override: a query failure surfaces as
+    /// [`RegistryError::Unavailable`] instead of collapsing into "not found",
+    /// so cluster callers can answer 503 rather than a misleading 404.
+    async fn lookup_owner_checked(&self, call_id: &str) -> Result<Option<String>, RegistryError> {
         match Entity::find()
             .select_only()
             .column(Column::NodeId)
@@ -201,12 +211,12 @@ impl SessionRegistry for DbSessionRegistry {
             .one(&self.db)
             .await
         {
-            Ok(row) => row.map(|(node_id,)| node_id),
+            Ok(row) => Ok(row.map(|(node_id,)| node_id)),
             // A DB outage must be distinguishable from "not found" — surface
             // it loudly instead of silently reporting no owner.
             Err(e) => {
                 tracing::error!(call_id, error = %e, "session registry lookup_owner failed");
-                None
+                Err(RegistryError::Unavailable(e.to_string()))
             }
         }
     }

@@ -109,6 +109,18 @@ pub trait AppRuntime: Send + Sync {
     /// Get the name of the currently running application (if any)
     fn current_app(&self) -> Option<String>;
 
+    /// Whether any application has ever successfully started on this session
+    /// (not just currently running — IVR/queue apps that already exited count).
+    ///
+    /// App-answered sessions legitimately emit zero `call_answered` events
+    /// when the caller never reaches an agent (the session-level-only policy
+    /// skips the caller-leg answer for app sessions); the session cleanup
+    /// safety net uses this to exclude those shapes. Default `false`
+    /// (conservative: runtimes without app tracking stay subject to the net).
+    fn has_started_app(&self) -> bool {
+        false
+    }
+
     /// Synchronous best-effort cancellation of the running app's event loop.
     ///
     /// Used by `SipSession::drop` (which cannot `.await`) so an orphaned app

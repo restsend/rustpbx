@@ -15,8 +15,12 @@ mod integration;
 mod leg_timeline_tests;
 #[path = "rwi/resume_e2e.rs"]
 mod resume_e2e;
+#[path = "rwi/cluster_ops_e2e.rs"]
+mod cluster_ops_e2e;
 #[path = "rwi/server.rs"]
 mod server;
+#[path = "rwi/userdata_e2e.rs"]
+mod userdata_e2e;
 
 #[path = "rwi/wire_format.rs"]
 mod wire_format;

@@ -91,6 +91,13 @@ pub struct SipSession {
     /// session with its own latch, so per-agent attribution is preserved.
     answered_event_emitted: bool,
 
+    /// Set once any leg of this session transitions into `LegState::Connected`.
+    /// Drives the cleanup safety net for the session-level-only
+    /// `call_answered` policy: if a leg connected but the session-level event
+    /// never fired on a session that never ran an app, a call shape is
+    /// missing its emit site.
+    any_leg_reached_connected: bool,
+
     pub app_event_bridge: crate::proxy::proxy_call::state::AppEventBridge,
 
     /// Per-session typed extensions bag (session cookie) for cross-addon data
@@ -1187,6 +1194,7 @@ impl SipSession {
             reporter: None,
             cdr_sent: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             answered_event_emitted: false,
+            any_leg_reached_connected: false,
             app_event_bridge: app_event_bridge.clone(),
             extensions: session_extensions,
             conference_bridge: crate::call::runtime::SessionConferenceBridge::new(),
@@ -2439,6 +2447,12 @@ impl SipSession {
         // handling a queued Confirmed state again is idempotent. Subsequent
         // re-INVITE/BYE states are handled by the normal caller-state branch.
         self.update_leg_state(&LegId::from("caller"), LegState::Connected);
+        // The originate processor owns this session's session-level
+        // `call_answered` (emitted right after `process_uac` is spawned — see
+        // `RwiCommandProcessor`'s originate task), so latch it here: the
+        // cleanup safety net must not flag originate sessions, and any late
+        // accept_call must not double-emit.
+        self.answered_event_emitted = true;
         info!(session_id = %self.id, "UAC caller leg marked Connected after attaching caller dialog");
         Ok(())
     }
@@ -3510,8 +3524,8 @@ impl SipSession {
                 };
                 tx_handle.respond(code, None, None).await.ok();
             }
-            DialogState::Info(_, request, tx_handle) => {
-                self.handle_dialog_info(DialogSide::Caller, request, tx_handle)
+            DialogState::Info(dialog_id, request, tx_handle) => {
+                self.handle_dialog_info(DialogSide::Caller, &dialog_id, request, tx_handle)
                     .await?;
             }
             DialogState::Notify(_, request, tx_handle) => {
@@ -3569,9 +3583,13 @@ impl SipSession {
     async fn handle_dialog_info(
         &mut self,
         side: DialogSide,
+        dialog_id: &rsipstack::dialog::DialogId,
         request: rsipstack::sip::Request,
         tx_handle: TransactionHandle,
     ) -> Result<()> {
+        // Resolve which leg this dialog belongs to (dynamic agent legs are
+        // first-class — the legacy caller/callee sides don't cover them).
+        let dialog_leg = self.leg_id_for_dialog(&dialog_id.to_string());
         let content_type = Self::request_content_type(&request);
         let is_dtmf = content_type
             .as_deref()
@@ -3675,7 +3693,7 @@ impl SipSession {
             .as_deref()
             .is_some_and(|ct| ct.contains(RUSTPBX_COMMAND_CT))
         {
-            self.handle_rustpbx_info_command(&body_text, &tx_handle)
+            self.handle_rustpbx_info_command(&body_text, dialog_leg, &tx_handle)
                 .await?;
             // Do NOT forward to peer — this is a PBX-internal command
             return Ok(());
@@ -3838,6 +3856,7 @@ impl SipSession {
     async fn handle_rustpbx_info_command(
         &mut self,
         body: &str,
+        dialog_leg: Option<LegId>,
         tx_handle: &TransactionHandle,
     ) -> Result<()> {
         let parsed: serde_json::Value = match serde_json::from_str(body) {
@@ -3870,7 +3889,7 @@ impl SipSession {
         // ── ivr.exec: bundled IVR execution (hold callee + start app) ──
         if action == "ivr.exec" {
             return self
-                .handle_ivr_exec_command(params.cloned(), tx_handle)
+                .handle_ivr_exec_command(params.cloned(), dialog_leg, tx_handle)
                 .await;
         }
 
@@ -3960,6 +3979,7 @@ impl SipSession {
     async fn handle_ivr_exec_command(
         &mut self,
         params: Option<serde_json::Value>,
+        dialog_leg: Option<LegId>,
         tx_handle: &TransactionHandle,
     ) -> Result<()> {
         let session_id = self.context.session_id.clone();
@@ -4021,29 +4041,67 @@ impl SipSession {
             .and_then(Self::parse_info_media_source);
 
         // 1. Write IvrExecState so the post-exit hook can reconstruct the result.
+        // The initiating leg is whoever sent the INFO on (the agent's dynamic
+        // leg in the multi-leg model — NOT necessarily the legacy "callee").
+        // Falling back to "callee" keeps the single-callee behaviour intact.
+        let initiator_leg = dialog_leg
+            .filter(|leg| leg.as_str() != "caller")
+            .unwrap_or_else(|| LegId::from("callee"));
+        // Hold target: the AGENT. After a queue transfer the agent lives on a
+        // dynamic leg whose SDP hangs off its own media peer — the legacy
+        // "callee" side carries no SDP in that topology, so holding it failed
+        // with "No SDP available for callee hold/unhold" (agent never held).
+        // Prefer a connected dynamic leg; fall back to "callee" for direct
+        // (non-transfer) flows where the agent IS the callee.
+        let held_leg_id = {
+            let dynamic: Vec<LegId> = self
+                .legs
+                .iter()
+                .filter(|(id, _)| id.as_str() != "caller" && id.as_str() != "callee")
+                .map(|(id, _)| id.clone())
+                .collect();
+            dynamic
+                .iter()
+                .find(|id| {
+                    self.legs
+                        .get(id)
+                        .is_some_and(|leg| leg.state == LegState::Connected)
+                })
+                .cloned()
+                .or_else(|| dynamic.first().cloned())
+                .unwrap_or_else(|| LegId::from("callee"))
+        };
         {
             let mut ext = self.extensions.write();
             ext.insert(crate::proxy::proxy_call::ivr_exec_hook::IvrExecState {
                 request_id: request_id.clone(),
                 held_leg: if hold_agent {
-                    Some(LegId::from("callee"))
+                    Some(held_leg_id.clone())
                 } else {
                     None
                 },
-                initiator_leg: LegId::from("callee"),
+                initiator_leg: initiator_leg.clone(),
                 webhook_url,
                 app_name: app_name.clone(),
                 metadata,
             });
         }
 
-        // 2. Hold callee + play music (use override_music if provided, else default).
+        // 2. Hold the agent leg + play music (use override_music if provided,
+        // else default). `handle_hold` negotiates a proper re-INVITE for ANY
+        // leg and swallows re-INVITE failures (warn + continue) — the
+        // previous side-based propagate aborted here, leaving the INFO
+        // transaction unanswered (remote saw a 501 timeout) whenever the
+        // held leg had no stored SDP (queue-transfer dynamic legs).
         if hold_agent {
-            self.propagate_hold_to_side(LegSide::B,
-                &[],
-                override_music,
-            )
-            .await?;
+            if let Err(e) = self.handle_hold(held_leg_id.clone(), override_music).await {
+                warn!(session_id = %self.id,
+                    session_id = %self.context.session_id,
+                    leg = %held_leg_id,
+                    error = %e,
+                    "ivr.exec: hold of initiator leg failed; continuing without hold"
+                );
+            }
         }
 
         // 3. Start the app on the caller leg.
@@ -4359,8 +4417,8 @@ impl SipSession {
                 };
                 tx_handle.respond(code, None, None).await.ok();
             }
-            DialogState::Info(_, request, tx_handle) => {
-                self.handle_dialog_info(DialogSide::Callee, request, tx_handle)
+            DialogState::Info(dialog_id, request, tx_handle) => {
+                self.handle_dialog_info(DialogSide::Callee, &dialog_id, request, tx_handle)
                     .await?;
             }
             _ => {}
@@ -7897,6 +7955,24 @@ impl SipSession {
     async fn cleanup(&mut self) {
         trace!(session_id = %self.context.session_id, "Cleaning up session");
 
+        // Safety net for the session-level-only `call_answered` policy: a leg
+        // reached Connected but the session-level event never fired.
+        // App-answered sessions (IVR/queue) intentionally emit zero answered
+        // events when the caller never reaches an agent, so those are excluded
+        // via `has_started_app()`. Anything else is a call shape missing its
+        // session-level emit site and must be investigated.
+        if self.any_leg_reached_connected
+            && !self.answered_event_emitted
+            && !self.app_runtime.has_started_app()
+        {
+            warn!(
+                session_id = %self.context.session_id,
+                "session reached Connected but never emitted the session-level call_answered; \
+                 a call shape may be missing its session-level emit site"
+            );
+            metrics::counter!("rwi_session_connected_without_answered_total").increment(1);
+        }
+
         // Cancel the session's token FIRST so every child token (leg forwarders,
         // dialog monitors, conference bridges, DTMF forwarders, bridge loops)
         // is signalled to stop immediately. Otherwise those tasks keep running
@@ -8016,9 +8092,20 @@ impl SipSession {
             }
         }
 
+        // Hold this session's own handle on the RWI cleanup guard across the
+        // final event emission.  `report_with_rwi_guard` moves the sibling
+        // clone into the CDR record; the call-record channel is bounded, so on
+        // `Full`/`Closed` that record drops SYNCHRONOUSLY — without this
+        // clone the guard cleanup (user_data / CallMeta / ownership wipe)
+        // would run right here, BEFORE the `call_hangup` below is dispatched,
+        // silently stripping `user_data` and call context from it.
+        let rwi_state_guard = self.server.rwi_gateway.as_ref().map(|gw| {
+            crate::rwi::RwiCallRecordGuard::new(gw, self.context.session_id.clone())
+        });
+
         if let Some(reporter) = &self.reporter {
             let snapshot = self.record_snapshot();
-            reporter.report(snapshot);
+            reporter.report_with_rwi_guard(snapshot, rwi_state_guard.clone());
             self.cdr_sent
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
@@ -9192,12 +9279,37 @@ impl SipSession {
             target_session_id: None,
             started_at: chrono::Utc::now(),
         };
-        match crate::call::runtime::SessionGuard::register(
-            self.server.session_registry.clone(),
-            info,
-        )
-        .await
-        {
+        // A missing registry row silently breaks every cross-node operation
+        // for this call (owner-routed userdata, hangup forwarding, …) — the
+        // session keeps running but peers can no longer locate it.  Retry a
+        // couple of times before degrading: transient DB hiccups must not
+        // permanently orphan the call's owner record.
+        const RETRY_DELAYS_MS: [u64; 2] = [200, 500];
+        let mut result: Result<
+            crate::call::runtime::SessionGuard,
+            crate::call::runtime::RegistryError,
+        > = Err(crate::call::runtime::RegistryError::Unavailable(
+            "unreached".to_string(),
+        ));
+        for attempt in 0..=RETRY_DELAYS_MS.len() {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(RETRY_DELAYS_MS[attempt - 1])).await;
+                info!(
+                    session_id = %self.id,
+                    attempt = attempt,
+                    "retrying session registry registration"
+                );
+            }
+            result = crate::call::runtime::SessionGuard::register(
+                self.server.session_registry.clone(),
+                info.clone(),
+            )
+            .await;
+            if result.is_ok() {
+                break;
+            }
+        }
+        match result {
             Ok(guard) => self.session_registry_guard = Some(guard),
             Err(e) => {
                 crate::db_report::report_db_write_failure(
@@ -10502,7 +10614,9 @@ impl SipSession {
         };
 
         for completion in completions {
-            // Unhold leg if requested.
+            // Unhold leg if requested. Legacy "callee" keeps the side-based
+            // propagate; any other leg (dynamic agent leg held by ivr.exec)
+            // unholds through the per-leg renegotiation path.
             if let Some(leg_id) = &completion.unhold_leg {
                 if leg_id.as_str() == "callee" {
                     if let Err(e) = self
@@ -10513,6 +10627,15 @@ impl SipSession {
                             session_id = %self.context.session_id,
                             error = %e,
                             "Failed to unhold callee after app exit"
+                        );
+                    }
+                } else if self.legs.get(leg_id).is_some() {
+                    if let Err(e) = self.handle_unhold(leg_id.clone()).await {
+                        warn!(session_id = %self.id,
+                            session_id = %self.context.session_id,
+                            leg = %leg_id,
+                            error = %e,
+                            "Failed to unhold leg after app exit"
                         );
                     }
                 }
@@ -10889,14 +11012,23 @@ impl SipSession {
             let changed = leg.state != new_state;
             leg.state = new_state;
             if changed {
+                if matches!(new_state, LegState::Connected) {
+                    self.any_leg_reached_connected = true;
+                }
                 match new_state {
                     LegState::Ringing | LegState::EarlyMedia => self.emit_typed_rwi_event(&crate::rwi::CallRinging {
                         call_id: self.context.session_id.clone(), leg_id: Some(leg_id.to_string()),
                         early_media: new_state == LegState::EarlyMedia,
                     }),
-                    LegState::Connected => self.emit_typed_rwi_event(&crate::rwi::CallAnswered {
-                        call_id: self.context.session_id.clone(), leg_id: Some(leg_id.to_string()),
-                    }),
+                    // No leg-level `call_answered`: the event is session-scoped
+                    // (`leg_id: None`) and fires exactly once from the
+                    // session-level emit sites — accept_call (direct answer),
+                    // the queue-agent connect branch, and originate completion —
+                    // so downstream sees ONE authoritative "connected" per
+                    // call_id instead of one event per bridged leg (a single
+                    // 200 OK used to fan out into session + caller + callee
+                    // duplicates). Leg connect/teardown timelines remain visible
+                    // through `call_ringing` / `call_hangup` leg events.
                     _ => {}
                 }
             }

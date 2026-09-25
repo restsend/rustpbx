@@ -181,6 +181,17 @@ pub trait SessionRegistry: Send + Sync + 'static {
     /// Which node owns `call_id`?  `None` = not found / already ended.
     async fn lookup_owner(&self, call_id: &str) -> Option<String>;
 
+    /// Like [`Self::lookup_owner`], but distinguishes "the registry has no
+    /// record of this call" (`Ok(None)`) from "the registry backend could not
+    /// be queried" (`Err`).  Callers use the split to answer 404 vs 503 — a
+    /// locate failure must NOT degrade into a local "call not found".
+    ///
+    /// Default: [`Self::lookup_owner`] (cannot fail).  Backends with real
+    /// failure modes (DB) override this.
+    async fn lookup_owner_checked(&self, call_id: &str) -> Result<Option<String>, RegistryError> {
+        Ok(self.lookup_owner(call_id).await)
+    }
+
     /// Full session info for `call_id`.
     async fn lookup(&self, call_id: &str) -> Option<SessionInfo>;
 }

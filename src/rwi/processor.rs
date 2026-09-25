@@ -262,6 +262,84 @@ impl RwiCommandProcessor {
         &self,
         command: RwiCommandPayload,
     ) -> Result<CommandResult, CommandError> {
+        // Owner routing: a session-scoped command for a call hosted on a peer
+        // must execute THERE.  Loop-safe — the terminal endpoint runs
+        // `process_command_local`, which contains no routing code and never
+        // forwards (see the contract in `cluster_forward.rs`).
+        let routable_call_id = if is_session_scoped_routable(&command) {
+            command.dispatch_call_id().map(str::to_string)
+        } else {
+            None
+        };
+        if let Some(call_id) = routable_call_id
+            && !self.call_registry.get_handle(&call_id).is_some()
+            && self.sip_server.as_ref().is_some_and(|s| !s.cluster_peers.is_empty())
+        {
+            return self.forward_session_op(&call_id, command).await;
+        }
+        self.process_command_local(command).await
+    }
+
+    /// Forward a session-scoped command to its owner node via the
+    /// `/cluster/session_op` envelope, mapping the terminal result back onto
+    /// the RWI command result.
+    async fn forward_session_op(
+        &self,
+        call_id: &str,
+        command: RwiCommandPayload,
+    ) -> Result<CommandResult, CommandError> {
+        let command_json = serde_json::to_value(&command).map_err(|e| {
+            CommandError::CommandFailed(format!("command not serializable: {e}"))
+        })?;
+        let op = crate::proxy::cluster_forward::RwiCommandOp {
+            command: command_json,
+        };
+        match self.route_to_owner(call_id, &op).await? {
+            RoutedOutcome::Local => self.process_command_local(command).await,
+            RoutedOutcome::Forwarded(status, body) => {
+                Self::map_envelope_response(call_id, status, body)
+            }
+        }
+    }
+
+    /// Map the terminal `/cluster/session_op` HTTP response onto the RWI
+    /// command result. Wire shape (see `ami.rs`):
+    /// `{"ok": true, "result": <CommandResult>}` on success,
+    /// `{"ok": false, "error": …}` on failure.
+    fn map_envelope_response(
+        call_id: &str,
+        status: reqwest::StatusCode,
+        body: serde_json::Value,
+    ) -> Result<CommandResult, CommandError> {
+        match status {
+            reqwest::StatusCode::OK => {
+                let result = body.get("result").cloned().unwrap_or(serde_json::Value::Null);
+                serde_json::from_value(result).map_err(|e| {
+                    CommandError::CommandFailed(format!(
+                        "owner returned malformed session_op result: {e}"
+                    ))
+                })
+            }
+            reqwest::StatusCode::NOT_FOUND => {
+                Err(CommandError::CallNotFound(call_id.to_string()))
+            }
+            other => {
+                let message = body
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("session_op failed")
+                    .to_string();
+                Err(CommandError::CommandFailed(format!(
+                    "owner node answered {other}: {message}"
+                )))
+            }
+        }
+    }
+
+    async fn process_command_local(
+        &self,
+        command: RwiCommandPayload,
+    ) -> Result<CommandResult, CommandError> {
         // Commands handled entirely at the processor level (no session dispatch).
         match &command {
             RwiCommandPayload::Originate(req) => {
@@ -514,45 +592,30 @@ impl RwiCommandProcessor {
                 value,
             } => {
                 let mut gw = self.gateway.write();
-                gw.set_call_var(call_id, key.clone(), value.clone());
+                gw.set_call_var(&call_id.to_string(), key.clone(), value.clone());
                 return Ok(CommandResult::Success);
             }
             RwiCommandPayload::GetVar { call_id, key } => {
                 let gw = self.gateway.read();
-                let value = gw.get_call_var(call_id, key);
+                let value = gw.get_call_var(&call_id.to_string(), key);
                 return Ok(CommandResult::CallVar {
                     key: key.clone(),
                     value,
                 });
             }
             RwiCommandPayload::SetUserData { call_id, data } => {
-                let mut gw = self.gateway.write();
-                gw.set_user_data(call_id, data.clone()).map_err(|e| {
-                    tracing::info!(
-                        audit_event = "call_userdata_update",
-                        session_id = %call_id,
-                        source = "rwi",
-                        result = "failure",
-                        message = %e,
-                        "call.set_userdata rejected"
-                    );
-                    match e {
-                        crate::rwi::SetUserDataError::SessionNotFound => {
-                            CommandError::CallNotFound(call_id.clone())
-                        }
-                        crate::rwi::SetUserDataError::TooLarge { .. } => {
-                            CommandError::CommandFailed(e.to_string())
-                        }
-                    }
-                })?;
-                return Ok(CommandResult::Success);
+                return self.userdata_op_local(
+                    call_id,
+                    crate::proxy::cluster_forward::UserdataOp::Set(serde_json::Value::Object(
+                        data.clone(),
+                    )),
+                );
             }
             RwiCommandPayload::GetUserData { call_id } => {
-                let gw = self.gateway.read();
-                let user_data = gw.get_user_data(call_id);
-                return Ok(CommandResult::UserData {
-                    user_data: serde_json::Value::Object(user_data),
-                });
+                return self.userdata_op_local(
+                    call_id,
+                    crate::proxy::cluster_forward::UserdataOp::Get,
+                );
             }
             RwiCommandPayload::SipMessage {
                 call_id,
@@ -1026,6 +1089,8 @@ impl RwiCommandProcessor {
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
 
+        let cdr_gateway = self.gateway.clone();
+
         crate::utils::spawn(async move {
             use crate::call::cookie::TransactionCookie;
             use crate::call::{DialDirection, Dialplan};
@@ -1077,6 +1142,24 @@ impl RwiCommandProcessor {
                             })
                             .into_iter()
                             .collect();
+                        // Session user data (set via RWI/REST on this
+                        // originate) rides into the outbound CDR under a
+                        // namespaced `user_data` key — same as the
+                        // session-path CDR (`record_snapshot`). Safe to read:
+                        // the guard only MOVES into the record below (and on
+                        // a full channel drops after this read).
+                        let user_data_meta = {
+                            let gw = cdr_gateway.read();
+                            let ud = gw.get_user_data(&cdr_call_id);
+                            (!ud.is_empty()).then(|| {
+                                let mut meta = std::collections::HashMap::new();
+                                meta.insert(
+                                    "user_data".to_string(),
+                                    serde_json::Value::Object(ud),
+                                );
+                                meta
+                            })
+                        };
                         let mut record = crate::callrecord::CallRecord {
                             call_id: cdr_call_id.clone(),
                             // Originates are root sessions: session_id == call_id.
@@ -1106,6 +1189,7 @@ impl RwiCommandProcessor {
                                 },
                                 from_number: Some(cdr_caller.clone()),
                                 to_number: Some(cdr_callee.clone()),
+                                metadata: user_data_meta,
                                 ..Default::default()
                             },
                             extensions: http::Extensions::new(),
@@ -1872,6 +1956,102 @@ impl RwiCommandProcessor {
         self.call_registry
             .get_handle(call_id)
             .ok_or_else(|| CommandError::CallNotFound(call_id.to_string()))
+    }
+
+    /// Route an owner-routed op: `Local` = the session is hosted here (apply
+    /// locally), `Forwarded` = the owner answered. Registry unavailability is
+    /// a retryable `CommandFailed`, never a misleading "call not found".
+    async fn route_to_owner(
+        &self,
+        call_id: &str,
+        op: &impl crate::proxy::cluster_forward::OwnerRoutedOp,
+    ) -> Result<RoutedOutcome, CommandError> {
+        let hosted_locally = self.call_registry.get_handle(call_id).is_some();
+        let cluster_server = self.sip_server.as_ref().filter(|s| !s.cluster_peers.is_empty());
+        if hosted_locally {
+            return Ok(RoutedOutcome::Local);
+        }
+        let Some(server) = cluster_server else {
+            // Single node (or no server context, e.g. unit tests): the local
+            // apply is the only truth.
+            return Ok(RoutedOutcome::Local);
+        };
+        let self_node_id = server.cluster_self_addr.as_ref().map(|a| a.to_string());
+        let ami_path = server
+            .proxy_config
+            .load()
+            .ami_path
+            .clone()
+            .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string());
+        match crate::proxy::cluster_forward::routed_op_on_owner(
+            &server.session_registry,
+            &server.cluster_peers,
+            self_node_id.as_deref(),
+            &ami_path,
+            &server.http_client,
+            call_id,
+            op,
+        )
+        .await
+        {
+            crate::proxy::cluster_forward::OwnerOpOutcome::ApplyLocally
+            | crate::proxy::cluster_forward::OwnerOpOutcome::UnknownCall => Ok(RoutedOutcome::Local),
+            crate::proxy::cluster_forward::OwnerOpOutcome::RegistryUnavailable(e) => Err(
+                CommandError::CommandFailed(format!(
+                    "session registry unavailable, cannot locate '{call_id}': {e}"
+                )),
+            ),
+            crate::proxy::cluster_forward::OwnerOpOutcome::OwnerUnreachable => {
+                Err(CommandError::CallNotFound(call_id.to_string()))
+            }
+            crate::proxy::cluster_forward::OwnerOpOutcome::Applied(status, body) => {
+                Ok(RoutedOutcome::Forwarded(status, body))
+            }
+        }
+    }
+
+    /// Local (non-forwarded) userdata op — the previous inline behavior.
+    fn userdata_op_local(
+        &self,
+        call_id: &str,
+        op: crate::proxy::cluster_forward::UserdataOp,
+    ) -> Result<CommandResult, CommandError> {
+        match op {
+            crate::proxy::cluster_forward::UserdataOp::Set(data) => {
+                let Some(map) = data.as_object().cloned() else {
+                    return Err(CommandError::CommandFailed(
+                        "user data must be a JSON object".to_string(),
+                    ));
+                };
+                let mut gw = self.gateway.write();
+                gw.set_user_data(&call_id.to_string(), map).map_err(|e| {
+                    tracing::info!(
+                        audit_event = "call_userdata_update",
+                        session_id = %call_id,
+                        source = "rwi",
+                        result = "failure",
+                        message = %e,
+                        "call.set_userdata rejected"
+                    );
+                    match e {
+                        crate::rwi::SetUserDataError::SessionNotFound => {
+                            CommandError::CallNotFound(call_id.to_string())
+                        }
+                        crate::rwi::SetUserDataError::TooLarge { .. } => {
+                            CommandError::CommandFailed(e.to_string())
+                        }
+                    }
+                })?;
+                Ok(CommandResult::Success)
+            }
+            crate::proxy::cluster_forward::UserdataOp::Get => {
+                let gw = self.gateway.read();
+                let user_data = gw.get_user_data(&call_id.to_string());
+                Ok(CommandResult::UserData {
+                    user_data: serde_json::Value::Object(user_data),
+                })
+            }
+        }
     }
 
     /// Query a leg's recorder status, mapping transport errors onto
@@ -3164,7 +3344,7 @@ impl RwiCommandProcessor {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum CommandResult {
     /// Dial request queued; progress is reported by leg lifecycle events.
     LegAdded { leg_id: String },
@@ -3249,7 +3429,7 @@ fn originate_ringing_requested(has_record_option: bool, policy: Option<&Recordin
     has_record_option || policy.is_some_and(|policy| policy.record_ringing_enabled())
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CallInfo {
     pub session_id: String,
     pub caller: Option<String>,
@@ -3258,6 +3438,63 @@ pub struct CallInfo {
     pub status: String,
     pub started_at: String,
     pub answered_at: Option<String>,
+}
+
+/// Session-scoped commands that are safe to route to the session's owner
+/// node via the `/cluster/session_op` envelope.  Everything NOT in this list
+/// is either node-scoped (`originate`, `list_calls`, `subscribe`,
+/// `session.resume` — node-local event cache) or deliberately not routed
+/// (transfers/supervisor: multi-call commands).
+pub(crate) fn is_session_scoped_routable(command: &RwiCommandPayload) -> bool {
+    use RwiCommandPayload as P;
+    matches!(
+        command,
+        P::SetUserData { .. }
+            | P::GetUserData { .. }
+            | P::SetVar { .. }
+            | P::GetVar { .. }
+            | P::CallSendDtmf { .. }
+            | P::DtmfCollect(_)
+            | P::SipMessage { .. }
+            | P::SipNotify { .. }
+    )
+}
+
+/// TERMINAL execution of a routed session op on the node that hosts the
+/// session.  This is the endpoint core of `/cluster/session_op` — by contract
+/// it contains NO routing: a forwarded request stops here.  Loop-safety
+/// checks (consistency, allowlist, hop canary) all live in this one place.
+pub async fn execute_session_op_local(
+    processor: &RwiCommandProcessor,
+    session_id: &str,
+    hops: u8,
+    command: RwiCommandPayload,
+) -> Result<CommandResult, CommandError> {
+    // Forwarding-loop canary: the router stamps hops = 1; a terminal that
+    // receives anything above 1 means a peer re-routed an already-forwarded
+    // request — reject loudly (500 upstream) instead of ping-ponging.
+    if hops > 1 {
+        return Err(CommandError::CommandFailed(format!(
+            "session_op hop limit exceeded (hops={hops}) — forwarding loop detected"
+        )));
+    }
+    // Consistency: the envelope session_id must match the command's own call
+    // id, so a mismatched construction can never apply state to another call.
+    match command.dispatch_call_id() {
+        Some(cid) if cid == session_id => {}
+        _ => {
+            return Err(CommandError::CommandFailed(
+                "session_id does not match the command's call_id".to_string(),
+            ))
+        }
+    }
+    // Allowlist: only session-scoped commands may be remotely executed.
+    if !is_session_scoped_routable(&command) {
+        return Err(CommandError::CommandFailed(
+            "command is not session-scoped and cannot be routed".to_string(),
+        ));
+    }
+    processor.process_command_local(command).await
 }
 
 #[derive(Debug)]
@@ -3477,4 +3714,11 @@ mod tests {
             .expect("drop must remove its sender without another registration");
         }
     }
+}
+
+/// The result of routing an owner-routed op: apply locally, or the owner
+/// answered with (status, body).
+enum RoutedOutcome {
+    Local,
+    Forwarded(reqwest::StatusCode, serde_json::Value),
 }
