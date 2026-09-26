@@ -2545,11 +2545,18 @@ fn write_silence_wav(
 
 /// Build a real, single-leg-A negotiated MediaBridge suitable for `play_file`.
 async fn playable_bridge(session_id: &str) -> crate::media::media_bridge::MediaBridge {
+    playable_bridge_with_peer(session_id, "callee").await
+}
+
+async fn playable_bridge_with_peer(
+    session_id: &str,
+    peer_id: &str,
+) -> crate::media::media_bridge::MediaBridge {
     use crate::media::leg::{LegConfig, LegInner};
     use crate::media::media_bridge::MediaBridge;
     let mut mb = MediaBridge::new(session_id);
     let a = LegInner::new("caller", &LegConfig::rtp_pcmu(), None).expect("leg a");
-    let b = LegInner::new("callee", &LegConfig::rtp_pcmu(), None).expect("leg b");
+    let b = LegInner::new(peer_id, &LegConfig::rtp_pcmu(), None).expect("leg b");
     mb.replace_leg(crate::media::media_bridge::LegSide::A, a)
         .await;
     mb.replace_leg(crate::media::media_bridge::LegSide::B, b)
@@ -2558,7 +2565,7 @@ async fn playable_bridge(session_id: &str) -> crate::media::media_bridge::MediaB
         .leg_for_id(&crate::media::leg_id::LegId::from("caller"))
         .unwrap();
     let lb = mb
-        .leg_for_id(&crate::media::leg_id::LegId::from("callee"))
+        .leg_for_id(&crate::media::leg_id::LegId::from(peer_id))
         .unwrap();
     let offer = la.create_offer().await.expect("offer");
     let answer = lb.answer(&offer).await.expect("answer");
@@ -2786,6 +2793,7 @@ async fn bridged_session_for_play_test(
         );
         session.update_leg_state(&id, LegState::Connected);
     }
+    session.bridge = BridgeConfig::bridge(LegId::from("caller"), LegId::from("callee"));
     session.media.bridge = Some(mb);
     (session, cmd_rx)
 }
@@ -4847,6 +4855,7 @@ async fn toivr_transfer_injects_origin_into_route_variables() {
 /// This is the normal IVR -> queue -> agent shape before an agent sends REFER.
 #[tokio::test]
 async fn toivr_transfer_from_queue_agent_detaches_old_leg_and_redacts_event() {
+    use crate::call::domain::HangupCommand;
     use crate::proxy::routing::RouteAction;
     use crate::rwi::gateway::RwiGateway;
 
@@ -4882,6 +4891,23 @@ async fn toivr_transfer_from_queue_agent_detaches_old_leg_and_redacts_event() {
     let agent = LegId::from("agent-leg");
     session.legs.insert(agent.clone(), Leg::new(agent.clone()));
     assert!(session.update_leg_state(&agent, LegState::Connected));
+    let mut media = playable_bridge_with_peer("refer-egress", agent.as_str()).await;
+    media.accept(crate::media::media_bridge::LegSide::A).await;
+    media.accept(crate::media::media_bridge::LegSide::B).await;
+    session.legs.set_media_leg(
+        &LegId::from("caller"),
+        media
+            .leg_for_id(&crate::media::leg_id::LegId::from("caller"))
+            .unwrap(),
+    );
+    session.legs.set_media_leg(
+        &agent,
+        media
+            .leg_for_id(&crate::media::leg_id::LegId::from(agent.as_str()))
+            .unwrap(),
+    );
+    session.bridge = BridgeConfig::bridge(LegId::from("caller"), agent.clone());
+    session.media.bridge = Some(media);
     let agent_dialog = rsipstack::dialog::DialogId {
         call_id: "agent-dialog".into(),
         local_tag: "local".into(),
@@ -4962,6 +4988,54 @@ async fn toivr_transfer_from_queue_agent_detaches_old_leg_and_redacts_event() {
         entry.event.payload["transfer_source"]["source_type"],
         "queue"
     );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let prompt = write_silence_wav(dir.path(), "survey.wav", 8000, 800);
+    let (app_event_tx, mut app_event_rx) = mpsc::unbounded_channel();
+    session
+        .app_event_bridge
+        .set_app_event_sender(Some(app_event_tx));
+    let play = session
+        .execute_command(
+            CallCommand::Play {
+                leg_id: None,
+                source: crate::call::domain::MediaSource::File {
+                    path: prompt.to_str().unwrap().to_string(),
+                },
+                options: Some(crate::call::domain::PlayOptions {
+                    track_id: Some("survey-prompt".to_string()),
+                    ..Default::default()
+                }),
+            },
+            None,
+        )
+        .await;
+    assert!(
+        play.success,
+        "successor IVR prompt must play: {:?}",
+        play.message
+    );
+
+    let audio_complete = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            match app_event_rx.recv().await.expect("app event channel open") {
+                crate::call::app::ControllerEvent::AudioComplete {
+                    track_id,
+                    interrupted,
+                } if track_id == "survey-prompt" => break interrupted,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("successor IVR must receive playback completion");
+    assert!(!audio_complete, "survey prompt must finish naturally");
+
+    let hangup = session
+        .execute_command(CallCommand::Hangup(HangupCommand::all(None, None)), None)
+        .await;
+    assert!(hangup.success, "successor hangup must remain executable");
+    assert!(session.pending_hangup.contains(&session.caller_dialog_id()));
 }
 
 /// Remembered IVR metadata must not hide the agent currently transferring the call.
