@@ -309,8 +309,16 @@ impl BuiltinAppFactory {
                     if file_config.ivr.is_step_mode() {
                         // Step mode from TOML
                         let provider_cfg = file_config.ivr.provider.as_ref()?;
+                        let provider_url =
+                            match provider_cfg.resolve_url(&context.config.proxy.ivr_endpoints) {
+                                Ok(url) => url,
+                                Err(error) => {
+                                    *diagnostic = Some(error);
+                                    return None;
+                                }
+                            };
                         let mut provider = crate::call::app::ivr::StepProvider::new(
-                            &provider_cfg.url,
+                            &provider_url,
                             context.http_client.clone(),
                         );
                         for (k, v) in &provider_cfg.headers {

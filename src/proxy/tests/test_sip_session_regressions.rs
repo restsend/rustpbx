@@ -267,6 +267,8 @@ struct NameCapturingRuntime {
 struct RoutePointRuntime {
     started_apps: std::sync::Mutex<Vec<(String, Option<serde_json::Value>)>>,
     route_variables: std::sync::Mutex<Vec<HashMap<String, String>>>,
+    route_sip_headers: std::sync::Mutex<Vec<HashMap<String, String>>>,
+    current_app: std::sync::Mutex<Option<String>>,
     failed_apps: Vec<String>,
     invocation: Option<AppInvocationContext>,
     context: Option<Arc<ApplicationContext>>,
@@ -277,6 +279,8 @@ impl RoutePointRuntime {
         Self {
             started_apps: std::sync::Mutex::new(Vec::new()),
             route_variables: std::sync::Mutex::new(Vec::new()),
+            route_sip_headers: std::sync::Mutex::new(Vec::new()),
+            current_app: std::sync::Mutex::new(None),
             failed_apps: failed_apps.iter().map(|name| name.to_string()).collect(),
             invocation: None,
             context: None,
@@ -289,6 +293,15 @@ impl RoutePointRuntime {
 
     fn route_variables(&self) -> Vec<HashMap<String, String>> {
         self.route_variables.lock().unwrap().clone()
+    }
+
+    fn route_sip_headers(&self) -> Vec<HashMap<String, String>> {
+        self.route_sip_headers.lock().unwrap().clone()
+    }
+
+    fn with_current_app(self, app_name: &str) -> Self {
+        *self.current_app.lock().unwrap() = Some(app_name.to_string());
+        self
     }
 }
 
@@ -311,6 +324,7 @@ impl AppRuntime for RoutePointRuntime {
         if self.failed_apps.iter().any(|name| name == app_name) {
             return Err(AppRuntimeError::UnknownApp(app_name.to_string()));
         }
+        *self.current_app.lock().unwrap() = Some(app_name.to_string());
         Ok(())
     }
 
@@ -325,6 +339,10 @@ impl AppRuntime for RoutePointRuntime {
             .lock()
             .unwrap()
             .push(route_context.variables);
+        self.route_sip_headers
+            .lock()
+            .unwrap()
+            .push(route_context.sip_headers);
         self.start_app(app_name, params, auto_answer).await
     }
 
@@ -333,6 +351,7 @@ impl AppRuntime for RoutePointRuntime {
     }
 
     async fn stop_app(&self, _reason: Option<String>) -> crate::call::runtime::AppResult<()> {
+        *self.current_app.lock().unwrap() = None;
         Ok(())
     }
 
@@ -341,11 +360,11 @@ impl AppRuntime for RoutePointRuntime {
     }
 
     fn is_running(&self) -> bool {
-        false
+        self.current_app.lock().unwrap().is_some()
     }
 
     fn current_app(&self) -> Option<String> {
-        None
+        self.current_app.lock().unwrap().clone()
     }
 }
 
@@ -2526,11 +2545,18 @@ fn write_silence_wav(
 
 /// Build a real, single-leg-A negotiated MediaBridge suitable for `play_file`.
 async fn playable_bridge(session_id: &str) -> crate::media::media_bridge::MediaBridge {
+    playable_bridge_with_peer(session_id, "callee").await
+}
+
+async fn playable_bridge_with_peer(
+    session_id: &str,
+    peer_id: &str,
+) -> crate::media::media_bridge::MediaBridge {
     use crate::media::leg::{LegConfig, LegInner};
     use crate::media::media_bridge::MediaBridge;
     let mut mb = MediaBridge::new(session_id);
     let a = LegInner::new("caller", &LegConfig::rtp_pcmu(), None).expect("leg a");
-    let b = LegInner::new("callee", &LegConfig::rtp_pcmu(), None).expect("leg b");
+    let b = LegInner::new(peer_id, &LegConfig::rtp_pcmu(), None).expect("leg b");
     mb.replace_leg(crate::media::media_bridge::LegSide::A, a)
         .await;
     mb.replace_leg(crate::media::media_bridge::LegSide::B, b)
@@ -2539,7 +2565,7 @@ async fn playable_bridge(session_id: &str) -> crate::media::media_bridge::MediaB
         .leg_for_id(&crate::media::leg_id::LegId::from("caller"))
         .unwrap();
     let lb = mb
-        .leg_for_id(&crate::media::leg_id::LegId::from("callee"))
+        .leg_for_id(&crate::media::leg_id::LegId::from(peer_id))
         .unwrap();
     let offer = la.create_offer().await.expect("offer");
     let answer = lb.answer(&offer).await.expect("answer");
@@ -2767,6 +2793,7 @@ async fn bridged_session_for_play_test(
         );
         session.update_leg_state(&id, LegState::Connected);
     }
+    session.bridge = BridgeConfig::bridge(LegId::from("caller"), LegId::from("callee"));
     session.media.bridge = Some(mb);
     (session, cmd_rx)
 }
@@ -4783,11 +4810,13 @@ async fn toivr_transfer_injects_origin_into_route_variables() {
         ..Default::default()
     });
     let mut session = build_session_with_config(route_point_dialplan(), config).await;
-    let runtime = Arc::new(RoutePointRuntime::new(&[]));
+    let runtime = Arc::new(RoutePointRuntime::new(&[]).with_current_app("ivr"));
     session.app_runtime = runtime.clone();
 
-    // Simulate the call flowing out of a step IVR: the session remembers
-    // the originating IVR short code and the current node.
+    // The runtime has returned from a queue into IVR, while CallMeta still
+    // carries the historical queue application and queue name.
+    session.meta.app_name = Some("queue".to_string());
+    session.meta.queue_name = Some("support".to_string());
     session.session_ext_set("ivr", "main-ivr");
     session.session_ext_set("ivr_node", "menu-1");
 
@@ -4819,6 +4848,224 @@ async fn toivr_transfer_injects_origin_into_route_variables() {
     assert_eq!(
         vars[0].get("source_node").map(String::as_str),
         Some("menu-1")
+    );
+}
+
+/// Remembered IVR metadata must not hide the queue currently serving the call.
+/// This is the normal IVR -> queue -> agent shape before an agent sends REFER.
+#[tokio::test]
+async fn toivr_transfer_from_queue_agent_detaches_old_leg_and_redacts_event() {
+    use crate::call::domain::HangupCommand;
+    use crate::proxy::routing::RouteAction;
+    use crate::rwi::gateway::RwiGateway;
+
+    let config = route_point_config(RouteAction {
+        action: Some("application".to_string()),
+        app: Some("ivr".to_string()),
+        ..Default::default()
+    });
+    let gateway = RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let (server, _) =
+        create_test_server_with_rwi_gateway(config, Arc::new(parking_lot::RwLock::new(gateway)))
+            .await;
+    let mut session = build_session_on_server(server, route_point_dialplan()).await;
+    let mut runtime = RoutePointRuntime::new(&[]);
+    runtime.invocation = Some(AppInvocationContext {
+        app_execution_id: 1,
+        callee: "queue".to_string(),
+        sip_headers: HashMap::from([
+            ("X-Route-Metadata".to_string(), "route-default".to_string()),
+            (
+                "X-Unchanged-Context".to_string(),
+                "route-default-retained".to_string(),
+            ),
+        ]),
+        variables: HashMap::new(),
+    });
+    let runtime = Arc::new(runtime);
+    session.app_runtime = runtime.clone();
+    session.session_ext_set("ivr", "remembered-ivr");
+    session.meta.queue_name = Some("support".to_string());
+    assert!(session.update_leg_state(&LegId::from("caller"), LegState::Connected));
+    let agent = LegId::from("agent-leg");
+    session.legs.insert(agent.clone(), Leg::new(agent.clone()));
+    assert!(session.update_leg_state(&agent, LegState::Connected));
+    let mut media = playable_bridge_with_peer("refer-egress", agent.as_str()).await;
+    media.accept(crate::media::media_bridge::LegSide::A).await;
+    media.accept(crate::media::media_bridge::LegSide::B).await;
+    session.legs.set_media_leg(
+        &LegId::from("caller"),
+        media
+            .leg_for_id(&crate::media::leg_id::LegId::from("caller"))
+            .unwrap(),
+    );
+    session.legs.set_media_leg(
+        &agent,
+        media
+            .leg_for_id(&crate::media::leg_id::LegId::from(agent.as_str()))
+            .unwrap(),
+    );
+    session.bridge = BridgeConfig::bridge(LegId::from("caller"), agent.clone());
+    session.media.bridge = Some(media);
+    let agent_dialog = rsipstack::dialog::DialogId {
+        call_id: "agent-dialog".into(),
+        local_tag: "local".into(),
+        remote_tag: "remote".into(),
+    };
+    session.meta.connected_callee = Some("sip:agent@rustpbx.test".to_string());
+    session.meta.connected_callee_dialog_id = Some(agent_dialog.clone());
+    session.callee_dialogs.insert(agent_dialog.clone(), ());
+    let (_callee_tx, mut callee_rx) = mpsc::unbounded_channel();
+
+    let result = session
+        .execute_command(
+            CallCommand::TransferWithCompletion {
+                leg_id: agent.clone(),
+                target: "toivr:39230?private_context=secret-value".to_string(),
+                headers: HashMap::from([
+                    (
+                        "X-Route-Metadata".to_string(),
+                        "workflow=feedback".to_string(),
+                    ),
+                    ("X-Trace-Context".to_string(), "trace-test".to_string()),
+                ]),
+                completion: None,
+            },
+            Some(&mut callee_rx),
+        )
+        .await;
+
+    assert!(
+        result.success,
+        "toivr transfer should succeed: {:?}",
+        result
+    );
+    assert_eq!(
+        runtime.route_variables()[0]
+            .get("transferred_from")
+            .map(String::as_str),
+        Some("queue")
+    );
+    assert_eq!(
+        runtime.route_sip_headers()[0]
+            .get("X-Route-Metadata")
+            .map(String::as_str),
+        Some("workflow=feedback")
+    );
+    assert_eq!(
+        runtime.route_sip_headers()[0]
+            .get("X-Trace-Context")
+            .map(String::as_str),
+        Some("trace-test")
+    );
+    assert_eq!(
+        runtime.route_sip_headers()[0]
+            .get("X-Unchanged-Context")
+            .map(String::as_str),
+        Some("route-default-retained")
+    );
+    assert!(session.meta.transferred);
+    assert!(!session.legs.contains_key(&agent));
+    assert!(session.meta.connected_callee_dialog_id.is_none());
+    assert!(session.pending_hangup.contains(&agent_dialog));
+    assert!(!session.callee_dialogs.contains_key(&agent_dialog));
+    assert!(!session.pending_hangup.contains(&session.caller_dialog_id()));
+
+    let entry = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let entry = events.recv().await.expect("event tap must stay open");
+            if entry.event.event_type == "call_transferred" {
+                return entry;
+            }
+        }
+    })
+    .await
+    .expect("call_transferred must be emitted");
+    assert_eq!(entry.event.payload["transfer_target"], "toivr:39230");
+    assert_eq!(entry.event.payload["transfer_target_type"], "route_point");
+    assert_eq!(
+        entry.event.payload["transfer_source"]["source_type"],
+        "queue"
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let prompt = write_silence_wav(dir.path(), "survey.wav", 8000, 800);
+    let (app_event_tx, mut app_event_rx) = mpsc::unbounded_channel();
+    session
+        .app_event_bridge
+        .set_app_event_sender(Some(app_event_tx));
+    let play = session
+        .execute_command(
+            CallCommand::Play {
+                leg_id: None,
+                source: crate::call::domain::MediaSource::File {
+                    path: prompt.to_str().unwrap().to_string(),
+                },
+                options: Some(crate::call::domain::PlayOptions {
+                    track_id: Some("survey-prompt".to_string()),
+                    ..Default::default()
+                }),
+            },
+            None,
+        )
+        .await;
+    assert!(
+        play.success,
+        "successor IVR prompt must play: {:?}",
+        play.message
+    );
+
+    let audio_complete = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            match app_event_rx.recv().await.expect("app event channel open") {
+                crate::call::app::ControllerEvent::AudioComplete {
+                    track_id,
+                    interrupted,
+                } if track_id == "survey-prompt" => break interrupted,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("successor IVR must receive playback completion");
+    assert!(!audio_complete, "survey prompt must finish naturally");
+
+    let hangup = session
+        .execute_command(CallCommand::Hangup(HangupCommand::all(None, None)), None)
+        .await;
+    assert!(hangup.success, "successor hangup must remain executable");
+    assert!(session.pending_hangup.contains(&session.caller_dialog_id()));
+}
+
+/// Remembered IVR metadata must not hide the agent currently transferring the call.
+#[tokio::test]
+async fn toivr_transfer_prefers_current_agent_over_remembered_ivr() {
+    use crate::proxy::routing::RouteAction;
+
+    let config = route_point_config(RouteAction {
+        action: Some("application".to_string()),
+        app: Some("ivr".to_string()),
+        ..Default::default()
+    });
+    let mut session = build_session_with_config(route_point_dialplan(), config).await;
+    let runtime = Arc::new(RoutePointRuntime::new(&[]));
+    session.app_runtime = runtime.clone();
+    session.session_ext_set("ivr", "remembered-ivr");
+    session.session_ext_set("resolved_agent_id", "1001");
+
+    let result = execute_route_point_transfer(&mut session).await;
+
+    assert!(
+        result.success,
+        "toivr transfer should succeed: {:?}",
+        result
+    );
+    assert_eq!(
+        runtime.route_variables()[0]
+            .get("transferred_from")
+            .map(String::as_str),
+        Some("agent")
     );
 }
 

@@ -1156,7 +1156,7 @@ async fn calls_query_handler(
     // A dialog Call-ID alias resolves to the owning proxy session id.
     let mut alias_session_ids: Vec<String> = Vec::new();
     if let Some(cid) = query.call_id.as_deref()
-        && let Some(handle) = registry.get_handle_by_dialog(cid)
+        && let Some(handle) = registry.get_handle_by_call_id(cid)
     {
         alias_session_ids.push(handle.session_id().to_string());
     }
@@ -2079,7 +2079,7 @@ async fn cluster_dispatch_command_handler(
     // Accept proxy session id or B-leg dialog Call-ID (CC CTI contract).
     let resolved_id = if registry.get_handle(&session_id).is_some() {
         session_id.clone()
-    } else if let Some(handle) = registry.get_handle_by_dialog(&session_id) {
+    } else if let Some(handle) = registry.get_handle_by_call_id(&session_id) {
         handle.session_id().to_string()
     } else {
         tracing::info!(
@@ -2181,7 +2181,7 @@ async fn cluster_forward_sip_handler(
 
     let registry = state.sip_server().inner.active_call_registry.clone();
     let handle = registry
-        .get_handle_by_dialog(dialog_call_id)
+        .get_handle_by_call_id(dialog_call_id)
         .or_else(|| registry.get_handle(dialog_call_id));
     let Some(handle) = handle else {
         return (
