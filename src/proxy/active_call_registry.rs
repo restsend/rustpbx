@@ -52,6 +52,7 @@ pub struct ActiveCallContextMeta {
 pub struct ActiveProxyCallRegistry {
     entries: DashMap<String, ActiveProxyCallEntry>,
     handles: DashMap<String, SipSessionHandle>,
+    // Lookup keys are either a full Dialog-ID or a plain Call-ID alias.
     handles_by_dialog: DashMap<String, SipSessionHandle>,
     dialog_by_session: DashMap<String, Vec<String>>,
     context_meta: DashMap<String, ActiveCallContextMeta>,
@@ -127,6 +128,32 @@ impl ActiveProxyCallRegistry {
 
     pub fn get_handle_by_dialog(&self, dialog_id: &str) -> Option<SipSessionHandle> {
         self.handles_by_dialog.get(dialog_id).map(|e| e.clone())
+    }
+
+    pub fn register_call_id(&self, call_id: String, handle: SipSessionHandle) {
+        self.register_dialog(call_id, handle);
+    }
+
+    pub fn get_handle_by_call_id(&self, call_id: &str) -> Option<SipSessionHandle> {
+        self.get_handle_by_dialog(call_id)
+    }
+
+    pub fn unregister_call_id(&self, call_id: &str) {
+        self.unregister_dialog(call_id);
+    }
+
+    pub fn register_dialog_identity(
+        &self,
+        dialog_id: &rsipstack::dialog::DialogId,
+        handle: SipSessionHandle,
+    ) {
+        self.register_dialog(dialog_id.to_string(), handle.clone());
+        self.register_call_id(dialog_id.call_id.clone(), handle);
+    }
+
+    pub fn unregister_dialog_identity(&self, dialog_id: &rsipstack::dialog::DialogId) {
+        self.unregister_dialog(&dialog_id.to_string());
+        self.unregister_call_id(&dialog_id.call_id);
     }
 
     pub fn update<F>(&self, session_id: &str, updater: F)

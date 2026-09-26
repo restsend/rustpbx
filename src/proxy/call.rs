@@ -2302,6 +2302,7 @@ impl CallModule {
         let original_handle = original_handle.unwrap();
         let original_session_id = original_handle.session_id().to_string();
         let user = cookie.get_user().clone();
+        let refer_app_headers = Self::refer_application_headers(tx.original.headers.iter());
         // Fresh cookie for the route lookup (carries no transaction state —
         // see `try_execute_refer_app_handoff`).
         let route_cookie = crate::call::cookie::TransactionCookie::from(&tx.key);
@@ -2348,6 +2349,7 @@ impl CallModule {
                     &target_uri,
                     &route_cookie,
                     &dialog_id,
+                    &refer_app_headers,
                 )
                 .await
                 {
@@ -2508,21 +2510,50 @@ impl CallModule {
             target = %target_uri,
             "Executing inbound REFER as in-session blind transfer"
         );
+        match Self::execute_inbound_refer_transfer_command(
+            original_handle,
+            leg_id,
+            target_uri.to_string(),
+            Default::default(),
+        )
+        .await
+        {
+            Ok(true) => Ok(true),
+            Ok(false) => {
+                info!(
+                    session_id = %original_handle.session_id(),
+                    "transfer dispatch failed (session gone); falling back to raw originate"
+                );
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn execute_inbound_refer_transfer_command(
+        original_handle: &crate::proxy::proxy_call::sip_session::SipSessionHandle,
+        leg_id: crate::call::domain::LegId,
+        target: String,
+        headers: HashMap<String, String>,
+    ) -> Result<bool, (u16, String)> {
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
         if original_handle
-            .send_command(crate::call::domain::CallCommand::Transfer {
+            .send_command(crate::call::domain::CallCommand::TransferWithCompletion {
                 leg_id,
-                target: target_uri.to_string(),
-                attended: false,
+                target,
+                headers,
+                completion: Some(completion_tx),
             })
             .is_err()
         {
-            info!(
-                session_id = %original_handle.session_id(),
-                "transfer dispatch failed (session gone); falling back to raw originate"
-            );
             return Ok(false);
         }
-        Ok(true)
+        match tokio::time::timeout(std::time::Duration::from_secs(30), completion_rx).await {
+            Ok(Ok(Ok(()))) => Ok(true),
+            Ok(Ok(Err(reason))) => Err((500, reason)),
+            Ok(Err(_)) => Err((500, "session ended before transfer completed".to_string())),
+            Err(_) => Err((504, "transfer execution timed out".to_string())),
+        }
     }
 
     /// Attempt to execute an inbound REFER as an in-session application
@@ -2547,6 +2578,7 @@ impl CallModule {
         target_uri: &str,
         cookie: &crate::call::cookie::TransactionCookie,
         dialog_id: &DialogId,
+        refer_app_headers: &HashMap<String, String>,
     ) -> Result<ReferExecution, (u16, String)> {
         // CC quick-route feature codes (`*81<sg-id>` / `*82<ivr-name>`) are
         // internal-by-construction and resolve to a transfer target without
@@ -2555,7 +2587,9 @@ impl CallModule {
         // the ACD / an IVR.
         if let Some(resolver) = server.quick_route_resolver.as_ref() {
             let parsed = rsipstack::sip::Uri::try_from(target_uri).ok();
-            let user = parsed.as_ref().and_then(|u| u.user().map(|u| u.to_string()));
+            let user = parsed
+                .as_ref()
+                .and_then(|u| u.user().map(|u| u.to_string()));
             if let Some(user) = user
                 && let Some(target) = resolver.resolve_quick_target(&user).await
             {
@@ -2583,14 +2617,17 @@ impl CallModule {
                         }
                     }
                 };
-                original_handle
-                    .send_command(crate::call::domain::CallCommand::Transfer {
-                        leg_id,
-                        target,
-                        attended: false,
-                    })
-                    .map_err(|e| (500u16, format!("quick-route transfer failed: {}", e)))?;
-                return Ok(ReferExecution::Done);
+                return match Self::execute_inbound_refer_transfer_command(
+                    original_handle,
+                    leg_id,
+                    target,
+                    refer_app_headers.clone(),
+                )
+                .await?
+                {
+                    true => Ok(ReferExecution::Done),
+                    false => Err((500, "quick-route transfer dispatch failed".to_string())),
+                };
             }
         }
         if !server.proxy_config.load().route_originated_calls {
@@ -2675,17 +2712,20 @@ impl CallModule {
         info!(
             session_id = %original_session_id,
             leg = %leg_id,
-            target = %handoff_target,
+            route_point = %user,
             "Inbound REFER target routed to queue/application; dispatching in-session transfer"
         );
-        original_handle
-            .send_command(crate::call::domain::CallCommand::Transfer {
-                leg_id,
-                target: handoff_target,
-                attended: false,
-            })
-            .map_err(|e| (500, format!("failed to dispatch transfer command: {}", e)))?;
-        Ok(ReferExecution::Done)
+        match Self::execute_inbound_refer_transfer_command(
+            original_handle,
+            leg_id,
+            handoff_target,
+            refer_app_headers.clone(),
+        )
+        .await?
+        {
+            true => Ok(ReferExecution::Done),
+            false => Err((500, "failed to dispatch transfer command".to_string())),
+        }
     }
 
     /// Parse Replaces header from incoming request headers.
@@ -2734,6 +2774,29 @@ impl CallModule {
         } else {
             (refer_to.to_string(), None)
         }
+    }
+
+    fn refer_application_headers<'a>(
+        headers: impl IntoIterator<Item = &'a rsipstack::sip::Header>,
+    ) -> HashMap<String, String> {
+        let mut carried = HashMap::new();
+        let mut seen = std::collections::HashSet::new();
+        for header in headers {
+            let rsipstack::sip::Header::Other(name, value) = header else {
+                continue;
+            };
+            if !name
+                .get(..2)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("X-"))
+            {
+                continue;
+            }
+            if !seen.insert(name.to_ascii_lowercase()) {
+                continue;
+            }
+            carried.insert(name.clone(), value.clone());
+        }
+        carried
     }
 
     /// Execute the actual transfer for an inbound REFER.
@@ -4878,6 +4941,54 @@ mod tests {
             targets[0].supports_webrtc,
             "supports_webrtc must propagate from locator result into target"
         );
+    }
+
+    #[test]
+    fn refer_application_headers_preserve_extension_headers() {
+        let headers = vec![
+            rsipstack::sip::Header::Other("X-Route-Metadata".into(), "workflow=feedback".into()),
+            rsipstack::sip::Header::Other("X-Trace-Context".into(), "trace-test".into()),
+            rsipstack::sip::Header::Other(
+                "X-User-Data".into(),
+                "form=feedback;template=three-option".into(),
+            ),
+            rsipstack::sip::Header::Other("Authorization".into(), "secret".into()),
+        ];
+
+        assert_eq!(
+            CallModule::refer_application_headers(&headers),
+            std::collections::HashMap::from([
+                (
+                    "X-Route-Metadata".to_string(),
+                    "workflow=feedback".to_string(),
+                ),
+                ("X-Trace-Context".to_string(), "trace-test".to_string()),
+                (
+                    "X-User-Data".to_string(),
+                    "form=feedback;template=three-option".to_string(),
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn refer_application_headers_keep_first_case_insensitive_value() {
+        let headers = vec![
+            rsipstack::sip::Header::Other("X-Route-Metadata".into(), "   ".into()),
+            rsipstack::sip::Header::Other("x-ROUTE-metadata".into(), "second".into()),
+            rsipstack::sip::Header::Other("X-Trace-Context".into(), "trace-test".into()),
+        ];
+
+        let carried = CallModule::refer_application_headers(&headers);
+        assert_eq!(
+            carried.get("X-Route-Metadata").map(String::as_str),
+            Some("   ")
+        );
+        assert_eq!(
+            carried.get("X-Trace-Context").map(String::as_str),
+            Some("trace-test")
+        );
+        assert_eq!(carried.len(), 2);
     }
 
     #[tokio::test]
