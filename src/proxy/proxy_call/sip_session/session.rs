@@ -9927,6 +9927,35 @@ impl SipSession {
                 )
             }
 
+            CallCommand::TransferWithCompletion {
+                leg_id,
+                target,
+                headers,
+                completion,
+            } => {
+                let result = if let Some(callee_state_rx) = callee_state_rx.as_deref_mut() {
+                    self.handle_transfer(
+                        leg_id,
+                        target,
+                        false,
+                        transfer::TransferDisposition::Detach,
+                        callee_state_rx,
+                        headers,
+                    )
+                    .await
+                } else {
+                    Err(anyhow::anyhow!(
+                        "No callee state receiver available for transfer"
+                    ))
+                };
+                if let Some(completion) = completion {
+                    let completion_result =
+                        result.as_ref().map(|_| ()).map_err(ToString::to_string);
+                    let _ = completion.send(completion_result);
+                }
+                Self::ok_or_failure(result)
+            }
+
             CallCommand::TransferAwaitResult {
                 leg_id,
                 target,
