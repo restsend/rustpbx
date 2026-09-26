@@ -871,7 +871,7 @@ async fn test_target_invite_call_ids_resolve_before_dialing() {
         assert_eq!(invite.call_id.as_deref(), Some(call_id.as_str()));
         assert_ne!(call_id, session_id);
         let resolved = registry
-            .get_handle_by_dialog(&call_id)
+            .get_handle_by_call_id(&call_id)
             .expect("the desk's SIP Call-ID must resolve before it receives INVITE");
         assert_eq!(resolved.session_id(), session_id);
         call_ids.push(call_id);
@@ -923,12 +923,12 @@ async fn test_target_invite_call_ids_resolve_before_dialing() {
         );
     }
     for call_id in &call_ids {
-        assert!(registry.get_handle_by_dialog(call_id).is_some());
+        assert!(registry.get_handle_by_call_id(call_id).is_some());
     }
 
     registry.remove(&session_id);
     for call_id in &call_ids {
-        assert!(registry.get_handle_by_dialog(call_id).is_none());
+        assert!(registry.get_handle_by_call_id(call_id).is_none());
     }
 }
 
@@ -6664,6 +6664,9 @@ async fn cancel_before_queued_answer_sends_bye_to_late_dialog() {
         let cancel = CancellationToken::new();
         let _cancel_on_exit = cancel.clone().drop_guard();
         let (mut session, handle, mut commands) = SipSession::new_uac(server.clone(), cancel.clone(), None, context, true);
+        server
+            .active_call_registry
+            .register_handle(session.id.to_string(), handle.clone());
         let leg_id = LegId::from("late-target");
         let add = CallCommand::LegAdd {
             source_leg: None, target: format!("sip:alice@{target_addr}"), leg_id: Some(leg_id.clone()), headers: vec![],
@@ -6691,8 +6694,11 @@ async fn cancel_before_queued_answer_sends_bye_to_late_dialog() {
             let mut queued = Vec::new();
             loop {
                 let command = commands.recv().await.expect("dial task notification");
-                let answered = matches!(&command, CallCommand::LegConnected { leg_id: id, dialog_id: Some(dialog), .. }
-                    if id == &leg_id && dialog == &call_id);
+                let answered = matches!(&command, CallCommand::LegConnected {
+                    leg_id: id,
+                    dialog_id: Some(command_call_id),
+                    ..
+                } if id == &leg_id && command_call_id == &call_id);
                 queued.push(command);
                 if answered { return queued; }
             }
@@ -6703,6 +6709,14 @@ async fn cancel_before_queued_answer_sends_bye_to_late_dialog() {
         let dialogs = server.dialog_layer.get_client_dialog_by_call_id(&call_id);
         assert_eq!(dialogs.len(), 1);
         let confirmed_id = dialogs[0].id();
+        assert_eq!(
+            server
+                .active_call_registry
+                .get_handle_by_dialog(&confirmed_id.to_string())
+                .map(|registered| registered.session_id().to_string()),
+            Some(handle.session_id().to_string()),
+            "the full dialog must resolve before LegConnected is consumed"
+        );
         assert!(!dialogs[0].state().is_terminated());
         for command in queued {
             if matches!(&command, CallCommand::LegConnected { .. }) {

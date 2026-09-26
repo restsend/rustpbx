@@ -3311,7 +3311,7 @@ impl SipSession {
         // Register it before either sequential or parallel dialing sends INVITE.
         let registry = &self.server.active_call_registry;
         if let Some(handle) = registry.get_handle(&self.context.session_id) {
-            registry.register_dialog(callee_call_id.clone(), handle);
+            registry.register_call_id(callee_call_id.clone(), handle);
         }
 
         let option = rsipstack::dialog::invitation::InviteOption {
@@ -4189,7 +4189,16 @@ impl SipSession {
             "Callee dialog state"
         );
         match state {
-            DialogState::Confirmed(_, _) => {
+            DialogState::Confirmed(dialog_id, _) => {
+                if let Some(handle) = self
+                    .server
+                    .active_call_registry
+                    .get_handle(&self.id.to_string())
+                {
+                    self.server
+                        .active_call_registry
+                        .register_dialog_identity(&dialog_id, handle);
+                }
                 self.update_leg_state(&LegId::from("callee"), LegState::Connected);
                 info!(session_id = %self.id,
                     session_id = %self.context.session_id,
@@ -4212,6 +4221,9 @@ impl SipSession {
                 self.unschedule_timer(&terminated_dialog_id);
                 self.timers.remove(&terminated_dialog_id);
                 self.update_refresh_disabled.remove(&terminated_dialog_id);
+                self.server
+                    .active_call_registry
+                    .unregister_dialog_identity(&terminated_dialog_id);
                 // The remote BYE already terminated this leg; remove it before dropping
                 // its guard so guard cleanup does not send a second BYE back.
                 self.server
@@ -6184,6 +6196,15 @@ impl SipSession {
         invite_option: &rsipstack::dialog::invitation::InviteOption,
         default_expires: u64,
     ) -> Result<(), CalleeError> {
+        if let Some(handle) = self
+            .server
+            .active_call_registry
+            .get_handle(&self.id.to_string())
+        {
+            self.server
+                .active_call_registry
+                .register_dialog_identity(&dialog_id, handle);
+        }
         let callee_sdp = response.as_ref().and_then(|r: &rsipstack::sip::Response| {
             let body = r.body();
             Self::extract_sdp(body)
@@ -10037,28 +10058,18 @@ impl SipSession {
                     // the queued hangup has not run yet.
                     if let Some(call_id) = dialog_id.as_deref() {
                         for dialog in self.server.dialog_layer.get_client_dialog_by_call_id(call_id) {
-                            self.pending_hangup.insert(dialog.id());
-                            self.callee_guards.push(ClientDialogGuard::new(self.server.dialog_layer.clone(), dialog.id()));
+                            let dialog_id = dialog.id();
+                            self.server
+                                .active_call_registry
+                                .unregister_dialog_identity(&dialog_id);
+                            self.pending_hangup.insert(dialog_id.clone());
+                            self.callee_guards.push(ClientDialogGuard::new(self.server.dialog_layer.clone(), dialog_id));
                         }
                     }
                     return CommandResult::success();
                 }
 
-                // Contract §3.3: CTI `{call_id}` is the B-leg SIP Call-ID.
-                // Map this leg's dialog Call-ID onto the session handle so
-                // `/cc/calls/{call_id}/...` resolves it via `get_handle_by_dialog`.
-                // Covers the main callee leg, fork winners, and dynamic
-                // (queue-agent / consult) legs alike.
                 if let Some(call_id) = &dialog_id {
-                    if let Some(handle) = self
-                        .server
-                        .active_call_registry
-                        .get_handle(&self.id.to_string())
-                    {
-                        self.server
-                            .active_call_registry
-                            .register_dialog(call_id.clone(), handle);
-                    }
                     // Cluster: also register dialog Call-ID → session owner so
                     // CTI / in-dialog SIP arriving on another node can resolve.
                     let node_id = self
@@ -11280,6 +11291,9 @@ impl SipSession {
             .or_else(|| (leg_id == self.resolve_transfer_leg(LegId::from("callee")))
                 .then(|| self.meta.connected_callee_dialog_id.clone()).flatten());
         if let Some(dialog_id) = dialog_id {
+            self.server
+                .active_call_registry
+                .unregister_dialog_identity(&dialog_id);
             self.pending_hangup.insert(dialog_id.clone());
             self.callee_dialogs.remove(&dialog_id);
             if self.meta.connected_callee_dialog_id.as_ref() == Some(&dialog_id) {
@@ -11430,10 +11444,11 @@ impl SipSession {
         {
             self.server
                 .active_call_registry
-                .register_dialog(bleg_call_id, handle);
+                .register_call_id(bleg_call_id, handle);
         }
 
         let dialog_layer = self.server.dialog_layer.clone();
+        let active_call_registry = self.server.active_call_registry.clone();
         let leg_id_for_spawn = leg_id.clone();
         let session_id = self.id.to_string();
         let cmd_tx = self
@@ -11483,14 +11498,18 @@ impl SipSession {
                                             None
                                         };
 
+                                        let dialog_id = dialog.id();
                                         // Own the answered dialog before publishing it to the session.
                                         // Removing the leg aborts this task, including before
                                         // LegConnected has been processed.
-                                        answered_guard = Some(ClientDialogGuard::new(dialog_layer.clone(), dialog.id()));
+                                        answered_guard = Some(ClientDialogGuard::new(dialog_layer.clone(), dialog_id.clone()));
+                                        if let Some(handle) = active_call_registry.get_handle(&session_id) {
+                                            active_call_registry.register_dialog_identity(&dialog_id, handle);
+                                        }
                                         let _ = cmd_tx.send(CallCommand::LegConnected {
                                             leg_id: leg_id.clone(),
                                             answer_sdp,
-                                            dialog_id: Some(dialog.id().call_id.clone()),
+                                            dialog_id: Some(dialog_id.call_id.clone()),
                                         }).await;
 
                                         result = Ok(dialog);
