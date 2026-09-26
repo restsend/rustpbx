@@ -11488,7 +11488,11 @@ impl SipSession {
         if self.conference_bridge.conf_id.is_none()
             && self.bridge().is_some_and(|bridge| bridge.side_for_leg(&leg_id).is_some())
         {
-            if let Some(bridge) = self.bridge_mut() { bridge.unbridge().await?; }
+            if let Some(bridge) = self.bridge_mut() {
+                bridge.unbridge().await?;
+                // Future app playback must not mirror to the removed leg after its egress stops.
+                bridge.detach_leg(&leg_id);
+            }
         }
         let dialog_id = self.legs.get_dialog(&leg_id).map(|dialog| dialog.id())
             .or_else(|| (leg_id == self.resolve_transfer_leg(LegId::from("callee")))
