@@ -4057,6 +4057,112 @@ max_retries = 3
         app.ok().flatten().is_some(),
         "BuiltinAppFactory should create IVR app from DB store when generated_db=true"
     );
+
+    let step_ivr_toml = r#"
+[ivr]
+name = "endpoint-step-ivr"
+ivr_mode = "step"
+
+[ivr.provider]
+endpoint = "example-step"
+"#;
+    store
+        .write("ivr", "endpoint-step-ivr.generated.toml", step_ivr_toml)
+        .await
+        .unwrap();
+
+    let mut endpoint_config = crate::config::Config::default();
+    endpoint_config.proxy.generated_db = true;
+    endpoint_config.proxy.ivr_endpoints.insert(
+        "example-step".to_string(),
+        crate::config::IvrEndpointConfig {
+            url: "https://provider.example.test/ivr/step".to_string(),
+        },
+    );
+    let endpoint_ctx = crate::call::app::ApplicationContext::new(
+        app_ctx.db.clone(),
+        app_ctx.call_info.clone(),
+        std::sync::Arc::new(endpoint_config),
+        reqwest::Client::new(),
+    );
+    let endpoint_params = Some(serde_json::json!({
+        "file": "db://ivr/endpoint-step-ivr.generated.toml"
+    }));
+
+    assert!(
+        factory
+            .create_app("ivr", endpoint_params.clone(), &endpoint_ctx)
+            .await
+            .unwrap()
+            .is_some(),
+        "configured deployment endpoint should create the shared Step IVR"
+    );
+    let error = factory
+        .create_app("ivr", endpoint_params, &app_ctx)
+        .await
+        .expect_err("an unconfigured deployment endpoint must be rejected");
+    assert!(error.to_string().contains("example-step"));
+
+    let direct_config = r#"
+[ivr]
+name = "direct-step-ivr"
+ivr_mode = "step"
+
+[ivr.provider]
+url = "https://provider.example.test/ivr/step"
+"#;
+    store
+        .write("ivr", "direct-step-ivr.generated.toml", direct_config)
+        .await
+        .unwrap();
+    let direct_params = Some(serde_json::json!({
+        "file": "db://ivr/direct-step-ivr.generated.toml"
+    }));
+    assert!(
+        factory
+            .create_app("ivr", direct_params.clone(), &app_ctx)
+            .await
+            .unwrap()
+            .is_some(),
+        "legacy direct provider URLs should remain supported"
+    );
+
+    store
+        .write(
+            "ivr",
+            "direct-step-ivr.generated.toml",
+            &direct_config.replace(
+                "url = \"https://provider.example.test/ivr/step\"",
+                "url = \"https://provider.example.test/ivr/step\"\nendpoint = \"example-step\"",
+            ),
+        )
+        .await
+        .unwrap();
+    let error = factory
+        .create_app("ivr", direct_params, &endpoint_ctx)
+        .await
+        .expect_err("provider URL and endpoint must be mutually exclusive");
+    assert!(error.to_string().contains("exactly one"));
+
+    store
+        .write(
+            "ivr",
+            "direct-step-ivr.generated.toml",
+            &direct_config.replace(
+                "url = \"https://provider.example.test/ivr/step\"",
+                "url = \"https://provider.example.test/ivr/step\"\nendpoint = \"   \"",
+            ),
+        )
+        .await
+        .unwrap();
+    let whitespace_params = Some(serde_json::json!({
+        "file": "db://ivr/direct-step-ivr.generated.toml"
+    }));
+    let error = factory
+        .create_app("ivr", whitespace_params, &endpoint_ctx)
+        .await
+        .expect_err("present provider fields must remain mutually exclusive when one is blank");
+    assert!(error.to_string().contains("exactly one"));
 }
 
 // ── align_answer_direction_with_offer ──

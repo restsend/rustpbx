@@ -74,7 +74,10 @@ pub struct IvrDefinition {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IvrProviderConfig {
-    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
     #[serde(default)]
     pub headers: HashMap<String, String>,
     #[serde(default = "default_provider_retries")]
@@ -86,6 +89,36 @@ pub struct IvrProviderConfig {
     /// Action when provider HTTP retries are exhausted and session IVR fallback is off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_action: Option<ActionNode>,
+}
+
+impl IvrProviderConfig {
+    pub fn validate_address(&self) -> Result<(), String> {
+        match (&self.url, &self.endpoint) {
+            (Some(url), None) if !url.trim().is_empty() => Ok(()),
+            (None, Some(endpoint)) if !endpoint.trim().is_empty() => Ok(()),
+            (Some(_), None) => Err("IVR provider 'url' must not be empty".to_string()),
+            (None, Some(_)) => Err("IVR provider 'endpoint' must not be empty".to_string()),
+            _ => Err("IVR provider must configure exactly one of 'url' or 'endpoint'".to_string()),
+        }
+    }
+
+    pub fn resolve_url(
+        &self,
+        endpoints: &HashMap<String, crate::config::IvrEndpointConfig>,
+    ) -> Result<String, String> {
+        self.validate_address()?;
+        if let Some(url) = self.url.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+            return Ok(url.to_string());
+        }
+
+        let name = self.endpoint.as_deref().map(str::trim).unwrap_or_default();
+        endpoints
+            .get(name)
+            .map(|config| config.url.trim())
+            .filter(|url| !url.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| format!("IVR endpoint '{name}' is not configured"))
+    }
 }
 
 fn default_provider_retries() -> u32 {
@@ -695,7 +728,11 @@ impl IvrDefinition {
 
     pub fn validate(&self) -> Result<(), String> {
         if self.is_step_mode() {
-            return Ok(());
+            return self
+                .provider
+                .as_ref()
+                .ok_or_else(|| "step IVR requires a provider".to_string())?
+                .validate_address();
         }
         if let Some(ref root) = self.root {
             Self::validate_menu_refs(root, "root", &self.menus)?;
@@ -888,6 +925,47 @@ impl EntryAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_address_requires_one_present_non_empty_field() {
+        let cases = [
+            (None, None, false),
+            (Some(""), None, false),
+            (Some("   "), None, false),
+            (None, Some(""), false),
+            (None, Some("   "), false),
+            (Some("https://provider.example.test/ivr/step"), None, true),
+            (None, Some("example-step"), true),
+            (
+                Some("https://provider.example.test/ivr/step"),
+                Some(""),
+                false,
+            ),
+            (Some(""), Some("example-step"), false),
+            (
+                Some("https://provider.example.test/ivr/step"),
+                Some("example-step"),
+                false,
+            ),
+        ];
+
+        for (url, endpoint, expected_valid) in cases {
+            let provider = IvrProviderConfig {
+                url: url.map(str::to_string),
+                endpoint: endpoint.map(str::to_string),
+                headers: HashMap::new(),
+                max_retries: default_provider_retries(),
+                retry_delay_ms: default_provider_delay(),
+                timeout_secs: default_provider_timeout(),
+                fallback_action: None,
+            };
+            assert_eq!(
+                provider.validate_address().is_ok(),
+                expected_valid,
+                "unexpected validation result for url={url:?}, endpoint={endpoint:?}"
+            );
+        }
+    }
 
     #[test]
     fn test_parse_basic_ivr_toml() {
