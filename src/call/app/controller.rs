@@ -216,6 +216,16 @@ impl CallController {
         });
     }
 
+    /// Pin the CC agent attribution for a leg the queue is about to dial, so
+    /// the leg's `call_ringing` event is enriched with the agent context even
+    /// when the CC session hook has not run yet. Fire-and-forget.
+    pub fn pin_agent_meta(&self, agent_id: Option<String>, agent_name: Option<String>) {
+        let _ = self.session.send_command(CallCommand::PinAgentMeta {
+            agent_id,
+            agent_name,
+        });
+    }
+
     pub async fn hangup(
         &self,
         reason: Option<CallRecordHangupReason>,

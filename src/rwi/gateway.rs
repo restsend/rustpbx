@@ -665,10 +665,14 @@ impl RwiGateway {
 
     fn enrich_flat_event(&self, flat: &RwiEvent) -> RwiEvent {
         let mut ctx_root: Option<String> = None;
+        let mut meta_agent: Option<String> = None;
+        let mut meta_agent_name: Option<String> = None;
         let mut payload = if let Some(call_id) = &flat.call_id
             && let Some(meta) = self.meta_store.get_sync(call_id)
         {
             ctx_root = meta.session_id.clone();
+            meta_agent = meta.agent_id.clone();
+            meta_agent_name = meta.agent_name.clone();
             let mut payload = flat.payload.clone();
             let ctx = crate::rwi::proto::EventCallContext::from(meta);
             merge_event_context(&mut payload, Some(&ctx));
@@ -683,6 +687,56 @@ impl RwiGateway {
             }
             flat.payload.clone()
         };
+
+        // Canonical `transfer_target` form for `call_transferred`: several
+        // emitters report the raw Refer-To / consult target, which for a
+        // bare extension is `"1003"`. Normalize scheme-less, host-less
+        // values to `sip:1003` so webhook consumers see one stable,
+        // URI-shaped contract. Values that already carry a host (`@`) or a
+        // non-SIP scheme (`queue:`, `app:`) pass through untouched.
+        if flat.event_type == "call_transferred"
+            && let Some(obj) = payload.as_object_mut()
+            && let Some(target) = obj.get("transfer_target").and_then(|v| v.as_str())
+        {
+            let t = target.trim();
+            if !t.is_empty()
+                && !t.contains('@')
+                && !t.starts_with("sip:")
+                && !t.starts_with("sips:")
+                && !t.contains(':')
+            {
+                obj.insert(
+                    "transfer_target".to_string(),
+                    serde_json::Value::String(format!("sip:{t}")),
+                );
+            }
+        }
+
+        // Canonical `transfer_source` for `call_transferred`: emitters that
+        // run outside the session flow (proxy REFER handling, cross-session
+        // merges) have no app-context snapshot and may deliver no source at
+        // all. When the CallMeta carries an agent attribution, synthesize
+        // `source_type: "agent"` from it so consumers can rely on the field.
+        if flat.event_type == "call_transferred"
+            && meta_agent.is_some()
+            && let Some(obj) = payload.as_object_mut()
+        {
+            let needs_source = match obj.get("transfer_source") {
+                Some(serde_json::Value::Object(o)) => o.get("source_type").is_none(),
+                Some(_) => false, // a non-object source: leave untouched
+                None => true,     // absent entirely
+            };
+            if needs_source {
+                obj.insert(
+                    "transfer_source".to_string(),
+                    serde_json::json!({
+                        "source_type": "agent",
+                        "agent_id": meta_agent,
+                        "agent_name": meta_agent_name,
+                    }),
+                );
+            }
+        }
 
         // Attach the session user data object (REST/RWI-set business context)
         // under `user_data`. Keyed by session_id; for the main call the event

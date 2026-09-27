@@ -144,6 +144,15 @@ pub enum CallCommand {
         attended: bool,
     },
 
+    /// Run an internal blind transfer and report its actual execution result.
+    TransferWithCompletion {
+        leg_id: LegId,
+        target: String,
+        headers: HashMap<String, String>,
+        #[serde(skip)]
+        completion: Option<oneshot::Sender<std::result::Result<(), String>>>,
+    },
+
     TransferAwaitResult {
         leg_id: LegId,
         target: String,
@@ -192,6 +201,20 @@ pub enum CallCommand {
         queue_label: Option<String>,
         /// Current skill-group id to set.
         skill_group_id: Option<String>,
+    },
+
+    /// Pin the CC agent attribution for a leg the queue is about to dial.
+    ///
+    /// Written by the queue app BEFORE the agent INVITE goes out so that the
+    /// session-level `call_ringing` event — emitted on the agent leg's 180,
+    /// possibly before the CC session hook runs — is enriched with the
+    /// `agent_id`/`agent_name` context. Fields absent (None) are left
+    /// unchanged.
+    PinAgentMeta {
+        /// Agent id being dialed (registry identity, e.g. `"1001"`).
+        agent_id: Option<String>,
+        /// Display name, when known.
+        agent_name: Option<String>,
     },
 
     /// Hang up the original direct/queue agent, resolving the legacy callee alias.
@@ -786,12 +809,14 @@ impl CallCommand {
                 | CallCommand::Reject { .. }
                 | CallCommand::Hangup(_)
                 | CallCommand::Transfer { .. }
+                | CallCommand::TransferWithCompletion { .. }
                 | CallCommand::TransferAwaitResult { .. }
                 | CallCommand::Hold { music: None, .. }
                 | CallCommand::Unhold { .. }
                 | CallCommand::Trace { .. }
                 | CallCommand::ReportCallError { .. }
                 | CallCommand::UpdateQueueMeta { .. }
+                | CallCommand::PinAgentMeta { .. }
         )
     }
 }

@@ -497,6 +497,13 @@ impl RwiCommandProcessor {
             );
 
             match &command {
+                // CallBridged is emitted here on the dispatch ACK; with the
+                // sync pre-validation in dispatch_command (both legs verified
+                // BEFORE dispatch), an Ok result means the bridge request is
+                // valid. The actual media bridging happens asynchronously in
+                // the session loop — consumers that need to know when media
+                // actually flows should watch for call_ringing/call_answered
+                // on the bridged legs, not CallBridged.
                 RwiCommandPayload::Bridge { leg_a, leg_b, .. } if result.is_ok() => {
                     let gw = self.gateway.read();
                     let event = crate::rwi::CallBridged {

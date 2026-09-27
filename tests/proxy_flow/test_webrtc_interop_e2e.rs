@@ -329,7 +329,10 @@ async fn create_webrtc_caller(
     };
     let mut ua = match audio_caps {
         Some(caps) => crate::common::test_ua::TestUa::new_webrtc_with_caps(config, caps),
-        None => crate::common::test_ua::TestUa::new(config),
+        None => crate::common::test_ua::TestUa::new_webrtc_with_caps(
+            config,
+            vec![rustrtc::config::AudioCapability::opus()],
+        ),
     };
     ua.start().await?;
     ua.register().await?;

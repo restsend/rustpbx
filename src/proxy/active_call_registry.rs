@@ -52,7 +52,8 @@ pub struct ActiveCallContextMeta {
 pub struct ActiveProxyCallRegistry {
     entries: DashMap<String, ActiveProxyCallEntry>,
     handles: DashMap<String, SipSessionHandle>,
-    // Session ownership is indexed by bare SIP Call-ID; dialog tags are not part of this key.
+    // Lookup keys are either a full Dialog-ID or a plain Call-ID alias;
+    // session ownership is indexed by bare SIP Call-ID (dialog tags not part of the key).
     handles_by_dialog: DashMap<String, SipSessionHandle>,
     dialog_by_session: DashMap<String, Vec<String>>,
     context_meta: DashMap<String, ActiveCallContextMeta>,

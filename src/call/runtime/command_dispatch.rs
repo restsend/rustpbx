@@ -78,12 +78,29 @@ fn dispatch_command(
         ));
     };
 
-    // Send the command to the session's event loop
-    match handle.send_command(command) {
-        Ok(_) => Ok(CommandResult::success()),
-        Err(e) => Ok(CommandResult::failure_with_kind(
-            format!("failed to dispatch: {}", e),
-            CommandFailureKind::DispatchFailed,
-        )),
+    // Bridge pre-validation: reject unknown legs synchronously (B2BUA contract).
+    if let CallCommand::Bridge { leg_a, leg_b, .. } = &command {
+        let valid = |id: &str| -> bool {
+            matches!(id, "caller" | "callee" | "consult")
+                || id.starts_with("consult-")
+                || registry.get_handle(id).is_some()
+                || {
+                    let b = id.strip_prefix("leg-").or_else(|| id.strip_prefix("fork-")).unwrap_or(id);
+                    b.len() >= 32 && b.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+                }
+        };
+        for leg in [leg_a.as_str(), leg_b.as_str()] {
+            if !valid(leg) {
+                return Ok(CommandResult::failure_with_kind(
+                    format!("Call not found: {leg}"),
+                    CommandFailureKind::SessionNotFound,
+                ));
+            }
+        }
     }
+
+    handle.send_command(command).map_err(|e| {
+        anyhow::anyhow!("failed to dispatch: {e}")
+    })?;
+    Ok(CommandResult::success())
 }

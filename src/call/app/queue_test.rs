@@ -622,18 +622,18 @@ mod tests {
             .expect("should exit after agent connected");
     }
 
-    /// Test agent ring timeout handling (wait-retention dial path): the
-    /// no-answer event fires, the agent is moved to Wrapup, and the call
-    /// returns to wait retention instead of hanging up.
+    /// Test agent ring timeout handling (origin/0.5.1 semantics: the
+    /// no-answer event fires, the call hangs up via fallback, and the agent
+    /// is moved to Wrapup — no Bridge: nothing answered).
+    /// NOTE: origin uses DbRegistry (pruned here in 179c4bef) — the memory
+    /// registry stands in with identical presence semantics.
     #[tokio::test]
     async fn test_agent_ring_timeout() {
+        use crate::call::app::agent_registry::{MemoryRegistry, PresenceState};
         use std::sync::Arc;
-        let registry = Arc::new(
-            HookRecordingRegistry::new()
-                .with_resolve_uris(vec![vec!["sip:agent1@example.com".to_string()]]),
-        );
+
+        let registry = Arc::new(MemoryRegistry::new());
         registry
-            .inner
             .register(
                 "agent-001".to_string(),
                 "Alice".to_string(),
@@ -644,11 +644,7 @@ mod tests {
             .await
             .unwrap();
         registry
-            .inner
-            .update_presence(
-                "agent-001",
-                crate::call::app::agent_registry::PresenceState::Idle,
-            )
+            .update_presence("agent-001", PresenceState::Idle)
             .await
             .unwrap();
 
@@ -700,12 +696,9 @@ mod tests {
 
         // After a ring timeout the agent must be left NON-idle (wrapup),
         // not silently returned to Idle.
-        let agent = registry.inner.get_agent("agent-001").await.unwrap();
+        let agent = registry.get_agent("agent-001").await.unwrap();
         assert!(
-            matches!(
-                agent.presence,
-                crate::call::app::agent_registry::PresenceState::Wrapup { .. }
-            ),
+            matches!(agent.presence, PresenceState::Wrapup { .. }),
             "ring timeout must move the agent to Wrapup (non-idle), got {:?}",
             agent.presence
         );
@@ -1419,26 +1412,25 @@ mod tests {
             })
             .await;
 
-        // Both agents fail - ring timeout
+        // Both agents fail - ring timeout. Late-answer grace: the INVITEs
+        // are NOT cancelled at ring timeout (the late-answer Wrapup→Busy
+        // path needs them alive). The queue falls through to fallback
+        // directly — the INVITEs terminate naturally (UA timeout or the
+        // caller's eventual hangup cascade).
         stack.timeout("agent_ring_timeout");
 
-        // Both outstanding INVITEs must be cancelled before fallback.
-        let first_removed = match stack.next_cmd(2000).await {
-            Some(CallCommand::LegRemove { leg_id }) => leg_id,
-            other => panic!("expected first cancellation, got {other:?}"),
-        };
-        let second_removed = match stack.next_cmd(2000).await {
-            Some(CallCommand::LegRemove { leg_id }) => leg_id,
-            other => panic!("expected second cancellation, got {other:?}"),
-        };
-        assert_ne!(first_removed, second_removed);
-
-        // Should hit no-answer fallback
-        stack
-            .assert_cmd(2000, "FallbackHangup", |c| {
-                matches!(c, CallCommand::Hangup(_))
-            })
-            .await;
+        // Should hit no-answer fallback (may see InjectAppEvent for
+        // queue.agent_no_answer first — drain until the Hangup).
+        let mut saw_hangup = false;
+        for _ in 0..10 {
+            match stack.next_cmd(2000).await {
+                Some(CallCommand::Hangup(_)) => { saw_hangup = true; break; }
+                Some(CallCommand::InjectAppEvent { .. }) => continue,
+                Some(other) => panic!("expected Hangup or InjectAppEvent, got {other:?}"),
+                None => break,
+            }
+        }
+        assert!(saw_hangup, "expected fallback hangup after ring timeout");
     }
 
     #[tokio::test]
@@ -3036,17 +3028,13 @@ mod tests {
         // The agent never answers → ring timeout → round exhausted → the app
         // must go back to waiting (hold restarts), not hang up.
         stack.timeout("agent_ring_timeout");
-        let mut cancelled_leg = false;
+        // Late-answer grace: no LegRemove at ring timeout — the INVITE
+        // stays alive; the queue falls through to wait retention directly.
         let mut hold_restarted = false;
         let mut hung_up = false;
         for _ in 0..10 {
             match stack.next_cmd(300).await {
-                Some(CallCommand::LegRemove { leg_id }) => {
-                    assert_eq!(leg_id, dialed_leg);
-                    cancelled_leg = true;
-                }
                 Some(CallCommand::Play { .. }) => {
-                    assert!(cancelled_leg, "cancel the timed-out INVITE before returning to wait retention");
                     hold_restarted = true;
                     break;
                 }

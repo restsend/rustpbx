@@ -38,11 +38,18 @@ def _negotiated_codec(ua) -> str:
 
 
 @pytest.mark.asyncio
-async def test_webrtc_to_rtp_opus_relay(pbx, sipbot_pool):
-    """WebRTC caller (opus) -> RTP callee (opus): opus<->opus relay audio."""
+async def test_webrtc_to_rtp_opus_relay(pbx, sipbot_pool, tmp_path):
+    """WebRTC caller (opus) -> RTP callee (opus): opus<->opus relay audio.
+
+    The caller plays a tone — `sipbot --webrtc` transmits silence unless a
+    file is played, and a silent caller legitimately delivers silence.
+    """
     pbx.config_builder.media_proxy = "all"
     pbx.config_builder.set_webrtc_users(["1001"])
     h.boot_pbx(pbx)
+
+    sine = tmp_path / "webrtc_opus_tone.wav"
+    h.generate_sine_wav(sine, 440.0, 5.0, 8000, 0.5)
 
     callee = sipbot_pool.callee(
         host=pbx.host, port=h.ua_port(15300), username="1002", password="123456",
@@ -54,6 +61,7 @@ async def test_webrtc_to_rtp_opus_relay(pbx, sipbot_pool):
     caller = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456",
         hangup=10, webrtc=True, audio_quality=True, codecs="opus,pcmu",
+        play_file=str(sine),
     )
     answered = await caller.wait_output_async(r"200 OK|Call established", timeout=25)
     assert answered, f"WebRTC call not answered:\n{caller.output[-1500:]}"
@@ -76,6 +84,8 @@ async def test_webrtc_to_rtp_opus_relay(pbx, sipbot_pool):
 
     if pbx.log_file_path and pbx.log_file_path.exists():
         log = pbx.log_file_path.read_text(encoding="utf-8", errors="replace")
-        assert "fast-path relay activated" in log and "codec=Opus" in log, (
+        # d4367f76 renamed the log phrase: "activated" → "selected" (+ later
+        # "armed" when transport comes up). Match the current contract.
+        assert "fast-path relay selected" in log and "codec=Opus" in log, (
             f"bridge did not run Opus fast-path relay:\n{log[-3000:]}"
         )

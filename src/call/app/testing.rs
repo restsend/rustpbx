@@ -55,6 +55,8 @@ pub struct MockCallStack {
     /// existing command-sequence assertions keep working while overflow tests
     /// can still assert on the recorded sequence.
     pub queue_meta_updates: std::sync::Mutex<Vec<(Option<String>, Option<String>, Option<String>)>>,
+    /// Recorded [`CallCommand::PinAgentMeta`] payloads (see [`Self::next_cmd`]).
+    pub pinned_agent_meta: std::sync::Mutex<Vec<(Option<String>, Option<String>)>>,
     /// Cancel token wired to the AppEventLoop's child token.
     cancel: CancellationToken,
     /// Background task running the AppEventLoop.
@@ -108,6 +110,7 @@ impl MockCallStack {
             event_tx,
             cmd_rx,
             queue_meta_updates: std::sync::Mutex::new(Vec::new()),
+            pinned_agent_meta: std::sync::Mutex::new(Vec::new()),
             cancel,
             join_handle,
         }
@@ -192,6 +195,18 @@ impl MockCallStack {
             match tokio::time::timeout_at(deadline, self.cmd_rx.recv()).await {
                 Ok(Some(CallCommand::Trace { .. }))
                 | Ok(Some(CallCommand::ReportCallError { .. })) => continue,
+                Ok(Some(cmd @ CallCommand::PinAgentMeta { .. })) => {
+                    // Fire-and-forget attribution metadata (like
+                    // UpdateQueueMeta): recorded, never part of command
+                    // sequence assertions.
+                    if let CallCommand::PinAgentMeta { agent_id, agent_name } = &cmd {
+                        self.pinned_agent_meta.lock().unwrap().push((
+                            agent_id.clone(),
+                            agent_name.clone(),
+                        ));
+                    }
+                    continue;
+                }
                 Ok(Some(cmd @ CallCommand::UpdateQueueMeta { .. })) => {
                     if let CallCommand::UpdateQueueMeta {
                         queue_name,
@@ -245,6 +260,13 @@ impl MockCallStack {
                         queue_label,
                         skill_group_id,
                     ));
+                }
+                // Attribution metadata; recorded, not part of the sequence.
+                CallCommand::PinAgentMeta { agent_id, agent_name } => {
+                    self.pinned_agent_meta
+                        .lock()
+                        .unwrap()
+                        .push((agent_id, agent_name));
                 }
                 // Diagnostic side-channel; not part of the app action sequence.
                 CallCommand::ReportCallError { .. } => {}

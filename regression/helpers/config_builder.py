@@ -87,6 +87,11 @@ class ConfigBuilder:
         self.max_ring_time: Optional[int] = None
         self.config_name = "rustpbx_regression.toml"
         self.log_level = os.environ.get("RUSTPBX_E2E_LOG_LEVEL", "info")
+        # Advertised IP for SIP Contact / RTP c= lines. Default loopback so
+        # e2e traffic stays on 127.0.0.1 even when the host has a LAN IP —
+        # without this the wildcard bind makes ICE pick the LAN interface and
+        # fork races can latch to the wrong remote (a_egress=0).
+        self.sip_external_ip: str | None = os.environ.get("RUSTPBX_E2E_SIP_IP")
         # Outbound dial SSE interface ([outbound] section).
         self.outbound_enabled: bool = False
         # [proxy.ivr_fallback] — Step IVR session recovery (rules + default).
@@ -900,9 +905,11 @@ class ConfigBuilder:
             f'http_addr = "0.0.0.0:{self.http_port}"',
             "",
             "[proxy]",
-            'addr = "0.0.0.0"',
+            'addr = "127.0.0.1"',
             f"udp_port = {self.sip_port}",
             f"tcp_port = {self.sip_port}",
+            f'sip_external_ip = "{self.sip_external_ip or "127.0.0.1"}"',
+            f'external_ip = "{self.sip_external_ip or "127.0.0.1"}"',
             'ws_handler = "/ws"',
             'addons = ["' + '", "'.join(self.addons) + '"]',
             "registrar_expires = 3600",

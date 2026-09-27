@@ -857,7 +857,20 @@ impl SipSession {
         let target_type = transfer_target_type_str(&parsed_target).map(String::from);
         let target_for_event = match &parsed_target {
             TransferTarget::RoutePoint { name, .. } => format!("toivr:{name}"),
-            _ => target.clone(),
+            _ => {
+                // Canonical event form: a bare extension target (`"1003"`) is
+                // reported as `sip:1003` — URI-shaped like the B2BUA dial path.
+                let t = target.trim();
+                if target_type.as_deref() == Some("sip")
+                    && !t.contains('@')
+                    && !t.starts_with("sip:")
+                    && !t.starts_with("sips:")
+                {
+                    format!("sip:{t}")
+                } else {
+                    target.clone()
+                }
+            }
         };
 
         let result = self
@@ -875,7 +888,9 @@ impl SipSession {
         } else if !emits_own_event {
             // Application-side targets swap the flow in-session and never hit
             // the SIP dial paths that emit their own events — emit here so
-            // consumers see the hand-off in the event stream.
+            // consumers see the hand-off in the event stream. A missing
+            // transfer_source is synthesized centrally by the RWI gateway
+            // enrichment (agent attribution from CallMeta).
             self.emit_typed_rwi_event(&crate::rwi::CallTransferred {
                 call_id: self.context.session_id.to_string(),
                 transfer_target: Some(target_for_event),
@@ -1637,9 +1652,25 @@ impl SipSession {
     fn stashed_transfer_source(&self) -> Option<crate::rwi::TransferSource> {
         let gw = self.server.rwi_gateway.as_ref()?;
         let g = gw.read();
-        g.meta_store
+        let stashed = g
+            .meta_store
             .get_sync(&self.context.session_id.to_string())
-            .and_then(|m| m.transfer_source)
+            .and_then(|m| m.transfer_source);
+        drop(g);
+        // Agent-initiated transfers (agent phone REFERs during a plain
+        // agent call) have no app context to snapshot. Fall back to the
+        // call's own agent attribution — the transferring agent — so the
+        // event still carries `source_type: "agent"` for consumers.
+        stashed.or_else(|| {
+            let agent_id = self.session_ext_get("agent_id")?;
+            Some(crate::rwi::TransferSource {
+                source_type: "agent".to_string(),
+                name: None,
+                ivr_node_id: None,
+                agent_id: Some(agent_id),
+                agent_name: self.session_ext_get("agent_name"),
+            })
+        })
     }
 
     /// Surface who handed the call to an IVR target so the successor's step

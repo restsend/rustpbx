@@ -319,11 +319,19 @@ entries = []
     # The queue-dialed agent's phone rings → call_ringing must be emitted with the
     # agent id. This was previously missing because the dynamic-leg 180 Ringing
     # never fired the on_call_ringing session hooks.
+    # NOTE: TWO call_ringing events fire per queue dial — the leg-level
+    # SIP 180 (fired by update_leg_state before PinAgentMeta lands) and
+    # the queue-level event (enriched by the CC hook). Only the queue-level
+    # one carries agent_id; the leg-level one may race PinAgentMeta's
+    # session-ext write. Assert on the ENRICHED event, not the first.
     ring_events = [e for e in event_checker.webhook.events_for_call(call_id)
                    if e.event_type == "call_ringing"]
     assert ring_events, (
         f"call_ringing missing for queue-dialed agent. wh={wh_types}")
-    ring = ring_events[0]
+    ring = next(
+        (e for e in ring_events if e.payload.get("agent_id")),
+        ring_events[0],
+    )
     assert ring.payload.get("agent_id") in ("1001",), (
         f"call_ringing must carry the agent_id, got {ring.payload!r:.150}")
     assert ring.call_id == call_id, f"call_ringing call_id mismatch: {ring!r:.120}"
@@ -451,7 +459,32 @@ entries = []
 
     # 5. Wait for the survey + DTMF + hangup to complete (hard requirement:
     #    the survey must run to call_hangup, no soft-skip).
-    await event_checker.expect_webhook_event("call_hangup", timeout=60)
+    #    NOTE: the FIRST call_hangup is the agent leg's BYE (queue agent
+    #    hangup_after=6s). The CSAT survey starts AFTER that, collects the
+    #    DTMF score (~t+22s), plays the thanks prompt, and only THEN hangs
+    #    up the caller — the CDR (with csat_score) is written on the CALLER's
+    #    call_hangup. Waiting for just any call_hangup returns immediately
+    #    on the agent's event, long before the score is collected.
+    deadline = asyncio.get_event_loop().time() + 60
+    while asyncio.get_event_loop().time() < deadline:
+        events = event_checker.webhook.events
+        caller_hangups = [
+            e for e in events
+            if e.event_type == "call_hangup"
+            and (e.payload.get("leg_id") == "caller" or e.payload.get("leg_id") is None)
+        ]
+        # The caller's hangup is the FINAL event — it arrives after the
+        # survey completes and the PBX sends BYE to the caller.
+        if caller_hangups and any(
+            e.payload.get("hangup_by") for e in caller_hangups
+        ):
+            break
+        # Also accept a hangup without leg_id (session-level final hangup).
+        if len([e for e in events if e.event_type == "call_hangup"]) >= 2:
+            break
+        await asyncio.sleep(1)
+    else:
+        pytest.fail("Caller call_hangup (post-survey) never arrived within 60s")
 
     # 6. Find the call_id from the webhook events (the final call_hangup).
     hangup_ev = event_checker.webhook.find("call_hangup")

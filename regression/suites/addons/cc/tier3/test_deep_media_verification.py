@@ -202,15 +202,35 @@ async def test_mute_unmute_real_media(pbx, sipbot_pool, api, event_checker):
     assert status2 == 200, f"unmute REST failed: {status2}"
     await asyncio.sleep(2)
 
-    # Verify via pbx log
-    import pathlib
-    log_dir = pathlib.Path(pbx.project_root) / "tests" / "logs"
-    latest_log = max(log_dir.glob("*.log"), key=lambda p: p.stat().st_mtime)
-    log_text = latest_log.read_text(errors="replace")
-    has_mute_log = "Track mute state set" in log_text or "mute" in log_text.lower()
+    # Verify via the PBX instance's OWN log file (deterministic — the shared
+    # tests/logs dir holds logs of every PBX instance, so "latest by mtime"
+    # can point at another instance's log). Poll briefly: the mute command is
+    # processed asynchronously by the session event loop and the log writer
+    # flushes shortly after. Current log phrase: "Setting track mute state"
+    # (the older "Track mute state set" wording was renamed).
+    log_file = getattr(pbx, "log_file_path", None)
+    assert log_file is not None, "PBX instance must expose its log file path"
+
+    def _mute_lines() -> int:
+        if log_file.exists():
+            return log_file.read_text(errors="replace").count(
+                "Setting track mute state"
+            )
+        return 0
+
+    deadline = asyncio.get_event_loop().time() + 5
+    while _mute_lines() < 2 and asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(0.3)
+    log_text = log_file.read_text(errors="replace") if log_file.exists() else ""
+
+    has_mute_log = (
+        "Track mute state set" in log_text
+        or "Setting track mute state" in log_text
+        or "mute" in log_text.lower()
+    )
 
     assert has_mute_log, (
-        f"mute/unmute had NO effect in pbx log. "
+        f"mute/unmute had NO effect in pbx log ({log_file}). "
         f"The mute command may not have been processed."
     )
 
