@@ -2193,8 +2193,7 @@ impl SipSession {
         info!(session_id = %self.id, %dialog_id, "Attaching callee dialog to UAC session");
 
         self.callee_dialogs.insert(dialog_id.clone(), ());
-        // In-dialog REFER and Replaces lookups use Call-ID plus the local tag;
-        // the bare Call-ID alias registered for CTI is not sufficient.
+        // REFER, Replaces, and CTI resolve the owning session by bare Call-ID.
         let registry = &self.server.active_call_registry;
         if let Some(handle) = registry.get_handle(&self.context.session_id) {
             registry.register_dialog_identity(&dialog_id, handle);
@@ -6544,8 +6543,7 @@ impl SipSession {
 
         self.meta.connected_callee_dialog_id = Some(dialog_id.clone());
         self.callee_dialogs.insert(dialog_id.clone(), ());
-        // In-dialog REFER and Replaces lookups use Call-ID plus the local tag;
-        // the bare Call-ID alias registered for CTI is not sufficient.
+        // REFER, Replaces, and CTI resolve the owning session by bare Call-ID.
         let registry = &self.server.active_call_registry;
         if let Some(handle) = registry.get_handle(&self.context.session_id) {
             registry.register_dialog_identity(&dialog_id, handle);

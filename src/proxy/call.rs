@@ -1873,15 +1873,8 @@ impl CallModule {
             let registry = self.inner.server.active_call_registry.clone();
             let conference_manager = self.inner.server.conference_manager.clone();
 
-            // Find the old session by searching dialogs with matching call-id and tags
-            let old_handle = {
-                let dialog_id = rsipstack::dialog::DialogId {
-                    call_id: replaces_call_id.clone(),
-                    local_tag: replaces_to_tag.clone(),
-                    remote_tag: replaces_from_tag.clone(),
-                };
-                registry.get_handle_by_dialog(&format!("{}-{}", dialog_id.call_id, dialog_id.local_tag))
-            };
+            // The ownership registry uses the replaced dialog's bare Call-ID.
+            let old_handle = registry.get_handle_by_dialog(&replaces_call_id);
 
             if let Some(ref old_handle) = old_handle {
                 let old_session_id = old_handle.session_id().to_string();
@@ -2257,7 +2250,7 @@ impl CallModule {
             .inner
             .server
             .active_call_registry
-            .get_handle_by_dialog(&format!("{}-{}", dialog_id.call_id, dialog_id.local_tag));
+            .get_handle_by_dialog(&dialog_id.call_id);
 
         if original_handle.is_none() {
             warn!(dialog_id = %dialog_id, "No active session found for REFER dialog");

@@ -6823,7 +6823,7 @@ async fn cancel_before_queued_answer_sends_bye_to_late_dialog() {
         assert_eq!(
             server
                 .active_call_registry
-                .get_handle_by_dialog(&format!("{}-{}", confirmed_id.call_id, confirmed_id.local_tag))
+                .get_handle_by_dialog(&confirmed_id.call_id)
                 .map(|registered| registered.session_id().to_string()),
             Some(handle.session_id().to_string()),
             "the dialog key must resolve before LegConnected is consumed"

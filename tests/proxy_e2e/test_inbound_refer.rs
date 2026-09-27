@@ -168,31 +168,15 @@ async fn test_inbound_refer_success() {
 
     sleep(Duration::from_millis(300)).await;
 
-    // Dialog tags are local/remote from each endpoint's perspective.
     let bob_dialog = bob_dialog_id.as_ref().unwrap();
-    let mut pbx_dialog = rsipstack::dialog::DialogId {
-        call_id: bob_dialog.call_id.clone(),
-        local_tag: bob_dialog.remote_tag.clone(),
-        remote_tag: bob_dialog.local_tag.clone(),
-    };
     let registry = &server.server_ref.active_call_registry;
-    let owner = registry.get_handle_by_dialog(&format!("{}-{}", pbx_dialog.call_id, pbx_dialog.local_tag))
-        .expect("confirmed B-leg Call-ID and local tag must resolve for REFER");
-    assert_ne!(owner.session_id(), pbx_dialog.call_id);
-    assert_eq!(
-        registry.get_handle_by_dialog(&pbx_dialog.call_id).unwrap().session_id(),
-        owner.session_id(),
-        "CTI Call-ID alias must still resolve to the same session",
-    );
-    pbx_dialog.remote_tag.clear();
-    assert_eq!(registry.get_handle_by_dialog(&format!("{}-{}", pbx_dialog.call_id, pbx_dialog.local_tag)).unwrap().session_id(), owner.session_id(),
-        "remote tag is not part of the registry key");
-    pbx_dialog.local_tag.push_str("-wrong");
-    assert!(registry.get_handle_by_dialog(&format!("{}-{}", pbx_dialog.call_id, pbx_dialog.local_tag)).is_none(),
-        "wrong local tag must not resolve through the Call-ID alias");
+    let owner = registry.get_handle_by_dialog(&bob_dialog.call_id)
+        .expect("B-leg bare Call-ID must resolve for REFER");
+    assert_ne!(owner.session_id(), bob_dialog.call_id);
+    assert_eq!(registry.get_handle_by_call_id(&bob_dialog.call_id).unwrap().session_id(), owner.session_id(),
+        "CTI and REFER must use the same registry key");
 
-    // Bob sends REFER on the B-leg dialog, whose Call-ID differs from the
-    // session ID. Registering only its bare Call-ID previously returned 481.
+    // REFER arrives on B's dialog, whose Call-ID differs from the session ID.
     let refer_status = bob
         .send_refer(bob_dialog_id.as_ref().unwrap(), &charlie_uri)
         .await
