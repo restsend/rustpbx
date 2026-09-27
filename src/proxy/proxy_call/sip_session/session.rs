@@ -1755,7 +1755,10 @@ impl SipSession {
             self.legs.get(id).is_some_and(|leg| leg.source_leg.is_some()
                 && matches!(leg.state, LegState::Initializing | LegState::Ringing)));
         for id in self.legs.keys() {
-            if let Some(peer) = self.media_leg(id) { peer.set_app_paused(self.meta.transfer_in_progress || waiting_for_peer); }
+            if let Some(peer) = self.media_leg(id) {
+                let detached = self.conference.as_ref().is_some_and(|member| &member.leg_id != id);
+                peer.set_app_paused(self.meta.transfer_in_progress || waiting_for_peer || detached);
+            }
         }
     }
 
@@ -4456,11 +4459,27 @@ impl SipSession {
             return Err(anyhow!("Peer already belongs to another conference"));
         }
         self.prepare_conference_leg(&peer).await?;
-        if let Err(error) = self.handle_join_mixer_leg(conference_id, peer.clone()).await {
+        let result = async {
+            self.handle_join_mixer_leg(conference_id.clone(), peer.clone()).await?;
+            if self.conference.is_none() {
+                let room = crate::call::runtime::ConferenceId::from(conference_id.as_str());
+                let commands = self.cmd_tx.clone().ok_or_else(|| anyhow!("Session command queue is closed"))?;
+                self.server.conference_server.manager_raw().bind_participant_session(
+                    &room, &self.participant_leg(&peer), commands,
+                )?;
+                self.conference = Some(ConferenceAttachment {
+                    leg_id: peer.clone(), conference_id: room,
+                });
+            }
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        if let Err(error) = result {
             self.leave_conference_leg(&peer).await.ok();
             self.update_media_path().await;
+            self.sync_rtp_timeout_pause();
             return Err(error);
         }
+        self.sync_rtp_timeout_pause();
         Ok(peer)
     }
 
@@ -10454,6 +10473,14 @@ impl SipSession {
                 Self::ok_or_failure(self.handle_join_mixer_leg(mixer_id, leg_id).await)
             }
 
+            CallCommand::JoinConferencePeer { conference_id, dialog_id, reply } => {
+                if reply.is_closed() { return CommandResult::success(); }
+                let result = self.handle_join_conference_peer(conference_id, dialog_id).await
+                    .map_err(|error| error.to_string());
+                let _ = reply.send(result);
+                CommandResult::success()
+            }
+
             CallCommand::ConferenceEnded { conference_id } => {
                 if self.conference.as_ref().is_none_or(|attachment| attachment.conference_id.0 != conference_id) {
                     return CommandResult::success();
@@ -10461,6 +10488,11 @@ impl SipSession {
                 let attachment = self.conference.take().unwrap();
                 drop(self.legs.remove_conference_bridge_handle(&attachment.leg_id));
                 self.conference_bridge.conf_id = None;
+                // A transfer peer's departure asks the owner to end the call.
+                // If the room was already destroyed this is an idempotent no-op.
+                self.server.conference_server.manager_raw().destroy_conference(
+                    &crate::call::runtime::ConferenceId::from(conference_id.as_str()),
+                ).await.ok();
                 info!(session_id = %self.id, %conference_id, leg = %attachment.leg_id,
                     "Conference ended; hanging up participant");
                 self.handle_hangup(&HangupCommand::local("conference ended", None, None)).await
@@ -11515,6 +11547,13 @@ impl SipSession {
                     _ => {}
                 }
             }
+            if let Some(peer) = self.media_leg(leg_id) {
+                match new_state {
+                    LegState::Hold => peer.pause_rtp_timeout(),
+                    LegState::Connected => peer.resume_rtp_timeout(),
+                    _ => {}
+                }
+            }
             self.sync_state();
             true
         } else {
@@ -12265,7 +12304,8 @@ impl SipSession {
                                         break;
                                     }
                                     Some(state @ (DialogState::Updated(..) | DialogState::Info(..)
-                                        | DialogState::Options(..) | DialogState::Confirmed(..))) => {
+                                        | DialogState::Options(..) | DialogState::Confirmed(..)
+                                        | DialogState::Refer(..) | DialogState::Notify(..))) => {
                                         if let Some(tx) = session_state_tx.as_ref() { let _ = tx.send(state); }
                                     }
                                     Some(_) => {}

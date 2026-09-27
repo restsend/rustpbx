@@ -41,6 +41,10 @@ impl SipSession {
             dialog.notify_refer(StatusCode::NotImplemented, "terminated;reason=noresource").await?;
             return Ok(());
         }
+        if let Some(replaces) = replaces_header.as_deref() {
+            dialog.notify_refer(StatusCode::Trying, "active").await.ok();
+            return self.handle_refer_replaces(&dialog_id, replaces, &target_uri).await;
+        }
         let app_target = if replaces_header.is_none() && !conference_target {
             match Self::resolve_refer_app_target(
                 &self.server, &self.context.session_id, &target_uri, &TransactionCookie::default(),
@@ -63,8 +67,8 @@ impl SipSession {
         }
         let original_handle = self.server.active_call_registry.get_handle(&self.context.session_id)
             .ok_or_else(|| anyhow!("REFER session is no longer registered"))?;
-        // Attended REFER and the explicitly configured legacy path retain
-        // their existing external execution. Blind in-session REFER is owned
+        // The explicitly configured legacy blind-transfer path retains
+        // its existing external execution. Blind in-session REFER is owned
         // entirely by SipSession after the event above.
         // Spawn async task to handle the transfer and send NOTIFYs
         let dialog_layer = self.server.dialog_layer.clone();
@@ -89,12 +93,11 @@ impl SipSession {
                 }
             }
 
-            // Determine if this REFER includes a Replaces parameter
-            let (target_uri, replaces_header) = Self::parse_refer_to(&refer_to_clone);
+            let (target_uri, _) = Self::parse_refer_to(&refer_to_clone);
 
             let result = Self::execute_inbound_refer_transfer(
                 &server, &original_handle, &original_session_id,
-                &target_uri, replaces_header.as_deref(),
+                &target_uri,
             ).await;
 
             // Send final NOTIFY based on result
@@ -120,7 +123,7 @@ impl SipSession {
                 info!(status = notify_status, "Sent final NOTIFY for REFER");
             }
 
-            // Only this legacy/attended path needs an external transfer event.
+            // Only this legacy blind-transfer path needs an external transfer event.
             // In-session REFER emits its event from the session.
             if notify_status == 200
                 && let Some(ref gw) = server.rwi_gateway
@@ -138,6 +141,134 @@ impl SipSession {
             }
         });
 
+        Ok(())
+    }
+
+    /// Resolve session ownership by bare Call-ID, then validate the SIP dialog
+    /// with Replaces tags. The registry key convention is unchanged.
+    async fn handle_refer_replaces(
+        &mut self,
+        source_dialog: &DialogId,
+        replaces: &str,
+        target_uri: &str,
+    ) -> Result<()> {
+        let mut failed_setup = None;
+        let result: Result<(), (u16, String)> = async {
+            let mut fields = replaces.split(';');
+            let call_id = fields.next().unwrap_or_default().trim();
+            let mut to_tag = None;
+            let mut from_tag = None;
+            let mut early_only = false;
+            for field in fields {
+                let field = field.trim();
+                if field.eq_ignore_ascii_case("early-only") { early_only = true; }
+                if let Some((name, value)) = field.split_once('=') {
+                    if name.eq_ignore_ascii_case("to-tag") { to_tag = Some(value.to_string()); }
+                    if name.eq_ignore_ascii_case("from-tag") { from_tag = Some(value.to_string()); }
+                }
+            }
+            let (Some(local_tag), Some(remote_tag)) = (to_tag, from_tag) else {
+                return Err((400, "Replaces requires both dialog tags".into()));
+            };
+            let owner = self.server.active_call_registry.get_handle_by_dialog(call_id)
+                .ok_or_else(|| (481, "Replaces Call-ID is not owned by a local session".into()))?;
+            let target_dialog = DialogId { call_id: call_id.into(), local_tag, remote_tag };
+            let dialog = self.server.dialog_layer.get_dialog(&target_dialog)
+                .ok_or_else(|| (481, "Replaces tags do not match a local dialog".into()))?;
+            if !dialog.state().is_confirmed() || early_only {
+                return Err((486, "Replaces requires an established consultation".into()));
+            }
+            if owner.session_id() == self.context.session_id {
+                return Err((501, "Same-session Replaces is not supported by this cross-session path".into()));
+            }
+            if self.meta.connected_callee_dialog_id.as_ref() != Some(source_dialog) {
+                return Err((481, "REFER must originate from the current callee".into()));
+            }
+            if self.meta.transfer_in_progress || self.conference.is_some() {
+                return Err((491, "Call is already transferring or in a conference".into()));
+            }
+            let room = crate::call::runtime::ConferenceId::from(format!("transfer-{}", uuid::Uuid::new_v4()));
+            let manager = self.server.conference_server.manager_raw().clone();
+            manager.create_conference(room.clone(), Some(2)).await.map_err(|e| (500, e.to_string()))?;
+            failed_setup = Some((room.clone(), owner.clone()));
+            self.meta.transfer_in_progress = true;
+            self.sync_rtp_timeout_pause();
+            let result: Result<()> = async {
+                let local_leg = self.handle_join_conference_peer(room.0.clone(), source_dialog.clone()).await?;
+                let (reply, completed) = tokio::sync::oneshot::channel();
+                owner.send_command(crate::call::domain::CallCommand::JoinConferencePeer {
+                    conference_id: room.0.clone(), dialog_id: target_dialog, reply,
+                })?;
+                let remote_leg = tokio::time::timeout(std::time::Duration::from_secs(10), completed)
+                    .await.map_err(|_| anyhow!("Consultation session did not complete the attachment"))??
+                    .map_err(|error| anyhow!(error))?;
+                if self.caller_dialog.as_ref().is_none_or(|dialog| dialog.state().is_terminated()) {
+                    return Err(anyhow!("Caller left before transfer completed"));
+                }
+                let remote_participant = LegId::from(format!("{}-{}", owner.session_id(), remote_leg));
+                manager.bind_transfer_owner(&room, &self.participant_leg(&local_leg), &remote_participant)?;
+                info!(session_id = %self.id, peer_session = %owner.session_id(), %local_leg, %remote_leg,
+                    room = %room.0, "Attended REFER connected existing participants across sessions");
+                Ok(())
+            }.await;
+            self.meta.transfer_in_progress = false;
+            self.sync_rtp_timeout_pause();
+            result.map_err(|error| (500, error.to_string()))
+        }.await;
+        let status = match &result {
+            Ok(()) => 200,
+            Err((status, reason)) => {
+                warn!(session_id = %self.id, %reason, status, "Local attended REFER failed");
+                *status
+            }
+        };
+        if status == 200 {
+            let source = if let Some(leg) = self.leg_id_for_dialog(&source_dialog.to_string()) {
+                self.transfer_source_snapshot(&leg).await
+            } else { None };
+            self.stash_transfer_source(source.clone());
+            self.mark_transferred_with(Some(serde_json::json!({"target": target_uri, "kind": "sip"})));
+            self.emit_typed_rwi_event(&crate::rwi::CallTransferred {
+                call_id: self.context.session_id.clone(), transfer_target: Some(target_uri.to_string()),
+                transfer_target_type: Some("sip".into()), transfer_source: source,
+            });
+        }
+        // Finish the REFER subscription before any cleanup can remove B's dialog.
+        // Failure to deliver NOTIFY must not prevent teardown of a failed setup.
+        if let Some(Dialog::Invite(dialog)) = self.server.dialog_layer.get_dialog(source_dialog) {
+            if let Err(error) = dialog.notify_refer(StatusCode::from(status), "terminated;reason=noresource").await {
+                warn!(session_id = %self.id, %error, "Failed to send final attended REFER NOTIFY");
+            } else {
+                info!(session_id = %self.id, status, "Sent final attended REFER NOTIFY");
+            }
+        }
+        if result.is_err() && let Some((room, owner)) = failed_setup {
+            let manager = self.server.conference_server.manager_raw().clone();
+            let caller = self.participant_leg(&LegId::from("caller"));
+            let remote_attached = manager.get_conference(&room).await
+                .is_some_and(|room| room.participants.keys().any(|leg| leg != &caller));
+            // Handle the local hangup directly. Ignore its queued room-ended
+            // notification so we do not initiate the same hangup twice.
+            if self.conference.as_ref().is_some_and(|attachment| attachment.conference_id == room) {
+                let attachment = self.conference.take().unwrap();
+                drop(self.legs.remove_conference_bridge_handle(&attachment.leg_id));
+                self.conference_bridge.conf_id = None;
+            }
+            if let Err(error) = manager.destroy_conference(&room).await {
+                warn!(%error, "Failed to destroy incomplete transfer room");
+            }
+            if !remote_attached {
+                // The room cannot notify a session which never attached C.
+                crate::utils::spawn(async move {
+                    if let Err(error) = owner.send_command_async(CallCommand::Hangup(
+                        HangupCommand::local("attended transfer setup failed", None, None),
+                    )).await {
+                        warn!(%error, "Failed to deliver consultation cleanup");
+                    }
+                });
+            }
+            self.handle_hangup(&HangupCommand::local("attended transfer setup failed", None, None)).await;
+        }
         Ok(())
     }
 
@@ -271,7 +402,6 @@ impl SipSession {
         original_handle: &crate::proxy::proxy_call::sip_session::SipSessionHandle,
         original_session_id: &str,
         target_uri: &str,
-        replaces_header: Option<&str>,
     ) -> Result<(), (u16, String)> {
         info!(target_uri, "Starting inbound REFER transfer execution");
 
@@ -319,13 +449,6 @@ impl SipSession {
             None,
             None,
         ));
-        if let Some(replaces) = replaces_header {
-            headers.push(rsipstack::sip::Header::Other(
-                "Replaces".into(),
-                replaces.into(),
-            ));
-        }
-
         // Get media config for SDP
         let media = server.default_media_config();
         let external_ip = media

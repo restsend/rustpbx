@@ -47,3 +47,17 @@ phone; the integration test reproduces its captured signaling.
 
 The attended-transfer room implementation is saved separately. This version
 has no transfer-specific room policy or cross-session transfer peer state.
+
+Attended REFER with Replaces resolves the consultation owner through the same
+bare Call-ID registry used by the CC addon. The Replaces tags are checked
+against the SIP dialog separately. For two different local sessions, each
+session attaches the peer of B's dialog to an internal two-participant room;
+no replacement INVITE is sent. Both attachments must finish before success is
+reported. If attachment fails, the session attempts the final failure NOTIFY
+before destroying the room and hanging up both involved sessions, including a
+consultation session that never joined the room. After both attachments
+succeed, the surviving caller A becomes the room owner. A leaving destroys the
+room; C leaving asks A's session to end the call and destroy its room. There is
+no minimum-participant lifetime rule, so attaching A first does not end the room.
+B's original dialogs remain until B sends BYE. Unknown Replaces dialogs fail
+locally; they are not forwarded in a new INVITE.
