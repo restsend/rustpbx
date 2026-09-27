@@ -1930,6 +1930,7 @@ async fn test_blind_transfer_reports_queue_flow_source() {
     // of queue sales when the agent blind-transferred them onward. The CC
     // hook publishes the paired display name next to the resolved id.
     session.meta.queue_name = Some("sales".to_string());
+    session.legs.get_mut(&LegId::from("caller")).unwrap().agent_id = Some("2002".into());
     session.session_ext_set("resolved_agent_id", "2002");
     session.session_ext_set("agent_name", "Alice");
 
@@ -2044,6 +2045,7 @@ async fn test_blind_transfer_reports_agent_flow_source_with_name() {
     session.callee_event_tx = Some(callee_tx);
 
     // No IVR and no queue context: the transferring agent is the flow origin.
+    session.legs.get_mut(&LegId::from("caller")).unwrap().agent_id = Some("2002".into());
     session.session_ext_set("resolved_agent_id", "2002");
     session.session_ext_set("agent_name", "Alice");
 
@@ -2160,8 +2162,9 @@ async fn test_blind_transfer_agent_name_requires_resolved_id() {
     let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
     session.callee_event_tx = Some(callee_tx);
 
-    // agent_id falls back to the connected callee user-part; a stale
+    // The transferring leg owns agent attribution; a stale session-level
     // `agent_name` extension must not be attached to it.
+    session.legs.get_mut(&LegId::from("caller")).unwrap().agent_id = Some("2002".into());
     session.meta.connected_callee = Some("sip:2002@rustpbx.com".to_string());
     session.session_ext_set("agent_name", "Alice");
 
@@ -5424,6 +5427,13 @@ async fn conference_merge_resolves_queue_agent_alias_and_delivers_audio() {
         phones.push(phone);
     }
     assert!(session.media_leg(&LegId::from("callee")).is_none());
+    assert!(session.setup_bridge(LegId::from("caller"), agent.clone()).await);
+    assert_eq!(session.resolve_transfer_leg(), agent);
+    session.handle_hold(LegId::from("caller"), None).await.unwrap();
+    assert_eq!(session.resolve_transfer_leg(), agent, "hold must retain the queue agent as the selected callee");
+    session.handle_unhold(LegId::from("caller")).await.unwrap();
+    assert!(session.setup_bridge(LegId::from("caller"), consult.clone()).await);
+    assert_eq!(session.resolve_transfer_leg(), consult, "a completed transfer selects its new peer even with source_leg set");
     assert!(session.setup_bridge(agent.clone(), consult.clone()).await);
     let room = crate::call::runtime::ConferenceId::from("queue-merge-room");
     server.conference_server.create_conference(room.clone(), None).await.unwrap();
@@ -7360,4 +7370,143 @@ async fn removing_terminated_leg_does_not_schedule_bye() {
 
     assert!(!session.legs.contains_key(&leg_id));
     assert!(!session.pending_hangup.contains(&dialog.id()));
+}
+
+#[tokio::test]
+async fn agent_consultation_uses_active_call_without_headers() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::call::app::agent_registry::{AgentRegistry, MemoryRegistry, PresenceState};
+    use crate::proxy::tests::common::{create_test_request, create_test_server};
+    let (mut server, _) = create_test_server().await;
+    let agents = Arc::new(MemoryRegistry::new());
+    for (id, extension) in [("bob", "1001"), ("charlie", "1003")] {
+        agents.register(id.into(), id.into(), format!("sip:{extension}@rustpbx.com"), vec![], 2).await.unwrap();
+    }
+    Arc::get_mut(&mut server).unwrap().agent_registry = Some(agents.clone());
+    let mut sessions = Vec::new();
+    for (id, target, busy, authenticated, expected) in [
+        ("parent", "1003", false, true, false),
+        ("consult", "1003", true, true, true),
+        ("agent-login", "charlie", true, true, true),
+        ("external", "customer", true, true, false),
+        ("conference", "conference", true, true, false),
+        ("untrusted", "1003", true, false, false),
+        ("idle", "1003", false, true, false),
+        ("stale", "1003", true, true, false),
+    ] {
+        agents.update_presence("bob", if busy {
+            PresenceState::Busy { call_id: Some(if id == "stale" { "missing" } else { "parent" }.into()) }
+        } else { PresenceState::Idle }).await.unwrap();
+        let request = create_test_request(rsipstack::sip::Method::Invite, "bob", None, "rustpbx.com", None);
+        let cookie = TransactionCookie::default();
+        if authenticated { cookie.set_user(crate::call::SipUser { username: "1001".into(), ..Default::default() }); }
+        let context = CallContext {
+            session_id: id.into(),
+            dialplan: Arc::new(Dialplan::new(id.into(), request, DialDirection::Outbound)),
+            cookie, start_time: Instant::now(), original_caller: "sip:1001@rustpbx.com".into(),
+            original_callee: format!("sip:{target}@rustpbx.com"), max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(), metadata: None,
+        };
+        let (mut session, handle, rx) = SipSession::new_uac(server.clone(), CancellationToken::new(), None, context, false);
+        server.active_call_registry.register_handle(id.into(), handle);
+        session.initialize_agent_consultation().await;
+        assert_eq!(session.meta.root_session_id.is_some(), expected, "{id}");
+        assert_eq!(session.legs.get(&LegId::from("caller")).unwrap().agent_id.as_deref(), expected.then_some("bob"));
+        if expected {
+            assert_eq!(session.session_ext_get("resolved_agent_id").as_deref(), Some("charlie"));
+
+            assert_eq!(session.meta.root_session_id.as_deref(), Some("parent"));
+            let mut old = Leg::new(LegId::from("old-b")); old.agent_id = Some("bob".into());
+            let mut current = Leg::new(LegId::from("callee")); current.agent_id = Some("charlie".into());
+            session.legs.insert(old.id.clone(), old);
+            session.legs.insert(current.id.clone(), current);
+            session.meta.transferred = true;
+            let departure = session.transferred_agent_context(&LegId::from("old-b")).unwrap();
+            assert_eq!(departure.extensions.read().get::<HashMap<String, String>>().unwrap().get("resolved_agent_id").map(String::as_str), Some("bob"));
+            assert_eq!(session.session_ext_get("resolved_agent_id").as_deref(), Some("charlie"));
+            assert_eq!(session.legs.get(&LegId::from("callee")).unwrap().agent_id.as_deref(), Some("charlie"));
+            session.legs.remove(&LegId::from("old-b"));
+            assert!(session.transferred_agent_context(&LegId::from("old-b")).is_none());
+        }
+        sessions.push((session, rx));
+    }
+}
+
+#[tokio::test]
+async fn sip_consult_switch_events_follow_only_b_reinvite_transitions() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
+    let gateway = crate::rwi::gateway::RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let (server, _) = create_test_server_with_rwi_gateway(Default::default(), Arc::new(parking_lot::RwLock::new(gateway))).await;
+    let request = create_test_request(rsipstack::sip::Method::Invite, "bob", None, "rustpbx.com", None);
+    let context = CallContext {
+        session_id: "consult".into(),
+        dialplan: Arc::new(Dialplan::new("consult".into(), request, DialDirection::Outbound)),
+        cookie: TransactionCookie::default(), start_time: Instant::now(),
+        original_caller: "sip:bob@rustpbx.com".into(), original_callee: "sip:charlie@rustpbx.com".into(),
+        max_forwards: 70, created_at: chrono::Utc::now().to_rfc3339(), metadata: None,
+    };
+    let (mut session, _handle, _commands) = SipSession::new_uac(server, CancellationToken::new(), None, context, false);
+    session.media_profile.path = MediaPathMode::Bypass;
+    session.legs.insert(LegId::from("callee"), Leg::new(LegId::from("callee")));
+    session.meta.root_session_id = Some("original".into());
+    session.legs.get_mut(&LegId::from("caller")).unwrap().agent_id = Some("bob".into());
+    session.extensions.write().insert(HashMap::from([("resolved_agent_id".to_string(), "charlie".to_string())]));
+    for (scenario, side, prev, direction, expected) in [
+        ("unanswered", DialogSide::Caller, LegState::Connected, "sendonly", None),
+        ("early_media", DialogSide::Caller, LegState::Connected, "sendonly", None),
+        ("initial", DialogSide::Caller, LegState::Initializing, "sendrecv", None),
+        ("initial_hold", DialogSide::Caller, LegState::Initializing, "sendonly", None),
+        ("hold", DialogSide::Caller, LegState::Connected, "sendonly", Some("customer")),
+        ("repeat_hold", DialogSide::Caller, LegState::Hold, "sendonly", None),
+        ("resume", DialogSide::Caller, LegState::Hold, "sendrecv", Some("consult")),
+        ("repeat_resume", DialogSide::Caller, LegState::Connected, "sendrecv", None),
+        ("c_hold", DialogSide::Callee, LegState::Connected, "sendonly", None),
+        ("c_resume", DialogSide::Callee, LegState::Hold, "sendrecv", None),
+        ("api", DialogSide::Caller, LegState::Connected, "sendonly", None),
+        ("handoff", DialogSide::Caller, LegState::Connected, "sendonly", None),
+        ("transferred", DialogSide::Caller, LegState::Hold, "sendrecv", None),
+        ("conference", DialogSide::Caller, LegState::Hold, "sendrecv", None),
+        ("conference_hold", DialogSide::Caller, LegState::Connected, "sendonly", None),
+        ("ordinary", DialogSide::Caller, LegState::Connected, "sendonly", None),
+    ] {
+        session.meta.answer_time = (scenario != "unanswered").then(Instant::now);
+        session.legs.get_mut(&LegId::from("callee")).unwrap().state =
+            if scenario == "early_media" { LegState::EarlyMedia } else { LegState::Connected };
+        session.meta.transfer_in_progress = scenario == "handoff";
+        session.meta.transferred = scenario == "transferred";
+        session.conference = scenario.starts_with("conference").then(|| ConferenceAttachment {
+            leg_id: LegId::from("callee"), conference_id: "room".into(),
+        });
+        if scenario == "ordinary" { session.meta.root_session_id = None; }
+        let leg = LegId::from(if side == DialogSide::Caller { "caller" } else { "callee" });
+        session.legs.get_mut(&leg).unwrap().state = prev;
+        while events.try_recv().is_ok() {}
+        let next = if direction == "sendonly" { LegState::Hold } else { LegState::Connected };
+        if scenario == "api" {
+            session.fire_hold_transition_hooks(&leg, Some(prev), next).await;
+        } else {
+            let sdp = format!("v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 23456 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na={direction}\r\n");
+            let offer = rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, &sdp).unwrap();
+            session.apply_reinvite_hold_transition(side, &leg, &offer, &[]).await;
+        }
+        let mut switched = Vec::new();
+        let mut holds = 0;
+        while let Ok(entry) = events.try_recv() {
+            match entry.event.event_type {
+                "consult_switched" => switched.push(entry.event.payload),
+                "call_held" | "call_unheld" => holds += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(switched.len(), usize::from(expected.is_some()), "{scenario}");
+        if let Some(talking_to) = expected {
+            assert_eq!(switched[0]["call_id"], "original");
+            assert_eq!(switched[0]["transfer_id"], "consult");
+            assert_eq!(switched[0]["talking_to"], talking_to);
+        }
+        let changed_hold = (prev == LegState::Hold) != (next == LegState::Hold);
+        assert_eq!(holds, usize::from(changed_hold), "generic hold event: {scenario}");
+    }
 }

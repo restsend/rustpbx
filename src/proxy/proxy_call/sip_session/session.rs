@@ -1361,6 +1361,8 @@ impl SipSession {
             .active_call_registry
             .register_dialog_identity(&server_dialog.id(), handle.clone());
 
+        session.initialize_agent_consultation().await;
+
         // Publish this session's owning node in the cluster session registry
         // (no-op backend in single-node mode).
         session.register_in_session_registry().await;
@@ -2656,7 +2658,7 @@ impl SipSession {
         gw.meta_store.insert(session_id, meta);
     }
 
-    fn session_hook_ctx(&self) -> crate::proxy::proxy_call::session_hooks::CallSessionContext {
+    pub(super) fn session_hook_ctx(&self) -> crate::proxy::proxy_call::session_hooks::CallSessionContext {
         // Merge routing metadata (X-CRM-* / X-CC-*) into extensions.
         // Use entry() to avoid overwriting keys already set by addons (e.g.
         // CcCallSessionHook writes agent_id/agent_name here).
@@ -2708,6 +2710,24 @@ impl SipSession {
         // Hooks may have resolved + published the agent attribution — make it
         // visible to event enrichment before the caller emits `call_ringing`.
         self.sync_agent_context_to_rwi_meta();
+    }
+
+    fn transferred_agent_context(&self, leg_id: &LegId) -> Option<crate::proxy::proxy_call::session_hooks::CallSessionContext> {
+        if !self.meta.transferred || self.is_caller_peer(leg_id) { return None; }
+        let agent_id = self.legs.get(leg_id)?.agent_id.clone()?;
+        let mut ctx = self.session_hook_ctx();
+        // Attribute this callback to the departing leg, without overwriting the
+        // live session's current agent or retaining old contexts per dialog.
+        let extensions = crate::proxy::proxy_call::session_hooks::SessionExtensions::new();
+        *extensions.write() = ctx.extensions.read().clone();
+        {
+            let mut ext = extensions.write();
+            if ext.get::<HashMap<String, String>>().is_none() { ext.insert(HashMap::<String, String>::new()); }
+            let metadata = ext.get_mut::<HashMap<String, String>>().unwrap();
+            metadata.insert("resolved_agent_id".into(), agent_id);
+        }
+        ctx.extensions = extensions;
+        Some(ctx)
     }
 
     /// Fire the `on_call_connected` session hooks for this session.
@@ -2773,6 +2793,65 @@ impl SipSession {
             .as_deref()
             .is_some_and(|app| app == "queue")
             || crate::proxy::proxy_call::call_meta::has_queue_name(&self.meta)
+    }
+
+    /// A busy agent calling another agent starts a separate consultation.
+    /// Capture the parent before lifecycle hooks update the target's presence.
+    async fn initialize_agent_consultation(&mut self) {
+        use crate::call::app::agent_registry::PresenceState;
+        let Some(user) = self.context.cookie.get_user() else { return; };
+        let Some(registry) = self.server.agent_registry.as_ref() else { return; };
+        let caller_uri = self.context.original_caller.parse::<rsipstack::sip::Uri>().ok()
+            .map(|uri| format!("sip:{}@{}", user.username, uri.host()));
+        let caller = match caller_uri {
+            Some(uri) => registry.find_agent_by_uri(&uri).await,
+            None => None,
+        };
+        let caller = match caller {
+            Some(agent) => Some(agent),
+            None => registry.get_agent(&user.username).await,
+        };
+        let Some(caller) = caller else { return; };
+        let PresenceState::Busy { call_id: Some(parent) } = caller.presence else { return; };
+        if parent == self.context.session_id { return; }
+        let Some(owner) = self.server.active_call_registry.get_handle(&parent) else { return; };
+        let callee_id = match self.context.original_callee.parse::<rsipstack::sip::Uri>() {
+            Ok(uri) if self.server.is_same_realm(&uri.host().to_string()).await => {
+                match registry.find_agent_by_uri(&self.context.original_callee).await {
+                    Some(agent) => Some(agent.agent_id),
+                    None => match uri.user() {
+                        Some(id) => registry.get_agent(id).await.map(|agent| agent.agent_id),
+                        None => None,
+                    },
+                }
+            }
+            _ => None,
+        };
+        let Some(callee_id) = callee_id else { return; };
+        if callee_id == caller.agent_id { return; }
+        if let Some(leg) = self.legs.get_mut(&LegId::from("caller")) {
+            leg.agent_id = Some(caller.agent_id);
+        }
+        {
+            let mut extensions = self.extensions.write();
+            if extensions.get::<HashMap<String, String>>().is_none() {
+                extensions.insert(HashMap::<String, String>::new());
+            }
+            extensions.get_mut::<HashMap<String, String>>().unwrap()
+                .insert("resolved_agent_id".into(), callee_id);
+        }
+        let root = self.server.rwi_gateway.as_ref()
+            .and_then(|gw| gw.read().meta_store.get_sync(owner.session_id()))
+            .and_then(|meta| meta.session_id)
+            .unwrap_or_else(|| parent.clone());
+        self.meta.root_session_id = Some(root.clone());
+        if let Some(gw) = &self.server.rwi_gateway {
+            let gw = gw.read();
+            let mut meta = gw.meta_store.get_sync(&self.context.session_id).unwrap_or_default();
+            meta.session_id = Some(root);
+            gw.meta_store.insert(self.context.session_id.clone(), meta);
+        }
+
     }
 
     /// Resolve the agent id for a queue agent-leg event.
@@ -4360,6 +4439,10 @@ impl SipSession {
             let status = match &result {
                 Ok(leg) => {
                     info!(session_id = %self.id, room = %room.id.0, %leg, "Existing call joined SIP conference");
+                    self.emit_typed_rwi_event(&crate::rwi::ConferenceJoined {
+                        conf_id: room.id.0.clone(), call_id: self.context.session_id.clone(),
+                        leg_id: self.participant_leg(leg).to_string(),
+                    });
                     StatusCode::OK
                 }
                 Err(error) => {
@@ -4439,11 +4522,11 @@ impl SipSession {
     ) -> Result<LegId> {
         use crate::call::domain::LegState;
         let caller = self.caller_dialog.as_ref().ok_or_else(|| anyhow!("Caller dialog is gone"))?;
-        let callee = self.meta.connected_callee_dialog_id.as_ref();
+        let callee_leg = self.resolve_transfer_leg();
+        let callee = self.legs.get_dialog(&callee_leg);
         let peer = if caller.id() == dialog_id && caller.state().is_confirmed() {
-            self.leg_id_for_dialog(&callee.ok_or_else(|| anyhow!("No connected peer"))?.to_string())
-        } else if callee == Some(&dialog_id) && self.server.dialog_layer.get_dialog(&dialog_id)
-            .is_some_and(|dialog| dialog.id() == dialog_id && dialog.state().is_confirmed())
+            callee.filter(|dialog| dialog.state().is_confirmed()).map(|_| callee_leg)
+        } else if callee.is_some_and(|dialog| dialog.id() == dialog_id && dialog.state().is_confirmed())
         {
             Some(LegId::from("caller"))
         } else { None }.ok_or_else(|| anyhow!("Dialog is not a connected call endpoint"))?;
@@ -4598,6 +4681,11 @@ impl SipSession {
                 } else { false };
                 let unpaired = conference_leg || conference_survives || terminated_leg.as_ref().is_some_and(|id| !self.is_caller_peer(id)
                     && self.legs.get(id).is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::Hold)));
+                if let Some(ctx) = terminated_leg.as_ref().and_then(|leg| self.transferred_agent_context(leg)) {
+                    for hook in self.server.session_hooks.iter() {
+                        hook.on_agent_disconnected(&ctx, &*self.app_runtime).await;
+                    }
+                }
                 self.pending_hangup.remove(&terminated_dialog_id);
                 self.callee_dialogs.remove(&terminated_dialog_id);
                 self.legs.retain_dialogs_by_dialog_id(&terminated_dialog_id);
@@ -7880,6 +7968,31 @@ impl SipSession {
         self.fire_hold_transition_hooks(&leg_id, prev, new_state)
             .await;
 
+        // Only B's inbound consultation re-INVITE means a private-talk switch.
+        // Initialization, C's offers and PBX/API media changes are not switches.
+        // Once attached to a room (including attended transfer), stop inference.
+        if matches!(side, DialogSide::Caller) && leg_id.as_str() == "caller"
+            && self.meta.answer_time.is_some()
+            && self.legs.get(&self.resolve_transfer_leg())
+                .is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::Hold))
+            && self.conference.is_none() && !self.meta.transferred
+            && !self.meta.transfer_in_progress && self.pending_refers.is_empty()
+            && matches!((prev, new_state),
+                (Some(LegState::Connected), LegState::Hold) | (Some(LegState::Hold), LegState::Connected))
+        {
+            let consultation = self.meta.root_session_id.as_deref()
+                .is_some_and(|root| root != self.context.session_id)
+                && self.legs.get(&leg_id).is_some_and(|leg| leg.agent_id.is_some())
+                && self.session_ext_get("resolved_agent_id").is_some();
+            if consultation {
+                self.emit_typed_rwi_event(&crate::rwi::ConsultSwitched {
+                    call_id: self.root_session_id_str(),
+                    transfer_id: self.context.session_id.clone(),
+                    talking_to: if new_state == LegState::Hold { "customer" } else { "consult" }.into(),
+                });
+            }
+        }
+
         // Cross-leg hold propagation only applies when the proxy anchors media
         // (a MediaBridge is present). In bypass mode the peer already received
         // the relayed offer — this hold UPDATE was forwarded to the callee
@@ -9754,9 +9867,15 @@ impl SipSession {
             | CallCommand::StopPlayback { leg_id: Some(id) }
             | CallCommand::Hold { leg_id: id, .. }
             | CallCommand::Unhold { leg_id: id }
-            | CallCommand::JoinMixerLeg { leg_id: id, .. }
-            | CallCommand::LegRemove { leg_id: id } => {
+            | CallCommand::JoinMixerLeg { leg_id: id, .. } => {
                 if id.as_str() == "callee" { *id = self.resolve_transfer_leg(); }
+            }
+            CallCommand::LegRemove { leg_id } => {
+                // After bridging A to C, an explicit removal of the retained
+                // B leg must not resolve to the newly selected C leg.
+                if leg_id.as_str() == "callee" && !self.legs.contains_key(leg_id) {
+                    *leg_id = self.resolve_transfer_leg();
+                }
             }
             _ => {}
         }
@@ -10765,6 +10884,9 @@ impl SipSession {
                     // primary one. Gated to queue context so direct (non-
                     // queue) calls keep deriving the agent from parties.
                     let leg_agent_id = self.leg_agent_id(Some(agent_uri)).await;
+                    if self.in_queue_context() {
+                        if let Some(leg) = self.legs.get_mut(&leg_id) { leg.agent_id = leg_agent_id.clone(); }
+                    }
                     if let Some(ref id) = leg_agent_id
                         && Some(id.as_str()) != self.session_ext_get("resolved_agent_id").as_deref()
                         && self.in_queue_context()
@@ -10901,6 +11023,11 @@ impl SipSession {
                     return CommandResult::success();
                 }
                 let dialog_id = self.legs.get_dialog(&leg_id).map(|dialog| dialog.id());
+                if let Some(ctx) = self.transferred_agent_context(&leg_id) {
+                    for hook in self.server.session_hooks.iter() {
+                        hook.on_agent_disconnected(&ctx, &*self.app_runtime).await;
+                    }
+                }
                 if dialog_id.is_some() && !self.is_caller_peer(&leg_id)
                     && self.legs.get(&leg_id).is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::Hold))
                     && !self.pending_refers.values().any(|pending| pending.transferor == leg_id)

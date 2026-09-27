@@ -742,13 +742,12 @@ impl SipSession {
     /// Resolve the active callee for transfer and media commands.
     pub(super) fn resolve_transfer_leg(&self) -> LegId {
         let leg_id = LegId::from("callee");
-        // A completed transfer can leave the former callee alive until BYE.
-        // Prefer the selected dialog/pair over the historical leg name.
-        if let Some(dialog_id) = self.meta.connected_callee_dialog_id.as_ref() {
-            if let Some(selected) = self.leg_id_for_dialog(&dialog_id.to_string()) {
-                if self.legs.get(&selected).is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::Hold)) {
-                    return selected;
-                }
+        // The selected pair survives hold even while RTP forwarding is detached.
+        // Resolve through legs rather than historical callee metadata.
+        if self.bridge.legs.len() == 2 && self.bridge.contains_leg(&LegId::from("caller")) {
+            if let Some(peer) = self.bridge.legs.iter().find(|id| id.as_str() != "caller"
+                && self.legs.get(id).is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::Hold))) {
+                return peer.clone();
             }
         }
         // A consultation/dial target can be selected before the original
@@ -895,29 +894,17 @@ impl SipSession {
         &self,
         transferor_leg: &LegId,
     ) -> Option<crate::rwi::TransferSource> {
-        // Prefer the CC-hook-resolved id: when present, the hook has also
-        // published the paired `agent_name`, so both can be attributed
-        // together. The id fallbacks (transferor leg endpoint / connected
-        // callee) cannot be paired with a name, so they stay name-less.
-        let resolved_agent_id = self.session_ext_get("resolved_agent_id");
-        let agent_name = if resolved_agent_id.is_some() {
+        // SIP legs carry their own identity. Keep the existing fallback for
+        // API-created calls whose originating leg predates agent attribution.
+        let agent_id = self.legs.get(transferor_leg).and_then(|leg| leg.agent_id.clone())
+            .or_else(|| self.session_ext_get("resolved_agent_id"))
+            .or_else(|| self.legs.get(transferor_leg).and_then(|leg| leg.endpoint.as_deref())
+                .and_then(crate::models::call_record::extract_sip_username))
+            .or_else(|| self.meta.connected_callee.as_deref()
+                .and_then(crate::models::call_record::extract_sip_username));
+        let agent_name = if agent_id.is_some() && agent_id == self.session_ext_get("resolved_agent_id") {
             self.session_ext_get("agent_name")
-        } else {
-            None
-        };
-        let agent_id = resolved_agent_id
-            .or_else(|| {
-                self.legs
-                    .get(transferor_leg)
-                    .and_then(|leg| leg.endpoint.as_deref())
-                    .and_then(crate::models::call_record::extract_sip_username)
-            })
-            .or_else(|| {
-                self.meta
-                    .connected_callee
-                    .as_deref()
-                    .and_then(crate::models::call_record::extract_sip_username)
-            });
+        } else { None };
 
         // An actively running IVR is authoritative. A remembered IVR short
         // code is only historical metadata after the call has moved on.

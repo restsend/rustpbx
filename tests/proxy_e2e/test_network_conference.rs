@@ -170,7 +170,11 @@ async fn test_attended_refer_existing_cross_session_dialogs() {
     config.conference_factory_uri = Some(factory.clone());
     let mut users = crate::common::test_helpers::standard_test_users();
     for user in &mut users { user.is_support_webrtc = false; }
-    let server = Arc::new(E2eTestServer::start_with_inject(config, E2eTestServerInject { users, ..Default::default() }).await.unwrap());
+    let gateway = rustpbx::rwi::gateway::RwiGateway::new();
+    let mut rwi_events = gateway.subscribe_events();
+    let server = Arc::new(E2eTestServer::start_with_inject(config, E2eTestServerInject {
+        users, rwi_gateway: Some(Arc::new(parking_lot::RwLock::new(gateway))), ..Default::default()
+    }).await.unwrap());
     let factory = format!("sip:conference@{}", server.proxy_addr);
     let mut effective = (*server.server_ref.proxy_config.load_full()).clone();
     effective.conference_factory_uri = Some(factory.clone());
@@ -230,6 +234,15 @@ async fn test_attended_refer_existing_cross_session_dialogs() {
                 sleep(Duration::from_millis(20)).await;
             }
         }).await.unwrap();
+        let mut transfers = Vec::new();
+        while let Ok(entry) = rwi_events.try_recv() {
+            if entry.event.event_type == "call_transferred" { transfers.push(entry.event); }
+        }
+        assert_eq!(transfers.len(), if expected == 200 { 1 } else { 0 },
+            "only successful attended REFER emits one transfer event");
+        if let Some(event) = transfers.first() {
+            assert_eq!(event.payload["call_id"], a_owner.session_id());
+        }
     }
     let room = server.server_ref.conference_server.list_conferences_detail().await.into_iter()
         .find(|room| room.host_leg_id == Some(rustpbx::call::domain::LegId::from(format!("{}-caller", a_owner.session_id()))))

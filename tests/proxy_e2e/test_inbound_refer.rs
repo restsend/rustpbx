@@ -682,8 +682,10 @@ async fn test_inbound_refer_rejection_recovery_and_transferor_bye() {
         config.media_proxy = MediaProxyMode::All;
         let mut users = crate::common::test_helpers::standard_test_users();
         for user in &mut users { user.is_support_webrtc = false; }
+        let gateway = rustpbx::rwi::gateway::RwiGateway::new();
+        let mut rwi_events = gateway.subscribe_events();
         let server = E2eTestServer::start_with_inject(config, E2eTestServerInject {
-            users, ..Default::default()
+            users, rwi_gateway: Some(Arc::new(parking_lot::RwLock::new(gateway))), ..Default::default()
         }).await.unwrap();
         let alice = server.create_ua("alice").await.unwrap();
         let bob = server.create_ua("bob").await.unwrap();
@@ -733,6 +735,9 @@ async fn test_inbound_refer_rejection_recovery_and_transferor_bye() {
             "must not report a final outcome while the target is ringing: {progress:?}");
         let owner = server.server_ref.active_call_registry.get_handle_by_dialog(&bob_dialog.call_id).unwrap();
         assert_eq!(owner.snapshot().unwrap().leg_count, 3, "A, B and C must coexist while C rings");
+        while let Ok(entry) = rwi_events.try_recv() {
+            assert_ne!(entry.event.event_type, "call_transferred", "ringing is not transfer success");
+        }
         if transferor_leaves {
             bob.hangup(&bob_dialog).await.unwrap();
             // Give the session loop time to process the original agent's BYE.
@@ -764,6 +769,11 @@ async fn test_inbound_refer_rejection_recovery_and_transferor_bye() {
             }
             sender.abort();
             assert_eq!(server.get_active_calls().len(), 1);
+            let mut transferred = 0;
+            while let Ok(entry) = rwi_events.try_recv() {
+                if entry.event.event_type == "call_transferred" { transferred += 1; }
+            }
+            assert_eq!(transferred, 1, "successful blind REFER emits exactly once");
             alice.hangup(&caller_dialog).await.unwrap();
             server.stop();
             continue;
@@ -821,6 +831,9 @@ async fn test_inbound_refer_rejection_recovery_and_transferor_bye() {
             }
             sender.abort();
             alice.hangup(&caller_dialog).await.unwrap();
+        }
+        while let Ok(entry) = rwi_events.try_recv() {
+            assert_ne!(entry.event.event_type, "call_transferred", "rejected target is not transfer success");
         }
         server.stop();
     }

@@ -32,6 +32,20 @@ impl SipSession {
             transaction.reply(StatusCode::CallTransactionDoesNotExist).await?;
             return Ok(());
         }
+        // Preserve an already known agent identity only when this leg refers.
+        // This does not classify ordinary dialed legs or query their Contact URIs.
+        if let Some(leg_id) = self.leg_id_for_dialog(&dialog_id.to_string()) {
+            let selected = self.resolve_transfer_leg();
+            let mut agent_id = self.legs.get(&leg_id).and_then(|leg| leg.agent_id.clone());
+            if agent_id.is_none() && leg_id == selected {
+                agent_id = self.session_ext_get("resolved_agent_id").or_else(|| self.session_ext_get("agent_id"));
+            }
+            if let Some(agent_id) = agent_id {
+                if let Some(leg) = self.legs.get_mut(&leg_id) {
+                    if leg.agent_id.is_none() { leg.agent_id = Some(agent_id); }
+                }
+            }
+        }
         transaction.reply(StatusCode::Accepted).await?;
         info!(session_id = %self.id, %dialog_id, %refer_to, "Inbound REFER received by session");
         let (target_uri, replaces_header) = Self::parse_refer_to(&refer_to);
@@ -181,7 +195,8 @@ impl SipSession {
             if owner.session_id() == self.context.session_id {
                 return Err((501, "Same-session Replaces is not supported by this cross-session path".into()));
             }
-            if self.meta.connected_callee_dialog_id.as_ref() != Some(source_dialog) {
+            let transferor = self.resolve_transfer_leg();
+            if self.legs.get_dialog(&transferor).is_none_or(|dialog| dialog.id() != *source_dialog) {
                 return Err((481, "REFER must originate from the current callee".into()));
             }
             if self.meta.transfer_in_progress || self.conference.is_some() {
