@@ -7338,3 +7338,26 @@ async fn dynamic_leg_rejects_known_unregistered_user_before_dialing() {
     assert!(!session.legs.contains_key(&target), "Offline resolution must finish before creating a SIP leg");
     assert!(session.callee_dialogs.is_empty());
 }
+
+#[tokio::test]
+async fn removing_terminated_leg_does_not_schedule_bye() {
+    use crate::call::{DialDirection, Dialplan};
+    use crate::proxy::tests::common::create_test_request;
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx;
+
+    let request = create_test_request(rsipstack::sip::Method::Invite, "caller", None, "rustpbx.com", None);
+    let dialplan = Dialplan::new("ended-leg".into(), request, DialDirection::Inbound);
+    let (mut session, _handle, _commands) = build_session_with_cmd_rx(dialplan).await;
+    let dialog = session.caller_dialog.as_ref().unwrap().clone();
+    dialog.reject(Some(StatusCode::Decline), None).unwrap();
+    assert!(dialog.state().is_terminated());
+    let leg_id = LegId::from("ended-agent");
+    let mut leg = crate::call::domain::Leg::new(leg_id.clone());
+    leg.state = LegState::Ended;
+    session.legs.add_leg(leg_id.clone(), leg, Some(rsipstack::dialog::dialog::Dialog::Invite(dialog.clone())));
+
+    session.handle_remove_leg(leg_id.clone()).await.unwrap();
+
+    assert!(!session.legs.contains_key(&leg_id));
+    assert!(!session.pending_hangup.contains(&dialog.id()));
+}

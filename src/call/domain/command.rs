@@ -541,6 +541,12 @@ pub enum CallCommand {
         leg_id: LegId,
     },
 
+    /// Connected leg ended normally through SIP BYE (async notification).
+    LegEnded {
+        leg_id: LegId,
+        reason: String,
+    },
+
     /// Leg dial failed (async notification)
     LegFailed {
         /// Leg ID that failed

@@ -1860,7 +1860,9 @@ impl SipSession {
 
         loop {
             for dialog_id in self.pending_hangup.drain() {
-                if let Some(dialog) = self.server.dialog_layer.get_dialog(&dialog_id) {
+                if let Some(dialog) = self.server.dialog_layer.get_dialog(&dialog_id)
+                    .filter(|dialog| !dialog.state().is_terminated())
+                {
                     let dialog = dialog.clone();
                     hangup_futures.push(async move {
                         let res = dialog.hangup().await;
@@ -8256,6 +8258,7 @@ impl SipSession {
             let hangup_dialogs = dialogs_to_hangup
                 .into_iter()
                 .filter_map(|dialog_id| self.server.dialog_layer.get_dialog(&dialog_id))
+                .filter(|dialog| !dialog.state().is_terminated())
                 .collect::<Vec<_>>();
             let hangups: FuturesUnordered<_> = hangup_dialogs
                 .iter()
@@ -10680,8 +10683,17 @@ impl SipSession {
                 CommandResult::success()
             }
 
-            CallCommand::LegFailed { leg_id, reason } => {
-                warn!(%leg_id, %reason, "Leg failed async notification");
+            event @ (CallCommand::LegFailed { .. } | CallCommand::LegEnded { .. }) => {
+                let (leg_id, reason, failed) = match event {
+                    CallCommand::LegFailed { leg_id, reason } => (leg_id, reason, true),
+                    CallCommand::LegEnded { leg_id, reason } => (leg_id, reason, false),
+                    _ => unreachable!(),
+                };
+                if failed {
+                    warn!(%leg_id, %reason, "Leg failed async notification");
+                } else {
+                    info!(%leg_id, %reason, "Leg ended async notification");
+                }
                 if self.pending_refers.contains_key(&leg_id) {
                     self.emit_rwi_leg_hangup(&leg_id, Some(reason.clone()));
                     let status = reason.split(|c: char| !c.is_ascii_digit())
@@ -10742,81 +10754,84 @@ impl SipSession {
                         .is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::Hold))
                         && self.resolve_transfer_leg() == leg_id;
                     let connected_bridge_leg = bridge_paired_leg || current_b_leg;
-                    // Forward to running app before removing the leg (so we can get the URI)
-                    let agent_uri = self.legs.get(&leg_id).and_then(|l| l.endpoint.clone());
-                    let event_name =
-                        if reason.contains("486") || reason.to_lowercase().contains("busy") {
-                            "agent_busy"
+                    if failed {
+                        // Forward to running app before removing the leg (so we can get the URI)
+                        let agent_uri = self.legs.get(&leg_id).and_then(|l| l.endpoint.clone());
+                        let event_name =
+                            if reason.contains("486") || reason.to_lowercase().contains("busy") {
+                                "agent_busy"
+                            } else {
+                                "agent_no_answer"
+                            };
+                        // Resolve the canonical agent_id from the failing LEG first
+                        // (sequential fallback dials a different agent than the
+                        // session-level value; validated against the registry so
+                        // WebRTC contact user-parts are not mistaken for agent ids),
+                        // then fall back to session extensions so the queue app can
+                        // update the correct agent's presence.
+                        let resolved_agent_id = self
+                            .leg_agent_id(agent_uri.as_deref())
+                            .await
+                            .unwrap_or_default();
+                        let agent_id = if !resolved_agent_id.is_empty() {
+                            resolved_agent_id.clone()
                         } else {
-                            "agent_no_answer"
+                            agent_uri
+                                .as_deref()
+                                .and_then(Self::uri_user_part)
+                                .unwrap_or_else(|| "unknown".to_string())
                         };
-                    // Resolve the canonical agent_id from the failing LEG first
-                    // (sequential fallback dials a different agent than the
-                    // session-level value; validated against the registry so
-                    // WebRTC contact user-parts are not mistaken for agent ids),
-                    // then fall back to session extensions so the queue app can
-                    // update the correct agent's presence.
-                    let resolved_agent_id = self
-                        .leg_agent_id(agent_uri.as_deref())
-                        .await
-                        .unwrap_or_default();
-                    let agent_id = if !resolved_agent_id.is_empty() {
-                        resolved_agent_id.clone()
-                    } else {
-                        agent_uri
-                            .as_deref()
-                            .and_then(Self::uri_user_part)
-                            .unwrap_or_else(|| "unknown".to_string())
-                    };
-                    {
-                        self.app_event_bridge.send_app_event(
-                            crate::call::app::ControllerEvent::Custom(
-                                event_name.to_string(),
-                                serde_json::json!({
-                                    "leg_id": leg_id.0,
-                                    "agent_uri": agent_uri,
-                                    "agent_id": agent_id,
-                                    "reason": reason,
-                                }),
-                            ),
-                        );
-                    }
+                        {
+                            self.app_event_bridge.send_app_event(
+                                crate::call::app::ControllerEvent::Custom(
+                                    event_name.to_string(),
+                                    serde_json::json!({
+                                        "leg_id": leg_id.0,
+                                        "agent_uri": agent_uri,
+                                        "agent_id": agent_id,
+                                        "reason": reason,
+                                    }),
+                                ),
+                            );
+                        }
 
-                    // Surface agent rejection / no-answer in the call trace so
-                    // operator-facing call records show *which* agent and *why*
-                    // the queue could not connect (e.g. 486 from off-hours phone).
-                    let in_queue = self.in_queue_context();
-                    if in_queue {
-                        let status = reason
-                            .strip_prefix("Rejected with ")
-                            .map(str::to_string)
-                            .unwrap_or_else(|| reason.clone());
-                        let queue_name =
-                            crate::proxy::proxy_call::call_meta::effective_queue_name(&self.meta)
-                                .unwrap_or_default();
-                        let (msg, severity) = if event_name == "agent_busy" {
-                            (
-                                format!("Agent {} rejected ({})", agent_id, status),
-                                crate::call_errors::ErrSeverity::Warn,
+                        // Surface agent rejection / no-answer in the call trace so
+                        // operator-facing call records show *which* agent and *why*
+                        // the queue could not connect (e.g. 486 from off-hours phone).
+                        let in_queue = self.in_queue_context();
+                        if in_queue {
+                            let status = reason
+                                .strip_prefix("Rejected with ")
+                                .map(str::to_string)
+                                .unwrap_or_else(|| reason.clone());
+                            let queue_name =
+                                crate::proxy::proxy_call::call_meta::effective_queue_name(&self.meta)
+                                    .unwrap_or_default();
+                            let (msg, severity) = if event_name == "agent_busy" {
+                                (
+                                    format!("Agent {} rejected ({})", agent_id, status),
+                                    crate::call_errors::ErrSeverity::Warn,
+                                )
+                            } else {
+                                (
+                                    format!("Agent {} no answer", agent_id),
+                                    crate::call_errors::ErrSeverity::Warn,
+                                )
+                            };
+                            let ev = crate::call_errors::TraceEvent::new(
+                                crate::call_errors::TraceKind::Queue,
+                                msg,
                             )
-                        } else {
-                            (
-                                format!("Agent {} no answer", agent_id),
-                                crate::call_errors::ErrSeverity::Warn,
-                            )
-                        };
-                        let ev = crate::call_errors::TraceEvent::new(
-                            crate::call_errors::TraceKind::Queue,
-                            msg,
-                        )
-                        .severity(severity)
-                        .detail(serde_json::json!({
-                            "agent": agent_id,
-                            "status": status,
-                            "reason": reason,
-                            "queue_name": queue_name,
-                        }));
-                        self.record_trace(ev);
+                            .severity(severity)
+                            .detail(serde_json::json!({
+                                "agent": agent_id,
+                                "status": status,
+                                "reason": reason,
+                                "queue_name": queue_name,
+                            }));
+                            self.record_trace(ev);
+                        }
+
                     }
 
                     self.update_leg_state(&leg_id, LegState::Ended);
@@ -10851,8 +10866,9 @@ impl SipSession {
                             "Connected dynamic leg ended; post-disconnect handler ran"
                         );
                     }
-                    CommandResult::failure(reason.clone())
+                    if failed { CommandResult::failure(reason.clone()) } else { CommandResult::success() }
                 };
+                if !failed { return result; }
                 let ctx = self.session_hook_ctx();
                 for hook in self.server.session_hooks.iter() {
                     if let Some(spec) = hook.on_leg_failed(&ctx, leg_id.as_str(), &reason).await {
@@ -11778,7 +11794,12 @@ impl SipSession {
                 .then(|| self.meta.connected_callee_dialog_id.clone()).flatten());
         if let Some(dialog_id) = dialog_id {
             self.server.active_call_registry.unregister_dialog_identity(&dialog_id);
-            self.pending_hangup.insert(dialog_id.clone());
+            if self.legs.get_dialog(&leg_id).cloned()
+                .or_else(|| self.server.dialog_layer.get_dialog(&dialog_id))
+                .is_some_and(|dialog| !dialog.state().is_terminated())
+            {
+                self.pending_hangup.insert(dialog_id.clone());
+            }
             self.callee_dialogs.remove(&dialog_id);
             if self.meta.connected_callee_dialog_id.as_ref() == Some(&dialog_id) {
                 self.meta.connected_callee_dialog_id = None;
@@ -12065,12 +12086,17 @@ impl SipSession {
                             }
                             state = state_rx.recv() => {
                                 match state {
-                                    Some(rsipstack::dialog::dialog::DialogState::Terminated(..)) => {
-                                        info!(session_id = %session_id, %leg_id, "SIP leg dialog terminated");
-                                        let _ = cmd_tx.send(CallCommand::LegFailed {
-                                            leg_id: leg_id.clone(),
-                                            reason: "Remote hung up".to_string(),
-                                        }).await;
+                                    Some(DialogState::Terminated(_, reason)) => {
+                                        info!(session_id = %session_id, %leg_id, ?reason, "SIP leg dialog terminated");
+                                        let event = match reason {
+                                            TerminatedReason::UasBye | TerminatedReason::UacBye => CallCommand::LegEnded {
+                                                leg_id: leg_id.clone(), reason: format!("{:?}", reason),
+                                            },
+                                            _ => CallCommand::LegFailed {
+                                                leg_id: leg_id.clone(), reason: format!("{:?}", reason),
+                                            },
+                                        };
+                                        let _ = cmd_tx.send(event).await;
                                         break;
                                     }
                                     Some(state @ (DialogState::Updated(..) | DialogState::Info(..)
