@@ -31,6 +31,13 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+/// Routing context for a SIP conference focus dialog.
+#[derive(Clone)]
+pub(crate) struct ConferenceFocusContext {
+    pub uri: String,
+    pub room: crate::call::runtime::ConferenceId,
+}
+
 /// Error type returned by [`CallRouter::resolve`] on failure.
 #[derive(Debug)]
 pub struct RouteError {
@@ -1857,6 +1864,8 @@ impl CallModule {
         // and may give up, inflating observed 408s under load.
         tx.send_trying().await.ok();
 
+        if self.handle_conference_invite(tx, cookie.clone()).await? { return Ok(()); }
+
         // Check for incoming INVITE with Replaces header (seat replacement scenario)
         if let Some((replaces_call_id, replaces_to_tag, replaces_from_tag)) =
             Self::parse_replaces_header(&tx.original)
@@ -2078,6 +2087,50 @@ impl CallModule {
         self.build_and_serve_dialplan(tx, cookie, dialplan).await
     }
 
+    /// Conference factory and room routing precede ordinary extension routing.
+    async fn handle_conference_invite(&self, tx: &mut Transaction, cookie: TransactionCookie) -> Result<bool> {
+        let Some(factory) = self.inner.server.proxy_config.load().conference_factory_uri.clone() else { return Ok(false) };
+        let factory = rsipstack::sip::Uri::try_from(factory.as_str())?;
+        let requested = &tx.original.uri;
+        let is_factory = requested.user() == factory.user() && requested.host_with_port == factory.host_with_port;
+        let existing = self.inner.server.conference_server.list_conferences_detail().await.into_iter()
+            .find(|room| room.focus_uri.as_deref() == Some(requested.to_string().as_str()));
+        if !is_factory && existing.is_none() {
+            if requested.host_with_port == factory.host_with_port && requested.user().is_some_and(|user| user.starts_with("room-")) {
+                tx.reply(rsipstack::sip::StatusCode::NotFound).await?;
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        if Self::parse_replaces_header(&tx.original).is_some() {
+            tx.reply(rsipstack::sip::StatusCode::NotImplemented).await?;
+            return Ok(true);
+        }
+        let session_id = tx.original.call_id_header()?.value().to_string();
+        let room = if is_factory {
+            let id = crate::call::runtime::ConferenceId::from(format!("room-{}", uuid::Uuid::new_v4()));
+            self.inner.server.conference_server.create_conference_ex(
+                id.clone(), None, Some(crate::call::domain::LegId::from(format!("{session_id}-caller"))), None,
+            ).await?;
+            let mut uri = factory.clone();
+            uri.auth = Some(rsipstack::sip::Auth { user: id.0.clone(), password: None });
+            self.inner.server.conference_server.set_focus(&id, uri.to_string())?;
+            self.inner.server.conference_server.get_conference(&id).await.unwrap()
+        } else { existing.unwrap() };
+        info!(conference_id = %room.id.0, %session_id, factory = is_factory, "Routing SIP conference INVITE");
+        let focus = ConferenceFocusContext { uri: room.focus_uri.clone().unwrap(), room: room.id.clone() };
+        let mut dialplan = Dialplan::new(session_id, tx.original.clone(), DialDirection::Inbound);
+        dialplan.media.proxy_mode = crate::config::MediaProxyMode::All;
+        dialplan.flow = DialplanFlow::Application {
+            app_name: "conference".into(), app_params: Some(serde_json::json!({"id": room.id.0})), auto_answer: true,
+        };
+        dialplan.extensions.insert(focus);
+        let result = self.build_and_serve_dialplan(tx, cookie, dialplan).await;
+        if result.is_err() && is_factory { self.inner.server.conference_server.destroy_conference(&room.id).await.ok(); }
+        result?;
+        Ok(true)
+    }
+
     /// When an in-dialog BYE/INFO arrives on a node that does not own the
     /// dialog (typical after mid-call WS reconnect to another home_proxy),
     /// forward a textual copy to the owner via AMI. Returns `Some(Ok(()))`
@@ -2266,7 +2319,14 @@ impl CallModule {
 
         let original_handle = original_handle.unwrap();
         let (target_uri, replaces_header) = Self::parse_refer_to(&refer_to);
-        let app_target = if replaces_header.is_none() {
+        let conference_target = self.inner.server.conference_server.list_conferences_detail().await.into_iter()
+            .any(|room| room.focus_uri.as_deref() == Some(target_uri.as_str()));
+        if conference_target && replaces_header.is_some() {
+            tx.reply(rsipstack::sip::StatusCode::NotImplemented).await?;
+            return Ok(());
+        }
+
+        let app_target = if replaces_header.is_none() && !conference_target {
             let route_cookie = crate::call::cookie::TransactionCookie::from(&tx.key);
             match Self::resolve_refer_app_target(
                 &self.inner.server, original_handle.session_id(), &target_uri, &route_cookie,
@@ -2280,7 +2340,7 @@ impl CallModule {
             }
         } else { None };
         let in_session = replaces_header.is_none()
-            && (app_target.is_some() || self.inner.server.proxy_config.load().inbound_refer_in_session);
+            && (conference_target || app_target.is_some() || self.inner.server.proxy_config.load().inbound_refer_in_session);
 
         // Send 202 Accepted response
         tx.reply_with(rsipstack::sip::StatusCode::Accepted, vec![], None)
@@ -2905,6 +2965,20 @@ impl ProxyModule for CallModule {
             caller = %cookie.get_user().as_ref().map(|u|u.to_string()).unwrap_or_default(),
             "call transaction begin",
         );
+        if tx.original.method == rsipstack::sip::Method::Options && dialog_id.local_tag.is_empty() {
+            let requested = tx.original.uri.to_string();
+            let room = self.inner.server.conference_server.list_conferences_detail().await.into_iter()
+                .find(|room| room.focus_uri.as_deref() == Some(requested.as_str()));
+            let factory = self.inner.server.proxy_config.load().conference_factory_uri.clone();
+            if room.is_some() || factory.as_deref() == Some(requested.as_str()) {
+                let contact = if room.is_some() { format!("<{}>;isfocus", requested) } else { format!("<{}>", requested) };
+                tx.reply_with(rsipstack::sip::StatusCode::OK, vec![
+                    rsipstack::sip::Header::Contact(contact.into()),
+                    rsipstack::sip::Header::Allow("INVITE, ACK, CANCEL, BYE, OPTIONS, REFER, NOTIFY".into()),
+                ], None).await?;
+                return Ok(ProxyAction::Abort);
+            }
+        }
         match tx.original.method {
             rsipstack::sip::Method::Invite => {
                 // Check for Re-invite (INVITE within an existing dialog)

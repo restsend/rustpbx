@@ -69,6 +69,10 @@ impl ConferenceServer {
             .await
     }
 
+    pub fn set_focus(&self, id: &ConferenceId, uri: String) -> Result<()> {
+        self.manager.set_focus(id, uri)
+    }
+
     pub async fn get_conference(&self, conf_id: &ConferenceId) -> Option<ConferenceRoom> {
         self.manager.get_conference(conf_id).await
     }

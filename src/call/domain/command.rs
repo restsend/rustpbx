@@ -481,6 +481,10 @@ pub enum CallCommand {
         leg_id: LegId,
     },
 
+    /// The shared room ended; its owning session must hang up the participant.
+    #[serde(skip)]
+    ConferenceEnded { conference_id: String },
+
     /// Join the caller leg into a conference room, waiting for the leg to be
     /// media-ready first (room dial-in via app=conference). Processed after
     /// any queued Answer command, so the caller leg is Connected by the time

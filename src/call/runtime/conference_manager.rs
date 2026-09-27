@@ -9,7 +9,7 @@
 //! auto-destroyed. An optional `max_duration_secs` triggers auto-destroy
 //! on timeout (default 1 hour when used from the CC addon).
 
-use crate::call::domain::LegId;
+use crate::call::domain::{CallCommand, LegId};
 use crate::media::conference_mixer::{AudioFrame, ConferenceAudioMixer};
 use anyhow::{Result, anyhow};
 use audio_codec::CodecType;
@@ -56,6 +56,7 @@ pub struct ConferenceParticipant {
     pub muted: bool,
     pub role: ParticipantRole,
     pub joined_at: std::time::Instant,
+    session_commands: Option<mpsc::Sender<CallCommand>>,
 }
 
 impl ConferenceParticipant {
@@ -65,6 +66,7 @@ impl ConferenceParticipant {
             muted: false,
             role,
             joined_at: std::time::Instant::now(),
+            session_commands: None,
         }
     }
 }
@@ -72,6 +74,7 @@ impl ConferenceParticipant {
 /// Conference room state with audio mixing
 #[derive(Debug, Clone)]
 pub struct ConferenceRoom {
+    pub focus_uri: Option<String>,
     pub id: ConferenceId,
     pub participants: HashMap<LegId, ConferenceParticipant>,
     pub host_leg_id: Option<LegId>,
@@ -83,6 +86,7 @@ pub struct ConferenceRoom {
 impl ConferenceRoom {
     pub fn new(id: ConferenceId, max_participants: Option<usize>) -> Self {
         Self {
+            focus_uri: None,
             id,
             participants: HashMap::new(),
             host_leg_id: None,
@@ -295,33 +299,55 @@ impl ConferenceManager {
         });
     }
 
+    pub fn set_focus(&self, id: &ConferenceId, uri: String) -> Result<()> {
+        let mut room = self.conferences.get_mut(id).ok_or_else(|| anyhow!("Conference not found"))?;
+        room.focus_uri = Some(uri);
+        Ok(())
+    }
+
     /// Get a conference if it exists
     pub async fn get_conference(&self, conf_id: &ConferenceId) -> Option<ConferenceRoom> {
         self.conferences.get(conf_id).map(|v| v.clone())
     }
 
-    /// Destroy a conference
+    /// Bind an attached SIP participant to its owning session's command queue.
+    pub(crate) fn bind_participant_session(
+        &self,
+        conf_id: &ConferenceId,
+        leg_id: &LegId,
+        commands: mpsc::Sender<CallCommand>,
+    ) -> Result<()> {
+        let mut room = self.conferences.get_mut(conf_id)
+            .ok_or_else(|| anyhow!("Conference {} has ended", conf_id.0))?;
+        let participant = room.participants.get_mut(leg_id)
+            .ok_or_else(|| anyhow!("Conference participant {} has left", leg_id))?;
+        participant.session_commands = Some(commands);
+        Ok(())
+    }
+
+    /// Destroy the room and explicitly end its remaining SIP participants.
     pub async fn destroy_conference(&self, conf_id: &ConferenceId) -> Result<()> {
+        // Removing first prevents new attachments and makes destruction idempotent.
+        let Some((_, room)) = self.conferences.remove(conf_id) else { return Ok(()) };
         if let Some((_, token)) = self.timeout_tokens.remove(conf_id) {
             token.cancel();
         }
-
+        for (leg_id, participant) in room.participants {
+            self.leg_to_conference.remove(&leg_id);
+            self.participant_channels.remove(&leg_id);
+            self.participant_output_rxs.remove(&leg_id);
+            if let Some(commands) = participant.session_commands {
+                let command = CallCommand::ConferenceEnded { conference_id: conf_id.0.clone() };
+                // A room can be destroyed from an owning session's command handler.
+                // Never wait here for that same bounded queue to drain.
+                if let Err(mpsc::error::TrySendError::Full(command)) = commands.try_send(command) {
+                    crate::utils::spawn(async move { let _ = commands.send(command).await; });
+                }
+            }
+        }
         if let Some((_, mixer)) = self.audio_mixers.remove(conf_id) {
             mixer.stop().await;
         }
-
-        if let Some(conf) = self.conferences.get(conf_id) {
-            for leg_id in conf.participant_ids() {
-                self.leg_to_conference.remove(&leg_id);
-                self.participant_channels.remove(&leg_id);
-                self.participant_output_rxs.remove(&leg_id);
-            }
-        }
-
-        if self.conferences.remove(conf_id).is_none() {
-            return Ok(());
-        }
-
         info!(conf_id = %conf_id.0, "Conference destroyed");
         Ok(())
     }
@@ -399,11 +425,13 @@ impl ConferenceManager {
     ) -> Result<usize> {
         // Remove from conference room
         let remaining;
+        let creator_left;
         {
             let mut conference = self
                 .conferences
                 .get_mut(conf_id)
                 .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
+            creator_left = conference.focus_uri.is_some() && conference.is_host(leg_id);
             conference.remove_participant(leg_id)?;
             remaining = conference.participant_count();
         }
@@ -420,6 +448,12 @@ impl ConferenceManager {
         self.participant_channels.remove(leg_id);
         self.participant_output_rxs.remove(leg_id);
         self.leg_to_conference.remove(leg_id);
+
+        if creator_left {
+            info!(conf_id = %conf_id.0, %leg_id, "Conference creator departed; destroying room");
+            self.destroy_conference(conf_id).await?;
+            return Ok(0);
+        }
 
         if remaining == 0 {
             info!(

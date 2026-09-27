@@ -1,4 +1,5 @@
 use super::SipSession;
+use super::session::ConferenceAttachment;
 use crate::call::domain::LegId;
 use anyhow::{Result, anyhow};
 use tracing::{debug, info, warn};
@@ -50,7 +51,7 @@ impl SipSession {
         for leg_id in active_legs {
             let join_leg = self.participant_leg(&leg_id);
             let joined = self
-                .try_start_and_store_bridge(conf_id_str, &leg_id, "conference media bridge")
+                .handle_join_mixer_leg(conf_id_str.to_string(), leg_id.clone())
                 .await;
             match joined {
                 Ok(()) => {
@@ -184,19 +185,26 @@ impl SipSession {
         info!(session_id = %self.id, %mixer_id, %leg_id, "Joining mixer/conference (specific leg)");
 
         let conf_id_obj = crate::call::runtime::ConferenceId::from(mixer_id.as_str());
-        if self
-            .server
-            .conference_server
-            .get_conference(&conf_id_obj)
-            .await
-            .is_none()
-        {
-            return Err(anyhow!("Conference {} not found", mixer_id));
-        }
+        let room = self.server.conference_server.get_conference(&conf_id_obj).await
+            .ok_or_else(|| anyhow!("Conference {} not found", mixer_id))?;
 
+        if room.focus_uri.is_some() && self.conference.as_ref().is_some_and(|conference|
+            conference.leg_id != leg_id || conference.conference_id != room.id)
+        {
+            return Err(anyhow!("Session already has a conference participant"));
+        }
         self.require_leg(&leg_id)?;
         self.try_start_and_store_bridge(&mixer_id, &leg_id, "consult-transfer 3-way merge")
             .await?;
+        if room.focus_uri.is_some() {
+            let commands = self.cmd_tx.clone().ok_or_else(|| anyhow!("Session command queue is closed"))?;
+            self.server.conference_server.manager_raw().bind_participant_session(
+                &room.id, &self.participant_leg(&leg_id), commands,
+            )?;
+            self.conference = Some(ConferenceAttachment {
+                leg_id: leg_id.clone(), conference_id: room.id,
+            });
+        }
         if self
             .legs
             .get(&leg_id)
@@ -207,8 +215,33 @@ impl SipSession {
         Ok(())
     }
 
+    /// Detach media only; the SIP dialog remains owned by this session.
+    pub(super) async fn leave_conference_leg(&mut self, leg: &LegId) -> Result<()> {
+        if self.conference.as_ref().is_some_and(|conference| &conference.leg_id == leg) {
+            self.conference = None;
+        }
+        drop(self.legs.remove_conference_bridge_handle(leg));
+        if let Some(room) = self.server.conference_server.get_conference_id_for_leg(&self.participant_leg(leg)).await {
+            self.server.conference_server.remove_participant(&room, &self.participant_leg(leg)).await?;
+        }
+        if self.conference.is_none() { self.conference_bridge.conf_id = None; }
+        Ok(())
+    }
+
+    /// A member leaving never disconnects the other conference participants.
+    pub(super) async fn detach_ended_conference_leg(&mut self, leg: &LegId) -> bool {
+        if self.conference.as_ref().is_some_and(|conference| &conference.leg_id == leg) {
+            if let Err(error) = self.leave_conference_leg(leg).await {
+                warn!(%leg, %error, "Failed to detach conference participant");
+            }
+            if self.conference.is_none() { self.cancel_token.cancel(); }
+        }
+        self.conference.is_some()
+    }
+
     pub(super) async fn handle_leave_mixer(&mut self) -> Result<()> {
         info!(session_id = %self.id, "Leaving mixer/conference");
+        self.conference = None;
 
         // The takeover flag deliberately suppressed the B-leg-disconnect
         // cascade while the customer was parked in the takeover conference.

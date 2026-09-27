@@ -45,6 +45,11 @@ struct PendingRefer {
     source: Option<crate::rwi::TransferSource>,
 }
 
+pub(super) struct ConferenceAttachment {
+    pub leg_id: LegId,
+    pub conference_id: crate::call::runtime::ConferenceId,
+}
+
 pub struct SipSession {
     pub id: SessionId,
     pub state: SessionState,
@@ -76,6 +81,8 @@ pub struct SipSession {
     pub pending_hangup: HashSet<DialogId>,
     /// Transferors detached from media after successful REFER; await their BYE.
     pending_refers: HashMap<LegId, PendingRefer>,
+    /// This session contributes one leg while retaining its SIP dialog ownership.
+    pub(super) conference: Option<ConferenceAttachment>,
     pub meta: crate::proxy::proxy_call::call_meta::CallMeta,
     pub media: crate::proxy::proxy_call::media_state::MediaState,
 
@@ -1187,6 +1194,7 @@ impl SipSession {
             },
             pending_hangup: HashSet::new(),
             pending_refers: HashMap::new(),
+            conference: None,
             context,
             concurrent_call_lease,
             transient_leases: Vec::new(),
@@ -1302,8 +1310,9 @@ impl SipSession {
         let original_callee = context.original_callee.clone();
         let max_ring_time = Self::effective_ring_timeout(&context.dialplan, &server);
 
-        let local_contact = server
-            .contact_uri_for_transaction(tx)
+        let local_contact = context.dialplan.extensions.get::<crate::proxy::call::ConferenceFocusContext>()
+            .and_then(|focus| rsipstack::sip::Uri::try_from(focus.uri.as_str()).ok())
+            .or_else(|| server.contact_uri_for_transaction(tx))
             .or_else(|| server.default_contact_uri());
 
         let (state_tx, state_rx) = mpsc::unbounded_channel();
@@ -3414,7 +3423,8 @@ impl SipSession {
             tx_handle.respond(StatusCode::CallTransactionDoesNotExist, None, None).await.ok();
             return Ok(());
         };
-        let affects_pair = side == DialogSide::Caller || self.is_caller_peer(&leg_id);
+        let affects_pair = self.conference.is_none()
+            && (side == DialogSide::Caller || self.is_caller_peer(&leg_id));
 
         let update_result = self.update_dialog_timer_from_headers(&dialog_id, &request.headers);
         if let Err(e) = &update_result {
@@ -3443,6 +3453,12 @@ impl SipSession {
             self.successful_refresh_response_headers(&dialog_id)
         }
         .unwrap_or_default();
+
+        if side == DialogSide::Caller && update_result.is_ok() {
+            if let Some(focus) = self.context.dialplan.extensions.get::<crate::proxy::call::ConferenceFocusContext>() {
+                headers.push(rsipstack::sip::Header::Contact(format!("<{}>;isfocus", focus.uri).into()));
+            }
+        }
 
         let body = if update_result.is_ok() && !request.body.is_empty() {
             let offer_sdp = String::from_utf8_lossy(&request.body).to_string();
@@ -3588,7 +3604,17 @@ impl SipSession {
             DialogState::Notify(_, request, tx_handle) => {
                 self.handle_dialog_notify(request, tx_handle).await?;
             }
-            DialogState::Terminated(_, reason) => {
+            DialogState::Terminated(dialog_id, reason) => {
+                if self.detach_ended_conference_leg(&LegId::from("caller")).await {
+                    self.unschedule_timer(&dialog_id);
+                    self.timers.remove(&dialog_id);
+                    self.update_refresh_disabled.remove(&dialog_id);
+                    self.legs.remove(&LegId::from("caller"));
+                    self.server.active_call_registry.unregister_dialog_identity(&dialog_id);
+                    self.server.dialog_layer.remove_dialog(&dialog_id);
+                    self.update_snapshot_cache();
+                    return Ok(());
+                }
                 self.update_leg_state(&LegId::from("caller"), LegState::Ended);
                 self.meta.pending_transfer_outcome = None;
 
@@ -3647,6 +3673,12 @@ impl SipSession {
         // Resolve which leg this dialog belongs to (dynamic agent legs are
         // first-class — the legacy caller/callee sides don't cover them).
         let dialog_leg = self.leg_id_for_dialog(&dialog_id.to_string());
+        if self.conference.is_some() {
+            // Conference participants have no single SIP peer. In particular,
+            // do not forward INFO to their previous point-to-point peer.
+            tx_handle.respond(StatusCode::OK, None, None).await.ok();
+            return Ok(());
+        }
         let content_type = Self::request_content_type(&request);
         let is_dtmf = content_type
             .as_deref()
@@ -4306,6 +4338,26 @@ impl SipSession {
         } else {
             info!(session_id = %self.id, "Sent initial REFER NOTIFY: 100 Trying");
         }
+        if let Some(room) = self.server.conference_server.list_conferences_detail().await.into_iter()
+            .find(|room| room.focus_uri.as_deref() == Some(target.as_str()))
+        {
+            let result = self.handle_join_conference_peer(room.id.0.clone(), dialog_id).await;
+            let status = match &result {
+                Ok(leg) => {
+                    info!(session_id = %self.id, room = %room.id.0, %leg, "Existing call joined SIP conference");
+                    StatusCode::OK
+                }
+                Err(error) => {
+                    warn!(session_id = %self.id, %error, "Conference REFER attachment failed");
+                    StatusCode::ServerInternalError
+                }
+            };
+            if let Err(error) = dialog.notify_refer(status, "terminated;reason=noresource").await {
+                warn!(session_id = %self.id, %error, "Failed to send final conference REFER NOTIFY");
+            }
+            // Keep the transferor's old dialog until its own BYE.
+            return result.map(|_| ());
+        }
         let transferor = self.leg_id_for_dialog(&dialog_id.to_string());
         if let Some(ref leg_id) = transferor {
             if !self.pending_refers.is_empty() {
@@ -4364,8 +4416,82 @@ impl SipSession {
         result
     }
 
+    /// Resolve the remote participant of B's old dialog and attach its media.
+    pub(super) async fn handle_join_conference_peer(
+        &mut self,
+        conference_id: String,
+        dialog_id: rsipstack::dialog::DialogId,
+    ) -> Result<LegId> {
+        use crate::call::domain::LegState;
+        let caller = self.caller_dialog.as_ref().ok_or_else(|| anyhow!("Caller dialog is gone"))?;
+        let callee = self.meta.connected_callee_dialog_id.as_ref();
+        let peer = if caller.id() == dialog_id && caller.state().is_confirmed() {
+            self.leg_id_for_dialog(&callee.ok_or_else(|| anyhow!("No connected peer"))?.to_string())
+        } else if callee == Some(&dialog_id) && self.server.dialog_layer.get_dialog(&dialog_id)
+            .is_some_and(|dialog| dialog.id() == dialog_id && dialog.state().is_confirmed())
+        {
+            Some(LegId::from("caller"))
+        } else { None }.ok_or_else(|| anyhow!("Dialog is not a connected call endpoint"))?;
+        if !self.pending_refers.is_empty() || !self.legs.get(&peer)
+            .is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::Hold))
+        { return Err(anyhow!("Conference peer is unavailable")); }
+        if let Some(conference) = &self.conference {
+            if conference.leg_id == peer && conference.conference_id.0 == conference_id { return Ok(peer); }
+            return Err(anyhow!("Session already has a conference participant"));
+        }
+        if let Some(room) = self.server.conference_server.get_conference_id_for_leg(&self.participant_leg(&peer)).await {
+            if room.0 == conference_id { return Ok(peer); }
+            return Err(anyhow!("Peer already belongs to another conference"));
+        }
+        self.prepare_conference_leg(&peer).await?;
+        if let Err(error) = self.handle_join_mixer_leg(conference_id, peer.clone()).await {
+            self.leave_conference_leg(&peer).await.ok();
+            self.update_media_path().await;
+            return Err(error);
+        }
+        Ok(peer)
+    }
+
+    pub(super) async fn prepare_conference_leg(&mut self, leg: &LegId) -> Result<()> {
+        if !self.pending_refers.is_empty() || !self.legs.get(leg).is_some_and(|l| matches!(l.state, crate::call::domain::LegState::Connected | crate::call::domain::LegState::Hold)) {
+            return Err(anyhow!("Bridge endpoint is unavailable"));
+        }
+        let dialog = if leg.as_str() == "caller" { self.caller_dialog.clone() } else {
+            self.legs.get_dialog(leg).and_then(|d| match d {
+                rsipstack::dialog::dialog::Dialog::Invite(d) => Some(d.clone()), _ => None,
+            })
+        };
+        if dialog.as_ref().is_some_and(|d| d.state().is_terminated()) {
+            return Err(anyhow!("Bridge endpoint is gone"));
+        }
+        if self.media_leg(leg).is_none() {
+            let dialog = dialog.ok_or_else(|| anyhow!("Bridge endpoint has neither media nor a SIP dialog"))?;
+            let mode = self.legs.get_transport(leg).unwrap_or_else(|| self.caller_transport_mode());
+            let (peer, offer) = self.create_leg_peer(leg, mode.clone()).await?;
+            let response = dialog.reinvite(Some(Self::sdp_headers()), Some(offer.into_bytes())).await?
+                .ok_or_else(|| anyhow!("Bridge media anchoring timed out"))?;
+            if response.status_code.kind() != rsipstack::sip::StatusCodeKind::Successful {
+                peer.stop();
+                return Err(anyhow!("Bridge media anchoring rejected: {}", response.status_code));
+            }
+            let answer = String::from_utf8_lossy(response.body()).into_owned();
+            peer.apply_sdp(&answer, rustrtc::SdpType::Answer).await?;
+            peer.accept();
+            self.legs.set_media_leg(leg, peer);
+            self.legs.set_transport(leg.clone(), mode);
+            self.legs.set_answer(leg.clone(), answer);
+        } else if self.legs.get(leg).is_some_and(|l| l.state == crate::call::domain::LegState::Hold) {
+            let sdp = self.generate_sdp_for_side(leg, false)?;
+            self.send_reinvite_to_leg(leg, sdp).await?;
+        }
+        self.update_leg_state(leg, crate::call::domain::LegState::Connected);
+        if let Some(peer) = self.media_leg(leg) { peer.resume_rtp_timeout(); }
+        Ok(())
+    }
+
     /// Hold can suspend media without changing the selected conversation.
     fn is_caller_peer(&self, leg_id: &LegId) -> bool {
+        if self.conference.is_some() { return false; }
         if self.bridge.legs.len() == 2 && self.bridge.contains_leg(&LegId::from("caller")) {
             return leg_id.as_str() != "caller" && self.bridge.contains_leg(leg_id);
         }
@@ -4435,7 +4561,11 @@ impl SipSession {
                     self.callee_dialogs.contains_key(&terminated_dialog_id);
 
                 let terminated_leg = self.leg_id_for_dialog(&terminated_dialog_id.to_string());
-                let unpaired = terminated_leg.as_ref().is_some_and(|id| !self.is_caller_peer(id)
+                let conference_leg = terminated_leg.as_ref().is_some_and(|leg| self.conference.as_ref().is_some_and(|conference| &conference.leg_id == leg));
+                let conference_survives = if let Some(leg) = &terminated_leg {
+                    self.detach_ended_conference_leg(leg).await
+                } else { false };
+                let unpaired = conference_leg || conference_survives || terminated_leg.as_ref().is_some_and(|id| !self.is_caller_peer(id)
                     && self.legs.get(id).is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::Hold)));
                 self.pending_hangup.remove(&terminated_dialog_id);
                 self.callee_dialogs.remove(&terminated_dialog_id);
@@ -7114,6 +7244,9 @@ impl SipSession {
         if let Some(answer_sdp) = answer_sdp {
             let mut headers = Self::sdp_headers();
             headers.extend(timer_headers);
+            if let Some(focus) = self.context.dialplan.extensions.get::<crate::proxy::call::ConferenceFocusContext>() {
+                headers.push(rsipstack::sip::Header::Contact(format!("<{}>;isfocus", focus.uri).into()));
+            }
             if let Some(dialog) = self.caller_dialog.as_ref() {
                 if let Err(e) = dialog.accept(Some(headers), Some(answer_sdp.into_bytes())) {
                     if !self
@@ -8414,6 +8547,15 @@ impl SipSession {
                 );
             }
         }
+        // Failed setup can leave a factory-created room without participants.
+        if let Some(focus) = self.context.dialplan.extensions.get::<crate::proxy::call::ConferenceFocusContext>() {
+            if self.server.conference_server.get_conference(&focus.room).await
+                .is_some_and(|room| room.participant_count() == 0)
+            {
+                self.server.conference_server.destroy_conference(&focus.room).await.ok();
+            }
+        }
+
 
         // MediaBridge teardown is handled by the session Drop / cleanup path.
         // Close it eagerly so per-leg wire_leg monitor tasks and the DTMF
@@ -10307,6 +10449,18 @@ impl SipSession {
                 Self::ok_or_failure(self.handle_join_mixer_leg(mixer_id, leg_id).await)
             }
 
+            CallCommand::ConferenceEnded { conference_id } => {
+                if self.conference.as_ref().is_none_or(|attachment| attachment.conference_id.0 != conference_id) {
+                    return CommandResult::success();
+                }
+                let attachment = self.conference.take().unwrap();
+                drop(self.legs.remove_conference_bridge_handle(&attachment.leg_id));
+                self.conference_bridge.conf_id = None;
+                info!(session_id = %self.id, %conference_id, leg = %attachment.leg_id,
+                    "Conference ended; hanging up participant");
+                self.handle_hangup(&HangupCommand::local("conference ended", None, None)).await
+            }
+
             CallCommand::JoinConference { conf_id } => {
                 // Room dial-in: by command-ordering, the Answer command that
                 // preceded this one has completed, so the caller leg is
@@ -10693,6 +10847,12 @@ impl SipSession {
                     warn!(%leg_id, %reason, "Leg failed async notification");
                 } else {
                     info!(%leg_id, %reason, "Leg ended async notification");
+                }
+                if self.conference.as_ref().is_some_and(|conference| conference.leg_id == leg_id) {
+                    self.emit_rwi_leg_hangup(&leg_id, Some(reason.clone()));
+                    self.update_leg_state(&leg_id, LegState::Ended);
+                    self.detach_ended_conference_leg(&leg_id).await;
+                    return Self::ok_or_failure(self.handle_remove_leg(leg_id).await);
                 }
                 if self.pending_refers.contains_key(&leg_id) {
                     self.emit_rwi_leg_hangup(&leg_id, Some(reason.clone()));

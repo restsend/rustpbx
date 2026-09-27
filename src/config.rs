@@ -1581,6 +1581,9 @@ pub struct ProxyConfig {
     /// always take the raw originate. Default: enabled.
     #[serde(default = "default_true")]
     pub inbound_refer_in_session: bool,
+    /// SIP conference factory URI. Disabled when unset.
+    #[serde(default)]
+    pub conference_factory_uri: Option<String>,
     /// When enabled, app/transfer/RWI-originated calls whose target is not a
     /// registered internal contact are routed through the route table
     /// (match/rewrite/trunk selection) just like inbound calls. Default off —
@@ -2217,6 +2220,7 @@ impl Default for ProxyConfig {
             dialog_auth_cache: default_dialog_auth_cache(),
             blind_transfer_use_refer: false,
             inbound_refer_in_session: true,
+            conference_factory_uri: None,
             route_originated_calls: false,
             parallel_fork: default_parallel_fork(),
             max_ring_time: None,

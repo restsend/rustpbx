@@ -1567,8 +1567,16 @@ impl SipServer {
                     continue;
                 }
             }
+            // Configured conference discovery is a service request, not an
+            // unsolicited out-of-dialog probe. It still passes through modules.
+            let conference_options = if tx.original.method == rsipstack::sip::Method::Options {
+                let uri = tx.original.uri.to_string();
+                self.inner.proxy_config.load().conference_factory_uri.as_deref() == Some(uri.as_str())
+                    || self.inner.conference_server.list_conferences_detail().await.iter()
+                        .any(|room| room.focus_uri.as_deref() == Some(uri.as_str()))
+            } else { false };
             // Spam protection for out-of-dialog requests
-            if self.inner.ignore_out_of_dialog_request
+            if self.inner.ignore_out_of_dialog_request && !conference_options
                 && matches!(
                     tx.original.method,
                     rsipstack::sip::Method::Options
