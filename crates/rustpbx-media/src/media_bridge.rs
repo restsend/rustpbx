@@ -196,6 +196,22 @@ impl MediaBridge {
         self.side_for_leg(id).and_then(|side| self.leg(side))
     }
 
+    /// Detach a selected leg without stopping it; the session registry owns its lifecycle.
+    pub fn detach_leg(&mut self, id: &crate::leg_id::LegId) {
+        let Some(side) = self.side_for_leg(id) else {
+            return;
+        };
+        match side {
+            LegSide::A => self.leg_a = None,
+            LegSide::B => self.leg_b = None,
+        }
+        if let Some(cancel) = self.leg_wire_cancels.remove(&side) {
+            cancel.cancel();
+        }
+        self.last_bridged = None;
+        *self.legs_shared.lock() = (self.leg_a.clone(), self.leg_b.clone());
+    }
+
     /// Return a decoded PCM stream for a leg's ingress RTP. The caller must
     /// have the leg's negotiated profile ready (i.e. SDP already applied).
     /// Used as the conference / supervisor mixer data source: each leg's PCM

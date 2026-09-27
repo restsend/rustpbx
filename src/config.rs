@@ -1425,6 +1425,11 @@ fn default_sso_refresh_ttl() -> u64 {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct IvrEndpointConfig {
+    pub url: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProxyConfig {
     pub modules: Option<Vec<String>>,
     pub addr: String,
@@ -1531,6 +1536,8 @@ pub struct ProxyConfig {
     pub ivr_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ivr_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub ivr_endpoints: HashMap<String, IvrEndpointConfig>,
     /// Global Step-IVR recovery: when `/step` or `/fail` cannot continue the
     /// current provider session, match `from`/`to`/`headers` rules and jump to
     /// a built-in IVR; if no rule matches, use `default`.
@@ -2197,6 +2204,7 @@ impl Default for ProxyConfig {
             queue_dir: None,
             ivr_dir: None,
             ivr_files: Vec::new(),
+            ivr_endpoints: HashMap::new(),
             ivr_fallback: None,
             recording: None,
             transcript: None,

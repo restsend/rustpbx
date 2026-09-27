@@ -834,11 +834,14 @@ impl SipSession {
         // bridge targets report through the REFER-NOTIFY channel
         // (`emit_refer_event` → TransferController).
         let emits_own_event = matches!(
-            parsed_target,
+            &parsed_target,
             TransferTarget::Sip { .. } | TransferTarget::Bridge { .. }
         );
         let target_type = transfer_target_type_str(&parsed_target).map(String::from);
-        let target_for_event = target.clone();
+        let target_for_event = match &parsed_target {
+            TransferTarget::RoutePoint { name, .. } => format!("toivr:{name}"),
+            _ => target.clone(),
+        };
 
         let result = self
             .handle_blind_transfer_inner(leg_id, target, disposition, callee_state_rx, headers)
@@ -898,14 +901,13 @@ impl SipSession {
                     .and_then(crate::models::call_record::extract_sip_username)
             });
 
-        // IVR flow currently driving the session (`app_name == "ivr"`, or an
-        // IVR short code remembered from an earlier hop).
+        // An actively running IVR is authoritative. A remembered IVR short
+        // code is only historical metadata after the call has moved on.
         let ivr_name = self.session_ext_get("ivr");
-        let in_ivr = self.meta.app_name.as_deref() == Some("ivr") || ivr_name.is_some();
-        if in_ivr {
+        if self.app_runtime.current_app().as_deref() == Some("ivr") {
             return Some(crate::rwi::TransferSource {
                 source_type: "ivr".to_string(),
-                name: ivr_name,
+                name: ivr_name.clone(),
                 ivr_node_id: self.session_ext_get("ivr_node"),
                 agent_id,
                 agent_name,
@@ -931,6 +933,15 @@ impl SipSession {
                 ivr_node_id: None,
                 agent_id: Some(agent),
                 agent_name,
+            });
+        }
+        if ivr_name.is_some() {
+            return Some(crate::rwi::TransferSource {
+                source_type: "ivr".to_string(),
+                name: ivr_name,
+                ivr_node_id: self.session_ext_get("ivr_node"),
+                agent_id: None,
+                agent_name: None,
             });
         }
         None
@@ -1048,9 +1059,15 @@ impl SipSession {
                 let mut params = params;
                 self.inject_transfer_origin_params(&leg_id, &mut params)
                     .await;
-                let result = self.start_route_point_app(&name, params).await;
+                let result = self.start_route_point_app(&name, params, headers).await;
                 if result.is_ok() {
                     self.meta.ivr_flow_suspended = false;
+                    if leg_id != LegId::from("caller") {
+                        self.mark_transferred_with(Some(
+                            serde_json::json!({ "target": name, "kind": "route_point" }),
+                        ));
+                        self.handle_remove_leg(leg_id).await?;
+                    }
                 } else if self.meta.ivr_flow_suspended {
                     // Route-point successor failed to start — the logical
                     // flow died here. Emit the compensating session_end NOW
@@ -1912,6 +1929,7 @@ impl SipSession {
         &mut self,
         route_point: &str,
         variables: HashMap<String, String>,
+        transfer_headers: HashMap<String, String>,
     ) -> Result<()> {
         let caller = self
             .context
@@ -1957,10 +1975,16 @@ impl SipSession {
                 hints,
             }) => {
                 self.track_routed_leg_hints(hints);
-                let sip_headers = crate::call::app::merge_sip_headers(
+                let routed_headers = crate::call::app::merge_sip_headers(
                     &current_headers,
                     option.headers.as_deref().unwrap_or_default(),
                 );
+                let transfer_headers = transfer_headers
+                    .into_iter()
+                    .map(|(name, value)| rsipstack::sip::Header::Other(name, value))
+                    .collect::<Vec<_>>();
+                let sip_headers =
+                    crate::call::app::merge_sip_headers(&routed_headers, &transfer_headers);
                 let route_context = crate::call::app::AppRouteContext {
                     callee: route_point.to_string(),
                     sip_headers,

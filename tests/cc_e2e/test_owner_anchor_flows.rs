@@ -101,7 +101,7 @@ async fn e2e_blind_transfer_retires_agent_dialog_and_preserves_customer() {
         .unwrap();
     let handle = server
         .registry
-        .get_handle_by_dialog(&agent_dialog.call_id)
+        .get_handle_by_call_id(&agent_dialog.call_id)
         .expect("CC resolves the agent's SIP Call-ID to its owner session");
 
     let target_leg = LegId::new("transfer-target");
@@ -170,7 +170,7 @@ async fn e2e_blind_transfer_retires_agent_dialog_and_preserves_customer() {
     assert_eq!(entry.status, ActiveProxyCallStatus::Talking);
     let target_handle = server
         .registry
-        .get_handle_by_dialog(&target_dialog.call_id)
+        .get_handle_by_call_id(&target_dialog.call_id)
         .expect("Alice's new dialog belongs to the surviving session");
     assert_eq!(target_handle.session_id(), handle.session_id());
     target.hangup(&target_dialog).await.unwrap();

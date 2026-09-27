@@ -144,6 +144,15 @@ pub enum CallCommand {
         attended: bool,
     },
 
+    /// Run an internal blind transfer and report its actual execution result.
+    TransferWithCompletion {
+        leg_id: LegId,
+        target: String,
+        headers: HashMap<String, String>,
+        #[serde(skip)]
+        completion: Option<oneshot::Sender<std::result::Result<(), String>>>,
+    },
+
     TransferAwaitResult {
         leg_id: LegId,
         target: String,
@@ -768,6 +777,7 @@ impl CallCommand {
                 | CallCommand::Reject { .. }
                 | CallCommand::Hangup(_)
                 | CallCommand::Transfer { .. }
+                | CallCommand::TransferWithCompletion { .. }
                 | CallCommand::TransferAwaitResult { .. }
                 | CallCommand::Hold { music: None, .. }
                 | CallCommand::Unhold { .. }
