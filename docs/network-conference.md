@@ -34,9 +34,11 @@ matching the captured Yealink T31P signaling:
    A room is also removed when empty; one participant alone does not close it.
 
 The room URI also accepts ordinary dial-in and supports OPTIONS discovery.
-Conference REFER executes in the old call's owning session through the
-existing InboundRefer command. The session resolves the room, attaches its
-opposite leg, and sends NOTIFY; no conference-specific command/reply is needed.
+REFER follows normal dialog dispatch. The owning session handles the
+`DialogState::Refer` event, validates and acknowledges the request, resolves the
+room, attaches its opposite leg, and sends NOTIFY. The local rsipstack patch
+keeps the established dialog confirmed while delivering REFER as an event;
+no forwarding command or conference-specific command/reply is needed.
 The handler is selected by the local room target, not by conference ownership. SIP authentication and exact existing-dialog
 validation still apply. REFER/Replaces sent to the conference focus to pull
 other calls into the room is not implemented. Conference roster subscriptions

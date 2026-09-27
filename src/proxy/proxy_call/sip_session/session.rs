@@ -1911,13 +1911,25 @@ impl SipSession {
                 }
 
                 Some(state) = Self::recv_opt_state(&mut state_rx) => {
-                    if let Err(e) = self.handle_dialog_state(state).await {
+                    let result = match state {
+                        DialogState::Refer(id, request, transaction) => {
+                            self.handle_received_refer(id, request, transaction, &mut callee_state_rx).await
+                        }
+                        state => self.handle_dialog_state(state).await,
+                    };
+                    if let Err(e) = result {
                         warn!(session_id = %self.id, error = %e, "Error handling dialog state");
                     }
                 }
 
                 Some(state) = callee_state_rx.recv() => {
-                    if let Err(e) = self.handle_callee_state(state).await {
+                    let result = match state {
+                        DialogState::Refer(id, request, transaction) => {
+                            self.handle_received_refer(id, request, transaction, &mut callee_state_rx).await
+                        }
+                        state => self.handle_callee_state(state).await,
+                    };
+                    if let Err(e) = result {
                         warn!(session_id = %self.id, error = %e, "Error handling callee state");
                     }
                 }
@@ -10290,13 +10302,6 @@ impl SipSession {
                     )
                     .await,
                 )
-            }
-
-            CallCommand::InboundRefer { dialog_id, target, headers } => {
-                let Some(callee_state_rx) = callee_state_rx.as_deref_mut() else {
-                    return CommandResult::failure("No callee state receiver available for REFER".to_string());
-                };
-                Self::ok_or_failure(self.handle_inbound_refer(dialog_id, target, headers, callee_state_rx).await)
             }
 
             CallCommand::TransferAwaitResult {

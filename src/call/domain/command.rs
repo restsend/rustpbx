@@ -144,15 +144,6 @@ pub enum CallCommand {
         attended: bool,
     },
 
-    /// An accepted inbound blind REFER, delivered once to its owning session.
-    /// The session executes the handoff and owns the SIP NOTIFY subscription.
-    #[serde(skip)]
-    InboundRefer {
-        dialog_id: rsipstack::dialog::DialogId,
-        target: String,
-        headers: HashMap<String, String>,
-    },
-
     TransferAwaitResult {
         leg_id: LegId,
         target: String,
@@ -788,7 +779,6 @@ impl CallCommand {
                 | CallCommand::Hangup(_)
                 | CallCommand::Transfer { .. }
                 | CallCommand::TransferAwaitResult { .. }
-                | CallCommand::InboundRefer { .. }
                 | CallCommand::Hold { music: None, .. }
                 | CallCommand::Unhold { .. }
                 | CallCommand::Trace { .. }
