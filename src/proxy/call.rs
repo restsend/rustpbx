@@ -2300,6 +2300,7 @@ impl CallModule {
             let command = crate::call::domain::CallCommand::InboundRefer {
                 dialog_id: dialog_id.clone(),
                 target: app_target.unwrap_or(target_uri),
+                headers: Self::refer_application_headers(tx.original.headers.iter()),
             };
             if let Err(error) = original_handle.send_command(command) {
                 warn!(%error, "Session closed before accepting REFER event");
@@ -2514,6 +2515,29 @@ impl CallModule {
         } else {
             (refer_to.to_string(), None)
         }
+    }
+
+    fn refer_application_headers<'a>(
+        headers: impl IntoIterator<Item = &'a rsipstack::sip::Header>,
+    ) -> HashMap<String, String> {
+        let mut carried = HashMap::new();
+        let mut seen = std::collections::HashSet::new();
+        for header in headers {
+            let rsipstack::sip::Header::Other(name, value) = header else {
+                continue;
+            };
+            if !name
+                .get(..2)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("X-"))
+            {
+                continue;
+            }
+            if !seen.insert(name.to_ascii_lowercase()) {
+                continue;
+            }
+            carried.insert(name.clone(), value.clone());
+        }
+        carried
     }
 
     /// Execute the actual transfer for an inbound REFER.
@@ -2978,6 +3002,54 @@ mod tests {
     use crate::proxy::tests::common::{create_test_server, create_test_server_with_config};
     use async_trait::async_trait;
     use rsipstack::dialog::invitation::InviteOption;
+
+    #[test]
+    fn refer_application_headers_preserve_extension_headers() {
+        let headers = vec![
+            rsipstack::sip::Header::Other("X-Route-Metadata".into(), "workflow=feedback".into()),
+            rsipstack::sip::Header::Other("X-Trace-Context".into(), "trace-test".into()),
+            rsipstack::sip::Header::Other(
+                "X-User-Data".into(),
+                "form=feedback;template=three-option".into(),
+            ),
+            rsipstack::sip::Header::Other("Authorization".into(), "secret".into()),
+        ];
+
+        assert_eq!(
+            CallModule::refer_application_headers(&headers),
+            std::collections::HashMap::from([
+                (
+                    "X-Route-Metadata".to_string(),
+                    "workflow=feedback".to_string(),
+                ),
+                ("X-Trace-Context".to_string(), "trace-test".to_string()),
+                (
+                    "X-User-Data".to_string(),
+                    "form=feedback;template=three-option".to_string(),
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn refer_application_headers_keep_first_case_insensitive_value() {
+        let headers = vec![
+            rsipstack::sip::Header::Other("X-Route-Metadata".into(), "   ".into()),
+            rsipstack::sip::Header::Other("x-ROUTE-metadata".into(), "second".into()),
+            rsipstack::sip::Header::Other("X-Trace-Context".into(), "trace-test".into()),
+        ];
+
+        let carried = CallModule::refer_application_headers(&headers);
+        assert_eq!(
+            carried.get("X-Route-Metadata").map(String::as_str),
+            Some("   ")
+        );
+        assert_eq!(
+            carried.get("X-Trace-Context").map(String::as_str),
+            Some("trace-test")
+        );
+        assert_eq!(carried.len(), 2);
+    }
 
     fn make_loc() -> Vec<Location> {
         vec![Location {

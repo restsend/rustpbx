@@ -150,6 +150,7 @@ pub enum CallCommand {
     InboundRefer {
         dialog_id: rsipstack::dialog::DialogId,
         target: String,
+        headers: HashMap<String, String>,
     },
 
     TransferAwaitResult {

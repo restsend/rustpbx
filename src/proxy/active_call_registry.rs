@@ -52,6 +52,7 @@ pub struct ActiveCallContextMeta {
 pub struct ActiveProxyCallRegistry {
     entries: DashMap<String, ActiveProxyCallEntry>,
     handles: DashMap<String, SipSessionHandle>,
+    // Dialog keys use Call-ID + local tag; plain Call-ID aliases serve CTI consumers.
     handles_by_dialog: DashMap<String, SipSessionHandle>,
     dialog_by_session: DashMap<String, Vec<String>>,
     context_meta: DashMap<String, ActiveCallContextMeta>,
@@ -127,6 +128,32 @@ impl ActiveProxyCallRegistry {
 
     pub fn get_handle_by_dialog(&self, dialog_id: &str) -> Option<SipSessionHandle> {
         self.handles_by_dialog.get(dialog_id).map(|e| e.clone())
+    }
+
+    pub fn register_call_id(&self, call_id: String, handle: SipSessionHandle) {
+        self.register_dialog(call_id, handle);
+    }
+
+    pub fn get_handle_by_call_id(&self, call_id: &str) -> Option<SipSessionHandle> {
+        self.get_handle_by_dialog(call_id)
+    }
+
+    pub fn unregister_call_id(&self, call_id: &str) {
+        self.unregister_dialog(call_id);
+    }
+
+    pub fn register_dialog_identity(
+        &self,
+        dialog_id: &rsipstack::dialog::DialogId,
+        handle: SipSessionHandle,
+    ) {
+        self.register_dialog(format!("{}-{}", dialog_id.call_id, dialog_id.local_tag), handle.clone());
+        self.register_call_id(dialog_id.call_id.clone(), handle);
+    }
+
+    pub fn unregister_dialog_identity(&self, dialog_id: &rsipstack::dialog::DialogId) {
+        self.unregister_dialog(&format!("{}-{}", dialog_id.call_id, dialog_id.local_tag));
+        self.unregister_call_id(&dialog_id.call_id);
     }
 
     pub fn update<F>(&self, session_id: &str, updater: F)
@@ -443,10 +470,10 @@ mod tests {
         };
         registry.register_dialog(dialog.call_id.clone(), first.clone());
         assert!(registry.get_handle_by_dialog(&format!("{}-{}", dialog.call_id, dialog.local_tag)).is_none(), "bare alias is not a dialog registration");
-        registry.register_dialog(format!("{}-{}", dialog.call_id, dialog.local_tag), first.clone());
+        registry.register_dialog_identity(&dialog, first.clone());
         dialog.remote_tag = "phone-tag".into();
         assert_eq!(registry.get_handle_by_dialog(&format!("{}-{}", dialog.call_id, dialog.local_tag)).unwrap().session_id(), "first-session");
-        registry.register_dialog(format!("{}-{}", dialog.call_id, dialog.local_tag), first);
+        registry.register_dialog_identity(&dialog, first);
         assert_eq!(registry.handles_by_dialog_count(), 2,
             "early and confirmed registrations must share one dialog key, plus the CTI alias");
 

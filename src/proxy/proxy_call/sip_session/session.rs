@@ -1350,7 +1350,7 @@ impl SipSession {
 
         server
             .active_call_registry
-            .register_dialog(format!("{}-{}", server_dialog.id().call_id, server_dialog.id().local_tag), handle.clone());
+            .register_dialog_identity(&server_dialog.id(), handle.clone());
 
         // Publish this session's owning node in the cluster session registry
         // (no-op backend in single-node mode).
@@ -2197,7 +2197,7 @@ impl SipSession {
         // the bare Call-ID alias registered for CTI is not sufficient.
         let registry = &self.server.active_call_registry;
         if let Some(handle) = registry.get_handle(&self.context.session_id) {
-            registry.register_dialog(format!("{}-{}", dialog_id.call_id, dialog_id.local_tag), handle);
+            registry.register_dialog_identity(&dialog_id, handle);
         }
 
         // Register the callee leg with a real dialog.
@@ -3335,7 +3335,7 @@ impl SipSession {
         // Register it before either sequential or parallel dialing sends INVITE.
         let registry = &self.server.active_call_registry;
         if let Some(handle) = registry.get_handle(&self.context.session_id) {
-            registry.register_dialog(callee_call_id.clone(), handle);
+            registry.register_call_id(callee_call_id.clone(), handle);
         }
 
         let option = rsipstack::dialog::invitation::InviteOption {
@@ -4292,6 +4292,7 @@ impl SipSession {
         &mut self,
         dialog_id: rsipstack::dialog::DialogId,
         target: String,
+        headers: HashMap<String, String>,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<()> {
         let Some(rsipstack::dialog::dialog::Dialog::Invite(dialog)) = self.server.dialog_layer.get_dialog(&dialog_id) else {
@@ -4335,7 +4336,7 @@ impl SipSession {
         }
         let result = if let Some(ref leg_id) = transferor {
             self.handle_transfer(leg_id.clone(), target, false, transfer::TransferDisposition::Refer,
-                callee_state_rx, HashMap::new()).await
+                callee_state_rx, headers).await
         } else {
             Err(transfer::BlindTransferDialError { code: 481, message: "Unknown transferor dialog".to_string() }.into())
         };
@@ -4441,6 +4442,9 @@ impl SipSession {
                 self.unschedule_timer(&terminated_dialog_id);
                 self.timers.remove(&terminated_dialog_id);
                 self.update_refresh_disabled.remove(&terminated_dialog_id);
+                self.server
+                    .active_call_registry
+                    .unregister_dialog_identity(&terminated_dialog_id);
                 // The remote BYE already terminated this leg; remove it before dropping
                 // its guard so guard cleanup does not send a second BYE back.
                 self.server
@@ -6544,7 +6548,7 @@ impl SipSession {
         // the bare Call-ID alias registered for CTI is not sufficient.
         let registry = &self.server.active_call_registry;
         if let Some(handle) = registry.get_handle(&self.context.session_id) {
-            registry.register_dialog(format!("{}-{}", dialog_id.call_id, dialog_id.local_tag), handle);
+            registry.register_dialog_identity(&dialog_id, handle);
         }
         self.callee_guards.push(callee_guard);
 
@@ -10145,11 +10149,11 @@ impl SipSession {
                 )
             }
 
-            CallCommand::InboundRefer { dialog_id, target } => {
+            CallCommand::InboundRefer { dialog_id, target, headers } => {
                 let Some(callee_state_rx) = callee_state_rx.as_deref_mut() else {
                     return CommandResult::failure("No callee state receiver available for REFER".to_string());
                 };
-                Self::ok_or_failure(self.handle_inbound_refer(dialog_id, target, callee_state_rx).await)
+                Self::ok_or_failure(self.handle_inbound_refer(dialog_id, target, headers, callee_state_rx).await)
             }
 
             CallCommand::TransferAwaitResult {
@@ -10419,6 +10423,7 @@ impl SipSession {
                     // the queued hangup has not run yet.
                     if let Some(call_id) = dialog_id.as_deref() {
                         for dialog in self.server.dialog_layer.get_client_dialog_by_call_id(call_id) {
+                            self.server.active_call_registry.unregister_dialog_identity(&dialog.id());
                             self.pending_hangup.insert(dialog.id());
                             self.callee_guards.push(ClientDialogGuard::new(self.server.dialog_layer.clone(), dialog.id()));
                         }
@@ -10426,21 +10431,7 @@ impl SipSession {
                     return CommandResult::success();
                 }
 
-                // Contract §3.3: CTI `{call_id}` is the B-leg SIP Call-ID.
-                // Map this leg's dialog Call-ID onto the session handle so
-                // `/cc/calls/{call_id}/...` resolves it via `get_handle_by_dialog`.
-                // Covers the main callee leg, fork winners, and dynamic
-                // (queue-agent / consult) legs alike.
                 if let Some(call_id) = &dialog_id {
-                    if let Some(handle) = self
-                        .server
-                        .active_call_registry
-                        .get_handle(&self.id.to_string())
-                    {
-                        self.server
-                            .active_call_registry
-                            .register_dialog(call_id.clone(), handle);
-                    }
                     // Cluster: also register dialog Call-ID → session owner so
                     // CTI / in-dialog SIP arriving on another node can resolve.
                     let node_id = self
@@ -10508,7 +10499,7 @@ impl SipSession {
                         let dlg_id = invite.id();
                         let registry = &self.server.active_call_registry;
                         if let Some(handle) = registry.get_handle(&self.context.session_id) {
-                            registry.register_dialog(format!("{}-{}", dlg_id.call_id, dlg_id.local_tag), handle);
+                            registry.register_dialog_identity(&dlg_id, handle);
                         }
                         self.legs.set_dialog(
                             leg_id.clone(),
@@ -11778,12 +11769,17 @@ impl SipSession {
         if self.conference_bridge.conf_id.is_none()
             && self.bridge().is_some_and(|bridge| bridge.side_for_leg(&leg_id).is_some())
         {
-            if let Some(bridge) = self.bridge_mut() { bridge.unbridge().await?; }
+            if let Some(bridge) = self.bridge_mut() {
+                bridge.unbridge().await?;
+                // Future app playback must not mirror to the removed leg after its egress stops.
+                bridge.detach_leg(&leg_id);
+            }
         }
         let dialog_id = self.legs.get_dialog(&leg_id).map(|dialog| dialog.id())
             .or_else(|| (leg_id == self.resolve_transfer_leg())
                 .then(|| self.meta.connected_callee_dialog_id.clone()).flatten());
         if let Some(dialog_id) = dialog_id {
+            self.server.active_call_registry.unregister_dialog_identity(&dialog_id);
             self.pending_hangup.insert(dialog_id.clone());
             self.callee_dialogs.remove(&dialog_id);
             if self.meta.connected_callee_dialog_id.as_ref() == Some(&dialog_id) {
@@ -11931,10 +11927,11 @@ impl SipSession {
         {
             self.server
                 .active_call_registry
-                .register_dialog(bleg_call_id, handle);
+                .register_call_id(bleg_call_id, handle);
         }
 
         let dialog_layer = self.server.dialog_layer.clone();
+        let active_call_registry = self.server.active_call_registry.clone();
         let leg_id_for_spawn = leg_id.clone();
         let session_state_tx = self.callee_event_tx.clone();
         let session_id = self.id.to_string();
@@ -11985,14 +11982,18 @@ impl SipSession {
                                             None
                                         };
 
+                                        let dialog_id = dialog.id();
                                         // Own the answered dialog before publishing it to the session.
                                         // Removing the leg aborts this task, including before
                                         // LegConnected has been processed.
-                                        answered_guard = Some(ClientDialogGuard::new(dialog_layer.clone(), dialog.id()));
+                                        answered_guard = Some(ClientDialogGuard::new(dialog_layer.clone(), dialog_id.clone()));
+                                        if let Some(handle) = active_call_registry.get_handle(&session_id) {
+                                            active_call_registry.register_dialog_identity(&dialog_id, handle);
+                                        }
                                         let _ = cmd_tx.send(CallCommand::LegConnected {
                                             leg_id: leg_id.clone(),
                                             answer_sdp,
-                                            dialog_id: Some(dialog.id().call_id.clone()),
+                                            dialog_id: Some(dialog_id.call_id.clone()),
                                         }).await;
 
                                         result = Ok(dialog);
