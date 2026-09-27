@@ -213,7 +213,7 @@ impl SipSession {
                 .or_else(|| {
                     self.server
                         .active_call_registry
-                        .get_handle_by_dialog(sup_session)
+                        .get_handle_by_call_id(sup_session)
                 })
             {
                 if let Err(error) = sup_handle.send_command(CallCommand::JoinMixerLeg {

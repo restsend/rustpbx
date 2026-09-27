@@ -23,17 +23,17 @@ use tokio::time::sleep;
 
 use crate::common::webhook_capture::WebhookCapture;
 
-/// Test inbound REFER success flow.
-///
-/// Scenario:
-/// 1. Alice registers and calls Bob via PBX
-/// 2. Bob answers
-/// 3. Alice sends REFER to PBX, targeting Charlie (sipbot)
-/// 4. PBX returns 202 Accepted, then originates to Charlie
-/// 5. Charlie answers
-/// 6. PBX bridges the calls
 #[tokio::test]
-async fn test_inbound_refer_success() {
+async fn test_inbound_refer_success_from_caller() {
+    run_inbound_refer_success(false).await;
+}
+
+#[tokio::test]
+async fn test_inbound_refer_success_from_callee() {
+    run_inbound_refer_success(true).await;
+}
+
+async fn run_inbound_refer_success(from_callee: bool) {
     let _ = tracing_subscriber::fmt::try_init();
 
     let server = Arc::new(
@@ -98,7 +98,7 @@ async fn test_inbound_refer_success() {
         }
         sleep(Duration::from_millis(100)).await;
     }
-    assert!(bob_dialog_id.is_some(), "Bob should receive the call");
+    let bob_dialog_id = bob_dialog_id.expect("Bob should receive the call");
 
     let alice_dialog_id = match tokio::time::timeout(Duration::from_secs(5), caller_handle).await {
         Ok(Ok(Ok(id))) => id,
@@ -158,21 +158,23 @@ async fn test_inbound_refer_success() {
         charlie_dialog_id
     });
 
-    sleep(Duration::from_millis(300)).await;
-
-    // Alice sends REFER to PBX
-    let refer_status = alice
-        .send_refer(&alice_dialog_id, &charlie_uri)
+    let (referrer, referrer_dialog) = if from_callee {
+        (&bob, &bob_dialog_id)
+    } else {
+        (&alice, &alice_dialog_id)
+    };
+    let refer_status = referrer
+        .send_refer(referrer_dialog, &charlie_uri)
         .await
         .expect("send_refer failed");
 
     assert_eq!(refer_status, 202, "REFER should be accepted with 202");
 
-    // Process Alice's dialog events (including NOTIFY from PBX) so the REFER subscription can proceed
-    let alice_clone = alice.clone();
-    let alice_event_handle = rustpbx::utils::spawn(async move {
+    // Process the referrer's NOTIFY events so the REFER subscription can proceed.
+    let referrer = referrer.clone();
+    let referrer_event_handle = rustpbx::utils::spawn(async move {
         for _ in 0..100 {
-            let _ = alice_clone.process_dialog_events().await;
+            let _ = referrer.process_dialog_events().await;
             sleep(Duration::from_millis(50)).await;
         }
     });
@@ -187,7 +189,7 @@ async fn test_inbound_refer_success() {
         "Charlie should receive and answer the transfer call"
     );
 
-    alice_event_handle.abort();
+    referrer_event_handle.abort();
 
     // Blind inbound REFERs execute INSIDE the original session by default
     // (`inbound_refer_in_session`): the B leg is swapped in place — Charlie
@@ -215,7 +217,7 @@ async fn test_inbound_refer_success() {
 
     // Cleanup
     alice.hangup(&alice_dialog_id).await.ok();
-    bob.hangup(&bob_dialog_id.unwrap()).await.ok();
+    bob.hangup(&bob_dialog_id).await.ok();
     if let Some(ref id) = charlie_dialog_id {
         charlie.hangup(id).await.ok();
     }

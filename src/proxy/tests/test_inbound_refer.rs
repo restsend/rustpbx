@@ -25,57 +25,83 @@ fn refer_test_dialplan() -> crate::call::Dialplan {
 }
 
 #[tokio::test]
-async fn inbound_refer_in_session_dispatches_transfer_command() {
-    let (mut session, handle, mut cmd_rx) = build_session_with_cmd_rx(refer_test_dialplan()).await;
-    let dialog_id = session
-        .caller_dialog
-        .as_ref()
-        .map(|d| d.id())
-        .expect("UAS test session must have a caller dialog");
+async fn inbound_refer_in_session_waits_for_transfer_result() {
+    let cases = [
+        (Ok(()), None),
+        (
+            Err("route-point start failed".to_string()),
+            Some((500, "route-point start failed")),
+        ),
+    ];
 
-    // Drive the session command loop: QueryLegByDialog is executed for real
-    // (resolving the transferor leg from the caller dialog), while the
-    // dispatched Transfer command is captured instead of executed — running
-    // the B-leg dial would hit the network and block the test.
-    let driver = tokio::spawn(async move {
-        let mut captured = None;
-        while let Some(command) = cmd_rx.recv().await {
-            match command {
-                CallCommand::Transfer {
-                    leg_id,
-                    target,
-                    attended,
-                } => {
-                    captured = Some((leg_id, target, attended));
-                    break;
-                }
-                other => {
-                    let _ = session.execute_command(other, None).await;
+    for (completion_result, expected_error) in cases {
+        let (mut session, handle, mut cmd_rx) =
+            build_session_with_cmd_rx(refer_test_dialplan()).await;
+        let dialog_id = session
+            .caller_dialog
+            .as_ref()
+            .map(|d| d.id())
+            .expect("UAS test session must have a caller dialog");
+
+        // Drive QueryLegByDialog through the real session, but capture the
+        // Transfer command because dialing a B-leg would hit the network.
+        let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+        let driver = tokio::spawn(async move {
+            while let Some(command) = cmd_rx.recv().await {
+                match command {
+                    CallCommand::TransferWithCompletion {
+                        leg_id,
+                        target,
+                        completion,
+                        ..
+                    } => {
+                        let _ = captured_tx.send((leg_id, target, completion));
+                        break;
+                    }
+                    other => {
+                        let _ = session.execute_command(other, None).await;
+                    }
                 }
             }
+        });
+
+        let execution = tokio::spawn({
+            let handle = handle.clone();
+            async move {
+                CallModule::execute_inbound_refer_in_session(
+                    &handle,
+                    &DialogId::from(dialog_id),
+                    "sip:2001@rustpbx.com",
+                )
+                .await
+            }
+        });
+
+        let (leg_id, target, completion) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), captured_rx)
+                .await
+                .expect("Transfer command must reach the session")
+                .expect("capture channel must stay open");
+        assert!(
+            !execution.is_finished(),
+            "dispatch must await transfer execution"
+        );
+        assert_eq!(leg_id.as_str(), "caller");
+        assert_eq!(target, "sip:2001@rustpbx.com");
+        completion
+            .expect("inbound REFER must request completion")
+            .send(completion_result)
+            .expect("execution must await the completion result");
+
+        let result = execution.await.expect("execution task must not panic");
+        match expected_error {
+            Some((status, reason)) => {
+                assert_eq!(result, Err((status, reason.to_string())));
+            }
+            None => assert_eq!(result, Ok(true)),
         }
-        captured
-    });
-
-    let dispatched = CallModule::execute_inbound_refer_in_session(
-        &handle,
-        &DialogId::from(dialog_id.clone()),
-        "sip:2001@rustpbx.com",
-    )
-    .await
-    .expect("dispatch must not error");
-    assert!(dispatched, "known dialog must dispatch in-session");
-
-    drop(handle);
-    let captured = tokio::time::timeout(std::time::Duration::from_secs(5), driver)
-        .await
-        .expect("driver must terminate after the Transfer command")
-        .expect("driver task panicked");
-    let (leg_id, target, attended) = captured.expect("Transfer command must reach the session");
-    // The REFER arrived on the caller dialog → the transferor leg is "caller".
-    assert_eq!(leg_id.as_str(), "caller");
-    assert_eq!(target, "sip:2001@rustpbx.com");
-    assert!(!attended);
+        driver.await.expect("driver task must not panic");
+    }
 }
 
 #[tokio::test]
@@ -141,6 +167,7 @@ fn transfer_command_shape_matches_dispatch() {
         leg_id,
         target,
         attended,
+        ..
     } = command
     else {
         panic!("expected Transfer");

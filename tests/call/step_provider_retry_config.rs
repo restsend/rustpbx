@@ -12,7 +12,8 @@ use rustpbx::call::app::ivr::{
 #[test]
 fn step_provider_uses_configured_timeout_and_retry_delay() {
     let config = IvrProviderConfig {
-        url: "http://127.0.0.1:28080/ivr/step".into(),
+        url: Some("http://127.0.0.1:28080/ivr/step".into()),
+        endpoint: None,
         headers: HashMap::new(),
         max_retries: 3,
         retry_delay_ms: 250,
