@@ -1,4 +1,26 @@
 use crate::media::media_bridge::MediaBridge;
+use tokio_util::sync::CancellationToken;
+
+/// Which external (WebSocket) media bridge a handle belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalBridgeKind {
+    /// TTS/voip bridge established by `connect_bridge`.
+    Voip,
+    /// Realtime (AI voice) bridge.
+    Realtime,
+}
+
+/// Handle to an EXTERNAL (WebSocket) media bridge attached to one leg —
+/// TTS/voip (`connect_bridge`) or realtime AI voice (`RealtimeStart`).
+/// Deliberately distinct from `ConferenceBridgeHandle`: the conference
+/// slot's `conf_id` gates `update_media_path()` and must never be set by
+/// an external bridge (a past cause of one-way audio).
+pub struct ExternalBridgeHandle {
+    pub cancel: CancellationToken,
+    pub kind: ExternalBridgeKind,
+    /// Realtime only: an unexpected endpoint close hangs the call up.
+    pub hangup_on_disconnect: bool,
+}
 
 pub struct MediaState {
     pub caller_offer: Option<String>,

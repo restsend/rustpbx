@@ -133,7 +133,15 @@ impl TestPbx {
             builder = builder.with_callrecord_sender(Some(sender));
         }
         for inspector in inject.dialplan_inspectors {
-            builder = builder.with_dialplan_inspector(inspector);
+            builder = builder.with_dialplan_inspector_entry(
+                rustpbx::proxy::routing::inspector_stack::OrderedDialplanInspector::new(
+                    "test.anonymous",
+                    rustpbx::proxy::routing::stack::RoutingPhase::PreRoute,
+                    0,
+                    rustpbx::proxy::routing::stack::EvalMode::PreRoute,
+                    inspector,
+                ),
+            );
         }
 
         let sip_server = builder.build().await.expect("SipServer build failed");

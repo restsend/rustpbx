@@ -151,8 +151,7 @@ pub struct CallHangup {
     pub hangup_by: Option<String>,
     pub sip_status: Option<u16>,
     /// Talk time in seconds (answer → hangup). `None` when the call was never
-    /// answered (originate setup failures). Replaces the `duration_secs`
-    /// previously carried only by `cc_hangup`.
+    /// answered (originate setup failures).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_secs: Option<u64>,
 }

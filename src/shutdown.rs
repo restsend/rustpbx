@@ -78,7 +78,7 @@ pub async fn wait_until_drained(
 }
 
 /// Log helper for the shared drain loop: a one-line summary at the end
-/// of a drain, matching the messages the AMI handler used to emit.
+/// of a drain.
 pub fn log_drain_outcome(outcome: DrainOutcome) {
     match outcome {
         DrainOutcome::Drained => {

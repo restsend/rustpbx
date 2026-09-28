@@ -430,6 +430,152 @@ pub fn is_proxy_address(addr: &SocketAddr, proxy_ip: &str, proxy_ports: &[u16]) 
     addr.ip().to_string() == proxy_ip && proxy_ports.contains(&addr.port())
 }
 
+/// Captured inbound RTP packet with its payload retained for content analysis.
+#[derive(Debug, Clone)]
+pub struct CapturedRtp {
+    pub payload_type: u8,
+    pub sequence_number: u16,
+    pub timestamp: u32,
+    pub payload: Vec<u8>,
+}
+
+/// Upper bound on captured packets (4000 × ~160 B ≈ 640 KB per endpoint).
+const CAPTURE_CAP: usize = 4000;
+
+/// A combined RTP media endpoint that sends and receives on the SAME UDP
+/// socket — like a real UA. Use this (instead of an [`RtpReceiver`]/[`RtpSender`]
+/// pair) whenever the server side latches the return path to the inbound
+/// packet source address: packets sent from a separate sender socket would
+/// redirect the server's egress to that socket, starving the receiver.
+///
+/// Inbound packets are captured with payloads (bounded by [`CAPTURE_CAP`]) so
+/// tests can decode them (e.g. μ-law → PCM) and assert on audio content.
+pub struct RtpEndpoint {
+    socket: Arc<UdpSocket>,
+    captured: std::sync::Arc<std::sync::Mutex<Vec<CapturedRtp>>>,
+    cancel_token: tokio_util::sync::CancellationToken,
+}
+
+impl RtpEndpoint {
+    pub async fn bind(port: u16) -> Result<Self> {
+        let addr = format!("127.0.0.1:{}", port);
+        let socket = Arc::new(UdpSocket::bind(&addr).await?);
+        debug!("RTP endpoint bound to {}", addr);
+        Ok(Self {
+            socket,
+            captured: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+        })
+    }
+
+    pub fn local_port(&self) -> Result<u16> {
+        Ok(self.socket.local_addr()?.port())
+    }
+
+    /// Start receiving in the background, capturing every decodable RTP packet.
+    pub fn start_receiving(&self) {
+        let socket = Arc::clone(&self.socket);
+        let captured = Arc::clone(&self.captured);
+        let cancel_token = self.cancel_token.clone();
+
+        rustpbx::utils::spawn(async move {
+            let mut buf = vec![0u8; 1500];
+            loop {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        debug!("RTP endpoint receive cancelled");
+                        break;
+                    }
+                    result = socket.recv_from(&mut buf) => {
+                        match result {
+                            Ok((len, _from)) => {
+                                if let Ok(packet) = RtpPacket::decode(&buf[..len]) {
+                                    let mut cap = captured.lock().unwrap();
+                                    if cap.len() < CAPTURE_CAP {
+                                        cap.push(CapturedRtp {
+                                            payload_type: packet.payload_type,
+                                            sequence_number: packet.sequence_number,
+                                            timestamp: packet.timestamp,
+                                            payload: packet.payload,
+                                        });
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("RTP endpoint receive error: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /// Continuously send PCMU (PT 0) silence packets (160-byte payloads, 20 ms
+    /// pacing) to `target` for `seconds`. Used to open the server's latched
+    /// return path and simulate a live caller uplink.
+    pub fn start_sending_pcmu(&self, target: SocketAddr, seconds: u64) {
+        let socket = Arc::clone(&self.socket);
+        let cancel_token = self.cancel_token.clone();
+
+        rustpbx::utils::spawn(async move {
+            let mut packet = RtpPacket::new(0, 0, 0, 0x5254_5045, vec![0xFFu8; 160]);
+            let mut interval = tokio::time::interval(Duration::from_millis(20));
+            let deadline = Instant::now() + Duration::from_secs(seconds);
+            loop {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        debug!("RTP endpoint send cancelled");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        if Instant::now() >= deadline {
+                            break;
+                        }
+                        packet.sequence_number = packet.sequence_number.wrapping_add(1);
+                        packet.timestamp = packet.timestamp.wrapping_add(160);
+                        let data = packet.encode();
+                        if let Err(e) = socket.send_to(&data, target).await {
+                            warn!("RTP endpoint send error: {}", e);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /// Total number of captured RTP packets (all payload types).
+    pub fn captured_count(&self) -> usize {
+        self.captured.lock().unwrap().len()
+    }
+
+    /// Payloads of captured PCMU (PT 0) packets, in arrival order.
+    pub fn captured_pcmu_payloads(&self) -> Vec<Vec<u8>> {
+        self.captured
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.payload_type == 0)
+            .map(|c| c.payload.clone())
+            .collect()
+    }
+
+    /// Distinct payload types seen so far (for diagnostics).
+    pub fn captured_payload_types(&self) -> Vec<u8> {
+        let mut types: Vec<u8> = {
+            let cap = self.captured.lock().unwrap();
+            cap.iter().map(|c| c.payload_type).collect()
+        };
+        types.sort_unstable();
+        types.dedup();
+        types
+    }
+
+    pub fn stop(&self) {
+        self.cancel_token.cancel();
+    }
+}
+
 /// RTP validation result
 #[derive(Debug, Clone)]
 pub struct RtpValidationResult {

@@ -54,19 +54,23 @@ cross = []
 # they can drive real SIP+RTP flows against their own server assembly.
 e2e-testing = ["dep:portpicker"]
 console = ["dep:minijinja"]
-addon-acme = ["instant-acme"]
+# Addons below integrate the web console (crate::console handlers, AppState
+# fields), so they hard-depend on the `console` feature to stay compilable in
+# every feature combination (--no-default-features included).
+addon-acme = ["console", "instant-acme"]
 addon-wholesale = [
+    "console",
     "dep:async-stream",
     "dep:async-compression",
     "dep:country-emoji",
     "dep:hex",
     "dep:iso_currency",
 ]
-addon-archive = ["dep:async-compression", "dep:csv-async"]
-addon-transcript = []
-addon-voicemail = ["dep:url"]
-addon-ivr-editor = ["dep:hex"]
-addon-cc = []
+addon-archive = ["console", "dep:async-compression", "dep:csv-async"]
+addon-transcript = ["console"]
+addon-voicemail = ["console", "dep:url"]
+addon-ivr-editor = ["console", "dep:hex"]
+addon-cc = ["console"]
 
 addon-observability = ["metrics-exporter-prometheus"]
 commerce = [

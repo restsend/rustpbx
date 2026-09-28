@@ -3,6 +3,7 @@
 //! than duplicating helpers or splitting into a separate crate.
 #![allow(dead_code)]
 
+pub mod audio_analysis;
 pub mod audio_mocks;
 pub mod cdr_capture;
 pub mod e2e_test_server;

@@ -38,7 +38,7 @@ impl SipSession {
             let selected = self.resolve_transfer_leg();
             let mut agent_id = self.legs.get(&leg_id).and_then(|leg| leg.agent_id.clone());
             if agent_id.is_none() && leg_id == selected {
-                agent_id = self.session_ext_get("resolved_agent_id").or_else(|| self.session_ext_get("agent_id"));
+                agent_id = self.pinned_agent_id().or_else(|| self.session_ext_get("agent_id"));
             }
             if let Some(agent_id) = agent_id {
                 if let Some(leg) = self.legs.get_mut(&leg_id) {
@@ -84,7 +84,6 @@ impl SipSession {
         // The explicitly configured legacy blind-transfer path retains
         // its existing external execution. Blind in-session REFER is owned
         // entirely by SipSession after the event above.
-        // Spawn async task to handle the transfer and send NOTIFYs
         let dialog_layer = self.server.dialog_layer.clone();
         let refer_to_clone = refer_to.clone();
         let server = self.server.clone();
@@ -92,10 +91,8 @@ impl SipSession {
         crate::utils::spawn(async move {
             info!("Spawned inbound REFER background task");
 
-            // Small delay to ensure 202 response is sent
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-            // Send NOTIFY with 100 Trying
             info!("Sending NOTIFY 100 Trying for REFER");
             match Self::send_refer_notify(&dialog_layer, &dialog_id, 100, "Trying", &refer_to_clone)
                 .await
@@ -114,7 +111,6 @@ impl SipSession {
                 &target_uri,
             ).await;
 
-            // Send final NOTIFY based on result
             let (notify_status, notify_reason) = match result {
                 Ok(_) => (200, "OK"),
                 Err((status, ref reason)) => {
@@ -420,11 +416,9 @@ impl SipSession {
     ) -> Result<(), (u16, String)> {
         info!(target_uri, "Starting inbound REFER transfer execution");
 
-        // Parse destination URI
         let destination_uri: rsipstack::sip::Uri = rsipstack::sip::Uri::try_from(target_uri)
             .map_err(|e| (400, format!("Invalid transfer target URI: {:?}", e)))?;
 
-        // Build caller URI (use server realm)
         let proxy_config = server.proxy_config.load();
         let realm = proxy_config
             .realms
@@ -451,7 +445,6 @@ impl SipSession {
             })
             .unwrap_or_else(|| original_session_id.to_string());
 
-        // Build headers
         let mut headers = vec![rsipstack::sip::Header::Other(
             "Max-Forwards".into(),
             "70".into(),
@@ -464,14 +457,12 @@ impl SipSession {
             None,
             None,
         ));
-        // Get media config for SDP
         let media = server.default_media_config();
         let external_ip = media
             .external_ip
             .clone()
             .unwrap_or_else(|| "127.0.0.1".to_string());
 
-        // Create media track and SDP offer
         let new_call_id = uuid::Uuid::new_v4().to_string();
         let media_track =
             crate::media::RtpTrackBuilder::new(format!("inbound-refer-{}", new_call_id))
@@ -495,7 +486,6 @@ impl SipSession {
             .await
             .map_err(|e| (500, format!("Failed to generate SDP: {}", e)))?;
 
-        // Build invite options
         let invite_option = rsipstack::dialog::invitation::InviteOption {
             callee: destination_uri.clone(),
             caller: caller_uri.clone(),
@@ -520,11 +510,9 @@ impl SipSession {
         let original_session_id = original_session_id.to_string();
         let target_for_log = target_uri.to_string();
 
-        // Do the originate
         let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut invitation = dialog_layer.do_invite(invite_option, state_tx).boxed();
 
-        // Create session and register
         let id = SessionId::from(new_call_id.clone());
         let (new_handle, mut _cmd_rx) = SipSession::with_handle(id);
 
@@ -539,7 +527,6 @@ impl SipSession {
         };
         registry.upsert(entry, new_handle.clone());
 
-        // Wait for invitation result with timeout
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(None);
         let timeout_secs = 60u64;
         let result = tokio::time::timeout(
@@ -607,7 +594,6 @@ impl SipSession {
                     gw.meta_store.insert(new_call_id.clone(), meta);
                 }
 
-                // Bridge original call with new call
                 let leg_a = crate::call::domain::LegId::new(&original_session_id);
                 let leg_b = crate::call::domain::LegId::new(&new_call_id);
 

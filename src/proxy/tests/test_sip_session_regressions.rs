@@ -2431,6 +2431,34 @@ fn parse_media_play() {
 }
 
 #[test]
+fn parse_media_play_side_only_targets_single_leg() {
+    // `side_only: true` disables the opposite-leg mirror: the named `leg_id`
+    // (default caller) is then the only ear. Default stays mirroring (false).
+    let parsed = serde_json::json!({
+        "action":"media.play",
+        "params":{"source":{"source_type":"file","uri":"prompt.wav"},
+                  "leg_id":"caller","side_only":true}
+    });
+    let cmd = SipSession::parse_info_command("media.play", parsed.get("params"), &parsed);
+    let Some(CallCommand::Play { leg_id, options, .. }) = cmd else {
+        panic!("media.play must parse: {cmd:?}");
+    };
+    assert_eq!(leg_id.as_ref().map(|l| l.as_str()), Some("caller"));
+    let options = options.expect("play options");
+    assert!(options.side_only, "side_only must ride PlayOptions");
+
+    let parsed = serde_json::json!({
+        "action":"media.play",
+        "params":{"source":{"source_type":"file","uri":"prompt.wav"}}
+    });
+    let cmd = SipSession::parse_info_command("media.play", parsed.get("params"), &parsed);
+    let Some(CallCommand::Play { options, .. }) = cmd else {
+        panic!("media.play must parse: {cmd:?}");
+    };
+    assert!(!options.expect("play options").side_only, "default mirrors");
+}
+
+#[test]
 fn parse_media_stop() {
     let parsed = serde_json::json!({"action":"media.stop","params":{"leg_id":"caller"}});
     let cmd = SipSession::parse_info_command("media.stop", parsed.get("params"), &parsed);
@@ -3276,10 +3304,12 @@ async fn voip_bridge_must_not_block_queue_agent_media_bridge() {
 
     // An IVR TTS voip bridge goes up — the session must NOT poison the
     // conference guard (the regression: conf_id stayed Some forever).
-    session.voip_bridge = Some(crate::call::runtime::ConferenceBridgeHandle {
-        _tasks: vec![],
-        cancel_token: tokio_util::sync::CancellationToken::new(),
-    });
+    session.external_bridge =
+        Some(crate::proxy::proxy_call::media_state::ExternalBridgeHandle {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            kind: crate::proxy::proxy_call::media_state::ExternalBridgeKind::Voip,
+            hangup_on_disconnect: false,
+        });
     assert!(
         session.conference_bridge.conf_id.is_none(),
         "voip bridge must not set conference_bridge.conf_id"
@@ -3289,7 +3319,7 @@ async fn voip_bridge_must_not_block_queue_agent_media_bridge() {
     session
         .execute_command(CallCommand::VoipBridgeClosed, None)
         .await;
-    assert!(session.voip_bridge.is_none(), "handle must be dropped");
+    assert!(session.external_bridge.is_none(), "handle must be dropped");
 
     // Queue dials the dynamic agent leg and it answers.
     let agent_leg = LegId::from("queue-agent-1");

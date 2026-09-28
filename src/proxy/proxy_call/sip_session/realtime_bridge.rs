@@ -88,24 +88,23 @@ impl Playout for MediaBridgePlayout {
 // Session wiring — `impl SipSession` handlers for the realtime commands.
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Cancellable handle for the active realtime bridge, owned by the session.
-pub(crate) struct RealtimeBridgeHandle {
-    pub cancel: CancellationToken,
-    /// `true` when an unexpected endpoint close should hang the call up
-    /// (from `RealtimeParams::hangup_on_disconnect`).
-    pub hangup_on_disconnect: bool,
-}
-
 use super::session::SipSession;
 use crate::call::domain::{CallCommand, HangupCascade, HangupCommand, HangupInitiator};
 use crate::call_errors::{ErrSeverity, TraceEvent, TraceKind};
+use crate::proxy::proxy_call::media_state::{ExternalBridgeHandle, ExternalBridgeKind};
 use crate::rwi::RealtimeEvent;
 
 impl SipSession {
     /// Cancel the active realtime bridge without any hangup side effects —
     /// used on call teardown, `StopApp` and app replacement. Idempotent.
+    /// Leaves a voip bridge alone (stop the app that owns it instead).
     pub(crate) fn teardown_realtime_bridge(&mut self, why: &str) {
-        if let Some(handle) = self.realtime_bridge.take() {
+        if self
+            .external_bridge
+            .as_ref()
+            .is_some_and(|h| h.kind == ExternalBridgeKind::Realtime)
+        {
+            let handle = self.external_bridge.take().expect("checked above");
             handle.cancel.cancel();
             info!(session_id = %self.id, why, "realtime: bridge torn down");
         }
@@ -277,8 +276,9 @@ impl SipSession {
             });
         }
 
-        self.realtime_bridge = Some(RealtimeBridgeHandle {
+        self.external_bridge = Some(ExternalBridgeHandle {
             cancel,
+            kind: ExternalBridgeKind::Realtime,
             hangup_on_disconnect,
         });
 
@@ -304,9 +304,14 @@ impl SipSession {
         &mut self,
         reason: Option<String>,
     ) -> anyhow::Result<()> {
-        let Some(handle) = self.realtime_bridge.take() else {
+        if !self
+            .external_bridge
+            .as_ref()
+            .is_some_and(|h| h.kind == ExternalBridgeKind::Realtime)
+        {
             return Ok(());
-        };
+        }
+        let handle = self.external_bridge.take().expect("checked above");
         handle.cancel.cancel();
         info!(session_id = %self.id, reason = ?reason, "realtime: bridge stopped");
         self.record_trace(

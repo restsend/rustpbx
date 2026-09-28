@@ -295,6 +295,82 @@ async def test_refer_transfers_into_ivr(pbx, webhook_server, cc_api, sipbot_pool
         await agent.stop()
 
 
+@pytest.mark.xfail(
+    reason="known_gap (shares the REFER→IVR teardown gap, see "
+    "test_refer_transfers_into_ivr): after the REFER hand-off resolves the "
+    "*83 feature code to `conference:<room>` (call_transferred fires), the "
+    "referrer's automatic BYE (refer_mode=auto, transferor-exits) tears down "
+    "the whole session before the conference app can run — no "
+    "conference_joined. Direct dialing of *83<room> works fully (see "
+    "test_quick_route.py::test_feature_code_joins_conference_and_room_auto_ends).",
+    strict=False,
+)
+async def test_refer_transfers_into_conference(pbx, webhook_server, cc_api,
+                                               sipbot_pool, evidence,
+                                               event_checker):
+    """In-dialog REFER to `sip:*83<room>@…` → the transferred call joins the
+    (created-on-demand) conference room. The room is visible as a live
+    transfer-target while the call is up and is auto-destroyed once the call
+    ends (无人自动结束)."""
+    room_id = "room-refer"
+    _register_callee(sipbot_pool, pbx, "1001", 15112, hangup_after=60)
+    await asyncio.sleep(2)
+    webhook_server.receiver.clear()
+
+    agent = RestsendAgent(pbx, "1002", local_port=25123)
+    await agent.start()
+    try:
+        assert await agent.register(expires=120), "1002 REGISTER failed"
+        await agent.publish_idle()
+        await agent.cmd({"cmd": "sip_call",
+                         "remote_uri": f"sip:1001@{pbx.sip_addr}"})
+        connected = await agent.wait_event(
+            "state_changed", predicate=lambda e: e.get("name") == "connected", timeout=15)
+        assert connected, f"call to 1001 not connected:\n{agent.stderr_text()[-400:]}"
+
+        await agent.cmd({"cmd": "sip_refer",
+                         "refer_to": f"sip:*83{room_id}@{pbx.sip_addr}"})
+
+        joined = await _wait_webhook(
+            webhook_server, "conference_joined",
+            predicate=lambda e: (e.payload or {}).get("conf_id") == room_id,
+            timeout=25,
+        )()
+        assert joined, (
+            f"transferred call must join conference room '{room_id}'. Events: "
+            f"{webhook_server.receiver.event_types()}"
+        )
+        evidence.log_metric("refer_conference", {"room": room_id})
+
+        # Live-room visibility via the picker candidates API.
+        resp = await cc_api.get(f"{API_BASE}/transfer-targets")
+        entry = next((c for c in (resp.get("conferences") or [])
+                      if c.get("id") == room_id), None)
+        assert entry and entry.get("number") == f"*83{room_id}", (
+            f"live room '{room_id}' missing/incorrect in /transfer-targets: {entry}"
+        )
+
+        await agent.hangup()
+
+        # Last participant left → room auto-destroyed.
+        async def _room_present():
+            resp = await cc_api.get(f"{API_BASE}/transfer-targets")
+            return any(c.get("id") == room_id for c in (resp.get("conferences") or []))
+
+        import time as _time
+        deadline = _time.monotonic() + 12
+        gone = False
+        while _time.monotonic() < deadline:
+            if not (await _room_present()):
+                gone = True
+                break
+            await asyncio.sleep(0.5)
+        assert gone, f"room '{room_id}' must auto-destroy after the call ends"
+        evidence.log_metric("refer_conference_auto_end", f"{room_id} destroyed")
+    finally:
+        await agent.stop()
+
+
 # ── P6: outbound-permission enforcement ─────────────────────────────────────
 
 

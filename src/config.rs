@@ -275,10 +275,6 @@ pub struct RecordingPolicy {
     /// `type = "sipflow"` for SipFlow RTP capture. Kept for config compatibility.
     #[serde(default)]
     pub force_file: Option<bool>,
-    /// Deprecated: the signaling JSONL sidecar has been removed. SIP signalling
-    /// is captured only when `[sipflow]` is configured. Kept for compatibility.
-    #[serde(default)]
-    pub signaling: Option<bool>,
     /// Swap stereo channels in recording: callee→left, caller→right.
     #[serde(default)]
     pub stereo_swap: Option<bool>,
@@ -1584,6 +1580,12 @@ pub struct ProxyConfig {
     /// SIP conference factory URI. Disabled when unset.
     #[serde(default)]
     pub conference_factory_uri: Option<String>,
+    /// Seconds an empty conference room may linger before a watchdog
+    /// destroys it ("nobody joined / everyone left" safety net — also covers
+    /// rooms whose media bridges all failed right after dial-in). `0`
+    /// disables the watchdog. Default: 60.
+    #[serde(default = "default_conference_empty_timeout_secs")]
+    pub conference_empty_timeout_secs: u64,
     /// When enabled, app/transfer/RWI-originated calls whose target is not a
     /// registered internal contact are routed through the route table
     /// (match/rewrite/trunk selection) just like inbound calls. Default off —
@@ -1677,6 +1679,9 @@ fn default_uri_max_length() -> usize {
 }
 fn default_parallel_fork() -> bool {
     true
+}
+fn default_conference_empty_timeout_secs() -> u64 {
+    60
 }
 fn default_true() -> bool {
     true
@@ -2221,6 +2226,7 @@ impl Default for ProxyConfig {
             blind_transfer_use_refer: false,
             inbound_refer_in_session: true,
             conference_factory_uri: None,
+            conference_empty_timeout_secs: default_conference_empty_timeout_secs(),
             route_originated_calls: false,
             parallel_fork: default_parallel_fork(),
             max_ring_time: None,

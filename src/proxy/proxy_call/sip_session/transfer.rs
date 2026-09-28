@@ -912,12 +912,12 @@ impl SipSession {
         // SIP legs carry their own identity. Keep the existing fallback for
         // API-created calls whose originating leg predates agent attribution.
         let agent_id = self.legs.get(transferor_leg).and_then(|leg| leg.agent_id.clone())
-            .or_else(|| self.session_ext_get("resolved_agent_id"))
+            .or_else(|| self.pinned_agent_id())
             .or_else(|| self.legs.get(transferor_leg).and_then(|leg| leg.endpoint.as_deref())
                 .and_then(crate::models::call_record::extract_sip_username))
             .or_else(|| self.meta.connected_callee.as_deref()
                 .and_then(crate::models::call_record::extract_sip_username));
-        let agent_name = if agent_id.is_some() && agent_id == self.session_ext_get("resolved_agent_id") {
+        let agent_name = if agent_id.is_some() && agent_id == self.pinned_agent_id() {
             self.session_ext_get("agent_name")
         } else { None };
 
@@ -1848,9 +1848,7 @@ impl SipSession {
                     crate::call::TransferEndpoint::Conference(id.to_string())
                 }
                 _ => {
-                    // Generic app — use IVR as the fallback endpoint with the
-                    // app name so it re-enters routing.  This is a best-effort
-                    // path for non-standard apps.
+                    // See the endpoint mapping above: IVR re-enters routing.
                     let target = spec.target.as_deref().unwrap_or(&spec.app_name);
                     crate::call::TransferEndpoint::Ivr(target.to_string())
                 }
@@ -2200,7 +2198,7 @@ impl SipSession {
         let ivr_file = self.server.data_context.resolve_ivr_file(ivr_name).await;
         info!(session_id = %self.id, ivr = %ivr_name, file = %ivr_file, "Starting IVR application");
         // Remember the IVR short code so a later queue dispatch can inject
-        // `User-to-User` `ivr=` (desk_rustpbx.md §3.2).
+        // `User-to-User` `ivr=`.
         self.session_ext_set("ivr", ivr_name);
         let mut app_params = serde_json::json!({"file": ivr_file});
         if !query_params.is_empty() {
@@ -2432,17 +2430,13 @@ impl SipSession {
                     .map(MediaNegotiator::extract_leg_profile)
             });
 
-        // ── 3. Determine codec type + payload type ───────────────────────
+        // ── 2. Determine codec type + payload type ───────────────────────
         // Prefer the selected leg's negotiated codec and PT so the injected
         // audio and reverse decoder use the profile that leg actually accepted.
-        // The bridge URL `codec` query param is only a fallback.
-        //
-        // The forward loop used to encode the `codec` param and tag frames with
-        // `codec_type.payload_type()` — the codec's STATIC default PT (Opus=111,
-        // PCMU=0). When that differs from the caller's negotiated PT (e.g. Opus
-        // negotiated at 96, or a PCMU caller bridged with codec=opus), the
-        // forward frames carry a PT the caller never offered, which on the same
-        // SSRC as the IVR greeting shows up as a PT 0↔96/111 toggle.
+        // The bridge URL `codec` query param is only a fallback — encoding the
+        // fallback's STATIC default PT (Opus=111, PCMU=0) instead of the
+        // negotiated PT makes forward frames carry a PT the caller never
+        // offered (PT 0↔96/111 toggle on the greeting's SSRC).
         let codec_type = if let Some(audio) = negotiated_profile
             .as_ref()
             .and_then(|profile| profile.audio.as_ref())
@@ -2474,10 +2468,10 @@ impl SipSession {
         let dec_sample_rate = decoder.sample_rate();
         let ws_sample_rate = if sample_rate == 0 { 8000 } else { sample_rate };
 
-        // ── 5. Cancellation token (parent = session cancel) ──────────
+        // ── 3. Cancellation token (parent = session cancel) ──────────
         let cancel_token = self.cancel_token.child_token();
 
-        // ── 5b. DTMF payload types (from answer SDP) ─────────────────
+        // ── 4. DTMF payload types (from answer SDP) ─────────────────
         let mut dtmf_payload_types: Vec<u8> = negotiated_profile
             .as_ref()
             .map(|profile| profile.dtmf_pts().into_iter().collect())
@@ -2485,7 +2479,7 @@ impl SipSession {
         dtmf_payload_types.sort_unstable();
         dtmf_payload_types.dedup();
 
-        // ── 5c. DTMF JSON text-frame channel ─────────────────────────
+        // ── 5. DTMF JSON text-frame channel ─────────────────────────
         let (dtmf_json_tx, mut dtmf_json_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         *self.bridge_dtmf_tx.write() = Some(dtmf_json_tx.clone());
         let bridge_dtmf_tx_state = self.bridge_dtmf_tx.clone();
@@ -2604,14 +2598,12 @@ impl SipSession {
         };
 
         // ── 8. Store bridge reference on session ─────────────────────
-        // Kept on the dedicated voip_bridge slot: `conference_bridge` carries
-        // a `conf_id` that gates `update_media_path()` for REAL conferences;
-        // parking the voip handle there left that guard set forever after the
-        // bridge closed, silently blocking every later media-route update
-        // (e.g. bridging a queue agent leg that connects afterwards).
-        self.voip_bridge = Some(crate::call::runtime::ConferenceBridgeHandle {
-            _tasks: vec![],
-            cancel_token: cancel_token.clone(),
+        // External voip bridge slot — see the field doc for why this must
+        // never live in `conference_bridge`.
+        self.external_bridge = Some(crate::proxy::proxy_call::media_state::ExternalBridgeHandle {
+            cancel: cancel_token.clone(),
+            kind: crate::proxy::proxy_call::media_state::ExternalBridgeKind::Voip,
+            hangup_on_disconnect: false,
         });
 
         // ── 9. Write return app to CallMeta + spawn disconnect monitor ──
@@ -2948,13 +2940,6 @@ mod tests {
 
     // -------------------------------------------------------------------------
     // parse_transfer_target — pure-function dispatch tests
-    //
-    // Why these tests didn't exist before:
-    //   The target dispatch was inlined inside `handle_blind_transfer` as a
-    //   sequence of `starts_with` if-chains.  Without extraction into a
-    //   standalone function there was nothing to call in a unit test; the logic
-    //   was only reachable through a fully-wired SipSession, so the edge cases
-    //   (empty suffix, mixed casing, return_to_ivr param) were never exercised.
     // -------------------------------------------------------------------------
 
     #[test]
@@ -3361,17 +3346,8 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Disposable-channel spin-loop regression check
-    //
-    // Why the spin loop wasn't caught before:
-    //   The pattern `let (_tx, mut rx) = unbounded_channel(); fn(&mut rx)` sends
-    //   the sender to `_` (immediately dropped).  Inside `try_single_target` the
-    //   tokio::select! polls `rx.recv()` which returns `None` on every tick
-    //   because the sender is gone — yet the loop body didn't `break`, so it
-    //   spun on the CPU until the parallel `invitation` future completed.
-    //   Integration tests exercised the happy-path (call connects quickly)
-    //   without measuring early-media forwarding or CPU usage, so the spin was
-    //   invisible.  A dropped-sender can be verified as a unit test:
+    // Disposable-channel spin-loop regression: a dropped sender makes
+    // `rx.recv()` return None on every tick — the loop must break, not spin.
     // -------------------------------------------------------------------------
 
     #[tokio::test]

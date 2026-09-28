@@ -4,31 +4,47 @@ use crate::call::runtime::BridgeConfig;
 use anyhow::{Result, anyhow};
 use tracing::{error, info, warn};
 
+/// Monitor flavor sharing one conference-bridge flow (barge/takeover differ).
+#[derive(PartialEq)]
+pub(crate) enum SupervisorMode {
+    Listen,
+    Whisper,
+}
+
+impl SupervisorMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            SupervisorMode::Listen => "listen",
+            SupervisorMode::Whisper => "whisper",
+        }
+    }
+}
+
 impl SipSession {
-    async fn handle_supervisor_monitor(
+    pub(super) async fn handle_supervisor_monitor(
         &mut self,
-        kind: &str,
+        mode: SupervisorMode,
         supervisor_leg: LegId,
         target_leg: LegId,
         supervisor_session_id: Option<String>,
     ) -> Result<()> {
-        if kind == "listen" {
-            if let Some(ref sup_session_id) = supervisor_session_id
-                && sup_session_id != &self.id.0
-            {
-                return self
-                    .handle_cross_session_supervisor_listen(sup_session_id, target_leg)
-                    .await;
-            }
+        if mode == SupervisorMode::Listen
+            && let Some(ref sup_session_id) = supervisor_session_id
+            && sup_session_id != &self.id.0
+        {
+            return self
+                .handle_cross_session_supervisor_listen(sup_session_id, target_leg)
+                .await;
         }
 
         self.require_leg(&supervisor_leg)?;
-        let resolved_target_leg = if kind == "listen" {
+        let resolved_target_leg = if mode == SupervisorMode::Listen {
             self.resolve_supervisor_target(&target_leg, false)?
         } else {
             self.require_leg(&target_leg)?;
             target_leg
         };
+        let kind = mode.as_str();
         self.start_supervisor_bridge_pair(kind, &supervisor_leg, &resolved_target_leg)
             .await?;
         info!(session_id = %self.id,
@@ -37,16 +53,6 @@ impl SipSession {
             "Supervisor {kind} mode activated via conference bridge"
         );
         Ok(())
-    }
-
-    pub(super) async fn handle_supervisor_listen(
-        &mut self,
-        supervisor_leg: LegId,
-        target_leg: LegId,
-        supervisor_session_id: Option<String>,
-    ) -> Result<()> {
-        self.handle_supervisor_monitor("listen", supervisor_leg, target_leg, supervisor_session_id)
-            .await
     }
 
     /// Resolve a supervisor target leg, optionally skipping the exact match
@@ -99,16 +105,6 @@ impl SipSession {
 
         self.update_leg_state(supervisor_leg, LegState::Connected);
         Ok(())
-    }
-
-    pub(super) async fn handle_supervisor_whisper(
-        &mut self,
-        supervisor_leg: LegId,
-        target_leg: LegId,
-        supervisor_session_id: Option<String>,
-    ) -> Result<()> {
-        self.handle_supervisor_monitor("whisper", supervisor_leg, target_leg, supervisor_session_id)
-            .await
     }
 
     pub(super) async fn handle_supervisor_barge(

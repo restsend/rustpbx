@@ -269,33 +269,17 @@ impl InvalidHostFallback {
 /// Determine whether a lookup URI requires the `.invalid` host fallback, and
 /// if so, return the [`InvalidHostFallback`] parameters.
 ///
-/// Returns `None` when:
-/// - the host is **not** a `.invalid` domain, or
-/// - the URI has no user part or an empty one.
+/// Returns `None` when the host is **not** a `.invalid` domain, or the URI has
+/// no (non-empty) user part.
 ///
-/// # Example (DbLocator / SQL)
+/// Backends apply the same two-step fallback when the exact AoR match is
+/// empty — AoR-pattern lookup by `user@host`, then username lookup:
 /// ```ignore
 /// if models.is_empty() {
 ///     if let Some(fb) = invalid_host_fallback(uri) {
-///         models = Entity::find()
-///             .filter(Column::Aor.like(fb.aor_like_pattern()))
-///             .all(&db).await?;
+///         models = lookup_by_aor_like(fb.aor_like_pattern());
 ///         if models.is_empty() {
-///             models = Entity::find()
-///                 .filter(Column::Username.eq(&fb.user))
-///                 .all(&db).await?;
-///         }
-///     }
-/// }
-/// ```
-///
-/// # Example (RedisLocator / Redis)
-/// ```ignore
-/// if locations.is_empty() {
-///     if let Some(fb) = invalid_host_fallback(uri) {
-///         locations = redis.aor_scan(fb.aor_like_pattern()).await;
-///         if locations.is_empty() {
-///             locations = redis.username_lookup(&fb.user).await;
+///             models = lookup_by_username(&fb.user);
 ///         }
 ///     }
 /// }

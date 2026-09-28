@@ -977,6 +977,7 @@ async fn test_originate_explicit_trunk_skips_route() {
 /// `cc_hangup` events emitted by the CC addon; the originate setup loop
 /// dialing its first leg outside the session-hook lifecycle used to skip the
 /// ringing/answered events entirely.
+#[cfg(feature = "addon-cc")]
 #[tokio::test]
 async fn test_originate_agent_click_to_call_emits_agent_attributed_call_events() {
     use crate::common::e2e_test_server::{E2eTestServer, E2eTestServerInject};
@@ -1262,6 +1263,7 @@ async fn test_originate_provisionals_emit_call_ringing_with_early_media_flag() {
 /// agent returns to Idle and an agent-attributed `call_hangup` webhook is
 /// emitted. Without this the agent stays stuck in Ringing forever (the UAC
 /// session loop never starts on failed setup).
+#[cfg(feature = "addon-cc")]
 #[tokio::test]
 async fn test_originate_rejected_releases_agent_and_emits_call_hangup() {
     use crate::common::e2e_test_server::{E2eTestServer, E2eTestServerInject};

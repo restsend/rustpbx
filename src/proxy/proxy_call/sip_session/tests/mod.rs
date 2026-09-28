@@ -1411,7 +1411,7 @@ async fn rwi_bridge_setup_results_reach_listener_before_call_ends() {
         .await
         .expect("bridge setup result must reach the RWI controller");
         assert!(!session.cancel_token.is_cancelled());
-        assert!(session.voip_bridge.is_some());
+        assert!(session.external_bridge.is_some());
         assert!(session.conference_bridge.conf_id.is_none(), "a voip bridge must not occupy the conference slot");
         assert!(server.active_call_registry.get(call_id).is_some());
     }
@@ -5767,7 +5767,12 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
         let mut private_tokens: Vec<CancellationToken> = Vec::new();
         if scenario == "supervisor_switch" {
             session
-                .handle_supervisor_listen(consult.clone(), LegId::from("callee"), None)
+                .handle_supervisor_monitor(
+                    SupervisorMode::Listen,
+                    consult.clone(),
+                    LegId::from("callee"),
+                    None,
+                )
                 .await
                 .unwrap();
             let listen_token = session

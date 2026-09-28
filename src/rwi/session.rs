@@ -737,8 +737,8 @@ where
 }
 
 impl RwiCommandPayload {
-    /// Post-deserialization fixups that used to live in the old wire→internal
-    /// conversion: generate call/conference ids when the client omitted them.
+    /// Post-deserialization fixups: generate call/conference ids when the
+    /// client omitted them.
     pub fn normalize(&mut self) {
         match self {
             Self::Originate(r) => {

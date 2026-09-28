@@ -1,24 +1,9 @@
-//! Queue Application — built-in **call queue executor**.
-//!
-//! # Ownership boundary
-//!
-//! This module is the **execution layer** (hold music, ring agents, bridge,
-//! fallback media actions). It must **not** own contact-center decision logic.
-//!
-//! | Concern | Owner |
-//! |---------|--------|
-//! | Dial / hold / bridge / fallback prompts | **Core** `QueueApp` (this file) |
-//! | Agent selection, skill groups, ACD strategy, SLA policy | **CC addon** (`addons/cc/acd`, `CcAgentRegistryAdapter`) |
-//! | Escalation *timeline policy* | CC (`escalation_plan_for`) |
-//! | Escalation *dial widening* (add/replace legs) | Executor calls registry for URIs |
-//! | Cluster scheduling | CC (affinity: call stays on enqueue node; home_proxy rings remote agents) |
-//!
-//! CC-flavoured fields on [`QueueConfig`] (`routing_strategy`, `skill_group`,
-//! `no_answer_action`, `sla_*`, `escalation_*`, …) exist for injection by the
-//! CC adapter / assembly path. New strategy algorithms belong in
-//! `addons/cc/acd`, not here.
-//!
-//! Without `addon-cc`, static `agents` + sequential/parallel dialing still work.
+//! Queue Application — built-in **call queue executor** (execution layer:
+//! hold music, ring agents, bridge, fallback media). Contact-center decision
+//! logic (agent selection, ACD strategy, escalation/SLA policy, cluster
+//! scheduling) belongs in the CC addon; CC-flavoured [`QueueConfig`] fields
+//! exist only for injection by the CC adapter. Without `addon-cc`, static
+//! `agents` + sequential/parallel dialing still work.
 //!
 //! # State Machine
 //!
@@ -286,6 +271,120 @@ enum AgentUnavailableReason {
     NoAnswer,
 }
 
+/// Typed contract for the session → [`QueueApp`] custom events
+/// (`AppEvent::Custom`). The wire format is `(name, JSON object)`; this enum
+/// is the single place where event names and payload keys are defined, so a
+/// typo on either side is a compile error.
+pub(crate) enum QueueSignal {
+    /// An agent leg is ringing (offer extended).
+    AgentRinging {
+        leg_id: String,
+        agent_uri: String,
+        agent_id: Option<String>,
+    },
+    /// An agent leg answered.
+    AgentConnected {
+        leg_id: Option<String>,
+        agent_uri: String,
+        agent_id: Option<String>,
+    },
+    /// An agent leg rejected the call (e.g. 486).
+    AgentBusy {
+        leg_id: Option<String>,
+        agent_uri: Option<String>,
+        agent_id: String,
+        reason: String,
+    },
+    /// An agent leg did not answer in time.
+    AgentNoAnswer {
+        leg_id: Option<String>,
+        agent_uri: Option<String>,
+        agent_id: String,
+        reason: String,
+    },
+    /// Kick sequential dialing after the app started.
+    DialNext,
+    /// Every candidate was unavailable.
+    AllAgentsBusy,
+}
+
+impl QueueSignal {
+    fn event_name(&self) -> &'static str {
+        match self {
+            QueueSignal::AgentRinging { .. } => "agent_ringing",
+            QueueSignal::AgentConnected { .. } => "agent_connected",
+            QueueSignal::AgentBusy { .. } => "agent_busy",
+            QueueSignal::AgentNoAnswer { .. } => "agent_no_answer",
+            QueueSignal::DialNext => "dial_next_agent",
+            QueueSignal::AllAgentsBusy => "all_agents_busy",
+        }
+    }
+
+    /// The `ControllerEvent::Custom` wire pair for this signal.
+    pub fn to_custom(&self) -> (String, serde_json::Value) {
+        let data = match self {
+            QueueSignal::AgentRinging { leg_id, agent_uri, agent_id } => {
+                serde_json::json!({
+                    "leg_id": leg_id,
+                    "agent_uri": agent_uri,
+                    "agent_id": agent_id,
+                })
+            }
+            QueueSignal::AgentConnected { leg_id, agent_uri, agent_id } => {
+                serde_json::json!({
+                    "leg_id": leg_id,
+                    "agent_uri": agent_uri,
+                    "agent_id": agent_id,
+                })
+            }
+            QueueSignal::AgentBusy { leg_id, agent_uri, agent_id, reason }
+            | QueueSignal::AgentNoAnswer { leg_id, agent_uri, agent_id, reason } => {
+                serde_json::json!({
+                    "leg_id": leg_id,
+                    "agent_uri": agent_uri,
+                    "agent_id": agent_id,
+                    "reason": reason,
+                })
+            }
+            QueueSignal::DialNext | QueueSignal::AllAgentsBusy => serde_json::json!({}),
+        };
+        (self.event_name().to_string(), data)
+    }
+
+    /// Parse an incoming custom event. Unknown names yield `None` (the app
+    /// ignores them).
+    fn from_custom(name: &str, data: &serde_json::Value) -> Option<Self> {
+        let get = |key: &str| data.get(key).and_then(|v| v.as_str().map(str::to_string));
+        match name {
+            "agent_ringing" => Some(QueueSignal::AgentRinging {
+                leg_id: get("leg_id").unwrap_or_default(),
+                agent_uri: get("agent_uri").unwrap_or_default(),
+                agent_id: get("agent_id"),
+            }),
+            "agent_connected" => Some(QueueSignal::AgentConnected {
+                leg_id: get("leg_id"),
+                agent_uri: get("agent_uri")?,
+                agent_id: get("agent_id"),
+            }),
+            "agent_busy" => Some(QueueSignal::AgentBusy {
+                leg_id: get("leg_id"),
+                agent_uri: get("agent_uri"),
+                agent_id: get("agent_id").unwrap_or_default(),
+                reason: get("reason").unwrap_or_default(),
+            }),
+            "agent_no_answer" => Some(QueueSignal::AgentNoAnswer {
+                leg_id: get("leg_id"),
+                agent_uri: get("agent_uri"),
+                agent_id: get("agent_id").unwrap_or_default(),
+                reason: get("reason").unwrap_or_default(),
+            }),
+            "dial_next_agent" => Some(QueueSignal::DialNext),
+            "all_agents_busy" => Some(QueueSignal::AllAgentsBusy),
+            _ => None,
+        }
+    }
+}
+
 /// A built-in Queue application for call distribution.
 ///
 /// Routes incoming calls to available agents using configured dialing
@@ -372,6 +471,10 @@ pub struct QueueApp {
     /// re-arm it — `set_timeout` replaces timers, which would extend the
     /// caller's promised max wait on every failed cycle.
     max_wait_armed: bool,
+    /// The one-shot post-escalation ring grace was already granted — without
+    /// this the `max_wait_timeout` handler would re-grant it forever and the
+    /// call could never fall back after a fully-triggered overflow chain.
+    max_wait_grace_used: bool,
     /// `queue_joined` was already broadcast by `SipSession::start_queue_app`
     /// (before agent resolution) so it stays the FIRST queue event. When set,
     /// `on_enter` must not emit a duplicate.
@@ -411,6 +514,7 @@ impl QueueApp {
             fallback_executed: false,
             attempted_agents: Vec::new(),
             max_wait_armed: false,
+            max_wait_grace_used: false,
             joined_emitted_externally: false,
         }
     }
@@ -2197,16 +2301,20 @@ impl CallApp for QueueApp {
         let queue_id = self.config.name.clone();
 
         match event {
-            super::AppEvent::Custom { name, data } => match name.as_str() {
-                "agent_connected" => {
+            super::AppEvent::Custom { name, data } => match QueueSignal::from_custom(&name, &data)
+            {
+                Some(QueueSignal::AgentConnected { agent_uri, leg_id, agent_id }) => {
                     if self.call_already_connected() {
                         return Ok(AppAction::Continue);
                     }
-                    if let Some(agent_uri) = data.get("agent_uri").and_then(|v| v.as_str()) {
-                        let agent_leg = data.get("leg_id").and_then(|v| v.as_str())
-                            .or_else(|| self.pending_agents.iter()
-                                .find(|(uri, _)| uri == agent_uri).map(|(_, id)| id.as_str()));
-                        let Some(agent_leg) = agent_leg.map(str::to_owned) else {
+                    {
+                        let agent_leg = leg_id.clone().or_else(|| {
+                            self.pending_agents
+                                .iter()
+                                .find(|(uri, _)| uri == &agent_uri)
+                                .map(|(_, id)| id.clone())
+                        });
+                        let Some(agent_leg) = agent_leg else {
                             warn!(agent = %agent_uri, "Queue: ignoring answer without an agent leg ID");
                             return Ok(AppAction::Continue);
                         };
@@ -2266,11 +2374,8 @@ impl CallApp for QueueApp {
                         // 486 got a phantom `Busy{call_id}` from the agent_busy
                         // handler). The connected agent is excluded — its real
                         // lifecycle is owned by the call-session hooks.
-                        let connected_agent_id = data
-                            .get("agent_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(agent_uri)
-                            .to_string();
+                        let connected_agent_id =
+                            agent_id.clone().unwrap_or_else(|| agent_uri.clone());
                         self.release_phantom_agents(Some(connected_agent_id.as_str()))
                             .await;
 
@@ -2298,14 +2403,11 @@ impl CallApp for QueueApp {
 
                         // The winner's bridge command precedes playback. Play the
                         // caller-only service prompt if configured, then exit.
-                        return self
-                            .play_service_prompt_or_exit(ctrl, agent_uri.to_string())
-                            .await;
+                        return self.play_service_prompt_or_exit(ctrl, agent_uri).await;
                     }
-                    Ok(AppAction::Continue)
                 }
-                "agent_ringing" => {
-                    if let Some(agent_id) = data.get("agent_id").and_then(|v| v.as_str()) {
+                Some(QueueSignal::AgentRinging { agent_id, .. }) => {
+                    if let Some(agent_id) = agent_id.as_deref() {
                         info!(agent = %agent_id, "Queue: agent ringing");
 
                         if let Some(ref registry) = self.agent_registry {
@@ -2328,7 +2430,7 @@ impl CallApp for QueueApp {
                     }
                     Ok(AppAction::Continue)
                 }
-                "agent_busy" => {
+                Some(QueueSignal::AgentBusy { agent_id, leg_id, .. }) => {
                     info!("Queue: agent busy");
                     // Stale leg failures (e.g. parallel legs cancelled by
                     // `agent_connected`) must not touch agent presence nor
@@ -2337,37 +2439,33 @@ impl CallApp for QueueApp {
                         warn!("Queue: ignoring agent-busy after connect");
                         return Ok(AppAction::Continue);
                     }
-                    if let Some(agent_id) = data.get("agent_id").and_then(|v| v.as_str())
+                    if !agent_id.is_empty()
                         && let Some(ref registry) = self.agent_registry
                     {
-                        let _ = registry.release_call(agent_id, &self.call_id).await;
+                        let _ = registry.release_call(&agent_id, &self.call_id).await;
                     }
-                    self.handle_agent_unavailable(
-                        ctrl,
-                        AgentUnavailableReason::Busy,
-                        data.get("leg_id").and_then(|value| value.as_str()),
-                    )
-                    .await
+                    self.handle_agent_unavailable(ctrl, AgentUnavailableReason::Busy, leg_id.as_deref())
+                        .await
                 }
-                "agent_no_answer" => {
+                Some(QueueSignal::AgentNoAnswer { agent_id, leg_id, .. }) => {
                     info!("Queue: agent no answer");
                     if self.call_already_connected() {
                         warn!("Queue: ignoring agent-no-answer after connect");
                         return Ok(AppAction::Continue);
                     }
-                    if let Some(agent_id) = data.get("agent_id").and_then(|v| v.as_str())
+                    if !agent_id.is_empty()
                         && let Some(ref registry) = self.agent_registry
                     {
-                        let _ = registry.release_call(agent_id, &self.call_id).await;
+                        let _ = registry.release_call(&agent_id, &self.call_id).await;
                     }
                     self.handle_agent_unavailable(
                         ctrl,
                         AgentUnavailableReason::NoAnswer,
-                        data.get("leg_id").and_then(|value| value.as_str()),
+                        leg_id.as_deref(),
                     )
                     .await
                 }
-                "all_agents_busy" => {
+                Some(QueueSignal::AllAgentsBusy) => {
                     warn!("Queue: all agents busy");
                     self.play_unavailable_prompt_and_then_fallback(
                         ctrl,
@@ -2375,8 +2473,8 @@ impl CallApp for QueueApp {
                     )
                     .await
                 }
-                "dial_next_agent" => self.dial_next_agent(ctrl).await,
-                _ => Ok(AppAction::Continue),
+                Some(QueueSignal::DialNext) => self.dial_next_agent(ctrl).await,
+                None => Ok(AppAction::Continue),
             },
             _ => Ok(AppAction::Continue),
         }
@@ -2463,6 +2561,38 @@ impl CallApp for QueueApp {
                     .await
             }
             "max_wait_timeout" => {
+                // Escalation (overflow) steps still pending? The wall-clock
+                // max_wait doubles as the escalation threshold when the plan
+                // is synthesized from a skill group's `max_wait_secs`, so the
+                // two timers share a deadline. Falling back here would cancel
+                // the pending escalation and the overflow chain could NEVER
+                // fire — defer the fallback until every step has triggered
+                // and the widened candidate set has had its chance.
+                if let Some(delay) = self.next_escalation_check_delay() {
+                    debug!(
+                        queue = %self.config.name,
+                        defer = delay.as_secs(),
+                        "Queue: max wait reached but escalation steps pending — deferring fallback"
+                    );
+                    ctrl.set_timeout("max_wait_timeout", delay.max(Duration::from_secs(1)));
+                    return Ok(AppAction::Continue);
+                }
+                if !self.escalated_groups.is_empty() && !self.max_wait_grace_used {
+                    // Every escalation step has triggered and the widened
+                    // candidate set was dialed — give that ringing round one
+                    // full ring timeout before giving up, instead of dropping
+                    // the caller mid-ring. One-shot: without the flag the
+                    // handler would re-grant the grace forever.
+                    self.max_wait_grace_used = true;
+                    let grace = self.config.ring_timeout.unwrap_or(Duration::from_secs(30));
+                    debug!(
+                        queue = %self.config.name,
+                        grace = grace.as_secs(),
+                        "Queue: max wait reached post-escalation — one last ring window"
+                    );
+                    ctrl.set_timeout("max_wait_timeout", grace);
+                    return Ok(AppAction::Continue);
+                }
                 info!("Queue: max wait timeout, executing fallback");
                 ctrl.cancel_timeout("queue_retry");
                 // The wait is over — the fallback path owns the call now.

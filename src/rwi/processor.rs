@@ -241,8 +241,7 @@ impl RwiCommandProcessor {
                         Some(CommandFailureKind::SessionNotFound) => {
                             Some(Err(CommandError::CallNotFound(call_id.to_string())))
                         }
-                        Some(CommandFailureKind::DispatchFailed)
-                        | Some(CommandFailureKind::MediaDenied)
+                        Some(CommandFailureKind::MediaDenied)
                         | None => Some(Err(CommandError::CommandFailed(msg))),
                     }
                 }
@@ -963,32 +962,15 @@ impl RwiCommandProcessor {
             ..Default::default()
         };
 
-        // Direct-to-trunk routing. The base option above has destination:None, so
-        // rsipstack resolves the next hop from the callee request-URI — which only
-        // reaches a registered/reachable SIP URI (and self-INVITEs this proxy, which
-        // 407s a non-local callee). When the caller names a `trunk`, stamp that
-        // trunk's next-hop + credential + P-Asserted-Identity onto the option so
-        // rsipstack sends ONE INVITE straight to the carrier and auto-answers its
-        // 401/407 from the credential. When `trunk` is absent the option is left
-        // untouched and the legacy direct-to-callee behavior is preserved
-        // (byte-identical).
-        //
-        // Originate is an API command, so the caller declares which carrier gateway
-        // it wants by name; the named trunk's config is applied here. We deliberately
-        // do NOT consult the proxy route table here — that would duplicate
-        // CallModule's direction + admission semantics and drift.
-        //
-        // KNOWN LIMITATIONS on this direct path (vs. the inbound-proxy route path):
-        //   * Authorization: any RWI caller permitted to originate may select any
-        //     enabled trunk by name. There is no per-token trunk allowlist/scope; the
-        //     only gate is whatever authorizes the originate command itself.
-        //   * Admission: per-trunk CAC/CPS/max-duration and route-layer media policy
-        //     are NOT enforced here — the caller is responsible for pacing.
-        // Both are acceptable for a caller-driven control API but are documented so a
-        // deployment can add a trunk allowlist/scope if its threat model needs one.
-        //
-        // Runs synchronously (before the spawn below), so an unknown/disabled trunk
-        // returns an immediate failed ack rather than leaking a half-built call.
+        // Direct-to-trunk routing: when the caller names a `trunk`, stamp its
+        // next-hop + credential + P-Asserted-Identity onto the option so
+        // rsipstack sends ONE INVITE straight to the carrier (auto-answering
+        // its 401/407). Without `trunk` the option is untouched (legacy
+        // direct-to-callee). The route table is deliberately NOT consulted
+        // here — that would duplicate CallModule's admission semantics.
+        // Known limits: no per-token trunk allowlist and no per-trunk
+        // CAC/CPS enforcement on this path; the caller is responsible for
+        // pacing. Runs synchronously so an unknown trunk fails fast.
         Self::apply_explicit_originate_trunk(
             &server,
             &mut invite_option,
@@ -1256,7 +1238,11 @@ impl RwiCommandProcessor {
                 let dest_is_agent =
                     !dest_user.is_empty() && registry.get_agent(&dest_user).await.is_some();
                 if !dest_is_agent {
-                    metadata.insert("resolved_agent_id".to_string(), user.to_string());
+                    metadata.insert(
+                        crate::proxy::proxy_call::session_hooks::SessionExtensions::AGENT_ATTRIBUTION_KEY
+                            .to_string(),
+                        user.to_string(),
+                    );
                 }
             }
             let mut dialplan = Dialplan::new(
@@ -2173,7 +2159,6 @@ impl RwiCommandProcessor {
     ) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
 
-        // Stop current app first
         handle
             .send_command(CallCommand::StopApp {
                 reason: Some("chaining".into()),
@@ -2183,7 +2168,6 @@ impl RwiCommandProcessor {
         // Brief yield to let the app stop complete
         tokio::task::yield_now().await;
 
-        // Start new app
         handle
             .send_command(CallCommand::StartApp {
                 app_name: app_name.clone(),
@@ -3537,7 +3521,6 @@ impl RwiCommandProcessor {
         target: String,
         _attended: bool,
     ) -> Result<CommandResult, CommandError> {
-        // Verify call exists
         if self.call_registry.get_handle(&call_id).is_none() {
             return Err(CommandError::CallNotFound(call_id));
         }
@@ -3550,11 +3533,9 @@ impl RwiCommandProcessor {
             .await
         {
             Ok(_tx) => {
-                // Transfer initiated successfully (REFER accepted)
                 Ok(CommandResult::Success)
             }
             Err(e) => {
-                // Transfer failed
                 Err(CommandError::CommandFailed(format!(
                     "Transfer failed: {}",
                     e.as_str()
@@ -3569,7 +3550,6 @@ impl RwiCommandProcessor {
         call_id: String,
         target: String,
     ) -> Result<CommandResult, CommandError> {
-        // Verify call exists
         if self.call_registry.get_handle(&call_id).is_none() {
             return Err(CommandError::CallNotFound(call_id));
         }

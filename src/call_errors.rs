@@ -44,7 +44,7 @@ impl ErrSeverity {
 
 /// A single standardized error definition.
 ///
-/// Entries live in `const` slices (see [`CallErrCatalog`]) and are referenced
+/// Entries live in `const` slices and are referenced
 /// by `&'static CallErrInfo` throughout the call pipeline.
 #[derive(Debug, Clone)]
 pub struct CallErrInfo {
@@ -79,16 +79,6 @@ impl CallErrInfo {
     }
 }
 
-/// Implemented by every subsystem that owns a `const` catalog of errors.
-///
-/// Implementations are aggregated at startup by [`CallErrRegistry::merge`].
-/// Each addon gates its implementation behind its cargo feature so the merged
-/// registry only contains entries for compiled-in subsystems.
-pub trait CallErrCatalog: Send + Sync {
-    /// The subsystem's static catalog of error definitions.
-    fn catalog() -> &'static [CallErrInfo];
-}
-
 /// Merged, read-only view over all registered error catalogs.
 ///
 /// Built once at startup ([`CallErrRegistry::build`]) and shared (via
@@ -107,14 +97,8 @@ impl CallErrRegistry {
         Self::default()
     }
 
-    /// Merge a single catalog into the registry. Idempotent on re-registration:
-    /// a duplicate `code` replaces the prior entry (keeps the registry
-    /// consistent if an addon is re-registered).
-    pub fn merge<C: CallErrCatalog>(&mut self) {
-        self.merge_slice(C::catalog());
-    }
-
-    /// Merge a raw `&'static [CallErrInfo]` slice.
+    /// Merge a raw `&'static [CallErrInfo]` slice. Idempotent on
+    /// re-registration: a duplicate `code` replaces the prior entry.
     pub fn merge_slice(&mut self, catalog: &'static [CallErrInfo]) {
         for info in catalog {
             self.by_code.insert(info.code, info);
