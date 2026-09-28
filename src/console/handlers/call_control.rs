@@ -452,7 +452,7 @@ enum UserdataRoute {
 /// Route a user-data op to the node that hosts `session_id`.
 ///
 /// Resolution order (loop-safe — see the invariants on
-/// [`crate::proxy::cluster_forward::userdata_op_on_owner`]):
+/// [`crate::proxy::cluster_forward::routed_op_on_owner`]):
 /// 1. Session hosted here → [`UserdataRoute::Local`].
 /// 2. Cluster disabled → [`UserdataRoute::Local`] (single-node: the session
 ///    is always here).
@@ -487,7 +487,7 @@ async fn route_userdata_to_owner(
     } else {
         crate::proxy::cluster_forward::UserdataOp::Set(payload.clone())
     };
-    let outcome = crate::proxy::cluster_forward::userdata_op_on_owner(
+    let outcome = crate::proxy::cluster_forward::routed_op_on_owner(
         &server.session_registry,
         &peers,
         self_node_id.as_deref(),
@@ -735,16 +735,24 @@ async fn query_session_from_peers(state: &ConsoleState, session_id: &str) -> Opt
 
     let ami_path = get_ami_path(state);
     let client = state.http_client().clone();
+    let self_node_id = server.cluster_self_addr.as_ref().map(|a| a.to_string());
 
-    crate::proxy::cluster_forward::query_session(
+    match crate::proxy::cluster_forward::routed_op_on_owner(
         &server.session_registry,
         &peers,
+        self_node_id.as_deref(),
         &ami_path,
         &client,
         session_id,
+        &crate::proxy::cluster_forward::ShowSessionOp,
     )
     .await
-    .map(|(status, body)| (status, Json(body)).into_response())
+    {
+        crate::proxy::cluster_forward::OwnerOpOutcome::Applied(status, body) => {
+            Some((status, Json(body)).into_response())
+        }
+        _ => None,
+    }
 }
 
 #[cfg(feature = "commerce")]

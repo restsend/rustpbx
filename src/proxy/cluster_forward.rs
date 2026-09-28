@@ -57,127 +57,6 @@ pub(crate) async fn forward_json(
 
 /// Dispatch a call command cluster-wide.
 ///
-/// Strategy: session-registry `lookup_owner` first — one targeted request to
-/// the owning node; if that fails (unknown owner, unreachable node, or the
-/// owner no longer has the call) fall back to fanning out to every peer and
-/// return the first response that is not a 404.
-///
-/// `payload` is the wire form of the console `CallCommandPayload` consumed by
-/// the remote node's `/cluster/dispatch_command` endpoint.
-///
-/// `session_id` may be a proxy session id or a dialog Call-ID alias registered
-/// via [`SessionInfo::dialog_alias`].
-pub async fn dispatch_call_command(
-    registry: &SessionRegistryRef,
-    peers: &[ClusterPeer],
-    ami_path: &str,
-    client: &reqwest::Client,
-    session_id: &str,
-    payload: &serde_json::Value,
-) -> Option<(reqwest::StatusCode, serde_json::Value)> {
-    if peers.is_empty() {
-        return None;
-    }
-
-    // Prefer canonical session id when `session_id` is a dialog alias.
-    let forward_id = crate::call::runtime::resolve_owner_and_session(registry, session_id)
-        .await
-        .map(|(_, sid)| sid)
-        .unwrap_or_else(|| session_id.to_string());
-
-    let body = serde_json::json!({
-        "session_id": forward_id,
-        "payload": payload,
-    });
-
-    // 1. Targeted forward to the owning node.
-    if let Some(owner) = registry.lookup_owner(session_id).await {
-        if let Some(peer) = peer_for_node_id(peers, &owner) {
-            let url = format!("{}/cluster/dispatch_command", peer_ami_base(peer, ami_path));
-            if let Some(resp) = forward_json(client, &url, reqwest::Method::POST, Some(&body)).await
-            {
-                if resp.0 != reqwest::StatusCode::NOT_FOUND {
-                    return Some(resp);
-                }
-            }
-        }
-    }
-
-    // 2. Fan-out fallback: first non-404 response wins.
-    let mut handles = Vec::new();
-    for peer in peers {
-        let url = format!("{}/cluster/dispatch_command", peer_ami_base(peer, ami_path));
-        let client = client.clone();
-        let body = body.clone();
-        handles.push(tokio::spawn(async move {
-            forward_json(&client, &url, reqwest::Method::POST, Some(&body)).await
-        }));
-    }
-    for handle in handles {
-        if let Ok(Some(resp)) = handle.await {
-            if resp.0 != reqwest::StatusCode::NOT_FOUND {
-                return Some(resp);
-            }
-        }
-    }
-    None
-}
-
-/// Forward arbitrary JSON to the owning node's AMI relative path.
-///
-/// Core has no knowledge of addon endpoints: callers (e.g. the CC addon)
-/// supply `ami_relative_path` such as `"cluster/cc_owner_op"` and the full
-/// request body. Owner is resolved via session registry (dialog alias OK);
-/// if the targeted peer returns 404, fans out to remaining peers.
-pub async fn dispatch_to_owner(
-    registry: &SessionRegistryRef,
-    peers: &[ClusterPeer],
-    ami_path: &str,
-    client: &reqwest::Client,
-    session_or_dialog_id: &str,
-    ami_relative_path: &str,
-    body: &serde_json::Value,
-) -> Option<(reqwest::StatusCode, serde_json::Value)> {
-    if peers.is_empty() {
-        return None;
-    }
-
-    let owner = crate::call::runtime::resolve_owner_and_session(registry, session_or_dialog_id)
-        .await
-        .map(|(o, _)| o)
-        .or(registry.lookup_owner(session_or_dialog_id).await)?;
-
-    let rel = ami_relative_path.trim_start_matches('/');
-
-    if let Some(peer) = peer_for_node_id(peers, &owner) {
-        let url = format!("{}/{}", peer_ami_base(peer, ami_path), rel);
-        if let Some(resp) = forward_json(client, &url, reqwest::Method::POST, Some(body)).await {
-            if resp.0 != reqwest::StatusCode::NOT_FOUND {
-                return Some(resp);
-            }
-        }
-    }
-
-    // Fan-out fallback
-    let mut handles = Vec::new();
-    for peer in peers {
-        let url = format!("{}/{}", peer_ami_base(peer, ami_path), rel);
-        let client = client.clone();
-        let body = body.clone();
-        handles.push(tokio::spawn(async move {
-            forward_json(&client, &url, reqwest::Method::POST, Some(&body)).await
-        }));
-    }
-    for handle in handles {
-        if let Ok(Some(resp)) = handle.await {
-            if resp.0 != reqwest::StatusCode::NOT_FOUND {
-                return Some(resp);
-            }
-        }
-    }
-    None
-}
-
 /// Forward raw in-dialog SIP (BYE/INFO/…) to the dialog owner when this node
 /// has no matching dialog. Body is the serialized SIP request bytes / text.
 pub async fn dispatch_indialog_sip(
@@ -199,56 +78,6 @@ pub async fn dispatch_indialog_sip(
         "message": sip_message,
     });
     forward_json(client, &url, reqwest::Method::POST, Some(&body)).await
-}
-
-/// Fetch a session snapshot cluster-wide (console "show call"). Same
-/// owner-first strategy as [`dispatch_call_command`].
-pub async fn query_session(
-    registry: &SessionRegistryRef,
-    peers: &[ClusterPeer],
-    ami_path: &str,
-    client: &reqwest::Client,
-    session_id: &str,
-) -> Option<(reqwest::StatusCode, serde_json::Value)> {
-    if peers.is_empty() {
-        return None;
-    }
-
-    if let Some(owner) = registry.lookup_owner(session_id).await {
-        if let Some(peer) = peer_for_node_id(peers, &owner) {
-            let url = format!(
-                "{}/cluster/show_session/{}",
-                peer_ami_base(peer, ami_path),
-                session_id
-            );
-            if let Some(resp) = forward_json(client, &url, reqwest::Method::GET, None).await {
-                if resp.0 != reqwest::StatusCode::NOT_FOUND {
-                    return Some(resp);
-                }
-            }
-        }
-    }
-
-    let mut handles = Vec::new();
-    for peer in peers {
-        let url = format!(
-            "{}/cluster/show_session/{}",
-            peer_ami_base(peer, ami_path),
-            session_id
-        );
-        let client = client.clone();
-        handles.push(tokio::spawn(async move {
-            forward_json(&client, &url, reqwest::Method::GET, None).await
-        }));
-    }
-    for handle in handles {
-        if let Ok(Some(resp)) = handle.await {
-            if resp.0 != reqwest::StatusCode::NOT_FOUND {
-                return Some(resp);
-            }
-        }
-    }
-    None
 }
 
 /// Result of asking the session registry where a call lives.
@@ -308,8 +137,13 @@ pub enum OwnerOpOutcome {
 
 /// An operation that can be routed to the node hosting its session.
 pub trait OwnerRoutedOp {
-    /// Terminal AMI-cluster relative path on the owner node.
-    fn relative_path(&self) -> &'static str;
+    /// Terminal AMI-cluster relative path on the owner node (may embed the
+    /// session id).
+    fn relative_path(&self, session_id: &str) -> String;
+    /// HTTP method for the terminal endpoint.
+    fn method(&self) -> reqwest::Method {
+        reqwest::Method::POST
+    }
     /// Wire body for the terminal endpoint.
     fn body(&self, session_id: &str) -> serde_json::Value;
 }
@@ -322,10 +156,10 @@ pub enum UserdataOp {
 }
 
 impl OwnerRoutedOp for UserdataOp {
-    fn relative_path(&self) -> &'static str {
+    fn relative_path(&self, _session_id: &str) -> String {
         match self {
-            UserdataOp::Set(_) => "cluster/set_userdata",
-            UserdataOp::Get => "cluster/get_userdata",
+            UserdataOp::Set(_) => "cluster/set_userdata".to_string(),
+            UserdataOp::Get => "cluster/get_userdata".to_string(),
         }
     }
 
@@ -334,6 +168,24 @@ impl OwnerRoutedOp for UserdataOp {
             UserdataOp::Set(data) => serde_json::json!({ "session_id": session_id, "data": data }),
             UserdataOp::Get => serde_json::json!({ "session_id": session_id }),
         }
+    }
+}
+
+/// Console "show call" — fetches the session snapshot from the owner node.
+#[derive(Debug, Clone)]
+pub struct ShowSessionOp;
+
+impl OwnerRoutedOp for ShowSessionOp {
+    fn relative_path(&self, session_id: &str) -> String {
+        format!("cluster/show_session/{session_id}")
+    }
+
+    fn method(&self) -> reqwest::Method {
+        reqwest::Method::GET
+    }
+
+    fn body(&self, _session_id: &str) -> serde_json::Value {
+        serde_json::json!({})
     }
 }
 
@@ -362,8 +214,8 @@ pub struct SessionOpEnvelope {
 }
 
 impl OwnerRoutedOp for RwiCommandOp {
-    fn relative_path(&self) -> &'static str {
-        "cluster/session_op"
+    fn relative_path(&self, _session_id: &str) -> String {
+        "cluster/session_op".to_string()
     }
 
     fn body(&self, session_id: &str) -> serde_json::Value {
@@ -383,8 +235,8 @@ pub struct ConsoleCommandOp {
 }
 
 impl OwnerRoutedOp for ConsoleCommandOp {
-    fn relative_path(&self) -> &'static str {
-        "cluster/dispatch_command"
+    fn relative_path(&self, _session_id: &str) -> String {
+        "cluster/dispatch_command".to_string()
     }
 
     fn body(&self, session_id: &str) -> serde_json::Value {
@@ -392,13 +244,13 @@ impl OwnerRoutedOp for ConsoleCommandOp {
     }
 }
 
-/// Execute a session-userdata operation on the node that hosts `session_id`.
+/// Locate the session's owner and execute `op` there (see the contract above).
 ///
 /// Loop-safety invariants (keep all four):
 /// 1. **Single hop** — only entry points (REST handler, RWI command
-///    processor) call this.  The internal `cluster/{set,get}_userdata`
-///    endpoints apply locally and never re-resolve, so a forwarded request
-///    always terminates.
+///    processor) call this.  The terminal `cluster/*` endpoints apply
+///    locally and never re-resolve, so a forwarded request always
+///    terminates.
 /// 2. **No self-forward** — when the registry resolves the owner to this
 ///    node (`self_node_id`), returns [`OwnerOpOutcome::ApplyLocally`] instead
 ///    of HTTP-calling ourselves.  The local apply terminates: success, or a
@@ -408,28 +260,6 @@ impl OwnerRoutedOp for ConsoleCommandOp {
 ///    which neither re-broadcasts nor emits events.
 /// 4. **Bounded fallback** — the fan-out below is a fixed single round over
 ///    the configured peer list, never recursive.
-pub async fn userdata_op_on_owner(
-    registry: &SessionRegistryRef,
-    peers: &[ClusterPeer],
-    self_node_id: Option<&str>,
-    ami_path: &str,
-    client: &reqwest::Client,
-    session_id: &str,
-    op: &UserdataOp,
-) -> OwnerOpOutcome {
-    routed_op_on_owner(
-        registry,
-        peers,
-        self_node_id,
-        ami_path,
-        client,
-        session_id,
-        op,
-    )
-    .await
-}
-
-/// Locate the session's owner and execute `op` there (see the contract above).
 pub async fn routed_op_on_owner(
     registry: &SessionRegistryRef,
     peers: &[ClusterPeer],
@@ -444,6 +274,13 @@ pub async fn routed_op_on_owner(
         return OwnerOpOutcome::UnknownCall;
     }
 
+    // Prefer the canonical session id when handed a dialog Call-ID alias.
+    let forward_id =
+        crate::call::runtime::resolve_owner_and_session(registry, session_id)
+            .await
+            .map(|(_, sid)| sid)
+            .unwrap_or_else(|| session_id.to_string());
+
     match locate_owner(registry, session_id).await {
         OwnerLocation::Unknown => OwnerOpOutcome::UnknownCall,
         OwnerLocation::Unavailable(e) => OwnerOpOutcome::RegistryUnavailable(e),
@@ -453,19 +290,27 @@ pub async fn routed_op_on_owner(
                 return OwnerOpOutcome::ApplyLocally;
             }
 
+            let method = op.method();
+            let has_body = method != reqwest::Method::GET;
+
             // 1. Targeted single-cast to the owning node.
             if let Some(peer) = peer_for_node_id(peers, &owner) {
                 let url = format!(
                     "{}/{}",
                     peer_ami_base(peer, ami_path),
-                    op.relative_path()
+                    op.relative_path(&forward_id)
                 );
-                if let Some((status, body)) =
-                    forward_json(client, &url, reqwest::Method::POST, Some(&op.body(session_id)))
-                        .await
+                let body = op.body(&forward_id);
+                if let Some((status, resp)) = forward_json(
+                    client,
+                    &url,
+                    method.clone(),
+                    has_body.then_some(&body),
+                )
+                .await
                 {
                     if status != reqwest::StatusCode::NOT_FOUND {
-                        return OwnerOpOutcome::Applied(status, body);
+                        return OwnerOpOutcome::Applied(status, resp);
                     }
                 }
             }
@@ -477,19 +322,20 @@ pub async fn routed_op_on_owner(
                 let url = format!(
                     "{}/{}",
                     peer_ami_base(peer, ami_path),
-                    op.relative_path()
+                    op.relative_path(&forward_id)
                 );
                 let client = client.clone();
-                let body = op.body(session_id);
+                let body = op.body(&forward_id);
+                let method = method.clone();
                 handles.push(tokio::spawn(async move {
-                    forward_json(&client, &url, reqwest::Method::POST, Some(&body)).await
+                    forward_json(&client, &url, method, has_body.then_some(&body)).await
                 }));
             }
             for handle in handles {
-                if let Ok(Some((status, body))) = handle.await
+                if let Ok(Some((status, resp))) = handle.await
                     && status != reqwest::StatusCode::NOT_FOUND
                 {
-                    return OwnerOpOutcome::Applied(status, body);
+                    return OwnerOpOutcome::Applied(status, resp);
                 }
             }
             OwnerOpOutcome::OwnerUnreachable
@@ -509,7 +355,7 @@ mod tests {
         }
     }
 
-    // ── userdata_op_on_owner: locate → single-cast → loop safety ───────────
+    // ── routed_op_on_owner: locate → single-cast → loop safety ───────────
 
     /// Registry double that can simulate an outage.
     struct MockRegistry {
@@ -635,12 +481,12 @@ mod tests {
         assert!(peer_for_node_id(&peers, "10.9.9.9:5060").is_none());
     }
 
-    /// `dispatch_to_owner` must POST the body to the peer owning the session
-    /// (resolved via the session registry) — this is the path the console's
-    /// user-data forwarding uses when the REST request lands on a non-owner
-    /// node.
+    /// `routed_op_on_owner` must POST the op body to the peer owning the
+    /// session (resolved via the session registry) — this is the path the
+    /// console's user-data forwarding uses when the REST request lands on a
+    /// non-owner node.
     #[tokio::test]
-    async fn dispatch_to_owner_posts_to_owning_peer() {
+    async fn routed_op_posts_to_owning_peer() {
         use crate::call::runtime::{MemorySessionRegistry, SessionInfo};
         use axum::{Json, Router, extract::State, routing::post};
 
@@ -673,17 +519,21 @@ mod tests {
             .unwrap();
 
         let peers = vec![peer("127.0.0.1", 5060, port)];
-        let body = serde_json::json!({"session_id":"sess-1","data":{"crm_id":"C-1"}});
-        let resp = dispatch_to_owner(
+        let op = UserdataOp::Set(serde_json::json!({"crm_id":"C-1"}));
+        let resp = match routed_op_on_owner(
             &registry,
             &peers,
+            None,
             "",
             &reqwest::Client::new(),
             "sess-1",
-            "cluster/set_userdata",
-            &body,
+            &op,
         )
-        .await;
+        .await
+        {
+            OwnerOpOutcome::Applied(status, body) => Some((status, body)),
+            _ => None,
+        };
         assert_eq!(resp.as_ref().map(|(s, _)| s.as_u16()), Some(200));
         let got = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
             .await
@@ -710,7 +560,7 @@ mod tests {
         let registry = MockRegistry::new(MockPlan::Row(node_id.clone()));
         let peers = vec![owner_peer.clone(), bystander_peer];
 
-        let outcome = userdata_op_on_owner(
+        let outcome = routed_op_on_owner(
             &registry,
             &peers,
             Some("this-node:5060"),
@@ -748,7 +598,7 @@ mod tests {
         let self_node_id = format!("{}:{}", peer.addr, peer.sip_port);
         let registry = MockRegistry::new(MockPlan::Row(self_node_id.clone()));
 
-        let outcome = userdata_op_on_owner(
+        let outcome = routed_op_on_owner(
             &registry,
             &[peer.clone()],
             Some(&self_node_id),
@@ -770,7 +620,7 @@ mod tests {
         let (peer, _rx, hits) = spawn_peer(axum::http::StatusCode::OK).await;
         let registry = MockRegistry::new(MockPlan::NoRow);
 
-        let outcome = userdata_op_on_owner(
+        let outcome = routed_op_on_owner(
             &registry,
             &[peer],
             Some("this-node:5060"),
@@ -792,7 +642,7 @@ mod tests {
         let (peer, _rx, hits) = spawn_peer(axum::http::StatusCode::OK).await;
         let registry = MockRegistry::new(MockPlan::Down);
 
-        let outcome = userdata_op_on_owner(
+        let outcome = routed_op_on_owner(
             &registry,
             &[peer],
             Some("this-node:5060"),
@@ -818,7 +668,7 @@ mod tests {
         let (peer_b, _rx_b, hits_b) = spawn_peer(axum::http::StatusCode::OK).await;
         let registry = MockRegistry::new(MockPlan::Row("203.0.113.9:5060".to_string()));
 
-        let outcome = userdata_op_on_owner(
+        let outcome = routed_op_on_owner(
             &registry,
             &[peer_a, peer_b],
             Some("this-node:5060"),
@@ -858,7 +708,7 @@ mod tests {
         let (peer_b, _rx_b, hits_b) = spawn_peer(axum::http::StatusCode::NOT_FOUND).await;
         let registry = MockRegistry::new(MockPlan::Row("203.0.113.9:5060".to_string()));
 
-        let outcome = userdata_op_on_owner(
+        let outcome = routed_op_on_owner(
             &registry,
             &[peer_a, peer_b],
             Some("this-node:5060"),
