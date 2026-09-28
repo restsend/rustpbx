@@ -401,7 +401,16 @@ async def wait_dispatch_agent(
     assert webhook is not None, "webhook receiver not configured"
     deadline = asyncio.get_event_loop().time() + timeout
     while asyncio.get_event_loop().time() < deadline:
-        rings = [e for e in webhook.all_events() if e.event_type == "call_ringing"]
+        # Only AGENT-ATTRIBUTED rings count as dispatches: since 86b53308 the
+        # agent leg's 180 also emits a per-leg call_ringing (leg_id set, no
+        # agent attribution) right before the CC hook publishes the
+        # attributed one — counting both broke every index-based dispatch
+        # assertion.
+        rings = [
+            e for e in webhook.all_events()
+            if e.event_type == "call_ringing"
+            and (e.payload or {}).get("agent_id")
+        ]
         if len(rings) > after_call_ringing_count:
             ring = rings[after_call_ringing_count]
             call_id = ring.call_id
@@ -436,13 +445,15 @@ async def wait_second_dispatch(
     except BaseException:
         await place_queue_call(sipbot_pool, pbx, route_point, hangup=retry_hangup)
         # Stray rings may have landed while the original queued caller was
-        # lost (transfer legs, readiness probes). Anchor on the CURRENT ring
-        # count and wait for the next NEW dispatch instead of a fixed index.
+        # lost (transfer legs, readiness probes). Anchor on the CURRENT
+        # ATTRIBUTED ring count (same filter wait_dispatch_agent indexes
+        # with) and wait for the next NEW dispatch instead of a fixed index.
         base = len(
             [
                 e
                 for e in event_checker.webhook.all_events()
                 if e.event_type == "call_ringing"
+                and (e.payload or {}).get("agent_id")
             ]
         )
         return await wait_dispatch_agent(

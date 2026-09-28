@@ -44,3 +44,6 @@ mod test_cluster_home_proxy_e2e;
 
 #[path = "proxy_e2e/test_cluster_session_registry.rs"]
 mod test_cluster_session_registry;
+
+#[path = "proxy_e2e/test_network_conference.rs"]
+mod test_network_conference;

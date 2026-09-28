@@ -62,6 +62,11 @@ pub struct MediaBridge {
     leg_a: Option<Leg>,
     leg_b: Option<Leg>,
     route_active: bool,
+    /// Set by [`Self::detach_route`] when playback tears an ACTIVE route down,
+    /// cleared when the route is re-armed or explicitly unbridged. Lets the
+    /// session's `ResumeMedia` restore only routes that playback itself broke
+    /// (an explicit `Unbridge` must stay unbridged).
+    detached_for_playback: bool,
     dtmf_bus: broadcast::Sender<(crate::leg_id::LegId, DtmfEvent)>,
     /// Root cancel token for all spawned sub-tasks (DTMF forwarders).
     root_cancel: CancellationToken,
@@ -152,6 +157,7 @@ impl MediaBridge {
             leg_a: None,
             leg_b: None,
             route_active: false,
+            detached_for_playback: false,
             dtmf_bus,
             root_cancel: cancel,
             leg_wire_cancels: HashMap::new(),
@@ -372,6 +378,17 @@ impl MediaBridge {
                 warn!(session = %self.session_id, error = %e, "re-bridge after leg replacement failed");
             }
         }
+    }
+
+    /// Release the selected pair without stopping registry-owned peers.
+    /// A lone caller can continue application playback after this.
+    pub async fn clear_selection(&mut self) -> Result<()> {
+        self.unbridge().await?;
+        self.leg_a = None;
+        self.leg_b = None;
+        self.detached_for_playback = false;
+        *self.legs_shared.lock() = (None, None);
+        Ok(())
     }
 
     /// Select two existing peers without closing either displaced peer.
@@ -680,8 +697,21 @@ impl MediaBridge {
         }
 
         self.route_active = true;
+        self.detached_for_playback = false;
         *self.health.route_activated_at.lock() = Some(std::time::Instant::now());
         Ok(())
+    }
+
+    /// Whether [`Self::detach_route`] tore down an active route that has not
+    /// been re-armed yet. `ResumeMedia` may restore only such routes.
+    pub fn detached_for_playback(&self) -> bool {
+        self.detached_for_playback
+    }
+
+    /// Forget a pending playback-detach restore (e.g. an explicit `Unbridge`
+    /// arrived while the prompt was playing — it wins over the restore).
+    pub fn clear_detached_for_playback(&mut self) {
+        self.detached_for_playback = false;
     }
 
     /// Break the route: both legs' egress → [`EgressSource::Silence`] and any
@@ -696,11 +726,41 @@ impl MediaBridge {
         if let Some(old) = self.rtcp_cancel.take() {
             old.cancel();
         }
+        info!(session = %self.session_id, "media bridge route detached (unbridge)");
         if let Some(la) = self.leg_a.as_ref() {
             la.set_egress_source(EgressSource::Silence).await?;
         }
         if let Some(lb) = self.leg_b.as_ref() {
             lb.set_egress_source(EgressSource::Silence).await?;
+        }
+        Ok(())
+    }
+
+    /// Unconditionally tear down the route and any transport-level rewrite
+    /// relay before playback takes the legs' egress.
+    ///
+    /// Unlike [`Self::unbridge`], this does NOT trust the `route_active`
+    /// bookkeeping: the fast-path relay is armed on the transports and must be
+    /// cleared even when the route flag has drifted (production incident
+    /// 2026-09-24: play on a fast-path call left the armed relay untouched and
+    /// the prompt never reached the wire). Both teardown mechanisms are applied
+    /// — the explicit transport clear and the egress-source switch (which also
+    /// re-anchors the egress timeline via `was_relay`) — so exactly one of them
+    /// is effective regardless of the bookkeeping state.
+    pub async fn detach_route(&mut self) -> Result<()> {
+        self.route_active = false;
+        self.last_bridged = None;
+        *self.health.route_activated_at.lock() = None;
+        if let Some(old) = self.rtcp_cancel.take() {
+            old.cancel();
+        }
+        self.detached_for_playback = true;
+        info!(session = %self.session_id, "media route force-detached for playback");
+        for leg in [self.leg_a.as_ref(), self.leg_b.as_ref()].into_iter().flatten() {
+            // Belt and braces: clear the transport-level relay directly in case
+            // the leg's `was_relay` flag no longer reflects the armed state.
+            leg.pc().clear_rtp_rewrite_bridge();
+            leg.set_egress_source(EgressSource::Silence).await?;
         }
         Ok(())
     }
@@ -1364,6 +1424,21 @@ fn spawn_bridge_stats_task(
                             tx_idrop = 0u64,
                             "bridge media quality anomaly [5s]"
                         );
+                    } else if rx_packets_d + tx_packets_d > 0 {
+                        // Healthy interval: log the reconciliation counters
+                        // anyway. This is the per-call evidence trail for
+                        // disputes — five-second proof that every packet
+                        // received on one leg was emitted on the peer.
+                        info!(
+                            bridge_id = %session_id,
+                            relay = relay_mode,
+                            a_ingress = da.ingress, a_egress = da.egress,
+                            b_ingress = db.ingress, b_egress = db.egress,
+                            rx_idrop = rx_idrop_d,
+                            rx_loss = format!("{:.2}%", rx_loss_pct),
+                            tx_loss = format!("{:.2}%", tx_loss_pct),
+                            "bridge media quality [5s]"
+                        );
                     }
 
                     // ── media health snapshot (call-trace diagnostics) ──
@@ -1835,6 +1910,12 @@ mod tests {
         peers[0].play(Box::new(crate::audio_source::ToneAudioSource::new(
             440, Duration::from_secs(1), 8000,
         ).unwrap()), true, Some(Arc::new(move |_| { flag.store(true, Ordering::SeqCst); }))).await.unwrap();
+        bridge.clear_selection().await.unwrap();
+        assert!(bridge.leg(LegSide::A).is_none() && bridge.leg(LegSide::B).is_none());
+        assert!(!bridge.detached_for_playback());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!interrupted.load(Ordering::SeqCst), "Clearing selection interrupted caller playback");
+        assert!(remotes[0].pc().received_rtp_packets() > 0, "Caller playback needs no selected pair");
         bridge.select_pair(peers[1].clone(), peers[2].clone()).await.unwrap();
         bridge.bridge().await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
-use tracing::{error, info};
+use tracing::{debug, error};
 
 // ── Provider Trait ───────────────────────────────────────────────────────────
 
@@ -351,18 +351,22 @@ impl StepProvider {
         label: &str,
     ) -> anyhow::Result<ActionNode> {
         let mut last_err = anyhow::anyhow!("no retry attempted");
+        // Serialize once — the same bytes go into the debug log and the body.
         let body_str = serde_json::to_string(ctx).unwrap_or_default();
         for attempt in 0..self.retry.max_retries {
             let start = std::time::Instant::now();
-            info!(
+            debug!(
                 url = %url,
                 method = "POST",
-                headers = ?self.headers,
                 body = %body_str,
                 attempt = attempt,
                 "{label} request"
             );
-            let req = self.http_client.post(url).json(ctx);
+            let req = self
+                .http_client
+                .post(url)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body_str.clone());
             match crate::http_util::execute_request(
                 req,
                 &self.headers,
@@ -373,8 +377,13 @@ impl StepProvider {
                 Ok(resp) => {
                     let status = resp.status();
                     let elapsed = start.elapsed();
-                    let body = resp.text().await.unwrap_or_default();
-                    info!(
+                    let body = crate::http_util::read_body_with_timeout(
+                        Duration::from_millis(self.retry.timeout_ms),
+                        resp.text(),
+                    )
+                    .await
+                    .unwrap_or_default();
+                    debug!(
                         url = %url,
                         status = %status,
                         duration_ms = %elapsed.as_millis(),
@@ -438,14 +447,6 @@ impl ActionProvider for StepProvider {
 
     async fn on_session_start(&self, ctx: &SessionContext) -> anyhow::Result<()> {
         let url = self.endpoint_url(Some("start"));
-        let body_str = serde_json::to_string(ctx).unwrap_or_default();
-        info!(
-            url = %url,
-            method = "POST",
-            headers = ?self.headers,
-            body = %body_str,
-            "StepProvider on_session_start request"
-        );
         let start = std::time::Instant::now();
         let req = self.http_client.post(&url).json(ctx);
         if let Err(e) = crate::http_util::execute_request(req, &self.headers, None).await {
@@ -456,7 +457,7 @@ impl ActionProvider for StepProvider {
                 "StepProvider on_session_start failed"
             );
         } else {
-            info!(
+            debug!(
                 url = %url,
                 duration_ms = %start.elapsed().as_millis(),
                 "StepProvider on_session_start response"
@@ -477,14 +478,6 @@ impl ActionProvider for StepProvider {
             "reason": reason.reason,
             "detail": reason.detail,
         });
-        let body_str = serde_json::to_string(&body).unwrap_or_default();
-        info!(
-            url = %url,
-            method = "POST",
-            headers = ?self.headers,
-            body = %body_str,
-            "StepProvider on_session_end request"
-        );
         let start = std::time::Instant::now();
         let req = self.http_client.post(&url).json(&body);
         if let Err(e) = crate::http_util::execute_request(req, &self.headers, None).await {
@@ -501,14 +494,6 @@ impl ActionProvider for StepProvider {
     async fn on_local_dtmf_match(&self, digit: &str, action: &ActionNode) {
         let url = self.endpoint_url(Some("dtmf-match"));
         let body = serde_json::json!({ "digit": digit, "action": action });
-        let body_str = serde_json::to_string(&body).unwrap_or_default();
-        info!(
-            url = %url,
-            method = "POST",
-            headers = ?self.headers,
-            body = %body_str,
-            "StepProvider on_local_dtmf_match request"
-        );
         let start = std::time::Instant::now();
         let req = self.http_client.post(&url).json(&body);
         if let Err(e) = crate::http_util::execute_request(req, &self.headers, None).await {
@@ -519,7 +504,7 @@ impl ActionProvider for StepProvider {
                 "StepProvider on_local_dtmf_match failed"
             );
         } else {
-            info!(
+            debug!(
                 url = %url,
                 duration_ms = %start.elapsed().as_millis(),
                 "StepProvider on_local_dtmf_match response"

@@ -1,4 +1,5 @@
-//! CommandExecutor trait - unified command execution interface
+//! Command result DTOs and the media-capability check used by the session's
+//! unified command path (`SipSession::execute_command`).
 
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,25 @@ pub struct CommandResult {
     /// Optional structured data payload
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+    /// Machine-readable failure kind, set on failures so callers can branch
+    /// without string matching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<CommandFailureKind>,
+}
+
+/// Machine-readable classification of a failed command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandFailureKind {
+    /// The command is not convertible to the unified dispatch path; the
+    /// caller should fall back to its legacy handler.
+    NotSupported,
+    /// No live session for the target id.
+    SessionNotFound,
+    /// The session rejected or could not enqueue the command.
+    DispatchFailed,
+    /// Media capability check denied the command (e.g. bypass mode).
+    MediaDenied,
 }
 
 impl CommandResult {
@@ -26,6 +46,7 @@ impl CommandResult {
             message: None,
             affected_leg: None,
             data: None,
+            failure_kind: None,
         }
     }
 
@@ -36,6 +57,7 @@ impl CommandResult {
             message: None,
             affected_leg: Some(leg),
             data: None,
+            failure_kind: None,
         }
     }
 
@@ -46,97 +68,89 @@ impl CommandResult {
             message: Some(message.into()),
             affected_leg: None,
             data: None,
+            failure_kind: None,
         }
     }
-}
 
-/// Context for command execution
-#[derive(Debug, Clone)]
-pub struct ExecutionContext {
-    /// The session ID
-    pub session_id: String,
-    /// Media runtime profile for capability checks
-    pub media_profile: MediaRuntimeProfile,
-}
-
-impl ExecutionContext {
-    pub fn new(session_id: impl Into<String>) -> Self {
+    /// Create a failed result with a machine-readable failure kind
+    pub fn failure_with_kind(message: impl Into<String>, kind: CommandFailureKind) -> Self {
         Self {
-            session_id: session_id.into(),
-            media_profile: MediaRuntimeProfile::default(),
+            success: false,
+            message: Some(message.into()),
+            affected_leg: None,
+            data: None,
+            failure_kind: Some(kind),
         }
     }
+}
 
-    pub fn with_media_profile(mut self, profile: MediaRuntimeProfile) -> Self {
-        self.media_profile = profile;
-        self
+/// Check if the command can be executed with the session's media capabilities
+pub fn check_media_capability(
+    media_profile: &MediaRuntimeProfile,
+    cmd: &CallCommand,
+) -> MediaCapabilityCheck {
+    if cmd.is_signaling_only() {
+        return MediaCapabilityCheck::Allowed;
     }
 
-    /// Check if the command can be executed with current media capabilities
-    pub fn check_media_capability(&self, cmd: &CallCommand) -> MediaCapabilityCheck {
-        if cmd.is_signaling_only() {
-            return MediaCapabilityCheck::Allowed;
-        }
+    if !cmd.requires_media() {
+        return MediaCapabilityCheck::Allowed;
+    }
 
-        if !cmd.requires_media() {
-            return MediaCapabilityCheck::Allowed;
+    // Check specific media requirements
+    match cmd {
+        CallCommand::Play { .. } => {
+            if media_profile.can_play() {
+                MediaCapabilityCheck::Allowed
+            } else {
+                MediaCapabilityCheck::Degraded {
+                    reason: "playback not supported in bypass mode".to_string(),
+                }
+            }
         }
-
-        // Check specific media requirements
-        match cmd {
-            CallCommand::Play { .. } => {
-                if self.media_profile.can_play() {
-                    MediaCapabilityCheck::Allowed
-                } else {
-                    MediaCapabilityCheck::Degraded {
-                        reason: "playback not supported in bypass mode".to_string(),
-                    }
+        CallCommand::StartRecording { .. } => {
+            if media_profile.can_record() {
+                MediaCapabilityCheck::Allowed
+            } else {
+                MediaCapabilityCheck::Denied {
+                    reason: "recording not supported in bypass mode".to_string(),
                 }
             }
-            CallCommand::StartRecording { .. } => {
-                if self.media_profile.can_record() {
-                    MediaCapabilityCheck::Allowed
-                } else {
-                    MediaCapabilityCheck::Denied {
-                        reason: "recording not supported in bypass mode".to_string(),
-                    }
-                }
-            }
-            CallCommand::SupervisorListen { .. }
-            | CallCommand::SupervisorWhisper { .. }
-            | CallCommand::SupervisorBarge { .. }
-            | CallCommand::SupervisorTakeover { .. } => {
-                if self.media_profile.can_supervise() {
-                    MediaCapabilityCheck::Allowed
-                } else {
-                    MediaCapabilityCheck::Denied {
-                        reason: "supervisor modes not supported in bypass mode".to_string(),
-                    }
-                }
-            }
-            CallCommand::StartTranscription { .. } => {
-                // Like supervision, transcription taps decoded leg media —
-                // impossible in bypass mode (no MediaBridge).
-                if self.media_profile.can_supervise() {
-                    MediaCapabilityCheck::Allowed
-                } else {
-                    MediaCapabilityCheck::Denied {
-                        reason: "transcription not supported in bypass mode".to_string(),
-                    }
-                }
-            }
-            CallCommand::Hold { music: Some(_), .. } => {
-                if self.media_profile.supports_media_injection {
-                    MediaCapabilityCheck::Allowed
-                } else {
-                    // Hold itself works, but music won't play
-                    MediaCapabilityCheck::Degraded {
-                        reason: "hold music not supported in bypass mode".to_string(),
-                    }
-                }
-            }
-            _ => MediaCapabilityCheck::Allowed,
         }
+        CallCommand::SupervisorListen { .. }
+        | CallCommand::SupervisorWhisper { .. }
+        | CallCommand::SupervisorBarge { .. }
+        | CallCommand::SupervisorTakeover { .. } => {
+            if media_profile.can_supervise() {
+                MediaCapabilityCheck::Allowed
+            } else {
+                MediaCapabilityCheck::Denied {
+                    reason: "supervisor modes not supported in bypass mode".to_string(),
+                }
+            }
+        }
+        CallCommand::StartTranscription { .. } => {
+            // Like supervision, transcription taps decoded leg media —
+            // impossible in bypass mode (no MediaBridge).
+            if media_profile.can_supervise() {
+                MediaCapabilityCheck::Allowed
+            } else {
+                MediaCapabilityCheck::Denied {
+                    reason: "transcription not supported in bypass mode".to_string(),
+                }
+            }
+        }
+        CallCommand::Hold { music: Some(_), .. } => {
+            if media_profile.supports_media_injection {
+                MediaCapabilityCheck::Allowed
+            } else {
+                // Hold itself works, but music won't play
+                MediaCapabilityCheck::Degraded {
+                    reason: "hold music not supported in bypass mode".to_string(),
+                }
+            }
+        }
+        _ => MediaCapabilityCheck::Allowed,
     }
 }
 
@@ -173,14 +187,14 @@ mod tests {
     #[test]
     fn execution_context_media_check_signaling() {
         let ctx =
-            ExecutionContext::new("session-1").with_media_profile(MediaRuntimeProfile::degraded());
+            &MediaRuntimeProfile::degraded();
 
         // Signaling-only commands should always be allowed
         let cmd = CallCommand::Answer {
             leg_id: LegId::new("leg-1"),
         };
         assert!(matches!(
-            ctx.check_media_capability(&cmd),
+            check_media_capability(ctx, &cmd),
             MediaCapabilityCheck::Allowed
         ));
     }
@@ -188,7 +202,7 @@ mod tests {
     #[test]
     fn execution_context_media_check_play_bypass() {
         let ctx =
-            ExecutionContext::new("session-1").with_media_profile(MediaRuntimeProfile::degraded());
+            &MediaRuntimeProfile::degraded();
 
         let cmd = CallCommand::Play {
             leg_id: None,
@@ -196,7 +210,7 @@ mod tests {
             options: None,
         };
 
-        match ctx.check_media_capability(&cmd) {
+        match check_media_capability(ctx, &cmd) {
             MediaCapabilityCheck::Degraded { reason } => {
                 assert!(reason.contains("bypass"));
             }
@@ -207,7 +221,7 @@ mod tests {
     #[test]
     fn execution_context_media_check_record_bypass() {
         let ctx =
-            ExecutionContext::new("session-1").with_media_profile(MediaRuntimeProfile::degraded());
+            &MediaRuntimeProfile::degraded();
 
         let cmd = CallCommand::StartRecording {
             config: crate::call::domain::RecordConfig {
@@ -226,7 +240,7 @@ mod tests {
             },
         };
 
-        match ctx.check_media_capability(&cmd) {
+        match check_media_capability(ctx, &cmd) {
             MediaCapabilityCheck::Denied { reason } => {
                 assert!(reason.contains("recording"));
             }
@@ -237,7 +251,7 @@ mod tests {
     #[test]
     fn execution_context_media_check_record_anchored() {
         let ctx =
-            ExecutionContext::new("session-1").with_media_profile(MediaRuntimeProfile::default()); // Anchored by default
+            &MediaRuntimeProfile::default(); // Anchored by default
 
         let cmd = CallCommand::StartRecording {
             config: crate::call::domain::RecordConfig {
@@ -257,7 +271,7 @@ mod tests {
         };
 
         assert!(matches!(
-            ctx.check_media_capability(&cmd),
+            check_media_capability(ctx, &cmd),
             MediaCapabilityCheck::Allowed
         ));
     }

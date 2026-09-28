@@ -230,13 +230,7 @@ impl ThirdPartyTreeProvider {
                 params: HashMap::new(),
             },
 
-            "syshangup" => EntryAction::Hangup {
-                prompt: None,
-                prompt_text: None,
-                prompt_voice: None,
-                delay_before_ms: 0,
-                delay_after_ms: 0,
-            },
+            "syshangup" => EntryAction::hangup_none(),
 
             "input_phone" => EntryAction::InputPhone {
                 prompt: Some(node.nodename.clone()).filter(|p| !p.is_empty()),
@@ -256,13 +250,7 @@ impl ThirdPartyTreeProvider {
 
             _ => {
                 warn!(nodetype = %node.nodetype, "unknown third-party node type, treating as hangup");
-                EntryAction::Hangup {
-                    prompt: None,
-                    prompt_text: None,
-                    prompt_voice: None,
-                    delay_before_ms: 0,
-                    delay_after_ms: 0,
-                }
+                EntryAction::hangup_none()
             }
         }
     }
@@ -372,13 +360,7 @@ impl ThirdPartyTreeProvider {
                 }
             }
         }
-        ActionNode::new(EntryAction::Hangup {
-            prompt: None,
-            prompt_text: None,
-            prompt_voice: None,
-            delay_before_ms: 0,
-            delay_after_ms: 0,
-        })
+        ActionNode::new(EntryAction::hangup_none())
     }
 
     fn resolve_branch_key(body: &serde_json::Value) -> String {
@@ -501,13 +483,7 @@ impl ActionProvider for ThirdPartyTreeProvider {
                     .cloned();
 
                 let Some(current) = current else {
-                    return Ok(ActionNode::new(EntryAction::Hangup {
-                        prompt: None,
-                        prompt_text: None,
-                        prompt_voice: None,
-                        delay_before_ms: 0,
-                        delay_after_ms: 0,
-                    }));
+                    return Ok(ActionNode::new(EntryAction::hangup_none()));
                 };
 
                 if current.controltype == "getDynamicTree" {
@@ -535,13 +511,7 @@ impl ActionProvider for ThirdPartyTreeProvider {
                                     return Ok(self.action_for_node(&tree, &next, &mut state));
                                 }
                             }
-                            return Ok(ActionNode::new(EntryAction::Hangup {
-                                prompt: None,
-                                prompt_text: None,
-                                prompt_voice: None,
-                                delay_before_ms: 0,
-                                delay_after_ms: 0,
-                            }));
+                            return Ok(ActionNode::new(EntryAction::hangup_none()));
                         }
                     }
                 }
@@ -567,13 +537,7 @@ impl ActionProvider for ThirdPartyTreeProvider {
                     }
                 }
 
-                Ok(ActionNode::new(EntryAction::Hangup {
-                    prompt: None,
-                    prompt_text: None,
-                    prompt_voice: None,
-                    delay_before_ms: 0,
-                    delay_after_ms: 0,
-                }))
+                Ok(ActionNode::new(EntryAction::hangup_none()))
             }
 
             Some(ProviderEvent::DtmfTimeout) | Some(ProviderEvent::DtmfMenuTimeout) => {
@@ -584,44 +548,20 @@ impl ActionProvider for ThirdPartyTreeProvider {
                 let tree = self.tree.lock();
                 let current_id = state.current_node_id.clone();
                 let Some(cid) = current_id else {
-                    return Ok(ActionNode::new(EntryAction::Hangup {
-                        prompt: None,
-                        prompt_text: None,
-                        prompt_voice: None,
-                        delay_before_ms: 0,
-                        delay_after_ms: 0,
-                    }));
+                    return Ok(ActionNode::new(EntryAction::hangup_none()));
                 };
                 let node = tree.nodes.get(&cid).cloned();
                 let Some(node) = node else {
-                    return Ok(ActionNode::new(EntryAction::Hangup {
-                        prompt: None,
-                        prompt_text: None,
-                        prompt_voice: None,
-                        delay_before_ms: 0,
-                        delay_after_ms: 0,
-                    }));
+                    return Ok(ActionNode::new(EntryAction::hangup_none()));
                 };
 
                 let next_id = Self::get_next_linear_child(&node);
                 let Some(nid) = next_id else {
-                    return Ok(ActionNode::new(EntryAction::Hangup {
-                        prompt: None,
-                        prompt_text: None,
-                        prompt_voice: None,
-                        delay_before_ms: 0,
-                        delay_after_ms: 0,
-                    }));
+                    return Ok(ActionNode::new(EntryAction::hangup_none()));
                 };
                 let next = tree.nodes.get(&nid).cloned();
                 let Some(next) = next else {
-                    return Ok(ActionNode::new(EntryAction::Hangup {
-                        prompt: None,
-                        prompt_text: None,
-                        prompt_voice: None,
-                        delay_before_ms: 0,
-                        delay_after_ms: 0,
-                    }));
+                    return Ok(ActionNode::new(EntryAction::hangup_none()));
                 };
 
                 state.current_node_id = Some(nid.clone());

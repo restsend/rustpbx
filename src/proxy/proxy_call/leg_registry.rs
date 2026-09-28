@@ -62,6 +62,16 @@ impl LegRegistry {
         Some(data.leg)
     }
 
+    /// Remove a leg entry WITHOUT stopping its media peer, conference bridge
+    /// or tasks. The caller takes ownership of the lifecycle. Used by the
+    /// parallel-fork winner handoff: the winning fork's media peer must stay
+    /// alive (it becomes the session's "callee" peer), while the loser forks
+    /// use the regular [`Self::remove`] (which stops everything).
+    pub fn remove_preserve_media(&mut self, id: &LegId) -> Option<Leg> {
+        let data = self.legs.remove(id)?;
+        Some(data.leg)
+    }
+
     pub fn set_dialog(&mut self, id: LegId, dialog: Dialog) {
         if let Some(data) = self.legs.get_mut(&id) {
             data.dialog = Some(dialog);

@@ -12,13 +12,14 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum TransferDisposition {
+pub(crate) enum TransferDisposition {
     Detach,
     AwaitResult,
+    Refer,
 }
 
 fn use_b2bua(blind_transfer_use_refer: bool, disposition: TransferDisposition) -> bool {
-    !blind_transfer_use_refer || disposition == TransferDisposition::AwaitResult
+    !blind_transfer_use_refer || disposition != TransferDisposition::Detach
 }
 
 async fn wait_for_bridge_disconnect(
@@ -682,8 +683,15 @@ fn parse_named_target(mut raw_name: String) -> (String, HashMap<String, String>)
     (name, params)
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("B-leg transfer failed: {code} {message}")]
+pub(super) struct BlindTransferDialError {
+    pub code: u16,
+    pub message: String,
+}
+
 impl SipSession {
-    pub(super) async fn handle_transfer(
+    pub(in crate::proxy) async fn handle_transfer(
         &mut self,
         leg_id: LegId,
         target: String,
@@ -731,14 +739,23 @@ impl SipSession {
         result
     }
 
-    /// CTI transfer ops address the agent side as `callee`. On queue-routed
-    /// (dynamic-leg) calls the answered agent leg is registered under its
-    /// dialog UUID while the literal `callee` entry is a placeholder that
-    /// never leaves `Initializing` — resolve `callee` to the single
-    /// connected non-caller leg so the transfer reaches the real agent leg.
-    pub(super) fn resolve_transfer_leg(&self, leg_id: LegId) -> LegId {
-        if leg_id.as_str() != "callee" {
-            return leg_id;
+    /// Resolve the active callee for transfer and media commands.
+    pub(super) fn resolve_transfer_leg(&self) -> LegId {
+        let leg_id = LegId::from("callee");
+        // The selected pair survives hold even while RTP forwarding is detached.
+        // Resolve through legs rather than historical callee metadata.
+        if self.bridge.legs.len() == 2 && self.bridge.contains_leg(&LegId::from("caller")) {
+            if let Some(peer) = self.bridge.legs.iter().find(|id| id.as_str() != "caller"
+                && self.legs.get(id).is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::Hold))) {
+                return peer.clone();
+            }
+        }
+        // A consultation/dial target can be selected before the original
+        // agent is released; it is not yet the transfer source.
+        if let Some(selected) = self.bridge.legs.iter().find(|id| !matches!(id.as_str(), "caller" | "consult")
+            && self.legs.get(id).is_some_and(|leg| leg.source_leg.is_none()
+                && matches!(leg.state, LegState::Connected | LegState::Hold))) {
+            return selected.clone();
         }
         if self
             .legs
@@ -771,7 +788,7 @@ impl SipSession {
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
         headers: HashMap<String, String>,
     ) -> Result<()> {
-        let leg_id = self.resolve_transfer_leg(leg_id);
+        let leg_id = if leg_id.as_str() == "callee" { self.resolve_transfer_leg() } else { leg_id };
         let leg = self.require_leg(&leg_id)?;
         if !matches!(leg.state, LegState::Connected | LegState::Hold) {
             return Err(anyhow!(
@@ -840,7 +857,20 @@ impl SipSession {
         let target_type = transfer_target_type_str(&parsed_target).map(String::from);
         let target_for_event = match &parsed_target {
             TransferTarget::RoutePoint { name, .. } => format!("toivr:{name}"),
-            _ => target.clone(),
+            _ => {
+                // Canonical event form: a bare extension target (`"1003"`) is
+                // reported as `sip:1003` — URI-shaped like the B2BUA dial path.
+                let t = target.trim();
+                if target_type.as_deref() == Some("sip")
+                    && !t.contains('@')
+                    && !t.starts_with("sip:")
+                    && !t.starts_with("sips:")
+                {
+                    format!("sip:{t}")
+                } else {
+                    target.clone()
+                }
+            }
         };
 
         let result = self
@@ -858,7 +888,9 @@ impl SipSession {
         } else if !emits_own_event {
             // Application-side targets swap the flow in-session and never hit
             // the SIP dial paths that emit their own events — emit here so
-            // consumers see the hand-off in the event stream.
+            // consumers see the hand-off in the event stream. A missing
+            // transfer_source is synthesized centrally by the RWI gateway
+            // enrichment (agent attribution from CallMeta).
             self.emit_typed_rwi_event(&crate::rwi::CallTransferred {
                 call_id: self.context.session_id.to_string(),
                 transfer_target: Some(target_for_event),
@@ -873,33 +905,21 @@ impl SipSession {
     /// node) currently driving the session, the queue the call was served by,
     /// or the transferring agent. `None` when nothing meaningful can be
     /// attributed (bare session without app/queue/agent context).
-    async fn transfer_source_snapshot(
+    pub(super) async fn transfer_source_snapshot(
         &self,
         transferor_leg: &LegId,
     ) -> Option<crate::rwi::TransferSource> {
-        // Prefer the CC-hook-resolved id: when present, the hook has also
-        // published the paired `agent_name`, so both can be attributed
-        // together. The id fallbacks (transferor leg endpoint / connected
-        // callee) cannot be paired with a name, so they stay name-less.
-        let resolved_agent_id = self.session_ext_get("resolved_agent_id");
-        let agent_name = if resolved_agent_id.is_some() {
+        // SIP legs carry their own identity. Keep the existing fallback for
+        // API-created calls whose originating leg predates agent attribution.
+        let agent_id = self.legs.get(transferor_leg).and_then(|leg| leg.agent_id.clone())
+            .or_else(|| self.session_ext_get("resolved_agent_id"))
+            .or_else(|| self.legs.get(transferor_leg).and_then(|leg| leg.endpoint.as_deref())
+                .and_then(crate::models::call_record::extract_sip_username))
+            .or_else(|| self.meta.connected_callee.as_deref()
+                .and_then(crate::models::call_record::extract_sip_username));
+        let agent_name = if agent_id.is_some() && agent_id == self.session_ext_get("resolved_agent_id") {
             self.session_ext_get("agent_name")
-        } else {
-            None
-        };
-        let agent_id = resolved_agent_id
-            .or_else(|| {
-                self.legs
-                    .get(transferor_leg)
-                    .and_then(|leg| leg.endpoint.as_deref())
-                    .and_then(crate::models::call_record::extract_sip_username)
-            })
-            .or_else(|| {
-                self.meta
-                    .connected_callee
-                    .as_deref()
-                    .and_then(crate::models::call_record::extract_sip_username)
-            });
+        } else { None };
 
         // An actively running IVR is authoritative. A remembered IVR short
         // code is only historical metadata after the call has moved on.
@@ -951,7 +971,7 @@ impl SipSession {
     /// emitters outside the session (TransferController REFER outcomes,
     /// attended completion, Replaces takeover) can enrich their
     /// `call_transferred` events. Read-modify-write keeps the other fields.
-    fn stash_transfer_source(&self, source: Option<crate::rwi::TransferSource>) {
+    pub(super) fn stash_transfer_source(&self, source: Option<crate::rwi::TransferSource>) {
         let Some(source) = source else { return };
         let Some(ref gw) = self.server.rwi_gateway else {
             return;
@@ -1062,7 +1082,7 @@ impl SipSession {
                 let result = self.start_route_point_app(&name, params, headers).await;
                 if result.is_ok() {
                     self.meta.ivr_flow_suspended = false;
-                    if leg_id != LegId::from("caller") {
+                    if disposition != TransferDisposition::Refer && leg_id != LegId::from("caller") {
                         self.mark_transferred_with(Some(
                             serde_json::json!({ "target": name, "kind": "route_point" }),
                         ));
@@ -1140,7 +1160,10 @@ impl SipSession {
                 return_app,
                 from_user,
             } => {
-                self.meta.transfer_return_app = self.resolve_return_app(return_app).await;
+                let return_app = self.resolve_return_app(return_app).await;
+                if disposition != TransferDisposition::Refer || return_app.is_some() {
+                    self.meta.transfer_return_app = return_app;
+                }
                 self.mark_transferred_with(Some(
                     serde_json::json!({ "target": uri, "kind": "sip" }),
                 ));
@@ -1161,7 +1184,7 @@ impl SipSession {
                             &refer_to_uri,
                             from_user,
                             callee_state_rx,
-                            disposition != TransferDisposition::AwaitResult,
+                            disposition,
                             &headers,
                         )
                         .await;
@@ -1225,7 +1248,7 @@ impl SipSession {
                                         &refer_to_uri,
                                         from_user,
                                         callee_state_rx,
-                                        disposition != TransferDisposition::AwaitResult,
+                                        disposition,
                                         &headers,
                                     )
                                     .await;
@@ -1292,7 +1315,7 @@ impl SipSession {
     /// disposition requires an anchored result), and as the 3PCC fallback
     /// when the peer rejects an outbound REFER with 405/420/501.
     ///
-    /// `allow_app_route` enables the route-table application hand-off: a bare
+    /// Dispositions other than `AwaitResult` enable application hand-off: a bare
     /// number that is not a registered contact but whose route resolves to a
     /// queue or application (IVR, ...) starts that flow in-session instead of
     /// dialing the number. Disabled for `AwaitResult` dispositions, which
@@ -1304,14 +1327,14 @@ impl SipSession {
         refer_to_uri: &rsipstack::sip::Uri,
         from_user: Option<String>,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
-        allow_app_route: bool,
+        disposition: TransferDisposition,
         headers: &HashMap<String, String>,
     ) -> Result<()> {
         info!(session_id = %self.id, %leg_id, target = %uri, return_app = ?self.meta.transfer_return_app, "Blind transfer via B-leg INVITE (B2BUA)");
         // `callee` is a reusable slot: finalizing the target replaces its
         // dialog. Save the current B-leg identity before dialing so cleanup
         // cannot accidentally hang up the transfer target (or the caller).
-        let replaced_leg = self.resolve_transfer_leg(LegId::from("callee"));
+        let replaced_leg = self.resolve_transfer_leg();
         let replaced_dialog_id = self
             .legs
             .get_dialog(&replaced_leg)
@@ -1358,7 +1381,7 @@ impl SipSession {
         // Not a registered internal contact — run the transfer target
         // through the route table (match/rewrite/trunk) when enabled. Queue /
         // application route results hand the call to that flow in-session.
-        if !registered && allow_app_route {
+        if !registered && disposition != TransferDisposition::AwaitResult {
             match self.route_transfer_target_leg(&location).await {
                 Ok(BlindTransferRoute::Dial(routed, hints)) => {
                     location = routed;
@@ -1367,7 +1390,9 @@ impl SipSession {
                 Ok(BlindTransferRoute::Queue { queue, hints }) => {
                     info!(session_id = %self.id, %leg_id, queue = %queue.queue_name, "Blind transfer target routed to queue; starting QueueApp in-session");
                     self.track_routed_leg_hints(hints);
-                    self.retire_replaced_blind_transfer_leg(replaced_leg, replaced_dialog_id);
+                    if disposition != TransferDisposition::Refer {
+                        self.retire_replaced_blind_transfer_leg(replaced_leg, replaced_dialog_id);
+                    }
                     let result = self.start_queue_app(queue, None).await;
                     if result.is_ok() {
                         self.emit_blind_transfer_app_event(uri, "queue");
@@ -1383,7 +1408,9 @@ impl SipSession {
                 }) => {
                     info!(session_id = %self.id, %leg_id, app = %app_name, "Blind transfer target routed to application; starting app in-session");
                     self.track_routed_leg_hints(hints);
-                    self.retire_replaced_blind_transfer_leg(replaced_leg, replaced_dialog_id);
+                    if disposition != TransferDisposition::Refer {
+                        self.retire_replaced_blind_transfer_leg(replaced_leg, replaced_dialog_id);
+                    }
                     let target_type = if app_name == "ivr" {
                         "ivr"
                     } else {
@@ -1428,7 +1455,9 @@ impl SipSession {
             )
             .await;
         if result.is_ok() {
-            self.retire_replaced_blind_transfer_leg(replaced_leg, replaced_dialog_id);
+            if disposition != TransferDisposition::Refer {
+                self.retire_replaced_blind_transfer_leg(replaced_leg, replaced_dialog_id);
+            }
             // The B2BUA blind-transfer path swaps the B leg
             // in-session (no REFER), so the REFER-based emitters
             // never fire. Emit the transfer notification here,
@@ -1441,17 +1470,14 @@ impl SipSession {
             });
         }
         result.map_err(|(code, text, reason)| {
-            self.meta.transfer_return_app = None;
             if self.meta.pending_transfer_outcome.is_some() {
                 self.meta.pending_transfer_outcome =
                     Some(crate::call::domain::TransferOutcome::from_sip_status(code));
             }
-            anyhow!(
-                "B-leg transfer failed: {} {} - {}",
+            BlindTransferDialError {
                 code,
-                text,
-                reason.unwrap_or_default()
-            )
+                message: format!("{} - {}", text, reason.unwrap_or_default()),
+            }.into()
         })
     }
 
@@ -1472,14 +1498,11 @@ impl SipSession {
             None => return Ok(BlindTransferRoute::Dial(location.clone(), None)),
         };
         let contact = self
-            .context
-            .dialplan
-            .caller_contact
-            .as_ref()
-            .map(|c| c.uri.clone())
-            .or_else(|| self.server.contact_uri_for_location_with_sip_contact(
-                location, self.context.dialplan.media.sip_contact.as_ref(),
-            ))
+            .server
+            .contact_uri_for_location_with_sip_contact(
+                location,
+                self.context.dialplan.media.sip_contact.as_ref(),
+            )
             .unwrap_or_else(|| caller.clone());
         // Carry original caller headers (X-CRM-*, X-CC-*, etc.) so header-based
         // match/rewrite rules behave like the inbound path.
@@ -1629,9 +1652,25 @@ impl SipSession {
     fn stashed_transfer_source(&self) -> Option<crate::rwi::TransferSource> {
         let gw = self.server.rwi_gateway.as_ref()?;
         let g = gw.read();
-        g.meta_store
+        let stashed = g
+            .meta_store
             .get_sync(&self.context.session_id.to_string())
-            .and_then(|m| m.transfer_source)
+            .and_then(|m| m.transfer_source);
+        drop(g);
+        // Agent-initiated transfers (agent phone REFERs during a plain
+        // agent call) have no app context to snapshot. Fall back to the
+        // call's own agent attribution — the transferring agent — so the
+        // event still carries `source_type: "agent"` for consumers.
+        stashed.or_else(|| {
+            let agent_id = self.session_ext_get("agent_id")?;
+            Some(crate::rwi::TransferSource {
+                source_type: "agent".to_string(),
+                name: None,
+                ivr_node_id: None,
+                agent_id: Some(agent_id),
+                agent_name: self.session_ext_get("agent_name"),
+            })
+        })
     }
 
     /// Surface who handed the call to an IVR target so the successor's step
@@ -2690,7 +2729,7 @@ impl SipSession {
             return Err(anyhow!("Consult leg has not answered"));
         }
         self.require_leg(&caller)?;
-        let agent = self.resolve_transfer_leg(LegId::from("callee"));
+        let agent = self.resolve_transfer_leg();
         self.require_leg(&agent)?;
         // Validate peers before changing any routing or releasing the agent.
         for id in [&caller, &consult_leg] {
@@ -2720,7 +2759,7 @@ impl SipSession {
 
         self.require_leg(&consult_leg)?;
         let caller = LegId::from("caller");
-        let agent = self.resolve_transfer_leg(LegId::from("callee"));
+        let agent = self.resolve_transfer_leg();
         self.require_leg(&caller)?;
         self.require_leg(&agent)?;
         if consult_leg == caller || consult_leg == agent {

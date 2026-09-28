@@ -1,7 +1,6 @@
 use anyhow::Result;
 use rsipstack::sip::{
     Header, Transport,
-    headers::auth::Algorithm,
     prelude::{HeadersExt, ToTypedHeader},
     typed::Authorization,
 };
@@ -222,41 +221,6 @@ impl SipUser {
             params: contact_params,
         };
         self.contact = Some(contact);
-    }
-
-    pub fn auth_digest(&self, algorithm: Algorithm) -> String {
-        use md5::{Digest, Md5};
-        use sha2::{Sha256, Sha512};
-        let value = format!(
-            "{}:{}:{}",
-            self.username,
-            self.realm.as_ref().unwrap_or(&"".to_string()),
-            self.password.as_ref().unwrap_or(&"".to_string()),
-        );
-        fn to_hex(bytes: impl AsRef<[u8]>) -> String {
-            bytes
-                .as_ref()
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect()
-        }
-        match algorithm {
-            Algorithm::Md5 | Algorithm::Md5Sess => {
-                let mut hasher = Md5::new();
-                hasher.update(value);
-                to_hex(hasher.finalize())
-            }
-            Algorithm::Sha256 | Algorithm::Sha256Sess => {
-                let mut hasher = Sha256::new();
-                hasher.update(value);
-                to_hex(hasher.finalize())
-            }
-            Algorithm::Sha512 | Algorithm::Sha512Sess => {
-                let mut hasher = Sha512::new();
-                hasher.update(value);
-                to_hex(hasher.finalize())
-            }
-        }
     }
 }
 

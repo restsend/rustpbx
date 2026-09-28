@@ -550,7 +550,12 @@ When a `prompt` action contains `tts_text` but no TTS service is configured:
 
 Every provider flow **must** end with a terminal action that takes the call somewhere else (`hangup` / `play_and_hangup` / `transfer` / `queue` / `bridge`). A flow that ends with a non-terminal node (or a plain `exit`) leaves the call up, and the session may re-enter the same IVR (queue `return_to_ivr`, route-point hops, `start_app` returns). Because each re-entry POSTs a fresh `/start`, a **stateless** provider would repeat its last node forever — producing endless `start → step → end` cycles.
 
-RustPBX guards against this: if the same IVR flow is re-entered more than `max_flow_restarts` times within `reentry_window_secs` without any real DTMF input (real input resets the counter), the next entry is blocked **before** `/start` and the call is routed to `[proxy.ivr_fallback]` (at most once, like any other fallback), else `sounds/error.wav` plays and the call hangs up. The trace carries an `ivr_fallback` entry with `reason="reentry_loop"` and `ivr_end_reason=ivr_reentry_loop` is published.
+RustPBX guards against this — with node-level progress detection so the per-node bridge progression is never misjudged:
+
+* **Fresh re-entries** (no `ivr_resumed` marker: a plain re-entry after `exit`, `start_app` returns) count immediately; once the count exceeds `max_flow_restarts` within `reentry_window_secs` without real DTMF input, the next entry is blocked **before** `/start`.
+* **Resumed entries** (`ivr_resumed=1`: voip_bridge / queue `return_to_ivr` returns, JumpIvr resume — the per-node progression of one logical flow) are judged by node identity: if the FIRST node of the new cycle carries the **same `step_id`** as the previous cycle's first node, the repeated-node counter grows; a **different `step_id`** means the provider is advancing through its flow and always resets the counter. A node without a `step_id` cannot prove progress and counts conservatively.
+
+When the guard fires, the call is routed to `[proxy.ivr_fallback]` (at most once, like any other fallback), else `sounds/error.wav` plays and the call hangs up. Real caller input — a live DTMF event or digits buffered on a bridge return — resets the counter. The trace carries an `ivr_fallback` entry with `reason="reentry_loop"` and `ivr_end_reason=ivr_reentry_loop` is published.
 
 ### Published step.json (IVR Editor creates this, for reference)
 

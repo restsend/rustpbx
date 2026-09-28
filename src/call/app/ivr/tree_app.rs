@@ -165,19 +165,6 @@ impl IvrApp {
         self
     }
 
-    /// Load an `IvrApp` from a TOML file path.
-    pub fn from_file(path: &str) -> anyhow::Result<Self> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| anyhow::anyhow!("Failed to read IVR config '{}': {}", path, e))?;
-        let file_config: super::config::IvrFileConfig = toml::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse IVR config '{}': {}", path, e))?;
-        file_config
-            .ivr
-            .validate()
-            .map_err(|e| anyhow::anyhow!("IVR config validation failed '{}': {}", path, e))?;
-        Ok(Self::new(file_config.ivr))
-    }
-
     /// Emit an RWI event via the gateway in the application context, if configured.
     fn emit_rwi_event_typed(
         &self,

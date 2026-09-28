@@ -2409,10 +2409,22 @@ impl CallApp for QueueApp {
                 // user-parts that differ from the registered agent_id are
                 // handled correctly (e.g. DbRegistry custom URIs).
                 let timed_out_agents = std::mem::take(&mut self.pending_agents);
-                let timed_out_legs: Vec<String> = timed_out_agents.iter()
+
+                // Late-answer grace (race1): do NOT cancel the INVITEs at
+                // ring timeout. The CC hook's on_call_connected has a
+                // Wrapup→Busy transition for late answers — the 200 OK that
+                // lands just after the timeout's Wrapup must still connect
+                // and bridge (via the LegConnected self-heal bridge). The
+                // INVITEs terminate naturally (UA timeout / CANCEL from
+                // caller / late 200 OK). pending_agents is already cleared,
+                // so the queue won't re-dial these agents.
+                //
+                // The previous `ctrl.remove_legs(&timed_out_legs)` sent
+                // CANCEL immediately — the late answer's 200 OK crossed with
+                // the CANCEL and the call never connected, defeating the
+                // Wrapup→Busy design in cc_call_session_hook.rs.
+                let _timed_out_legs: Vec<String> = timed_out_agents.iter()
                     .map(|(_, leg_id)| leg_id.clone()).collect();
-                // Cancel the unanswered INVITEs before releasing agents or retrying.
-                ctrl.remove_legs(&timed_out_legs);
 
                 if let Some(ref registry) = self.agent_registry {
                     let all_agents = registry.list_agents().await;

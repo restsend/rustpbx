@@ -547,7 +547,12 @@ RustPBX 通过 `toivr:{target}` 跳转，并设置 `ivr_fallback_used=1`，确�
 
 每个 Provider 流程**必须**以将呼叫带离当前 IVR 的终端动作结束（`hangup` / `play_and_hangup` / `transfer` / `queue` / `bridge`）。若流程以非终端节点（或普通 `exit`）收尾，通话会保持并可能重新进入同一 IVR（queue 的 `return_to_ivr`、路由点跳转、`start_app` 返回等）。由于每次重入都会重新 POST `/start`，**无状态** Provider 会永远重复其"最后一个节点"——形成无限的 `start → step → end` 循环。
 
-RustPBX 对此有防环保护：同一 IVR 流程在 `reentry_window_secs` 内无任何真实 DTMF 输入（真实输入会重置计数）地重入超过 `max_flow_restarts` 次后，下一次重入会在 `/start` 之前被拦截，呼叫转至 `[proxy.ivr_fallback]`（与其他回退一样每通电话最多一次），未配置则播放 `sounds/error.wav` 后挂断。追踪中会记录 `reason="reentry_loop"` 的 `ivr_fallback` 条目，并发布 `ivr_end_reason=ivr_reentry_loop`。
+RustPBX 对此有防环保护，并带节点级进度识别，逐节点 bridge 推进不会被误判：
+
+* **全新重入**（无 `ivr_resumed` 标记：`exit` 结尾后的普通重入、`start_app` 返回）直接计数；在 `reentry_window_secs` 内无真实 DTMF 输入地累计超过 `max_flow_restarts` 后，下一次重入会在 `/start` 之前被拦截。
+* **延续重入**（`ivr_resumed=1`：voip_bridge / queue `return_to_ivr` 返回、JumpIvr resume——同一逻辑流程的逐节点推进）按节点身份判定：若新周期首个节点的 `step_id` 与上一周期**相同**，重复节点计数增加；**不同**则说明 provider 正在流程中推进，计数重置。节点未带 `step_id` 时无法证明进度，保守计数。
+
+防环触发后，呼叫转至 `[proxy.ivr_fallback]`（与其他回退一样每通电话最多一次），未配置则播放 `sounds/error.wav` 后挂断。真实用户输入——实时 DTMF 或 bridge 返回时缓存带回的按键——会重置计数。追踪中会记录 `reason="reentry_loop"` 的 `ivr_fallback` 条目，并发布 `ivr_end_reason=ivr_reentry_loop`。
 
 ### 发布后的 step.json（由 IVR 编辑器创建，供参考）
 

@@ -23,24 +23,50 @@ import uuid
 
 import pytest
 
+import helpers as h
+from helpers import (
+    compute_rms_db,
+    find_dominant_frequency,
+    find_signal_start,
+    has_audio_content,
+    read_wav_mono,
+)
+
 pytestmark = [pytest.mark.tier3, pytest.mark.cc_transfer_events]
+
+MIX_TONE_HZ = 620.0
+FREQ_TOL_HZ = 15.0
+MIN_RMS_DB = -40.0
 
 
 @pytest.mark.asyncio
-async def test_consult_merge_bridges_real_rtp(pbx, sipbot_pool, api, event_checker):
+async def test_consult_merge_bridges_real_rtp(
+    pbx, sipbot_pool, api, event_checker, tmp_path
+):
     """After /merge, B (1002) and C (1003) must receive mixed audio from
     the conference bridge. This is the core assertion that backlog #1
     (JoinMixerLeg dispatch) actually wires RTP into the MCU.
+
+    Content assertion (not just packet counts): a 620 Hz tone is played
+    into call1 after the merge; the mixer must deliver it to BOTH B and C —
+    each bot's mixdown recording must carry the tone's spectrum. Packet
+    counters alone cannot distinguish real audio from CNG/silence.
     """
+    record_b = tmp_path / "merge_b_rx.wav"
+    record_c = tmp_path / "merge_c_rx.wav"
+    mix_tone = tmp_path / "merge_mix620.wav"
+    h.generate_sine_wav(mix_tone, MIX_TONE_HZ, 40.0, 8000, 0.4)
     callee_b = sipbot_pool.callee(
         host=pbx.host, port=16820, username="1002", password="123456",
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
-        ring_secs=1, answer_mode="echo", hangup_after=90,
+        ring_secs=1, answer_mode="echo", hangup_after=75,
+        record_file=str(record_b),
     )
     callee_c = sipbot_pool.callee(
         host=pbx.host, port=16830, username="1003", password="123456",
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
-        ring_secs=1, answer_mode="echo", hangup_after=90,
+        ring_secs=1, answer_mode="echo", hangup_after=75,
+        record_file=str(record_c),
     )
     await asyncio.sleep(3)
 
@@ -96,6 +122,13 @@ async def test_consult_merge_bridges_real_rtp(pbx, sipbot_pool, api, event_check
     # Wait for JoinMixerLeg dispatch + bridge establishment + RTP to flow
     await asyncio.sleep(5)
 
+    # ── Content probe: inject a 620 Hz tone into the call and require it ──
+    # in BOTH bots' mixdown recordings. Packet counters cannot tell real
+    # audio from CNG/silence; a spectrum peak can.
+    await event_checker.rwi.media_play(call1, "file", str(mix_tone), loop=True)
+    await asyncio.sleep(8)
+    await event_checker.rwi.media_stop(call1)
+
     b_rtp_after = callee_b.get_rtp_stats()
     c_rtp_after = callee_c.get_rtp_stats()
     print(f"[rtp] B after merge:  {b_rtp_after}")
@@ -133,10 +166,47 @@ async def test_consult_merge_bridges_real_rtp(pbx, sipbot_pool, api, event_check
     if b_rx_delta == 0:
         print("[warn] B received 0 new RTP packets post-consult — bridge may not be delivering")
 
-    # Cleanup
+    # Cleanup: end the calls, then let the bots self-exit (hangup_after) so
+    # their mixdown recordings flush; poll for the files before content
+    # assertions.
     for cid in (call1, call2):
         try:
             await event_checker.rwi.hangup(cid)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[cleanup] hangup {cid} ignored: {exc}")
+
+    async def _wait_recording(path):
+        deadline = asyncio.get_event_loop().time() + 75
+        while asyncio.get_event_loop().time() < deadline:
+            hits = sorted(path.parent.glob(path.stem + "*.wav"))
+            if hits:
+                return hits[-1]  # sipbot suffixes the filename
+            await asyncio.sleep(1.0)
+        return None
+
+    async def _assert_mix_tone(path, label):
+        resolved = await _wait_recording(path)
+        assert resolved, f"{label}: mixdown recording never flushed — {path}"
+        samples, sr = read_wav_mono(resolved)
+        assert has_audio_content(samples, MIN_RMS_DB), (
+            f"{label}: recording silent — the merged conference never "
+            "delivered audio to this participant"
+        )
+        start = find_signal_start(samples)
+        region = samples[start:min(start + 5 * sr, samples.size)]
+        assert region.size >= sr // 2, f"{label}: not enough audio"
+        rms = compute_rms_db(region)
+        assert rms >= MIN_RMS_DB, f"{label}: recording too quiet ({rms:.1f}dB)"
+        dom, _mag = find_dominant_frequency(region, sr, low=200, high=900, step=5)
+        assert abs(dom - MIX_TONE_HZ) <= FREQ_TOL_HZ, (
+            f"{label}: recording dominant {dom:.0f}Hz, expected the injected "
+            f"{MIX_TONE_HZ:.0f}Hz (±{FREQ_TOL_HZ}) — the mixer did NOT "
+            "deliver the merged audio to this participant"
+        )
+        print(f"[rtp] {label} mixdown: {MIX_TONE_HZ:.0f}Hz ok rms={rms:.1f}dB")
+
+    await asyncio.gather(
+        _assert_mix_tone(record_b, "B(1002)"),
+        _assert_mix_tone(record_c, "C(1003)"),
+    )
     await asyncio.sleep(2)

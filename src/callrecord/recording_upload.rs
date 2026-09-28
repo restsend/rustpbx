@@ -1076,10 +1076,18 @@ impl RecordingUploadHook {
         }
         let metadata = build_segment_recording_metadata(record, media, url);
         let gw_ref = gw.read();
-        gw_ref.send_to_owner(&crate::rwi::RecordingMetadataAvailable {
+        // POST-CALL event: recording finalization runs asynchronously after
+        // session teardown, when the originate's RWI ownership entry is
+        // already released — owner-routed delivery would be silently
+        // dropped (production: `recording_metadata_available` never reached
+        // WS consumers on RWI-originated recordings). Broadcast instead:
+        // the webhook tap fires for every delivery and the event carries
+        // its `call_id`, so consumers filter by call.
+        let event = crate::rwi::RecordingMetadataAvailable {
             call_id: record.call_id.clone(),
             metadata,
-        });
+        };
+        gw_ref.broadcast_event(&crate::rwi::RwiEvent::from_spec(&event, None));
     }
 }
 

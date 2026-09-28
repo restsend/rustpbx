@@ -45,7 +45,7 @@ async def _wait_audio_frames(ua, label: str = "ua", min_frames: int = 50, timeou
 
 
 @pytest.mark.asyncio
-async def test_webrtc_to_webrtc_call_media_flows(pbx, sipbot_pool):
+async def test_webrtc_to_webrtc_call_media_flows(pbx, sipbot_pool, tmp_path):
     """Baseline: WebRTC caller → RTP callee (proven pattern from
     test_webrtc_interop.py). Two-WebRTC topology isn't supported by the
     pytest config_builder; we focus on the re-INVITE-to-WebRTC-client
@@ -63,10 +63,16 @@ async def test_webrtc_to_webrtc_call_media_flows(pbx, sipbot_pool):
     )
     await h.wait_registered(callee)
 
+    # Tone source: `sipbot --webrtc` transmits silence unless a file is
+    # played, and a silent caller legitimately delivers silence.
+    sine = tmp_path / "webrtc_reinvite_tone.wav"
+    h.generate_sine_wav(sine, 440.0, 8.0, 8000, 0.5)
+
     caller = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456",
         hangup=30, webrtc=True,
         codecs="opus,pcmu", audio_quality=True,
+        play_file=str(sine),
     )
     answered = await caller.wait_output_async(r"200 OK|Call established", timeout=30)
     assert answered, f"call never answered:\n{caller.output[-1500:]}"

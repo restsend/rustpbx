@@ -782,6 +782,14 @@ impl LegInner {
     /// the PC's rewrite bridge (transport-level, ICE exclusively owned); all
     /// other sources go to the always-alive [`EgressPipeline`].
     pub async fn set_egress_source(&self, source: EgressSource) -> Result<()> {
+        let kind = match &source {
+            EgressSource::RewriteRelay { .. } => "relay",
+            EgressSource::Silence => "silence",
+            EgressSource::Media { .. } => "media",
+            EgressSource::TranscodePeer { .. } => "transcode_peer",
+            EgressSource::Inject { .. } => "inject",
+        };
+        tracing::debug!(leg = %self.id, source = kind, "leg egress source switch");
         let is_relay = matches!(&source, EgressSource::RewriteRelay { .. });
         if let Some(previous) = self.relay_arm_task.lock().take() {
             previous.abort();
@@ -897,6 +905,11 @@ impl LegInner {
             jitter_us: rtcp.jitter_us,
             rtt_us: rtcp.rtt_us,
             loss_pct: rtcp.loss_pct(),
+            // Receiver-reported cumulative lost: the remote's own account of
+            // our transmitted stream. Filled cross-leg by the session's
+            // record_snapshot.
+            rtcp_packets_lost: rtcp.packets_lost,
+            relay_drop: None,
             advertised_addr: self.advertised_addr(),
             peer_advertised_addr: self.peer_advertised_addr(),
             remote_addr,

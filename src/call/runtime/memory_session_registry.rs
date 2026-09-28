@@ -162,15 +162,18 @@ impl SessionRegistry for MemorySessionRegistry {
     async fn lookup(&self, call_id: &str) -> Option<SessionInfo> {
         self.sessions.get(call_id).map(|e| e.info.clone())
     }
+}
 
-    async fn list_all(&self, limit: usize) -> Vec<SessionInfo> {
+#[cfg(test)]
+impl MemorySessionRegistry {
+    pub(crate) async fn list_all(&self, limit: usize) -> Vec<SessionInfo> {
         let mut entries: Vec<SessionInfo> = self.sessions.iter().map(|e| e.info.clone()).collect();
         entries.sort_by(|a, b| b.started_at.cmp(&a.started_at));
         entries.truncate(limit);
         entries
     }
 
-    async fn list_by_node(&self, node_id: &str) -> Vec<String> {
+    pub(crate) async fn list_by_node(&self, node_id: &str) -> Vec<String> {
         self.sessions
             .iter()
             .filter(|e| e.info.node_id == node_id)
@@ -178,12 +181,8 @@ impl SessionRegistry for MemorySessionRegistry {
             .collect()
     }
 
-    async fn active_count(&self) -> usize {
+    pub(crate) async fn active_count(&self) -> usize {
         self.sessions.len()
-    }
-
-    async fn health_check(&self) -> Result<(), RegistryError> {
-        Ok(())
     }
 }
 

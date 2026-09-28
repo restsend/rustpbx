@@ -165,6 +165,8 @@ pub enum TestUaEvent {
     CallUpdated(DialogId, rsipstack::sip::Method, Option<String>),
     /// Refer received with target URI
     Referred(DialogId, String),
+    /// REFER progress: dialog, sipfrag body, Subscription-State.
+    ReferNotify(DialogId, String, String),
     /// SIP INFO with DTMF (application/dtmf-relay) received on this dialog
     DtmfInfo(DialogId, String),
     /// SIP INFO (non-DTMF) received: (dialog_id, content_type, body)
@@ -1132,7 +1134,12 @@ impl TestUa {
                             tx_handle.reply(rsipstack::sip::StatusCode::OK).await.ok();
                         }
                     }
-                    DialogState::Notify(id, _request, tx_handle) => {
+                    DialogState::Notify(id, request, tx_handle) => {
+                        let state = request.headers.iter()
+                            .find(|h| h.name().eq_ignore_ascii_case("Subscription-State"))
+                            .map(|h| h.value().to_string()).unwrap_or_default();
+                        events.push(TestUaEvent::ReferNotify(id.clone(),
+                            String::from_utf8_lossy(request.body()).into_owned(), state));
                         debug!("TestUa: Received Notify state for {}", id);
                         // Reply 200 OK to NOTIFY so the sender can proceed
                         tx_handle.reply(rsipstack::sip::StatusCode::OK).await.ok();

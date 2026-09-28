@@ -8,8 +8,8 @@ pub use crate::call::domain::{
 pub use crate::call::domain::{Leg, SessionState};
 pub use crate::call::runtime::BridgeConfig;
 pub use crate::call::runtime::{
-    AppFactory, AppRuntime, AppRuntimeConfig, CommandResult, DefaultAppRuntime, ExecutionContext,
-    MediaCapabilityCheck, SessionId,
+    AppFactory, AppRuntime, AppRuntimeConfig, CommandFailureKind, CommandResult,
+    DefaultAppRuntime, MediaCapabilityCheck, SessionId,
 };
 pub use crate::call::sip::{ClientDialogGuard, ServerDialogGuard};
 pub use crate::call::{DialStrategy, Location};

@@ -174,13 +174,24 @@ async def test_p2p_bidirectional_audio(pbx, sipbot_pool, tmp_path):
 # ---------------------------------------------------------------------------
 
 async def _register_two_devices(sipbot_pool, pbx, *, port_echo: int, port_none: int,
-                                username: str = "1002"):
+                                username: str = "1002", tmp_path=None):
     """Register the SAME username from two sipbot UAs on different local ports.
 
     The echo device is registered first; the never-answering device is
     registered second, making it the *newest* registration — the one that
     last-alive mode would pick.
+
+    The never-answering device needs a LONG ringback file: sipbot 0.2.x's
+    built-in `--ringback` plays ~2s then ANSWERS, which would defeat the
+    "never answers" premise. A 120s ringback + ring-duration 60 keeps it in
+    the 180-Ringing stage for the whole test window.
     """
+    long_ring = None
+    if tmp_path is not None:
+        from helpers import generate_sine_wav
+        long_ring = tmp_path / "never_answer_ringback.wav"
+        generate_sine_wav(long_ring, 440.0, 120.0, 8000, 0.05)
+
     sipbot_pool.callee(
         host=pbx.host, port=port_echo, username=username, password="123456",
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
@@ -190,18 +201,19 @@ async def _register_two_devices(sipbot_pool, pbx, *, port_echo: int, port_none: 
     sipbot_pool.callee(
         host=pbx.host, port=port_none, username=username, password="123456",
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
-        ring_secs=60, answer_mode="none",
+        ring_secs=60, answer_mode="none", ringback=str(long_ring) if long_ring else None,
     )
     await asyncio.sleep(1.5)
 
 
 @pytest.mark.asyncio
-async def test_p2p_parallel_fork_rings_all_registrations(pbx, sipbot_pool):
+async def test_p2p_parallel_fork_rings_all_registrations(pbx, sipbot_pool, tmp_path):
     """parallel_fork=true (default): a callee with multiple registered devices
     rings ALL of them — the caller connects even though the NEWEST registration
     never answers (the older echo device picks up first)."""
     h.boot_pbx(pbx)
-    await _register_two_devices(sipbot_pool, pbx, port_echo=15220, port_none=15221)
+    await _register_two_devices(sipbot_pool, pbx, port_echo=15220, port_none=15221,
+                                tmp_path=tmp_path)
 
     caller = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456", hangup=6,
@@ -213,13 +225,14 @@ async def test_p2p_parallel_fork_rings_all_registrations(pbx, sipbot_pool):
 
 
 @pytest.mark.asyncio
-async def test_p2p_parallel_fork_disabled_rings_last_registered(pbx, sipbot_pool, pbx_config):
+async def test_p2p_parallel_fork_disabled_rings_last_registered(pbx, sipbot_pool, pbx_config, tmp_path):
     """parallel_fork=false: only the NEWEST registration is dialed. Here the
     newest device never answers, so the caller must NOT connect and no media
     flows — proving the older device was not rung."""
     pbx_config.set_parallel_fork(False)
     h.boot_pbx(pbx)
-    await _register_two_devices(sipbot_pool, pbx, port_echo=15222, port_none=15223)
+    await _register_two_devices(sipbot_pool, pbx, port_echo=15222, port_none=15223,
+                                tmp_path=tmp_path)
 
     caller = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456", hangup=4,
@@ -236,7 +249,7 @@ async def test_p2p_parallel_fork_disabled_rings_last_registered(pbx, sipbot_pool
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_p2p_max_ring_time_rejects_no_answer(pbx, sipbot_pool, pbx_config):
+async def test_p2p_max_ring_time_rejects_no_answer(pbx, sipbot_pool, pbx_config, tmp_path):
     """[proxy] max_ring_time rejects a no-answer call with 408 after N seconds.
 
     With max_ring_time=4 and a callee that never answers, the caller must
@@ -245,10 +258,17 @@ async def test_p2p_max_ring_time_rejects_no_answer(pbx, sipbot_pool, pbx_config)
     """
     pbx_config.set_max_ring_time(4)
     h.boot_pbx(pbx)
+
+    # Long ringback: the callee must STAY in the 180-Ringing stage (never
+    # answer) so the PBX's max_ring_time enforcement is what ends the call.
+    from helpers import generate_sine_wav
+    long_ring = tmp_path / "never_answer_ringback.wav"
+    generate_sine_wav(long_ring, 440.0, 120.0, 8000, 0.05)
+
     ua = sipbot_pool.callee(
         host=pbx.host, port=h.ua_port(15224), username="1002", password="123456",
         register=True, proxy=f"{pbx.host}:{pbx.sip_port}", domain=pbx.host,
-        ring_secs=60, answer_mode="none",
+        ring_secs=60, answer_mode="none", ringback=str(long_ring),
     )
     await h.wait_registered(ua)
 

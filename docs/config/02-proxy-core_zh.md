@@ -507,3 +507,39 @@ SipServerBuilder::new(config)
 ```
 
 完整的 `ivr.exec` 协议参考见 [`docs/ivr_exec.md`](../ivr_exec.md)。
+
+## RWI 通话事件：`call_answered` 语义
+
+`call_answered` 是**会话级**事件：每次通话（session）**恰好发出 1 条**，**不携带
+`leg_id`**，标记通话进入业务接通状态的时刻。
+
+### 发射点
+
+| 通话形态 | 发出时刻 | 富化字段 |
+|------------|-----------|------------|
+| 直呼 / 拨分机（无应用） | 主叫腿应答 | — |
+| 排队呼叫（IVR → 排队 → 坐席） | 坐席接通 | `agent_id`、`queue_id` 等 |
+| 外呼 / click-to-call | 对端应答（200 OK） | CTI 外呼带 `agent_id` |
+
+### 哪些情况**不再**发出 `call_answered`
+
+- **腿级状态翻转。** 过去一个 200 OK 会扇出成 session 级 + caller 腿 + callee 腿最多
+  3 条重复事件。腿的接通/拆除时间线仍可通过 `call_ringing` / `call_hangup` 的腿事件
+  （保留 `leg_id`）观察。
+- **保持 / 恢复。** 恢复由 `call_unheld` 表达，不再重发 `call_answered`。
+- **未发生业务接通的呼叫。** 呼入方在 IVR 内挂断（未转到人工）不会产生任何
+  `call_answered`。「是否被接起」改由 `call_hangup.duration_secs > 0` 或
+  `ivr_step_trace` 判定。
+
+### 下游契约
+
+下游系统对每个 `call_id` 收到且仅收到一条权威 `call_answered` ——
+无需去重、无需按 `leg_id` 过滤、无需「挑对的事件」启发式。Genesys 兼容 MQ
+的适配层与事件码 64 一一对应。
+
+### 安全网
+
+会话进入过通话状态却从未发出 `call_answered`（且从未运行过应用 —— 应用应答的会话在
+呼叫方未转人工时合法地为 0 条）时，会打 warning 日志并递增
+`rwi_session_connected_without_answered_total` 计数器。该计数非零即说明存在缺少
+session 级发射点的通话形态，需要排查。

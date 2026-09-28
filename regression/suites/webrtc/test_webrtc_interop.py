@@ -35,11 +35,19 @@ async def _wait_audio_frames(ua, label: str, min_frames: int = 100, timeout: flo
 
 
 @pytest.mark.asyncio
-async def test_webrtc_to_rtp_call_audio(pbx, sipbot_pool):
-    """WebRTC caller → RTP callee: bidirectional audio flows through the bridge."""
+async def test_webrtc_to_rtp_call_audio(pbx, sipbot_pool, tmp_path):
+    """WebRTC caller → RTP callee: bidirectional audio flows through the bridge.
+
+    The caller plays a 440 Hz tone through the PC: `sipbot --webrtc` does NOT
+    inject audio on its own, so a silent caller would legitimately deliver
+    silence to the callee (the media relay is verified by the tone).
+    """
     pbx.config_builder.media_proxy = "all"
     pbx.config_builder.set_webrtc_users(["1001"])
     h.boot_pbx(pbx)
+
+    sine = tmp_path / "webrtc_tone_440.wav"
+    h.generate_sine_wav(sine, 440.0, 5.0, 8000, 0.5)
 
     callee = sipbot_pool.callee(
         host=pbx.host, port=h.ua_port(15300), username="1002", password="123456",
@@ -51,6 +59,7 @@ async def test_webrtc_to_rtp_call_audio(pbx, sipbot_pool):
     caller = sipbot_pool.caller(
         target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456",
         hangup=10, webrtc=True, audio_quality=True, codecs="opus,pcmu",
+        play_file=str(sine),
     )
     answered = await caller.wait_output_async(r"200 OK|Call established", timeout=25)
     assert answered, f"WebRTC call not answered:\n{caller.output[-1500:]}"

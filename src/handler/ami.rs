@@ -1,5 +1,6 @@
 #[cfg(feature = "console")]
 use crate::console::ReloadTarget;
+use crate::rwi::RwiGatewayRef;
 use crate::{
     app::AppState,
     config::{Config, ProxyConfig},
@@ -122,7 +123,13 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
         // Owner-routed session user-data ops: a peer that does not host the
         // session forwards `PUT/GET /calls/active/{id}/userdata` here.
         .route("/cluster/set_userdata", post(cluster_set_userdata))
-        .route("/cluster/get_userdata", post(cluster_get_userdata));
+        .route("/cluster/get_userdata", post(cluster_get_userdata))
+        // Owner-routed call vars: same contract — TERMINAL, apply locally.
+        .route("/cluster/set_var", post(cluster_set_var))
+        .route("/cluster/get_var", post(cluster_get_var))
+        // Generic owner-routed RWI command envelope (terminal = local
+        // process_command; see `processor::execute_session_op_local`).
+        .route("/cluster/session_op", post(cluster_session_op));
 
     let r = r.layer(middleware::from_fn_with_state(
         app_state.clone(),
@@ -2441,6 +2448,86 @@ async fn cluster_event_user_data(
     StatusCode::OK.into_response()
 }
 
+// ── Terminal owner-node cores ──────────────────────────────────────────────
+//
+// These apply a cluster-routed session operation on THIS node's gateway and
+// are TERMINAL by contract: they never consult the session registry and never
+// forward — a request that reaches here stops here (loop-safety invariant ①).
+// `pub` so the two-node integration tests can bind them to their own gateway
+// instances.
+
+/// Terminal: replace the whole user-data object of a session hosted here.
+pub fn apply_userdata_set_local(
+    gateway: &RwiGatewayRef,
+    session_id: &str,
+    data: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let Some(map) = data.as_object().cloned() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "message": "user data must be a JSON object" }),
+        );
+    };
+    let result = gateway.write().set_user_data(&session_id.to_string(), map);
+    match result {
+        Ok(()) => {
+            let stored = gateway.read().get_user_data(&session_id.to_string());
+            (
+                StatusCode::OK,
+                serde_json::json!({
+                    "message": "User data updated",
+                    "data": serde_json::Value::Object(stored),
+                }),
+            )
+        }
+        Err(e) => {
+            let status = match e {
+                crate::rwi::SetUserDataError::SessionNotFound => StatusCode::NOT_FOUND,
+                crate::rwi::SetUserDataError::TooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+            };
+            (status, serde_json::json!({ "message": e.to_string() }))
+        }
+    }
+}
+
+/// Terminal: read the whole user-data object of a session hosted here.
+pub fn apply_userdata_get_local(
+    gateway: &RwiGatewayRef,
+    session_id: &str,
+) -> (StatusCode, serde_json::Value) {
+    let data = gateway.read().get_user_data(&session_id.to_string());
+    (
+        StatusCode::OK,
+        serde_json::json!({ "data": serde_json::Value::Object(data) }),
+    )
+}
+
+/// Terminal: set a call var on a session hosted here.
+pub fn apply_call_var_set_local(
+    gateway: &RwiGatewayRef,
+    session_id: &str,
+    key: String,
+    value: String,
+) -> (StatusCode, serde_json::Value) {
+    gateway
+        .write()
+        .set_call_var(&session_id.to_string(), key, value);
+    (
+        StatusCode::OK,
+        serde_json::json!({ "message": "Call var updated" }),
+    )
+}
+
+/// Terminal: read a call var of a session hosted here.
+pub fn apply_call_var_get_local(
+    gateway: &RwiGatewayRef,
+    session_id: &str,
+    key: String,
+) -> (StatusCode, serde_json::Value) {
+    let value = gateway.read().get_call_var(&session_id.to_string(), &key);
+    (StatusCode::OK, serde_json::json!({ "value": value }))
+}
+
 #[derive(Deserialize)]
 struct ClusterSetUserDataBody {
     session_id: String,
@@ -2452,6 +2539,19 @@ struct ClusterGetUserDataBody {
     session_id: String,
 }
 
+#[derive(Deserialize)]
+struct ClusterSetVarBody {
+    session_id: String,
+    key: String,
+    value: String,
+}
+
+#[derive(Deserialize)]
+struct ClusterGetVarBody {
+    session_id: String,
+    key: String,
+}
+
 /// Apply a session user-data update forwarded by a peer node that does not
 /// host the session. Replace-all semantics; mirrors `PUT
 /// /calls/active/{session_id}/userdata` on the owner. Success also triggers
@@ -2460,16 +2560,6 @@ async fn cluster_set_userdata(
     State(state): State<AppState>,
     Json(body): Json<ClusterSetUserDataBody>,
 ) -> Response {
-    let data = match body.data {
-        serde_json::Value::Object(map) => map,
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "message": "user data must be a JSON object" })),
-            )
-                .into_response();
-        }
-    };
     let server = state.sip_server();
     let Some(ref gateway) = server.inner.rwi_gateway else {
         return (
@@ -2478,30 +2568,8 @@ async fn cluster_set_userdata(
         )
             .into_response();
     };
-    // Scope the write guard: reading the stored value below needs a read lock,
-    // and parking_lot RwLock is not reentrant.
-    let result = gateway.write().set_user_data(&body.session_id, data);
-    match result {
-        Ok(()) => {
-            let stored = gateway.read().get_user_data(&body.session_id);
-            Json(serde_json::json!({
-                "message": "User data updated",
-                "data": serde_json::Value::Object(stored),
-            }))
-            .into_response()
-        }
-        Err(e) => {
-            let status = match e {
-                crate::rwi::SetUserDataError::SessionNotFound => StatusCode::NOT_FOUND,
-                crate::rwi::SetUserDataError::TooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-            };
-            (
-                status,
-                Json(serde_json::json!({ "message": e.to_string() })),
-            )
-                .into_response()
-        }
-    }
+    let (status, body) = apply_userdata_set_local(gateway, &body.session_id, body.data);
+    (status, Json(body)).into_response()
 }
 
 /// Read a session's user-data object on behalf of a forwarding peer.
@@ -2517,8 +2585,118 @@ async fn cluster_get_userdata(
         )
             .into_response();
     };
-    let data = gateway.read().get_user_data(&body.session_id);
-    Json(serde_json::json!({ "data": serde_json::Value::Object(data) })).into_response()
+    let (status, body) = apply_userdata_get_local(gateway, &body.session_id);
+    (status, Json(body)).into_response()
+}
+
+/// Terminal: set a call var on a session hosted on THIS node (never routed).
+async fn cluster_set_var(
+    State(state): State<AppState>,
+    Json(body): Json<ClusterSetVarBody>,
+) -> Response {
+    let server = state.sip_server();
+    let Some(ref gateway) = server.inner.rwi_gateway else {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "message": "RWI gateway is not available" })),
+        )
+            .into_response();
+    };
+    let (status, body) =
+        apply_call_var_set_local(gateway, &body.session_id, body.key, body.value);
+    (status, Json(body)).into_response()
+}
+
+/// Terminal: read a call var on a session hosted on THIS node (never routed).
+async fn cluster_get_var(
+    State(state): State<AppState>,
+    Json(body): Json<ClusterGetVarBody>,
+) -> Response {
+    let server = state.sip_server();
+    let Some(ref gateway) = server.inner.rwi_gateway else {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "message": "RWI gateway is not available" })),
+        )
+            .into_response();
+    };
+    let (status, body) = apply_call_var_get_local(gateway, &body.session_id, body.key);
+    (status, Json(body)).into_response()
+}
+
+#[derive(Deserialize)]
+struct ClusterSessionOpBody {
+    session_id: String,
+    command: serde_json::Value,
+    #[serde(default)]
+    hops: u8,
+}
+
+/// Terminal: execute a session-scoped RWI command on the node that hosts the
+/// session.  This is the owner-routing envelope for the whole command plane —
+/// loop-safety lives inside `execute_session_op_local` (consistency check,
+/// allowlist, hop canary; the local execution NEVER re-routes).
+async fn cluster_session_op(
+    State(state): State<AppState>,
+    Json(body): Json<ClusterSessionOpBody>,
+) -> Response {
+    let server = state.sip_server();
+    let Some(ref gateway) = server.inner.rwi_gateway else {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "message": "RWI gateway is not available" })),
+        )
+            .into_response();
+    };
+    let command: crate::rwi::RwiCommandPayload = match serde_json::from_value(body.command) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("invalid command: {e}") })),
+            )
+                .into_response();
+        }
+    };
+    let processor = crate::rwi::RwiCommandProcessor::new(
+        server.inner.active_call_registry.clone(),
+        gateway.clone(),
+        server.inner.conference_manager.clone(),
+    )
+    .with_sip_server(server.inner.clone());
+    match crate::rwi::processor::execute_session_op_local(
+        &processor,
+        &body.session_id,
+        body.hops,
+        command,
+    )
+    .await
+    {
+        Ok(result) => {
+            let result = serde_json::to_value(&result).unwrap_or(serde_json::Value::Null);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "ok": true, "result": result })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            let status = match &e {
+                crate::rwi::processor::CommandError::CallNotFound(_) => StatusCode::NOT_FOUND,
+                crate::rwi::processor::CommandError::CommandFailed(msg)
+                    if msg.contains("hop limit") =>
+                {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+                crate::rwi::processor::CommandError::CommandFailed(_) => StatusCode::BAD_REQUEST,
+            };
+            (
+                status,
+                Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
 }
 
 #[cfg(test)]

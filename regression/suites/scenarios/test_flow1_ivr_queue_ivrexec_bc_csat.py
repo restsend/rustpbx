@@ -326,13 +326,16 @@ async def test_flow1_ivr_queue_ivrexec_bc_transfer_csat(
         assert answered, f"call never answered:\n{caller.output[-1500:]}"
 
         # ── 4. Queue dispatched agent B.                                     ─
-        ringing = await event_checker.webhook.wait_for_event("call_ringing", timeout=20)
-        assert ringing is not None, (
-            f"no call_ringing — queue did not dispatch. events: "
-            f"{event_checker.webhook.event_types()}"
+        # Since 86b53308 (independent dial legs) the agent leg's 180 also
+        # emits a per-leg `call_ringing` (leg_id set, no agent attribution)
+        # ~2ms BEFORE the CC hook publishes the attributed one — wait for the
+        # AGENT-ATTRIBUTED event, not just the first call_ringing.
+        ringing = await event_checker.webhook.wait_for_event(
+            "call_ringing", timeout=20, match={"payload.agent_id": AGENT_B},
         )
-        assert ringing.payload.get("agent_id") == AGENT_B, (
-            f"queue dispatched {ringing.payload.get('agent_id')!r}, want {AGENT_B}"
+        assert ringing is not None, (
+            f"no call_ringing attributed to {AGENT_B} — queue did not dispatch. "
+            f"events: {event_checker.webhook.event_types()}"
         )
         call_id = ringing.call_id
         answered_ev = await event_checker.webhook.wait_for_event(
@@ -342,7 +345,10 @@ async def test_flow1_ivr_queue_ivrexec_bc_transfer_csat(
 
         # ── 5. ivr.exec fired by agent B → collect IVR ran on caller leg.    ─
         await h.wait_log(pbx, r"SIP INFO rustpbx command accepted", 20, "ivr.exec")
-        await h.wait_log(pbx, r"Propagating hold", 10, "hold agent B")
+        # ivr.exec holds the agent leg with a re-INVITE (handle_hold) — the
+        # log line changed from "Propagating hold" (side-based propagate) to
+        # "Handling hold with SDP renegotiation" (per-leg hold).
+        await h.wait_log(pbx, r"Handling hold with SDP renegotiation", 10, "hold agent B")
 
         # Order number "42": '4' is unmapped → unknown_key_action collect
         # (seeded with '4'); '2' completes it. Both presses are gated on PBX
@@ -410,7 +416,8 @@ async def test_flow1_ivr_queue_ivrexec_bc_transfer_csat(
             f"call_transferred never fired. events: {event_checker.webhook.event_types()}"
         )
         # Agent B must be gone (BYE) after complete.
-        await agent_b.wait_output_async(r"BYE|Hangup|hangup", timeout=10)
+        agent_b_gone = await agent_b.wait_output_async(r"BYE|Hangup|hangup", timeout=10)
+        assert agent_b_gone, "agent B never received the BYE after transfer completion"
 
         # ── 7. Agent A hangs up (hangup_after=20) while caller is online →   ─
         #    after_transfer CSAT runs on the caller. Score 5 via stdin DTMF

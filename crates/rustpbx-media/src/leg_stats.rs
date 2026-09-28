@@ -8,7 +8,7 @@
 //! so a stats listener can coexist with the relay forwarder.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use rustrtc::rtp::{ReportBlock, RtcpPacket};
 use rustrtc::{RtpSender, RtpSenderInterceptor};
@@ -22,6 +22,11 @@ pub struct LegRtcpSnapshot {
     pub rtt_us: u64,
     /// Latest fraction lost (0..=255, where 255 = 100%).
     pub fraction_lost: u8,
+    /// Latest cumulative packets lost reported by the remote receiver's
+    /// report block (RR/SR): the *receiver's* view of our transmitted stream.
+    /// Monotonic per SSRC while the remote keeps reporting — the per-call
+    /// "delivery receipt" used for dispute evidence.
+    pub packets_lost: i32,
     /// Latest cumulative packet count reported by the remote Sender Report.
     /// Zero when no SR has been observed.
     pub sr_packet_count: u64,
@@ -75,6 +80,17 @@ pub struct LegQualityReport {
     pub rtt_us: u64,
     /// Latest RTCP fraction lost as a percentage (0..=100).
     pub loss_pct: f64,
+    /// Latest cumulative packets lost reported by the remote receiver's RTCP
+    /// report block — the receiver's own account of how many packets of our
+    /// transmitted stream it never got. 0 with traffic = delivery receipt.
+    pub rtcp_packets_lost: i32,
+    /// Cross-leg relay reconciliation: packets received on THIS leg but never
+    /// emitted on the peer leg (`ingress(self) − egress(peer)`, saturating).
+    /// Zero on a healthy same-codec relay; non-zero ⇒ the bridge itself
+    /// dropped packets. `None` when the peer leg is absent or codecs differ
+    /// (transcode paths run at different packet rates, so the diff is not a
+    /// drop signal — mirrors the bridge monitor's `relay_mode` guard).
+    pub relay_drop: Option<u64>,
     /// Audio `addr:port` this leg advertised in its SDP (where the peer
     /// sends media). Diagnostics anchor for media black holes.
     pub advertised_addr: Option<String>,
@@ -90,6 +106,7 @@ pub struct LegRtcpStats {
     jitter_us: AtomicU64,
     rtt_us: AtomicU64,
     fraction_lost: AtomicU8,
+    packets_lost: AtomicI32,
     sr_packet_count: AtomicU64,
     /// The remote SSRC the latest Sender Report describes (the stream we
     /// receive). Lets the stats task tell audio vs video SRs apart.
@@ -103,6 +120,7 @@ impl Default for LegRtcpStats {
             jitter_us: AtomicU64::new(0),
             rtt_us: AtomicU64::new(0),
             fraction_lost: AtomicU8::new(0),
+            packets_lost: AtomicI32::new(0),
             sr_packet_count: AtomicU64::new(0),
             sr_ssrc: AtomicU32::new(0),
             has_sr: std::sync::atomic::AtomicBool::new(false),
@@ -116,6 +134,7 @@ impl LegRtcpStats {
             jitter_us: AtomicU64::new(0),
             rtt_us: AtomicU64::new(0),
             fraction_lost: AtomicU8::new(0),
+            packets_lost: AtomicI32::new(0),
             sr_packet_count: AtomicU64::new(0),
             sr_ssrc: AtomicU32::new(0),
             has_sr: std::sync::atomic::AtomicBool::new(false),
@@ -127,6 +146,7 @@ impl LegRtcpStats {
             jitter_us: self.jitter_us.load(Ordering::Relaxed),
             rtt_us: self.rtt_us.load(Ordering::Relaxed),
             fraction_lost: self.fraction_lost.load(Ordering::Relaxed),
+            packets_lost: self.packets_lost.load(Ordering::Relaxed),
             sr_packet_count: self.sr_packet_count.load(Ordering::Relaxed),
             sr_ssrc: self.sr_ssrc.load(Ordering::Relaxed),
             has_sr: self.has_sr.load(Ordering::Relaxed),
@@ -179,6 +199,9 @@ fn update_from_report_blocks(
         stats
             .fraction_lost
             .store(block.fraction_lost, Ordering::Relaxed);
+        stats
+            .packets_lost
+            .store(block.packets_lost, Ordering::Relaxed);
         // RTT = now − SR_sent_time − DLSR  (RFC 3550 §6.4.1)
         if block.last_sender_report != 0 {
             let times = sr_times.lock();
@@ -281,6 +304,7 @@ mod tests {
         let snap = stats.snapshot();
         assert_eq!(snap.jitter_us, 200_000); // 1600 * 1e6 / 8000
         assert_eq!(snap.fraction_lost, 40);
+        assert_eq!(snap.packets_lost, 10);
         assert!((snap.loss_pct() - 40.0 / 255.0 * 100.0).abs() < 0.01);
         // Unrelated SSRC must not update.
         let blocks2 = vec![ReportBlock {

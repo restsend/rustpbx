@@ -614,7 +614,7 @@ async fn test_media_proxy_auto_anchors_queue_flow() {
 }
 
 #[tokio::test]
-async fn test_connected_dynamic_leg_failure_hangs_up_caller() {
+async fn test_connected_dynamic_leg_ended_hangs_up_caller() {
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
         queue_name: "support".to_string(),
         ..Default::default()
@@ -632,21 +632,22 @@ async fn test_connected_dynamic_leg_failure_hangs_up_caller() {
         .as_ref()
         .map(|d| d.id())
         .expect("caller dialog present");
-    session
+    let result = session
         .execute_command(
-            CallCommand::LegFailed {
+            CallCommand::LegEnded {
                 leg_id: agent_leg,
                 reason: "Remote hung up".to_string(),
             },
             None,
         )
         .await;
+    assert!(result.success, "normal BYE must succeed: {:?}", result.message);
 
     assert!(session.pending_hangup.contains(&caller_dialog_id));
 }
 
 #[tokio::test]
-async fn test_connected_dynamic_leg_failure_hangs_up_caller_even_without_bridge() {
+async fn test_connected_dynamic_leg_ended_hangs_up_caller_even_without_bridge() {
     // Production 2026-09-17 (node 10.193.244.54): the media bridge was never
     // activated (TTS voip bridge poisoning regression), so when the connected
     // agent leg hung up, `LegFailed` skipped the post-disconnect handler and
@@ -671,15 +672,16 @@ async fn test_connected_dynamic_leg_failure_hangs_up_caller_even_without_bridge(
         .as_ref()
         .map(|d| d.id())
         .expect("caller dialog present");
-    session
+    let result = session
         .execute_command(
-            CallCommand::LegFailed {
+            CallCommand::LegEnded {
                 leg_id: agent_leg,
                 reason: "Remote hung up".to_string(),
             },
             None,
         )
         .await;
+    assert!(result.success, "normal BYE must succeed: {:?}", result.message);
 
     assert!(
         session.pending_hangup.contains(&caller_dialog_id),
@@ -4918,29 +4920,18 @@ async fn toivr_transfer_from_queue_agent_detaches_old_leg_and_redacts_event() {
     session.callee_dialogs.insert(agent_dialog.clone(), ());
     let (_callee_tx, mut callee_rx) = mpsc::unbounded_channel();
 
-    let result = session
-        .execute_command(
-            CallCommand::TransferWithCompletion {
-                leg_id: agent.clone(),
-                target: "toivr:39230?private_context=secret-value".to_string(),
-                headers: HashMap::from([
-                    (
-                        "X-Route-Metadata".to_string(),
-                        "workflow=feedback".to_string(),
-                    ),
-                    ("X-Trace-Context".to_string(), "trace-test".to_string()),
-                ]),
-                completion: None,
-            },
-            Some(&mut callee_rx),
-        )
-        .await;
-
-    assert!(
-        result.success,
-        "toivr transfer should succeed: {:?}",
-        result
-    );
+    let result = session.handle_transfer(
+        agent.clone(),
+        "toivr:39230?private_context=secret-value".to_string(),
+        false,
+        crate::proxy::proxy_call::sip_session::TransferDisposition::Detach,
+        &mut callee_rx,
+        HashMap::from([
+            ("X-Route-Metadata".to_string(), "workflow=feedback".to_string()),
+            ("X-Trace-Context".to_string(), "trace-test".to_string()),
+        ]),
+    ).await;
+    assert!(result.is_ok(), "toivr transfer should succeed: {:?}", result);
     assert_eq!(
         runtime.route_variables()[0]
             .get("transferred_from")
