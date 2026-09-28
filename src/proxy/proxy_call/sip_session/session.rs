@@ -138,15 +138,12 @@ pub struct SipSession {
     /// return-app IVR params when the bridge disconnects.
     pub(crate) bridge_dtmf_digits: Arc<parking_lot::Mutex<Vec<String>>>,
 
-    /// Active realtime (AI voice) WS bridge handle — set by
-    /// `CallCommand::RealtimeStart`, cleared by `RealtimeStop` / teardown.
-    pub(crate) realtime_bridge: Option<super::realtime_bridge::RealtimeBridgeHandle>,
-
-    /// Active TTS/voip WebSocket bridge handle — set by `connect_bridge()`,
-    /// cleared on disconnect (`CallCommand::VoipBridgeClosed`) / teardown.
-    /// Must stay out of `conference_bridge`: that slot's `conf_id` gates
+    /// Active external (WebSocket) media bridge — voip (`connect_bridge`)
+    /// or realtime AI voice (`CallCommand::RealtimeStart`). Cleared by
+    /// `VoipBridgeClosed` / `RealtimeStop` / teardown. Must stay out of
+    /// `conference_bridge`: that slot's `conf_id` gates
     /// `update_media_path()` and would block later media-route updates.
-    pub(crate) voip_bridge: Option<crate::call::runtime::ConferenceBridgeHandle>,
+    pub(crate) external_bridge: Option<crate::proxy::proxy_call::media_state::ExternalBridgeHandle>,
 
     pub cmd_tx: Option<mpsc::Sender<CallCommand>>,
 
@@ -439,6 +436,16 @@ impl SipSession {
     }
 
     // ── MediaBridge helpers ─────────────────────────────────────────────
+
+    /// Cancel and drop any external (voip/realtime) WS bridge handle.
+    /// Idempotent; safe from Drop (cancel is synchronous).
+    pub(crate) fn teardown_external_bridge(&mut self, why: &str) {
+        if let Some(handle) = self.external_bridge.take() {
+            handle.cancel.cancel();
+            debug!(session_id = %self.id, why, kind = ?handle.kind, "external bridge torn down");
+        }
+    }
+
     pub(super) fn bridge(&self) -> Option<&MediaBridge> {
         self.media.bridge.as_ref()
     }
@@ -1251,8 +1258,7 @@ impl SipSession {
             bridge_dtmf_tx: Arc::new(parking_lot::RwLock::new(None)),
             bridge_trace_context: Arc::new(parking_lot::Mutex::new(None)),
             bridge_dtmf_digits: Arc::new(parking_lot::Mutex::new(Vec::new())),
-            realtime_bridge: None,
-            voip_bridge: None,
+            external_bridge: None,
             cmd_tx: Some(cmd_tx.clone()),
             handle: sip_handle.clone(),
             session_registry_guard: None,
@@ -11242,7 +11248,7 @@ impl SipSession {
                     && !leg_id.0.starts_with("consult-")
                     && self.bridge.legs.len() != 2
                     && self.conference_bridge.conf_id.is_none()
-                    && self.voip_bridge.is_none()
+                    && self.external_bridge.is_none()
                     && !self.bypasses_local_media()
                     && self.legs.get(&LegId::from("caller")).is_some_and(|l| {
                         l.state == LegState::Connected
@@ -11490,7 +11496,10 @@ impl SipSession {
                 // up, `update_media_path()` deliberately stayed out of the way;
                 // a route that became pending meanwhile (e.g. a queue agent leg
                 // connecting) must be established now that it is gone.
-                if self.voip_bridge.take().is_some() {
+                if self.external_bridge.as_ref().is_some_and(|h| {
+                    h.kind == crate::proxy::proxy_call::media_state::ExternalBridgeKind::Voip
+                }) {
+                    self.teardown_external_bridge("voip bridge closed");
                     debug!(session_id = %self.id, "Voip bridge closed; re-evaluating media path");
                 }
                 self.update_media_path().await;
@@ -11781,9 +11790,9 @@ impl SipSession {
 
     pub(super) async fn handle_hangup(&mut self, cmd: &HangupCommand) -> CommandResult {
         self.meta.pending_transfer_outcome = None;
-        // Kill any realtime (AI voice) bridge — media tasks must not outlive
-        // the call.
-        self.teardown_realtime_bridge("call hangup");
+        // Kill any external (voip/realtime) bridge — media tasks must not
+        // outlive the call.
+        self.teardown_external_bridge("call hangup");
         let cascade = &cmd.cascade;
 
         // Record the system hangup reason (e.g. RtpTimeout from the RTP
@@ -13627,7 +13636,7 @@ impl Drop for SipSession {
         // Stop conference bridges (safety net — cancel only, since we can't
         // .await in Drop)
         self.conference_bridge.stop_bridge();
-        self.voip_bridge = None;
+        self.teardown_external_bridge("session drop");
         self.legs.stop_all_conference_bridge_handles();
 
         // Media bridge — torn down explicitly under catch_unwind so a teardown

@@ -2598,11 +2598,12 @@ impl SipSession {
         };
 
         // ── 8. Store bridge reference on session ─────────────────────
-        // Dedicated voip_bridge slot — see the field doc for why this must
+        // External voip bridge slot — see the field doc for why this must
         // never live in `conference_bridge`.
-        self.voip_bridge = Some(crate::call::runtime::ConferenceBridgeHandle {
-            _tasks: vec![],
-            cancel_token: cancel_token.clone(),
+        self.external_bridge = Some(crate::proxy::proxy_call::media_state::ExternalBridgeHandle {
+            cancel: cancel_token.clone(),
+            kind: crate::proxy::proxy_call::media_state::ExternalBridgeKind::Voip,
+            hangup_on_disconnect: false,
         });
 
         // ── 9. Write return app to CallMeta + spawn disconnect monitor ──
