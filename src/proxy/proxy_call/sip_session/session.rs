@@ -400,6 +400,19 @@ impl SipSession {
         }
     }
 
+    /// Whether the auto recorder should install at `stage` (dialplan
+    /// switches): `None` matches any stage, `Some(s)` only when the dialplan
+    /// asks for exactly that stage.
+    fn should_auto_start_recording(
+        &self,
+        stage: Option<crate::config::RecordingAutoStartAt>,
+    ) -> bool {
+        let recording = &self.context.dialplan.recording;
+        recording.enabled
+            && recording.auto_start
+            && stage.map_or(true, |s| recording.auto_start_at == s)
+    }
+
     // ── MediaBridge helpers ─────────────────────────────────────────────
     pub(super) fn bridge(&self) -> Option<&MediaBridge> {
         self.media.bridge.as_ref()
@@ -624,15 +637,13 @@ impl SipSession {
         if !is_app_scoped {
             return;
         }
-        let outcome = self.media.recording.stop_recording().await;
-        match outcome {
-            Ok(Some(result)) => {
+        match self.stop_and_publish_recording().await {
+            Ok(Some(path)) => {
                 info!(
                     session_id = %self.id,
-                    path = %result.path,
+                    path = %path,
                     "IVR recording segment closed at app hand-off"
                 );
-                self.publish_recording_complete(result);
             }
             Ok(None) => {}
             Err(error) => {
@@ -2481,11 +2492,9 @@ impl SipSession {
         let dialog_enum = rsipstack::dialog::dialog::Dialog::Invite(dialog);
         self.legs.set_dialog(caller_id.clone(), dialog_enum);
 
-        let auto_start_on_answer = {
-            let recording = &self.context.dialplan.recording;
-            recording.enabled && recording.auto_start
-        };
-        if auto_start_on_answer && let Err(error) = self.set_auto_recorder().await {
+        if self.should_auto_start_recording(None)
+            && let Err(error) = self.set_auto_recorder().await
+        {
             warn!(session_id = %self.id, %error, "Auto recorder installation at final answer failed");
         }
         self.maybe_autostart_live_transcription("originate_answer")
@@ -6181,13 +6190,9 @@ impl SipSession {
         // caller" guess.
         self.legs.set_transport(LegId::from("caller"), transport);
 
-        let auto_start_on_media_setup = {
-            let recording = &self.context.dialplan.recording;
-            recording.enabled
-                && recording.auto_start
-                && recording.auto_start_at == crate::config::RecordingAutoStartAt::Media
-        };
-        if auto_start_on_media_setup && let Err(error) = self.set_auto_recorder().await {
+        if self.should_auto_start_recording(Some(crate::config::RecordingAutoStartAt::Media))
+            && let Err(error) = self.set_auto_recorder().await
+        {
             warn!(session_id = %self.id, %error, "Auto recorder installation after caller media setup failed");
         }
 
@@ -7477,13 +7482,9 @@ impl SipSession {
 
         // Caller media setup is complete and the final response is ready.
         // The answer timing installs its recorder immediately before 200 OK.
-        let auto_start_on_answer = {
-            let recording = &self.context.dialplan.recording;
-            recording.enabled
-                && recording.auto_start
-                && recording.auto_start_at == crate::config::RecordingAutoStartAt::Answer
-        };
-        if auto_start_on_answer && let Err(error) = self.set_auto_recorder().await {
+        if self.should_auto_start_recording(Some(crate::config::RecordingAutoStartAt::Answer))
+            && let Err(error) = self.set_auto_recorder().await
+        {
             warn!(session_id = %self.id, %error, "Auto recorder installation at final answer failed");
         }
         self.maybe_autostart_live_transcription("call_answer").await;
@@ -8498,6 +8499,22 @@ impl SipSession {
         )
     }
 
+    /// Stop the active recorder and publish the completed segment (CDR +
+    /// RWI events). Returns the finalized segment path, or `Ok(None)` when
+    /// no recorder was armed; each caller keeps its own log/command-result
+    /// policy for `Err`.
+    async fn stop_and_publish_recording(&mut self) -> Result<Option<String>> {
+        match self.media.recording.stop_recording().await {
+            Ok(Some(result)) => {
+                let path = result.path.clone();
+                self.publish_recording_complete(result);
+                Ok(Some(path))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     pub(crate) fn publish_recording_complete(
         &mut self,
         result: crate::media::media_recorder::RecordingResult,
@@ -8570,12 +8587,8 @@ impl SipSession {
     /// give the app event loop a brief, bounded window to execute it once.
     pub(crate) async fn finalize_recording_for_app_shutdown(&mut self) {
         if !self.media.recording.has_recorder_task() { return; }
-        let outcome = self.media.recording.stop_recording().await;
-        let completed = match outcome {
-            Ok(Some(result)) => {
-                self.publish_recording_complete(result);
-                true
-            }
+        let completed = match self.stop_and_publish_recording().await {
+            Ok(Some(_)) => true,
             Ok(None) => false,
             Err(error) => {
                 warn!(
@@ -8727,12 +8740,8 @@ impl SipSession {
         // (UAC) calls, whose caller dialog state channel is not wired into the
         // main loop.
         if self.media.recording.has_recorder_task() {
-            match self.media.recording.stop_recording().await {
-                Ok(Some(result)) => self.publish_recording_complete(result),
-                Ok(None) => {}
-                Err(e) => {
-                    warn!(session_id = %self.id, error = %e, "Failed to finalize recording on cleanup");
-                }
+            if let Err(e) = self.stop_and_publish_recording().await {
+                warn!(session_id = %self.id, error = %e, "Failed to finalize recording on cleanup");
             }
         }
 
@@ -10365,9 +10374,7 @@ impl SipSession {
                             session_id = %self.id,
                             "App recording supersedes the auto full-call recorder"
                         );
-                        if let Ok(Some(result)) = self.media.recording.stop_recording().await {
-                            self.publish_recording_complete(result);
-                        }
+                        let _ = self.stop_and_publish_recording().await;
                     }
                     // Honor a caller-minted id (RWI `record.start` replies with
                     // it immediately) or mint one here for the auto paths.
@@ -10427,13 +10434,8 @@ impl SipSession {
             }
 
             CallCommand::StopRecording => {
-                let outcome = self.media.recording.stop_recording().await;
-                match outcome {
-                    Ok(Some(result)) => {
-                        self.publish_recording_complete(result);
-                        CommandResult::success()
-                    }
-                    Ok(None) => CommandResult::success(),
+                match self.stop_and_publish_recording().await {
+                    Ok(_) => CommandResult::success(),
                     Err(error) => CommandResult::failure(error.to_string()),
                 }
             }
@@ -10456,13 +10458,8 @@ impl SipSession {
                         "StopRecordingSegment: active recorder is not our agent segment — leaving it alone");
                     return CommandResult::success();
                 }
-                let outcome = self.media.recording.stop_recording().await;
-                match outcome {
-                    Ok(Some(result)) => {
-                        self.publish_recording_complete(result);
-                        CommandResult::success()
-                    }
-                    Ok(None) => CommandResult::success(),
+                match self.stop_and_publish_recording().await {
+                    Ok(_) => CommandResult::success(),
                     Err(error) => CommandResult::failure(error.to_string()),
                 }
             }
