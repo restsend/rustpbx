@@ -413,6 +413,31 @@ impl SipSession {
             && stage.map_or(true, |s| recording.auto_start_at == s)
     }
 
+    /// Core `call_ringing` RWI event (session-level when `leg_id` is None).
+    fn emit_call_ringing(&self, leg_id: Option<String>, early_media: bool) {
+        self.emit_typed_rwi_event(&crate::rwi::CallRinging {
+            leg_id,
+            call_id: self.context.session_id.clone(),
+            early_media,
+        });
+    }
+
+    /// Session-scoped `call_answered` (`leg_id: None`), emitted at most once
+    /// per session via the `answered_event_emitted` latch.
+    fn emit_session_call_answered_once(&self) {
+        if !self
+            .answered_event_emitted
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            self.answered_event_emitted
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            self.emit_typed_rwi_event(&crate::rwi::CallAnswered {
+                leg_id: None,
+                call_id: self.context.session_id.clone(),
+            });
+        }
+    }
+
     // ── MediaBridge helpers ─────────────────────────────────────────────
     pub(super) fn bridge(&self) -> Option<&MediaBridge> {
         self.media.bridge.as_ref()
@@ -6688,11 +6713,7 @@ impl SipSession {
                                 // early_media = true, enriched with the agent
                                 // context.
                                 self.fire_on_call_ringing_hooks(true).await;
-                                self.emit_typed_rwi_event(&crate::rwi::CallRinging {
-                                    leg_id: None,
-                                    call_id: self.context.session_id.clone(),
-                                    early_media: true,
-                                });
+                                self.emit_call_ringing(None, true);
 
                                 if self.media_profile.path == MediaPathMode::Anchored {
                                     let caller_sdp = match self
@@ -6759,11 +6780,7 @@ impl SipSession {
                             // SDP) so agent attribution is published, then
                             // emit the enriched core ringing event.
                             self.fire_on_call_ringing_hooks(false).await;
-                            self.emit_typed_rwi_event(&crate::rwi::CallRinging {
-                                leg_id: None,
-                                call_id: self.context.session_id.clone(),
-                                early_media: false,
-                            });
+                            self.emit_call_ringing(None, false);
                         }
                         self.update_snapshot_cache();
                     } else if let Some(state) = state {
@@ -7603,12 +7620,8 @@ impl SipSession {
             }
             self.sync_agent_context_to_rwi_meta();
         }
-        if !self.app_runtime.is_running() && !self.answered_event_emitted.load(std::sync::atomic::Ordering::Relaxed) {
-            self.answered_event_emitted.store(true, std::sync::atomic::Ordering::Relaxed);
-            self.emit_typed_rwi_event(&crate::rwi::CallAnswered {
-                leg_id: None,
-                call_id: self.context.session_id.clone(),
-            });
+        if !self.app_runtime.is_running() {
+            self.emit_session_call_answered_once();
         }
 
         Ok(())
@@ -10931,10 +10944,7 @@ impl SipSession {
                             }
                         }
                     }
-                    self.emit_typed_rwi_event(&crate::rwi::CallRinging {
-                        leg_id: None,
-                        call_id: self.context.session_id.clone(), early_media,
-                    });
+                    self.emit_call_ringing(None, early_media);
                     return CommandResult::success();
                 }
                 self.fire_on_call_ringing_hooks(false).await;
@@ -10955,11 +10965,7 @@ impl SipSession {
                         ),
                     );
                 }
-                self.emit_typed_rwi_event(&crate::rwi::CallRinging {
-                    leg_id: None,
-                    call_id: self.context.session_id.clone(),
-                    early_media: false,
-                });
+                self.emit_call_ringing(None, false);
                 CommandResult::success()
             }
 
@@ -11200,13 +11206,7 @@ impl SipSession {
                     // One-shot: the queue-app answer path (accept_call) may
                     // have already emitted under an app-startup race — see
                     // `answered_event_emitted`.
-                    if !self.answered_event_emitted.load(std::sync::atomic::Ordering::Relaxed) {
-                        self.answered_event_emitted.store(true, std::sync::atomic::Ordering::Relaxed);
-                        self.emit_typed_rwi_event(&crate::rwi::CallAnswered {
-                            leg_id: None,
-                            call_id: self.context.session_id.clone(),
-                        });
-                    }
+                    self.emit_session_call_answered_once();
                 }
 
                 // Owner-anchored consult leg ("C answered" signal): fire the
@@ -11925,10 +11925,10 @@ impl SipSession {
                     self.any_leg_reached_connected = true;
                 }
                 match new_state {
-                    LegState::Ringing | LegState::EarlyMedia => self.emit_typed_rwi_event(&crate::rwi::CallRinging {
-                        call_id: self.context.session_id.clone(), leg_id: Some(leg_id.to_string()),
-                        early_media: new_state == LegState::EarlyMedia,
-                    }),
+                    LegState::Ringing | LegState::EarlyMedia => self.emit_call_ringing(
+                        Some(leg_id.to_string()),
+                        new_state == LegState::EarlyMedia,
+                    ),
                     // No leg-level `call_answered`: the event is session-scoped
                     // (`leg_id: None`) and fires exactly once from the
                     // session-level emit sites — accept_call (direct answer),
@@ -12004,25 +12004,6 @@ impl SipSession {
                 .severity(crate::call_errors::ErrSeverity::Info),
             );
         }
-        if self.server.session_hooks.is_empty() {
-            // No hooks — still emit the core hold/unheld events (agent
-            // attribution comes from the meta already published at
-            // ringing/connected time).
-            let event_call_id = self.context.session_id.clone();
-            let leg_id_str = leg_id.to_string();
-            if entered_hold {
-                self.emit_typed_rwi_event(&crate::rwi::CallHeld {
-                    call_id: event_call_id,
-                    leg_id: leg_id_str,
-                });
-            } else {
-                self.emit_typed_rwi_event(&crate::rwi::CallUnheld {
-                    call_id: event_call_id,
-                    leg_id: leg_id_str,
-                });
-            }
-            return;
-        }
         let ctx = self.session_hook_ctx();
         let leg_id_str = leg_id.to_string();
         for hook in self.server.session_hooks.iter() {
@@ -12032,15 +12013,17 @@ impl SipSession {
                 hook.on_call_unheld(&ctx, &leg_id_str).await;
             }
         }
+        // Core hold/unheld events (agent attribution comes from the meta
+        // already published at ringing/connected time).
         if entered_hold {
             self.emit_typed_rwi_event(&crate::rwi::CallHeld {
                 call_id: ctx.session_id.clone(),
-                leg_id: leg_id_str.clone(),
+                leg_id: leg_id_str,
             });
         } else {
             self.emit_typed_rwi_event(&crate::rwi::CallUnheld {
                 call_id: ctx.session_id.clone(),
-                leg_id: leg_id_str.clone(),
+                leg_id: leg_id_str,
             });
         }
     }
