@@ -471,6 +471,10 @@ pub struct QueueApp {
     /// re-arm it — `set_timeout` replaces timers, which would extend the
     /// caller's promised max wait on every failed cycle.
     max_wait_armed: bool,
+    /// The one-shot post-escalation ring grace was already granted — without
+    /// this the `max_wait_timeout` handler would re-grant it forever and the
+    /// call could never fall back after a fully-triggered overflow chain.
+    max_wait_grace_used: bool,
     /// `queue_joined` was already broadcast by `SipSession::start_queue_app`
     /// (before agent resolution) so it stays the FIRST queue event. When set,
     /// `on_enter` must not emit a duplicate.
@@ -510,6 +514,7 @@ impl QueueApp {
             fallback_executed: false,
             attempted_agents: Vec::new(),
             max_wait_armed: false,
+            max_wait_grace_used: false,
             joined_emitted_externally: false,
         }
     }
@@ -2556,6 +2561,38 @@ impl CallApp for QueueApp {
                     .await
             }
             "max_wait_timeout" => {
+                // Escalation (overflow) steps still pending? The wall-clock
+                // max_wait doubles as the escalation threshold when the plan
+                // is synthesized from a skill group's `max_wait_secs`, so the
+                // two timers share a deadline. Falling back here would cancel
+                // the pending escalation and the overflow chain could NEVER
+                // fire — defer the fallback until every step has triggered
+                // and the widened candidate set has had its chance.
+                if let Some(delay) = self.next_escalation_check_delay() {
+                    debug!(
+                        queue = %self.config.name,
+                        defer = delay.as_secs(),
+                        "Queue: max wait reached but escalation steps pending — deferring fallback"
+                    );
+                    ctrl.set_timeout("max_wait_timeout", delay.max(Duration::from_secs(1)));
+                    return Ok(AppAction::Continue);
+                }
+                if !self.escalated_groups.is_empty() && !self.max_wait_grace_used {
+                    // Every escalation step has triggered and the widened
+                    // candidate set was dialed — give that ringing round one
+                    // full ring timeout before giving up, instead of dropping
+                    // the caller mid-ring. One-shot: without the flag the
+                    // handler would re-grant the grace forever.
+                    self.max_wait_grace_used = true;
+                    let grace = self.config.ring_timeout.unwrap_or(Duration::from_secs(30));
+                    debug!(
+                        queue = %self.config.name,
+                        grace = grace.as_secs(),
+                        "Queue: max wait reached post-escalation — one last ring window"
+                    );
+                    ctrl.set_timeout("max_wait_timeout", grace);
+                    return Ok(AppAction::Continue);
+                }
                 info!("Queue: max wait timeout, executing fallback");
                 ctrl.cancel_timeout("queue_retry");
                 // The wait is over — the fallback path owns the call now.
