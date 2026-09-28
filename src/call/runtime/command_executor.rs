@@ -32,8 +32,6 @@ pub enum CommandFailureKind {
     NotSupported,
     /// No live session for the target id.
     SessionNotFound,
-    /// The session rejected or could not enqueue the command.
-    DispatchFailed,
     /// Media capability check denied the command (e.g. bypass mode).
     MediaDenied,
 }

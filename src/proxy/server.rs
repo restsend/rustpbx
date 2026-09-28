@@ -20,7 +20,7 @@ use crate::{
         FnCreateRouteInvite,
         active_call_registry::ActiveProxyCallRegistry,
         auth::AuthBackend,
-        call::{CallRouter, DialplanInspector},
+        call::CallRouter,
         cluster_event::ClusterEventHub,
         locator::{
             DialogTargetLocator, LocatorEvent, LocatorEventLock, LocatorEventSender,
@@ -342,22 +342,6 @@ impl SipServerBuilder {
 
     pub fn with_call_router(mut self, call_router: Box<dyn CallRouter>) -> Self {
         self.call_router = Some(call_router);
-        self
-    }
-
-    pub fn with_dialplan_inspector(
-        mut self,
-        dialplan_inspector: Box<dyn DialplanInspector>,
-    ) -> Self {
-        self.dialplan_inspectors.push(Arc::new(
-            crate::proxy::routing::inspector_stack::OrderedDialplanInspector::new(
-                "legacy.anonymous",
-                crate::proxy::routing::stack::RoutingPhase::PreRoute,
-                0,
-                crate::proxy::routing::stack::EvalMode::PreRoute,
-                dialplan_inspector,
-            ),
-        ));
         self
     }
 

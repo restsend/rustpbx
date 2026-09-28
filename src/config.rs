@@ -275,10 +275,6 @@ pub struct RecordingPolicy {
     /// `type = "sipflow"` for SipFlow RTP capture. Kept for config compatibility.
     #[serde(default)]
     pub force_file: Option<bool>,
-    /// Deprecated: the signaling JSONL sidecar has been removed. SIP signalling
-    /// is captured only when `[sipflow]` is configured. Kept for compatibility.
-    #[serde(default)]
-    pub signaling: Option<bool>,
     /// Swap stereo channels in recording: callee→left, caller→right.
     #[serde(default)]
     pub stereo_swap: Option<bool>,

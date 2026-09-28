@@ -241,8 +241,7 @@ impl RwiCommandProcessor {
                         Some(CommandFailureKind::SessionNotFound) => {
                             Some(Err(CommandError::CallNotFound(call_id.to_string())))
                         }
-                        Some(CommandFailureKind::DispatchFailed)
-                        | Some(CommandFailureKind::MediaDenied)
+                        Some(CommandFailureKind::MediaDenied)
                         | None => Some(Err(CommandError::CommandFailed(msg))),
                     }
                 }

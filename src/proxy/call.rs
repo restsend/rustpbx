@@ -1322,13 +1322,10 @@ impl CallModule {
                 if overrides.recording_type.is_some() {
                     merged.recording_type = overrides.recording_type;
                 }
-                // force_file / signaling are deprecated; still merge so
+                // force_file is deprecated; still merged so
                 // effective_recording_type() can apply the migration hint.
                 if overrides.force_file.is_some() {
                     merged.force_file = overrides.force_file;
-                }
-                if overrides.signaling.is_some() {
-                    merged.signaling = overrides.signaling;
                 }
 
                 merged

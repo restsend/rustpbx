@@ -7119,7 +7119,6 @@ impl SipSession {
                 };
                 self.media.answer = caller_answer.clone();
 
-                let probe_sid = self.id.clone();
                 {
                     let mb = self.bridge_mut().ok_or_else(|| anyhow!("No MediaBridge"))?;
                     if let Some(callee_leg) = mb.leg(LegSide::B) {
