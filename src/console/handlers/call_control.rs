@@ -323,20 +323,88 @@ pub async fn dispatch_call_command_inner(
         }
     }
 
-    #[cfg(feature = "commerce")]
-    {
-        let resp = forward_command_to_peers(state, session_id, &payload).await;
-        if resp.is_some() {
-            tracing::info!(
-                audit_event = "call_command",
-                action = action,
-                session_id = %session_id,
-                source = "console_api",
-                operator = %operator,
-                result = "forwarded",
-                "Command forwarded to cluster peers"
-            );
-            return resp.unwrap();
+    // 2. Cluster: locate the node hosting the session and dispatch there.
+    // (Previously `#[cfg(feature = "commerce")]`-gated — owner routing is
+    // required on EVERY cluster build: CC builds route console control
+    // commands too. A locate failure answers 503/502, never a misleading
+    // local "call not found".)
+    if let Some(peers) = get_cluster_peers(state).filter(|p| !p.is_empty()) {
+        if let Some(server) = state.sip_server() {
+            let self_node_id = server.cluster_self_addr.as_ref().map(|a| a.to_string());
+            let ami_path = get_ami_path(state);
+            let client = state.http_client().clone();
+            let payload_value = match serde_json::to_value(&payload) {
+                Ok(v) => v,
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "message": format!("payload not serializable: {e}") })),
+                    )
+                        .into_response();
+                }
+            };
+            let op = crate::proxy::cluster_forward::ConsoleCommandOp {
+                payload: payload_value,
+            };
+            match crate::proxy::cluster_forward::routed_op_on_owner(
+                &server.session_registry,
+                &peers,
+                self_node_id.as_deref(),
+                &ami_path,
+                &client,
+                session_id,
+                &op,
+            )
+            .await
+            {
+                crate::proxy::cluster_forward::OwnerOpOutcome::Applied(status, body) => {
+                    tracing::info!(
+                        audit_event = "call_command",
+                        action = action,
+                        session_id = %session_id,
+                        source = "console_api",
+                        operator = %operator,
+                        result = "forwarded",
+                        "Command forwarded to the owning node"
+                    );
+                    return (status, Json(body)).into_response();
+                }
+                crate::proxy::cluster_forward::OwnerOpOutcome::RegistryUnavailable(e) => {
+                    tracing::warn!(
+                        audit_event = "call_command",
+                        action = action,
+                        session_id = %session_id,
+                        error = %e,
+                        "call command: session registry unavailable — the call may be alive on a peer"
+                    );
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({ "message": format!(
+                            "session registry unavailable, cannot locate call '{session_id}': {e}"
+                        ) })),
+                    )
+                        .into_response();
+                }
+                crate::proxy::cluster_forward::OwnerOpOutcome::OwnerUnreachable => {
+                    tracing::warn!(
+                        audit_event = "call_command",
+                        action = action,
+                        session_id = %session_id,
+                        "call command: owner node unreachable — the call may be alive on a peer"
+                    );
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "message": format!(
+                            "owner node for call '{session_id}' is unreachable"
+                        ) })),
+                    )
+                        .into_response();
+                }
+                // Owner == this node (stale record) or the call exists nowhere
+                // → fall through to the local 404.
+                crate::proxy::cluster_forward::OwnerOpOutcome::ApplyLocally
+                | crate::proxy::cluster_forward::OwnerOpOutcome::UnknownCall => {}
+            }
         }
     }
 
@@ -368,50 +436,104 @@ fn snapshot_for(
 
 // ── Session user data ────────────────────────────────────────────────────
 
-/// Route a user-data op to the node that owns `session_id`.
+/// Where a userdata operation for `session_id` should execute.
+enum UserdataRoute {
+    /// Apply on this node (session hosted here, or clustering disabled).
+    Local,
+    /// A peer answered — pass its response through unchanged.
+    Forwarded(Response),
+    /// The session is not hosted here and its owner cannot be located or
+    /// reached.  Deliberately NOT a local 404: a locate failure must not
+    /// masquerade as "call not found" — the call is likely alive on a peer
+    /// and the operation is retryable (502/503).
+    RemoteError(Response),
+}
+
+/// Route a user-data op to the node that hosts `session_id`.
 ///
-/// Returns `None` when the session is hosted locally (caller applies it) or
-/// clustering is disabled. Otherwise forwards `cluster/set_userdata` or
-/// `cluster/get_userdata` to the owner (fan-out fallback) and returns its
-/// response.
-async fn forward_userdata_to_owner(
+/// Resolution order (loop-safe — see the invariants on
+/// [`crate::proxy::cluster_forward::userdata_op_on_owner`]):
+/// 1. Session hosted here → [`UserdataRoute::Local`].
+/// 2. Cluster disabled → [`UserdataRoute::Local`] (single-node: the session
+///    is always here).
+/// 3. Registry resolves the owner → targeted single-cast to that node's
+///    terminal `cluster/{set,get}_userdata` endpoint (those never re-resolve,
+///    so a forwarded request cannot loop); fan-out stays as a bounded
+///    last-resort for stale node ids.
+/// 4. Registry resolves the owner to THIS node (stale record) →
+///    [`UserdataRoute::Local`]; the local apply terminates with the real
+///    answer (success or 404).
+async fn route_userdata_to_owner(
     state: &ConsoleState,
     session_id: &str,
     payload: &serde_json::Value,
     read: bool,
-) -> Option<Response> {
-    let peers = get_cluster_peers(state)?;
-    if peers.is_empty() {
-        return None;
-    }
-    let server = state.sip_server()?;
+) -> UserdataRoute {
+    let Some(peers) = get_cluster_peers(state).filter(|p| !p.is_empty()) else {
+        return UserdataRoute::Local;
+    };
+    let Some(server) = state.sip_server() else {
+        return UserdataRoute::Local;
+    };
     if server.active_call_registry.get_handle(session_id).is_some() {
-        return None;
+        return UserdataRoute::Local;
     }
+
     let ami_path = get_ami_path(state);
     let client = state.http_client().clone();
-    let (rel, body) = if read {
-        (
-            "cluster/get_userdata".to_string(),
-            json!({ "session_id": session_id }),
-        )
+    let self_node_id = server.cluster_self_addr.as_ref().map(|a| a.to_string());
+    let op = if read {
+        crate::proxy::cluster_forward::UserdataOp::Get
     } else {
-        (
-            "cluster/set_userdata".to_string(),
-            json!({ "session_id": session_id, "data": payload }),
-        )
+        crate::proxy::cluster_forward::UserdataOp::Set(payload.clone())
     };
-    crate::proxy::cluster_forward::dispatch_to_owner(
+    let outcome = crate::proxy::cluster_forward::userdata_op_on_owner(
         &server.session_registry,
         &peers,
+        self_node_id.as_deref(),
         &ami_path,
         &client,
         session_id,
-        &rel,
-        &body,
+        &op,
     )
-    .await
-    .map(|(status, body)| (status, Json(body)).into_response())
+    .await;
+
+    match outcome {
+        crate::proxy::cluster_forward::OwnerOpOutcome::ApplyLocally | crate::proxy::cluster_forward::OwnerOpOutcome::UnknownCall => {
+            if matches!(outcome, crate::proxy::cluster_forward::OwnerOpOutcome::UnknownCall) {
+                // The registry has no record.  Most often the call ended; but
+                // when the owning node could not register (DB degraded) this
+                // masks a live call.  Make that case visible to operators.
+                tracing::warn!(
+                    session_id,
+                    peers = peers.len(),
+                    "userdata op: session not in registry and not local — answering 404 (registry row may be missing if cluster registration degraded)"
+                );
+            }
+            UserdataRoute::Local
+        }
+        crate::proxy::cluster_forward::OwnerOpOutcome::Applied(status, body) => {
+            UserdataRoute::Forwarded((status, Json(body)).into_response())
+        }
+        crate::proxy::cluster_forward::OwnerOpOutcome::RegistryUnavailable(e) => UserdataRoute::RemoteError(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "message": format!(
+                    "session registry unavailable, cannot locate call '{session_id}': {e}"
+                ) })),
+            )
+                .into_response(),
+        ),
+        crate::proxy::cluster_forward::OwnerOpOutcome::OwnerUnreachable => UserdataRoute::RemoteError(
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "message": format!(
+                    "owner node for call '{session_id}' is unreachable"
+                ) })),
+            )
+                .into_response(),
+        ),
+    }
 }
 
 /// Replace the whole user data object of an active call session.
@@ -426,10 +548,10 @@ pub async fn set_call_userdata(
     AxumPath(session_id): AxumPath<String>,
     Json(payload): Json<serde_json::Value>,
 ) -> Response {
-    if let Some(resp) = forward_userdata_to_owner(&state, &session_id, &payload, false).await {
-        return resp;
+    match route_userdata_to_owner(&state, &session_id, &payload, false).await {
+        UserdataRoute::Forwarded(resp) | UserdataRoute::RemoteError(resp) => resp,
+        UserdataRoute::Local => set_call_userdata_inner(&state, &session_id, payload, &user.username),
     }
-    set_call_userdata_inner(&state, &session_id, payload, &user.username)
 }
 
 pub fn set_call_userdata_inner(
@@ -538,11 +660,15 @@ pub async fn get_call_userdata(
     AuthRequired(_): AuthRequired,
     AxumPath(session_id): AxumPath<String>,
 ) -> Response {
-    if let Some(resp) =
-        forward_userdata_to_owner(&state, &session_id, &serde_json::Value::Null, true).await
-    {
-        return resp;
+    match route_userdata_to_owner(&state, &session_id, &serde_json::Value::Null, true).await {
+        UserdataRoute::Forwarded(resp) | UserdataRoute::RemoteError(resp) => resp,
+        UserdataRoute::Local => get_call_userdata_local(&state, &session_id),
     }
+}
+
+/// Local read path — the session is hosted on this node (or clustering is
+/// disabled).
+fn get_call_userdata_local(state: &Arc<ConsoleState>, session_id: &str) -> Response {
     let Some(server) = state.sip_server() else {
         return (
             StatusCode::NOT_FOUND,
@@ -552,7 +678,7 @@ pub async fn get_call_userdata(
     };
     if server
         .active_call_registry
-        .get_handle(&session_id)
+        .get_handle(session_id)
         .is_none()
     {
         return (
@@ -570,7 +696,7 @@ pub async fn get_call_userdata(
             .into_response();
     };
 
-    let data = gateway.read().get_user_data(&session_id);
+    let data = gateway.read().get_user_data(&session_id.to_string());
     Json(json!({ "data": serde_json::Value::Object(data) })).into_response()
 }
 
@@ -595,36 +721,6 @@ fn get_ami_path(state: &ConsoleState) -> String {
                 .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string())
         })
         .unwrap_or_else(|| crate::config::DEFAULT_AMI_PATH.to_string())
-}
-
-#[cfg(feature = "commerce")]
-async fn forward_command_to_peers(
-    state: &ConsoleState,
-    session_id: &str,
-    payload: &CallCommandPayload,
-) -> Option<Response> {
-    let peers = get_cluster_peers(state)?;
-    if peers.is_empty() {
-        return None;
-    }
-    let Some(server) = state.sip_server() else {
-        return None;
-    };
-
-    let ami_path = get_ami_path(state);
-    let client = state.http_client().clone();
-    let body = serde_json::to_value(payload).ok()?;
-
-    crate::proxy::cluster_forward::dispatch_call_command(
-        &server.session_registry,
-        &peers,
-        &ami_path,
-        &client,
-        session_id,
-        &body,
-    )
-    .await
-    .map(|(status, body)| (status, Json(body)).into_response())
 }
 
 #[cfg(feature = "commerce")]

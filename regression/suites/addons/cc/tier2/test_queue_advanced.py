@@ -11,6 +11,15 @@ import uuid
 
 import pytest
 
+import helpers as h
+from helpers import (
+    compute_rms_db,
+    find_dominant_frequency,
+    find_signal_start,
+    has_audio_content,
+    read_wav_mono,
+)
+
 pytestmark = [pytest.mark.tier2, pytest.mark.queue]
 
 
@@ -77,9 +86,28 @@ async def test_queue_parallel_ringing(pbx, sipbot_pool, event_checker):
 
 
 @pytest.mark.asyncio
-async def test_queue_hold_music(pbx, sipbot_pool, event_checker):
+async def test_queue_hold_music(pbx, sipbot_pool, event_checker, tmp_path):
     """Queue hold — the caller is answered and audio actually flows while
-    the agent leg is on the call."""
+    the agent leg is on the call.
+
+    Content gate: the caller plays a 620 Hz tone and records its mixdown;
+    after the call the recording must be dominated by that tone (the
+    agent's echo proves the round trip caller→agent→caller actually
+    carried audio — `is_bidirectional` alone cannot: it counts packets,
+    and CNG/noise also counts).
+    """
+    from helpers import (
+        compute_rms_db,
+        find_dominant_frequency,
+        find_signal_start,
+        has_audio_content,
+        read_wav_mono,
+    )
+
+    tone = tmp_path / "qhold_tone620.wav"
+    record = tmp_path / "qhold_caller_rx.wav"
+    h.generate_sine_wav(tone, 620.0, 12.0, 8000, 0.4)
+
     sipbot_pool.terminate_user("1001")
     agent = sipbot_pool.callee(
         host=pbx.host,
@@ -99,6 +127,8 @@ async def test_queue_hold_music(pbx, sipbot_pool, event_checker):
         username="1001",
         password="123456",
         hangup=5,
+        play_file=str(tone),
+        record_file=str(record),
     )
     ok = await caller.wait_output_async(r"200 OK|Call established", timeout=15)
     assert ok, f"Call not answered. Output:\n{caller.output[-500:]}"
@@ -112,6 +142,37 @@ async def test_queue_hold_music(pbx, sipbot_pool, event_checker):
     assert stats.is_bidirectional, (
         f"Answered call must have bidirectional RTP. Stats: {stats}"
     )
+
+    # Content gate: the caller's mixdown recording must carry the 620 Hz
+    # tone end-to-end (caller → agent echo → back). The caller bot exits on
+    # its own hangup, which flushes the recording.
+    deadline = asyncio.get_event_loop().time() + 15
+    resolved = None
+    while asyncio.get_event_loop().time() < deadline:
+        hits = sorted(record.parent.glob(record.stem + "*.wav"))
+        if hits:
+            resolved = hits[-1]
+            break
+        await asyncio.sleep(0.5)
+    assert resolved, (
+        f"caller mixdown recording never flushed: {record} — audio never "
+        "flowed on the queue call"
+    )
+    samples, sr = read_wav_mono(resolved)
+    assert has_audio_content(samples, -40.0), (
+        "caller recording silent — queue call carried no audio content"
+    )
+    start = find_signal_start(samples)
+    region = samples[start:min(start + 3 * sr, samples.size)]
+    assert region.size >= sr // 2, "not enough non-silent audio"
+    rms = compute_rms_db(region)
+    assert rms >= -40.0, f"caller recording too quiet ({rms:.1f}dB)"
+    dom, _mag = find_dominant_frequency(region, sr, low=200, high=900, step=5)
+    assert abs(dom - 620.0) <= 15, (
+        f"caller recording dominant {dom:.0f}Hz, want the played 620Hz "
+        f"(±15) — queue call audio corrupted or one-way"
+    )
+    print(f"\n[queue-hold] round-trip audio ok: 620Hz dominant, rms={rms:.1f}dB")
 
 
 @pytest.mark.asyncio

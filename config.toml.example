@@ -149,6 +149,8 @@ drain_timeout_secs = 300
 # enabled_at_startup = false
 
 [proxy]
+# Optional network conference service (use your PBX address).
+# conference_factory_uri = "sip:conference@pbx.example.com:5060"
 modules = ["acl", "auth", "presence", "registrar", "call"]
 addr = "0.0.0.0"
 udp_port = 15060

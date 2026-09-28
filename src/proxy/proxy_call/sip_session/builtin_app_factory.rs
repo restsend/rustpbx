@@ -139,6 +139,15 @@ impl BuiltinAppFactory {
                 Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
             }
             "ivr" => {
+                // Record the IVR config file path so pending return specs
+                // (sub-app hand-offs) can resume the same IVR later.
+                if let Some(file) = params
+                    .as_ref()
+                    .and_then(|p| p.get("file"))
+                    .and_then(|v| v.as_str())
+                {
+                    crate::call::app::ivr::exec::remember_ivr_start_file(context, file);
+                }
                 // First check if params has inline step mode config (legacy/debug routes)
                 let mode = params
                     .as_ref()

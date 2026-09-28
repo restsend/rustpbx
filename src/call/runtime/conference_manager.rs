@@ -5,11 +5,11 @@
 //!
 //! Supports host/moderator role: the participant who creates or merges the
 //! conference becomes the host. The host can end the entire conference for
-//! all participants. When only 0-1 participants remain the conference is
-//! auto-destroyed. An optional `max_duration_secs` triggers auto-destroy
+//! all participants. Empty rooms are auto-destroyed; a managed SIP owner's
+//! departure also destroys its room. An optional `max_duration_secs` triggers auto-destroy
 //! on timeout (default 1 hour when used from the CC addon).
 
-use crate::call::domain::LegId;
+use crate::call::domain::{CallCommand, LegId};
 use crate::media::conference_mixer::{AudioFrame, ConferenceAudioMixer};
 use anyhow::{Result, anyhow};
 use audio_codec::CodecType;
@@ -56,24 +56,17 @@ pub struct ConferenceParticipant {
     pub muted: bool,
     pub role: ParticipantRole,
     pub joined_at: std::time::Instant,
+    session_commands: Option<mpsc::Sender<CallCommand>>,
 }
 
 impl ConferenceParticipant {
-    pub fn new(leg_id: LegId) -> Self {
-        Self {
-            leg_id,
-            muted: false,
-            role: ParticipantRole::Member,
-            joined_at: std::time::Instant::now(),
-        }
-    }
-
     pub fn with_role(leg_id: LegId, role: ParticipantRole) -> Self {
         Self {
             leg_id,
             muted: false,
             role,
             joined_at: std::time::Instant::now(),
+            session_commands: None,
         }
     }
 }
@@ -81,6 +74,7 @@ impl ConferenceParticipant {
 /// Conference room state with audio mixing
 #[derive(Debug, Clone)]
 pub struct ConferenceRoom {
+    pub focus_uri: Option<String>,
     pub id: ConferenceId,
     pub participants: HashMap<LegId, ConferenceParticipant>,
     pub host_leg_id: Option<LegId>,
@@ -92,6 +86,7 @@ pub struct ConferenceRoom {
 impl ConferenceRoom {
     pub fn new(id: ConferenceId, max_participants: Option<usize>) -> Self {
         Self {
+            focus_uri: None,
             id,
             participants: HashMap::new(),
             host_leg_id: None,
@@ -109,11 +104,6 @@ impl ConferenceRoom {
     pub fn with_max_duration(mut self, secs: u64) -> Self {
         self.max_duration_secs = Some(secs);
         self
-    }
-
-    /// Add a participant to the conference
-    pub fn add_participant(&mut self, leg_id: LegId) -> Result<()> {
-        self.add_participant_with_role(leg_id, ParticipantRole::Member)
     }
 
     /// Add a participant with an explicit role
@@ -258,10 +248,6 @@ impl ConferenceManager {
         host_leg_id: Option<LegId>,
         max_duration_secs: Option<u64>,
     ) -> Result<ConferenceRoom> {
-        if self.conferences.contains_key(&conf_id) {
-            return Err(anyhow!("Conference {} already exists", conf_id.0));
-        }
-
         let mut conference = ConferenceRoom::new(conf_id.clone(), max_participants);
         if let Some(ref host) = host_leg_id {
             conference = conference.with_host(host.clone());
@@ -269,7 +255,19 @@ impl ConferenceManager {
         if let Some(dur) = max_duration_secs {
             conference = conference.with_max_duration(dur);
         }
-        self.conferences.insert(conf_id.clone(), conference.clone());
+
+        // Atomically claim the id: a racing creator must fail here instead of
+        // overwriting a room whose mixer may already be running (a leaked
+        // permanently-running task).
+        use dashmap::mapref::entry::Entry;
+        match self.conferences.entry(conf_id.clone()) {
+            Entry::Vacant(e) => {
+                e.insert(conference.clone());
+            }
+            Entry::Occupied(_) => {
+                return Err(anyhow!("Conference {} already exists", conf_id.0));
+            }
+        }
 
         let mixer = Arc::new(ConferenceAudioMixer::new(conf_id.0.clone(), 8000));
         mixer.start();
@@ -301,33 +299,68 @@ impl ConferenceManager {
         });
     }
 
+    pub fn set_focus(&self, id: &ConferenceId, uri: String) -> Result<()> {
+        let mut room = self.conferences.get_mut(id).ok_or_else(|| anyhow!("Conference not found"))?;
+        room.focus_uri = Some(uri);
+        Ok(())
+    }
+
+    /// Commit the existing A/C attachments with the surviving caller as owner.
+    /// Until this succeeds, no participant departure cascades to A.
+    pub(crate) fn bind_transfer_owner(&self, id: &ConferenceId, caller: &LegId, peer: &LegId) -> Result<()> {
+        let mut room = self.conferences.get_mut(id).ok_or_else(|| anyhow!("Conference ended"))?;
+        for leg in [caller, peer] {
+            if room.participants.get(leg).is_none_or(|member| member.session_commands.is_none()) {
+                return Err(anyhow!("Transfer participant {} is no longer attached", leg));
+            }
+        }
+        room.host_leg_id = Some(caller.clone());
+        Ok(())
+    }
+
     /// Get a conference if it exists
     pub async fn get_conference(&self, conf_id: &ConferenceId) -> Option<ConferenceRoom> {
         self.conferences.get(conf_id).map(|v| v.clone())
     }
 
-    /// Destroy a conference
+    /// Bind an attached SIP participant to its owning session's command queue.
+    pub(crate) fn bind_participant_session(
+        &self,
+        conf_id: &ConferenceId,
+        leg_id: &LegId,
+        commands: mpsc::Sender<CallCommand>,
+    ) -> Result<()> {
+        let mut room = self.conferences.get_mut(conf_id)
+            .ok_or_else(|| anyhow!("Conference {} has ended", conf_id.0))?;
+        let participant = room.participants.get_mut(leg_id)
+            .ok_or_else(|| anyhow!("Conference participant {} has left", leg_id))?;
+        participant.session_commands = Some(commands);
+        Ok(())
+    }
+
+    /// Destroy the room and explicitly end its remaining SIP participants.
     pub async fn destroy_conference(&self, conf_id: &ConferenceId) -> Result<()> {
+        // Removing first prevents new attachments and makes destruction idempotent.
+        let Some((_, room)) = self.conferences.remove(conf_id) else { return Ok(()) };
         if let Some((_, token)) = self.timeout_tokens.remove(conf_id) {
             token.cancel();
         }
-
+        for (leg_id, participant) in room.participants {
+            self.leg_to_conference.remove(&leg_id);
+            self.participant_channels.remove(&leg_id);
+            self.participant_output_rxs.remove(&leg_id);
+            if let Some(commands) = participant.session_commands {
+                let command = CallCommand::ConferenceEnded { conference_id: conf_id.0.clone() };
+                // A room can be destroyed from an owning session's command handler.
+                // Never wait here for that same bounded queue to drain.
+                if let Err(mpsc::error::TrySendError::Full(command)) = commands.try_send(command) {
+                    crate::utils::spawn(async move { let _ = commands.send(command).await; });
+                }
+            }
+        }
         if let Some((_, mixer)) = self.audio_mixers.remove(conf_id) {
             mixer.stop().await;
         }
-
-        if let Some(conf) = self.conferences.get(conf_id) {
-            for leg_id in conf.participant_ids() {
-                self.leg_to_conference.remove(&leg_id);
-                self.participant_channels.remove(&leg_id);
-                self.participant_output_rxs.remove(&leg_id);
-            }
-        }
-
-        if self.conferences.remove(conf_id).is_none() {
-            return Ok(());
-        }
-
         info!(conf_id = %conf_id.0, "Conference destroyed");
         Ok(())
     }
@@ -397,7 +430,7 @@ impl ConferenceManager {
 
     /// Remove a participant from a conference.
     /// Returns the number of remaining participants.
-    /// If 0 or 1 remain, the conference is auto-destroyed.
+    /// When 0 remain, the conference is auto-destroyed.
     pub async fn remove_participant(
         &self,
         conf_id: &ConferenceId,
@@ -405,11 +438,23 @@ impl ConferenceManager {
     ) -> Result<usize> {
         // Remove from conference room
         let remaining;
+        let creator_left;
+        let owner_commands;
         {
             let mut conference = self
                 .conferences
                 .get_mut(conf_id)
                 .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
+            let managed_owner = conference.host_leg_id.as_ref()
+                .and_then(|owner| conference.participants.get(owner))
+                .and_then(|owner| owner.session_commands.clone());
+            creator_left = conference.is_host(leg_id)
+                && (conference.focus_uri.is_some() || managed_owner.is_some());
+            // A transfer has no SIP focus: its peer leaving ends the owner's
+            // call. Ordinary SIP conference members only remove themselves.
+            owner_commands = if !creator_left && conference.focus_uri.is_none() {
+                managed_owner
+            } else { None };
             conference.remove_participant(leg_id)?;
             remaining = conference.participant_count();
         }
@@ -426,6 +471,19 @@ impl ConferenceManager {
         self.participant_channels.remove(leg_id);
         self.participant_output_rxs.remove(leg_id);
         self.leg_to_conference.remove(leg_id);
+
+        if creator_left {
+            info!(conf_id = %conf_id.0, %leg_id, "Conference departure requires room teardown");
+            self.destroy_conference(conf_id).await?;
+            return Ok(0);
+        }
+
+        if let Some(commands) = owner_commands {
+            let command = CallCommand::ConferenceEnded { conference_id: conf_id.0.clone() };
+            if let Err(mpsc::error::TrySendError::Full(command)) = commands.try_send(command) {
+                crate::utils::spawn(async move { let _ = commands.send(command).await; });
+            }
+        }
 
         if remaining == 0 {
             info!(
@@ -454,9 +512,10 @@ impl ConferenceManager {
             conference.mute_participant(leg_id)?;
         }
 
-        // Update local audio mixer
-        if let Some(mixer) = self.audio_mixers.get(conf_id) {
-            let mixer = mixer.value().clone();
+        // Update local audio mixer. Clone the mixer out of the map first —
+        // the DashMap shard guard must not be held across the `.await`.
+        let mixer = self.audio_mixers.get(conf_id).map(|m| m.value().clone());
+        if let Some(mixer) = mixer {
             mixer.set_muted(leg_id, true).await?;
         }
 
@@ -474,9 +533,10 @@ impl ConferenceManager {
             conference.unmute_participant(leg_id)?;
         }
 
-        // Update local audio mixer
-        if let Some(mixer) = self.audio_mixers.get(conf_id) {
-            let mixer = mixer.value().clone();
+        // Update local audio mixer. Clone the mixer out of the map first —
+        // the DashMap shard guard must not be held across the `.await`.
+        let mixer = self.audio_mixers.get(conf_id).map(|m| m.value().clone());
+        if let Some(mixer) = mixer {
             mixer.set_muted(leg_id, false).await?;
         }
 
@@ -563,15 +623,15 @@ impl ConferenceManager {
             ));
         }
 
-        let removed = participant_ids.clone();
+        let removed_count = participant_ids.len();
         self.destroy_conference(conf_id).await?;
         info!(
             conf_id = %conf_id.0,
             host_leg_id = %host_leg_id,
-            removed_count = removed.len(),
+            removed_count,
             "Host ended conference"
         );
-        Ok(removed)
+        Ok(participant_ids)
     }
 }
 
@@ -1184,4 +1244,57 @@ mod tests {
             "Conference should auto-destroy when empty"
         );
     }
+    #[tokio::test]
+    async fn incomplete_transfer_room_tears_down_attached_caller() {
+        let manager = ConferenceManager::new();
+        let room = ConferenceId::from("refer-rollback");
+        let a = LegId::from("a");
+        let c = LegId::from("c");
+        manager.create_conference(room.clone(), Some(2)).await.unwrap();
+        manager.add_participant(&room, a.clone()).await.unwrap();
+        let (commands, mut events) = mpsc::channel(4);
+        manager.bind_participant_session(&room, &a, commands).unwrap();
+        assert!(manager.bind_transfer_owner(&room, &a, &c).is_err());
+        assert_eq!(manager.get_conference(&room).await.unwrap().participant_count(), 1);
+        assert!(events.try_recv().is_err(), "one participant during setup must not end the room");
+        manager.destroy_conference(&room).await.unwrap();
+        assert!(manager.get_conference(&room).await.is_none());
+        assert!(matches!(events.try_recv().unwrap(), CallCommand::ConferenceEnded {
+            conference_id,
+        } if conference_id == room.0));
+    }
+
+    #[tokio::test]
+    async fn transfer_caller_owns_teardown_in_both_departure_orders() {
+        for caller_leaves in [true, false] {
+            let manager = ConferenceManager::new();
+            let room = ConferenceId::from("refer-owned");
+            let a = LegId::from("a");
+            let c = LegId::from("c");
+            manager.create_conference(room.clone(), Some(2)).await.unwrap();
+            let (a_commands, mut a_events) = mpsc::channel(4);
+            let (c_commands, mut c_events) = mpsc::channel(4);
+            manager.add_participant(&room, a.clone()).await.unwrap();
+            manager.bind_participant_session(&room, &a, a_commands).unwrap();
+            manager.add_participant(&room, c.clone()).await.unwrap();
+            manager.bind_participant_session(&room, &c, c_commands).unwrap();
+            manager.bind_transfer_owner(&room, &a, &c).unwrap();
+            assert_eq!(manager.get_conference(&room).await.unwrap().host_leg_id, Some(a.clone()));
+            if !caller_leaves {
+                manager.remove_participant(&room, &c).await.unwrap();
+                assert!(manager.get_conference(&room).await.is_some(), "owner ends its room");
+                assert!(matches!(a_events.try_recv().unwrap(), CallCommand::ConferenceEnded {
+                    conference_id,
+                } if conference_id == room.0));
+            }
+            manager.remove_participant(&room, &a).await.unwrap();
+            assert!(manager.get_conference(&room).await.is_none());
+            if caller_leaves {
+                assert!(matches!(c_events.try_recv().unwrap(), CallCommand::ConferenceEnded {
+                    conference_id,
+                } if conference_id == room.0));
+            }
+        }
+    }
+
 }

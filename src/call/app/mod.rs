@@ -109,7 +109,7 @@ mod ivr_test;
 mod queue_test;
 
 pub use app_context::{
-    AppInvocationContext, AppRouteContext, AppSharedState, ApplicationContext, CallInfo,
+    AppInvocationContext, AppRouteContext, ApplicationContext, CallInfo,
     PendingQueuePlan, QueueOverflowOverrides, extract_sip_headers, merge_sip_headers,
 };
 pub use controller::{
@@ -130,7 +130,6 @@ pub enum CallAppType {
     Ivr,
     Conference,
     Queue,
-    Fax,
     /// Realtime (AI voice) WebSocket bridge.
     Realtime,
     Custom,
@@ -143,7 +142,6 @@ impl fmt::Display for CallAppType {
             CallAppType::Ivr => write!(f, "ivr"),
             CallAppType::Conference => write!(f, "conference"),
             CallAppType::Queue => write!(f, "queue"),
-            CallAppType::Fax => write!(f, "fax"),
             CallAppType::Realtime => write!(f, "realtime"),
             CallAppType::Custom => write!(f, "custom"),
         }
@@ -235,14 +233,6 @@ impl fmt::Display for ExitReason {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AppEvent {
-    /// HTTP webhook response received
-    HttpResponse { body: String },
-    /// Conference participant joined
-    ParticipantJoined { room_id: String, count: usize },
-    /// Conference participant left
-    ParticipantLeft { room_id: String, count: usize },
-    /// Conference ended by moderator
-    ConferenceEnded { room_id: String },
     /// A transfer retained by this application reached a terminal outcome.
     TransferResult { outcome: TransferOutcome },
     /// Custom event with arbitrary JSON data

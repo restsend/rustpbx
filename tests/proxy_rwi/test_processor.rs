@@ -1116,6 +1116,13 @@ async fn test_originate_agent_click_to_call_emits_agent_attributed_call_events()
         "call_answered must carry the agent's id"
     );
     assert_eq!(answered.call_id, call_id);
+    // Session-level-only policy: the answered event carries no `leg_id` — the
+    // customer-leg connect must not emit its own answered event.
+    assert!(
+        answered.event.payload["leg_id"].is_null(),
+        "call_answered must be session-level (no leg_id), got: {:?}",
+        answered.event.payload
+    );
     {
         let agent = cc_registry.get_agent("1001").await.expect("agent");
         assert!(

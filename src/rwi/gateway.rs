@@ -665,10 +665,14 @@ impl RwiGateway {
 
     fn enrich_flat_event(&self, flat: &RwiEvent) -> RwiEvent {
         let mut ctx_root: Option<String> = None;
+        let mut meta_agent: Option<String> = None;
+        let mut meta_agent_name: Option<String> = None;
         let mut payload = if let Some(call_id) = &flat.call_id
             && let Some(meta) = self.meta_store.get_sync(call_id)
         {
             ctx_root = meta.session_id.clone();
+            meta_agent = meta.agent_id.clone();
+            meta_agent_name = meta.agent_name.clone();
             let mut payload = flat.payload.clone();
             let ctx = crate::rwi::proto::EventCallContext::from(meta);
             merge_event_context(&mut payload, Some(&ctx));
@@ -683,6 +687,56 @@ impl RwiGateway {
             }
             flat.payload.clone()
         };
+
+        // Canonical `transfer_target` form for `call_transferred`: several
+        // emitters report the raw Refer-To / consult target, which for a
+        // bare extension is `"1003"`. Normalize scheme-less, host-less
+        // values to `sip:1003` so webhook consumers see one stable,
+        // URI-shaped contract. Values that already carry a host (`@`) or a
+        // non-SIP scheme (`queue:`, `app:`) pass through untouched.
+        if flat.event_type == "call_transferred"
+            && let Some(obj) = payload.as_object_mut()
+            && let Some(target) = obj.get("transfer_target").and_then(|v| v.as_str())
+        {
+            let t = target.trim();
+            if !t.is_empty()
+                && !t.contains('@')
+                && !t.starts_with("sip:")
+                && !t.starts_with("sips:")
+                && !t.contains(':')
+            {
+                obj.insert(
+                    "transfer_target".to_string(),
+                    serde_json::Value::String(format!("sip:{t}")),
+                );
+            }
+        }
+
+        // Canonical `transfer_source` for `call_transferred`: emitters that
+        // run outside the session flow (proxy REFER handling, cross-session
+        // merges) have no app-context snapshot and may deliver no source at
+        // all. When the CallMeta carries an agent attribution, synthesize
+        // `source_type: "agent"` from it so consumers can rely on the field.
+        if flat.event_type == "call_transferred"
+            && meta_agent.is_some()
+            && let Some(obj) = payload.as_object_mut()
+        {
+            let needs_source = match obj.get("transfer_source") {
+                Some(serde_json::Value::Object(o)) => o.get("source_type").is_none(),
+                Some(_) => false, // a non-object source: leave untouched
+                None => true,     // absent entirely
+            };
+            if needs_source {
+                obj.insert(
+                    "transfer_source".to_string(),
+                    serde_json::json!({
+                        "source_type": "agent",
+                        "agent_id": meta_agent,
+                        "agent_name": meta_agent_name,
+                    }),
+                );
+            }
+        }
 
         // Attach the session user data object (REST/RWI-set business context)
         // under `user_data`. Keyed by session_id; for the main call the event
@@ -1227,6 +1281,67 @@ mod tests {
 
         gw.call_finished(&"sess-1".to_string());
         assert!(gw.get_user_data(&"sess-1".to_string()).is_empty());
+    }
+
+    /// The session teardown holds a CLONE of the same guard instance that
+    /// moved into the CDR record (`report_with_rwi_guard`). If the record
+    /// drops early — the call-record channel is bounded, so on `Full`/`Closed`
+    /// it drops synchronously — the cleanup must NOT run while the session is
+    /// still emitting its final events: `user_data` and CallMeta have to stay
+    /// alive until the LAST guard handle drops.
+    #[tokio::test]
+    async fn test_session_held_guard_survives_record_drop() {
+        let gateway = StdArc::new(RwLock::new(RwiGateway::new()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        {
+            let mut gw = gateway.write();
+            let sid = gw.create_session(create_identity()).read().id.clone();
+            gw.set_session_event_sender(&sid, tx);
+            gw.claim_call_ownership(&sid, "c1".into(), OwnershipMode::Control)
+                .unwrap();
+            gw.meta_store.insert(
+                "c1".into(),
+                crate::rwi::proto::CallMeta {
+                    caller: Some("sip:caller@example.com".into()),
+                    ..Default::default()
+                },
+            );
+            let mut data = serde_json::Map::new();
+            data.insert("crm_id".to_string(), serde_json::json!("C-1"));
+            gw.set_user_data(&"c1".to_string(), data).unwrap();
+        }
+
+        // One guard instance, two handles: record-side + session-side.
+        let record_guard = RwiCallRecordGuard::new(&gateway, "c1".into());
+        let session_guard = record_guard.clone();
+
+        // The record drops early (channel full/closed simulation).
+        drop(record_guard);
+
+        // State must still be alive: events stay enriched with user_data and
+        // context. (Drain the `call_userdata_updated` emitted during setup
+        // first.)
+        let setup_evt = rx.recv().await.expect("setup event");
+        assert_eq!(setup_evt["event_type"], "call_userdata_updated");
+        gateway.read().send_to_owner(&crate::rwi::CallAnswered {
+            leg_id: None,
+            call_id: "c1".into(),
+        });
+        let event = rx.recv().await.expect("final event must still flow");
+        assert_eq!(event["event_type"], "call_answered");
+        assert_eq!(
+            event["user_data"]["crm_id"],
+            "C-1",
+            "user_data must survive the record-side guard drop"
+        );
+        assert_eq!(event["caller"], "sip:caller@example.com", "meta must survive");
+
+        // The session finishes emitting and drops its handle → cleanup.
+        drop(session_guard);
+        let gateway = gateway.read();
+        assert!(!gateway.call_ownership.contains_key("c1"));
+        assert!(gateway.meta_store.get_sync("c1").is_none());
+        assert!(gateway.get_user_data(&"c1".to_string()).is_empty());
     }
 
     #[tokio::test]

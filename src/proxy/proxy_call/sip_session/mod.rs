@@ -8,6 +8,7 @@ mod session;
 mod util;
 
 mod conference;
+mod refer;
 mod live_transcription;
 mod supervisor;
 mod transfer;
@@ -15,7 +16,7 @@ mod transfer;
 pub(crate) use util::{pct_decode_query, route_outbound_leg};
 
 #[cfg(test)]
-pub(crate) use transfer::ReturnTargetSpec;
+pub(crate) use transfer::{ReturnTargetSpec, TransferDisposition};
 
 pub use session::{SessionSnapshot, SipSession, SipSessionHandle};
 pub use util::{CalleeError, into_callee_err};

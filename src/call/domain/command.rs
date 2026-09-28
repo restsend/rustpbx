@@ -203,6 +203,20 @@ pub enum CallCommand {
         skill_group_id: Option<String>,
     },
 
+    /// Pin the CC agent attribution for a leg the queue is about to dial.
+    ///
+    /// Written by the queue app BEFORE the agent INVITE goes out so that the
+    /// session-level `call_ringing` event — emitted on the agent leg's 180,
+    /// possibly before the CC session hook runs — is enriched with the
+    /// `agent_id`/`agent_name` context. Fields absent (None) are left
+    /// unchanged.
+    PinAgentMeta {
+        /// Agent id being dialed (registry identity, e.g. `"1001"`).
+        agent_id: Option<String>,
+        /// Display name, when known.
+        agent_name: Option<String>,
+    },
+
     /// Hang up the original direct/queue agent, resolving the legacy callee alias.
     /// Notifies agent-disconnect hooks when leaving for blind or attended transfer.
     HangupAgentLeg,
@@ -481,6 +495,18 @@ pub enum CallCommand {
         leg_id: LegId,
     },
 
+    /// The shared room ended; its owning session must hang up the participant.
+    #[serde(skip)]
+    ConferenceEnded { conference_id: String },
+
+    /// Ask the owning session to attach the peer of an established SIP dialog.
+    #[serde(skip)]
+    JoinConferencePeer {
+        conference_id: String,
+        dialog_id: rsipstack::dialog::DialogId,
+        reply: oneshot::Sender<Result<LegId, String>>,
+    },
+
     /// Join the caller leg into a conference room, waiting for the leg to be
     /// media-ready first (room dial-in via app=conference). Processed after
     /// any queued Answer command, so the caller leg is Connected by the time
@@ -539,6 +565,12 @@ pub enum CallCommand {
     LegRinging {
         /// Leg ID that is ringing
         leg_id: LegId,
+    },
+
+    /// Connected leg ended normally through SIP BYE (async notification).
+    LegEnded {
+        leg_id: LegId,
+        reason: String,
     },
 
     /// Leg dial failed (async notification)
@@ -784,6 +816,7 @@ impl CallCommand {
                 | CallCommand::Trace { .. }
                 | CallCommand::ReportCallError { .. }
                 | CallCommand::UpdateQueueMeta { .. }
+                | CallCommand::PinAgentMeta { .. }
         )
     }
 }

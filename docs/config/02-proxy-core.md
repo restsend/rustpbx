@@ -531,3 +531,43 @@ SipServerBuilder::new(config)
 ```
 
 For the complete `ivr.exec` protocol reference, see [`docs/ivr_exec.md`](../ivr_exec.md).
+
+## RWI Call Events: `call_answered` Semantics
+
+`call_answered` is a **session-scoped** event: it fires **exactly once per call
+(session)**, carries **no `leg_id`**, and marks the moment the call is
+business-connected.
+
+### Emission points
+
+| Call shape | Emitted at | Enrichment |
+|------------|-----------|------------|
+| Direct answer / dial to extension (no app) | caller-leg accept | — |
+| Queue call (IVR → queue → agent) | agent connect | `agent_id`, `queue_id`, … |
+| Outbound / click-to-call originate | remote answer (200 OK) | `agent_id` for CTI originates |
+
+### What does NOT emit `call_answered`
+
+- **Leg transitions.** A single 200 OK previously fanned out into session +
+  caller-leg + callee-leg duplicates. Leg connect/teardown timelines remain
+  visible through `call_ringing` and `call_hangup` leg events (which keep their
+  `leg_id`).
+- **Hold / resume.** Un-hold is expressed by `call_unheld`; it no longer
+  re-emits `call_answered`.
+- **Calls that never business-connect.** A caller who hangs up inside the IVR
+  (never reaching an agent) produces zero `call_answered` events. Derive
+  "was answered" from `call_hangup.duration_secs > 0` or `ivr_step_trace`.
+
+### Consumer contract
+
+Downstream systems receive one authoritative `call_answered` per `call_id` —
+no de-duplication, `leg_id` filtering, or "pick the right event" heuristics are
+needed. Events targeting a Genesys-compatible MQ map 1:1 to event code 64.
+
+### Safety net
+
+A session that reached the talking state without ever emitting
+`call_answered` (and never ran an app — app-answered sessions legitimately emit
+zero when the caller never reaches an agent) logs a warning and increments the
+`rwi_session_connected_without_answered_total` counter. A non-zero rate there
+indicates a call shape missing its session-level emit site.

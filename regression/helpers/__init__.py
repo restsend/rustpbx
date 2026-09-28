@@ -35,6 +35,17 @@ from .audio_verifier import (  # noqa: F401
     has_audio_content,
     find_dominant_frequency,
     goertzel_magnitude_normalized,
+    band_peak_db,
+    window_rms_db,
+    goertzel_timeline,
+    longest_above_run,
+    wait_recording,
+    wait_recording_async,
+    assert_tone_window,
+    assert_play_then_restore,
+    assert_server_recording,
+    negotiated_codec,
+    assert_media_quantity,
 )
 from .ws_bridge_echo import WsBridgeEchoServer, WsBridgeCapture  # noqa: F401
 

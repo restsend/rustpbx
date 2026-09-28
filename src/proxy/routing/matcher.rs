@@ -1034,6 +1034,11 @@ fn extract_regex_captures(pattern: &str, value: &str) -> Result<Option<Vec<Strin
     Ok(None)
 }
 
+/// Compiled-regex cache for `matches_pattern` — routing rules reuse the same
+/// handful of patterns across every call, so compiling per match is waste.
+static REGEX_CACHE: once_cell::sync::Lazy<dashmap::DashMap<String, regex::Regex>> =
+    once_cell::sync::Lazy::new(dashmap::DashMap::new);
+
 /// Match pattern (supports regex)
 pub(crate) fn matches_pattern(pattern: &str, value: &str) -> Result<bool> {
     // If pattern doesn't contain regex special characters, use exact match
@@ -1049,8 +1054,16 @@ pub(crate) fn matches_pattern(pattern: &str, value: &str) -> Result<bool> {
         return Ok(pattern == value);
     }
 
-    let regex =
-        Regex::new(pattern).map_err(|e| anyhow!("Invalid regex pattern '{}': {}", pattern, e))?;
+    let regex = if let Some(regex) = REGEX_CACHE.get(pattern) {
+        regex
+    } else {
+        let compiled = Regex::new(pattern)
+            .map_err(|e| anyhow!("Invalid regex pattern '{}': {}", pattern, e))?;
+        REGEX_CACHE
+            .entry(pattern.to_string())
+            .or_insert(compiled)
+            .downgrade()
+    };
     Ok(regex.is_match(value))
 }
 

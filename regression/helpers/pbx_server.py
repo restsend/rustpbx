@@ -14,6 +14,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import threading
 import time
 import urllib.request
 import urllib.error
@@ -180,10 +181,48 @@ class PbxServer:
     log_file_path: Optional[Path] = None
     _config_builder: Optional[ConfigBuilder] = None
     _http_session: Optional[aiohttp.ClientSession] = None
+    # supervised-restart state (see PbxServer.start)
+    _stopping: bool = False
+    _respawns: int = 0
+    _generation: int = 0
+    _swap_lock: threading.Lock = threading.Lock()
+    _spawn_cmd: Optional[list] = None
+    _spawn_log_f: Optional[object] = None
 
     @property
     def sip_addr(self) -> str:
         return f"{self.host}:{self.sip_port}"
+
+    @staticmethod
+    def _port_holder(port: int) -> Optional[dict]:
+        """Return {pid, cmdline} when `port` is bound (LISTEN/UDP), else None.
+        Client-side connections TO the port don't count."""
+        import subprocess as _sp
+
+        try:
+            out = _sp.run(
+                ["lsof", "-nP", f"-iTCP:{port}", f"-iUDP:{port}"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout
+        except Exception:  # noqa: BLE001 — lsof missing/timeout: skip the guard
+            return None
+        for line in out.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) < 9 or not parts[1].isdigit():
+                continue
+            name_and_state = " ".join(parts[8:])
+            if "->" in name_and_state:  # client side of a connection
+                continue
+            local = name_and_state.split(" (")[0]
+            if not local.endswith(f":{port}"):
+                continue
+            pid = int(parts[1])
+            cmdline = _sp.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                capture_output=True, text=True,
+            ).stdout.strip()
+            return {"pid": pid, "cmdline": cmdline}
+        return None
 
     @property
     def http_url(self) -> str:
@@ -289,7 +328,17 @@ class PbxServer:
         return self.config_path
 
     def start(self, timeout: float = 30) -> None:
-        """Start rustpbx process and wait until healthy."""
+        """Start rustpbx process and wait until healthy.
+
+        Idempotent (re)start: function-scoped fixtures (cc_api etc.) call
+        boot_pbx() per test after mutating the config on the SAME PbxServer
+        the session fixture already started. The live instance must be torn
+        down first — a duplicate loses the port race, and the port guard
+        below would then raise (or, pre-guard, the stale instance would
+        poison the rest of the session).
+        """
+        if self.process is not None and self.process.poll() is None:
+            self.stop()
         assert self.binary is not None, "Call prepare() first"
         assert self.config_path is not None, "Call prepare() first"
 
@@ -327,8 +376,53 @@ class PbxServer:
                 except (OSError, NotImplementedError):
                     logger.warning("could not symlink cc static into %s", work_dir)
 
+            # The repo's config/sounds (hold audio phone-calling.wav, queue
+            # prompts, error cues) must ALSO be visible under the work dir:
+            # the suite writes its own work-dir config/ files, so without
+            # this mirror resolve_audio_file_path's "config/<file>" fallback
+            # misses and hold music / error cues degrade to silence.
+            repo_config_sounds = project_root / "config" / "sounds"
+            if repo_config_sounds.is_dir():
+                dst = work_dir / "config" / "sounds"
+                if not dst.exists():
+                    try:
+                        dst.symlink_to(repo_config_sounds, target_is_directory=True)
+                    except (OSError, NotImplementedError):
+                        logger.warning(
+                            "could not symlink config/sounds into %s", work_dir
+                        )
+
         log_dir = self.work_dir / "tests" / "logs"
         self.log_file_path = log_dir / f"rustpbx_regression_{int(time.time())}.log"
+
+        # Refuse to start over a stale listener: a leftover instance holding
+        # SIP/HTTP makes the readiness poll succeed against the WRONG process
+        # (stale registry/webhook state → baffling cross-test failures).
+        # A leftover that belongs to THIS harness (same work-dir config) is
+        # SIGKILLed automatically first: rustpbx's graceful drain can hold
+        # the port for up to 300 s with active calls, outliving stop()'s
+        # 3 s SIGTERM window.
+        for port_desc, port in (("SIP", self.sip_port), ("HTTP", self.http_port)):
+            culprit = PbxServer._port_holder(port)
+            if culprit and "rustpbx" in culprit["cmdline"] and "--conf" in culprit["cmdline"]:
+                logger.warning(
+                    "killing leftover harness rustpbx PID %s holding %s port %s",
+                    culprit["pid"], port_desc, port,
+                )
+                try:
+                    os.kill(culprit["pid"], signal.SIGKILL)
+                    time.sleep(1.0)
+                except (OSError, ProcessLookupError):
+                    pass
+                culprit = PbxServer._port_holder(port)
+            if culprit:
+                raise RuntimeError(
+                    f"{port_desc} port {port} is already bound by PID "
+                    f"{culprit['pid']} ({culprit['cmdline']}) — a leftover "
+                    "instance from an earlier session. Kill it "
+                    "(pkill -9 -f 'rustpbx.*--conf') or point this run at "
+                    "other ports via RUSTPBX_SIP_PORT / RUSTPBX_HTTP_PORT."
+                )
 
         log_f = open(self.log_file_path, "w", encoding="utf-8")
         cmd = [str(self.binary), "--conf", str(self.config_path)]
@@ -340,10 +434,30 @@ class PbxServer:
             cwd=str(self.work_dir),
             preexec_fn=os.setsid if os.name != "nt" else None,
         )
+        self._spawn_cmd = cmd
+        self._spawn_log_f = log_f
+        with self._swap_lock:
+            self._generation += 1
+        gen = self._generation
+        self._stopping = False
+        self._respawns = 0
+
+        # Supervised restart: `/ami/v1/reload/app` legitimately exits the
+        # process (in production an external supervisor restarts it with the
+        # reloaded config). Without a watcher, one reload test leaves a dead
+        # PBX behind and every later test in the session fails with
+        # connection-refused (the 190-setup-error cascade).
+        threading.Thread(
+            target=self._supervise, args=(cmd, log_f, gen), daemon=True
+        ).start()
+        logger.info(
+            "supervisor watchdog armed (gen=%d) cmd=%s", gen, " ".join(cmd)
+        )
 
         # health check
         if not self._wait_ready(timeout):
             self.dump_logs()
+            self._stopping = True
             # The half-started process holds the SIP/HTTP ports — without a
             # hard kill every subsequent run fails with "address already in
             # use" (setsid puts it in its own process group, so the pytest
@@ -406,7 +520,56 @@ class PbxServer:
         except Exception:
             return False
 
+    def _supervise(self, cmd, log_f, gen: int):
+        """Watch the spawned rustpbx (generation *gen*) and respawn it if it
+        exits on its own. `/ami/v1/reload/app` legitimately exits the process
+        (prod semantics: an external supervisor restarts it with the reloaded
+        config) — without this watcher one reload test leaves a dead PBX and
+        every later test in the session fails with connection-refused.
+        Exits when superseded by a newer generation or when stopping. Caps at
+        3 respawns to avoid a crash loop."""
+        while True:
+            proc = self.process
+            if proc is None or self._generation != gen or self._stopping:
+                return
+            rc = proc.wait()
+            if self._stopping or self._generation != gen or self.process is not proc:
+                return
+            if self._respawns >= 3:
+                logger.error(
+                    "rustpbx exited (rc=%s) and the respawn budget (3) is "
+                    "exhausted — giving up", rc,
+                )
+                return
+            self._respawns += 1
+            logger.warning(
+                "rustpbx exited on its own (rc=%s) — supervised respawn "
+                "%d/3", rc, self._respawns,
+            )
+            time.sleep(1.0)
+            with self._swap_lock:
+                if self._stopping or self._generation != gen:
+                    return
+                self.process = subprocess.Popen(
+                    cmd,
+                    stdout=log_f,
+                    stderr=subprocess.STDOUT,
+                    cwd=str(self.work_dir),
+                    preexec_fn=os.setsid if os.name != "nt" else None,
+                )
+            if self._wait_ready(60):
+                logger.info(
+                    "supervised respawn %d ready on SIP %s, HTTP %s",
+                    self._respawns, self.sip_addr, self.http_url,
+                )
+            else:
+                logger.error(
+                    "supervised respawn %d did not become ready within 60s",
+                    self._respawns,
+                )
+
     def stop(self) -> None:
+        self._stopping = True
         if self.process and self.process.poll() is None:
             logger.info("Stopping rustpbx...")
             try:
