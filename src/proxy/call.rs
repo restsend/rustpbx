@@ -3230,7 +3230,6 @@ mod tests {
             auto_start: Some(true),
             auto_start_at: Some(crate::config::RecordingAutoStartAt::Answer),
             force_file: Some(true),
-            signaling: Some(false),
             ..Default::default()
         });
 
