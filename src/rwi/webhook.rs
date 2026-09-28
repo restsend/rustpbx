@@ -652,10 +652,8 @@ mod tests {
     }
 
     /// Regression: agent status, recording metadata, and recording finalization
-    /// events must all be deliverable through the RWI webhook. These three event
-    /// types are the ones most commonly missing because of a stale `events`
-    /// allow-list (the docs used to suggest `dn_state_changed`, which no longer
-    /// exists, and omitted the recording-data events).
+    /// events must all be deliverable through the RWI webhook — the ones most
+    /// commonly missing from a stale `events` allow-list.
     #[tokio::test]
     async fn test_webhook_receives_agent_and_recording_events() {
         let server = TestHttpServer::start().await;

@@ -1238,7 +1238,11 @@ impl RwiCommandProcessor {
                 let dest_is_agent =
                     !dest_user.is_empty() && registry.get_agent(&dest_user).await.is_some();
                 if !dest_is_agent {
-                    metadata.insert("resolved_agent_id".to_string(), user.to_string());
+                    metadata.insert(
+                        crate::proxy::proxy_call::session_hooks::SessionExtensions::AGENT_ATTRIBUTION_KEY
+                            .to_string(),
+                        user.to_string(),
+                    );
                 }
             }
             let mut dialplan = Dialplan::new(

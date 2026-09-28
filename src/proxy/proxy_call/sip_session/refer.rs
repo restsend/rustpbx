@@ -38,7 +38,7 @@ impl SipSession {
             let selected = self.resolve_transfer_leg();
             let mut agent_id = self.legs.get(&leg_id).and_then(|leg| leg.agent_id.clone());
             if agent_id.is_none() && leg_id == selected {
-                agent_id = self.session_ext_get("resolved_agent_id").or_else(|| self.session_ext_get("agent_id"));
+                agent_id = self.pinned_agent_id().or_else(|| self.session_ext_get("agent_id"));
             }
             if let Some(agent_id) = agent_id {
                 if let Some(leg) = self.legs.get_mut(&leg_id) {

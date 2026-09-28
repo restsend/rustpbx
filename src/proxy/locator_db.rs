@@ -903,7 +903,7 @@ impl Locator for DbLocator {
 
         // Best-effort cleanup of expired bindings so they don't shadow live
         // registrations in subsequent .invalid username lookups (which order by
-        // recency). Expired rows were previously only skipped, never deleted.
+        // recency).
         if !expired.is_empty() {
             let event_lock = self.event_lock.lock().await.clone();
             let _event_guard = match event_lock {

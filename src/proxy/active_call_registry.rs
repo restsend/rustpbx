@@ -43,6 +43,11 @@ pub struct ActiveCallContextMeta {
     pub skill_group_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ivr_node_id: Option<String>,
+    /// Wall-clock time the call entered its current IVR app — stamped next
+    /// to the `ivr` session ext when the app starts so the monitor can show
+    /// how long the call has been sitting in the IVR.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ivr_entered_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ticket_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

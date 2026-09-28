@@ -1034,9 +1034,8 @@ impl SipServerBuilder {
             self.data_context = Some(dc.clone());
             dc
         };
-        // Wire up the SIP endpoint for trunk registration, then reconcile so
-        // that trunks with register_enabled=true are registered on startup
-        // (previously reconcile ran before set_endpoint and was silently skipped).
+        // Wire up the SIP endpoint for trunk registration BEFORE reconciling,
+        // so trunks with register_enabled=true are registered on startup.
         data_context
             .trunk_registrar()
             .set_endpoint(endpoint.inner.clone());

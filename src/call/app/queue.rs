@@ -1,24 +1,9 @@
-//! Queue Application — built-in **call queue executor**.
-//!
-//! # Ownership boundary
-//!
-//! This module is the **execution layer** (hold music, ring agents, bridge,
-//! fallback media actions). It must **not** own contact-center decision logic.
-//!
-//! | Concern | Owner |
-//! |---------|--------|
-//! | Dial / hold / bridge / fallback prompts | **Core** `QueueApp` (this file) |
-//! | Agent selection, skill groups, ACD strategy, SLA policy | **CC addon** (`addons/cc/acd`, `CcAgentRegistryAdapter`) |
-//! | Escalation *timeline policy* | CC (`escalation_plan_for`) |
-//! | Escalation *dial widening* (add/replace legs) | Executor calls registry for URIs |
-//! | Cluster scheduling | CC (affinity: call stays on enqueue node; home_proxy rings remote agents) |
-//!
-//! CC-flavoured fields on [`QueueConfig`] (`routing_strategy`, `skill_group`,
-//! `no_answer_action`, `sla_*`, `escalation_*`, …) exist for injection by the
-//! CC adapter / assembly path. New strategy algorithms belong in
-//! `addons/cc/acd`, not here.
-//!
-//! Without `addon-cc`, static `agents` + sequential/parallel dialing still work.
+//! Queue Application — built-in **call queue executor** (execution layer:
+//! hold music, ring agents, bridge, fallback media). Contact-center decision
+//! logic (agent selection, ACD strategy, escalation/SLA policy, cluster
+//! scheduling) belongs in the CC addon; CC-flavoured [`QueueConfig`] fields
+//! exist only for injection by the CC adapter. Without `addon-cc`, static
+//! `agents` + sequential/parallel dialing still work.
 //!
 //! # State Machine
 //!

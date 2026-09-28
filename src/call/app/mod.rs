@@ -245,8 +245,9 @@ pub enum AppEvent {
 /// The core trait that all call applications must implement.
 ///
 /// Each method receives a mutable reference to [`CallController`] for
-/// performing call-control operations, and an [`ApplicationContext`] for
-/// accessing shared resources (database, storage, config).
+/// call-control operations, and an [`ApplicationContext`] for shared
+/// resources (database, storage, config). See the module docs for a
+/// complete example.
 ///
 /// # Event Handlers
 ///
@@ -259,33 +260,6 @@ pub enum AppEvent {
 /// | `on_external_event` | External event (HTTP, conference, custom) |
 /// | `on_timeout` | A named timeout expired |
 /// | `on_exit` | App is exiting (cleanup) |
-///
-/// # Example: Simple Greeting App
-///
-/// ```rust,ignore
-/// struct GreetingApp;
-///
-/// #[async_trait]
-/// impl CallApp for GreetingApp {
-///     fn app_type(&self) -> CallAppType { CallAppType::Custom }
-///     fn name(&self) -> &str { "greeting" }
-///
-///     async fn on_enter(
-///         &mut self, ctrl: &mut CallController, _ctx: &ApplicationContext,
-///     ) -> anyhow::Result<AppAction> {
-///         ctrl.answer().await?;
-///         ctrl.play_audio("sounds/hello.wav", false).await?;
-///         Ok(AppAction::Continue)
-///     }
-///
-///     async fn on_audio_complete(
-///         &mut self, _track_id: String,
-///         _ctrl: &mut CallController, _ctx: &ApplicationContext,
-///     ) -> anyhow::Result<AppAction> {
-///         Ok(AppAction::Hangup { reason: None, code: None })
-///     }
-/// }
-/// ```
 #[async_trait]
 pub trait CallApp: Send + Sync {
     /// Returns the application type identifier.

@@ -45,35 +45,10 @@ pub struct AppInvocationContext {
     pub variables: HashMap<String, String>,
 }
 
-/// The application context, providing access to shared resources.
-///
-/// Passed (by reference) to every [`CallApp`] event handler. Contains the database
-/// connection, storage backend, HTTP client, call info, and system configuration.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// async fn on_enter(
-///     &mut self,
-///     ctrl: &mut CallController,
-///     ctx: &ApplicationContext,
-/// ) -> Result<AppAction> {
-///     // Access the database
-///     let db = &ctx.db;
-///     
-///     // Access call metadata
-///     let caller = &ctx.call_info.caller;
-///     tracing::info!("Call from {}", caller);
-///     
-///     // Read/write session variables
-///     let vars = ctx.session_vars.read().await;
-///     if let Some(lang) = vars.get("language") {
-///         tracing::info!("Language: {}", lang);
-///     }
-///
-///     Ok(AppAction::Continue)
-/// }
-/// ```
+/// The application context, providing access to shared resources (database,
+/// storage, HTTP client, call info, system config). Passed (by reference) to
+/// every [`CallApp`] event handler; `session_vars` carries variables shared
+/// across chained applications.
 #[derive(Clone)]
 pub struct ApplicationContext {
     /// Session-level variables shared across chained applications.

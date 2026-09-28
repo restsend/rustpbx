@@ -1,5 +1,9 @@
-//! Skill-group DB ↔ TOML config round-trip tests (in-process, NOT SIP e2e):
+//! Skill-group config export/reload tests (in-process, NOT SIP e2e):
 //! real sqlite::memory: database and real file I/O, no SIP stack.
+//!
+//! Reload semantics: TOML (or DB config store) → runtime memory cache ONLY.
+//! The DB is the console edit surface and is never written by reload —
+//! workflow: console edit (DB) → export (DB→TOML) → reload (TOML→memory).
 
 use sea_orm::{ActiveModelTrait, Database, Set};
 use sea_orm_migration::MigratorTrait;
@@ -204,23 +208,31 @@ max_wait_secs = 60
 
     assert_eq!(loaded, 1, "should load 1 group");
 
-    // Verify the group is now in DB
+    // Reload is memory-only: the group lands in the runtime cache…
+    let cache = state.skill_group_cache.read().await;
+    let entry = cache
+        .groups
+        .get("sales")
+        .expect("sales group should be in the runtime cache");
+    assert_eq!(entry.display_name.as_deref(), Some("Sales Team"));
+    assert!(entry.skills_required.contains(&"sales".to_string()));
+    assert!(entry.skills_required.contains(&"crm".to_string()));
+    drop(cache);
+
+    // …while the DB stays untouched (console edit surface only).
     use sea_orm::EntityTrait;
     let groups = rustpbx::addons::cc::models::cc_skill_group::Entity::find()
         .all(&db)
         .await
         .unwrap();
-    assert_eq!(groups.len(), 1);
-    assert_eq!(groups[0].skill_group_id, "sales");
-    assert!(groups[0].is_active);
-
-    let skills: Vec<String> = serde_json::from_value(groups[0].skills_required.clone()).unwrap();
-    assert!(skills.contains(&"sales".to_string()));
-    assert!(skills.contains(&"crm".to_string()));
+    assert!(
+        groups.is_empty(),
+        "reload must not insert DB rows (memory-only semantics)"
+    );
 }
 
 #[tokio::test]
-async fn test_reload_deactivates_missing_groups() {
+async fn test_reload_drops_missing_groups_from_cache_keeps_db() {
     let db = setup_db().await;
     // Pre-insert two groups
     insert_skill_group(&db, "support", None, &["support"]).await;
@@ -248,6 +260,19 @@ max_wait_secs = 90
         .await
         .unwrap();
 
+    // Cache now only holds the groups present in TOML ("support").
+    let cache = state.skill_group_cache.read().await;
+    assert!(
+        cache.groups.contains_key("support"),
+        "support group should stay in the runtime cache"
+    );
+    assert!(
+        !cache.groups.contains_key("billing"),
+        "billing group should be dropped from the runtime cache"
+    );
+    drop(cache);
+
+    // The DB is a console edit surface — reload never deactivates rows.
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
     let billing = rustpbx::addons::cc::models::cc_skill_group::Entity::find()
         .filter(rustpbx::addons::cc::models::cc_skill_group::Column::SkillGroupId.eq("billing"))
@@ -256,7 +281,10 @@ max_wait_secs = 90
         .unwrap()
         .expect("billing group should still exist in DB");
 
-    assert!(!billing.is_active, "billing group should be deactivated");
+    assert!(
+        billing.is_active,
+        "billing DB row must remain active (reload is memory-only)"
+    );
 
     let support = rustpbx::addons::cc::models::cc_skill_group::Entity::find()
         .filter(rustpbx::addons::cc::models::cc_skill_group::Column::SkillGroupId.eq("support"))
@@ -269,7 +297,7 @@ max_wait_secs = 90
 }
 
 #[tokio::test]
-async fn test_reload_updates_existing_group() {
+async fn test_reload_updates_cache_without_touching_db() {
     let db = setup_db().await;
     insert_skill_group(&db, "support", Some("Old Name"), &["support"]).await;
 
@@ -295,6 +323,21 @@ max_wait_secs = 80
         .await
         .unwrap();
 
+    // The runtime cache picks up the TOML values…
+    let cache = state.skill_group_cache.read().await;
+    let entry = cache
+        .groups
+        .get("support")
+        .expect("support should be in the runtime cache");
+    assert_eq!(entry.display_name.as_deref(), Some("New Name"));
+    assert_eq!(entry.sla_target_secs, 25);
+    assert!(
+        entry.skills_required.contains(&"billing".to_string()),
+        "billing skill should be added"
+    );
+    drop(cache);
+
+    // …while the DB row keeps its console-edited values untouched.
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
     let updated = rustpbx::addons::cc::models::cc_skill_group::Entity::find()
         .filter(rustpbx::addons::cc::models::cc_skill_group::Column::SkillGroupId.eq("support"))
@@ -303,15 +346,13 @@ max_wait_secs = 80
         .unwrap()
         .expect("support should exist");
 
-    assert_eq!(updated.display_name, Some("New Name".to_string()));
-    assert_eq!(updated.sla_target_secs, 25);
-    assert!(updated.is_active);
-
-    let skills: Vec<String> = serde_json::from_value(updated.skills_required).unwrap();
-    assert!(
-        skills.contains(&"billing".to_string()),
-        "billing skill should be added"
+    assert_eq!(
+        updated.display_name,
+        Some("Old Name".to_string()),
+        "DB display_name must be untouched by reload"
     );
+    assert_eq!(updated.sla_target_secs, 30);
+    assert!(updated.is_active);
 }
 
 #[tokio::test]
@@ -365,7 +406,16 @@ async fn test_export_then_reload_roundtrip() {
         .unwrap();
     assert_eq!(reloaded, 2);
 
-    // Both groups should be active again
+    // Reload is memory-only: the runtime cache is re-activated, the DB
+    // rows stay exactly as the console left them.
+    {
+        let cache = state.skill_group_cache.read().await;
+        assert!(
+            cache.groups.contains_key("support") && cache.groups.contains_key("sales"),
+            "both groups should be live in the runtime cache after reload"
+        );
+    }
+
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
     let active_groups = rustpbx::addons::cc::models::cc_skill_group::Entity::find()
         .filter(rustpbx::addons::cc::models::cc_skill_group::Column::IsActive.eq(true))
@@ -374,8 +424,8 @@ async fn test_export_then_reload_roundtrip() {
         .unwrap();
     assert_eq!(
         active_groups.len(),
-        2,
-        "both groups should be re-activated after reload"
+        0,
+        "reload must not re-activate DB rows (memory-only semantics)"
     );
 }
 

@@ -21,10 +21,8 @@ use tracing::{debug, warn};
 // side (`ClusterSync::broadcast` etag) and the receiver side (AMI route
 // registered in `handler::ami`) MUST derive from the same constant.
 //
-// Regression note: queue events were broadcast as `queue_event` while the
-// AMI route was `queue` — every POST 404'd and `cluster_sync` treated the
-// completed response as success, silently dropping ALL queue-event sync
-// (remote ACD double-assign protection + console monitor call linkage).
+// Mismatched names once 404'd every POST and silently dropped all
+// queue-event sync (ACD double-assign protection + console call linkage).
 pub mod event_etags {
     pub const PRESENCE: &str = "presence";
     pub const LOCATOR: &str = "locator";

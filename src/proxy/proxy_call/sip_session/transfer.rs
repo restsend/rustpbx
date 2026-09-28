@@ -912,12 +912,12 @@ impl SipSession {
         // SIP legs carry their own identity. Keep the existing fallback for
         // API-created calls whose originating leg predates agent attribution.
         let agent_id = self.legs.get(transferor_leg).and_then(|leg| leg.agent_id.clone())
-            .or_else(|| self.session_ext_get("resolved_agent_id"))
+            .or_else(|| self.pinned_agent_id())
             .or_else(|| self.legs.get(transferor_leg).and_then(|leg| leg.endpoint.as_deref())
                 .and_then(crate::models::call_record::extract_sip_username))
             .or_else(|| self.meta.connected_callee.as_deref()
                 .and_then(crate::models::call_record::extract_sip_username));
-        let agent_name = if agent_id.is_some() && agent_id == self.session_ext_get("resolved_agent_id") {
+        let agent_name = if agent_id.is_some() && agent_id == self.pinned_agent_id() {
             self.session_ext_get("agent_name")
         } else { None };
 

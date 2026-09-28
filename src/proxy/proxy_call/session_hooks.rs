@@ -30,6 +30,40 @@ impl SessionExtensions {
     pub fn new() -> Self {
         Self(Arc::new(parking_lot::RwLock::new(http::Extensions::new())))
     }
+
+    /// Extension key of the session-level pinned agent id: planted at target
+    /// resolution (queue/skill-group resolve, RWI originate) and updated when
+    /// the connected leg is a validated agent. Shared write/read contract
+    /// between core session flows and the CC addon.
+    pub fn agent_attribution(&self) -> Option<String> {
+        self.read()
+            .get::<std::collections::HashMap<String, String>>()
+            .and_then(|m| m.get(Self::AGENT_ATTRIBUTION_KEY).cloned())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Whether an agent attribution has been planted.
+    pub fn has_agent_attribution(&self) -> bool {
+        self.read()
+            .get::<std::collections::HashMap<String, String>>()
+            .is_some_and(|m| m.contains_key(Self::AGENT_ATTRIBUTION_KEY))
+    }
+
+    /// Plant/update the pinned agent id.
+    pub fn set_agent_attribution(&self, agent_id: &str) {
+        let mut ext = self.write();
+        if ext.get_mut::<std::collections::HashMap<String, String>>().is_none() {
+            ext.insert(std::collections::HashMap::<String, String>::new());
+        }
+        ext.get_mut::<std::collections::HashMap<String, String>>()
+            .expect("map inserted above")
+            .insert(Self::AGENT_ATTRIBUTION_KEY.to_string(), agent_id.to_string());
+    }
+}
+
+/// Storage key backing [`SessionExtensions::agent_attribution`].
+impl SessionExtensions {
+    pub const AGENT_ATTRIBUTION_KEY: &'static str = "resolved_agent_id";
 }
 
 impl Default for SessionExtensions {
