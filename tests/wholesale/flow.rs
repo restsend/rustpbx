@@ -381,7 +381,9 @@ async fn enrich_hook_injects_wholesale_reject_code() {
     );
     assert_eq!(
         meta.get("error_severity").and_then(|v| v.as_str()).unwrap(),
-        "error"
+        // insufficient_funds is a business rejection: WARN per the error
+        // catalog downgrade (wholesale b7a64c0), not a system error.
+        "warn"
     );
     assert_eq!(
         meta.get("error_message").and_then(|v| v.as_str()).unwrap(),
