@@ -1230,6 +1230,11 @@ impl SipSession {
                     Leg::new(caller_id),
                     caller_leg_dialog,
                 );
+                // Placeholder "callee" slot: dial flows overwrite it when the
+                // B leg attaches. Without it, an early `update_media_path`
+                // (e.g. ResumeMedia after ringback playback) sees an
+                // incomplete bridge pair and clears the route.
+                lr.insert(LegId::from("callee"), Leg::new(LegId::new("")));
                 lr
             },
             pending_hangup: HashSet::new(),
@@ -12384,10 +12389,18 @@ impl SipSession {
                 .then(|| self.meta.connected_callee_dialog_id.clone()).flatten());
         if let Some(dialog_id) = dialog_id {
             self.server.active_call_registry.unregister_dialog_identity(&dialog_id);
-            if self.legs.get_dialog(&leg_id).cloned()
-                .or_else(|| self.server.dialog_layer.get_dialog(&dialog_id))
-                .is_some_and(|dialog| !dialog.state().is_terminated())
-            {
+            // Queue the BYE unless we can prove the dialog already
+            // terminated. A dialog id resolved from meta (dynamic agent legs
+            // detached on transfer) may have no live dialog object here —
+            // queue it anyway; the main-loop drain skips unknown ids.
+            let dialog_known = self
+                .legs
+                .get_dialog(&leg_id)
+                .cloned()
+                .or_else(|| self.server.dialog_layer.get_dialog(&dialog_id));
+            let terminated =
+                dialog_known.as_ref().is_some_and(|dialog| dialog.state().is_terminated());
+            if !terminated {
                 self.pending_hangup.insert(dialog_id.clone());
             }
             self.callee_dialogs.remove(&dialog_id);
