@@ -116,8 +116,9 @@ pub struct SipServerInner {
     /// Optional hook for enriching resolved agent locations before dialing (e.g. injecting
     /// CC / CRM headers for screen-pop).  Registered by the cc addon via proxy_server_hook.
     pub queue_location_enricher: Option<Arc<dyn crate::proxy::call::QueueLocationEnricher>>,
-    /// CC quick-route feature-code resolver (`*81<sg-id>` / `*82<ivr-name>` →
-    /// internal transfer targets). Consulted by the inbound-REFER hand-off.
+    /// CC quick-route feature-code resolver (`*81<sg-id>` / `*82<ivr-name>` /
+    /// `*83<room-id>` → internal transfer targets). Consulted by the
+    /// inbound-REFER hand-off.
     pub quick_route_resolver:
         Option<Arc<dyn crate::proxy::call::QuickRouteResolver>>,
     /// Subscribers for REFER NOTIFY events from SipSession.
@@ -1119,8 +1120,13 @@ impl SipServerBuilder {
             });
         }
 
-        // Create conference manager with in-server audio mixing
-        let conference_manager = Arc::new(crate::call::runtime::ConferenceManager::new());
+        // Create conference manager with in-server audio mixing. The empty-
+        // room watchdog grace is configurable (`conference_empty_timeout_secs`
+        // in the proxy config); 0 disables it.
+        let conference_manager = Arc::new(
+            crate::call::runtime::ConferenceManager::new()
+                .with_empty_room_grace_secs(self.config.conference_empty_timeout_secs),
+        );
         let conference_server = Arc::new(crate::call::runtime::ConferenceServer::new(
             conference_manager.clone(),
         ));

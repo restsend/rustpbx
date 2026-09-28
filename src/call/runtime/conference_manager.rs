@@ -8,6 +8,13 @@
 //! all participants. Empty rooms are auto-destroyed; a managed SIP owner's
 //! departure also destroys its room. An optional `max_duration_secs` triggers auto-destroy
 //! on timeout (default 1 hour when used from the CC addon).
+//!
+//! Empty-room watchdog: rooms that never receive a participant (e.g. every
+//! media bridge failed right after dial-in) are destroyed after
+//! `empty_room_grace` so their mixer tasks cannot leak. The grace is
+//! configurable via [`ConferenceManager::with_empty_room_grace_secs`]
+//! (`conference_empty_timeout_secs` in the proxy config; `0` disables the
+//! watchdog).
 
 use crate::call::domain::{CallCommand, LegId};
 use crate::media::conference_mixer::{AudioFrame, ConferenceAudioMixer};
@@ -16,10 +23,16 @@ use audio_codec::CodecType;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::info;
 
 pub const DEFAULT_CONFERENCE_TIMEOUT_SECS: u64 = 3600;
+
+/// Default empty-room watchdog grace ("nobody ever joined"). Generous enough
+/// that every in-process flow (dial-in, factory, RWI, transfer setup) adds its
+/// first participant well within the window.
+pub const DEFAULT_CONFERENCE_EMPTY_GRACE_SECS: u64 = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParticipantRole {
@@ -204,6 +217,9 @@ pub struct ConferenceManager {
     participant_channels: Arc<DashMap<LegId, ParticipantChannels>>,
     participant_output_rxs: Arc<DashMap<LegId, mpsc::Receiver<AudioFrame>>>,
     timeout_tokens: Arc<DashMap<ConferenceId, tokio_util::sync::CancellationToken>>,
+    /// How long a room may stay participant-less before the watchdog destroys
+    /// it (`0` = watchdog disabled).
+    empty_room_grace: Duration,
 }
 
 impl ConferenceManager {
@@ -215,7 +231,14 @@ impl ConferenceManager {
             participant_channels: Arc::new(DashMap::new()),
             participant_output_rxs: Arc::new(DashMap::new()),
             timeout_tokens: Arc::new(DashMap::new()),
+            empty_room_grace: Duration::from_secs(DEFAULT_CONFERENCE_EMPTY_GRACE_SECS),
         }
+    }
+
+    /// Override the empty-room watchdog grace (`0` disables the watchdog).
+    pub fn with_empty_room_grace_secs(mut self, secs: u64) -> Self {
+        self.empty_room_grace = Duration::from_secs(secs);
+        self
     }
 
     /// Diagnostic: current size of every internal map. Used by leak tests to
@@ -278,6 +301,8 @@ impl ConferenceManager {
             self.spawn_timeout(conf_id.clone(), dur).await;
         }
 
+        self.spawn_empty_room_watchdog(conf_id.clone());
+
         Ok(conference)
     }
 
@@ -295,6 +320,34 @@ impl ConferenceManager {
                     let _ = manager.destroy_conference(&conf_id).await;
                 }
                 _ = child.cancelled() => {}
+            }
+        });
+    }
+
+    /// One-shot empty-room watchdog: after `empty_room_grace`, destroy the
+    /// room **only if it is still participant-less**. Covers rooms nobody
+    /// ever joined (all media bridges failed right after dial-in, transfer
+    /// setup aborted before the first attach, …) whose mixer task would
+    /// otherwise run forever. Rooms that gained (or already have)
+    /// participants are left alone — their lifecycle stays with
+    /// `remove_participant`'s empty-check and `max_duration_secs`.
+    fn spawn_empty_room_watchdog(&self, conf_id: ConferenceId) {
+        if self.empty_room_grace.is_zero() {
+            return;
+        }
+        let manager = self.clone();
+        crate::utils::spawn(async move {
+            tokio::time::sleep(manager.empty_room_grace).await;
+            let is_empty = manager
+                .conferences
+                .get(&conf_id)
+                .is_some_and(|room| room.is_empty());
+            if is_empty {
+                info!(
+                    conf_id = %conf_id.0,
+                    "Conference has no participants — watchdog auto-destroying empty room"
+                );
+                let _ = manager.destroy_conference(&conf_id).await;
             }
         });
     }
@@ -1200,6 +1253,87 @@ mod tests {
             manager.get_conference(&conf_id).await.is_none(),
             "Conference should be auto-destroyed after timeout"
         );
+    }
+
+    #[tokio::test]
+    async fn test_empty_room_watchdog_destroys_never_joined_room() {
+        let manager = ConferenceManager::new().with_empty_room_grace_secs(1);
+        let conf_id = ConferenceId::from("test-empty-watchdog");
+
+        manager.create_conference(conf_id.clone(), None).await.unwrap();
+        assert!(manager.get_conference(&conf_id).await.is_some());
+
+        // Grace elapses with zero participants -> destroyed (mixer cleaned up).
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        assert!(
+            manager.get_conference(&conf_id).await.is_none(),
+            "Never-joined room must be auto-destroyed by the watchdog"
+        );
+        let (rooms, legs, mixers, chans, rxs) = manager.dashmap_sizes();
+        assert_eq!((rooms, legs, mixers, chans, rxs), (0, 0, 0, 0, 0), "no leaked state");
+    }
+
+    #[tokio::test]
+    async fn test_empty_room_watchdog_spares_occupied_room() {
+        let manager = ConferenceManager::new().with_empty_room_grace_secs(1);
+        let conf_id = ConferenceId::from("test-watchdog-occupied");
+
+        manager.create_conference(conf_id.clone(), None).await.unwrap();
+        manager
+            .add_participant(&conf_id, LegId::new("leg-a"))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        assert!(
+            manager.get_conference(&conf_id).await.is_some(),
+            "Room with participants must survive the watchdog"
+        );
+
+        manager.destroy_conference(&conf_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_empty_room_watchdog_can_be_disabled() {
+        let manager = ConferenceManager::new().with_empty_room_grace_secs(0);
+        let conf_id = ConferenceId::from("test-watchdog-off");
+
+        manager.create_conference(conf_id.clone(), None).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        assert!(
+            manager.get_conference(&conf_id).await.is_some(),
+            "grace=0 must disable the watchdog"
+        );
+
+        manager.destroy_conference(&conf_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_empty_room_watchdog_noop_after_last_leave_destroy() {
+        // Last participant leaving already auto-destroys via
+        // `remove_participant`; the watchdog must be a harmless no-op then.
+        let manager = ConferenceManager::new().with_empty_room_grace_secs(1);
+        let conf_id = ConferenceId::from("test-watchdog-noop");
+
+        manager.create_conference(conf_id.clone(), None).await.unwrap();
+        manager
+            .add_participant(&conf_id, LegId::new("leg-a"))
+            .await
+            .unwrap();
+        manager
+            .remove_participant(&conf_id, &LegId::new("leg-a"))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        assert!(manager.get_conference(&conf_id).await.is_none());
+        let (rooms, legs, mixers, chans, rxs) = manager.dashmap_sizes();
+        assert_eq!((rooms, legs, mixers, chans, rxs), (0, 0, 0, 0, 0), "no leaked state");
     }
 
     #[tokio::test]

@@ -229,11 +229,11 @@ pub struct QueueEnrichContext<'a> {
 }
 
 /// Resolves CC quick-route feature codes (`*81<skill-group-id>` /
-/// `*82<ivr-name>`) into internal transfer targets
-/// (`queue:skill-group:<id>` / `ivr:<name>`). Consulted by the inbound-REFER
-/// hand-off *before* the route table so the codes reach the ACD / IVR with
-/// zero route configuration. Unknown user parts return `None` and fall
-/// through to normal routing.
+/// `*82<ivr-name>` / `*83<room-id>`) into internal transfer targets
+/// (`queue:skill-group:<id>` / `ivr:<name>` / `conference:<room>`).
+/// Consulted by the inbound-REFER hand-off *before* the route table so the
+/// codes reach the ACD / IVR / conference with zero route configuration.
+/// Unknown user parts return `None` and fall through to normal routing.
 #[async_trait::async_trait]
 pub trait QuickRouteResolver: Send + Sync {
     async fn resolve_quick_target(&self, user: &str) -> Option<String>;
