@@ -5,6 +5,7 @@ use super::util::{
     normalize_call_hangup_by, other_header_ci, parse_dial_target, parse_dtmf_digit,
     parse_sipfrag_status, route_outbound_leg, sip_status_to_hangup_reason, trunk_host_port,
 };
+use super::supervisor::SupervisorMode;
 use super::{live_transcription, transfer};
 use crate::proxy::call::parse_allowed_codecs;
 
@@ -10782,8 +10783,13 @@ impl SipSession {
                 target_leg,
                 supervisor_session_id,
             } => Self::ok_or_failure(
-                self.handle_supervisor_listen(supervisor_leg, target_leg, supervisor_session_id)
-                    .await,
+                self.handle_supervisor_monitor(
+                    SupervisorMode::Listen,
+                    supervisor_leg,
+                    target_leg,
+                    supervisor_session_id,
+                )
+                .await,
             ),
 
             CallCommand::SupervisorWhisper {
@@ -10791,8 +10797,13 @@ impl SipSession {
                 target_leg,
                 supervisor_session_id,
             } => Self::ok_or_failure(
-                self.handle_supervisor_whisper(supervisor_leg, target_leg, supervisor_session_id)
-                    .await,
+                self.handle_supervisor_monitor(
+                    SupervisorMode::Whisper,
+                    supervisor_leg,
+                    target_leg,
+                    supervisor_session_id,
+                )
+                .await,
             ),
 
             CallCommand::SupervisorBarge {

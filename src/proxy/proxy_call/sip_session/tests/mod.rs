@@ -5767,7 +5767,12 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
         let mut private_tokens: Vec<CancellationToken> = Vec::new();
         if scenario == "supervisor_switch" {
             session
-                .handle_supervisor_listen(consult.clone(), LegId::from("callee"), None)
+                .handle_supervisor_monitor(
+                    SupervisorMode::Listen,
+                    consult.clone(),
+                    LegId::from("callee"),
+                    None,
+                )
                 .await
                 .unwrap();
             let listen_token = session
