@@ -7,6 +7,7 @@ use super::util::{
 };
 use super::supervisor::SupervisorMode;
 use super::{live_transcription, transfer};
+use crate::call::app::queue::QueueSignal;
 use crate::proxy::call::parse_allowed_codecs;
 
 const CMD_CHANNEL_CAPACITY: usize = 256;
@@ -5244,10 +5245,11 @@ impl SipSession {
         // resolved — on_enter already fell through to the busy-prompt/fallback
         // path, so a second dial attempt would replay the busy prompt.
         if !is_parallel && has_resolved_agents {
+            let (name, data) = QueueSignal::DialNext.to_custom();
             let _ = self.app_runtime.inject_event(serde_json::json!({
                 "type": "custom",
-                "name": "dial_next_agent",
-                "data": {},
+                "name": name,
+                "data": data,
             }));
         }
 
@@ -10967,16 +10969,14 @@ impl SipSession {
                 if let Some(ref agent_uri) = agent_uri {
                     // Agent from THIS leg first — see `leg_agent_id`.
                     let agent_id = self.leg_agent_id(Some(agent_uri)).await;
-                    self.app_event_bridge.send_app_event(
-                        crate::call::app::ControllerEvent::Custom(
-                            "agent_ringing".to_string(),
-                            serde_json::json!({
-                                "leg_id": leg_id.0,
-                                "agent_uri": agent_uri,
-                                "agent_id": agent_id,
-                            }),
-                        ),
-                    );
+                    let signal = QueueSignal::AgentRinging {
+                        leg_id: leg_id.0.clone(),
+                        agent_uri: agent_uri.clone(),
+                        agent_id,
+                    };
+                    let (name, data) = signal.to_custom();
+                    self.app_event_bridge
+                        .send_app_event(crate::call::app::ControllerEvent::Custom(name, data));
                 }
                 self.emit_call_ringing(None, false);
                 CommandResult::success()
@@ -11166,16 +11166,14 @@ impl SipSession {
                     }
                     let resolved_agent_id =
                         leg_agent_id.or_else(|| self.pinned_agent_id());
-                    self.app_event_bridge.send_app_event(
-                        crate::call::app::ControllerEvent::Custom(
-                            "agent_connected".to_string(),
-                            serde_json::json!({
-                                "leg_id": leg_id.0,
-                                "agent_uri": agent_uri,
-                                "agent_id": resolved_agent_id,
-                            }),
-                        ),
-                    );
+                    let signal = QueueSignal::AgentConnected {
+                        leg_id: Some(leg_id.0.clone()),
+                        agent_uri: agent_uri.clone(),
+                        agent_id: resolved_agent_id,
+                    };
+                    let (name, data) = signal.to_custom();
+                    self.app_event_bridge
+                        .send_app_event(crate::call::app::ControllerEvent::Custom(name, data));
                 }
                 if let Some(sdp) = answer_sdp.clone() {
                     self.legs.set_answer(leg_id.clone(), sdp);
@@ -11371,12 +11369,8 @@ impl SipSession {
                     if failed {
                         // Forward to running app before removing the leg (so we can get the URI)
                         let agent_uri = self.legs.get(&leg_id).and_then(|l| l.endpoint.clone());
-                        let event_name =
-                            if reason.contains("486") || reason.to_lowercase().contains("busy") {
-                                "agent_busy"
-                            } else {
-                                "agent_no_answer"
-                            };
+                        let busy =
+                            reason.contains("486") || reason.to_lowercase().contains("busy");
                         // Canonical agent from the failing LEG first (see
                         // `leg_agent_id`), then session extensions, so the
                         // queue app updates the correct agent's presence.
@@ -11392,17 +11386,25 @@ impl SipSession {
                                 .and_then(Self::uri_user_part)
                                 .unwrap_or_else(|| "unknown".to_string())
                         };
+                        let signal = if busy {
+                            QueueSignal::AgentBusy {
+                                leg_id: Some(leg_id.0.clone()),
+                                agent_uri: agent_uri.clone(),
+                                agent_id: agent_id.clone(),
+                                reason: reason.clone(),
+                            }
+                        } else {
+                            QueueSignal::AgentNoAnswer {
+                                leg_id: Some(leg_id.0.clone()),
+                                agent_uri: agent_uri.clone(),
+                                agent_id: agent_id.clone(),
+                                reason: reason.clone(),
+                            }
+                        };
                         {
+                            let (name, data) = signal.to_custom();
                             self.app_event_bridge.send_app_event(
-                                crate::call::app::ControllerEvent::Custom(
-                                    event_name.to_string(),
-                                    serde_json::json!({
-                                        "leg_id": leg_id.0,
-                                        "agent_uri": agent_uri,
-                                        "agent_id": agent_id,
-                                        "reason": reason,
-                                    }),
-                                ),
+                                crate::call::app::ControllerEvent::Custom(name, data),
                             );
                         }
 
@@ -11418,7 +11420,7 @@ impl SipSession {
                             let queue_name =
                                 crate::proxy::proxy_call::call_meta::effective_queue_name(&self.meta)
                                     .unwrap_or_default();
-                            let (msg, severity) = if event_name == "agent_busy" {
+                            let (msg, severity) = if busy {
                                 (
                                     format!("Agent {} rejected ({})", agent_id, status),
                                     crate::call_errors::ErrSeverity::Warn,
