@@ -3977,7 +3977,13 @@ impl SipSession {
                             .unwrap_or(false),
                         track_id: None,
                         send_progress: false,
-                        side_only: false,
+                        // `side_only: true` disables the opposite-leg mirror —
+                        // the named `leg_id` (default caller) is then the only
+                        // ear. Default false keeps the legacy mirror behaviour.
+                        side_only: params
+                            .and_then(|p| p.get("side_only"))
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
                     }),
                 })
             }
