@@ -7967,6 +7967,35 @@ impl SipSession {
 
     // ── Hold/Unhold propagation helpers ──
 
+    /// Target leg key for hold/unhold propagation: side B follows the
+    /// transfer-selected leg, side A is always "caller".
+    async fn hold_target_leg(&self, side: crate::media::media_bridge::LegSide) -> LegId {
+        if matches!(side, crate::media::media_bridge::LegSide::B) {
+            LegId::from(self.resolve_transfer_leg().as_str())
+        } else {
+            LegId::from("caller")
+        }
+    }
+
+    /// Re-INVITE fallback for hold/unhold when the side has no media peer.
+    /// Side B fans out to all callee dialogs; side A is the caller dialog.
+    async fn send_hold_reinvite(
+        &mut self,
+        side: crate::media::media_bridge::LegSide,
+        sendonly: bool,
+        sdp: String,
+    ) -> Result<()> {
+        let verb = if sendonly { "hold" } else { "unhold" };
+        if matches!(side, crate::media::media_bridge::LegSide::B) {
+            if let Some(response_sdp) = self.send_reinvite_to_callee_dialogs(&sdp).await? {
+                self.media.callee_answer_sdp = Some(response_sdp);
+            }
+        } else if let Err(e) = self.send_reinvite_to_leg(&LegId::from("caller"), sdp).await {
+            warn!(session_id = %self.context.session_id, error = %e, "Failed to send {verb} re-INVITE to caller");
+        }
+        Ok(())
+    }
+
     /// Called when caller initiates hold (sendonly/inactive).
     /// Propagate a hold to a side: updates leg state, sends a hold re-INVITE
     /// (media bypass) or starts hold music on its peer. `override_music`,
@@ -7977,20 +8006,15 @@ impl SipSession {
         request_headers: &[rsipstack::sip::Header],
         override_music: Option<crate::call::domain::MediaSource>,
     ) -> Result<()> {
-        let selected = self.resolve_transfer_leg();
-        let leg_key = if matches!(side, crate::media::media_bridge::LegSide::B) {
-            selected.as_str()
-        } else {
-            "caller"
-        };
+        let leg_key = self.hold_target_leg(side).await;
         info!(session_id = %self.id, %leg_key, "Propagating hold");
 
-        self.update_leg_state(&LegId::from(leg_key), LegState::Hold);
+        self.update_leg_state(&leg_key.clone(), LegState::Hold);
 
         let music = override_music.or_else(|| self.resolve_hold_music(request_headers));
         let session_id = self.id.clone();
 
-        if let Some(peer) = self.media_leg(&LegId::from(leg_key)) {
+        if let Some(peer) = self.media_leg(&leg_key) {
             if self.media_side_for_leg(peer.id()).is_some() {
                 if let Some(mb) = self.bridge_mut() { mb.unbridge().await?; }
             }
@@ -8014,8 +8038,8 @@ impl SipSession {
                     Ok(audio) => {
                         peer.play_media(Box::new(audio), true).await?;
                         self.record_play_start(
-                            format!("hold-music-{}", leg_key),
-                            format!("hold music ({})", leg_key),
+                            format!("hold-music-{leg_key}"),
+                            format!("hold music ({leg_key})"),
                         );
                     }
                     Err(e) => {
@@ -8028,17 +8052,8 @@ impl SipSession {
                 peer.set_egress_source(crate::media::egress::EgressSource::Silence).await?;
             }
         } else {
-            let hold_sdp = self.generate_sdp_for_side(&LegId::from(leg_key), true)?;
-            if matches!(side, crate::media::media_bridge::LegSide::B) {
-                if let Some(response_sdp) = self.send_reinvite_to_callee_dialogs(&hold_sdp).await? {
-                    self.media.callee_answer_sdp = Some(response_sdp);
-                }
-            } else if let Err(e) = self
-                .send_reinvite_to_leg(&LegId::from("caller"), hold_sdp)
-                .await
-            {
-                warn!(session_id = %self.context.session_id, error = %e, "Failed to send hold re-INVITE to caller");
-            }
+            let hold_sdp = self.generate_sdp_for_side(&leg_key, true)?;
+            self.send_hold_reinvite(side, true, hold_sdp).await?;
         }
         Ok(())
     }
@@ -8047,15 +8062,10 @@ impl SipSession {
         &mut self,
         side: crate::media::media_bridge::LegSide,
     ) -> Result<()> {
-        let selected = self.resolve_transfer_leg();
-        let leg_key = if matches!(side, crate::media::media_bridge::LegSide::B) {
-            selected.as_str()
-        } else {
-            "caller"
-        };
+        let leg_key = self.hold_target_leg(side).await;
         info!(session_id = %self.id, %leg_key, "Propagating unhold");
-        self.update_leg_state(&LegId::from(leg_key), LegState::Connected);
-        if let Some(peer) = self.media_leg(&LegId::from(leg_key)) {
+        self.update_leg_state(&leg_key.clone(), LegState::Connected);
+        if let Some(peer) = self.media_leg(&leg_key) {
             // Restoring the route replaces hold playback with live media.
             // A separate stop could silence a relay that is already active.
             peer.resume_rtp_timeout();
@@ -8081,19 +8091,8 @@ impl SipSession {
             }
             self.update_media_path().await;
         } else {
-            let unhold_sdp = self.generate_sdp_for_side(&LegId::from(leg_key), false)?;
-            if matches!(side, crate::media::media_bridge::LegSide::B) {
-                if let Some(response_sdp) =
-                    self.send_reinvite_to_callee_dialogs(&unhold_sdp).await?
-                {
-                    self.media.callee_answer_sdp = Some(response_sdp);
-                }
-            } else if let Err(e) = self
-                .send_reinvite_to_leg(&LegId::from("caller"), unhold_sdp)
-                .await
-            {
-                warn!(session_id = %self.context.session_id, error = %e, "Failed to send unhold re-INVITE to caller");
-            }
+            let unhold_sdp = self.generate_sdp_for_side(&leg_key, false)?;
+            self.send_hold_reinvite(side, false, unhold_sdp).await?;
         }
         Ok(())
     }
