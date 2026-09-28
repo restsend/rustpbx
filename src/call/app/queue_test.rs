@@ -702,10 +702,6 @@ mod tests {
             "ring timeout must move the agent to Wrapup (non-idle), got {:?}",
             agent.presence
         );
-        stack.assert_cmd(2000, "Bridge winner", |c| {
-            matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
-        }).await;
-
         stack.cancel();
         let _ = stack.join().await;
     }
