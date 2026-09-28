@@ -795,7 +795,7 @@ impl SipSession {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string)
-            .or_else(|| self.session_ext_get("resolved_agent_id"))
+            .or_else(|| self.pinned_agent_id())
             .or_else(|| self.session_ext_get("agent_id"))
             .or_else(|| self.session_ext_get("ivr"))
             .unwrap_or_else(|| segment_type.to_string())
@@ -2561,6 +2561,32 @@ impl SipSession {
         None
     }
 
+    /// Session-level pinned agent id — planted at target resolution (queue/
+    /// skill-group resolve, RWI originate) and updated when the connected leg
+    /// is a validated agent. Storage is the `resolved_agent_id` extension key,
+    /// shared with the CC addon.
+    pub(crate) fn pinned_agent_id(&self) -> Option<String> {
+        self.extensions
+            .read()
+            .get::<std::collections::HashMap<String, String>>()
+            .and_then(|m| m.get("resolved_agent_id").cloned())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Plant/update the pinned agent id in an extensions bag.
+    pub(crate) fn set_pinned_agent_id(
+        extensions: &crate::proxy::proxy_call::session_hooks::SessionExtensions,
+        agent_id: &str,
+    ) {
+        let mut ext = extensions.write();
+        if ext.get::<HashMap<String, String>>().is_none() {
+            ext.insert(HashMap::<String, String>::new());
+        }
+        ext.get_mut::<HashMap<String, String>>()
+            .expect("map inserted above")
+            .insert("resolved_agent_id".to_string(), agent_id.to_string());
+    }
+
     /// Read a string from the session-extensions `HashMap` bag.
     pub(crate) fn session_ext_get(&self, key: &str) -> Option<String> {
         self.extensions
@@ -2761,12 +2787,7 @@ impl SipSession {
         // live session's current agent or retaining old contexts per dialog.
         let extensions = crate::proxy::proxy_call::session_hooks::SessionExtensions::new();
         *extensions.write() = ctx.extensions.read().clone();
-        {
-            let mut ext = extensions.write();
-            if ext.get::<HashMap<String, String>>().is_none() { ext.insert(HashMap::<String, String>::new()); }
-            let metadata = ext.get_mut::<HashMap<String, String>>().unwrap();
-            metadata.insert("resolved_agent_id".into(), agent_id);
-        }
+        Self::set_pinned_agent_id(&extensions, &agent_id);
         ctx.extensions = extensions;
         Some(ctx)
     }
@@ -2873,14 +2894,7 @@ impl SipSession {
         if let Some(leg) = self.legs.get_mut(&LegId::from("caller")) {
             leg.agent_id = Some(caller.agent_id);
         }
-        {
-            let mut extensions = self.extensions.write();
-            if extensions.get::<HashMap<String, String>>().is_none() {
-                extensions.insert(HashMap::<String, String>::new());
-            }
-            extensions.get_mut::<HashMap<String, String>>().unwrap()
-                .insert("resolved_agent_id".into(), callee_id);
-        }
+        Self::set_pinned_agent_id(&self.extensions, &callee_id);
         let root = self.server.rwi_gateway.as_ref()
             .and_then(|gw| gw.read().meta_store.get_sync(owner.session_id()))
             .and_then(|meta| meta.session_id)
@@ -2905,7 +2919,7 @@ impl SipSession {
     /// unvalidated user-part (or a missing registry) falls back to the
     /// session-level value.
     async fn leg_agent_id(&self, agent_uri: Option<&str>) -> Option<String> {
-        let session_level = self.session_ext_get("resolved_agent_id");
+        let session_level = self.pinned_agent_id();
         let user = agent_uri
             .and_then(Self::uri_user_part)
             .filter(|u| Some(u.as_str()) != session_level.as_deref());
@@ -6353,27 +6367,16 @@ impl SipSession {
                                     // so that CC hooks can identify the agent regardless
                                     // of what routed_callee/connected_callee end up being.
                                     {
-                                        use std::collections::HashMap;
-                                        let mut ext = self.extensions.write();
                                         let user_part = uri
                                             .auth
                                             .as_ref()
                                             .map(|a| a.user.clone())
                                             .unwrap_or_default();
                                         if !user_part.is_empty() {
-                                            if let Some(map) =
-                                                ext.get_mut::<HashMap<String, String>>()
-                                            {
-                                                map.entry("resolved_agent_id".to_string())
-                                                    .or_insert(user_part.clone());
-                                            } else {
-                                                let mut map = HashMap::new();
-                                                map.insert(
-                                                    "resolved_agent_id".to_string(),
-                                                    user_part,
-                                                );
-                                                ext.insert(map);
-                                            }
+                                            Self::set_pinned_agent_id(
+                                                &self.extensions,
+                                                &user_part,
+                                            );
                                         }
                                     }
 
@@ -8150,7 +8153,7 @@ impl SipSession {
             let consultation = self.meta.root_session_id.as_deref()
                 .is_some_and(|root| root != self.context.session_id)
                 && self.legs.get(&leg_id).is_some_and(|leg| leg.agent_id.is_some())
-                && self.session_ext_get("resolved_agent_id").is_some();
+                && self.pinned_agent_id().is_some();
             if consultation {
                 self.emit_typed_rwi_event(&crate::rwi::ConsultSwitched {
                     call_id: self.root_session_id_str(),
@@ -8811,7 +8814,7 @@ impl SipSession {
         // centric). When no CC agent actually participated (no queue routing
         // and no resolved_agent_id), report "callee" so non-CC calls are not
         // mislabeled as agent-driven.
-        let has_resolved_agent = self.session_ext_get("resolved_agent_id").is_some();
+        let has_resolved_agent = self.pinned_agent_id().is_some();
         let queue_name = self.meta.queue_name.clone();
         let hangup_by = self
             .meta
@@ -11141,7 +11144,7 @@ impl SipSession {
                         if let Some(leg) = self.legs.get_mut(&leg_id) { leg.agent_id = leg_agent_id.clone(); }
                     }
                     if let Some(ref id) = leg_agent_id
-                        && Some(id.as_str()) != self.session_ext_get("resolved_agent_id").as_deref()
+                        && Some(id.as_str()) != self.pinned_agent_id().as_deref()
                         && self.in_queue_context()
                     {
                         let mut ext = self.extensions.write();
@@ -11157,7 +11160,7 @@ impl SipSession {
                         }
                     }
                     let resolved_agent_id =
-                        leg_agent_id.or_else(|| self.session_ext_get("resolved_agent_id"));
+                        leg_agent_id.or_else(|| self.pinned_agent_id());
                     self.app_event_bridge.send_app_event(
                         crate::call::app::ControllerEvent::Custom(
                             "agent_connected".to_string(),
