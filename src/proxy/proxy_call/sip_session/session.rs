@@ -102,9 +102,7 @@ pub struct SipSession {
     /// One-shot latch for the core `call_answered` event: `accept_call`
     /// (direct UAS answer) and the queue-agent `LegConnected` branch can both
     /// observe an answer moment for the same logical call (app-startup race);
-    /// only the first emits. Mirrors the dedup the former CC-addon
-    /// `cc_answered` got from the agent state machine (Ringing/Idle → Busy
-    /// fired exactly once per call). A transfer to a new agent runs in a NEW
+    /// only the first emits. A transfer to a new agent runs in a NEW
     /// session with its own latch, so per-agent attribution is preserved.
     answered_event_emitted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 
@@ -146,10 +144,8 @@ pub struct SipSession {
 
     /// Active TTS/voip WebSocket bridge handle — set by `connect_bridge()`,
     /// cleared on disconnect (`CallCommand::VoipBridgeClosed`) / teardown.
-    /// Kept separate from `conference_bridge`: storing the voip handle there
-    /// set a fake `conf_id` that permanently gated `update_media_path()`, so a
-    /// queue agent leg connecting after any TTS bridge flow was never bridged
-    /// (silent one-way audio).
+    /// Must stay out of `conference_bridge`: that slot's `conf_id` gates
+    /// `update_media_path()` and would block later media-route updates.
     pub(crate) voip_bridge: Option<crate::call::runtime::ConferenceBridgeHandle>,
 
     pub cmd_tx: Option<mpsc::Sender<CallCommand>>,
@@ -1494,11 +1490,8 @@ impl SipSession {
         }
     }
 
-    /// This node's identity for home-proxy self detection: the
-    /// cluster-internal address resolved from `[cluster].peers` when
-    /// available, otherwise the default contact URI — the same address the
-    /// registrar stamps as `home_proxy` when cluster self resolution fails,
-    /// so fallback-stamped registrations compare exactly.
+    /// This node's identity for home-proxy self detection — must match the
+    /// address the registrar stamps as `home_proxy` (see `route_via_home_proxy`).
     fn self_ident_addr(&self) -> Option<SipAddr> {
         self.server.cluster_self_addr.clone().or_else(|| {
             self.server
@@ -2309,11 +2302,10 @@ impl SipSession {
         let original_callee = self.context.original_callee.clone();
         let session_id = self.context.session_id.clone();
         // App flows start asynchronously AFTER the answer (the IVR/queue step
-        // provider may involve external HTTP roundtrips). Digits pressed in
-        // that window used to be silently discarded (`app_runtime.is_running()`
-        // false) — the classic "first DTMF lost". Buffer them (bounded, with
-        // a TTL) and replay in order once the app is running. Sessions that
-        // never run an app keep the previous drop-on-no-app behaviour.
+        // provider may involve external HTTP roundtrips). Buffer digits
+        // pressed in that window (bounded, with a TTL) and replay in order
+        // once the app is running. Sessions that never run an app keep the
+        // drop-on-no-app behaviour.
         let app_expected = matches!(
             self.context.dialplan.flow,
             crate::call::DialplanFlow::Application { .. } | crate::call::DialplanFlow::Queue { .. }
@@ -2588,28 +2580,15 @@ impl SipSession {
     }
 
     /// Publish CC agent attribution into the RWI `CallMetaStore` so every
-    /// `call_*` event dispatched from this session is enriched with
-    /// `agent_id` / `agent_name` / `queue_id` (same flat-merge mechanism as
-    /// `direction`). This replaces the addon-emitted `cc_ringing` /
-    /// `cc_answered` / `cc_hangup` / `cc_held` / `cc_unheld` events.
+    /// `call_*` event from this session is enriched with `agent_id` /
+    /// `agent_name` / `queue_id`.
     ///
-    /// Sources:
-    /// - `agent_id` / `agent_name` — session extensions, written by the CC
-    ///   session hook (`publish_agent_context`) during the ringing /
-    ///   connected / ended lifecycle callbacks. Call this only AFTER the
-    ///   hooks have fired.
-    /// - `queue_id` — the effective queue name from the session call meta.
-    ///
-    /// Existing meta fields are never cleared: a call that stops resolving an
-    /// agent (e.g. sequential fallback to a non-agent) keeps its earlier
-    /// attribution.
-    ///
-    /// When the meta entry has already been REMOVED (a queue→agent dispatch
-    /// transfers the caller away and the transfer completion releases the
-    /// original session's gateway state — including its CallMetaStore entry —
-    /// before this session's final `call_hangup` is emitted), it is REBUILT
-    /// from the live session context so the last lifecycle events keep their
-    /// flat enrichment (caller/callee/direction + agent attribution).
+    /// `agent_id` / `agent_name` come from session extensions written by the
+    /// CC session hook — call only AFTER hooks have fired. `queue_id` comes
+    /// from the call meta. Existing meta fields are never cleared (a call
+    /// that stops resolving an agent keeps its earlier attribution). If the
+    /// meta entry was already removed (transfer released the gateway state
+    /// before the final `call_hangup`), it is REBUILT from live context.
     fn sync_agent_context_to_rwi_meta(&self) {
         let Some(ref gw) = self.server.rwi_gateway else {
             return;
@@ -4322,10 +4301,9 @@ impl SipSession {
 
         // 2. Hold the agent leg + play music (use override_music if provided,
         // else default). `handle_hold` negotiates a proper re-INVITE for ANY
-        // leg and swallows re-INVITE failures (warn + continue) — the
-        // previous side-based propagate aborted here, leaving the INFO
-        // transaction unanswered (remote saw a 501 timeout) whenever the
-        // held leg had no stored SDP (queue-transfer dynamic legs).
+        // leg and swallows re-INVITE failures (warn + continue) — never leave
+        // the INFO transaction unanswered when the held leg has no stored SDP
+        // (queue-transfer dynamic legs).
         if hold_agent {
             if let Err(e) = self.handle_hold(held_leg_id.clone(), override_music).await {
                 warn!(session_id = %self.id,
@@ -4916,9 +4894,6 @@ impl SipSession {
                 }
             }
             DialogState::Options(_, _, tx_handle) => {
-                // During drain every OPTIONS reports 500 to signal the
-                // draining state (a 500 to an in-dialog OPTIONS does not
-                // terminate the dialog, so active calls are unaffected).
                 let code = if crate::shutdown::is_draining() {
                     rsipstack::sip::StatusCode::ServerInternalError
                 } else {
@@ -5836,9 +5811,9 @@ impl SipSession {
     ///
     /// A losing fork that already received a 2xx has its confirmed dialog
     /// registered in `dialog_layer` by rsipstack's `do_invite` (under the
-    /// confirmed dialog id) and no `ClientDialogGuard` is created for it — the
-    /// old cleanup only removed the leg from `LegRegistry`, which leaks the
-    /// dialog entry. This removes and hangs up each confirmed loser so the
+    /// confirmed dialog id) and no `ClientDialogGuard` is created for it —
+    /// removing only the leg from `LegRegistry` would leak the dialog entry.
+    /// This removes and hangs up each confirmed loser so the
     /// dialog layer returns to empty once the call drains.
     async fn cleanup_loser_fork_dialogs(
         &self,
@@ -6202,8 +6177,8 @@ impl SipSession {
         // NOT set here: every callee-creation path (`create_callee_track`,
         // `initiate_sip_leg`, `build_target_invite_option`) derives and stores
         // its own mode via `callee_transport_mode()`. Overwriting it here
-        // clobbered the proxy path's Srtp hint with an "opposite of caller"
-        // guess (issue #281).
+        // would clobber the proxy path's Srtp hint with an "opposite of
+        // caller" guess.
         self.legs.set_transport(LegId::from("caller"), transport);
 
         let auto_start_on_media_setup = {
@@ -6917,7 +6892,6 @@ impl SipSession {
 
         self.meta.connected_callee_dialog_id = Some(dialog_id.clone());
         self.callee_dialogs.insert(dialog_id.clone(), ());
-        // REFER, Replaces, and CTI resolve the owning session by bare Call-ID.
         let registry = &self.server.active_call_registry;
         if let Some(handle) = registry.get_handle(&self.context.session_id) {
             registry.register_dialog_identity(&dialog_id, handle);
@@ -6970,7 +6944,7 @@ impl SipSession {
     ) -> Result<Option<Vec<u8>>> {
         let callee_is_webrtc = Self::callee_supports_webrtc(target);
 
-        // Bug 3 fix: transport-aware parallel-fork caching. When multiple fork
+        // Transport-aware parallel-fork caching. When multiple fork
         // targets share the same transport type, reuse the cached offer so all
         // forks promise the same bound port. Regenerate when transport differs
         // (e.g. one WebRTC fork and one RTP fork).
@@ -8491,16 +8465,14 @@ impl SipSession {
 
     /// Address advertised for a finished local recording in RWI events. The
     /// CDR pipeline archives pipeline-generated WAVs into
-    /// `{root}/{YYYYMMDD}[/{HH}]/` right after session teardown (and before
-    /// the CDR row is persisted), so events must carry the final archived
-    /// location instead of the transient pre-archive path. Mirrors
-    /// `RecordingUploadHook::archive_local_artifacts`: same root, same
-    /// daily/hourly layout, date derived from the call start time (not the
-    /// recording moment), and operator-supplied custom paths outside the
-    /// root stay untouched. Falls back to the original path when no policy
-    /// is active, the media type never archives (`http`/`sipflow`), or the
-    /// call start time cannot be resolved — in every fallback the renamer
-    /// also leaves the file in place, so the address stays valid.
+    /// `{root}/{YYYYMMDD}[/{HH}]/` right after teardown (before the CDR row
+    /// is persisted), so events must carry the final archived location.
+    /// Mirrors `RecordingUploadHook::archive_local_artifacts`: same root and
+    /// daily/hourly layout, date from the call start time; custom paths
+    /// outside the root stay untouched. Falls back to the original path when
+    /// no policy is active, the media type never archives (`http`/`sipflow`),
+    /// or the start time is unknown — the renamer also leaves the file in
+    /// place in every fallback, so the address stays valid.
     pub(crate) fn predicted_recording_event_path(&self, path: &str) -> String {
         let policy_guard = self.server.recording_policy.load();
         let Some(policy) = policy_guard.as_ref() else {
@@ -10143,12 +10115,8 @@ impl SipSession {
             }
 
             CallCommand::ResumeMedia => {
-                // Root-cause fix for "both sides deaf after insert-play"
-                // (production incident 2026-09-24, session h3cehgd8sme1ucv0t8m1):
-                // the restore path keys off `self.bridge.legs`, but a bridge can
-                // be established through paths that never populate the logical
-                // pair (direct dialing selected the media pair directly;
-                // pre-2bcd07e8 builds never set it). Recover the pair from the
+                // `self.bridge.legs` can be empty for bridges established via
+                // direct media-pair selection, so recover the pair from the
                 // MediaBridge — but ONLY when playback itself tore down an
                 // active route (`detached_for_playback`): an explicit `Unbridge`
                 // must stay unbridged.
@@ -10977,10 +10945,7 @@ impl SipSession {
                 // it can track per-leg state and emit QueueAgentOffered.
                 let agent_uri = self.legs.get(&leg_id).and_then(|l| l.endpoint.clone());
                 if let Some(ref agent_uri) = agent_uri {
-                    // Identify the agent from THIS leg first: sequential
-                    // fallback dials a different agent than the session-level
-                    // `resolved_agent_id`, which stays pinned to the first
-                    // resolved agent.
+                    // Agent from THIS leg first — see `leg_agent_id`.
                     let agent_id = self.leg_agent_id(Some(agent_uri)).await;
                     self.app_event_bridge.send_app_event(
                         crate::call::app::ControllerEvent::Custom(
@@ -11041,11 +11006,9 @@ impl SipSession {
                     let registry = self.server.session_registry.clone();
                     crate::utils::spawn(async move {
                         if let Err(e) = registry.register(&alias).await {
-                            // Incident 2026-09-17: this used to be a debug! —
-                            // every alias insert was silently failing on
-                            // MySQL ("Data too long for column 'direction'")
-                            // and cross-node dialog resolution was dead
-                            // without anyone noticing.
+                            // A silently-failing alias insert breaks
+                            // cross-node dialog resolution without a trace
+                            // (e.g. MySQL "Data too long" on insert).
                             crate::db_report::report_db_write_failure_with_detail(
                                 "cluster_sessions",
                                 "upsert",
@@ -11214,8 +11177,6 @@ impl SipSession {
                     // queue-abandon detector can tell "served then hung up"
                     // apart from "hung up while waiting" (same flag
                     // accept_call maintains for the direct-answer path).
-                    // Without this, a caller hangup after a dynamic-leg
-                    // dispatch was misclassified as a queue abandon.
                     self.meta.ever_connected_callee = true;
                     if let Some(endpoint) = self.legs.get(&leg_id).and_then(|l| l.endpoint.clone())
                     {
@@ -11266,11 +11227,10 @@ impl SipSession {
 
                 self.update_leg_state(&leg_id, LegState::Connected);
                 // Queue-agent legs: an ANSWERED dynamic leg must never be
-                // left unbridged (production 2026-09-17: the caller and the
-                // agent both showed Connected with zero RTP in either
-                // direction). The queue app normally sends the explicit
-                // Bridge command; this covers every dispatcher that does
-                // not. Gated to queue flows (dialplan queue plan / running
+                // left unbridged (caller and agent both Connected with zero
+                // RTP). The queue app normally sends the explicit Bridge
+                // command; this covers every dispatcher that does not. Gated
+                // to queue flows (dialplan queue plan / running
                 // queue app / queue meta) so leg_add and manual-bridge
                 // dispatchers keep deciding bridging themselves, and strict
                 // guards keep special legs (caller/callee/consult), bypass
@@ -11391,7 +11351,7 @@ impl SipSession {
                     // consult legs and dial-source legs, so a consult hangup
                     // (a normal flow event) never triggers the cascade — and a
                     // ringing/no-answer failure never does either (the queue
-                    // keeps dialing; production 2026-09-17).
+                    // keeps dialing).
                     let current_b_leg = self
                         .legs
                         .get(&leg_id)
@@ -11407,12 +11367,9 @@ impl SipSession {
                             } else {
                                 "agent_no_answer"
                             };
-                        // Resolve the canonical agent_id from the failing LEG first
-                        // (sequential fallback dials a different agent than the
-                        // session-level value; validated against the registry so
-                        // WebRTC contact user-parts are not mistaken for agent ids),
-                        // then fall back to session extensions so the queue app can
-                        // update the correct agent's presence.
+                        // Canonical agent from the failing LEG first (see
+                        // `leg_agent_id`), then session extensions, so the
+                        // queue app updates the correct agent's presence.
                         let resolved_agent_id = self
                             .leg_agent_id(agent_uri.as_deref())
                             .await
@@ -11739,15 +11696,8 @@ impl SipSession {
         CommandResult::success()
     }
 
-    /// Emit the compensating `session_end` `ivr_step_trace` for an IVR flow
-    /// that died while suspended (caller hangup during a bridge/queue
-    /// hand-off, a JumpIvr target that failed to start, or session teardown).
-    ///
-    /// The step-IVR executor suppresses its own session_end trace for
-    /// resumable hand-offs, so this synthetic event guarantees consumers
-    /// still see exactly one session_end per logical flow — carrying the
-    /// REAL end reason instead of a premature `transfer`. Node context comes
-    /// from the bridge trace context when the suspension was a voip_bridge.
+    /// Session-facing wrapper for [`super::util::emit_suspended_flow_session_end`]
+    /// (see there for the exactly-one-session_end contract).
     pub(crate) async fn emit_suspended_flow_session_end(
         &self,
         end_reason: crate::call::app::ivr::provider::SessionEndReason,
@@ -11987,9 +11937,7 @@ impl SipSession {
                     // session-level emit sites — accept_call (direct answer),
                     // the queue-agent connect branch, and originate completion —
                     // so downstream sees ONE authoritative "connected" per
-                    // call_id instead of one event per bridged leg (a single
-                    // 200 OK used to fan out into session + caller + callee
-                    // duplicates). Leg connect/teardown timelines remain visible
+                    // call_id. Leg connect/teardown timelines remain visible
                     // through `call_ringing` / `call_hangup` leg events.
                     _ => {}
                 }
@@ -12832,11 +12780,9 @@ impl SipSession {
         if let (Some(a), Some(b)) = (self.legs.media_leg(&leg_a), self.legs.media_leg(&leg_b)) {
             if a.negotiated().is_none() || b.negotiated().is_none()
                 || ![&leg_a, &leg_b].iter().all(|id| self.legs.get(id).is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::EarlyMedia))) {
-                // Incident 2026-09-17: an answered agent leg whose ICE never
-                // completed kept deferring here silently — the call showed
-                // "answered" with no audio and no log trail. Make the
-                // pathological case (legs answered but media never negotiated)
-                // visible at warn; mid-call transitions stay debug.
+                // Legs answered but media never negotiated is pathological
+                // ("answered" with no audio) — make it visible at warn;
+                // mid-call transitions stay debug.
                 let legs_ready = ![&leg_a, &leg_b].iter().all(|id| self.legs.get(id).is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::EarlyMedia)));
                 let a_neg = a.negotiated().is_some();
                 let b_neg = b.negotiated().is_some();
@@ -13584,9 +13530,7 @@ impl SipSession {
         // Direct-dialed calls select the media pair directly and never
         // populate the logical bridge (see the ResumeMedia recovery).
         // Unhold is an explicit request to resume audio — recover the pair
-        // from the live media bridge so the route actually comes back
-        // (production: hold→unhold on direct-dialed calls left media dead
-        // until hangup).
+        // from the live media bridge so the route actually comes back.
         if self.bridge.legs.len() != 2
             && let Some(mb) = self.media.bridge.as_ref()
         {

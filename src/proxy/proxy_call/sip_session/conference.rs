@@ -271,11 +271,9 @@ impl SipSession {
     }
 }
 
-/// `AudioReceiver` backed by a MediaBridge leg's decoded PCM stream (P2.4).
-///
-/// This replaces the legacy `PeerConnectionAudioReceiver` (which read RTP from
-/// an independent VoiceEnginePeer PC) so the conference / supervisor mixer's
-/// data source is the same MediaBridge leg that carries the call's media.
+/// `AudioReceiver` backed by a MediaBridge leg's decoded PCM stream —
+/// keeps the conference / supervisor mixer's data source on the same
+/// MediaBridge leg that carries the call's media.
 struct MediaBridgeLegAudioReceiver {
     stream: crate::media::app_ingress::LegPcmStream,
 }

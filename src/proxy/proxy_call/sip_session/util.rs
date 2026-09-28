@@ -240,17 +240,11 @@ pub(super) async fn trace_sip_headers(
 /// While a bridge is active (`bridge_dtmf_tx` armed) the digit is also
 /// 1. buffered for the return-app IVR (`bridge_dtmf_digits`), and
 /// 2. reported as an `ivr_step_trace` with the originating node context
-///    (`bridge_trace_context`) so consumers see `trigger.detail.digit` for
-///    menu/TTS nodes executed via a bridge (consumer contract). The trace
-///    carries `step_start_time` (executor-stamped via `_rst_step_start_time`,
-///    falling back to the emission instant) alongside `step_end_time` —
-///    consumers derive duration as `event timestamp - step_start_time`, so
-///    an end without a start would order end < start.
-///
-///    Exception: for a RESUMABLE hand-off (`return_ivr_resume=1`) the eager
-///    per-digit trace is suppressed — the resumed step executor reports the
-///    bridge step itself once the successor node resolves, so that trace can
-///    carry `next_node_id`. The buffered digit still reaches the provider.
+///    (`bridge_trace_context`). The trace carries `step_start_time` alongside
+///    `step_end_time` — an end without a start would order end < start.
+///    For a RESUMABLE hand-off (`return_ivr_resume=1`) the eager per-digit
+///    trace is suppressed (the resumed executor reports the bridge step with
+///    `next_node_id`); the buffered digit still reaches the provider.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn forward_dtmf_event(
     digit: char,

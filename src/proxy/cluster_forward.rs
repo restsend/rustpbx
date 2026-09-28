@@ -1,4 +1,4 @@
-//! Cluster command forwarding with session-registry routing (commerce).
+//! Cluster command forwarding with session-registry routing.
 //!
 //! When a console/cc control request arrives on a node that does not host the
 //! target session, the request must reach the owning node. The
