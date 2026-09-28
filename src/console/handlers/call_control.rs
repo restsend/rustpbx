@@ -13,8 +13,6 @@ use std::sync::Arc;
 
 const DEFAULT_ACTIVE_CALL_LIMIT: usize = 50;
 const MAX_ACTIVE_CALL_LIMIT: usize = 500;
-#[cfg(feature = "commerce")]
-const CLUSTER_FORWARD_TIMEOUT_SECS: u64 = 10;
 
 pub fn urls() -> Router<Arc<ConsoleState>> {
     Router::new()
@@ -768,38 +766,40 @@ async fn fetch_peer_calls(state: &ConsoleState, limit: usize) -> Vec<serde_json:
 
     for peer in &peers {
         let url = format!(
-            "http://{}:{}{}/cluster/list_calls?limit={}",
-            peer.addr, peer.ami_port, ami_path, limit
+            "{}/cluster/list_calls?limit={}",
+            crate::proxy::cluster_forward::peer_ami_base(peer, &ami_path),
+            limit
         );
         let client = client.clone();
         let peer_label = format!("{}:{}", peer.addr, peer.sip_port);
 
         handles.push(tokio::spawn(async move {
-            let opts = crate::http_util::HttpFetchOptions::new()
-                .with_timeout(std::time::Duration::from_secs(CLUSTER_FORWARD_TIMEOUT_SECS));
-            let req = client.get(&url);
-            match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
-                Ok(resp) => {
-                    if let Ok(body) = resp.json::<serde_json::Value>().await {
-                        if let Some(data) = body.get("data").and_then(|d| d.as_array()) {
-                            return data
-                                .iter()
-                                .map(|item| {
-                                    let mut item = item.clone();
-                                    if let Some(obj) = item.as_object_mut() {
-                                        obj.insert(
-                                            "node".to_string(),
-                                            serde_json::Value::String(peer_label.clone()),
-                                        );
-                                    }
-                                    item
-                                })
-                                .collect();
-                        }
+            match crate::proxy::cluster_forward::forward_json(
+                &client,
+                &url,
+                reqwest::Method::GET,
+                None,
+            )
+            .await {
+                Some((_, body)) => {
+                    if let Some(data) = body.get("data").and_then(|d| d.as_array()) {
+                        return data
+                            .iter()
+                            .map(|item| {
+                                let mut item = item.clone();
+                                if let Some(obj) = item.as_object_mut() {
+                                    obj.insert(
+                                        "node".to_string(),
+                                        serde_json::Value::String(peer_label.clone()),
+                                    );
+                                }
+                                item
+                            })
+                            .collect();
                     }
                     Vec::new()
                 }
-                Err(_) => Vec::new(),
+                None => Vec::new(),
             }
         }));
     }
