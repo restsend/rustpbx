@@ -527,6 +527,8 @@ impl SipSession {
             // resolve their address via ICE and ignore this.
             enable_latching: self.context.dialplan.media.enable_latching,
             probation_max_packets: self.context.dialplan.media.probation_max_packets,
+            // Tag rustrtc media/ICE logs with the session (call) id.
+            call_id: Some(self.context.session_id.clone()),
             relay_ready_timeout: self
                 .context
                 .dialplan
