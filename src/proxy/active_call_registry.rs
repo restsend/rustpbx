@@ -64,6 +64,17 @@ fn heartbeat_now_ms() -> u64 {
         .unwrap_or_default()
 }
 
+/// Snapshot of the per-session event-loop heartbeats (metrics sampler input).
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct HeartbeatStats {
+    /// Session loops that have bumped a heartbeat.
+    pub tracked: usize,
+    /// Age of the oldest heartbeat, seconds.
+    pub max_age_secs: u64,
+    /// Heartbeats at or beyond the staleness threshold.
+    pub stale: usize,
+}
+
 pub struct ActiveProxyCallRegistry {
     entries: DashMap<String, ActiveProxyCallEntry>,
     handles: DashMap<String, SipSessionHandle>,
@@ -106,6 +117,23 @@ impl ActiveProxyCallRegistry {
             .or_insert_with(|| Arc::new(AtomicU64::new(now)))
             .clone();
         slot.store(now, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Heartbeat gauges for the metrics sampler (`stale` counts ages >=
+    /// `stale_after_secs`). Sessions without a heartbeat are not tracked.
+    pub fn heartbeat_stats(&self, stale_after_secs: u64) -> HeartbeatStats {
+        let mut stats = HeartbeatStats::default();
+        for entry in self.heartbeats.iter() {
+            let age = heartbeat_now_ms()
+                .saturating_sub(entry.value().load(std::sync::atomic::Ordering::Relaxed))
+                / 1000;
+            stats.tracked += 1;
+            stats.max_age_secs = stats.max_age_secs.max(age);
+            if age >= stale_after_secs {
+                stats.stale += 1;
+            }
+        }
+        stats
     }
 
     /// Seconds since the last heartbeat, or `None` when never bumped
@@ -429,6 +457,21 @@ mod tests {
         assert!(registry.heartbeat_age_secs(session).is_some());
         registry.remove(session);
         assert!(registry.heartbeat_age_secs(session).is_none());
+    }
+
+    /// heartbeat_stats aggregates for the metrics sampler: tracked/max-age
+    /// reflect the population, stale counts only ages beyond the threshold.
+    #[test]
+    fn test_heartbeat_stats_aggregates() {
+        let registry = ActiveProxyCallRegistry::new();
+        registry.touch_heartbeat("fresh-a");
+        registry.touch_heartbeat("fresh-b");
+        registry.backdate_heartbeat_for_test("stale-c", 300);
+
+        let stats = registry.heartbeat_stats(120);
+        assert_eq!(stats.tracked, 3);
+        assert!(stats.max_age_secs >= 300);
+        assert_eq!(stats.stale, 1);
     }
 
     /// Before fix: dialog_by_session stored only the LAST dialog, so remove() only

@@ -1435,6 +1435,10 @@ impl SipServer {
                         let count = registry_for_metrics.count();
                         crate::metrics::sip::set_active_dialogs(count);
                         crate::metrics::sip::set_draining(crate::shutdown::is_draining());
+                        let heartbeat = registry_for_metrics.heartbeat_stats(120);
+                        crate::metrics::session::set_heartbeat_tracked(heartbeat.tracked);
+                        crate::metrics::session::set_heartbeat_max_age(heartbeat.max_age_secs);
+                        crate::metrics::session::set_heartbeat_stale(heartbeat.stale);
                         let stats = endpoint_inner_for_metrics.get_stats();
                         crate::metrics::transaction::set_endpoint_running(stats.running_transactions);
                         crate::metrics::transaction::set_endpoint_finished(stats.finished_transactions);

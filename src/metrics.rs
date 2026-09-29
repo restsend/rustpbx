@@ -92,6 +92,21 @@ pub mod sip {
     }
 }
 
+/// Session event-loop heartbeat gauges (sampled from the active-call
+/// registry every 5s; `stale` uses the same 120s threshold as the CC
+/// stuck-binding watchdog).
+pub mod session {
+    pub fn set_heartbeat_tracked(count: usize) {
+        metrics::gauge!("rustpbx_session_heartbeats_tracked").set(count as f64);
+    }
+    pub fn set_heartbeat_max_age(secs: u64) {
+        metrics::gauge!("rustpbx_session_heartbeat_max_age_secs").set(secs as f64);
+    }
+    pub fn set_heartbeat_stale(count: usize) {
+        metrics::gauge!("rustpbx_session_heartbeats_stale").set(count as f64);
+    }
+}
+
 pub mod transaction {
     pub fn received() {
         metrics::counter!("rustpbx_sip_transactions_received_total").increment(1);

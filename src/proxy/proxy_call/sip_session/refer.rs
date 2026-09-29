@@ -313,9 +313,11 @@ impl SipSession {
         Ok(())
     }
 
-    /// True when the REFER target has a live local registration — dial it
-    /// directly instead of route-table resolution. Fails open on locator
-    /// errors (route resolution then decides).
+    /// True when the REFER target has a live registration — dial it directly
+    /// instead of route-table resolution. The shared locator is cluster-wide
+    /// (a peer node's registration counts; `handle_add_leg` dials the full
+    /// Location so cross-node home_proxy routing is preserved). Fails open
+    /// on locator errors.
     async fn refer_target_locally_registered(server: &SipServerRef, target_uri: &str) -> bool {
         let Ok(parsed) = rsipstack::sip::Uri::try_from(target_uri) else {
             return false;
