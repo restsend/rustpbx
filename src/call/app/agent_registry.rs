@@ -223,6 +223,13 @@ pub trait AgentRegistry: Send + Sync {
         self.list_agents().await.into_iter().find(|a| a.uri == uri)
     }
 
+    /// Side-effect-free existence probe for a custom transfer target scheme
+    /// (e.g. `agent:<extension>`); default: not resolvable.
+    async fn has_target(&self, target_uri: &str) -> bool {
+        let _ = target_uri;
+        false
+    }
+
     /// List all agents
     async fn list_agents(&self) -> Vec<AgentRecord>;
 
@@ -460,6 +467,14 @@ pub trait AgentRegistry: Send + Sync {
     /// owns it). Returns `true` when a state change was applied.
     async fn release_call(&self, _agent_id: &str, _call_id: &str) -> bool {
         false
+    }
+
+    /// Self-heal: release locally-owned agents whose Ringing/Busy state is
+    /// bound to a call that no longer exists (safety net for lost teardown
+    /// events). Liveness is verified against the node-local registry.
+    /// Returns the number of agents released.
+    async fn reconcile_dead_call_bindings(&self) -> usize {
+        0
     }
 }
 

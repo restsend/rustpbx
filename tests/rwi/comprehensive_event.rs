@@ -223,6 +223,8 @@ async fn test_comprehensive_core_event_structs() {
                 leg_id: None,
                 call_id: call_id.into(),
                 early_media: false,
+                agent_id: None,
+                agent_name: None,
             },
         );
         gw.fan_out(
@@ -265,6 +267,7 @@ async fn test_comprehensive_core_event_structs() {
             &rustpbx::rwi::QueueJoined {
                 call_id: call_id.into(),
                 queue_id: "support".into(),
+                skill_groups: Some(vec!["support".into()]),
             },
         );
         gw.fan_out(
@@ -498,6 +501,8 @@ async fn test_new_api_event_structs() {
             leg_id: None,
             call_id: call_id.into(),
             early_media: false,
+            agent_id: None,
+            agent_name: None,
         });
     }
 
@@ -628,6 +633,7 @@ async fn test_new_cc_event_structs() {
     gw.broadcast(&rustpbx::rwi::QueueJoined {
         call_id: "c1".into(),
         queue_id: "q1".into(),
+        skill_groups: Some(vec!["q1".into()]),
     });
     gw.broadcast(&rustpbx::addons::cc::cc_events::AgentRegistered {
         agent_id: "a2".into(),

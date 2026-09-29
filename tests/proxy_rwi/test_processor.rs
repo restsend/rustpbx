@@ -2142,6 +2142,7 @@ async fn test_queue_enqueue_success() {
                 call_id: "call-q".into(),
                 queue_id: "support".into(),
                 priority: Some(5),
+                skill_groups: None,
             },
         ))
         .await;
@@ -2157,6 +2158,7 @@ async fn test_queue_enqueue_not_found() {
                 call_id: "nonexistent".into(),
                 queue_id: "support".into(),
                 priority: Some(5),
+                skill_groups: None,
             },
         ))
         .await;
@@ -2182,6 +2184,7 @@ async fn test_queue_dequeue_success() {
                 call_id: "call-dq".into(),
                 queue_id: "support".into(),
                 priority: Some(5),
+                skill_groups: None,
             },
         ))
         .await
@@ -2225,6 +2228,7 @@ async fn test_queue_hold_success() {
                 call_id: "call-hold".into(),
                 queue_id: "support".into(),
                 priority: Some(5),
+                skill_groups: None,
             },
         ))
         .await
@@ -2332,6 +2336,7 @@ async fn test_queue_unhold_success() {
                 call_id: "call-unhold".into(),
                 queue_id: "support".into(),
                 priority: Some(5),
+                skill_groups: None,
             },
         ))
         .await
@@ -3147,6 +3152,7 @@ async fn test_queue_set_priority_success() {
             call_id: "call-1".into(),
             queue_id: "support".into(),
             priority: None,
+            skill_groups: None,
         }))
         .await
         .unwrap();
@@ -3200,6 +3206,7 @@ async fn test_queue_assign_agent_success() {
             call_id: "call-1".into(),
             queue_id: "support".into(),
             priority: None,
+            skill_groups: None,
         }))
         .await
         .unwrap();
@@ -3220,7 +3227,7 @@ async fn test_queue_requeue_success() {
     let cm = Arc::new(ConferenceManager::new());
     let processor = Arc::new(RwiCommandProcessor::new(
         registry.clone(),
-        gateway,
+        gateway.clone(),
         cm.clone(),
     ));
 
@@ -3230,18 +3237,35 @@ async fn test_queue_requeue_success() {
             call_id: "call-1".into(),
             queue_id: "support".into(),
             priority: None,
+            skill_groups: None,
         }))
         .await
         .unwrap();
+
+    // Tap AFTER the initial enqueue so the first `queue_joined` observed on
+    // the tap is the requeue's.
+    let mut tap = gateway.read().subscribe_events();
 
     let result = processor
         .process_command(RwiCommandPayload::QueueRequeue {
             call_id: "call-1".into(),
             queue_id: "sales".into(),
             priority: Some(5),
+            // Explicit pass-through: the management path has no dial targets,
+            // so callers supply the groups reported on `queue_joined`.
+            skill_groups: Some(vec!["G_Srzj_1043133_382_G".into()]),
         })
         .await;
     assert!(result.is_ok());
+
+    let joined =
+        wait_for_tap_event(&mut tap, "queue_joined", std::time::Duration::from_secs(2)).await;
+    let joined = joined.expect("requeue must broadcast queue_joined");
+    assert_eq!(joined.event.payload["queue_id"], "sales");
+    assert_eq!(
+        joined.event.payload["skill_groups"],
+        serde_json::json!(["G_Srzj_1043133_382_G"])
+    );
 }
 
 #[tokio::test]

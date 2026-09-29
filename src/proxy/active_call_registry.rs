@@ -2,6 +2,8 @@ use crate::proxy::proxy_call::sip_session::SipSessionHandle;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::Serialize;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use tokio::sync::Notify;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
@@ -54,6 +56,14 @@ pub struct ActiveCallContextMeta {
     pub customer_id: Option<String>,
 }
 
+/// Wall-clock millis for the registry heartbeat (process-local).
+fn heartbeat_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or_default()
+}
+
 pub struct ActiveProxyCallRegistry {
     entries: DashMap<String, ActiveProxyCallEntry>,
     handles: DashMap<String, SipSessionHandle>,
@@ -62,6 +72,9 @@ pub struct ActiveProxyCallRegistry {
     handles_by_dialog: DashMap<String, SipSessionHandle>,
     dialog_by_session: DashMap<String, Vec<String>>,
     context_meta: DashMap<String, ActiveCallContextMeta>,
+    /// Per-session event-loop heartbeat (unix millis); staleness tells the
+    /// CC stuck-binding watchdog a hung loop from an idle-but-alive one.
+    heartbeats: DashMap<String, Arc<AtomicU64>>,
     change_notify: Notify,
 }
 
@@ -79,8 +92,51 @@ impl ActiveProxyCallRegistry {
             handles_by_dialog: DashMap::new(),
             dialog_by_session: DashMap::new(),
             context_meta: DashMap::new(),
+            heartbeats: DashMap::new(),
             change_notify: Notify::new(),
         }
+    }
+
+    /// Record a main-loop heartbeat for `session_id`.
+    pub fn touch_heartbeat(&self, session_id: &str) {
+        let now = heartbeat_now_ms();
+        let slot = self
+            .heartbeats
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(AtomicU64::new(now)))
+            .clone();
+        slot.store(now, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Seconds since the last heartbeat, or `None` when never bumped
+    /// (treated as alive — never release an agent on missing data).
+    pub fn heartbeat_age_secs(&self, session_id: &str) -> Option<u64> {
+        let seen = self
+            .heartbeats
+            .get(session_id)
+            .map(|v| v.load(std::sync::atomic::Ordering::Relaxed))?;
+        Some(heartbeat_now_ms().saturating_sub(seen) / 1000)
+    }
+
+    /// Test-only: backdate a session's heartbeat.
+    #[cfg(test)]
+    pub(crate) fn backdate_heartbeat_for_test(&self, session_id: &str, age_secs: u64) {
+        let now = heartbeat_now_ms();
+        let slot = self
+            .heartbeats
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(AtomicU64::new(now)))
+            .clone();
+        slot.store(
+            now.saturating_sub(age_secs.saturating_mul(1000)),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// Test-only: drop a session's heartbeat entirely.
+    #[cfg(test)]
+    pub(crate) fn clear_heartbeat_for_test(&self, session_id: &str) {
+        self.heartbeats.remove(session_id);
     }
 
     fn notify_waiters(&self) {
@@ -176,6 +232,7 @@ impl ActiveProxyCallRegistry {
         }
         self.handles.remove(session_id);
         self.context_meta.remove(session_id);
+        self.heartbeats.remove(session_id);
         if let Some((_, dialogs)) = self.dialog_by_session.remove(session_id) {
             for dialog_id in dialogs {
                 self.handles_by_dialog.remove(&dialog_id);
@@ -328,6 +385,50 @@ mod tests {
             answered_at: None,
             status: ActiveProxyCallStatus::Ringing,
         }
+    }
+
+    /// Heartbeat lifecycle: touch refresh, age, backdate/clear, remove cleanup.
+    #[test]
+    fn test_heartbeat_lifecycle() {
+        let registry = ActiveProxyCallRegistry::new();
+        let session = "session-heartbeat";
+
+        // No heartbeat until the loop bumps it — unknown must read as None.
+        assert!(registry.heartbeat_age_secs(session).is_none());
+
+        registry.touch_heartbeat(session);
+        assert!(registry.heartbeat_age_secs(session).is_some());
+        assert!(registry.heartbeat_age_secs(session).unwrap() < 60);
+
+        // Stale tier: backdated beyond the watchdog threshold reads as old.
+        registry.backdate_heartbeat_for_test(session, 600);
+        assert!(registry.heartbeat_age_secs(session).unwrap() >= 600);
+
+        // Unknown tier: clearing makes the age None again (never judged dead).
+        registry.clear_heartbeat_for_test(session);
+        assert!(registry.heartbeat_age_secs(session).is_none());
+
+        // remove() must not leak the heartbeat slot.
+        let (handle, _cmd_rx) = {
+            let id = crate::call::runtime::SessionId::from(session);
+            SipSession::with_handle(id)
+        };
+        registry.upsert(
+            ActiveProxyCallEntry {
+                session_id: session.to_string(),
+                caller: None,
+                callee: None,
+                direction: "inbound".to_string(),
+                started_at: chrono::Utc::now(),
+                answered_at: None,
+                status: ActiveProxyCallStatus::Ringing,
+            },
+            handle,
+        );
+        registry.touch_heartbeat(session);
+        assert!(registry.heartbeat_age_secs(session).is_some());
+        registry.remove(session);
+        assert!(registry.heartbeat_age_secs(session).is_none());
     }
 
     /// Before fix: dialog_by_session stored only the LAST dialog, so remove() only

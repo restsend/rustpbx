@@ -127,6 +127,13 @@ pub struct CallRinging {
     /// ringback from early media by this flag instead of a separate event.
     #[serde(default)]
     pub early_media: bool,
+    /// Agent attribution pinned on the ringing LEG event before the INVITE;
+    /// session-level events leave it `None` (call-meta enrichment).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Display name, only when it unambiguously belongs to `agent_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
 }
 rwi_event!(CallRinging, "call_ringing");
 
@@ -557,6 +564,10 @@ impl RwiEventSpec for ConferenceCreated {
 pub struct QueueJoined {
     pub call_id: String,
     pub queue_id: String,
+    /// Skill groups from the queue's dial targets at join time; `None` when
+    /// not skill-group routed (mirrors `QueueLeft::skill_groups`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_groups: Option<Vec<String>>,
 }
 rwi_event!(QueueJoined, "queue_joined");
 
