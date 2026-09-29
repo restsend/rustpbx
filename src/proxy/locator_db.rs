@@ -91,7 +91,7 @@ impl MigrationTrait for Migration {
                             .default(Expr::current_timestamp()),
                     )
                     .col(boolean(Column::SupportsWebrtc).not_null().default(false))
-                    .col(string_len_null(Column::UserAgent, 255))
+                    .col(MigrationColumnDef::new(Column::UserAgent).text().null())
                     .to_owned(),
             )
             .await?;
@@ -185,12 +185,79 @@ impl MigrationTrait for MigrationAddInstanceId {
     }
 }
 
+/// Widen `rustpbx_locations.user_agent` from VARCHAR(255) to TEXT (the writer
+/// appends the proxy marker and AOR, overflowing the bound). Runs on every
+/// startup, guarded by an information_schema lookup.
+#[derive(DeriveMigrationName)]
+pub struct MigrationUserAgentText;
+
+#[async_trait::async_trait]
+impl MigrationTrait for MigrationUserAgentText {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let db = manager.get_connection();
+        match db.get_database_backend() {
+            sea_orm::DbBackend::MySql => {
+                let row = db
+                    .query_one_raw(sea_orm::Statement::from_string(
+                        sea_orm::DbBackend::MySql,
+                        "SELECT DATA_TYPE FROM information_schema.COLUMNS \
+                         WHERE TABLE_SCHEMA = DATABASE() \
+                           AND TABLE_NAME = 'rustpbx_locations' \
+                           AND COLUMN_NAME = 'user_agent'",
+                    ))
+                    .await?;
+                if let Some(row) = row {
+                    let data_type: String = row.try_get("", "DATA_TYPE")?;
+                    if data_type.eq_ignore_ascii_case("varchar") {
+                        db.execute_unprepared(
+                            "ALTER TABLE rustpbx_locations MODIFY COLUMN user_agent TEXT NULL",
+                        )
+                        .await?;
+                    }
+                }
+            }
+            sea_orm::DbBackend::Postgres => {
+                let row = db
+                    .query_one_raw(sea_orm::Statement::from_string(
+                        sea_orm::DbBackend::Postgres,
+                        "SELECT data_type FROM information_schema.columns \
+                         WHERE table_name = 'rustpbx_locations' \
+                           AND column_name = 'user_agent'",
+                    ))
+                    .await?;
+                if let Some(row) = row {
+                    let data_type: String = row.try_get("", "data_type")?;
+                    if data_type == "character varying" {
+                        // varchar → text is metadata-only in Postgres.
+                        db.execute_unprepared(
+                            "ALTER TABLE rustpbx_locations ALTER COLUMN user_agent TYPE TEXT",
+                        )
+                        .await?;
+                    }
+                }
+            }
+            // SQLite TEXT affinity: nothing to change.
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Locations rows are ephemeral — leave the column wide.
+        Ok(())
+    }
+}
+
 pub struct Migrator;
 
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(Migration {}), Box::new(MigrationAddInstanceId {})]
+        vec![
+            Box::new(Migration {}),
+            Box::new(MigrationAddInstanceId {}),
+            Box::new(MigrationUserAgentText {}),
+        ]
     }
 }
 
@@ -235,6 +302,10 @@ impl DbLocator {
             .up(&manager)
             .await
             .map_err(|e| anyhow::anyhow!("Migration error (add instance_id): {}", e))?;
+        MigrationUserAgentText
+            .up(&manager)
+            .await
+            .map_err(|e| anyhow::anyhow!("Migration error (user_agent text): {}", e))?;
         Ok(())
     }
 

@@ -9,6 +9,7 @@ pub mod add_metadata_column;
 pub mod add_outbound_sip_trunk_id;
 pub mod add_call_record_report_columns;
 pub mod add_call_record_quality_columns;
+pub mod add_long_text_columns;
 pub mod cdr_daily;
 pub mod runtime_snapshot;
 pub mod add_rewrite_columns;

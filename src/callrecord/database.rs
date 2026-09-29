@@ -99,7 +99,11 @@ async fn build_active_model(
     // `media_quality` metadata entry.
     let (media_loss_pct, media_jitter_ms, media_rtt_ms) =
         crate::callrecord::extract_trunk_media_quality(
-            record.details.metadata.as_ref().and_then(|m| m.get("media_quality")),
+            record
+                .details
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("media_quality")),
             &direction,
         );
     let sip_status_code = if record.status_code > 0 {
@@ -208,7 +212,7 @@ pub(crate) async fn persist_call_records(
     for record in records {
         active_models.push(build_active_model(db, record).await?);
     }
-    Entity::insert_many(active_models)
+    if let Err(e) = Entity::insert_many(active_models)
         .on_conflict(
             sea_orm::sea_query::OnConflict::column(Column::CallId)
                 .update_columns([
@@ -252,7 +256,18 @@ pub(crate) async fn persist_call_records(
                 .to_owned(),
         )
         .exec(db)
-        .await?;
+        .await
+    {
+        // Identical-value re-flush: MySQL 0 affected rows -> RecordNotInserted
+        // is a durable no-op, not a failure.
+        if !crate::db_report::is_noop_upsert(&e) {
+            return Err(e.into());
+        }
+        tracing::debug!(
+            batch_size = records.len(),
+            "call-record batch already stored with identical values"
+        );
+    }
 
     Ok(())
 }
