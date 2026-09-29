@@ -341,12 +341,15 @@ mod tests {
             .and_then(|v| v.as_array())
             .expect("trace array present");
         // Unified error entry first (registry code + severity), then the
-        // terminal `end` entry carrying the SIP reason.
+        // terminal `end` entry carrying the SIP reason. The wholesale code is
+        // not part of the default registry, so this resolves through the
+        // ROUTE_FAILED fallback — WARN since business rejections must not
+        // trip ERROR alerting.
         assert_eq!(trace[0]["kind"], "error");
-        assert_eq!(trace[0]["severity"], "error");
+        assert_eq!(trace[0]["severity"], "warn");
         assert_eq!(trace[0]["code"], "wholesale.insufficient_funds");
         assert_eq!(trace[1]["kind"], "end");
-        assert_eq!(trace[1]["severity"], "error");
+        assert_eq!(trace[1]["severity"], "warn");
         assert_eq!(trace[1]["code"], "wholesale.insufficient_funds");
         assert!(
             trace[1]["message"]

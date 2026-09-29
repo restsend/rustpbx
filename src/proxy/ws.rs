@@ -9,7 +9,7 @@ use rsipstack::{
 use std::time::Duration;
 use tokio::{select, sync::mpsc};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 pub async fn sip_ws_handler(
     token: CancellationToken,
@@ -76,7 +76,10 @@ pub async fn sip_ws_handler(
                             let text = text.to_string();
                             match SipMessage::try_from(text.as_str()) {
                                 Ok(sip_msg) => {
-                                    debug!(
+                                    // Full SIP dumps are extremely chatty on a
+                                    // busy proxy; TRACE keeps them available
+                                    // without flooding DEBUG.
+                                    trace!(
                                         addr = %local_addr_clone,
                                         cseq = sip_msg.cseq_header().ok().map(|c| c.value()).unwrap_or_default(),
                                         raw_message = text,
@@ -165,7 +168,7 @@ pub async fn sip_ws_handler(
                         TransportEvent::Incoming(sip_msg, _, _) => {
                             let raw_message = sip_msg.to_string();
                             let cseq = sip_msg.cseq_header().ok();
-                            debug!(
+                            trace!(
                                 addr = %local_addr_clone,
                                 cseq = cseq.map(|c| c.value()).unwrap_or_default(),
                                 raw_message,

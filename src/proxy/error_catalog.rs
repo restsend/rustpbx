@@ -203,7 +203,10 @@ pub const ROUTE_FAILED: CallErrInfo = CallErrInfo {
     message: "Call routing failed",
     sip_status: Some(500),
     hangup_reason: CallRecordHangupReason::Failed,
-    severity: ErrSeverity::Error,
+    // WARN, not ERROR: the majority of route failures in production are
+    // per-call business rejections (quota / DND / AXB binding), not system
+    // faults. The dialplan-build site still escalates genuine ones to ERROR.
+    severity: ErrSeverity::Warn,
     locale_key: "errors.proxy.route_failed",
     remediation_key: None,
 };
