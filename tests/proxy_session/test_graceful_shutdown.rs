@@ -54,13 +54,13 @@ async fn test_call_hangup_writes_cdr() -> Result<()> {
     // A clean hangup MUST produce a CDR (verified product behavior).
     sleep(Duration::from_millis(1000)).await;
     alice.hangup(&alice_id.unwrap()).await.ok();
-    sleep(Duration::from_millis(800)).await;
 
-    let all_records = server.cdr_capture.get_all_records().await;
-    assert!(
-        !all_records.is_empty(),
-        "Clean hangup should write CDR for the call"
-    );
+    // The bounded wait itself asserts the CDR arrived.
+    server
+        .cdr_capture
+        .wait_for_records(1, Duration::from_secs(5))
+        .await
+        .expect("Clean hangup should write CDR for the call");
 
     server.stop();
     Ok(())

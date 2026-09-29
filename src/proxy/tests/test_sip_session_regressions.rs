@@ -3186,6 +3186,7 @@ async fn queue_agent_leg_after_app_answer_bridges_trunk_caller() {
             &[],
         );
         let cfg = crate::media::leg::LegConfig {
+            call_id: None,
             codecs,
             ..crate::media::leg::LegConfig::rtp_pcmu()
         };
@@ -3290,6 +3291,7 @@ async fn voip_bridge_must_not_block_queue_agent_media_bridge() {
             &[],
         );
         let cfg = crate::media::leg::LegConfig {
+            call_id: None,
             codecs,
             ..crate::media::leg::LegConfig::rtp_pcmu()
         };
@@ -3445,6 +3447,7 @@ async fn voip_bridge_connect_without_timeout_ms_must_be_bounded() {
         &[],
     );
     let cfg = crate::media::leg::LegConfig {
+        call_id: None,
         codecs,
         ..crate::media::leg::LegConfig::rtp_pcmu()
     };

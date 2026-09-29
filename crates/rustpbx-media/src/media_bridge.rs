@@ -2037,6 +2037,7 @@ mod tests {
         // Two WebRTC (DTLS-SRTP) legs negotiate UAC/UAS-style SDP with each
         // other. Same codec (opus) → fast-path relay on both legs.
         let cfg = LegConfig {
+            call_id: None,
             relay_ready_timeout: None,
             ice_servers: Vec::new(),
             relay_only: false,
@@ -2100,6 +2101,7 @@ mod tests {
         use rustrtc::SdpType;
 
         let cfg = LegConfig {
+            call_id: None,
             relay_ready_timeout: None,
             ice_servers: Vec::new(),
             relay_only: false,
@@ -2163,6 +2165,7 @@ mod tests {
         // a WebRTC peer, leg B (RTP/PCMU) negotiates with an RTP peer, then the
         // bridge connects them. Different codecs → transcode (non-relay) route.
         let webrtc_cfg = LegConfig {
+            call_id: None,
             relay_ready_timeout: None,
             ice_servers: Vec::new(),
             relay_only: false,
@@ -2248,6 +2251,7 @@ mod tests {
                     use rustrtc::SdpType;
 
                     let webrtc_cfg = LegConfig {
+                        call_id: None,
                         relay_ready_timeout: None,
                         ice_servers: Vec::new(),
                         relay_only: false,
@@ -2271,6 +2275,7 @@ mod tests {
                         probation_max_packets: None,
                     };
                     let rtp_opus_cfg = LegConfig {
+                        call_id: None,
                         relay_ready_timeout: None,
                         ice_servers: Vec::new(),
                         relay_only: false,
@@ -2350,6 +2355,7 @@ mod tests {
         use rustrtc::SdpType;
 
         let webrtc_cfg = LegConfig {
+            call_id: None,
             relay_ready_timeout: None,
             ice_servers: Vec::new(),
             relay_only: false,
@@ -2373,6 +2379,7 @@ mod tests {
             probation_max_packets: None,
         };
         let rtp_pcmu_cfg = LegConfig {
+            call_id: None,
             relay_ready_timeout: None,
             ice_servers: Vec::new(),
             relay_only: false,

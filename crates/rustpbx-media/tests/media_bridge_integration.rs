@@ -807,6 +807,7 @@ async fn rtp_timeout_fires_on_inactive_webrtc_leg() {
     use rustrtc::TransportMode;
 
     let cfg = LegConfig {
+        call_id: None,
         ice_servers: Vec::new(),
         relay_only: false,
         enable_ice_lite: false,

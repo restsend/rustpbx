@@ -5,8 +5,6 @@
 //!   cargo test --test call -- ringback_mode
 //!   cargo test --test call -- media_task_leak -- --nocapture
 
-mod helpers;
-
 #[path = "call/audio_feature.rs"]
 mod audio_feature;
 #[path = "call/busy_wait.rs"]

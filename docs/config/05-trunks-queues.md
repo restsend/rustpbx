@@ -193,10 +193,16 @@ accept_immediately = true
 passthrough_ringback = false
 # acd_policy = "default"       # Reference to ACD policy (CC addon)
 
-# Hold Music
+# Hold Music (per-queue override)
 [proxy.queues.support_main.hold]
 audio_file = "sounds/hold_music.wav"
 loop_playback = true
+
+# PBX-wide queue wait music fallback (`[proxy] queue_hold_music`, top-level
+# `[proxy]` section in config.toml): applies when the queue itself has no
+# hold config; per-queue config wins. Without it, skill-group queues fall
+# back to the built-in ringback and route queues stay silent (historical
+# behavior). `voicemail_greeting` works the same way for voicemail greetings.
 
 # Distribution Strategy
 [proxy.queues.support_main.strategy]

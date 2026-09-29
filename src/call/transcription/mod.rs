@@ -23,7 +23,6 @@ use tokio::sync::mpsc;
 
 pub use remote::resample_to_16k;
 
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TranscriptionPlan {
     /// Provider registry key overriding `[proxy.transcript.remote] provider`

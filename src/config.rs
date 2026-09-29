@@ -1639,6 +1639,16 @@ pub struct ProxyConfig {
     pub jwt_auth: Option<JwtAuthConfig>,
     #[serde(default)]
     pub hold_music: Option<String>,
+    /// PBX-wide queue wait music (`[proxy] queue_hold_music`). Fills the
+    /// queue wait audio when the queue itself has no
+    /// `[proxy.queues.<name>.hold].audio_file`; per-queue config wins.
+    #[serde(default)]
+    pub queue_hold_music: Option<String>,
+    /// PBX-wide voicemail greeting (`[proxy] voicemail_greeting`). Used when
+    /// the dialplan app params carry no `greeting_path` of their own;
+    /// overrides the built-in `sounds/voicemail/greeting.wav`.
+    #[serde(default)]
+    pub voicemail_greeting: Option<String>,
 }
 
 /// Emergency number routing configuration.
@@ -2243,6 +2253,8 @@ impl Default for ProxyConfig {
             rtc_cname: None,
             jwt_auth: None,
             hold_music: None,
+            queue_hold_music: None,
+            voicemail_greeting: None,
             sip_worker_threads: default_sip_worker_threads(),
             media_worker_threads: default_media_worker_threads(),
             rwi_webhook_worker_threads: default_rwi_webhook_worker_threads(),
@@ -2982,6 +2994,34 @@ bucket = "default-recordings"
             config.callrecord.as_ref().unwrap().storage,
             CallRecordStorageConfig::S3 { .. }
         ));
+    }
+
+    #[test]
+    fn test_proxy_parses_global_audio_defaults() {
+        let toml_str = r#"
+            [proxy]
+            addr = "0.0.0.0"
+            hold_music = "sounds/hold.wav"
+            queue_hold_music = "sounds/moh/kzmusic.wav"
+            voicemail_greeting = "sounds/voicemail/custom.wav"
+        "#;
+        let config: Config = toml::from_str(toml_str).expect("config should parse");
+        assert_eq!(
+            config.proxy.queue_hold_music.as_deref(),
+            Some("sounds/moh/kzmusic.wav")
+        );
+        assert_eq!(
+            config.proxy.voicemail_greeting.as_deref(),
+            Some("sounds/voicemail/custom.wav")
+        );
+        assert_eq!(config.proxy.hold_music.as_deref(), Some("sounds/hold.wav"));
+
+        // Unset keys stay None — old configs keep working unchanged.
+        let empty: Config =
+            toml::from_str("[proxy]\naddr = \"0.0.0.0\"\n").expect("minimal config");
+        assert!(empty.proxy.queue_hold_music.is_none());
+        assert!(empty.proxy.voicemail_greeting.is_none());
+        assert!(empty.proxy.hold_music.is_none());
     }
 
     #[test]

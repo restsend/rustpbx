@@ -63,6 +63,26 @@ impl CdrCapture {
         None
     }
 
+    /// Wait until at least `min_count` records have been captured, returning
+    /// all records once the threshold is reached (or `None` on timeout).
+    /// Replaces the `sleep(X); get_all_records(); assert(!empty)` pattern.
+    pub async fn wait_for_records(
+        &self,
+        min_count: usize,
+        timeout: Duration,
+    ) -> Option<Vec<CallRecord>> {
+        let start = tokio::time::Instant::now();
+        while start.elapsed() < timeout {
+            let records = self.get_all_records().await;
+            if records.len() >= min_count {
+                return Some(records);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        warn!(min_count, "Timeout waiting for CDR records");
+        None
+    }
+
     /// Get all captured records
     pub async fn get_all_records(&self) -> Vec<CallRecord> {
         self.records.read().await.clone()

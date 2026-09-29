@@ -109,13 +109,12 @@ async fn test_webrtc_to_rtp_with_transcoding() -> Result<()> {
     if let Some(id) = &alice_dialog_id {
         alice.hangup(id).await.ok();
     }
-    sleep(Duration::from_millis(500)).await;
-
-    let all_records = server.cdr_capture.get_all_records().await;
-    assert!(
-        !all_records.is_empty(),
-        "CDR should be generated for transcoded call"
-    );
+    // The bounded wait itself asserts the CDR arrived.
+    server
+        .cdr_capture
+        .wait_for_records(1, Duration::from_secs(5))
+        .await
+        .expect("CDR should be generated for transcoded call");
 
     server.stop();
     Ok(())
@@ -387,11 +386,12 @@ async fn test_callee_hangup_cdr() -> Result<()> {
         bob.hangup(id).await?;
     }
 
-    // Wait for CDR
-    sleep(Duration::from_millis(500)).await;
-
     // Verify CDR
-    let all_records = server.cdr_capture.get_all_records().await;
+    let all_records = server
+        .cdr_capture
+        .wait_for_records(1, Duration::from_secs(5))
+        .await
+        .expect("CDR should be generated");
     if !all_records.is_empty() {
         let record = &all_records[0];
         info!(hangup_reason = ?record.hangup_reason, "CDR hangup reason");
@@ -516,10 +516,11 @@ async fn test_reinvite_codec_change() -> Result<()> {
     alice.hangup(&alice_id).await.ok();
 
     // Wait for CDR
-    sleep(Duration::from_millis(500)).await;
-
-    let all_records = server.cdr_capture.get_all_records().await;
-    assert!(!all_records.is_empty(), "CDR should be generated");
+    let all_records = server
+        .cdr_capture
+        .wait_for_records(1, Duration::from_secs(5))
+        .await
+        .expect("CDR should be generated");
 
     // Verify no recording was started (no [recording] config in this test)
     let expected = CdrExpectation::default().with_recording(false);
@@ -606,11 +607,13 @@ async fn test_auto_start_recording_creates_file() -> Result<()> {
     sleep(Duration::from_millis(800)).await;
 
     alice.hangup(alice_dialog_id.as_ref().unwrap()).await.ok();
-    sleep(Duration::from_millis(500)).await;
 
     // Verify CDR has a recorder entry
-    let all_records = server.cdr_capture.get_all_records().await;
-    assert!(!all_records.is_empty(), "CDR should be generated");
+    let all_records = server
+        .cdr_capture
+        .wait_for_records(1, Duration::from_secs(5))
+        .await
+        .expect("CDR should be generated");
 
     let record = &all_records[0];
 

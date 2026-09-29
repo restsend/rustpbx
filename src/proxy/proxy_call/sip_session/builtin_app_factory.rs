@@ -392,14 +392,17 @@ impl BuiltinAppFactory {
             "voicemail" => {
                 let extension = params.as_ref()?.get("extension")?.as_str()?.to_string();
                 // Core voicemail fallback — addon overrides via build_call_app above.
-                let mut app = crate::call::app::voicemail::VoicemailApp::new(extension);
-                if let Some(greeting) = params
-                    .as_ref()?
-                    .get("greeting_path")
-                    .and_then(|v| v.as_str())
-                {
-                    app = app.with_greeting_path(greeting);
-                }
+                // Greeting: dialplan `greeting_path` param > `[proxy]
+                // voicemail_greeting` > built-in default.
+                let greeting = crate::call::app::voicemail::resolve_greeting_path(
+                    params
+                        .as_ref()
+                        .and_then(|p| p.get("greeting_path"))
+                        .and_then(|v| v.as_str()),
+                    context.config.proxy.voicemail_greeting.as_deref(),
+                );
+                let app = crate::call::app::voicemail::VoicemailApp::new(extension)
+                    .with_greeting_path(greeting);
                 Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
             }
             "conference" => {

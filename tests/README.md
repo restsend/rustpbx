@@ -3,21 +3,34 @@
 ## Running locally
 
 ```bash
-cargo test-dev            # full local suite: --features addon-cc
-                          #   (covers cc_openapi_contract_test)
-cargo test                # subset only: feature-gated integration tests are skipped
-cargo test --test call -- ringback_mode   # single test from the call suite
-cargo test --test rwi  -- --nocapture      # RWI suite, full output
+cargo test-fast                     # unit tests only (lib + workspace members)
+cargo test-dev                      # full local suite: --features commerce,wholesale,contact-center
+cargo test-compile                  # pre-build every test binary without running
+scripts/run_cargo_tests.sh --parallel   # all suites, binaries concurrently (default nproc/2)
+scripts/run_cargo_tests.sh --serial     # baseline mode: one binary after another
+scripts/run_cargo_tests.sh --parallel 3 # explicit concurrency
+scripts/run_cargo_tests.sh --list       # list the test binaries
+scripts/check_test_sleeps.sh            # guard: no NEW fixed sleeps >= 100ms in tests
+cargo test --test e2e_core -- ringback_mode # single test from the core suite
+cargo test --test e2e_core -- rwi:: --nocapture # RWI submodule, full output
 ```
 
-- Test binaries (each aggregates its same-named subdirectory via `#[path]`):
-  `call.rs` (tests/call/), `rwi.rs` (tests/rwi/), `cc_e2e.rs` (tests/cc_e2e/),
-  `ivr_e2e.rs` (tests/ivr_e2e/), `proxy_e2e.rs` (tests/proxy_e2e/),
-  `proxy_flow.rs` (tests/proxy_flow/), `proxy_routing.rs` (tests/proxy_routing/),
-  `proxy_rwi.rs` (tests/proxy_rwi/), `proxy_session.rs` (tests/proxy_session/),
-  `proxy_trunk_b2bua.rs` (tests/proxy_trunk_b2bua/), `queue_e2e.rs`
-  (tests/queue_e2e/), `wholesale.rs` (tests/wholesale/) plus
-  `cc_openapi_contract_test.rs`. Each binary runs its tests in parallel threads.
+`run_cargo_tests.sh` builds once via cargo, then invokes the test executables
+directly (ports are portpicker-randomized, so binaries run concurrently) and
+writes per-suite timing + logs under `target/test-logs/<run_id>/`. On this
+machine the full suite went from **251s serial to ~52s parallel**.
+
+- Test binaries (explicit `[[test]]` targets; `autotests = false` in Cargo.toml):
+  - `e2e_core` — all non-addon suites (`tests/call.rs`, `rwi.rs`, `ivr_e2e.rs`,
+    `proxy_e2e.rs`, `proxy_flow.rs`, `proxy_routing.rs`, `proxy_rwi.rs`,
+    `proxy_session.rs`, `proxy_trunk_b2bua.rs`, `queue_e2e.rs`,
+    `realtime_bridge.rs`, `common_selftest.rs` included as modules; test paths
+    read `e2e_core::<suite>::...`)
+  - `e2e_addons` — `cc_e2e` (addon-cc) + `wholesale` (addon-wholesale), each
+    module feature-gated
+  - `cc_openapi_contract_test` — addon-cc contract test
+  The old per-suite binaries were merged to cut link time (~13 full links of
+  the crate down to 3 on incremental builds).
 - Feature-gated tests are skipped by a bare `cargo test`:
   - `cc_openapi_contract_test.rs` / `cc_e2e.rs` → require `addon-cc`
   - `wholesale.rs` → requires `addon-wholesale`
@@ -25,6 +38,20 @@ cargo test --test rwi  -- --nocapture      # RWI suite, full output
   (`--features commerce,wholesale,contact-center`) for the full local suite.
 - Ports are randomized via `portpicker` (`tests/helpers/test_server.rs`), so tests can
   run concurrently; flaky SIP/RTP tests can be re-run with the same `--test <name>` filter.
+- **Waiting for events**: use `tests/common/wait.rs` (`wait_until` /
+  `wait_for_value`) or `CdrCapture::wait_for_records` instead of
+  `sleep(X); assert(...)`. Fixed sleeps >= 100ms in test code are blocked by
+  `scripts/check_test_sleeps.sh` (existing ones are grandfathered in its
+  `TEST_SLEEP_BASELINE`); shrink that list as you convert call sites.
+- **TestUa events are drain-on-read**: `process_dialog_events()` consumes the
+  queue. Use the `next_incoming_call(&mut ua, timeout_ms)` helper and handle
+  the returned dialog id immediately — never `wait_for_event`-style poll and
+  then re-fetch the batch (a second drain sees nothing; several suites
+  silently no-op'd that way for months while still "passing").
+- **INVITEs should carry a proper CRLF SDP offer**: SDP-less INVITEs take a
+  degraded path (callee notification delayed well past a second), and bare-`\r`
+  SDP bodies fail to parse. The UA scenario suites now always send
+  `create_test_sdp(...)` offers/answers.
 - Coverage (optional): `cargo install cargo-llvm-cov && cargo llvm-cov --features addon-cc`.
 
 ## Python E2E (sipbot)

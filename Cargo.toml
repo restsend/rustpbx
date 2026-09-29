@@ -14,6 +14,10 @@ members = [
 name = "rustpbx"
 version = "0.5.1"
 edition = "2024"
+# Integration tests are explicit targets (see [[test]] below): the suites are
+# aggregated into e2e_core / e2e_addons; the remaining tests/*.rs files are
+# module sources included by those aggregates, NOT standalone test binaries.
+autotests = false
 default-run = "rustpbx"
 authors = ["jinti<shenjind@fourz.cn>"]
 description = "A SIP PBX implementation in Rust"
@@ -246,6 +250,15 @@ rustpbx-media = { path = "crates/rustpbx-media", version = "0.5.1" }
 # Required by the `e2e-testing` feature (proxy::tests helpers pick free ports).
 portpicker = { version = "0.1.1", optional = true }
 
+
+[[test]]
+name = "e2e_core"
+
+[[test]]
+name = "e2e_addons"
+
+[[test]]
+name = "cc_openapi_contract_test"
 
 [dev-dependencies]
 portpicker = "0.1.1"

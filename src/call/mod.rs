@@ -465,6 +465,27 @@ impl QueueHoldConfig {
     }
 }
 
+/// Fill a queue plan's wait audio from the PBX-wide default
+/// (`[proxy] queue_hold_music`) when the queue has no audio of its own.
+///
+/// Priority: per-queue `[proxy.queues.<name>.hold].audio_file` > global
+/// default. An existing hold config keeps its `loop_playback` setting — only
+/// the missing audio file is filled. When this leaves the hold audio unset,
+/// downstream behavior is unchanged (skill-group queues still fall back to
+/// the built-in ringback in the app factory; plain route queues stay silent).
+pub fn apply_queue_hold_music_default(plan: &mut QueuePlan, global: Option<String>) {
+    let needs_file = match plan.hold.as_ref() {
+        None => true,
+        Some(hold) => hold.audio_file.is_none(),
+    };
+    if needs_file
+        && let Some(file) = global
+    {
+        let base = plan.hold.take().unwrap_or_default();
+        plan.hold = Some(base.with_audio_file(file));
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum QueueFallbackAction {
     /// Reuse existing failure behaviors
@@ -787,7 +808,8 @@ pub struct MediaConfig {
     /// that passes a single STUN binding on its host candidate but cannot
     /// sustain the DTLS handshake. Defaults to false.
     #[serde(default)]
-    pub relay_only: bool,    /// Advertise `a=ice-lite` in the SDP of this call's plain-RTP legs (see
+    pub relay_only: bool,
+    /// Advertise `a=ice-lite` in the SDP of this call's plain-RTP legs (see
     /// `crate::media::leg::LegConfig::enable_ice_lite`). Answering as an
     /// ICE-lite agent lets strict full-ICE peers (e.g. Teams Direct Routing
     /// SBCs) that never fall back to plain RTP establish connectivity via
@@ -1248,9 +1270,7 @@ impl Dialplan {
                     "allow",
                     "supported",
                 ];
-                !BLOCKED
-                    .iter()
-                    .any(|b| name.eq_ignore_ascii_case(b))
+                !BLOCKED.iter().any(|b| name.eq_ignore_ascii_case(b))
             }
             _ => true,
         }
@@ -1347,8 +1367,8 @@ mod tests {
 
     #[test]
     fn realtime_transfer_endpoint_roundtrip() {
-        let endpoint = TransferEndpoint::parse("realtime:support-bot")
-            .expect("realtime target must parse");
+        let endpoint =
+            TransferEndpoint::parse("realtime:support-bot").expect("realtime target must parse");
         assert_eq!(endpoint, TransferEndpoint::Realtime("support-bot".into()));
         assert_eq!(endpoint.kind(), "realtime");
         assert_eq!(endpoint.to_string(), "realtime:support-bot");
@@ -1901,5 +1921,60 @@ mod tests {
                 "{excluded} must not be forwarded"
             );
         }
+    }
+
+    fn queue_plan_with_hold(hold: Option<QueueHoldConfig>) -> QueuePlan {
+        QueuePlan {
+            hold,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn queue_hold_default_global_fills_when_queue_has_none() {
+        let mut plan = queue_plan_with_hold(None);
+        apply_queue_hold_music_default(&mut plan, Some("sounds/moh/kzmusic.wav".into()));
+        let hold = plan.hold.expect("global default must materialize hold");
+        assert_eq!(hold.audio_file.as_deref(), Some("sounds/moh/kzmusic.wav"));
+        assert!(hold.loop_playback, "default hold loops");
+    }
+
+    #[test]
+    fn queue_hold_default_per_queue_config_wins() {
+        let mut plan = queue_plan_with_hold(Some(
+            QueueHoldConfig::default().with_audio_file("sounds/queue-own.wav".into()),
+        ));
+        apply_queue_hold_music_default(&mut plan, Some("sounds/moh/kzmusic.wav".into()));
+        let hold = plan.hold.expect("per-queue hold must survive");
+        assert_eq!(hold.audio_file.as_deref(), Some("sounds/queue-own.wav"));
+    }
+
+    #[test]
+    fn queue_hold_default_fills_hold_without_file_and_keeps_loop_setting() {
+        let mut plan = queue_plan_with_hold(Some(QueueHoldConfig {
+            audio_file: None,
+            loop_playback: false,
+        }));
+        apply_queue_hold_music_default(&mut plan, Some("sounds/moh/kzmusic.wav".into()));
+        let hold = plan.hold.expect("hold segment must stay Some");
+        assert_eq!(hold.audio_file.as_deref(), Some("sounds/moh/kzmusic.wav"));
+        assert!(!hold.loop_playback, "existing loop setting must be kept");
+    }
+
+    #[test]
+    fn queue_hold_default_no_global_leaves_plan_unchanged() {
+        let mut empty = queue_plan_with_hold(None);
+        apply_queue_hold_music_default(&mut empty, None);
+        assert!(empty.hold.is_none(), "no global -> stays unset (route queues stay silent)");
+
+        let mut builtin = queue_plan_with_hold(Some(
+            QueueHoldConfig::default().with_audio_file("sounds/phone-calling.wav".into()),
+        ));
+        apply_queue_hold_music_default(&mut builtin, None);
+        assert_eq!(
+            builtin.hold.and_then(|h| h.audio_file),
+            Some("sounds/phone-calling.wav".to_string()),
+            "no global -> factory built-in default path unaffected"
+        );
     }
 }

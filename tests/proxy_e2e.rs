@@ -1,5 +1,3 @@
-mod common;
-
 #[path = "proxy_e2e/test_sip_info_dtmf_e2e.rs"]
 mod test_sip_info_dtmf_e2e;
 

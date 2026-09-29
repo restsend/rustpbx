@@ -1,5 +1,3 @@
-mod common;
-
 #[path = "proxy_routing/routing_tests.rs"]
 mod routing_tests;
 

@@ -123,6 +123,10 @@ pub struct LegConfig {
     /// Max wait for a WebRTC leg's ICE+DTLS before degrading the fast-path
     /// relay to transcoding. `None` uses `WEBRTC_RELAY_READY_TIMEOUT` (5s).
     pub relay_ready_timeout: Option<std::time::Duration>,
+    /// Correlation label propagated into `RtcConfiguration::label` so rustrtc
+    /// media/ICE log lines carry the call id (session id). `None` renders as
+    /// "-" in rustrtc logs.
+    pub call_id: Option<String>,
 }
 
 impl LegConfig {
@@ -150,6 +154,7 @@ impl LegConfig {
             enable_latching: true,
             probation_max_packets: None,
             relay_ready_timeout: None,
+            call_id: None,
         }
     }
 }
@@ -1381,6 +1386,8 @@ fn build_rtc_config(cfg: &LegConfig) -> RtcConfiguration {
         // state. 500 reserved ~5x the rustrtc default (100) and is almost never
         // reached, so restore the default to cut per-leg reserved memory.
         rtp_buffer_capacity: 100,
+        // Correlate rustrtc media/ICE logs with the call (see LegConfig::call_id).
+        label: cfg.call_id.clone(),
         runtime_handle: tokio::runtime::Handle::try_current().ok(),
         media_capabilities: Some(rustrtc::config::MediaCapabilities {
             audio: cfg.codecs.iter().map(audio_capability_from_codec).collect(),
@@ -1518,6 +1525,7 @@ mod relay_policy_tests {
 
     fn webrtc_cfg(relay_only: bool, ice_servers: Vec<IceServer>) -> LegConfig {
         LegConfig {
+            call_id: None,
             transport: TransportMode::WebRtc,
             codecs: vec![CodecInfo {
                 payload_type: 111,
@@ -1846,6 +1854,7 @@ mod tests {
         // DTLS fingerprint, ICE creds and a UDP/TLS/RTP/SAVPF m-line — this is
         // the proxy-side capability P6 real WebRTC e2e relies on.
         let cfg = LegConfig {
+            call_id: None,
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
@@ -1929,6 +1938,7 @@ mod tests {
         // codec. The `a=ssrc` lets the remote browser demux relayed video
         // immediately instead of waiting out the 2–3 s unsignaled-SSRC timeout.
         let cfg = LegConfig {
+            call_id: None,
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
@@ -1989,6 +1999,7 @@ mod tests {
         // m-line was recvonly with no SSRC and the caller suffered the demux
         // delay.
         let cfg = LegConfig {
+            call_id: None,
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
@@ -2091,6 +2102,7 @@ mod tests {
         use std::net::SocketAddr;
 
         let cfg = LegConfig {
+            call_id: None,
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
@@ -2203,6 +2215,7 @@ mod p24_uac_test {
     #[tokio::test]
     async fn plain_rtp_av_offer_must_be_legacy_sip_compatible() {
         let cfg = LegConfig {
+            call_id: None,
             ice_servers: Vec::new(),
             relay_only: false,
             enable_ice_lite: false,
@@ -2269,6 +2282,7 @@ mod ice_lite_tests {
 
     fn rtp_cfg(enable_ice_lite: bool) -> LegConfig {
         LegConfig {
+            call_id: None,
             enable_ice_lite,
             ..LegConfig::rtp_pcmu()
         }
@@ -2361,6 +2375,7 @@ mod ice_lite_tests {
     #[tokio::test]
     async fn build_rtc_config_forces_ice_lite_off_for_webrtc() {
         let cfg = LegConfig {
+            call_id: None,
             transport: TransportMode::WebRtc,
             enable_ice_lite: true,
             ..LegConfig::rtp_pcmu()
@@ -2373,6 +2388,7 @@ mod ice_lite_tests {
         let rtc_rtp = build_rtc_config(&rtp_cfg(true));
         assert!(rtc_rtp.enable_ice_lite, "RTP legs honor the flag");
         let rtc_srtp = build_rtc_config(&LegConfig {
+            call_id: None,
             transport: TransportMode::Srtp,
             enable_ice_lite: true,
             ..LegConfig::rtp_pcmu()

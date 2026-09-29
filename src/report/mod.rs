@@ -54,23 +54,30 @@ impl TimeBucket {
 
 /// SQL fragment yielding `(to_col - from_col)` in whole seconds for the
 /// given backend (used for ring-duration derivation from timestamps).
-pub fn epoch_diff_secs_sql(backend: sea_orm::DatabaseBackend, from_col: &str, to_col: &str) -> String {
+pub fn epoch_diff_secs_sql(
+    backend: sea_orm::DatabaseBackend,
+    from_col: &str,
+    to_col: &str,
+) -> String {
     match backend {
-        sea_orm::DatabaseBackend::Sqlite => format!(
-            "CAST((julianday({to_col}) - julianday({from_col})) * 86400 AS INTEGER)"
-        ),
-        sea_orm::DatabaseBackend::MySql => format!(
-            "TIMESTAMPDIFF(SECOND, {from_col}, {to_col})"
-        ),
-        sea_orm::DatabaseBackend::Postgres => format!(
-            "CAST(EXTRACT(EPOCH FROM ({to_col} - {from_col})) AS BIGINT)"
-        ),
+        sea_orm::DatabaseBackend::Sqlite => {
+            format!("CAST((julianday({to_col}) - julianday({from_col})) * 86400 AS INTEGER)")
+        }
+        sea_orm::DatabaseBackend::MySql => format!("TIMESTAMPDIFF(SECOND, {from_col}, {to_col})"),
+        sea_orm::DatabaseBackend::Postgres => {
+            format!("CAST(EXTRACT(EPOCH FROM ({to_col} - {from_col})) AS BIGINT)")
+        }
         _ => "0".to_string(),
     }
 }
 
 /// Raw SQL fragment of [`bucket_index_expr`] (for hand-built statements).
-pub fn bucket_index_sql(backend: sea_orm::DatabaseBackend, column_sql: &str, bucket_secs: i64, tz_offset_secs: i64) -> String {
+pub fn bucket_index_sql(
+    backend: sea_orm::DatabaseBackend,
+    column_sql: &str,
+    bucket_secs: i64,
+    tz_offset_secs: i64,
+) -> String {
     match backend {
         // SQLite `/` on integers is already floor-division for positive
         // epochs (and there is no FLOOR function), so plain CAST is exact.
@@ -104,7 +111,12 @@ pub fn bucket_index_expr(
     bucket_secs: i64,
     tz_offset_secs: i64,
 ) -> SimpleExpr {
-    sea_orm::sea_query::Expr::cust(bucket_index_sql(backend, column_sql, bucket_secs, tz_offset_secs))
+    sea_orm::sea_query::Expr::cust(bucket_index_sql(
+        backend,
+        column_sql,
+        bucket_secs,
+        tz_offset_secs,
+    ))
 }
 
 /// UTC instant at which bucket `index` starts (undoing the tz shift used by
@@ -169,7 +181,10 @@ mod tests {
     fn bucket_start_roundtrip_with_tz() {
         // Day bucket with UTC+8: index 0 starts at 1970-01-01 00:00 UTC-8.
         let start = bucket_start_utc(0, 86400, 8 * 3600);
-        assert_eq!(start.format("%Y-%m-%d %H:%M").to_string(), "1969-12-31 16:00");
+        assert_eq!(
+            start.format("%Y-%m-%d %H:%M").to_string(),
+            "1969-12-31 16:00"
+        );
         // An epoch inside the same tz-aligned day maps to the same index.
         let expr = bucket_index_expr(sea_orm::DatabaseBackend::Sqlite, "x", 86400, 8 * 3600);
         // Sanity: the expression embeds the tz shift.

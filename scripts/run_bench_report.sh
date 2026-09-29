@@ -142,7 +142,7 @@ run_regression() {
 
   step "regression: wholesale Rust integration tests"
   export CC=clang
-  cargo test --features default,wholesale,contact-center --test wholesale 2>&1 | tee "$rust_log" || true
+  cargo test --features default,wholesale,contact-center --test e2e_addons -- wholesale:: 2>&1 | tee "$rust_log" || true
 
   # --- parse summaries ---
   local p2p_total p2p_passed p2p_failed p2p_skipped p2p_secs

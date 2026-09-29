@@ -712,10 +712,13 @@ async fn test_webrtc_pcmu_rtp_fastpath_recording_both_legs_audio_impl() -> Resul
 
     // Hang up and let the recording finalize.
     alice.hangup(&dialog_id).await.ok();
-    sleep(Duration::from_millis(1000)).await;
 
     // Locate the recorded WAV via the CDR.
-    let records = server.cdr_capture.get_all_records().await;
+    let records = server
+        .cdr_capture
+        .wait_for_records(1, Duration::from_secs(5))
+        .await
+        .expect("CDR with recorder entry should be generated after hangup");
     let record = records
         .iter()
         .find(|r| !r.recorder.is_empty())

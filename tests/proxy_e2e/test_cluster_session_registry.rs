@@ -6,6 +6,7 @@
 //! record must disappear after the call ends (RAII unregister).
 
 use crate::common::test_ua::{TestUa, TestUaConfig, TestUaEvent};
+use crate::common::wait::{wait_for_value, wait_until};
 use anyhow::Result;
 use async_trait::async_trait;
 use rsipstack::transaction::endpoint::MessageInspector;
@@ -245,12 +246,17 @@ async fn test_cluster_session_registry_publishes_and_clears_call_ownership() -> 
         Ok(Err(e)) => return Err(anyhow::anyhow!("caller task failed: {e}")),
         Err(_) => anyhow::bail!("make_call did not resolve after answer"),
     };
-    sleep(Duration::from_millis(400)).await;
-
-    // Find the live session id on A.
-    let entries = server_a.inner.active_call_registry.list_recent(10);
-    assert!(!entries.is_empty(), "call must be registered on node A");
-    let session_id = entries[0].session_id.clone();
+    // Wait until the RAII registration lands on A, then take the session id.
+    let session_id = wait_for_value(Duration::from_secs(5), || async {
+        server_a
+            .inner
+            .active_call_registry
+            .list_recent(10)
+            .first()
+            .map(|e| e.session_id.clone())
+    })
+    .await
+    .expect("call must be registered on node A");
 
     // Ownership record visible from BOTH nodes via the shared db backend.
     let owner_from_a = server_a
@@ -283,17 +289,16 @@ async fn test_cluster_session_registry_publishes_and_clears_call_ownership() -> 
 
     // End the call; the RAII guard unregisters (fire-and-forget spawn).
     tokio::time::timeout(Duration::from_secs(5), caller.hangup(&dialog_id)).await??;
-    sleep(Duration::from_millis(800)).await;
-
-    let owner_after = server_b
-        .inner
-        .session_registry
-        .lookup_owner(&session_id)
-        .await;
-    assert!(
-        owner_after.is_none(),
-        "registry record must be cleared after call end (got {owner_after:?})"
-    );
+    wait_until(Duration::from_secs(5), || async {
+        server_b
+            .inner
+            .session_registry
+            .lookup_owner(&session_id)
+            .await
+            .is_none()
+    })
+    .await
+    .expect("registry record must be cleared after call end");
 
     caller.stop();
     callee.stop();

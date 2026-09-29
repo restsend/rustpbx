@@ -194,10 +194,17 @@ accept_immediately = true
 passthrough_ringback = false
 # acd_policy = "default"       # Reference to ACD policy (CC addon)
 
-# Hold Music
+# Hold Music（逐队列覆盖）
 [proxy.queues.support_main.hold]
 audio_file = "sounds/hold_music.wav"
 loop_playback = true
+
+# 全局排队等待音兜底（`[proxy] queue_hold_music`）：队列自身未配置 hold 时
+# 生效；逐队列配置优先。未配置且队列无自带音频时，技能组队列回落内置
+# 回铃音，路由队列保持无音（与历史行为一致）。
+# 在 config.toml 顶层 `[proxy]` 段：
+# queue_hold_music = "sounds/moh/kzmusic.wav"
+# voicemail_greeting = "sounds/voicemail/custom.wav"
 
 # Distribution Strategy
 [proxy.queues.support_main.strategy]

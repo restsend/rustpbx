@@ -1,5 +1,6 @@
 use crate::common::test_helpers;
 use crate::common::test_ua::{TestUa, TestUaEvent};
+use crate::common::wait::wait_until;
 use anyhow::Result;
 use async_trait::async_trait;
 use rustpbx::call::user::SipUser;
@@ -352,8 +353,12 @@ async fn test_call_queue_routing() {
         );
     }
 
-    // Give the session a moment to flush on_call_ended
-    sleep(Duration::from_millis(500)).await;
+    // Wait for the on_call_ended hook to flush (event-driven, not a fixed wait).
+    wait_until(Duration::from_secs(5), || async {
+        !server.ended_events.lock().await.is_empty()
+    })
+    .await
+    .expect("on_call_ended hook should have fired after caller hangup");
     {
         let ended_events = server.ended_events.lock().await;
         assert!(
