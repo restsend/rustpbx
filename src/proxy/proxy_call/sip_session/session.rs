@@ -11036,10 +11036,11 @@ impl SipSession {
                         }
                     }
                 } else if let Some(ref call_id) = dialog_id {
-                    // Dynamic legs (queue agents): store the INVITE dialog on the leg
-                    // AND register a RAII ClientDialogGuard so the agent leg is
-                    // automatically hung up (BYE) when the session is destroyed —
-                    // these legs are not tracked in callee_dialogs.
+                    // Dynamic legs (queue agents): store the INVITE dialog on the leg.
+                    // The dial task in `initiate_sip_leg` already owns the
+                    // ClientDialogGuard for this dialog (taken before it sent
+                    // LegConnected) and drops it on session cancel or leg removal;
+                    // a second guard here raced it and sent a duplicate BYE.
                     if let Some(invite) = self
                         .server
                         .dialog_layer
@@ -11056,10 +11057,6 @@ impl SipSession {
                             leg_id.clone(),
                             rsipstack::dialog::dialog::Dialog::Invite(invite),
                         );
-                        self.callee_guards.push(ClientDialogGuard::new(
-                            self.server.dialog_layer.clone(),
-                            dlg_id,
-                        ));
                     }
                 }
 
