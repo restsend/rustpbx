@@ -1573,8 +1573,9 @@ pub struct ProxyConfig {
     /// one session/CDR: root session-id inheritance, transfer-source
     /// recording, return-app fallbacks and the cluster session registry all
     /// keep working, and the transferor leg hangs up only after the new leg
-    /// answers (restored untouched on failure). Replaces (attended) REFERs
-    /// always take the raw originate. Default: enabled.
+    /// answers (restored untouched on failure).
+    /// Attended (Replaces) REFERs to app targets (IVR/queue) run the
+    /// in-session hand-off; failures roll back atomically. Default: enabled.
     #[serde(default = "default_true")]
     pub inbound_refer_in_session: bool,
     /// SIP conference factory URI. Disabled when unset.

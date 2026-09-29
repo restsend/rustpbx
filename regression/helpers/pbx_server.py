@@ -151,6 +151,10 @@ def find_or_build_binary(project_root: Path, features: Optional[list[str]] = Non
         raise RuntimeError(f"Binary not found at {target} after build")
     # Promote to the stable copy so future sessions skip the build entirely.
     try:
+        # macOS SIGKILLs execs of an in-place replaced signed binary —
+        # always replace through a fresh file.
+        if stable.exists():
+            stable.unlink()
         shutil.copy2(target, stable)
         logger.info("Promoted build to stable copy at %s", stable)
     except OSError as exc:

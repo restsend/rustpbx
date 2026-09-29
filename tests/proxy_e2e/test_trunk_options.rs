@@ -2,7 +2,7 @@ use crate::common::e2e_test_server::E2eTestServer;
 use anyhow::Result;
 use rsipstack::EndpointBuilder;
 use rsipstack::sip::{
-    Method, Param, SipMessage, Version,
+    Method, Param, Request, SipMessage, Version,
     headers::CallId,
     headers::typed::CSeq,
     typed::{From as FromHeader, To as ToHeader, Via},
@@ -208,5 +208,85 @@ async fn test_options_from_unknown_ip_gets_no_response() -> Result<()> {
 
     server.stop();
     info!("test_options_from_unknown_ip_gets_no_response PASSED");
+    Ok(())
+}
+
+/// WS keepalive: out-of-dialog OPTIONS over a Channel transport (the exact
+/// production WS-adapter shape) must be answered 200 OK.
+#[tokio::test]
+async fn test_options_over_websocket_channel_gets_200_ok() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let server = E2eTestServer::start_with_config(trunk_options_proxy_config()).await?;
+    sleep(Duration::from_millis(200)).await;
+
+    // Simulate a SIP-over-WebSocket client link (Channel variant).
+    let (input_tx, input_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (output_tx, mut output_rx) = tokio::sync::mpsc::unbounded_channel();
+    let client_addr = rsipstack::transport::SipAddr {
+        r#type: Some(rsipstack::sip::Transport::Ws),
+        addr: rsipstack::sip::HostWithPort {
+            host: "127.0.0.1".parse()?,
+            port: Some(51999.into()),
+        },
+    };
+    let connection = rsipstack::transport::channel::ChannelConnection::create_connection(
+        input_rx, output_tx, client_addr.clone(), None,
+    )
+    .await?;
+    // add_connection: how proxy/ws.rs attaches the HTTP WS adapter.
+    server
+        .server_ref
+        .endpoint
+        .inner
+        .transport_layer
+        .add_connection(rsipstack::transport::SipConnection::Channel(connection.clone()));
+
+    let branch = format!(
+        "z9hG4bK-ws-keepalive-{}",
+        uuid::Uuid::new_v4().to_string().replace('-', "")
+    );
+    let tag = uuid::Uuid::new_v4().to_string()[..8].to_string();
+    let call_id = uuid::Uuid::new_v4().to_string();
+    let request = Request::try_from(format!(
+        "OPTIONS sip:keepalive@127.0.0.1:{} SIP/2.0\r\n\
+         Via: SIP/2.0/WS 127.0.0.1:51999;branch={branch};rport\r\n\
+         From: <sip:keepalive@127.0.0.1:51999>;tag={tag}\r\n\
+         To: <sip:keepalive@127.0.0.1:{}>\r\n\
+         Call-ID: {call_id}\r\n\
+         CSeq: 1 OPTIONS\r\n\
+         Max-Forwards: 70\r\n\
+         Content-Length: 0\r\n\r\n",
+        server.port, server.port
+    ))?;
+    // The event carries the Channel transport the exemption matches on.
+    input_tx
+        .send(rsipstack::transport::TransportEvent::Incoming(
+            rsipstack::sip::SipMessage::Request(request),
+            rsipstack::transport::SipConnection::Channel(connection),
+            client_addr,
+        ))
+        .expect("channel link closed");
+
+    let status = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(rsipstack::transport::TransportEvent::Incoming(msg, _, _)) =
+                output_rx.recv().await
+                && let rsipstack::sip::SipMessage::Response(resp) = msg
+            {
+                break u16::from(resp.status_code);
+            }
+        }
+    })
+    .await
+    .expect("no response to WS OPTIONS keepalive within 3s (dropped like UDP spam?)");
+
+    assert_eq!(
+        status, 200,
+        "OPTIONS over the WebSocket channel should be answered 200 OK"
+    );
+
+    server.stop();
+    info!("test_options_over_websocket_channel_gets_200_ok PASSED");
     Ok(())
 }

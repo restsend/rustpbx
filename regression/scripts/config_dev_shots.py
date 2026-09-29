@@ -172,14 +172,15 @@ def spawn_pc(name: str, extra: dict[str, str], args: list[str]) -> subprocess.Po
         "RESTSEND_DESK_CONFIG": str(TMP / "desk.bootstrap.json"),
         "RESTSEND_PC_DEVICE": "tone",
         "RESTSEND_PC_STATUS_PORT": str(STATUS_PORT),
-        "RUST_LOG": "warn",
+        "RUST_LOG": "info",
     })
     env.update(extra)
     bs = TMP / "data" / "boot_state.json"
     if bs.exists():
         bs.unlink()
+    client_log = open(TMP / f"client-{name}.log", "w")
     return subprocess.Popen([str(PC_BIN), *args], env=env, cwd=str(RESTSEND),
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            stdout=client_log, stderr=subprocess.STDOUT)
 
 
 def wait_registered(timeout: float = 25.0) -> bool:

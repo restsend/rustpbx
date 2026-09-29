@@ -269,6 +269,8 @@ action = {{ type = "transfer", target = "{queue_target}" }}
                 session_hook: Some(session_hook),
                 agent_registry: Some(adapter),
                 rwi_gateway: None,
+                #[cfg(feature = "addon-cc")]
+                cc_policy_db: None,
             },
         )
         .await

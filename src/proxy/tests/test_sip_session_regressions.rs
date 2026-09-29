@@ -4230,6 +4230,268 @@ async fn test_leg_ringing_fires_on_call_ringing_hook() {
     );
 }
 
+/// Queue agent attribution: the pin lands BEFORE the LegAdd, so BOTH
+/// `call_ringing` events carry `agent_id` with no ring-time hook race.
+#[tokio::test]
+async fn test_pinned_agent_rides_leg_and_session_call_ringing() {
+    use crate::rwi::gateway::RwiGateway;
+    use crate::rwi::session::OwnershipMode;
+    use parking_lot::RwLock as PlRwLock;
+
+    let gateway = Arc::new(PlRwLock::new(RwiGateway::new()));
+    let mut rx = {
+        let mut gw = gateway.write();
+        let sid = gw
+            .create_session(crate::rwi::RwiIdentity {
+                token: "test".into(),
+                scopes: vec!["call.control".into()],
+            })
+            .read()
+            .id
+            .clone();
+        let (tx, rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, tx);
+        gw.claim_call_ownership(&sid, "test-session".to_string(), OwnershipMode::Control)
+            .expect("claim the test session's call");
+        rx
+    };
+
+    let (server, _config) =
+        create_test_server_with_rwi_gateway(ProxyConfig::default(), gateway.clone()).await;
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session_on_server(server, dialplan).await;
+
+    // The queue app pins the agent BEFORE originating the agent leg (same
+    // FIFO command queue, so the pin is processed ahead of the INVITE).
+    session
+        .execute_command(
+            CallCommand::PinAgentMeta {
+                agent_id: Some("1001".to_string()),
+                agent_name: Some("Alice".to_string()),
+            },
+            None,
+        )
+        .await;
+    assert_eq!(
+        session.session_ext_get("resolved_agent_id").as_deref(),
+        Some("1001"),
+        "PinAgentMeta must plant the canonical resolved_agent_id \
+         (the CC hook's first-resolution path)"
+    );
+    assert_eq!(
+        session.session_ext_get("agent_name").as_deref(),
+        Some("Alice")
+    );
+
+    // ...then the dynamic leg is added and receives 180 Ringing.
+    let agent_leg = LegId::from("queue-agent");
+    session
+        .legs
+        .insert(agent_leg.clone(), Leg::new(agent_leg.clone()));
+    session
+        .execute_command(
+            CallCommand::LegRinging {
+                leg_id: agent_leg.clone(),
+            },
+            None,
+        )
+        .await;
+
+    // Exactly two ringing events: leg-level (payload attribution) then
+    // session-level (call-meta enrichment).
+    let mut ringings = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if event["event_type"] == "call_ringing" {
+            ringings.push(event);
+        }
+    }
+    assert_eq!(
+        ringings.len(),
+        2,
+        "leg-level + session-level call_ringing expected, got {ringings:?}"
+    );
+
+    let leg_event = ringings
+        .iter()
+        .find(|e| e["leg_id"] == "queue-agent")
+        .expect("leg-level call_ringing expected");
+    assert_eq!(
+        leg_event["agent_id"].as_str(),
+        Some("1001"),
+        "leg-level call_ringing must carry the pinned agent on its payload: {leg_event}"
+    );
+    assert_eq!(
+        leg_event["agent_name"].as_str(),
+        Some("Alice"),
+        "leg-level call_ringing must carry the agent name: {leg_event}"
+    );
+
+    let session_event = ringings
+        .iter()
+        .find(|e| e["leg_id"].is_null())
+        .expect("session-level call_ringing expected");
+    assert_eq!(
+        session_event["agent_id"].as_str(),
+        Some("1001"),
+        "session-level call_ringing must be enriched with the pinned agent \
+         from the call meta: {session_event}"
+    );
+}
+
+/// The pinned attribution must reach both ringing events regardless of
+/// session-hook timing.
+#[tokio::test]
+async fn test_pinned_agent_survives_slow_session_hooks() {
+    use crate::rwi::gateway::RwiGateway;
+    use crate::rwi::session::OwnershipMode;
+    use parking_lot::RwLock as PlRwLock;
+    use std::time::Duration;
+
+    struct SlowHook;
+    #[async_trait]
+    impl crate::proxy::proxy_call::session_hooks::CallSessionHook for SlowHook {
+        async fn on_call_ringing(&self, _ctx: &CallSessionContext, _early_media: bool) {
+            // Emulate a slow agent-resolution backend at ring time.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    for delay_ms in [0u64, 5, 50, 200] {
+        let gateway = Arc::new(PlRwLock::new(RwiGateway::new()));
+        let mut rx = {
+            let mut gw = gateway.write();
+            let sid = gw
+                .create_session(crate::rwi::RwiIdentity {
+                    token: "test".into(),
+                    scopes: vec!["call.control".into()],
+                })
+                .read()
+                .id
+                .clone();
+            let (tx, rx) = mpsc::unbounded_channel();
+            gw.set_session_event_sender(&sid, tx);
+            gw.claim_call_ownership(&sid, "test-session".to_string(), OwnershipMode::Control)
+                .expect("claim the test session's call");
+            rx
+        };
+
+        let (mut server, _config) =
+            create_test_server_with_rwi_gateway(ProxyConfig::default(), gateway.clone()).await;
+        Arc::get_mut(&mut server)
+            .expect("unique server ownership for hook registration")
+            .session_hooks = Arc::new(vec![Arc::new(SlowHook)]);
+        let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+            queue_name: "support".to_string(),
+            ..Default::default()
+        });
+        let mut session = build_session_on_server(server, dialplan).await;
+
+        session
+            .execute_command(
+                CallCommand::PinAgentMeta {
+                    agent_id: Some("1001".to_string()),
+                    agent_name: Some("Alice".to_string()),
+                },
+                None,
+            )
+            .await;
+        let agent_leg = LegId::from("queue-agent");
+        session
+            .legs
+            .insert(agent_leg.clone(), Leg::new(agent_leg.clone()));
+        session
+            .execute_command(
+                CallCommand::LegRinging {
+                    leg_id: agent_leg.clone(),
+                },
+                None,
+            )
+            .await;
+
+        let mut ringings = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if event["event_type"] == "call_ringing" {
+                ringings.push(event);
+            }
+        }
+        assert_eq!(
+            ringings.len(),
+            2,
+            "hook delay {delay_ms}ms: leg + session ringing expected, got {ringings:?}"
+        );
+        for event in &ringings {
+            assert_eq!(
+                event["agent_id"].as_str(),
+                Some("1001"),
+                "hook delay {delay_ms}ms: ringing must carry the pinned agent \
+                 regardless of hook timing: {event}"
+            );
+        }
+    }
+}
+
+/// Negative contract: without the pin, the leg-level `call_ringing` carries
+/// no agent attribution.
+#[tokio::test]
+async fn test_leg_ringing_without_pin_carries_no_agent() {
+    use crate::rwi::gateway::RwiGateway;
+    use crate::rwi::session::OwnershipMode;
+    use parking_lot::RwLock as PlRwLock;
+
+    let gateway = Arc::new(PlRwLock::new(RwiGateway::new()));
+    let mut rx = {
+        let mut gw = gateway.write();
+        let sid = gw
+            .create_session(crate::rwi::RwiIdentity {
+                token: "test".into(),
+                scopes: vec!["call.control".into()],
+            })
+            .read()
+            .id
+            .clone();
+        let (tx, rx) = mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, tx);
+        gw.claim_call_ownership(&sid, "test-session".to_string(), OwnershipMode::Control)
+            .expect("claim the test session's call");
+        rx
+    };
+
+    let (server, _config) =
+        create_test_server_with_rwi_gateway(ProxyConfig::default(), gateway.clone()).await;
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let mut session = build_session_on_server(server, dialplan).await;
+
+    // NO PinAgentMeta — the leg is dialed bare.
+    let agent_leg = LegId::from("queue-agent");
+    session
+        .legs
+        .insert(agent_leg.clone(), Leg::new(agent_leg.clone()));
+    session
+        .execute_command(
+            CallCommand::LegRinging {
+                leg_id: agent_leg.clone(),
+            },
+            None,
+        )
+        .await;
+
+    let leg_event = (&mut rx)
+        .try_recv()
+        .ok()
+        .filter(|e| e["event_type"] == "call_ringing" && e["leg_id"] == "queue-agent")
+        .expect("leg-level call_ringing expected");
+    assert!(
+        leg_event.get("agent_id").is_none(),
+        "without a pin the leg-level ringing must NOT invent agent attribution: {leg_event}"
+    );
+}
+
 /// The RWI originate path dials its first leg outside the regular
 /// `dial_sequential` flow, so it drives the session lifecycle hooks through
 /// `fire_on_call_ringing_hooks` / `fire_on_call_connected_hooks`. These

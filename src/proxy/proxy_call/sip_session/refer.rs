@@ -48,29 +48,55 @@ impl SipSession {
         }
         transaction.reply(StatusCode::Accepted).await?;
         info!(session_id = %self.id, %dialog_id, %refer_to, "Inbound REFER received by session");
+        let t_refer = std::time::Instant::now();
         let (target_uri, replaces_header) = Self::parse_refer_to(&refer_to);
         let conference_target = self.server.conference_server.list_conferences_detail().await.into_iter()
             .any(|room| room.focus_uri.as_deref() == Some(target_uri.as_str()));
         if conference_target && replaces_header.is_some() {
-            dialog.notify_refer(StatusCode::NotImplemented, "terminated;reason=noresource").await?;
+            SipSession::notify_refer_bounded(&dialog, StatusCode::NotImplemented, "terminated;reason=noresource").await?;
             return Ok(());
         }
-        if let Some(replaces) = replaces_header.as_deref() {
-            dialog.notify_refer(StatusCode::Trying, "active").await.ok();
-            return self.handle_refer_replaces(&dialog_id, replaces, &target_uri).await;
-        }
-        let app_target = if replaces_header.is_none() && !conference_target {
+        // P1a: a locally registered target rings directly, bypassing route
+        // rules (mirrors the inbound INVITE locator-first order).
+        let locator_direct = !conference_target
+            && Self::refer_target_locally_registered(&self.server, &target_uri).await;
+        // R1: resolve app targets for BOTH refer flavors; an attended REFER
+        // to an app runs the in-session hand-off like the blind path.
+        let app_target = if !conference_target && !locator_direct {
             match Self::resolve_refer_app_target(
                 &self.server, &self.context.session_id, &target_uri, &TransactionCookie::default(),
             ).await {
                 Ok(target) => target,
-                Err((code, reason)) => {
+                Err((code, reason)) if replaces_header.is_none() => {
                     warn!(session_id = %self.id, %reason, code, "Failed to resolve REFER target");
-                    dialog.notify_refer(StatusCode::from(code), "terminated;reason=noresource").await?;
+                    SipSession::notify_refer_bounded(&dialog, StatusCode::from(code), "terminated;reason=noresource").await?;
                     return Ok(());
+                }
+                // Attended: on lookup failure fall through to the room path.
+                Err((code, reason)) => {
+                    warn!(session_id = %self.id, %reason, code, "REFER app target lookup failed; falling back to room path");
+                    None
                 }
             }
         } else { None };
+        info!(session_id = %self.id, elapsed_ms = t_refer.elapsed().as_millis() as u64,
+            locator_direct, attended = replaces_header.is_some(),
+            app_target = app_target.as_deref().unwrap_or("<direct-sip>"),
+            "REFER stage: target resolved");
+        if let Some(replaces) = replaces_header.as_deref() {
+            // Bounded: the sender's contact may be stale; a doomed NOTIFY
+            // must not starve the session loop.
+            if let Err(error) = SipSession::notify_refer_bounded(&dialog, StatusCode::Trying, "active").await {
+                warn!(session_id = %self.id, error = %error, "REFER NOTIFY (Trying) failed; continuing transfer");
+            }
+            if let Some(app_target) = app_target {
+                return self.handle_inbound_refer(
+                    dialog_id, app_target,
+                    Self::refer_application_headers(request.headers.iter()), callee_state_rx,
+                ).await;
+            }
+            return self.handle_refer_replaces(&dialog_id, replaces, &target_uri).await;
+        }
         let in_session = replaces_header.is_none()
             && (conference_target || app_target.is_some() || self.server.proxy_config.load().inbound_refer_in_session);
         if in_session {
@@ -186,6 +212,11 @@ impl SipSession {
             let dialog = self.server.dialog_layer.get_dialog(&target_dialog)
                 .ok_or_else(|| (481, "Replaces tags do not match a local dialog".into()))?;
             if !dialog.state().is_confirmed() || early_only {
+                tracing::warn!(
+                    session_id = %self.context.session_id,
+                    state = ?dialog.state(), early_only,
+                    "Replaces target dialog not established (diagnostic)"
+                );
                 return Err((486, "Replaces requires an established consultation".into()));
             }
             if owner.session_id() == self.context.session_id {
@@ -247,40 +278,58 @@ impl SipSession {
         // Finish the REFER subscription before any cleanup can remove B's dialog.
         // Failure to deliver NOTIFY must not prevent teardown of a failed setup.
         if let Some(Dialog::Invite(dialog)) = self.server.dialog_layer.get_dialog(source_dialog) {
-            if let Err(error) = dialog.notify_refer(StatusCode::from(status), "terminated;reason=noresource").await {
+            if let Err(error) = SipSession::notify_refer_bounded(&dialog, StatusCode::from(status), "terminated;reason=noresource").await {
                 warn!(session_id = %self.id, %error, "Failed to send final attended REFER NOTIFY");
             } else {
                 info!(session_id = %self.id, status, "Sent final attended REFER NOTIFY");
             }
         }
-        if result.is_err() && let Some((room, owner)) = failed_setup {
+        if result.is_err() && let Some((room, _owner)) = failed_setup {
+            // R2: roll back atomically — customer restored held with the
+            // agent, both sessions stay up, no zombie room.
             let manager = self.server.conference_server.manager_raw().clone();
-            let caller = self.participant_leg(&LegId::from("caller"));
-            let remote_attached = manager.get_conference(&room).await
-                .is_some_and(|room| room.participants.keys().any(|leg| leg != &caller));
-            // Handle the local hangup directly. Ignore its queued room-ended
-            // notification so we do not initiate the same hangup twice.
+            let mut rolled_back_leg = None;
             if self.conference.as_ref().is_some_and(|attachment| attachment.conference_id == room) {
-                let attachment = self.conference.take().unwrap();
-                drop(self.legs.remove_conference_bridge_handle(&attachment.leg_id));
-                self.conference_bridge.conf_id = None;
+                let leg = self.conference.as_ref().unwrap().leg_id.clone();
+                if let Err(error) = self.leave_conference_leg(&leg).await {
+                    warn!(%error, %leg, "Failed to detach transfer room participant");
+                }
+                rolled_back_leg = Some(leg);
             }
             if let Err(error) = manager.destroy_conference(&room).await {
                 warn!(%error, "Failed to destroy incomplete transfer room");
             }
-            if !remote_attached {
-                // The room cannot notify a session which never attached C.
-                crate::utils::spawn(async move {
-                    if let Err(error) = owner.send_command_async(CallCommand::Hangup(
-                        HangupCommand::local("attended transfer setup failed", None, None),
-                    )).await {
-                        warn!(%error, "Failed to deliver consultation cleanup");
-                    }
-                });
+            if let Some(leg) = rolled_back_leg {
+                // Restore the held state media-only, then re-select the pair.
+                self.update_leg_state(&leg, crate::call::domain::LegState::Hold);
+                if let Err(error) = self.apply_hold_media(&leg, None).await {
+                    warn!(session_id = %self.id, %leg, %error, "Failed to restore hold media after transfer rollback");
+                }
+                self.update_media_path().await;
+                self.sync_rtp_timeout_pause();
+                info!(session_id = %self.id, %leg, room = %room.0, "Attended REFER rolled back; customer restored to held state");
             }
-            self.handle_hangup(&HangupCommand::local("attended transfer setup failed", None, None)).await;
         }
         Ok(())
+    }
+
+    /// True when the REFER target has a live local registration — dial it
+    /// directly instead of route-table resolution. Fails open on locator
+    /// errors (route resolution then decides).
+    async fn refer_target_locally_registered(server: &SipServerRef, target_uri: &str) -> bool {
+        let Ok(parsed) = rsipstack::sip::Uri::try_from(target_uri) else {
+            return false;
+        };
+        if !server.is_same_realm(parsed.host().to_string().as_str()).await {
+            return false;
+        }
+        match server.locator.lookup(&parsed).await {
+            Ok(locations) => !locations.is_empty(),
+            Err(error) => {
+                warn!(error = %error, target = %target_uri, "REFER locator fast-path lookup failed; falling back to route resolution");
+                false
+            }
+        }
     }
 
     /// Resolve REFER feature codes and application routes without executing a transfer.
@@ -352,8 +401,28 @@ impl SipSession {
                     urlencoding::encode(&user)
                 )
             }
-            Some(crate::config::RouteResult::Application { .. }) => {
-                format!("toivr:{}?refer_to={}", user, urlencoding::encode(&user))
+            Some(crate::config::RouteResult::Application { app_params, .. }) => {
+                // P1b: an application-routed number that is a known cc agent
+                // hands off straight via queue:agent:<ext>.
+                match Self::refer_target_cc_agent(server, &user).await {
+                    Some(ext) => {
+                        let mut target =
+                            format!("queue:agent:{ext}?refer_to={}", urlencoding::encode(&user));
+                        if let Some(ivr) = app_params
+                            .as_ref()
+                            .and_then(|p| p.get("file"))
+                            .and_then(|f| f.as_str())
+                            .and_then(Self::ivr_display_name)
+                        {
+                            target.push_str(&format!(
+                                "&return_app=ivr&return_target={}",
+                                urlencoding::encode(&ivr)
+                            ));
+                        }
+                        target
+                    }
+                    None => format!("toivr:{}?refer_to={}", user, urlencoding::encode(&user)),
+                }
             }
             _ => return Ok(None),
         };
@@ -361,6 +430,25 @@ impl SipSession {
         info!(session_id = %original_session_id, %target_uri, %handoff_target,
             "Resolved REFER application handoff");
         Ok(Some(handoff_target))
+    }
+
+    /// Side-effect-free probe: is this dialled user a known cc agent extension?
+    async fn refer_target_cc_agent(server: &SipServerRef, user: &str) -> Option<String> {
+        let registry = server.agent_registry.as_ref()?;
+        let target = format!("agent:{user}");
+        registry
+            .has_target(&target)
+            .await
+            .then(|| user.to_string())
+    }
+
+    /// `app_params.file` → IVR display name
+    /// ("config/ivr/x.toml" → "x", "db://ivr/x.generated.toml" → "x").
+    fn ivr_display_name(file: &str) -> Option<String> {
+        let base = file.rsplit('/').next()?.trim();
+        let base = base.strip_suffix(".toml").unwrap_or(base);
+        let base = base.strip_suffix(".generated").unwrap_or(base);
+        (!base.is_empty()).then(|| base.to_string())
     }
 
     /// Parse Refer-To URI, extracting the base target and optional Replaces header.
@@ -671,8 +759,7 @@ impl SipSession {
                         Ok(())
                     }
                     Err(e) => Err(anyhow!("Failed to send NOTIFY: {}", e)),
-                },
-                _ => {
+                },                _ => {
                     warn!("Dialog is not a server invite dialog, cannot send NOTIFY");
                     Ok(())
                 }

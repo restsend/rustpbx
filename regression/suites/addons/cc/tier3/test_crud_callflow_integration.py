@@ -319,22 +319,20 @@ entries = []
     # The queue-dialed agent's phone rings → call_ringing must be emitted with the
     # agent id. This was previously missing because the dynamic-leg 180 Ringing
     # never fired the on_call_ringing session hooks.
-    # NOTE: TWO call_ringing events fire per queue dial — the leg-level
-    # SIP 180 (fired by update_leg_state before PinAgentMeta lands) and
-    # the queue-level event (enriched by the CC hook). Only the queue-level
-    # one carries agent_id; the leg-level one may race PinAgentMeta's
-    # session-ext write. Assert on the ENRICHED event, not the first.
+    # BOTH call_ringing events must carry the agent id (pin lands before
+    # the INVITE; queue-level event via call-meta enrichment).
     ring_events = [e for e in event_checker.webhook.events_for_call(call_id)
                    if e.event_type == "call_ringing"]
     assert ring_events, (
         f"call_ringing missing for queue-dialed agent. wh={wh_types}")
-    ring = next(
-        (e for e in ring_events if e.payload.get("agent_id")),
-        ring_events[0],
-    )
-    assert ring.payload.get("agent_id") in ("1001",), (
-        f"call_ringing must carry the agent_id, got {ring.payload!r:.150}")
-    assert ring.call_id == call_id, f"call_ringing call_id mismatch: {ring!r:.120}"
+    assert len(ring_events) >= 2, (
+        f"leg-level + session-level call_ringing expected, "
+        f"got {len(ring_events)}: {[(e.event_type, e.sequence) for e in ring_events]}")
+    for ring in ring_events:
+        assert ring.payload.get("agent_id") in ("1001",), (
+            f"call_ringing must carry the agent_id, got {ring.payload!r:.150}")
+        assert ring.call_id == call_id, f"call_ringing call_id mismatch: {ring!r:.120}"
+    ring = ring_events[0]
 
     # call_answered must be emitted exactly once for the logical agent answer.
     # The IVR→queue→agent→return-to-IVR flow used to re-fire call_answered on

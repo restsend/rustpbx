@@ -55,6 +55,8 @@ pub struct TestUa {
     answer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
     /// Store received offer SDP per dialog from incoming INVITE
     received_offer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
+    /// From-user of each incoming INVITE (caller-id assertions).
+    incoming_from_users: Arc<Mutex<HashMap<DialogId, String>>>,
     /// Store negotiated answer SDP received by caller side after INVITE 200 OK
     negotiated_answer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
     /// Real rustrtc PeerConnection used when the UA runs with live media
@@ -242,6 +244,7 @@ impl TestUa {
             contact_uri: None,
             answer_sdps: Arc::new(Mutex::new(HashMap::new())),
             received_offer_sdps: Arc::new(Mutex::new(HashMap::new())),
+            incoming_from_users: Arc::new(Mutex::new(HashMap::new())),
             negotiated_answer_sdps: Arc::new(Mutex::new(HashMap::new())),
             webrtc_pc,
             media_mode,
@@ -330,6 +333,7 @@ impl TestUa {
             let contact_clone = self.contact_uri.clone().unwrap();
             let cancel_token = self.cancel_token.clone();
             let received_sdps_clone = self.received_offer_sdps.clone();
+            let incoming_from_clone = self.incoming_from_users.clone();
 
             rustpbx::utils::spawn(async move {
                 Self::process_incoming_request(
@@ -339,6 +343,7 @@ impl TestUa {
                     contact_clone,
                     cancel_token,
                     received_sdps_clone,
+                    incoming_from_clone,
                 )
                 .await
                 .ok();
@@ -405,7 +410,23 @@ impl TestUa {
         callee: &str,
         sdp_offer: Option<String>,
     ) -> Result<DialogId> {
-        self.make_call_inner(callee, sdp_offer, None).await
+        self.make_call_inner(callee, sdp_offer, None, Vec::new()).await
+    }
+
+    /// Make a call whose initial INVITE carries extra application headers
+    /// (surfaced in `call_created.sip_headers`).
+    pub async fn make_call_with_headers(
+        &self,
+        callee: &str,
+        sdp_offer: Option<String>,
+        extra_headers: Vec<(String, String)>,
+    ) -> Result<DialogId> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.make_call_inner(callee, sdp_offer, None, extra_headers),
+        )
+        .await
+        .map_err(|_| anyhow!("make_call_with_headers timed out after 30s for callee '{}'", callee))?
     }
 
     /// Make a call whose PC-generated SDP offer advertises `fake_ip` in the
@@ -420,7 +441,7 @@ impl TestUa {
     ) -> Result<DialogId> {
         tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            self.make_call_inner(callee, None, Some(fake_ip.to_string())),
+            self.make_call_inner(callee, None, Some(fake_ip.to_string()), Vec::new()),
         )
         .await
         .map_err(|_| anyhow!("make_call_spoofed_cline timed out after 30s for callee '{callee}'"))?
@@ -431,6 +452,7 @@ impl TestUa {
         callee: &str,
         sdp_offer: Option<String>,
         spoof_cline_ip: Option<String>,
+        extra_headers: Vec<(String, String)>,
     ) -> Result<DialogId> {
         let dialog_layer = self
             .dialog_layer
@@ -466,6 +488,10 @@ impl TestUa {
         .map_err(|e| anyhow!("Invalid proxy URI: {:?}", e))?;
         let route_header =
             rsipstack::sip::Header::from(rsipstack::sip::typed::Route::from(proxy_uri));
+        let mut invite_headers = vec![route_header];
+        for (name, value) in extra_headers {
+            invite_headers.push(rsipstack::sip::Header::Other(name.into(), value.into()));
+        }
 
         let (content_type, offer) = if let Some(sdp) = sdp_offer {
             (Some("application/sdp".to_string()), Some(sdp.into_bytes()))
@@ -517,7 +543,7 @@ impl TestUa {
             offer,
             contact: contact.clone(),
             credential: Some(credential),
-            headers: Some(vec![route_header]),
+            headers: Some(invite_headers),
             ..Default::default()
         };
 
@@ -1039,6 +1065,11 @@ impl TestUa {
         Ok(events)
     }
 
+    /// From-user presented by the INVITE that created `dialog_id`.
+    pub async fn incoming_from_user(&self, dialog_id: &DialogId) -> Option<String> {
+        self.incoming_from_users.lock().await.get(dialog_id).cloned()
+    }
+
     /// Map one dialog state to test events, performing the in-band replies
     /// the harness owes the peer (200 for re-INVITE / NOTIFY / INFO, 202 for
     /// REFER, ...). Runs on the background pump task.
@@ -1232,6 +1263,7 @@ impl TestUa {
         contact: rsipstack::sip::Uri,
         cancel_token: CancellationToken,
         received_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
+        incoming_from_users: Arc<Mutex<HashMap<DialogId, String>>>,
     ) -> Result<()> {
         loop {
             select! {
@@ -1260,6 +1292,13 @@ impl TestUa {
                                 } else {
                                     None
                                 };
+                                // Capture the presented caller-id.
+                                let from_user = tx
+                                    .original
+                                    .from_header()
+                                    .ok()
+                                    .and_then(|f| f.uri().ok())
+                                    .and_then(|u| u.user().map(|s| s.to_string()));
 
                                 if let Ok(mut dialog) = dialog_layer.get_or_create_server_invite(
                                     &tx, state_sender.clone(), None, Some(contact.clone())
@@ -1269,6 +1308,11 @@ impl TestUa {
                                         let dialog_id = dialog.id();
                                         let mut sdps = received_sdps.lock().await;
                                         sdps.insert(dialog_id, sdp_str);
+                                    }
+                                    if let Some(user) = from_user {
+                                        let dialog_id = dialog.id();
+                                        let mut users = incoming_from_users.lock().await;
+                                        users.insert(dialog_id, user);
                                     }
                                     rustpbx::utils::spawn(async move {
                                         dialog.handle(&mut tx).await.ok();

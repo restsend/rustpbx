@@ -68,6 +68,10 @@ class ConfigBuilder:
         self.skill_groups_file: Optional[str] = None
         self.acd_file: Optional[str] = None
         self.http_router: Optional[dict] = None
+        # Raw [proxy] keys for tests needing knobs the builder has no fluent
+        # setter for (e.g. `conference_factory_uri` for restsend-cli's
+        # `sip_conference` factory flow). Rendered verbatim into [proxy].
+        self.proxy_extra: dict[str, Any] = {}
         self.voicemail_config: Optional[dict] = None
         self.sbc_jsonrpc_config: Optional[dict] = None
         self.sipflow_engine: str = "flowdb"
@@ -116,6 +120,11 @@ class ConfigBuilder:
         self.recording_auto_start: bool = True
 
     # ---- addons / licenses ----
+
+    def set_proxy_extra(self, **kwargs) -> "ConfigBuilder":
+        """Set raw `[proxy]` TOML keys (values rendered via `_toml_value`)."""
+        self.proxy_extra.update(kwargs)
+        return self
 
     def set_addons(self, addons: list[str]) -> "ConfigBuilder":
         self.addons = list(addons)
@@ -925,6 +934,8 @@ class ConfigBuilder:
             'ivr_files = ["config/ivr/*.toml"]',
             "",
         ]
+        for key, value in self.proxy_extra.items():
+            lines.insert(6, f"{key} = {_toml_value(value)}")
         if self.realms is not None:
             lines.insert(6, f"realms = {_toml_value(self.realms)}")
         if self.media_proxy:

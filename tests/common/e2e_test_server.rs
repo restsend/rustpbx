@@ -35,6 +35,10 @@ pub struct E2eTestServerInject {
     /// through it — drive it with a webhook handler to capture full event
     /// sequences.
     pub rwi_gateway: Option<rustpbx::rwi::RwiGatewayRef>,
+    /// CC database whose policies/bindings the outbound-policy chain node
+    /// (same wiring as the cc addon's `proxy_server_hook`) enforces.
+    #[cfg(feature = "addon-cc")]
+    pub cc_policy_db: Option<sea_orm::DatabaseConnection>,
 }
 
 impl Default for E2eTestServerInject {
@@ -44,6 +48,8 @@ impl Default for E2eTestServerInject {
             session_hook: None,
             agent_registry: None,
             rwi_gateway: None,
+            #[cfg(feature = "addon-cc")]
+            cc_policy_db: None,
         }
     }
 }
@@ -229,10 +235,29 @@ impl E2eTestServer {
             let mode = config.media_proxy;
             let (builder, cdr_capture, cancel_token) = Self::base_builder(config, &inject).await?;
             let builder = test_helpers::register_standard_modules(builder);
-            let builder = match &inject.agent_registry {
+            #[allow(unused_mut)]
+            let mut builder = match &inject.agent_registry {
                 Some(registry) => builder.with_agent_registry(registry.clone()),
                 None => builder,
             };
+
+            // CC outbound-policy chain node, same wiring as the cc addon.
+            #[cfg(feature = "addon-cc")]
+            if let Some(db) = &inject.cc_policy_db {
+                use rustpbx::addons::cc::outbound_policy::{
+                    CcAgentPolicyRouteInvite, OutboundPolicyResolver,
+                };
+                let resolver = std::sync::Arc::new(OutboundPolicyResolver::new(db.clone()));
+                builder = builder.with_create_route_invite(std::sync::Arc::new(
+                    move |server, _proxy_config, routing_state| {
+                        Ok(Box::new(CcAgentPolicyRouteInvite::new(
+                            resolver.clone(),
+                            routing_state,
+                            server.data_context.clone(),
+                        )) as Box<dyn rustpbx::call::RouteInvite>)
+                    },
+                ));
+            }
 
             match Self::start_builder(
                 port,

@@ -1612,6 +1612,17 @@ impl SipServer {
                             tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
                             continue;
                         }
+                        if matches!(
+                            tx.connection.as_ref(),
+                            Some(
+                                SipConnection::Channel(_)
+                                    | SipConnection::WebSocket(_)
+                            )
+                        ) {
+                            info!(key = %tx.key, via_ip = %via_ip_str, "responding 200 OK OPTIONS (websocket keepalive)");
+                            tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
+                            continue;
+                        }
                     }
                     debug!(key = %tx.key, via_ip = %via_ip_str, "ignoring out-of-dialog {} request", tx.original.method);
                     continue;

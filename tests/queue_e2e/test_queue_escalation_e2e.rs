@@ -229,6 +229,8 @@ mod escalation_e2e {
                 session_hook: Some(hook),
                 agent_registry: Some(adapter),
                 rwi_gateway: None,
+                #[cfg(feature = "addon-cc")]
+                cc_policy_db: None,
             },
         )
         .await
