@@ -220,10 +220,7 @@ pub trait AgentRegistry: Send + Sync {
     /// Resolve the agent record behind a dialed URI. The default scans
     /// `list_agents()`; backends with a URI index should override.
     async fn find_agent_by_uri(&self, uri: &str) -> Option<AgentRecord> {
-        self.list_agents()
-            .await
-            .into_iter()
-            .find(|a| a.uri == uri)
+        self.list_agents().await.into_iter().find(|a| a.uri == uri)
     }
 
     /// List all agents

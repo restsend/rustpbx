@@ -1014,10 +1014,8 @@ impl CallRecordRow {
 
         let caller_uri = crate::models::call_record::normalize_endpoint_uri(&record.caller);
         let callee_uri = crate::models::call_record::normalize_endpoint_uri(&record.callee);
-        let media_quality = crate::callrecord::extract_trunk_media_quality(
-            metadata.as_ref(),
-            &direction,
-        );
+        let media_quality =
+            crate::callrecord::extract_trunk_media_quality(metadata.as_ref(), &direction);
 
         Self {
             call_id: record.call_id.clone(),
@@ -1386,19 +1384,58 @@ pub(crate) async fn create_call_record_table(
 pub(crate) async fn ensure_session_id_column(db: &DatabaseConnection, table_name: &str) {
     use sea_orm::sea_query::{ColumnDef, Table};
     let columns = [
-        ("session_id", ColumnDef::new(Alias::new("session_id")).string_len(255).null().to_owned()),
-        ("hangup_reason", ColumnDef::new(Alias::new("hangup_reason")).string_len(64).null().to_owned()),
-        ("sip_status_code", ColumnDef::new(Alias::new("sip_status_code")).integer().null().to_owned()),
-        ("media_loss_pct", ColumnDef::new(Alias::new("media_loss_pct")).double().null().to_owned()),
-        ("media_jitter_ms", ColumnDef::new(Alias::new("media_jitter_ms")).double().null().to_owned()),
-        ("media_rtt_ms", ColumnDef::new(Alias::new("media_rtt_ms")).double().null().to_owned()),
+        (
+            "session_id",
+            ColumnDef::new(Alias::new("session_id"))
+                .string_len(255)
+                .null()
+                .to_owned(),
+        ),
+        (
+            "hangup_reason",
+            ColumnDef::new(Alias::new("hangup_reason"))
+                .string_len(64)
+                .null()
+                .to_owned(),
+        ),
+        (
+            "sip_status_code",
+            ColumnDef::new(Alias::new("sip_status_code"))
+                .integer()
+                .null()
+                .to_owned(),
+        ),
+        (
+            "media_loss_pct",
+            ColumnDef::new(Alias::new("media_loss_pct"))
+                .double()
+                .null()
+                .to_owned(),
+        ),
+        (
+            "media_jitter_ms",
+            ColumnDef::new(Alias::new("media_jitter_ms"))
+                .double()
+                .null()
+                .to_owned(),
+        ),
+        (
+            "media_rtt_ms",
+            ColumnDef::new(Alias::new("media_rtt_ms"))
+                .double()
+                .null()
+                .to_owned(),
+        ),
     ];
     for (_, col) in columns {
         let alter = Table::alter()
             .table(Alias::new(table_name))
             .add_column(col)
             .to_owned();
-        if let Err(e) = db.execute_raw(db.get_database_backend().build(&alter)).await {
+        if let Err(e) = db
+            .execute_raw(db.get_database_backend().build(&alter))
+            .await
+        {
             tracing::debug!(
                 table = %table_name,
                 error = %e,
@@ -1677,7 +1714,10 @@ pub fn extract_trunk_media_quality(
                 .get("jitter_us")
                 .and_then(|v| v.as_f64())
                 .map(|us| us / 1000.0);
-            let rtt = leg.get("rtt_us").and_then(|v| v.as_f64()).map(|us| us / 1000.0);
+            let rtt = leg
+                .get("rtt_us")
+                .and_then(|v| v.as_f64())
+                .map(|us| us / 1000.0);
             (loss, jitter, rtt)
         }
         None => (None, None, None),

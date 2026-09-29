@@ -2039,6 +2039,12 @@ impl SipServerInner {
         if old.hold_music != new_proxy.hold_music {
             parts.push("hold_music".to_string());
         }
+        if old.queue_hold_music != new_proxy.queue_hold_music {
+            parts.push("queue_hold_music".to_string());
+        }
+        if old.voicemail_greeting != new_proxy.voicemail_greeting {
+            parts.push("voicemail_greeting".to_string());
+        }
         if old.parallel_fork != new_proxy.parallel_fork
             || old.passthrough_failure != new_proxy.passthrough_failure
         {

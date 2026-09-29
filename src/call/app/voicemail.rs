@@ -25,7 +25,7 @@ impl VoicemailApp {
     pub fn new(extension: impl Into<String>) -> Self {
         Self {
             extension: extension.into(),
-            greeting_path: "sounds/voicemail/greeting.wav".to_string(),
+            greeting_path: DEFAULT_VOICEMAIL_GREETING.to_string(),
             state: VoicemailState::Greeting,
             recording_path: None,
         }
@@ -35,6 +35,24 @@ impl VoicemailApp {
         self.greeting_path = path.into();
         self
     }
+}
+
+/// Built-in greeting played when neither the dialplan nor the PBX config
+/// provides one.
+pub const DEFAULT_VOICEMAIL_GREETING: &str = "sounds/voicemail/greeting.wav";
+
+/// Resolve the voicemail greeting.
+///
+/// Priority: dialplan app param `greeting_path` > PBX-wide
+/// `[proxy] voicemail_greeting` > built-in default. Empty/blank values fall
+/// through to the next layer.
+pub fn resolve_greeting_path(param: Option<&str>, global: Option<&str>) -> String {
+    param
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| global.map(str::trim).filter(|s| !s.is_empty()))
+        .unwrap_or(DEFAULT_VOICEMAIL_GREETING)
+        .to_string()
 }
 
 #[async_trait]
@@ -163,5 +181,47 @@ impl CallApp for VoicemailApp {
             });
         }
         Ok(AppAction::Continue)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_greeting_path;
+
+    #[test]
+    fn greeting_param_wins_over_global() {
+        assert_eq!(
+            resolve_greeting_path(Some("sounds/dialplan.wav"), Some("sounds/global.wav")),
+            "sounds/dialplan.wav"
+        );
+    }
+
+    #[test]
+    fn greeting_global_used_when_no_param() {
+        assert_eq!(
+            resolve_greeting_path(None, Some("sounds/global.wav")),
+            "sounds/global.wav"
+        );
+    }
+
+    #[test]
+    fn greeting_falls_back_to_builtin_without_config() {
+        assert_eq!(
+            resolve_greeting_path(None, None),
+            "sounds/voicemail/greeting.wav"
+        );
+    }
+
+    #[test]
+    fn greeting_blank_values_fall_through() {
+        // Blank dialplan param -> global; blank global -> built-in.
+        assert_eq!(
+            resolve_greeting_path(Some("  "), Some("sounds/global.wav")),
+            "sounds/global.wav"
+        );
+        assert_eq!(
+            resolve_greeting_path(None, Some("")),
+            "sounds/voicemail/greeting.wav"
+        );
     }
 }

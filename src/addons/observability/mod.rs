@@ -81,39 +81,57 @@ impl ObservabilityAddon {
             // everything longer than a minute into +Inf (calls routinely run
             // for hours) or waste every bucket above a slow DB query.
             .set_buckets_for_metric(
-                metrics_exporter_prometheus::Matcher::Full("rustpbx_call_duration_seconds".to_string()),
+                metrics_exporter_prometheus::Matcher::Full(
+                    "rustpbx_call_duration_seconds".to_string(),
+                ),
                 &[1.0, 5.0, 10.0, 30.0, 60.0, 180.0, 600.0, 1800.0, 3600.0],
             )?
             .set_buckets_for_metric(
-                metrics_exporter_prometheus::Matcher::Full("rustpbx_call_talk_time_seconds".to_string()),
+                metrics_exporter_prometheus::Matcher::Full(
+                    "rustpbx_call_talk_time_seconds".to_string(),
+                ),
                 &[1.0, 5.0, 10.0, 30.0, 60.0, 180.0, 600.0, 1800.0, 3600.0],
             )?
             .set_buckets_for_metric(
-                metrics_exporter_prometheus::Matcher::Full("rustpbx_recording_upload_latency_seconds".to_string()),
+                metrics_exporter_prometheus::Matcher::Full(
+                    "rustpbx_recording_upload_latency_seconds".to_string(),
+                ),
                 &[1.0, 5.0, 10.0, 30.0, 60.0, 300.0, 600.0],
             )?
             .set_buckets_for_metric(
-                metrics_exporter_prometheus::Matcher::Full("rustpbx_cc_queue_wait_time_seconds".to_string()),
+                metrics_exporter_prometheus::Matcher::Full(
+                    "rustpbx_cc_queue_wait_time_seconds".to_string(),
+                ),
                 &[1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0],
             )?
             .set_buckets_for_metric(
-                metrics_exporter_prometheus::Matcher::Full("rustpbx_cc_queue_handle_time_seconds".to_string()),
+                metrics_exporter_prometheus::Matcher::Full(
+                    "rustpbx_cc_queue_handle_time_seconds".to_string(),
+                ),
                 &[10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0],
             )?
             .set_buckets_for_metric(
-                metrics_exporter_prometheus::Matcher::Full("rustpbx_cc_agent_talk_time_seconds".to_string()),
+                metrics_exporter_prometheus::Matcher::Full(
+                    "rustpbx_cc_agent_talk_time_seconds".to_string(),
+                ),
                 &[1.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0],
             )?
             .set_buckets_for_metric(
-                metrics_exporter_prometheus::Matcher::Full("rustpbx_cc_agent_wrapup_time_seconds".to_string()),
+                metrics_exporter_prometheus::Matcher::Full(
+                    "rustpbx_cc_agent_wrapup_time_seconds".to_string(),
+                ),
                 &[1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0],
             )?
             .set_buckets_for_metric(
-                metrics_exporter_prometheus::Matcher::Full("rustpbx_cc_agent_ringing_time_seconds".to_string()),
+                metrics_exporter_prometheus::Matcher::Full(
+                    "rustpbx_cc_agent_ringing_time_seconds".to_string(),
+                ),
                 &[1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0],
             )?
             .set_buckets_for_metric(
-                metrics_exporter_prometheus::Matcher::Full("rustpbx_db_query_latency_seconds".to_string()),
+                metrics_exporter_prometheus::Matcher::Full(
+                    "rustpbx_db_query_latency_seconds".to_string(),
+                ),
                 &[
                     0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
                 ],
@@ -525,14 +543,14 @@ mod tests {
     #[tokio::test]
     async fn test_call_duration_buckets_customized() {
         ObservabilityAddon::install_recorder().ok();
-        metrics::histogram!("rustpbx_call_duration_seconds", "direction" => "test")
-            .record(120.0);
+        metrics::histogram!("rustpbx_call_duration_seconds", "direction" => "test").record(120.0);
         let Some(text) = ObservabilityAddon::render_prometheus() else {
             return; // recorder without render handle; nothing to assert
         };
         assert!(
-            text.lines().any(|l| l.starts_with("rustpbx_call_duration_seconds_bucket")
-                && l.contains("le=\"180\"")),
+            text.lines()
+                .any(|l| l.starts_with("rustpbx_call_duration_seconds_bucket")
+                    && l.contains("le=\"180\"")),
             "custom call-duration buckets not applied"
         );
     }
@@ -601,7 +619,10 @@ mod tests {
                 text.contains("rustpbx_process_resident_memory_bytes"),
                 "rss gauge missing on Linux"
             );
-            assert!(text.contains("rustpbx_process_open_fds"), "fds gauge missing");
+            assert!(
+                text.contains("rustpbx_process_open_fds"),
+                "fds gauge missing"
+            );
         }
     }
 

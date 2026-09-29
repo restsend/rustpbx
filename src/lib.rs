@@ -11,9 +11,9 @@ pub mod call_errors;
 pub mod callrecord;
 pub mod config;
 pub mod config_store;
-pub mod db_report;
 #[cfg(feature = "console")]
 pub mod console;
+pub mod db_report;
 pub mod handler;
 pub mod license;
 pub mod log_reload;
