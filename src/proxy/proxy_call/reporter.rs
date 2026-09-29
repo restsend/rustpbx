@@ -850,7 +850,7 @@ mod tests {
         enrich_error_metadata(&mut meta, Some(&route), 402, None, None);
         assert_eq!(
             meta_str(&meta, "error_severity"),
-            crate::call_errors::ErrSeverity::Error.as_str()
+            crate::call_errors::ErrSeverity::Warn.as_str()
         );
         assert_eq!(meta_str(&meta, "error_message"), "Insufficient funds");
     }
