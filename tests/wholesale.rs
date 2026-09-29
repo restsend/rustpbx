@@ -1,8 +1,6 @@
-mod common;
-
 #[cfg(feature = "addon-wholesale")]
 #[path = "wholesale/helpers.rs"]
-mod wholesale_helpers;
+pub(crate) mod wholesale_helpers;
 
 #[cfg(feature = "addon-wholesale")]
 #[path = "wholesale/billing_service_test.rs"]

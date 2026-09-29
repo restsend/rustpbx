@@ -1,5 +1,3 @@
-mod common;
-
 #[path = "proxy_flow/test_basic_call.rs"]
 mod test_basic_call;
 

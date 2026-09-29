@@ -25,6 +25,12 @@ mod user_http_test;
 
 pub mod test_helpers;
 
+// Shared condition-wait helpers, single-sourced from tests/common/wait.rs so
+// in-lib tests and integration binaries use the exact same implementation.
+#[cfg(any(test, feature = "e2e-testing"))]
+#[path = "../../../tests/common/wait.rs"]
+pub mod wait;
+
 // E2E testing infrastructure
 pub mod cdr_capture;
 pub mod e2e_test_server;

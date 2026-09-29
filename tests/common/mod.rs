@@ -10,4 +10,5 @@ pub mod e2e_test_server;
 pub mod rtp_utils;
 pub mod test_helpers;
 pub mod test_ua;
+pub mod wait;
 pub mod webhook_capture;

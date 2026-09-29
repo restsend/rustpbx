@@ -1,5 +1,3 @@
-mod common;
-
 #[cfg(feature = "addon-cc")]
 #[path = "cc_e2e/skill_group_routing_tests.rs"]
 mod skill_group_routing_tests;

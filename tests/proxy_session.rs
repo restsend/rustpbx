@@ -1,5 +1,3 @@
-mod common;
-
 #[path = "proxy_session/test_graceful_shutdown.rs"]
 mod test_graceful_shutdown;
 

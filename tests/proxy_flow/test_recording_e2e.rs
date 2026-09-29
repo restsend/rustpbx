@@ -54,9 +54,12 @@ async fn test_recording_cdr_generated() -> Result<()> {
 
     sleep(Duration::from_millis(500)).await;
     alice.hangup(&alice_id.clone().unwrap()).await.ok();
-    sleep(Duration::from_millis(500)).await;
-    let all_records = server.cdr_capture.get_all_records().await;
-    assert!(!all_records.is_empty(), "CDR should be generated");
+    // The bounded wait itself asserts the CDR arrived.
+    server
+        .cdr_capture
+        .wait_for_records(1, Duration::from_secs(5))
+        .await
+        .expect("CDR should be generated");
 
     server.stop();
     Ok(())

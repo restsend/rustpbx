@@ -194,13 +194,12 @@ impl MediaTestCtx {
 
     /// Wait for CDR and validate against expectations.
     async fn verify_cdr(&self, expectation: &CdrExpectation) -> Result<()> {
-        sleep(Duration::from_millis(800)).await;
-
-        let records = self.server.cdr_capture.get_all_records().await;
-        assert!(
-            !records.is_empty(),
-            "Expected at least one CDR record, got none"
-        );
+        let records = self
+            .server
+            .cdr_capture
+            .wait_for_records(1, Duration::from_secs(5))
+            .await
+            .expect("Expected at least one CDR record, got none");
 
         let record = &records[0];
         info!(
@@ -423,9 +422,13 @@ async fn test_p2p_no_answer_cdr() -> Result<()> {
     let call_result = tokio::time::timeout(Duration::from_secs(5), caller_handle).await;
     info!("Call result after no answer: {:?}", call_result.is_ok());
 
-    // Wait for CDR
-    sleep(Duration::from_millis(800)).await;
-    let records = server.cdr_capture.get_all_records().await;
+    // Wait for CDR (may or may not be generated depending on how the timeout
+    // is handled, so a bounded wait rather than a hard requirement).
+    let records = server
+        .cdr_capture
+        .wait_for_records(1, Duration::from_secs(2))
+        .await
+        .unwrap_or_default();
 
     // CDR may or may not be generated depending on how the timeout is handled
     if !records.is_empty() {
@@ -675,9 +678,11 @@ async fn test_p2p_direct_media_none_mode() -> Result<()> {
     // Hang up and verify CDR
     alice.hangup(&alice_id).await?;
 
-    sleep(Duration::from_millis(500)).await;
-    let records = server.cdr_capture.get_all_records().await;
-    assert!(!records.is_empty(), "Should have CDR");
+    let records = server
+        .cdr_capture
+        .wait_for_records(1, Duration::from_secs(5))
+        .await
+        .expect("Should have CDR");
 
     let record = &records[0];
     assert!(

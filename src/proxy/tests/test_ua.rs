@@ -1288,21 +1288,27 @@ mod tests {
         }
     }
 
-    async fn wait_for_event<F>(ua: &mut TestUa, mut predicate: F, timeout_ms: u64) -> Result<bool>
-    where
-        F: FnMut(&TestUaEvent) -> bool,
-    {
-        let iterations = timeout_ms / 25; // Reduced from 50ms to 25ms for faster polling
-        for _ in 0..iterations {
-            let events = ua.process_dialog_events().await?;
-            for event in &events {
-                if predicate(event) {
-                    return Ok(true);
+    /// Poll for the first [`TestUaEvent::IncomingCall`] and return its dialog
+    /// id, or `None` on timeout.
+    ///
+    /// `process_dialog_events()` DRAINS the event queue: handle the returned
+    /// id immediately and never re-fetch the batch afterwards — a second drain
+    /// sees an empty queue, which is how several tests used to silently no-op
+    /// (answering nothing) while still "passing".
+    async fn next_incoming_call(
+        ua: &mut TestUa,
+        timeout_ms: u64,
+    ) -> Option<rsipstack::dialog::DialogId> {
+        for _ in 0..(timeout_ms / 25) {
+            let events = ua.process_dialog_events().await.ok()?;
+            for event in events {
+                if let TestUaEvent::IncomingCall(id, _) = event {
+                    return Some(id);
                 }
             }
-            sleep(Duration::from_millis(25)).await; // Faster polling interval
+            sleep(Duration::from_millis(25)).await;
         }
-        Ok(false)
+        None
     }
 
     /// Test basic registration functionality
@@ -1459,16 +1465,16 @@ mod tests {
         {
             let caller_handle = crate::utils::spawn({
                 let alice = alice.clone();
-                async move { alice.make_call("bob", None).await }
+                async move {
+                        let offer = create_test_sdp("192.168.1.100", 5004, true);
+                        alice.make_call("bob", Some(offer)).await
+                    }
             });
-            if wait_for_event(
-                &mut bob,
-                |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
-                1000,
-            )
-            .await
-            .unwrap()
-            {
+            // Poll+handle INLINE: wait_for_event() drains the event batch, so a
+            // second process_dialog_events() here would see nothing (this test
+            // used to pass without ever rejecting a call).
+            let mut rejected = false;
+            for _ in 0..80 {
                 let bob_events = bob.process_dialog_events().await.unwrap();
                 for event in &bob_events {
                     if let TestUaEvent::IncomingCall(incoming_id, _) = event {
@@ -1476,10 +1482,16 @@ mod tests {
                             bob.reject_call(incoming_id).await.is_ok(),
                             "Should be able to reject call"
                         );
+                        rejected = true;
                         break;
                     }
                 }
+                if rejected {
+                    break;
+                }
+                sleep(Duration::from_millis(25)).await;
             }
+            assert!(rejected, "bob should receive IncomingCall to reject");
             let _ = await_caller_with_timeout(caller_handle, Duration::from_secs(3)).await;
         }
 
@@ -1487,16 +1499,13 @@ mod tests {
         {
             let caller_handle = crate::utils::spawn({
                 let alice = alice.clone();
-                async move { alice.make_call("bob", None).await }
+                async move {
+                        let offer = create_test_sdp("192.168.1.100", 5004, true);
+                        alice.make_call("bob", Some(offer)).await
+                    }
             });
-            if wait_for_event(
-                &mut bob,
-                |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
-                1000,
-            )
-            .await
-            .unwrap()
-            {
+            let mut rejected = false;
+            for _ in 0..80 {
                 let bob_events = bob.process_dialog_events().await.unwrap();
                 for event in &bob_events {
                     if let TestUaEvent::IncomingCall(incoming_id, _) = event {
@@ -1506,10 +1515,16 @@ mod tests {
                             bob.reject_call(incoming_id).await.is_ok(),
                             "Should be able to reject after ringing"
                         );
+                        rejected = true;
                         break;
                     }
                 }
+                if rejected {
+                    break;
+                }
+                sleep(Duration::from_millis(25)).await;
             }
+            assert!(rejected, "bob should receive IncomingCall to reject after ringing");
             let _ = await_caller_with_timeout(caller_handle, Duration::from_secs(3)).await;
         }
 
@@ -1722,7 +1737,10 @@ mod tests {
         {
             let caller_handle = crate::utils::spawn({
                 let a = alice.clone();
-                async move { a.make_call("bob", None).await }
+                async move {
+                        let offer = create_test_sdp("192.168.1.100", 5004, true);
+                        a.make_call("bob", Some(offer)).await
+                    }
             });
             let callee_fut = async {
                 let mut states_observed: Vec<String> = Vec::new();
@@ -1819,7 +1837,10 @@ mod tests {
         for i in 0..3 {
             let caller_handle = crate::utils::spawn({
                 let a = alice.clone();
-                async move { a.make_call("bob", None).await }
+                async move {
+                        let offer = create_test_sdp("192.168.1.100", 5004, true);
+                        a.make_call("bob", Some(offer)).await
+                    }
             });
             let callee_fut = async {
                 sleep(Duration::from_millis(100)).await;
@@ -1928,30 +1949,38 @@ mod tests {
         bob.register().await.unwrap();
         sleep(Duration::from_millis(100)).await;
 
-        // Rapid short-lived call cycles with proper concurrent callee handling
+        // Rapid short-lived call cycles with proper concurrent callee handling.
+        // Events must be handled INLINE in the polling loop: wait_for_event()
+        // already drains process_dialog_events(), so re-fetching afterwards
+        // yields an empty batch and the callee never answers (this test used
+        // to "pass" at ~15s while every cycle silently timed out).
+        let sdp_offer = create_test_sdp("192.168.1.100", 5004, true);
         for i in 0..5 {
             let caller_handle = {
                 let a = alice.clone();
-                crate::utils::spawn(async move { a.make_call("bob", None).await })
+                let offer = sdp_offer.clone();
+                crate::utils::spawn(async move { a.make_call("bob", Some(offer)).await })
             };
 
-            if wait_for_event(
-                &mut bob,
-                |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
-                800,
-            )
-            .await
-            .unwrap()
-            {
+            let mut answered = false;
+            for _ in 0..40 {
                 let events = bob.process_dialog_events().await.unwrap();
                 for e in &events {
                     if let TestUaEvent::IncomingCall(id, _) = e {
-                        // Answer quickly to let caller complete, then hang up immediately
-                        bob.answer_call(id, None).await.ok();
+                        // Answer quickly (with an answer SDP — a SDP-less 200
+                        // leaves the B2BUA caller leg hanging).
+                        let answer_sdp = create_test_sdp("192.168.1.200", 5006, true);
+                        bob.answer_call(id, Some(answer_sdp)).await.ok();
+                        answered = true;
                         break;
                     }
                 }
+                if answered {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
             }
+            assert!(answered, "cycle {i}: bob should receive IncomingCall");
 
             if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(3), caller_handle).await
                 && let Ok(Ok(dialog_id)) = join_res
@@ -1998,24 +2027,18 @@ mod tests {
             let alice_arc = alice.clone();
             let caller_handle = crate::utils::spawn({
                 let a = alice_arc.clone();
-                async move { a.make_call("bob", None).await }
+                async move {
+                        let offer = create_test_sdp("192.168.1.100", 5004, true);
+                        a.make_call("bob", Some(offer)).await
+                    }
             });
             // Wait for call establishment
-            if wait_for_event(
-                &mut bob,
-                |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
-                1000,
-            )
-            .await
-            .unwrap()
+            let incoming_id = next_incoming_call(&mut bob, 1000)
+                .await
+                .expect("bob should receive IncomingCall");
             {
-                let bob_events = bob.process_dialog_events().await.unwrap();
-                for event in &bob_events {
-                    if let TestUaEvent::IncomingCall(incoming_id, _) = event {
-                        bob.answer_call(incoming_id, None).await.ok();
-                        break;
-                    }
-                }
+                let answer_sdp = create_test_sdp("192.168.1.200", 5006, true);
+                bob.answer_call(&incoming_id, Some(answer_sdp)).await.ok();
 
                 sleep(Duration::from_millis(200)).await;
 
@@ -2075,40 +2098,34 @@ mod tests {
             let alice_arc = alice.clone();
             let caller_handle = crate::utils::spawn({
                 let a = alice_arc.clone();
-                async move { a.make_call("bob", None).await }
+                async move {
+                        let offer = create_test_sdp("192.168.1.100", 5004, true);
+                        a.make_call("bob", Some(offer)).await
+                    }
             });
             // Establish call
-            if wait_for_event(
-                &mut bob,
-                |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
-                1000,
-            )
-            .await
-            .unwrap()
+            let incoming_id = next_incoming_call(&mut bob, 1000)
+                .await
+                .expect("bob should receive IncomingCall");
             {
-                let bob_events = bob.process_dialog_events().await.unwrap();
-                for event in &bob_events {
-                    if let TestUaEvent::IncomingCall(incoming_id, _) = event {
-                        bob.answer_call(incoming_id, None).await.ok();
+                let answer_sdp = create_test_sdp("192.168.1.200", 5006, true);
+                bob.answer_call(&incoming_id, Some(answer_sdp)).await.ok();
 
-                        sleep(Duration::from_millis(300)).await;
+                sleep(Duration::from_millis(300)).await;
 
-                        // Simulate REFER request (blind transfer to charlie)
-                        println!("Simulating REFER for blind transfer to charlie");
-                        // In real implementation, this would send REFER SIP message
-                        // For now, we simulate the transfer scenario
+                // Simulate REFER request (blind transfer to charlie)
+                println!("Simulating REFER for blind transfer to charlie");
+                // In real implementation, this would send REFER SIP message
+                // For now, we simulate the transfer scenario
 
-                        // Transfer completed - original call should be replaced
-                        if let Ok(join_res) =
-                            tokio::time::timeout(Duration::from_secs(5), caller_handle).await
-                            && let Ok(Ok(id)) = join_res
-                        {
-                            alice_arc.hangup(&id).await.ok();
-                        }
-                        println!("Blind transfer scenario completed");
-                        break;
-                    }
+                // Transfer completed - original call should be replaced
+                if let Ok(join_res) =
+                    tokio::time::timeout(Duration::from_secs(5), caller_handle).await
+                    && let Ok(Ok(id)) = join_res
+                {
+                    alice_arc.hangup(&id).await.ok();
                 }
+                println!("Blind transfer scenario completed");
             }
         }
 
@@ -2145,15 +2162,15 @@ mod tests {
         let codec_test_cases = vec![
             (
                 "PCMU only",
-                "v=0\ro=test 123 456 IN IP4 192.168.1.100\rs=-\rc=IN IP4 192.168.1.100\rt=0 0\rm=audio 5004 RTP/AVP 0\ra=rtpmap:0 PCMU/8000\r",
+                "v=0\r\no=test 123 456 IN IP4 192.168.1.100\r\ns=-\r\nc=IN IP4 192.168.1.100\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n",
             ),
             (
                 "PCMA only",
-                "v=0\ro=test 123 456 IN IP4 192.168.1.100\rs=-\rc=IN IP4 192.168.1.100\rt=0 0\rm=audio 5004 RTP/AVP 8\ra=rtpmap:8 PCMA/8000\r",
+                "v=0\r\no=test 123 456 IN IP4 192.168.1.100\r\ns=-\r\nc=IN IP4 192.168.1.100\r\nt=0 0\r\nm=audio 5004 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n",
             ),
             (
                 "Multiple codecs",
-                "v=0\ro=test 123 456 IN IP4 192.168.1.100\rs=-\rc=IN IP4 192.168.1.100\rt=0 0\rm=audio 5004 RTP/AVP 0 8 18\ra=rtpmap:0 PCMU/8000\ra=rtpmap:8 PCMA/8000\ra=rtpmap:18 G729/8000\r",
+                "v=0\r\no=test 123 456 IN IP4 192.168.1.100\r\ns=-\r\nc=IN IP4 192.168.1.100\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0 8 18\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:18 G729/8000\r\n",
             ),
         ];
 
@@ -2167,26 +2184,16 @@ mod tests {
                     let s = offer_sdp.to_string();
                     async move { a.make_call("bob", Some(s)).await }
                 });
-                if wait_for_event(
-                    &mut bob,
-                    |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
-                    500,
-                )
-                .await
-                .unwrap()
+                let incoming_id = next_incoming_call(&mut bob, 500)
+                    .await
+                    .expect("bob should receive IncomingCall");
                 {
-                    let bob_events = bob.process_dialog_events().await.unwrap();
-                    for event in &bob_events {
-                        if let TestUaEvent::IncomingCall(incoming_id, _) = event {
-                            // Answer with compatible codec
-                            let answer_sdp = "v=0\ro=test 456 789 IN IP4 192.168.1.200\rs=-\rc=IN IP4 192.168.1.200\rt=0 0\rm=audio 5006 RTP/AVP 0\ra=rtpmap:0 PCMU/8000\r";
-                            bob.answer_call(incoming_id, Some(answer_sdp.to_string()))
-                                .await
-                                .ok();
-                            println!("  {} - codec negotiation completed", test_name);
-                            break;
-                        }
-                    }
+                    // Answer with compatible codec
+                    let answer_sdp = "v=0\r\no=test 456 789 IN IP4 192.168.1.200\r\ns=-\r\nc=IN IP4 192.168.1.200\r\nt=0 0\r\nm=audio 5006 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+                    bob.answer_call(&incoming_id, Some(answer_sdp.to_string()))
+                        .await
+                        .ok();
+                    println!("  {} - codec negotiation completed", test_name);
                 }
 
                 sleep(Duration::from_millis(100)).await;
@@ -2234,46 +2241,40 @@ mod tests {
             let alice_arc = alice.clone();
             let caller_handle = crate::utils::spawn({
                 let a = alice_arc.clone();
-                async move { a.make_call("bob", None).await }
+                async move {
+                        let offer = create_test_sdp("192.168.1.100", 5004, true);
+                        a.make_call("bob", Some(offer)).await
+                    }
             });
             // Establish call
-            if wait_for_event(
-                &mut bob,
-                |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
-                1000,
-            )
-            .await
-            .unwrap()
+            let incoming_id = next_incoming_call(&mut bob, 1000)
+                .await
+                .expect("bob should receive IncomingCall");
             {
-                let bob_events = bob.process_dialog_events().await.unwrap();
-                for event in &bob_events {
-                    if let TestUaEvent::IncomingCall(incoming_id, _) = event {
-                        bob.answer_call(incoming_id, None).await.ok();
-                        sleep(Duration::from_millis(200)).await;
+                let answer_sdp = create_test_sdp("192.168.1.200", 5006, true);
+                bob.answer_call(&incoming_id, Some(answer_sdp)).await.ok();
+                sleep(Duration::from_millis(200)).await;
 
-                        // Simulate hold (re-INVITE with sendonly)
-                        println!("Simulating hold operation");
-                        let _hold_sdp = "v=0\ro=test 123 456 IN IP4 192.168.1.100\rs=-\rc=IN IP4 192.168.1.100\rt=0 0\rm=audio 5004 RTP/AVP 0\ra=rtpmap:0 PCMU/8000\ra=sendonly\r";
-                        // In real implementation, this would be a re-INVITE
-                        println!("  Hold SDP prepared: sendonly");
+                // Simulate hold (re-INVITE with sendonly)
+                println!("Simulating hold operation");
+                let _hold_sdp = "v=0\ro=test 123 456 IN IP4 192.168.1.100\rs=-\rc=IN IP4 192.168.1.100\rt=0 0\rm=audio 5004 RTP/AVP 0\ra=rtpmap:0 PCMU/8000\ra=sendonly\r";
+                // In real implementation, this would be a re-INVITE
+                println!("  Hold SDP prepared: sendonly");
 
-                        sleep(Duration::from_millis(500)).await;
+                sleep(Duration::from_millis(500)).await;
 
-                        // Simulate unhold (re-INVITE with sendrecv)
-                        println!("Simulating unhold operation");
-                        let _unhold_sdp = "v=0\ro=test 123 456 IN IP4 192.168.1.100\rs=-\rc=IN IP4 192.168.1.100\rt=0 0\rm=audio 5004 RTP/AVP 0\ra=rtpmap:0 PCMU/8000\ra=sendrecv\r";
-                        // In real implementation, this would be another re-INVITE
-                        println!("  Unhold SDP prepared: sendrecv");
+                // Simulate unhold (re-INVITE with sendrecv)
+                println!("Simulating unhold operation");
+                let _unhold_sdp = "v=0\ro=test 123 456 IN IP4 192.168.1.100\rs=-\rc=IN IP4 192.168.1.100\rt=0 0\rm=audio 5004 RTP/AVP 0\ra=rtpmap:0 PCMU/8000\ra=sendrecv\r";
+                // In real implementation, this would be another re-INVITE
+                println!("  Unhold SDP prepared: sendrecv");
 
-                        sleep(Duration::from_millis(300)).await;
-                        if let Ok(join_res) =
-                            tokio::time::timeout(Duration::from_secs(5), caller_handle).await
-                            && let Ok(Ok(id)) = join_res
-                        {
-                            alice_arc.hangup(&id).await.ok();
-                        }
-                        break;
-                    }
+                sleep(Duration::from_millis(300)).await;
+                if let Ok(join_res) =
+                    tokio::time::timeout(Duration::from_secs(5), caller_handle).await
+                    && let Ok(Ok(id)) = join_res
+                {
+                    alice_arc.hangup(&id).await.ok();
                 }
             }
         }
@@ -2376,23 +2377,26 @@ a=rtpmap:0 PCMU/8000"#;
             let s = ipv6_sdp.to_string();
             async move { a.make_call("bob", Some(s)).await }
         });
-        if wait_for_event(
-            &mut bob,
-            |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
-            500,
-        )
-        .await
-        .unwrap()
-        {
+        // Poll+handle INLINE (wait_for_event drains the batch; re-fetching
+        // sees nothing and the callee never answers).
+        let mut answered = false;
+        for _ in 0..80 {
             let bob_events = bob.process_dialog_events().await.unwrap();
             for event in &bob_events {
                 if let TestUaEvent::IncomingCall(incoming_id, _) = event {
                     println!("IPv6 SDP call received and processed");
-                    bob.answer_call(incoming_id, None).await.ok();
+                    let answer_sdp = create_test_sdp("192.168.1.200", 5006, true);
+                    bob.answer_call(incoming_id, Some(answer_sdp)).await.ok();
+                    answered = true;
                     break;
                 }
             }
+            if answered {
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
         }
+        assert!(answered, "bob should receive IncomingCall (ipv6 sdp)");
 
         sleep(Duration::from_millis(100)).await;
         if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(5), caller_handle).await
@@ -2417,23 +2421,24 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
             let s = dual_stack_sdp.to_string();
             async move { a.make_call("bob", Some(s)).await }
         });
-        if wait_for_event(
-            &mut bob,
-            |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
-            1000,
-        )
-        .await
-        .unwrap()
-        {
+        let mut answered = false;
+        for _ in 0..80 {
             let bob_events = bob.process_dialog_events().await.unwrap();
             for event in &bob_events {
                 if let TestUaEvent::IncomingCall(incoming_id, _) = event {
                     // Answer to complete the call setup
-                    bob.answer_call(incoming_id, None).await.ok();
+                    let answer_sdp = create_test_sdp("192.168.1.200", 5006, true);
+                    bob.answer_call(incoming_id, Some(answer_sdp)).await.ok();
+                    answered = true;
                     break;
                 }
             }
+            if answered {
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
         }
+        assert!(answered, "bob should receive IncomingCall (dual-stack sdp)");
         if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(5), caller_handle).await
             && let Ok(Ok(id)) = join_res
         {
@@ -2475,32 +2480,40 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
         {
             let caller_handle = {
                 let a = alice.clone();
-                crate::utils::spawn(async move { a.make_call("bob", None).await })
+                crate::utils::spawn(async move {
+                        let offer = create_test_sdp("192.168.1.100", 5004, true);
+                        a.make_call("bob", Some(offer)).await
+                    })
             };
-            if wait_for_event(
-                &mut bob,
-                |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
-                800,
-            )
-            .await
-            .unwrap()
-            {
+            // Poll+handle INLINE (wait_for_event drains the batch; re-fetching
+            // sees nothing and the callee never answers).
+            let mut answered = false;
+            for _ in 0..80 {
                 let events = bob.process_dialog_events().await.unwrap();
                 for e in &events {
                     if let TestUaEvent::IncomingCall(id, _) = e {
-                        // Bob answers to allow caller future to resolve with DialogId
-                        bob.answer_call(id, None).await.ok();
+                        // Bob answers (with SDP) so the caller future resolves
+                        let answer_sdp = create_test_sdp("192.168.1.200", 5006, true);
+                        bob.answer_call(id, Some(answer_sdp)).await.ok();
+                        answered = true;
                         break;
                     }
                 }
+                if answered {
+                    break;
+                }
+                sleep(Duration::from_millis(25)).await;
             }
-            if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(3), caller_handle).await
-                && let Ok(Ok(dialog_id)) = join_res
-            {
-                // Caller terminates immediately after answer
-                assert!(alice.hangup(&dialog_id).await.is_ok());
-                println!("Caller terminated call immediately after answer");
-            }
+            assert!(answered, "bob should receive IncomingCall (scenario 1)");
+            let join_res =
+                tokio::time::timeout(Duration::from_secs(3), caller_handle).await;
+            let dialog_id = match join_res {
+                Ok(Ok(Ok(dialog_id))) => dialog_id,
+                other => panic!("caller should resolve after answer, got {other:?}"),
+            };
+            // Caller terminates immediately after answer
+            assert!(alice.hangup(&dialog_id).await.is_ok());
+            println!("Caller terminated call immediately after answer");
         }
 
         // Scenario 2: Ringing then early termination by caller (still requires established dialog in this simplified UA)
@@ -2508,16 +2521,13 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
         {
             let caller_handle = {
                 let a = alice.clone();
-                crate::utils::spawn(async move { a.make_call("bob", None).await })
+                crate::utils::spawn(async move {
+                        let offer = create_test_sdp("192.168.1.100", 5004, true);
+                        a.make_call("bob", Some(offer)).await
+                    })
             };
-            if wait_for_event(
-                &mut bob,
-                |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
-                1000,
-            )
-            .await
-            .unwrap()
-            {
+            let mut answered = false;
+            for _ in 0..80 {
                 let events = bob.process_dialog_events().await.unwrap();
                 for e in &events {
                     if let TestUaEvent::IncomingCall(id, _) = e {
@@ -2525,18 +2535,27 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
                         bob.send_ringing(id, None).await.ok();
                         sleep(Duration::from_millis(120)).await;
                         // Then answer so caller future resolves
-                        bob.answer_call(id, None).await.ok();
+                        let answer_sdp = create_test_sdp("192.168.1.200", 5006, true);
+                        bob.answer_call(id, Some(answer_sdp)).await.ok();
+                        answered = true;
                         break;
                     }
                 }
+                if answered {
+                    break;
+                }
+                sleep(Duration::from_millis(25)).await;
             }
-            if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(3), caller_handle).await
-                && let Ok(Ok(dialog_id)) = join_res
-            {
-                // Caller terminates immediately after answer
-                assert!(alice.hangup(&dialog_id).await.is_ok());
-                println!("Caller terminated during/after ringing phase");
-            }
+            assert!(answered, "bob should receive IncomingCall (scenario 2)");
+            let join_res =
+                tokio::time::timeout(Duration::from_secs(3), caller_handle).await;
+            let dialog_id = match join_res {
+                Ok(Ok(Ok(dialog_id))) => dialog_id,
+                other => panic!("caller should resolve after answer, got {other:?}"),
+            };
+            // Caller terminates immediately after answer
+            assert!(alice.hangup(&dialog_id).await.is_ok());
+            println!("Caller terminated during/after ringing phase");
         }
 
         alice.stop();
@@ -2572,35 +2591,28 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
         let alice_arc = alice.clone();
         let _caller_handle = crate::utils::spawn({
             let a = alice_arc.clone();
-            async move { a.make_call("bob", None).await }
+            async move {
+                        let offer = create_test_sdp("192.168.1.100", 5004, true);
+                        a.make_call("bob", Some(offer)).await
+                    }
         });
-        if wait_for_event(
-            &mut bob,
-            |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
-            1000,
-        )
-        .await
-        .unwrap()
-        {
-            let bob_events = bob.process_dialog_events().await.unwrap();
-            for event in &bob_events {
-                if let TestUaEvent::IncomingCall(bob_dialog_id, _) = event {
-                    // Bob answers the call
-                    bob.answer_call(bob_dialog_id, None).await.ok();
-                    sleep(Duration::from_millis(100)).await;
+        if let Some(bob_dialog_id) = next_incoming_call(&mut bob, 1000).await {
+            // Bob answers the call
+            let answer_sdp = create_test_sdp("192.168.1.200", 5006, true);
+            bob.answer_call(&bob_dialog_id, Some(answer_sdp)).await.ok();
+            sleep(Duration::from_millis(100)).await;
 
-                    // Bob hangs up during established call
-                    assert!(
-                        bob.hangup(bob_dialog_id).await.is_ok(),
-                        "Callee should be able to hang up established call"
-                    );
+            // Bob hangs up during established call
+            assert!(
+                bob.hangup(&bob_dialog_id).await.is_ok(),
+                "Callee should be able to hang up established call"
+            );
 
-                    // Verify alice receives hangup notification
-                    sleep(Duration::from_millis(200)).await;
-                    println!("Callee hangup completed successfully");
-                    break;
-                }
-            }
+            // Verify alice receives hangup notification
+            sleep(Duration::from_millis(200)).await;
+            println!("Callee hangup completed successfully");
+        } else {
+            panic!("bob should receive IncomingCall");
         }
         alice.stop();
         bob.stop();
@@ -2672,19 +2684,12 @@ a=sendrecv"#;
                     let s = webrtc_offer.to_string();
                     async move { a.make_call("bob", Some(s)).await }
                 });
-                if wait_for_event(
-                    &mut bob,
-                    |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
-                    1000,
-                )
-                .await
-                .unwrap()
+                let incoming_id = next_incoming_call(&mut bob, 1000)
+                    .await
+                    .expect("bob should receive IncomingCall");
                 {
-                    let bob_events = bob.process_dialog_events().await.unwrap();
-                    for event in &bob_events {
-                        if let TestUaEvent::IncomingCall(incoming_id, _) = event {
-                            // Bob responds with RTP answer
-                            let rtp_answer = r#"v=0
+                    // Bob responds with RTP answer
+                    let rtp_answer = r#"v=0
 o=test 654321 123456 IN IP4 192.168.1.200
 s=-
 c=IN IP4 192.168.1.200
@@ -2692,13 +2697,10 @@ t=0 0
 m=audio 5004 RTP/AVP 0
 a=rtpmap:0 PCMU/8000"#;
 
-                            bob.answer_call(incoming_id, Some(rtp_answer.to_string()))
-                                .await
-                                .ok();
-                            println!("WebRTC to RTP conversion test completed");
-                            break;
-                        }
-                    }
+                    bob.answer_call(&incoming_id, Some(rtp_answer.to_string()))
+                        .await
+                        .ok();
+                    println!("WebRTC to RTP conversion test completed");
                 }
 
                 sleep(Duration::from_millis(200)).await;
@@ -2725,19 +2727,12 @@ a=rtpmap:0 PCMU/8000"#;
                     let s = rtp_offer.to_string();
                     async move { a.make_call("bob", Some(s)).await }
                 });
-                if wait_for_event(
-                    &mut bob,
-                    |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
-                    1000,
-                )
-                .await
-                .unwrap()
+                let incoming_id = next_incoming_call(&mut bob, 1000)
+                    .await
+                    .expect("bob should receive IncomingCall");
                 {
-                    let bob_events = bob.process_dialog_events().await.unwrap();
-                    for event in &bob_events {
-                        if let TestUaEvent::IncomingCall(incoming_id, _) = event {
-                            // Bob responds with WebRTC-style answer
-                            let webrtc_answer = r#"v=0
+                    // Bob responds with WebRTC-style answer
+                    let webrtc_answer = r#"v=0
 o=test 654321 123456 IN IP4 192.168.1.200
 s=-
 c=IN IP4 192.168.1.200
@@ -2749,13 +2744,10 @@ a=ice-ufrag:wxyz
 a=ice-pwd:abcdefghijklmnopqrstuvw
 a=rtpmap:111 opus/48000/2"#;
 
-                            bob.answer_call(incoming_id, Some(webrtc_answer.to_string()))
-                                .await
-                                .ok();
-                            println!("RTP to WebRTC conversion test completed");
-                            break;
-                        }
-                    }
+                    bob.answer_call(&incoming_id, Some(webrtc_answer.to_string()))
+                        .await
+                        .ok();
+                    println!("RTP to WebRTC conversion test completed");
                 }
 
                 sleep(Duration::from_millis(200)).await;
@@ -2811,19 +2803,12 @@ a=rtpmap:0 PCMU/8000"#;
             let s = private_ip_sdp.to_string();
             async move { a.make_call("bob", Some(s)).await }
         });
-        if wait_for_event(
-            &mut bob,
-            |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
-            1000,
-        )
-        .await
-        .unwrap()
+        let incoming_id = next_incoming_call(&mut bob, 1000)
+            .await
+            .expect("bob should receive IncomingCall");
         {
-            let bob_events = bob.process_dialog_events().await.unwrap();
-            for event in &bob_events {
-                if let TestUaEvent::IncomingCall(incoming_id, _) = event {
-                    // Bob answers with another private IP
-                    let bob_private_sdp = r#"v=0
+            // Bob answers with another private IP
+            let bob_private_sdp = r#"v=0
 o=test 654321 123456 IN IP4 10.0.0.100
 s=-
 c=IN IP4 10.0.0.100
@@ -2831,13 +2816,10 @@ t=0 0
 m=audio 5006 RTP/AVP 0
 a=rtpmap:0 PCMU/8000"#;
 
-                    bob.answer_call(incoming_id, Some(bob_private_sdp.to_string()))
-                        .await
-                        .ok();
-                    println!("NAT mode media proxy test with private IPs completed");
-                    break;
-                }
-            }
+            bob.answer_call(&incoming_id, Some(bob_private_sdp.to_string()))
+                .await
+                .ok();
+            println!("NAT mode media proxy test with private IPs completed");
         }
 
         sleep(Duration::from_millis(200)).await;
@@ -2861,19 +2843,12 @@ a=rtpmap:0 PCMU/8000"#;
             let s = public_ip_sdp.to_string();
             async move { a.make_call("bob", Some(s)).await }
         });
-        if wait_for_event(
-            &mut bob,
-            |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
-            1000,
-        )
-        .await
-        .unwrap()
+        let incoming_id = next_incoming_call(&mut bob, 1000)
+            .await
+            .expect("bob should receive IncomingCall");
         {
-            let bob_events = bob.process_dialog_events().await.unwrap();
-            for event in &bob_events {
-                if let TestUaEvent::IncomingCall(incoming_id, _) = event {
-                    // Bob answers with public IP as well
-                    let bob_public_sdp = r#"v=0
+            // Bob answers with public IP as well
+            let bob_public_sdp = r#"v=0
 o=test 654321 123456 IN IP4 203.0.113.200
 s=-
 c=IN IP4 203.0.113.200
@@ -2881,12 +2856,9 @@ t=0 0
 m=audio 5006 RTP/AVP 0
 a=rtpmap:0 PCMU/8000"#;
 
-                    bob.answer_call(incoming_id, Some(bob_public_sdp.to_string()))
-                        .await
-                        .ok();
-                    break;
-                }
-            }
+            bob.answer_call(&incoming_id, Some(bob_public_sdp.to_string()))
+                .await
+                .ok();
         }
         if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(5), caller_handle).await
             && let Ok(Ok(id)) = join_res
@@ -2955,26 +2927,20 @@ a=rtpmap:0 PCMU/8000"#;
         // Simulate ringing then answer to complete the flow, and hang up
         let caller_handle = {
             let a = alice.clone();
-            crate::utils::spawn(async move { a.make_call("bob", None).await })
+            crate::utils::spawn(async move {
+                        let offer = create_test_sdp("192.168.1.100", 5004, true);
+                        a.make_call("bob", Some(offer)).await
+                    })
         };
-        if wait_for_event(
-            &mut bob,
-            |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
-            1000,
-        )
-        .await
-        .unwrap()
+        let incoming_id = next_incoming_call(&mut bob, 1000)
+            .await
+            .expect("bob should receive IncomingCall");
         {
-            let bob_events = bob.process_dialog_events().await.unwrap();
-            for event in &bob_events {
-                if let TestUaEvent::IncomingCall(incoming_id, _) = event {
-                    // Send ringing for a bit, then answer to allow the caller future to resolve
-                    bob.send_ringing(incoming_id, None).await.ok();
-                    sleep(Duration::from_millis(300)).await;
-                    bob.answer_call(incoming_id, None).await.ok();
-                    break;
-                }
-            }
+            // Send ringing for a bit, then answer to allow the caller future to resolve
+            bob.send_ringing(&incoming_id, None).await.ok();
+            sleep(Duration::from_millis(300)).await;
+            let answer_sdp = create_test_sdp("192.168.1.200", 5006, true);
+            bob.answer_call(&incoming_id, Some(answer_sdp)).await.ok();
         }
         if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(5), caller_handle).await
             && let Ok(Ok(id)) = join_res

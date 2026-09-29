@@ -170,26 +170,16 @@ async fn exchange_rtp(
     Ok((caller_stats, callee_stats))
 }
 
-/// Wait for CDR and return it.
-async fn wait_for_cdr(server: &E2eTestServer, timeout_ms: u64) -> Result<()> {
-    sleep(Duration::from_millis(timeout_ms)).await;
-
-    let records = server.cdr_capture.get_all_records().await;
-    assert!(!records.is_empty(), "Should have at least one CDR record");
-
-    let record = &records[0];
-    info!(
-        call_id = %record.call_id,
-        status = %record.details.status,
-        direction = %record.details.direction,
-        hangup_reason = ?record.hangup_reason,
-        caller = %record.caller,
-        callee = %record.callee,
-        sip_trunk_id = ?record.details.sip_trunk_id,
-        sip_gateway = ?record.details.sip_gateway,
-        "CDR record"
-    );
-    Ok(())
+/// Wait until at least one CDR record is captured and return the records.
+/// Polls every 20ms (usually returns well under the budget); `timeout_ms` is
+/// the upper bound (floored at 2s so call sites' historical sleep values keep
+/// adequate headroom).
+async fn wait_for_cdr(server: &E2eTestServer, timeout_ms: u64) -> Result<Vec<rustpbx::callrecord::CallRecord>> {
+    server
+        .cdr_capture
+        .wait_for_records(1, Duration::from_millis(timeout_ms.max(2000)))
+        .await
+        .ok_or_else(|| anyhow::anyhow!("no CDR record captured within {}ms", timeout_ms.max(2000)))
 }
 
 // ─── Test 2: Wholesale inbound — user (callee) hangs up ──────────────────────
@@ -236,8 +226,7 @@ async fn test_trunk_b2bua_inbound_user_hangup_rtp_cdr() -> Result<()> {
     callee_ua.hangup(&call.callee_id).await?;
 
     // Verify CDR — hangup reason must be ByCallee
-    wait_for_cdr(&server, 800).await?;
-    let records = server.cdr_capture.get_all_records().await;
+    let records = wait_for_cdr(&server, 800).await?;
     let record = &records[0];
 
     assert_eq!(record.details.status, "completed");
@@ -365,8 +354,7 @@ async fn test_trunk_b2bua_pcma_rtp_cdr() -> Result<()> {
     // Hang up and verify CDR
     caller_ua.hangup(&caller_id).await?;
 
-    wait_for_cdr(&server, 800).await?;
-    let records = server.cdr_capture.get_all_records().await;
+    let records = wait_for_cdr(&server, 800).await?;
     let record = &records[0];
     assert_eq!(record.details.status, "completed");
     assert!(matches!(
@@ -431,9 +419,7 @@ async fn test_trunk_b2bua_cdr_duration_accuracy() -> Result<()> {
     alice.hangup(&alice_id).await?;
 
     // Verify CDR duration
-    sleep(Duration::from_millis(800)).await;
-    let records = server.cdr_capture.get_all_records().await;
-    assert!(!records.is_empty(), "Should have CDR");
+    let records = wait_for_cdr(&server, 800).await?;
 
     let record = &records[0];
     let duration_secs = (record.end_time - record.start_time).num_seconds();
@@ -586,8 +572,7 @@ async fn test_trunk_b2bua_rtp_payload_integrity() -> Result<()> {
     // Hang up and verify CDR
     caller_ua.hangup(&caller_id).await.ok();
 
-    wait_for_cdr(&server, 800).await?;
-    let records = server.cdr_capture.get_all_records().await;
+    let records = wait_for_cdr(&server, 800).await?;
     let record = &records[0];
     assert_eq!(record.details.status, "completed");
 
@@ -687,8 +672,7 @@ async fn test_trunk_b2bua_early_media_183() -> Result<()> {
 
     caller_ua.hangup(&caller_id).await?;
 
-    wait_for_cdr(&server, 800).await?;
-    let records = server.cdr_capture.get_all_records().await;
+    let records = wait_for_cdr(&server, 800).await?;
     assert_eq!(records[0].details.status, "completed");
 
     caller_receiver.stop();
@@ -786,9 +770,7 @@ async fn test_trunk_b2bua_basic_call_cdr_roundtrip() -> Result<()> {
 
     alice.hangup(&alice_id).await?;
 
-    sleep(Duration::from_millis(800)).await;
-    let records = server.cdr_capture.get_all_records().await;
-    assert!(!records.is_empty(), "Should have CDR");
+    let records = wait_for_cdr(&server, 800).await?;
     assert_eq!(records[0].details.status, "completed");
     let error_code = records[0]
         .details
@@ -923,8 +905,7 @@ async fn test_trunk_b2bua_mid_call_reinvite() -> Result<()> {
 
     caller_ua.hangup(&caller_id).await?;
 
-    wait_for_cdr(&server, 800).await?;
-    let records = server.cdr_capture.get_all_records().await;
+    let records = wait_for_cdr(&server, 800).await?;
     assert_eq!(records[0].details.status, "completed");
 
     caller_receiver.stop();

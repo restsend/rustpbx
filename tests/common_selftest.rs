@@ -5,8 +5,6 @@
 //! same ~34 self-tests (24+ real-SIP UA tests among them, ~23s each pass)
 //! once per binary. They now live only here.
 
-mod common;
-
 #[path = "common_selftest/rtp_utils_tests.rs"]
 mod rtp_utils_tests;
 

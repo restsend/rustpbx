@@ -102,9 +102,11 @@ async fn test_cdr_carries_matched_route_info() -> Result<()> {
     if let Ok(Ok(Ok(id))) = tokio::time::timeout(Duration::from_secs(5), caller).await {
         alice.hangup(&id).await.ok();
     }
-    sleep(Duration::from_millis(500)).await;
-
-    let records = server.cdr_capture.get_all_records().await;
+    let records = server
+        .cdr_capture
+        .wait_for_records(1, Duration::from_secs(5))
+        .await
+        .expect("CDR for the routed call should be generated");
     let record = records
         .iter()
         .find(|r| r.details.to_number.as_deref() == Some("5100123456"))
