@@ -52,8 +52,10 @@ PROJECT_ROOT = find_project_root(SCRIPT_DIR)
 # guard SIGKILL the other workers' rustpbx (the reason this lane used to be
 # capped at a single serial worker).
 _xdist_worker = os.environ.get("PYTEST_XDIST_WORKER", "")
+_lane = os.environ.get("RUSTPBX_LANE", "")
+_isolation = _xdist_worker or _lane.replace("lane-", "")
 WORK_DIR = PROJECT_ROOT / "target" / (
-    "e2e-cc-regression" + (f"-{_xdist_worker}" if _xdist_worker else "")
+    "e2e-cc-regression" + (f"-{_isolation}" if _isolation else "")
 )
 REPORT_DIR = Path(os.environ.get("RUSTPBX_E2E_REPORT_DIR", SCRIPT_DIR / "report"))
 SCREENSHOT_DIR = REPORT_DIR / "screenshots"
