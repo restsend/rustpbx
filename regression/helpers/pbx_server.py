@@ -696,37 +696,83 @@ class PbxApiClient:
         return headers
 
     async def get(self, path: str, **kw) -> Any:
-        headers = await self._get_headers()
-        async with self.session.get(
-            f"{self.base_url}{path}", headers=headers, cookies=self._cookies, **kw
-        ) as resp:
-            return await self._handle(resp)
+        return await self._request_with_restart_retry("GET", path, None, kw)
 
     async def post(self, path: str, json_data: Any = None, **kw) -> Any:
-        headers = await self._get_headers()
         # aiohttp forces a Content-Type on every POST (application/json for
         # the json= argument, application/octet-stream otherwise), and the
         # server rejects an EMPTY body advertised as JSON. Endpoints like cc
         # hold/unhold accept no body at all (all-optional fields), so send an
         # empty JSON object instead of an empty body.
         payload = json_data if json_data is not None else {}
-        async with self.session.post(
-            f"{self.base_url}{path}",
-            headers=headers,
-            json=payload,
-            cookies=self._cookies,
-            **kw,
-        ) as resp:
-            return await self._handle(resp)
+        return await self._request_with_restart_retry("POST", path, payload, kw)
+
+    async def _request_with_restart_retry(
+        self, method: str, path: str, payload: Any, kw: dict
+    ) -> Any:
+        """Send a request, riding out in-process PBX restarts.
+
+        /reload/* endpoints (and the cc ACD reload) restart the PBX
+        in-place. For ~1-3s the HTTP listener is down (connection refused)
+        and after it boots the old session cookies are invalid (401).
+        Tests racing that window used to fail spuriously, so: connection
+        failures are retried for up to 15s, and a 401/403 right after a
+        restart triggers one re-login (throttled to once per 30s) before
+        the request is replayed.
+        """
+        deadline = time.monotonic() + 15.0
+        last_reauth = 0.0
+        warned = False
+        while True:
+            headers = await self._get_headers()
+            try:
+                if method == "GET":
+                    async with self.session.get(
+                        f"{self.base_url}{path}", headers=headers,
+                        cookies=self._cookies, **kw
+                    ) as resp:
+                        if resp.status in (401, 403) and time.monotonic() - last_reauth > 30:
+                            last_reauth = time.monotonic()
+                            logger.warning(
+                                "PBX session lost after restart (%s %s) — re-authenticating",
+                                method, path,
+                            )
+                            await self.ensure_console_auth()
+                            continue
+                        return await self._handle(resp)
+                else:
+                    async with self.session.post(
+                        f"{self.base_url}{path}", headers=headers,
+                        json=payload, cookies=self._cookies, **kw
+                    ) as resp:
+                        if resp.status in (401, 403) and time.monotonic() - last_reauth > 30:
+                            last_reauth = time.monotonic()
+                            logger.warning(
+                                "PBX session lost after restart (%s %s) — re-authenticating",
+                                method, path,
+                            )
+                            await self.ensure_console_auth()
+                            continue
+                        return await self._handle(resp)
+            except (
+                aiohttp.ClientConnectionError,
+                aiohttp.ClientOSError,
+                ConnectionResetError,
+                ConnectionRefusedError,
+            ) as exc:
+                if time.monotonic() >= deadline:
+                    raise
+                if not warned:
+                    warned = True
+                    logger.warning("PBX restarting (%s): %s — retrying up to 15s", path, exc)
+                await asyncio.sleep(0.5)
 
     async def put(self, path: str, json_data: Any = None, **kw) -> Any:
         headers = await self._get_headers()
+        payload = json_data if json_data is not None else {}
         async with self.session.put(
-            f"{self.base_url}{path}",
-            headers=headers,
-            json=json_data,
-            cookies=self._cookies,
-            **kw,
+            f"{self.base_url}{path}", headers=headers, json=payload,
+            cookies=self._cookies, **kw
         ) as resp:
             return await self._handle(resp)
 
@@ -739,12 +785,10 @@ class PbxApiClient:
 
     async def patch(self, path: str, json_data: Any = None, **kw) -> Any:
         headers = await self._get_headers()
+        payload = json_data if json_data is not None else {}
         async with self.session.patch(
-            f"{self.base_url}{path}",
-            headers=headers,
-            json=json_data,
-            cookies=self._cookies,
-            **kw,
+            f"{self.base_url}{path}", headers=headers, json=payload,
+            cookies=self._cookies, **kw
         ) as resp:
             return await self._handle(resp)
 
