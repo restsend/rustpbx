@@ -1161,12 +1161,14 @@ class ConfigBuilder:
             f'agents_files = ["{agents_rel}"]',
             f'skillgroup_files = ["{sg_rel}"]',
             "",
-            # Keep e2e wrapup short (3s): the built-in default is 30s and
+            # Keep e2e wrapup short (1s): the built-in default is 30s and
             # every call end / ring-no-answer otherwise parks the agent in
             # wrapup, adding ~30s per call cycle to hundreds of tests.
-            # NOTE: 0 is treated as "unset" (falls back to 30s), so use 3.
+            # NOTE: 0 is treated as "unset" (falls back to 30s), so 1s is the
+            # floor. Wrapup-state assertions poll at 0.25-0.4s and still see
+            # the window reliably.
             "[cc.desk.acw]",
-            "wrapup_time_secs = 3",
+            "wrapup_time_secs = 1",
             "",
         ])
 
