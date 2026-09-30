@@ -740,12 +740,12 @@ fn main() -> Result<()> {
             // Resolve the SIP ports from the config on disk (the in-memory
             // cache is only populated on build failures). These are the
             // listeners the OLD app still holds while it drains.
-            let ports = match &next_config_path {
+            let (bind_ip, ports) = match &next_config_path {
                 Some(path) => match Config::load_async(path).await {
-                    Ok(cfg) => cfg.proxy.all_udp_ports(),
-                    Err(_) => Vec::new(),
+                    Ok(cfg) => (cfg.proxy.addr.clone(), cfg.proxy.all_udp_ports()),
+                    Err(_) => (String::new(), Vec::new()),
                 },
-                None => Vec::new(),
+                None => (String::new(), Vec::new()),
             };
             info!("Reload requested; restarting with updated configuration");
             next_config_path = app_config_path;
@@ -757,11 +757,22 @@ fn main() -> Result<()> {
             // graceful drain (which waits for active calls), making the new
             // bind fail with "Address already in use" for up to the whole
             // retry budget.
+            //
+            // Probe the CONFIGURED bind address, not the wildcard: on macOS
+            // bind(("0.0.0.0", p)) can succeed while 127.0.0.1:p is still
+            // held by the draining app, so a wildcard-only probe reports
+            // "free" too early and the rebuild then burns its whole retry
+            // budget against the old listener and exits rc=1.
             let wait_start = std::time::Instant::now();
             loop {
-                let free = ports.is_empty()
-                    || ports.iter().all(|p| {
-                        match std::net::UdpSocket::bind(("0.0.0.0", *p)) {
+                let probe_targets: Vec<(String, u16)> = {
+                    let mut t: Vec<(String, u16)> = ports.iter().map(|p| (bind_ip.clone(), *p)).collect();
+                    t.extend(ports.iter().map(|p| ("0.0.0.0".to_string(), *p)));
+                    t
+                };
+                let free = probe_targets.is_empty()
+                    || probe_targets.iter().all(|(ip, p)| {
+                        match std::net::UdpSocket::bind((ip.as_str(), *p)) {
                             Ok(_) => true,
                             Err(_) => false,
                         }
