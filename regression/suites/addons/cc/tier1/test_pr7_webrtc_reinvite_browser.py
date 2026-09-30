@@ -63,7 +63,7 @@ async def test_pr7_webrtc_reinvite_hold_unhold_browser(
 
     # ── 1. sipbot calls the browser agent (1001) ────────────────────────
     callee = sipbot_pool.callee(
-        host=pbx.host, port=17250, username="1002", password="123456",
+        host=pbx.host, port=15251, username="1002", password="123456",
         register=False, ring_secs=2, answer_mode="echo",
     )
     await asyncio.sleep(1)
