@@ -224,7 +224,7 @@ impl GeneratedConfigStore {
             ..Default::default()
         };
 
-        config_entry::Entity::insert(model)
+        if let Err(e) = config_entry::Entity::insert(model)
             .on_conflict(
                 sea_orm::sea_query::OnConflict::columns([
                     config_entry::Column::Category,
@@ -239,7 +239,17 @@ impl GeneratedConfigStore {
             )
             .exec(db)
             .await
-            .map_err(|e| anyhow!("db config upsert error: {e}"))?;
+        {
+            // No-op upsert (identical resave), not a failure.
+            if !crate::db_report::is_noop_upsert(&e) {
+                return Err(anyhow!("db config upsert error: {e}"));
+            }
+            tracing::debug!(
+                category = %category,
+                name = %name,
+                "config upsert matched an identical row"
+            );
+        }
 
         Ok(())
     }

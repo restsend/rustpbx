@@ -1435,6 +1435,10 @@ impl SipServer {
                         let count = registry_for_metrics.count();
                         crate::metrics::sip::set_active_dialogs(count);
                         crate::metrics::sip::set_draining(crate::shutdown::is_draining());
+                        let heartbeat = registry_for_metrics.heartbeat_stats(120);
+                        crate::metrics::session::set_heartbeat_tracked(heartbeat.tracked);
+                        crate::metrics::session::set_heartbeat_max_age(heartbeat.max_age_secs);
+                        crate::metrics::session::set_heartbeat_stale(heartbeat.stale);
                         let stats = endpoint_inner_for_metrics.get_stats();
                         crate::metrics::transaction::set_endpoint_running(stats.running_transactions);
                         crate::metrics::transaction::set_endpoint_finished(stats.finished_transactions);
@@ -1609,6 +1613,17 @@ impl SipServer {
                         };
                         if is_trunk || from_trusted_proxy {
                             info!(key = %tx.key, via_ip = %via_ip_str, ?source_ip, "responding 200 OK OPTIONS (trunk or proxy health probe)");
+                            tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
+                            continue;
+                        }
+                        if matches!(
+                            tx.connection.as_ref(),
+                            Some(
+                                SipConnection::Channel(_)
+                                    | SipConnection::WebSocket(_)
+                            )
+                        ) {
+                            info!(key = %tx.key, via_ip = %via_ip_str, "responding 200 OK OPTIONS (websocket keepalive)");
                             tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
                             continue;
                         }

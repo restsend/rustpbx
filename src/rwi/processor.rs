@@ -372,8 +372,11 @@ impl RwiCommandProcessor {
                 call_id,
                 queue_id,
                 priority,
+                skill_groups,
             } => {
-                return self.queue_requeue(call_id, queue_id, *priority).await;
+                return self
+                    .queue_requeue(call_id, queue_id, *priority, skill_groups.clone())
+                    .await;
             }
             RwiCommandPayload::RecordStart(req) => {
                 return self.record_start(req.clone()).await;
@@ -1495,6 +1498,11 @@ impl RwiCommandProcessor {
                                                 leg_id: None,
                                                 call_id: call_id.clone(),
                                                 early_media,
+                                                // Session-level event: agent
+                                                // attribution rides call-meta
+                                                // enrichment, never pinned here.
+                                                agent_id: None,
+                                                agent_name: None,
                                             });
                                         }
 
@@ -2394,6 +2402,7 @@ impl RwiCommandProcessor {
         gw.send_to_owner(&crate::rwi::QueueJoined {
             call_id: req.call_id.clone(),
             queue_id: req.queue_id.clone(),
+            skill_groups: req.skill_groups.clone().filter(|g| !g.is_empty()),
         });
 
         info!(
@@ -2512,6 +2521,7 @@ impl RwiCommandProcessor {
         call_id: &str,
         queue_id: &str,
         _priority: Option<u32>,
+        skill_groups: Option<Vec<String>>,
     ) -> Result<CommandResult, CommandError> {
         self.get_handle(call_id).await?;
 
@@ -2536,6 +2546,7 @@ impl RwiCommandProcessor {
         gw.broadcast(&crate::rwi::QueueJoined {
             call_id: call_id.to_string(),
             queue_id: queue_id.to_string(),
+            skill_groups: skill_groups.filter(|g| !g.is_empty()),
         });
 
         info!(call_id = %call_id, new_queue = %queue_id, "Call requeued");

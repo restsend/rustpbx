@@ -19,6 +19,9 @@ mod test_early_media_sdp_change_regression;
 #[path = "proxy_e2e/test_inbound_refer.rs"]
 mod test_inbound_refer;
 
+#[path = "proxy_e2e/webhook_context_e2e.rs"]
+mod webhook_context_e2e;
+
 #[path = "proxy_e2e/test_trunk_options.rs"]
 mod test_trunk_options;
 

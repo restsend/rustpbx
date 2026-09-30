@@ -669,6 +669,8 @@ async fn test_session_resume_returns_events() {
                 leg_id: None,
                 call_id: "test-call-1".to_string(),
                 early_media: false,
+                agent_id: None,
+                agent_name: None,
             },
             None,
         );
@@ -719,6 +721,8 @@ async fn test_call_resume_returns_call_specific_events() {
                 leg_id: None,
                 call_id: "call-a".to_string(),
                 early_media: false,
+                agent_id: None,
+                agent_name: None,
             },
             None,
         );
@@ -727,6 +731,8 @@ async fn test_call_resume_returns_call_specific_events() {
                 leg_id: None,
                 call_id: "call-b".to_string(),
                 early_media: false,
+                agent_id: None,
+                agent_name: None,
             },
             None,
         );

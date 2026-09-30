@@ -42,6 +42,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 use crate::common::e2e_test_server::{E2eTestServer, E2eTestServerInject};
+use crate::common::rwi_timeline::RwiTimeline;
 use crate::common::test_ua::{
     TestUa, TestUaConfig, TestUaEvent, create_test_sdp, create_test_sdp_answer,
 };
@@ -283,6 +284,8 @@ async fn start_harness(capture: &WebhookCapture) -> Result<FullChainHarness> {
             session_hook: None,
             agent_registry: Some(adapter.clone()),
             rwi_gateway: Some(gateway),
+            #[cfg(feature = "addon-cc")]
+            cc_policy_db: None,
         },
     )
     .await?;
@@ -444,9 +447,17 @@ async fn test_full_chain_ivr_queue_agent_rwi_webhook_events() -> Result<()> {
         Some("all_busy"),
         "agent is Busy → reason must be all_busy: {queued}"
     );
-    wait_webhook_event(&capture, "queue_joined", Duration::from_secs(5))
+    let joined = wait_webhook_event(&capture, "queue_joined", Duration::from_secs(5))
         .await
         .expect("webhook must receive queue_joined");
+    // The skill-group target resolved at queue start must be reported on the
+    // join event (targets-derived snapshot; overflow groups land on
+    // `queue_left`).
+    assert_eq!(
+        joined["event"]["skill_groups"],
+        serde_json::json!([SKILL_GROUP]),
+        "queue_joined must carry the target skill group: {joined}"
+    );
 
     // ── Agent goes Idle → wait retention assigns him (分配) ──────────────
     // Presence state machine: busy → wrapup → idle.
@@ -538,6 +549,19 @@ async fn test_full_chain_ivr_queue_agent_rwi_webhook_events() -> Result<()> {
     wait_webhook_event(&capture, "call_hangup", Duration::from_secs(10))
         .await
         .expect("webhook must receive call_hangup after the caller hangs up");
+
+    // ── RWI timeline contract (whole-call, run last so every event landed) ─
+    // BOTH `call_ringing` events — the leg-level SIP 180 (agent attribution
+    // pinned BEFORE the INVITE, carried on the event payload) and the
+    // session-level one (call-meta enrichment) — must carry the agent id,
+    // alongside the ordering / uniqueness / stability contract. Previously
+    // only the CC-hook-enriched session event had the agent, and only when
+    // its ring-time registry/DB confirmation happened to succeed.
+    let call_id = ringing["call_id"]
+        .as_str()
+        .expect("call_ringing envelope carries call_id")
+        .to_string();
+    RwiTimeline::from_capture(&capture, &call_id).assert_queue_agent_contract("bob");
 
     // ── Sequence sanity: the chain must appear in a coherent order ───────
     {

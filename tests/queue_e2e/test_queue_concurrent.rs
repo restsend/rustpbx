@@ -276,6 +276,8 @@ async fn start_server(port: u16, flavor: Flavor, bob_idle_first_secs: u64) -> Re
             session_hook: Some(hook),
             agent_registry: Some(adapter),
             rwi_gateway: None,
+            #[cfg(feature = "addon-cc")]
+            cc_policy_db: None,
         },
     )
     .await?;

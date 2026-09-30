@@ -2072,7 +2072,15 @@ impl CallModule {
         let dialplan = match dialplan {
             Ok(d) => d,
             Err(route_err) => {
-                error!(key = %tx.key, error = %route_err.error, status = ?route_err.status, reason = %route_error_reason(&route_err), "failed to build dialplan");
+                let err_text = route_err.error.to_string();
+                // Zhongan business rejections (quota / DND / AXB binding) are
+                // expected per-policy outcomes, not system faults — keep them
+                // visible at WARN without tripping ERROR alerting.
+                if err_text.contains("zhongan_invite;cause=") {
+                    warn!(key = %tx.key, error = %route_err.error, status = ?route_err.status, reason = %route_error_reason(&route_err), "failed to build dialplan (business rejection)");
+                } else {
+                    error!(key = %tx.key, error = %route_err.error, status = ?route_err.status, reason = %route_error_reason(&route_err), "failed to build dialplan");
+                }
                 return self.reply_route_error(tx, &cookie, route_err).await;
             }
         };

@@ -151,6 +151,10 @@ def find_or_build_binary(project_root: Path, features: Optional[list[str]] = Non
         raise RuntimeError(f"Binary not found at {target} after build")
     # Promote to the stable copy so future sessions skip the build entirely.
     try:
+        # macOS SIGKILLs execs of an in-place replaced signed binary —
+        # always replace through a fresh file.
+        if stable.exists():
+            stable.unlink()
         shutil.copy2(target, stable)
         logger.info("Promoted build to stable copy at %s", stable)
     except OSError as exc:
@@ -365,16 +369,25 @@ class PbxServer:
                         # will fail with a clear file-not-found otherwise.
                         logger.warning("could not symlink %s into %s", asset, work_dir)
             # /console/cc/desk|dev serve src/addons/cc/static/*.html relative
-            # to the rustpbx CWD — mirror the nested path too.
-            cc_static = project_root / "src" / "addons" / "cc" / "static"
+            # to the rustpbx CWD — mirror the nested path too. The cc SPA
+            # template (contact_center/spa.html) likewise resolves via
+            # src/addons/cc/templates relative to CWD, so mirror that as
+            # well or /console/cc renders 500 (template not found).
+            cc_addon = project_root / "src" / "addons" / "cc"
             nested_parent = work_dir / "src" / "addons" / "cc"
-            nested = nested_parent / "static"
-            if cc_static.is_dir() and not nested.exists():
-                nested_parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    nested.symlink_to(cc_static, target_is_directory=True)
-                except (OSError, NotImplementedError):
-                    logger.warning("could not symlink cc static into %s", work_dir)
+            for sub in ("static", "templates"):
+                src_dir = cc_addon / sub
+                nested = nested_parent / sub
+                if src_dir.is_dir() and not nested.exists():
+                    nested_parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        nested.symlink_to(src_dir, target_is_directory=True)
+                    except (OSError, NotImplementedError):
+                        # Best effort only — tests that need the asset dir
+                        # will fail with a clear file-not-found otherwise.
+                        logger.warning(
+                            "could not symlink cc %s into %s", sub, work_dir
+                        )
 
             # The repo's config/sounds (hold audio phone-calling.wav, queue
             # prompts, error cues) must ALSO be visible under the work dir:

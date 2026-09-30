@@ -254,6 +254,10 @@ pub enum RwiCommandPayload {
         #[serde(default)]
         queue_id: String,
         priority: Option<u32>,
+        /// Optional skill groups to report on the re-`queue_joined` event
+        /// (mirrors `QueueEnqueueRequest::skill_groups`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        skill_groups: Option<Vec<String>>,
     },
     #[serde(rename = "supervisor.listen")]
     SupervisorListen {
@@ -667,6 +671,9 @@ pub struct QueueEnqueueRequest {
     #[serde(default)]
     pub queue_id: String,
     pub priority: Option<u32>,
+    /// Optional skill groups for the re-`queue_joined` event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_groups: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

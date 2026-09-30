@@ -3024,6 +3024,15 @@ mod tests {
         }
         let dialed_leg = dialed_leg.expect("wait-retention poll must dial the resolved agent");
 
+        // The dial must be preceded by the agent pin (PinAgentMeta).
+        let pins = stack.pinned_agent_meta.lock().unwrap().clone();
+        assert_eq!(
+            pins,
+            vec![(Some("agent-001".to_string()), Some("Alice".to_string()))],
+            "exactly one agent pin (id + display name) must precede the dial, got {pins:?}"
+        );
+        let _ = dialed_leg;
+
         // The agent never answers → ring timeout → round exhausted → the app
         // must go back to waiting (hold restarts), not hang up.
         stack.timeout("agent_ring_timeout");

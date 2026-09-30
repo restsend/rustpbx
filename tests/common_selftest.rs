@@ -11,6 +11,9 @@ mod rtp_utils_tests;
 #[path = "common_selftest/cdr_capture_tests.rs"]
 mod cdr_capture_tests;
 
+#[path = "common_selftest/rwi_timeline_tests.rs"]
+mod rwi_timeline_tests;
+
 #[path = "common_selftest/e2e_server_tests.rs"]
 mod e2e_server_tests;
 

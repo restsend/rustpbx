@@ -30,6 +30,13 @@ use crate::rwi::event::DbWriteFailed;
 /// `suppressed` on the next emission (and in every error! log line).
 pub const THROTTLE_COOLDOWN: Duration = Duration::from_secs(30);
 
+/// True when a failed-looking upsert is actually a successful no-op:
+/// sea-orm 2.x raises `RecordNotInserted` when the matched rows already
+/// hold identical values (or a DO UPDATE ... WHERE rejects the write).
+pub fn is_noop_upsert(error: &sea_orm::DbErr) -> bool {
+    matches!(error, sea_orm::DbErr::RecordNotInserted)
+}
+
 #[derive(Default)]
 struct ThrottleState {
     /// `(entity, operation) -> (last broadcast instant, suppressed count)`.
@@ -125,6 +132,19 @@ pub fn report_db_write_failure_with_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn noop_upsert_matches_record_not_inserted_only() {
+        use sea_orm::DbErr;
+
+        assert!(is_noop_upsert(&DbErr::RecordNotInserted));
+        // Real failures must keep flowing into the error path.
+        assert!(!is_noop_upsert(&DbErr::ConnectionAcquire(
+            sea_orm::ConnAcquireErr::Timeout
+        )));
+        assert!(!is_noop_upsert(&DbErr::RecordNotFound("missing".into())));
+        assert!(!is_noop_upsert(&DbErr::Custom("deadlock".into())));
+    }
 
     /// Unique keys per run so tests don't interact through the shared global
     /// throttle table.

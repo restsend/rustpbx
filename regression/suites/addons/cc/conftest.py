@@ -47,7 +47,14 @@ PROJECT_ROOT = find_project_root(SCRIPT_DIR)
 # config/cc/cc.toml wiping the global [csat] section). rustpbx still resolves
 # repo assets (sounds/locales/templates) through symlinks created by
 # PbxServer.start().
-WORK_DIR = PROJECT_ROOT / "target" / "e2e-cc-regression"
+# Per xdist worker: with -n N each worker boots its own session-scoped PBX in
+# its own work dir. Sharing one dir made each worker's stale-listener port
+# guard SIGKILL the other workers' rustpbx (the reason this lane used to be
+# capped at a single serial worker).
+_xdist_worker = os.environ.get("PYTEST_XDIST_WORKER", "")
+WORK_DIR = PROJECT_ROOT / "target" / (
+    "e2e-cc-regression" + (f"-{_xdist_worker}" if _xdist_worker else "")
+)
 REPORT_DIR = Path(os.environ.get("RUSTPBX_E2E_REPORT_DIR", SCRIPT_DIR / "report"))
 SCREENSHOT_DIR = REPORT_DIR / "screenshots"
 
@@ -347,10 +354,16 @@ async def api(pbx: PbxServer):
         # recovery window can span ~60 s. Wait for readiness so this test
         # doesn't hit ConnectionRefused at setup. Normal path: the first
         # probe succeeds and the loop breaks immediately.
+        #
+        # Probe /console/ (dashboard, template ships in repo templates/) —
+        # NOT /console/cc: the cc SPA template resolves via
+        # src/addons/cc/templates relative to the PBX CWD, which does not
+        # exist in isolated e2e work dirs, so /console/cc can 500 forever
+        # and probing it burned the full 75 s loop on EVERY test.
         import asyncio as _asyncio
         for _ in range(150):
             try:
-                async with session.get(f"{pbx.http_url}/console/cc", timeout=2) as resp:
+                async with session.get(f"{pbx.http_url}/console/", timeout=2) as resp:
                     if resp.status < 500:
                         break
             except Exception:

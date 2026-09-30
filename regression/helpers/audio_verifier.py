@@ -256,6 +256,56 @@ def window_rms_db(samples: np.ndarray, sample_rate: int, t0: float, t1: float):
     return rms, best_freq
 
 
+def band_gain_db(samples: np.ndarray, sample_rate: int, freq: float,
+                 width: float = 12.0, t0: float | None = None,
+                 t1: float | None = None) -> float:
+    """Band peak of *freq* relative to the window's full-band peak (dB,
+    ≤0). ≈0 ⇒ the tone dominates the window; ≤-20 ⇒ absent. Optionally
+    slice [t0, t1] seconds first."""
+    n = samples.size
+    if t0 is not None and t1 is not None:
+        lo, hi = int(t0 * sample_rate), int(t1 * sample_rate)
+        samples = samples[max(lo, 0):max(hi, lo + 16)]
+    n = samples.size
+    if n < 16:
+        return float("-inf")
+    seg_band = band_peak_db(samples, sample_rate, freq, width)
+    win = np.hanning(n)
+    spec = np.abs(np.fft.rfft(samples.astype(float) * win))
+    full = float(20 * np.log10(spec.max() + 1e-9))
+    return seg_band - full
+
+
+def rec_align_offset(rec_path: str | Path, freq: float,
+                     min_gain: float = -10.0, max_scan_s: float = 30.0,
+                     window_s: float = 0.5) -> float:
+    """Recording-time offset (s) of the first sustained *freq* tone — the
+    call-establish point. Scenario phase offsets (measured from establish
+    with time.monotonic()) must be shifted by this to index the recording."""
+    samples, sr = read_wav_mono(rec_path)
+    step = window_s
+    required_hits = 6  # 3 s of sustained dominance — ringback lasts less
+    t = 0.0
+    hits = 0
+    while t + step <= min(max_scan_s, len(samples) / sr):
+        # Absolute audibility gate first: during pre-answer silence the
+        # relative band gain is noise-driven and meaningless.
+        lo, hi = int(t * sr), int((t + step) * sr)
+        seg = samples[lo:hi]
+        if seg.size >= sr // 4 and band_peak_db(seg, sr, freq) > -42.0:
+            gain = band_gain_db(samples, sr, freq, t0=t, t1=t + step)
+            if gain >= min_gain:
+                hits += 1
+                if hits >= required_hits:
+                    return max(t - (required_hits - 2) * step, 0.0)
+            else:
+                hits = 0
+        else:
+            hits = 0
+        t += step
+    return 0.0
+
+
 def goertzel_timeline(
     samples: np.ndarray,
     sample_rate: int,

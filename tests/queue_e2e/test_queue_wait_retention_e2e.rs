@@ -227,6 +227,8 @@ async fn start_harness(
             session_hook: None,
             agent_registry: Some(adapter.clone()),
             rwi_gateway: None,
+            #[cfg(feature = "addon-cc")]
+            cc_policy_db: None,
         },
     )
     .await?;

@@ -57,6 +57,8 @@ async fn test_full_session_resume_flow() {
                     leg_id: None,
                     call_id: "resume-call-1".to_string(),
                     early_media: false,
+                    agent_id: None,
+                    agent_name: None,
                 },
             );
             gw.fan_out(
@@ -142,6 +144,8 @@ async fn test_call_resume_filters_by_call_id() {
                     leg_id: None,
                     call_id: "call-a".to_string(),
                     early_media: false,
+                    agent_id: None,
+                    agent_name: None,
                 },
                 None,
             ),
@@ -165,6 +169,8 @@ async fn test_call_resume_filters_by_call_id() {
                     leg_id: None,
                     call_id: "call-b".to_string(),
                     early_media: false,
+                    agent_id: None,
+                    agent_name: None,
                 },
                 None,
             ),

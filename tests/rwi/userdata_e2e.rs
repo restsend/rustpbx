@@ -17,7 +17,10 @@ use std::time::Duration;
 
 use tokio::time::timeout;
 
+use crate::common::webhook_capture::WebhookCapture;
 use crate::helpers::ws_harness::{connect, req, send_recv_matching, start_test_server};
+use rustpbx::config::LocatorWebhookConfig;
+use rustpbx::rwi::webhook::{start_rwi_webhook_handler, WEBHOOK_CHANNEL_SIZE};
 
 /// Read the next enriched event from the gateway event tap.
 async fn next_tap_event(
@@ -29,6 +32,30 @@ async fn next_tap_event(
             .expect("timeout waiting for event tap")
             .expect("event tap closed");
         return entry.event.payload.clone();
+    }
+}
+
+/// Poll the webhook capture until it has seen `event_type`; returns the full
+/// POST envelope.
+async fn wait_webhook_envelope(
+    capture: &WebhookCapture,
+    event_type: &str,
+) -> Option<serde_json::Value> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        {
+            let received = capture.received.lock().unwrap();
+            if let Some(ev) = received
+                .iter()
+                .find(|v| v["event_type"].as_str() == Some(event_type))
+            {
+                return Some(ev.clone());
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -191,6 +218,86 @@ async fn single_node_call_vars_roundtrip_and_cleanup() {
     assert!(
         v["data"]["value"].is_null(),
         "var must be gone after call_finished: {v}"
+    );
+
+    ws.close(None).await.unwrap();
+}
+
+/// The outbound RWI webhook must deliver `user_data` inside the POST
+/// envelope's inner `event` object — through the real webhook handler
+/// (envelope wrapping + dedup +
+/// delivery), which the tap-level tests do not exercise.
+///
+/// Pins: set over the real WS → `call_userdata_updated` POST carries
+/// `event.user_data`; a subsequent call-scoped event POST carries it too.
+#[tokio::test]
+async fn webhook_delivery_carries_user_data() {
+    let capture = WebhookCapture::start().await;
+    let (url, gw, _registry) = start_test_server().await;
+
+    gw.write().set_webhook_tx(start_rwi_webhook_handler(
+        LocatorWebhookConfig {
+            url: capture.url.clone(),
+            events: vec![],
+            headers: None,
+            timeout_ms: Some(5000),
+            retries: None,
+            track_queue_latency: None,
+        },
+        WEBHOOK_CHANNEL_SIZE,
+    ));
+
+    // Simulate the live call the proxy would have created.
+    gw.read().meta_store.insert(
+        "call-w1".to_string(),
+        rustpbx::rwi::CallMeta {
+            caller: Some("sip:alice@localhost".to_string()),
+            ..Default::default()
+        },
+    );
+
+    // Set user data over the real RWI WebSocket.
+    let mut ws = connect(&url).await;
+    let (set_id, set_req) = req(
+        "call.set_userdata",
+        serde_json::json!({"call_id": "call-w1", "data": {"crm_id": "C-1"}}),
+    );
+    let v = send_recv_matching(&mut ws, &set_req, &set_id).await;
+    assert_eq!(v["status"], "success", "set_userdata must succeed: {v}");
+
+    // 1. The `call_userdata_updated` POST must carry the full new value
+    //    inside the envelope's inner `event` object.
+    let posted = wait_webhook_envelope(&capture, "call_userdata_updated")
+        .await
+        .expect("webhook must receive call_userdata_updated");
+    assert_eq!(posted["rwi"], "1.0", "{posted}");
+    assert_eq!(posted["call_id"], "call-w1", "{posted}");
+    assert_eq!(
+        posted["event"]["user_data"]["crm_id"],
+        "C-1",
+        "webhook envelope event.user_data missing: {posted}"
+    );
+    // The envelope's top-level `event_type` is the single source of truth —
+    // the inner event must not repeat the key.
+    assert!(
+        posted["event"].get("event_type").is_none(),
+        "inner event must not carry event_type: {posted}"
+    );
+
+    // 2. A subsequent call-scoped event POST must be enriched with it.
+    gw.read().send_to_owner(&rustpbx::rwi::Dtmf {
+        call_id: "call-w1".into(),
+        digit: "5".into(),
+        leg_id: None,
+        extra: None,
+    });
+    let posted = wait_webhook_envelope(&capture, "dtmf")
+        .await
+        .expect("webhook must receive dtmf");
+    assert_eq!(
+        posted["event"]["user_data"]["crm_id"],
+        "C-1",
+        "dtmf webhook envelope must carry user_data: {posted}"
     );
 
     ws.close(None).await.unwrap();

@@ -716,6 +716,17 @@ impl QueueApp {
         extract_sip_username(uri).unwrap_or_else(|| uri.to_string())
     }
 
+    /// Pin the CC agent attribution (PinAgentMeta) BEFORE the LegAdd so the
+    /// leg-level `call_ringing` carries `agent_id` without racing the CC
+    /// session hook. Fire-and-forget.
+    async fn pin_agent_for_dial(&self, ctrl: &CallController, agent_id: &str, uri: &str) {
+        if agent_id.is_empty() {
+            return;
+        }
+        let name = self.resolve_agent_display_name(uri).await;
+        ctrl.pin_agent_meta(Some(agent_id.to_string()), Some(name));
+    }
+
     /// Release phantom agent states bound to THIS call (never-connected
     /// Ringing reservations / phantom Busy from rejections).
     ///
@@ -765,6 +776,18 @@ impl QueueApp {
             skill_group = ?self.config.skill_group,
             "Queue: no Idle agents — entering wait retention"
         );
+        // Self-heal: an agent stuck on a dead session would keep the queue
+        // empty until the periodic watchdog tick.
+        if let Some(ref registry) = self.agent_registry {
+            let released = registry.reconcile_dead_call_bindings().await;
+            if released > 0 {
+                info!(
+                    queue = %self.config.name,
+                    released,
+                    "Queue: reconciled dead agent bindings before wait retention"
+                );
+            }
+        }
         if !self.answered {
             ctrl.answer().await?;
             self.answered = true;
@@ -844,9 +867,23 @@ impl QueueApp {
         };
 
         let target = format!("skill-group:{}", sg);
-        let uris = registry
+        let mut uris = registry
             .resolve_target_with_policy(&target, None, &self.call_id)
             .await;
+        if uris.is_empty() {
+            // Self-heal, then re-poll: heals this caller within one poll
+            // instead of waiting for the periodic watchdog.
+            if registry.reconcile_dead_call_bindings().await > 0 {
+                info!(
+                    queue = %self.config.name,
+                    skill_group = %sg,
+                    "Queue: dead agent bindings healed — re-polling candidates"
+                );
+                uris = registry
+                    .resolve_target_with_policy(&target, None, &self.call_id)
+                    .await;
+            }
+        }
         if uris.is_empty() {
             debug!(skill_group = %sg, "Queue: wait retention poll — still no Idle agent");
             self.arm_queue_retry(ctrl);
@@ -1457,6 +1494,7 @@ impl QueueApp {
         if !self.is_parallel() {
             self.pending_agents.clear();
         }
+        self.pin_agent_for_dial(ctrl, &attempt_agent_id, &uri).await;
         match ctrl
             .originate_call_with_headers(&uri, Some(self.call_id.clone()), leg_headers)
             .await
@@ -1758,7 +1796,8 @@ impl QueueApp {
         let mut originated = false;
         for uri in uris {
             let agent_id = self.agent_id_for_uri(uri).await;
-            self.record_attempted_agent(agent_id);
+            self.record_attempted_agent(agent_id.clone());
+            self.pin_agent_for_dial(ctrl, &agent_id, uri).await;
             match ctrl.originate_call(uri, Some(self.call_id.clone())).await {
                 Ok(call_id) => {
                     info!(agent = %uri, call_id = %call_id, "{success_log}");
@@ -1927,9 +1966,15 @@ impl CallApp for QueueApp {
         // before agent resolution (strict "joined first" ordering); the app
         // only emits it here when it was started without that preparation.
         if !self.joined_emitted_externally {
+            let groups = self.all_skill_groups();
             self.emit_rwi(&crate::rwi::event::QueueJoined {
                 call_id: self.call_id.clone(),
                 queue_id: queue_id.clone(),
+                skill_groups: if groups.is_empty() {
+                    None
+                } else {
+                    Some(groups)
+                },
             });
         }
 
@@ -2022,6 +2067,8 @@ impl CallApp for QueueApp {
                     .await;
 
                 // Originate call to agent
+                self.pin_agent_for_dial(ctrl, &agent.agent_id, &agent.uri)
+                    .await;
                 let call_id = ctrl
                     .originate_call(&agent.uri, Some(self.call_id.clone()))
                     .await?;
@@ -2131,7 +2178,8 @@ impl CallApp for QueueApp {
                 for (idx, (uri, leg_headers)) in parallel_uris.into_iter().enumerate() {
                     let leg_headers = leg_headers.unwrap_or_default();
                     let attempt_agent_id = self.agent_id_for_uri(&uri).await;
-                    self.record_attempted_agent(attempt_agent_id);
+                    self.record_attempted_agent(attempt_agent_id.clone());
+                    self.pin_agent_for_dial(ctrl, &attempt_agent_id, &uri).await;
                     match ctrl
                         .originate_call_with_headers(&uri, Some(self.call_id.clone()), leg_headers)
                         .await

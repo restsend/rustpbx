@@ -1024,6 +1024,8 @@ impl SipSession {
         // rolling.
         self.close_app_scoped_recording().await;
 
+        // No unconditional caller unhold: held callers recover at the exact
+        // bridge point; an extra re-INVITE would perturb the hand-off.
         match target {
             TransferTarget::Queue {
                 name,
@@ -1706,6 +1708,57 @@ impl SipSession {
         target_overrides: Vec<String>,
         overflow_overrides: Option<crate::call::app::QueueOverflowOverrides>,
     ) -> Result<()> {
+        // `queue:agent:<ext>` (P1b): direct dispatch to ONE call-center
+        // agent; return_app degrades to the routed app when unavailable.
+        if let Some(ext) = queue_name.strip_prefix("agent:").map(str::trim).filter(|s| !s.is_empty())
+        {
+            use crate::call::{DialStrategy, Location, QueuePlan};
+            tracing::info!(
+                extension = %ext,
+                "handle_queue_transfer: synthesising queue plan for a specific agent"
+            );
+            let target = format!("agent:{ext}");
+            let aor: rsipstack::sip::Uri = match target.parse() {
+                Ok(aor) => aor,
+                Err(e) => {
+                    warn!(session_id = %self.id, %target, error = %e, "Invalid agent: queue target");
+                    return self
+                        .handle_queue_failure_fallback(
+                            queue_name,
+                            &format!("invalid target ({})", e),
+                            "queue.start_failed",
+                            return_app.as_ref(),
+                        )
+                        .await;
+                }
+            };
+            let mut queue_plan = QueuePlan {
+                dial_strategy: Some(DialStrategy::Sequential(vec![Location {
+                    aor,
+                    contact_raw: Some(target),
+                    ..Default::default()
+                }])),
+                queue_name: format!("agent:{ext}"),
+                ..Default::default()
+            };
+            if let Some(spec) = &return_app {
+                apply_return_app_fallback(&mut queue_plan, spec);
+            }
+            if let Err(e) = self.start_queue_app(queue_plan, overflow_overrides).await {
+                warn!(session_id = %self.id, extension = %ext, error = %e, "Agent queue app failed to start; applying graceful fallback");
+                return self
+                    .handle_queue_failure_fallback(
+                        queue_name,
+                        &format!("start failed ({})", e),
+                        "queue.start_failed",
+                        return_app.as_ref(),
+                    )
+                    .await;
+            }
+            self.meta.transfer_return_app = self.resolve_return_app(return_app).await;
+            Self::annotate_queue_return_origin(&mut self.meta.transfer_return_app, queue_name);
+            return Ok(());
+        }
         // `queue:skill-group:<id>` — direct ACD hand-off without a queue
         // definition: synthesise the plan from the skill group (mirrors
         // `QueuePlan::from_app_params`), so blind transfers can reach a

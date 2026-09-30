@@ -308,11 +308,7 @@ impl PresenceManager {
 
     /// Total presence subscription bindings (sum of all identity buckets).
     pub fn subscriber_bindings_len(&self) -> usize {
-        self.subscribers
-            .read()
-            .values()
-            .map(|v| v.len())
-            .sum()
+        self.subscribers.read().values().map(|v| v.len()).sum()
     }
 
     pub fn mwi_subscribers_len(&self) -> usize {
@@ -321,11 +317,7 @@ impl PresenceManager {
 
     /// Total MWI subscription bindings (sum of all extension buckets).
     pub fn mwi_subscriber_bindings_len(&self) -> usize {
-        self.mwi_subscribers
-            .read()
-            .values()
-            .map(|v| v.len())
-            .sum()
+        self.mwi_subscribers.read().values().map(|v| v.len()).sum()
     }
 
     pub fn get_state(&self, identity: &str) -> PresenceState {
@@ -379,14 +371,22 @@ impl PresenceManager {
                     .exec(db)
                     .await
                 {
-                    crate::db_report::report_db_write_failure_with_detail(
-                        "presence",
-                        "upsert",
-                        None,
-                        &e,
-                        Some(serde_json::json!({ "identity": identity })),
-                        crate::db_report::THROTTLE_COOLDOWN,
-                    );
+                    // Identical-value re-save is a no-op upsert, not a failure.
+                    if crate::db_report::is_noop_upsert(&e) {
+                        tracing::debug!(
+                            identity = %identity,
+                            "presence upsert matched an identical row"
+                        );
+                    } else {
+                        crate::db_report::report_db_write_failure_with_detail(
+                            "presence",
+                            "upsert",
+                            None,
+                            &e,
+                            Some(serde_json::json!({ "identity": identity })),
+                            crate::db_report::THROTTLE_COOLDOWN,
+                        );
+                    }
                 }
             }
         }
@@ -1522,10 +1522,7 @@ mod tests {
         // Panic inside a thread while the write guard is held.
         let panic_joined = std::thread::spawn(move || {
             let mut guard = states.write();
-            guard.insert(
-                "poison-ext".to_string(),
-                PresenceState::default(),
-            );
+            guard.insert("poison-ext".to_string(), PresenceState::default());
             panic!("simulated panic while holding the presence states lock");
         });
         let res = panic_joined.join();

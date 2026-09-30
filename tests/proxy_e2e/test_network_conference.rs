@@ -359,10 +359,148 @@ async fn test_blind_refer_from_replacement_leg() {
     server.stop();
 }
 
-/// A is already attached when C rejects joining; NOTIFY must precede teardown,
-/// and C's owning session must be ended even though it never joined that room.
+/// R1: an attended REFER to an app target runs the in-session hand-off —
+/// no originate, no transfer room; the customer lands in the IVR.
 #[tokio::test]
-async fn test_attended_refer_attachment_failure_ends_both_sessions() {
+async fn test_attended_refer_to_ivr_moves_customer_into_app() {
+    use crate::common::rtp_utils::RtpPacket;
+    let _ = tracing_subscriber::fmt::try_init();
+    let port = portpicker::pick_unused_port().unwrap();
+    let mut config = crate::common::test_helpers::test_proxy_config(port);
+    config.media_proxy = MediaProxyMode::All;
+    let ivr = tempfile::NamedTempFile::with_suffix(".toml").unwrap();
+    std::fs::write(ivr.path(), r#"
+[ivr]
+name = "attended_refer_ivr"
+ivr_mode = "tree"
+[ivr.root]
+greeting = "fixtures/sample.wav"
+timeout_ms = 60000
+max_retries = 10
+timeout_action = { type = "repeat" }
+"#).unwrap();
+    config.routes = Some(vec![rustpbx::proxy::routing::RouteRule {
+        name: "attended_refer_ivr".to_string(),
+        match_conditions: rustpbx::proxy::routing::MatchConditions {
+            to_user: Some("888".to_string()),
+            ..Default::default()
+        },
+        action: rustpbx::proxy::routing::RouteAction {
+            app: Some("ivr".to_string()),
+            app_params: Some(serde_json::json!({"file": ivr.path().to_str().unwrap()})),
+            ..Default::default()
+        },
+        ..Default::default()
+    }]);
+    let mut users = crate::common::test_helpers::standard_test_users();
+    for user in &mut users { user.is_support_webrtc = false; }
+    let gateway = rustpbx::rwi::gateway::RwiGateway::new();
+    let mut rwi_events = gateway.subscribe_events();
+    let server = Arc::new(E2eTestServer::start_with_inject(config, E2eTestServerInject {
+        users, rwi_gateway: Some(Arc::new(parking_lot::RwLock::new(gateway))), ..Default::default()
+    }).await.unwrap());
+    let alice = server.create_ua("alice").await.unwrap();
+    let bob = server.create_ua("bob").await.unwrap();
+    let caller_rtp = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 23456 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n".to_string()
+        .replace("m=audio 23456", &format!("m=audio {}", caller_rtp.local_addr().unwrap().port()));
+
+    // A -> B (established).
+    let dial = rustpbx::utils::spawn({ let a = alice.clone(); let sdp = sdp.clone(); async move { a.make_call("bob", Some(sdp.clone())).await.unwrap() } });
+    let bob_main = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            for event in bob.process_dialog_events().await.unwrap() {
+                if let TestUaEvent::IncomingCall(id, _) = event {
+                    bob.answer_call(&id, Some(sdp.clone())).await.unwrap();
+                    return id;
+                }
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    }).await.unwrap();
+    let alice_main = dial.await.unwrap();
+    alice.set_answer_sdp(&alice_main, &sdp).await;
+    bob.set_answer_sdp(&bob_main, &sdp).await;
+    server.wait_for_active_call(Duration::from_secs(3)).await.unwrap();
+
+    // B holds A, then consults the IVR number (app answers; B hears the greeting).
+    bob.send_reinvite(&bob_main, Some(sdp.replace("sendrecv", "sendonly"))).await.unwrap();
+    let consult = bob.make_call("888", Some(sdp.clone())).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if server.server_ref.active_call_registry.count() == 2 { break; }
+            sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("consult session must be registered");
+
+    // Attended REFER on the main dialog: Refer-To = the consult number with
+    // Replaces pointing at the consult dialog.
+    let replaces = format!("{};to-tag={};from-tag={}", consult.call_id, consult.remote_tag, consult.local_tag);
+    let target = format!("sip:888@{}?Replaces={}", server.proxy_addr, urlencoding::encode(&replaces));
+    assert_eq!(bob.send_refer(&bob_main, &target).await.unwrap(), 202);
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            for event in bob.process_dialog_events().await.unwrap() {
+                match event {
+                    TestUaEvent::ReferNotify(_, body, state) if state.starts_with("terminated") => {
+                        assert!(body.starts_with("SIP/2.0 200"), "{body}");
+                        return;
+                    }
+                    TestUaEvent::CallTerminated(_) => panic!("handoff must await the transferor's BYEs"),
+                    _ => {}
+                }
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("attended IVR handoff final NOTIFY");
+
+    // No originate: both pre-existing dialogs survive; no new session exists.
+    // (Drain the setup-era events first so only post-REFER events assert.)
+    let _ = alice.process_dialog_events().await.unwrap();
+    let events = alice.process_dialog_events().await.unwrap();
+    assert!(!events.iter().any(|event| matches!(event, TestUaEvent::IncomingCall(..))),
+        "customer must not be re-dialed: {events:?}");
+    assert!(!events.iter().any(|event| matches!(event, TestUaEvent::CallTerminated(..))),
+        "customer dialog must survive the handoff");
+    assert_eq!(server.server_ref.active_call_registry.count(), 2,
+        "handoff stays in the original two sessions");
+
+    // Transferor leaves with its own BYEs; the IVR stays in the original session.
+    bob.hangup(&bob_main).await.unwrap();
+    bob.hangup(&consult).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if server.server_ref.active_call_registry.count() == 1 { break; }
+            sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("consult session must retire with the transferor's BYEs");
+    let calls = server.get_active_calls();
+    assert_eq!(calls.len(), 1, "IVR must stay in the original session");
+    assert!(!alice.process_dialog_events().await.unwrap().iter().any(|event|
+        matches!(event, TestUaEvent::CallTerminated(_))), "customer call stays up");
+
+    // The customer hears the IVR greeting (app media on the original leg).
+    let mut buffer = [0u8; 2048];
+    tokio::time::timeout(Duration::from_secs(4), caller_rtp.recv_from(&mut buffer))
+        .await.expect("IVR greeting must reach the moved customer").unwrap();
+
+    // Exactly one transfer event carrying the dialed number.
+    let mut transfers = Vec::new();
+    while let Ok(entry) = rwi_events.try_recv() {
+        if entry.event.event_type == "call_transferred" { transfers.push(entry.event); }
+    }
+    assert_eq!(transfers.len(), 1, "one app hand-off = one transfer event");
+    assert!(transfers[0].payload["transfer_target"].as_str().unwrap_or("").contains("888"),
+        "transfer_target must keep the dialed number: {:?}", transfers[0].payload);
+    assert!(server.server_ref.conference_server.list_conferences_detail().await.is_empty(),
+        "no transfer room may exist for an app hand-off");
+    server.stop();
+}
+
+/// R2: a failed transfer-room join rolls back atomically — customer held
+/// with the agent, both sessions and all four dialogs stay up.
+#[tokio::test]
+async fn test_attended_refer_attachment_failure_rolls_back_atomically() {
     let _ = tracing_subscriber::fmt::try_init();
     let port = portpicker::pick_unused_port().unwrap();
     let mut config = crate::common::test_helpers::test_proxy_config(port);
@@ -421,34 +559,60 @@ async fn test_attended_refer_attachment_failure_ends_both_sessions() {
     let target = format!("sip:charlie@{}?Replaces={}", server.proxy_addr, urlencoding::encode(&replaces));
     assert_eq!(bob.send_refer(&original[0].1, &target).await.unwrap(), 202);
     let mut failure_notified = false;
-    let mut alice_ended = false;
-    let mut charlie_ended = false;
-    let mut transferor_ended = false;
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             for event in bob.process_dialog_events().await.unwrap() {
-                match event {
-                    TestUaEvent::ReferNotify(_, body, state) if state.starts_with("terminated") => {
+                if let TestUaEvent::ReferNotify(_, body, state) = event {
+                    if state.starts_with("terminated") {
                         assert!(body.contains("SIP/2.0 500"), "{body}");
-                        failure_notified = true;
+                        return;
                     }
-                    TestUaEvent::CallTerminated(id) if id == original[0].1 => {
-                        assert!(failure_notified, "REFER failure must precede B's BYE");
-                        transferor_ended = true;
-                    }
-                    _ => {}
                 }
             }
-            for event in alice.process_dialog_events().await.unwrap() {
-                if matches!(event, TestUaEvent::CallTerminated(id) if id == original[0].0) { alice_ended = true; }
-            }
-            for event in charlie.process_dialog_events().await.unwrap() {
-                if matches!(event, TestUaEvent::CallTerminated(id) if id == original[1].1) { charlie_ended = true; }
-            }
-            if failure_notified && transferor_ended && alice_ended && charlie_ended && registry.count() == 0
-                && server.server_ref.conference_server.list_conferences_detail().await.is_empty() { break; }
             sleep(Duration::from_millis(20)).await;
         }
-    }).await.expect("failed attachment must notify then clean both calls and all rooms");
+    }).await.expect("failed attachment must notify with an error status");
+    failure_notified = true;
+
+    // Atomic rollback: all four dialogs, both sessions, C's room membership.
+    assert!(failure_notified);
+    sleep(Duration::from_millis(400)).await;
+    assert_eq!(registry.count(), 2, "both sessions must survive the failed transfer");
+    assert!(!bob.process_dialog_events().await.unwrap().iter().any(|event|
+        matches!(event, TestUaEvent::CallTerminated(_))), "B owns its BYEs — none may be sent by the PBX");
+    assert!(!alice.process_dialog_events().await.unwrap().iter().any(|event|
+        matches!(event, TestUaEvent::CallTerminated(_))), "customer must NOT be hung up on a failed transfer");
+    assert!(!charlie.process_dialog_events().await.unwrap().iter().any(|event|
+        matches!(event, TestUaEvent::CallTerminated(_))), "consult dialog must survive");
+    assert!(server.server_ref.conference_server.list_conferences_detail().await.into_iter()
+        .all(|room| room.id == occupied),
+        "the aborted transfer room must be destroyed, occupied room untouched");
+    assert_eq!(manager.get_conference(&occupied).await.unwrap().participant_count(), 1,
+        "C keeps its pre-existing membership");
+
+    // The customer is released by the agent's BYE — proof the failed
+    // transfer never wedged the original call.
+    bob.hangup(&original[0].1).await.unwrap();
+    bob.hangup(&original[1].0).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let alice_gone = alice.process_dialog_events().await.unwrap().iter().any(|event|
+                matches!(event, TestUaEvent::CallTerminated(id) if *id == original[0].0));
+            if alice_gone { break; }
+            sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("agent BYE must release the customer after a rolled-back transfer");
+
+    charlie.hangup(&original[1].1).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let charlie_gone = charlie.process_dialog_events().await.unwrap().iter().any(|event|
+                matches!(event, TestUaEvent::CallTerminated(id) if *id == original[1].1));
+            if charlie_gone && registry.count() == 0 { break; }
+            sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("consult session must retire when C leaves its room");
+    assert!(server.server_ref.conference_server.list_conferences_detail().await.is_empty(),
+        "every room (transfer + occupied) must be gone after full teardown");
     server.stop();
 }

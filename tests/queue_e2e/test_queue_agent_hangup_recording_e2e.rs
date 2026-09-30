@@ -48,6 +48,7 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
 use crate::common::e2e_test_server::{E2eTestServer, E2eTestServerInject};
+use crate::common::rwi_timeline::RwiTimeline;
 use crate::common::test_ua::{
     TestUa, TestUaConfig, TestUaEvent, create_test_sdp, create_test_sdp_answer,
 };
@@ -227,6 +228,8 @@ async fn start_harness(capture: &WebhookCapture) -> Result<HangupFirstHarness> {
             session_hook: Some(Arc::new(session_hook)),
             agent_registry: Some(adapter),
             rwi_gateway: Some(gateway),
+            #[cfg(feature = "addon-cc")]
+            cc_policy_db: None,
         },
     )
     .await?;
@@ -478,6 +481,16 @@ async fn test_agent_hangup_first_propagates_bye_and_stops_recording() -> Result<
         Some("callee"),
         "agent hung up first → reason must be callee: {hangup}"
     );
+
+    // ── RWI timeline contract (whole-call, run last so every event landed) ─
+    // The queue→agent call must satisfy the attribution/ordering contract:
+    // every `call_ringing` (leg + session), the answered and the hangup
+    // carry the agent id — not just the CC-hook-enriched events.
+    let call_id = hangup["call_id"]
+        .as_str()
+        .expect("call_hangup envelope carries call_id")
+        .to_string();
+    RwiTimeline::from_capture(&capture, &call_id).assert_queue_agent_contract("bob");
 
     bob_pump.abort();
     let _ = bob.stop();

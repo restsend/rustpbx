@@ -7515,3 +7515,296 @@ async fn sip_consult_switch_events_follow_only_b_reinvite_transitions() {
         assert_eq!(holds, usize::from(changed_hold), "generic hold event: {scenario}");
     }
 }
+
+// Hold vs in-dialog confirmations (rsipstack re-emits Confirmed per transaction).
+/// A held caller leg must stay Hold, or the re-armed RTP watchdog tears the
+/// call down with rtpTimeout mid-hold.
+#[tokio::test]
+async fn caller_dialog_confirmation_preserves_negotiated_hold() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server, create_transaction,
+    };
+
+    let (server, _) = create_test_server().await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let (tx, _) = create_transaction(request.clone()).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let dialog = server
+        .dialog_layer
+        .get_or_create_server_invite(&tx, state_tx, None, None)
+        .unwrap();
+    let context = CallContext {
+        session_id: "caller-confirm-hold".into(),
+        dialplan: Arc::new(Dialplan::new(
+            "caller-confirm-hold".into(),
+            request,
+            DialDirection::Inbound,
+        )),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".into(),
+        original_callee: "sip:bob@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let (mut session, _handle, _commands) = SipSession::new(
+        server,
+        CancellationToken::new(),
+        None,
+        context,
+        dialog,
+        false,
+    );
+
+    // Simulate a negotiated hold on the caller leg (apply_reinvite_hold_transition
+    // has already run for the client's inactive/sendonly offer).
+    session.update_leg_state(&LegId::from("caller"), LegState::Hold);
+    assert_eq!(
+        session.legs.get(&LegId::from("caller")).unwrap().state,
+        LegState::Hold
+    );
+
+    // The ACK for the hold re-INVITE (or a later INFO/UPDATE) completes the
+    // in-dialog transaction → rsipstack re-emits Confirmed.
+    let confirmed = DialogState::Confirmed(
+        session.caller_dialog_id(),
+        rsipstack::sip::Response::default(),
+    );
+    session.handle_dialog_state(confirmed).await.unwrap();
+
+    assert_eq!(
+        session.legs.get(&LegId::from("caller")).unwrap().state,
+        LegState::Hold,
+        "caller Confirmed must not undo negotiated hold (mirrors the callee-side guard)"
+    );
+}
+
+/// The re-emitted Confirmed must also leave the held leg's RTP watchdog paused.
+#[tokio::test]
+async fn caller_confirmation_does_not_rearm_rtp_watchdog_while_held() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::media::leg::{LegConfig, LegInner};
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server, create_transaction,
+    };
+
+    let (server, _) = create_test_server().await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let (tx, _) = create_transaction(request.clone()).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let dialog = server
+        .dialog_layer
+        .get_or_create_server_invite(&tx, state_tx, None, None)
+        .unwrap();
+    let context = CallContext {
+        session_id: "caller-confirm-watchdog".into(),
+        dialplan: Arc::new(Dialplan::new(
+            "caller-confirm-watchdog".into(),
+            request,
+            DialDirection::Inbound,
+        )),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".into(),
+        original_callee: "sip:bob@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let (mut session, _handle, _commands) = SipSession::new(
+        server,
+        CancellationToken::new(),
+        None,
+        context,
+        dialog,
+        false,
+    );
+
+    // Wire a real media peer for the caller leg, as an answered call has.
+    let cfg = LegConfig::rtp_pcmu();
+    let peer = LegInner::new("caller", &cfg, None).unwrap();
+    session
+        .legs
+        .set_media_leg(&LegId::from("caller"), peer.clone());
+    session.update_leg_state(&LegId::from("caller"), LegState::Connected);
+    // Answered calls arm the inactivity watchdog on both bridge legs.
+    peer.arm_rtp_timeout(Duration::from_secs(60));
+    assert!(
+        session
+            .media_leg(&LegId::from("caller"))
+            .unwrap()
+            .rtp_timeout_state()
+            .active
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "precondition: watchdog armed on the answered caller leg"
+    );
+
+    // Client holds itself → leg state Hold pauses the watchdog.
+    session.update_leg_state(&LegId::from("caller"), LegState::Hold);
+    assert!(
+        !session
+            .media_leg(&LegId::from("caller"))
+            .unwrap()
+            .rtp_timeout_state()
+            .active
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "precondition: hold pauses the watchdog"
+    );
+
+    // ACK arrives → Confirmed re-emitted.
+    let confirmed = DialogState::Confirmed(
+        session.caller_dialog_id(),
+        rsipstack::sip::Response::default(),
+    );
+    session.handle_dialog_state(confirmed).await.unwrap();
+
+    assert!(
+        !session
+            .media_leg(&LegId::from("caller"))
+            .unwrap()
+            .rtp_timeout_state()
+            .active
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "Confirmed must not re-arm the RTP watchdog on a held (silent) leg"
+    );
+}
+
+/// A held leg unholding while the bridge is down must restore the media path.
+#[tokio::test]
+async fn own_side_unhold_restores_media_path_when_bridge_down() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::config::ProxyConfig;
+    use crate::media::leg::{LegConfig, LegInner};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
+    use crate::rwi::RwiGateway;
+
+    let gateway = Arc::new(parking_lot::RwLock::new(RwiGateway::new()));
+    let (server, _) = create_test_server_with_rwi_gateway(ProxyConfig::default(), gateway).await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "caller",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let context = CallContext {
+        session_id: "own-unhold-restore".into(),
+        dialplan: Arc::new(Dialplan::new(
+            "own-unhold-restore".into(),
+            request,
+            DialDirection::Inbound,
+        )),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:caller@rustpbx.com".into(),
+        original_callee: "sip:1101@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let cancel = CancellationToken::new();
+    let _guard = cancel.clone().drop_guard();
+    let (mut session, _handle, _commands) =
+        SipSession::new_uac(server.clone(), cancel, None, context, true);
+
+    // Wire negotiated media for caller + agent legs (same recipe as the
+    // added-media bridge test above: remote peer offers, local leg answers).
+    let cfg = LegConfig::rtp_pcmu();
+    let remote_caller = LegInner::new("remote-caller", &cfg, None).unwrap();
+    let caller_peer = LegInner::new("caller", &cfg, None).unwrap();
+    let caller_offer = remote_caller.create_offer().await.unwrap();
+    let caller_answer = caller_peer
+        .apply_sdp(&caller_offer, rustrtc::SdpType::Offer)
+        .await
+        .unwrap();
+    remote_caller
+        .apply_sdp(&caller_answer, rustrtc::SdpType::Answer)
+        .await
+        .unwrap();
+    session
+        .legs
+        .set_media_leg(&LegId::from("caller"), caller_peer.clone());
+    session.media_leg(&LegId::from("caller")).unwrap().accept();
+    session.update_leg_state(&LegId::from("caller"), LegState::Connected);
+
+    let remote_agent = LegInner::new("remote-agent", &cfg, None).unwrap();
+    let agent_peer = LegInner::new("agent", &cfg, None).unwrap();
+    let agent_offer = remote_agent.create_offer().await.unwrap();
+    let agent_answer = agent_peer
+        .apply_sdp(&agent_offer, rustrtc::SdpType::Offer)
+        .await
+        .unwrap();
+    remote_agent
+        .apply_sdp(&agent_answer, rustrtc::SdpType::Answer)
+        .await
+        .unwrap();
+    session.legs.insert(
+        LegId::from("agent"),
+        crate::call::domain::Leg::new(LegId::from("agent")),
+    );
+    session
+        .legs
+        .set_media_leg(&LegId::from("agent"), agent_peer.clone());
+    session.media_leg(&LegId::from("agent")).unwrap().accept();
+    session.update_leg_state(&LegId::from("agent"), LegState::Connected);
+
+    // Logical pair selected (queue handoff bridged caller+agent once).
+    session.bridge = BridgeConfig::bridge(LegId::from("caller"), LegId::from("agent"));
+    // Bridge the pair for real, then simulate the hold teardown.
+    assert!(
+        session
+            .execute_command(
+                CallCommand::Bridge {
+                    leg_a: LegId::from("caller"),
+                    leg_b: LegId::from("agent"),
+                    mode: crate::call::domain::P2PMode::Audio,
+                },
+                None
+            )
+            .await
+            .success,
+        "precondition: bridge established"
+    );
+    if let Some(mb) = session.bridge_mut() {
+        mb.unbridge().await.unwrap();
+    }
+    assert!(
+        !session.bridge().unwrap().is_bridged(),
+        "precondition: media bridge torn down (held)"
+    );
+
+    // The held caller leg.
+    session.update_leg_state(&LegId::from("caller"), LegState::Hold);
+
+    // Client retrieves: sendrecv re-INVITE offer arrives on the caller dialog.
+    let sdp = "v=0\r\no=- 9 9 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+               m=audio 23456 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+    let offer = rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, sdp).unwrap();
+    session
+        .apply_reinvite_hold_transition(DialogSide::Caller, &LegId::from("caller"), &offer, &[])
+        .await;
+
+    assert_eq!(
+        session.legs.get(&LegId::from("caller")).unwrap().state,
+        LegState::Connected,
+        "own-side unhold must leave the leg Connected"
+    );
+    assert!(
+        session.bridge().unwrap().is_bridged(),
+        "own-side unhold with a bridged pair must restore the media path (stop hold music)"
+    );
+}

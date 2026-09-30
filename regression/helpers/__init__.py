@@ -36,6 +36,8 @@ from .audio_verifier import (  # noqa: F401
     find_dominant_frequency,
     goertzel_magnitude_normalized,
     band_peak_db,
+    band_gain_db,
+    rec_align_offset,
     window_rms_db,
     goertzel_timeline,
     longest_above_run,

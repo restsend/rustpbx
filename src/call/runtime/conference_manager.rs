@@ -94,6 +94,10 @@ pub struct ConferenceRoom {
     pub max_duration_secs: Option<u64>,
     pub created_at: std::time::Instant,
     pub max_participants: Option<usize>,
+    /// Participant high-water mark (lone-member watchdog input).
+    pub max_participants_seen: usize,
+    /// Last add/remove transition (lone-member grace anchor).
+    pub last_participant_change: std::time::Instant,
 }
 
 impl ConferenceRoom {
@@ -106,6 +110,8 @@ impl ConferenceRoom {
             max_duration_secs: None,
             created_at: std::time::Instant::now(),
             max_participants,
+            max_participants_seen: 0,
+            last_participant_change: std::time::Instant::now(),
         }
     }
 
@@ -137,6 +143,8 @@ impl ConferenceRoom {
 
         let participant = ConferenceParticipant::with_role(leg_id.clone(), role);
         self.participants.insert(leg_id.clone(), participant);
+        self.max_participants_seen = self.max_participants_seen.max(self.participants.len());
+        self.last_participant_change = std::time::Instant::now();
         info!(conf_id = %self.id.0, leg_id = %leg_id, "Participant added to conference");
         Ok(())
     }
@@ -146,6 +154,7 @@ impl ConferenceRoom {
         if self.participants.remove(leg_id).is_none() {
             return Err(anyhow!("Leg {} is not in conference", leg_id));
         }
+        self.last_participant_change = std::time::Instant::now();
         info!(conf_id = %self.id.0, leg_id = %leg_id, "Participant removed from conference");
         Ok(())
     }
@@ -324,30 +333,41 @@ impl ConferenceManager {
         });
     }
 
-    /// One-shot empty-room watchdog: after `empty_room_grace`, destroy the
-    /// room **only if it is still participant-less**. Covers rooms nobody
-    /// ever joined (all media bridges failed right after dial-in, transfer
-    /// setup aborted before the first attach, …) whose mixer task would
-    /// otherwise run forever. Rooms that gained (or already have)
-    /// participants are left alone — their lifecycle stays with
-    /// `remove_participant`'s empty-check and `max_duration_secs`.
+    /// Room lifecycle watchdog, sweeping every `empty_room_grace`:
+    /// 1. empty room (no participant ever) — destroy so the mixer cannot leak;
+    /// 2. lone member (peaked >=2, no host_leg_id) — destroy and let
+    ///    `ConferenceEnded` hang the survivor up cleanly.
+    /// Peak-1 rooms and owner-bound rooms are protected. `0` disables.
     fn spawn_empty_room_watchdog(&self, conf_id: ConferenceId) {
         if self.empty_room_grace.is_zero() {
             return;
         }
         let manager = self.clone();
         crate::utils::spawn(async move {
-            tokio::time::sleep(manager.empty_room_grace).await;
-            let is_empty = manager
-                .conferences
-                .get(&conf_id)
-                .is_some_and(|room| room.is_empty());
-            if is_empty {
-                info!(
-                    conf_id = %conf_id.0,
-                    "Conference has no participants — watchdog auto-destroying empty room"
-                );
-                let _ = manager.destroy_conference(&conf_id).await;
+            loop {
+                tokio::time::sleep(manager.empty_room_grace).await;
+                let verdict = {
+                    let Some(room) = manager.conferences.get(&conf_id) else { return; };
+                    if room.is_empty() {
+                        Some("empty")
+                    } else if room.participants.len() == 1
+                        && room.host_leg_id.is_none()
+                        && room.max_participants_seen >= 2
+                        && room.last_participant_change.elapsed() >= manager.empty_room_grace
+                    {
+                        Some("lone-member")
+                    } else {
+                        None
+                    }
+                };
+                if let Some(reason) = verdict {
+                    info!(
+                        conf_id = %conf_id.0,
+                        "Conference watchdog auto-destroying {reason} room"
+                    );
+                    let _ = manager.destroy_conference(&conf_id).await;
+                    return;
+                }
             }
         });
     }
@@ -1292,6 +1312,71 @@ mod tests {
             "Room with participants must survive the watchdog"
         );
 
+        manager.destroy_conference(&conf_id).await.unwrap();
+    }
+
+    /// R3: shrunken unowned room is reaped and the survivor notified.
+    #[tokio::test]
+    async fn test_lone_member_watchdog_ends_shrunken_room() {
+        let manager = ConferenceManager::new().with_empty_room_grace_secs(1);
+        let conf_id = ConferenceId::from("test-lone-member-zombie");
+
+        manager.create_conference(conf_id.clone(), None).await.unwrap();
+        manager.add_participant(&conf_id, LegId::new("leg-a")).await.unwrap();
+        manager.add_participant(&conf_id, LegId::new("leg-b")).await.unwrap();
+
+        let (tx, mut rx) = mpsc::channel(8);
+        manager.bind_participant_session(&conf_id, &LegId::new("leg-a"), tx).unwrap();
+        manager.remove_participant(&conf_id, &LegId::new("leg-b")).await.unwrap();
+
+        // Within ~2 sweeps the room must be gone and the survivor notified.
+        let notified = tokio::time::timeout(std::time::Duration::from_secs(4), async {
+            loop {
+                if manager.get_conference(&conf_id).await.is_none() { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            rx.recv().await
+        }).await.expect("lone-member room must be reaped");
+        assert!(matches!(notified, Some(CallCommand::ConferenceEnded { .. })), "{notified:?}");
+        let (rooms, legs, mixers, chans, rxs) = manager.dashmap_sizes();
+        assert_eq!((rooms, legs, mixers, chans, rxs), (0, 0, 0, 0, 0), "no leaked state");
+    }
+
+    /// R3 protection: an owner-bound survivor is a legal lone member.
+    #[tokio::test]
+    async fn test_lone_member_watchdog_spares_owner_bound_room() {
+        let manager = ConferenceManager::new().with_empty_room_grace_secs(1);
+        let conf_id = ConferenceId::from("test-lone-member-owner");
+
+        manager.create_conference_ex(
+            conf_id.clone(), None, Some(LegId::new("leg-a")), None,
+        ).await.unwrap();
+        manager.add_participant(&conf_id, LegId::new("leg-a")).await.unwrap();
+        manager.add_participant(&conf_id, LegId::new("leg-b")).await.unwrap();
+        manager.remove_participant(&conf_id, &LegId::new("leg-b")).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(2300)).await;
+        assert!(
+            manager.get_conference(&conf_id).await.is_some(),
+            "owner-bound survivor is a legal lone member"
+        );
+        manager.destroy_conference(&conf_id).await.unwrap();
+    }
+
+    /// R3 protection: a peak-1 room (creator waiting) is never reaped.
+    #[tokio::test]
+    async fn test_lone_member_watchdog_spares_waiting_creator() {
+        let manager = ConferenceManager::new().with_empty_room_grace_secs(1);
+        let conf_id = ConferenceId::from("test-lone-member-creator");
+
+        manager.create_conference(conf_id.clone(), None).await.unwrap();
+        manager.add_participant(&conf_id, LegId::new("focus")).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(2300)).await;
+        assert!(
+            manager.get_conference(&conf_id).await.is_some(),
+            "peak-1 room is a creator waiting for joiners — protected"
+        );
         manager.destroy_conference(&conf_id).await.unwrap();
     }
 

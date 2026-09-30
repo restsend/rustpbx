@@ -907,6 +907,8 @@ mod tests {
             leg_id: None,
             call_id: "c1".into(),
             early_media: false,
+                agent_id: None,
+                agent_name: None,
         });
         let v = rx.recv().await.unwrap();
         assert!(v.to_string().contains("call_ringing"));
@@ -1252,6 +1254,8 @@ mod tests {
             leg_id: None,
             call_id: "sess-1".into(),
             early_media: false,
+                agent_id: None,
+                agent_name: None,
         });
         let _ = rx.recv().await.unwrap();
 
@@ -1668,6 +1672,8 @@ mod tests {
             leg_id: None,
             call_id: "c1".into(),
             early_media: false,
+                agent_id: None,
+                agent_name: None,
         });
 
         let v = rx.recv().await.unwrap();

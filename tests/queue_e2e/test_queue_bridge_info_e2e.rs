@@ -1,19 +1,29 @@
+//! E2E (SP-74): answer-first sessions send the caller dialog an in-dialog
+//! INFO (`application/vnd.rustpbx.event+json`,
+//! `{"event":"call_bridge_connected","leg":…}`) at the real bridge moment.
+//! Flow: caller → route(queue, accept_immediately) → agent leg answers →
+//! caller receives exactly the bridge-connected INFO on its dialog.
+//! Client contract: restsend-call `crates/restsend-proto/src/bridge_event.rs`.
+
 use anyhow::Result;
-use async_trait::async_trait;
 use rustpbx::call::user::SipUser;
 use rustpbx::config::ProxyConfig;
-use rustpbx::proxy::proxy_call::session_hooks::{CallSessionContext, CallSessionHook};
 use rustpbx::proxy::routing::{
     MatchConditions, RouteAction, RouteQueueConfig, RouteQueueStrategyConfig,
     RouteQueueTargetConfig, RouteRule,
 };
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
-use tokio::sync::Mutex;
-use tokio::time::sleep;
 
 use crate::common::e2e_test_server::{E2eTestServer, E2eTestServerInject};
 use crate::common::test_ua::{TestUa, TestUaConfig, TestUaEvent};
+
+/// The bridge-notification INFO contract (restsend-proto `bridge_event`).
+const EVENT_CT: &str = "application/vnd.rustpbx.event+json";
+const EVENT_NAME: &str = "call_bridge_connected";
 
 fn create_queue_proxy_config(port: u16) -> ProxyConfig {
     let mut config = ProxyConfig {
@@ -36,7 +46,9 @@ fn create_queue_proxy_config(port: u16) -> ProxyConfig {
             }],
             ..Default::default()
         },
-        accept_immediately: false,
+        // Answer-first: the caller leg is answered before any agent exists —
+        // the exact SP-74 shape the bridge INFO exists to close.
+        accept_immediately: true,
         ..Default::default()
     };
     config.queues.insert("support".to_string(), queue_config);
@@ -59,34 +71,9 @@ fn create_queue_proxy_config(port: u16) -> ProxyConfig {
     config
 }
 
-#[derive(Clone)]
-struct QueueTestHook {
-    connected: Arc<Mutex<Vec<CallSessionContext>>>,
-}
-
-#[async_trait]
-impl CallSessionHook for QueueTestHook {
-    async fn on_call_connected(&self, ctx: &CallSessionContext) {
-        self.connected.lock().await.push(ctx.clone());
-    }
-
-    async fn on_call_ended(
-        &self,
-        _ctx: &CallSessionContext,
-        _reason: Option<&rustpbx::callrecord::CallRecordHangupReason>,
-        _duration_secs: u64,
-    ) {
-    }
-}
-
 #[tokio::test]
-async fn test_call_queue_routing_e2e() -> Result<()> {
+async fn test_queue_bridge_connected_info_on_agent_answer() -> Result<()> {
     let _ = tracing_subscriber::fmt().try_init();
-
-    let connected: Arc<Mutex<Vec<CallSessionContext>>> = Arc::new(Mutex::new(Vec::new()));
-    let hook: Arc<dyn CallSessionHook> = Arc::new(QueueTestHook {
-        connected: connected.clone(),
-    });
 
     let server = E2eTestServer::start_with_inject(
         create_queue_proxy_config(portpicker::pick_unused_port().unwrap_or(15060)),
@@ -109,7 +96,7 @@ async fn test_call_queue_routing_e2e() -> Result<()> {
                     ..Default::default()
                 },
             ],
-            session_hook: Some(hook),
+            session_hook: None,
             agent_registry: None,
             rwi_gateway: None,
             #[cfg(feature = "addon-cc")]
@@ -146,18 +133,40 @@ async fn test_call_queue_routing_e2e() -> Result<()> {
         a=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n"
         .to_string();
 
-    let call_task = tokio::spawn({
-        let c = caller;
-        async move {
-            let dialog_id = c.make_call("support", Some(sdp_offer)).await?;
-            sleep(Duration::from_millis(500)).await;
-            c.hangup(&dialog_id).await?;
-            Ok::<_, anyhow::Error>(())
-        }
-    });
+    let agent_answered = Arc::new(AtomicBool::new(false));
+    let agent_answered2 = agent_answered.clone();
 
-    let mut agent_dialog_id = None;
-    for _ in 0..50 {
+    // Caller: dial the queue, then keep servicing the dialog — the bridge
+    // INFO arrives on this dialog once the agent leg answers.
+    let caller = Arc::new(caller);
+    let caller_task = {
+        let c = caller.clone();
+        tokio::spawn(async move {
+            let dialog_id = c.make_call("support", Some(sdp_offer)).await?;
+            let mut bridge_info: Option<(String, Vec<u8>)> = None;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+            while tokio::time::Instant::now() < deadline {
+                for event in c.process_dialog_events().await? {
+                    if let TestUaEvent::InfoReceived(_id, ct, body) = event {
+                        if ct.contains(EVENT_CT) && String::from_utf8_lossy(&body).contains(EVENT_NAME)
+                        {
+                            bridge_info = Some((ct, body));
+                        }
+                    }
+                }
+                if bridge_info.is_some() && agent_answered2.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            let _ = c.hangup(&dialog_id).await;
+            Ok::<_, anyhow::Error>(bridge_info)
+        })
+    };
+
+    // Agent: answer the queued dispatch — that connect moment must fire the
+    // caller-leg bridge INFO.
+    for _ in 0..80 {
         let events = agent.process_dialog_events().await?;
         for event in events {
             if let TestUaEvent::IncomingCall(id, _) = event {
@@ -167,31 +176,30 @@ async fn test_call_queue_routing_e2e() -> Result<()> {
                     a=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n"
                     .to_string();
                 agent.answer_call(&id, Some(sdp_answer)).await?;
-                agent_dialog_id = Some(id.clone());
+                agent_answered.store(true, Ordering::SeqCst);
                 break;
             }
         }
-        if agent_dialog_id.is_some() {
+        if agent_answered.load(Ordering::SeqCst) {
             break;
         }
-        sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(
-        agent_dialog_id.is_some(),
-        "Agent should receive queued call"
-    );
+    assert!(agent_answered.load(Ordering::SeqCst), "agent should receive the queued call and answer");
 
-    let _ = tokio::time::timeout(Duration::from_secs(10), call_task).await;
-    sleep(Duration::from_millis(500)).await;
-
-    let connected_events = connected.lock().await;
-    assert!(
-        !connected_events.is_empty(),
-        "on_call_connected should have fired"
+    let bridge_info = tokio::time::timeout(Duration::from_secs(15), caller_task)
+        .await
+        .expect("caller task must finish")??;
+    let (ct, body) = bridge_info.expect(
+        "caller dialog must receive the call_bridge_connected INFO when the agent leg answers \
+         (SP-74: answer-first sessions need the real-connect signal)",
     );
-    assert!(
-        connected_events[0].callee.contains("support"),
-        "callee should contain 'support'"
+    assert!(ct.contains(EVENT_CT), "content type must be the rustpbx event CT: {ct}");
+    let payload: serde_json::Value = serde_json::from_slice(&body)?;
+    assert_eq!(
+        payload.get("event").and_then(|v| v.as_str()),
+        Some(EVENT_NAME),
+        "payload must carry the call_bridge_connected discriminator: {payload}"
     );
 
     server.stop();
