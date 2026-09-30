@@ -143,8 +143,12 @@ async def test_step_ivr_dtmf_during_non_interruptible_prompt_transfers(pbx, sipb
 
         # The buffered digit must reach the provider after the announcement and
         # transfer the call to 1002.
-        assert await callee.wait_output_async(r"200 OK|Call established", timeout=20), (
-            f"callee 1002 never received the transferred call:\n{callee.output[-1500:]}"
+        # sipbot 0.2.65 no longer prints a "Call established" banner for
+        # wait-mode callees (and the earlier REGISTER 200 OK matches
+        # instantly) — wait for the per-call stats instead: the callee
+        # must have rang (180) AND answered (200) the transferred call.
+        assert await callee.wait_output_async(r"Status: \[180:1, 200:1\]", timeout=20), (
+            f"callee 1002 never received the transferred call:\n{callee.output}"
         )
         assert _has_dtmf(hits, "2"), (
             f"step provider never received dtmf:2 (the 'press 2' bug):\n{hits}"
@@ -173,8 +177,12 @@ async def test_step_ivr_dtmf_during_interruptible_prompt_barges_in(pbx, sipbot_p
             dtmf_flows="1.5s:2",
         )
         assert await caller.wait_output_async(r"200 OK|Call established", timeout=25), caller.output
-        assert await callee.wait_output_async(r"200 OK|Call established", timeout=20), (
-            f"callee 1002 never received the transferred call:\n{callee.output[-1500:]}"
+        # sipbot 0.2.65 no longer prints a "Call established" banner for
+        # wait-mode callees (and the earlier REGISTER 200 OK matches
+        # instantly) — wait for the per-call stats instead: the callee
+        # must have rang (180) AND answered (200) the transferred call.
+        assert await callee.wait_output_async(r"Status: \[180:1, 200:1\]", timeout=20), (
+            f"callee 1002 never received the transferred call:\n{callee.output}"
         )
         assert _has_dtmf(hits, "2"), f"step provider never received dtmf:2:\n{hits}"
     finally:
