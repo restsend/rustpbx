@@ -111,7 +111,7 @@ async def test_acd_least_calls_strategy(pbx, sipbot_pool, api, event_checker):
         sipbot_pool,
         pbx,
         rp,
-        after_call_ringing_count=1,
+        exclude_call_ids={call1_id},
         timeout=60,
     )
     assert second_agent == other, (
@@ -146,8 +146,14 @@ async def test_acd_round_robin_strategy(pbx, sipbot_pool, api, event_checker):
     await ensure_agents_ready(api, ["1002", "1003"], exclusive_skill=exclusive_skill)
 
     await place_queue_call(sipbot_pool, pbx, rp, hangup=15)
-    _c2, agent2 = await wait_dispatch_agent(
-        event_checker, timeout=35, after_call_ringing_count=1
+    _c2, agent2 = await wait_second_dispatch(
+        event_checker,
+        sipbot_pool,
+        pbx,
+        rp,
+        exclude_call_ids={_c1},
+        timeout=35,
+        retry_hangup=15,
     )
     assert agent1 != agent2, (
         f"round_robin should rotate agents across two calls, got {agent1} twice"
