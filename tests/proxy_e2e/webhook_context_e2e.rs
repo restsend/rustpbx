@@ -107,6 +107,7 @@ async fn webhook_context_sip_headers_and_user_data_full_chain() {
         E2eTestServer::start_with_inject(
             config,
             E2eTestServerInject {
+            queue_enricher: None,
                 users,
                 rwi_gateway: Some(gateway.clone()),
                 ..Default::default()

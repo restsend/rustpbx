@@ -5369,6 +5369,7 @@ impl SipSession {
         let resolved_agents = self.resolve_custom_targets(agents).await;
 
         // Enrich via queue_location_enricher if configured
+        let mut queue_enricher_setup = None;
         let resolved_agents = if let Some(enricher) = &self.server.queue_location_enricher {
             let caller_headers: Vec<rsipstack::sip::Header> = self
                 .caller_dialog
@@ -5423,6 +5424,22 @@ impl SipSession {
                     customer_id,
                 },
             );
+            // Capture the enrich context for the queue app: its dynamic
+            // dial-list re-resolution (wait-retention assignment /
+            // `resolve_agents`) must re-apply the enricher or the agent
+            // INVITE loses the screen-pop headers on those paths.
+            queue_enricher_setup = Some(crate::call::app::queue::QueueLocationEnricherSetup {
+                enricher: enricher.clone(),
+                session_id: session_id_owned.clone(),
+                queue_name: queue_label_owned.clone(),
+                queue_id: queue_id_owned.clone(),
+                caller: caller.clone(),
+                callee: callee.clone(),
+                direction: direction_str.clone(),
+                skill_group_id: Some(skill_owned.clone()),
+                ivr_node_id: ivr_owned.clone(),
+                caller_headers: caller_headers.clone(),
+            });
             enricher
                 .enrich(
                     resolved_agents,
@@ -5505,6 +5522,7 @@ impl SipSession {
                 skill_group_id: primary_skill_group,
                 overflow_overrides,
                 joined_emitted,
+                queue_enricher: queue_enricher_setup,
             });
         }
 

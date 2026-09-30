@@ -151,6 +151,7 @@ async fn test_queue_custom_hold_audio_reaches_caller_and_loops() -> Result<()> {
             &hold_audio,
         ),
         E2eTestServerInject {
+            queue_enricher: None,
             users: vec![SipUser {
                 id: 1,
                 username: "caller".to_string(),

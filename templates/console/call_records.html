@@ -342,6 +342,18 @@
                                                 </svg>
                                                 <span x-text="directionLabel(record.direction)"></span>
                                             </div>
+                                            <template x-if="record.leg_count && record.leg_count > 1">
+                                                <a :href="recordDetailUrl(record)"
+                                                    class="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2 py-0.5 font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-500/20 transition hover:bg-indigo-100"
+                                                    :title="'{{ "call_record.leg_count_badge" | t }}'.replace('{n}', record.leg_count)">
+                                                    <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none"
+                                                        stroke="currentColor" stroke-width="1.6">
+                                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                                            d="M3 6h6v10H3zM11 4h6v12h-6z" />
+                                                    </svg>
+                                                    <span x-text="record.leg_count"></span>
+                                                </a>
+                                            </template>
                                             <template x-if="record.sip_gateway">
                                                 <div class="inline-flex items-center gap-1">
                                                     <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none"

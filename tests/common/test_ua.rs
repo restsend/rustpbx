@@ -57,6 +57,9 @@ pub struct TestUa {
     received_offer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
     /// From-user of each incoming INVITE (caller-id assertions).
     incoming_from_users: Arc<Mutex<HashMap<DialogId, String>>>,
+    /// All headers of each incoming initial INVITE — screen-pop `Call-Info` /
+    /// `User-to-User` assertions on queue-dispatched legs.
+    incoming_invite_headers: Arc<Mutex<HashMap<DialogId, Vec<(String, String)>>>>,
     /// Store negotiated answer SDP received by caller side after INVITE 200 OK
     negotiated_answer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
     /// Real rustrtc PeerConnection used when the UA runs with live media
@@ -245,6 +248,7 @@ impl TestUa {
             answer_sdps: Arc::new(Mutex::new(HashMap::new())),
             received_offer_sdps: Arc::new(Mutex::new(HashMap::new())),
             incoming_from_users: Arc::new(Mutex::new(HashMap::new())),
+            incoming_invite_headers: Arc::new(Mutex::new(HashMap::new())),
             negotiated_answer_sdps: Arc::new(Mutex::new(HashMap::new())),
             webrtc_pc,
             media_mode,
@@ -334,6 +338,7 @@ impl TestUa {
             let cancel_token = self.cancel_token.clone();
             let received_sdps_clone = self.received_offer_sdps.clone();
             let incoming_from_clone = self.incoming_from_users.clone();
+            let incoming_headers_clone = self.incoming_invite_headers.clone();
 
             rustpbx::utils::spawn(async move {
                 Self::process_incoming_request(
@@ -344,6 +349,7 @@ impl TestUa {
                     cancel_token,
                     received_sdps_clone,
                     incoming_from_clone,
+                    incoming_headers_clone,
                 )
                 .await
                 .ok();
@@ -1070,6 +1076,23 @@ impl TestUa {
         self.incoming_from_users.lock().await.get(dialog_id).cloned()
     }
 
+    /// First header `name` (case-insensitive) of the initial INVITE that
+    /// created `dialog_id` — screen-pop `Call-Info` / `User-to-User`
+    /// assertions on queue-dispatched legs.
+    pub async fn incoming_invite_header(
+        &self,
+        dialog_id: &DialogId,
+        name: &str,
+    ) -> Option<String> {
+        self.incoming_invite_headers
+            .lock()
+            .await
+            .get(dialog_id)?
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.clone())
+    }
+
     /// Map one dialog state to test events, performing the in-band replies
     /// the harness owes the peer (200 for re-INVITE / NOTIFY / INFO, 202 for
     /// REFER, ...). Runs on the background pump task.
@@ -1264,6 +1287,7 @@ impl TestUa {
         cancel_token: CancellationToken,
         received_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
         incoming_from_users: Arc<Mutex<HashMap<DialogId, String>>>,
+        incoming_invite_headers: Arc<Mutex<HashMap<DialogId, Vec<(String, String)>>>>,
     ) -> Result<()> {
         loop {
             select! {
@@ -1299,6 +1323,14 @@ impl TestUa {
                                     .ok()
                                     .and_then(|f| f.uri().ok())
                                     .and_then(|u| u.user().map(|s| s.to_string()));
+                                // Capture every header of the initial INVITE
+                                // (Call-Info / User-to-User assertions).
+                                let invite_headers: Vec<(String, String)> = tx
+                                    .original
+                                    .headers
+                                    .iter()
+                                    .map(|h| (h.name().to_string(), h.value().to_string()))
+                                    .collect();
 
                                 if let Ok(mut dialog) = dialog_layer.get_or_create_server_invite(
                                     &tx, state_sender.clone(), None, Some(contact.clone())
@@ -1313,6 +1345,11 @@ impl TestUa {
                                         let dialog_id = dialog.id();
                                         let mut users = incoming_from_users.lock().await;
                                         users.insert(dialog_id, user);
+                                    }
+                                    {
+                                        let dialog_id = dialog.id();
+                                        let mut headers = incoming_invite_headers.lock().await;
+                                        headers.insert(dialog_id, invite_headers);
                                     }
                                     rustpbx::utils::spawn(async move {
                                         dialog.handle(&mut tx).await.ok();

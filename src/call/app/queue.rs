@@ -397,6 +397,27 @@ impl QueueSignal {
 /// - **SLA monitoring**: Built-in statistics tracking
 /// - **Queue announcements**: Position and wait time announcements
 /// - **Retry logic**: Configurable retry intervals and max attempts
+/// Owned enricher + per-call context captured by
+/// `SipSession::start_queue_app` (the enrich context needs the caller /
+/// queue / skill-group values only the session has at app start). The
+/// queue app re-applies the enricher whenever it (re)builds its dial list
+/// dynamically — wait-retention assignment and `resolve_agents` build
+/// bare `Location`s that would otherwise reach the agent INVITE without
+/// the screen-pop `Call-Info` / `User-to-User` headers.
+#[derive(Clone)]
+pub struct QueueLocationEnricherSetup {
+    pub enricher: Arc<dyn crate::proxy::call::QueueLocationEnricher>,
+    pub session_id: String,
+    pub queue_name: String,
+    pub queue_id: String,
+    pub caller: String,
+    pub callee: String,
+    pub direction: String,
+    pub skill_group_id: Option<String>,
+    pub ivr_node_id: Option<String>,
+    pub caller_headers: Vec<rsipstack::sip::Header>,
+}
+
 pub struct QueueApp {
     /// The queue plan configuration.
     plan: QueuePlan,
@@ -416,6 +437,12 @@ pub struct QueueApp {
     dynamic_agents: Option<Vec<Location>>,
     /// Optional AgentRegistry for dynamic routing.
     agent_registry: Option<Arc<dyn AgentRegistry>>,
+    /// Enricher + per-call context captured by `SipSession::start_queue_app`.
+    /// Dynamic dial-list re-resolution (wait-retention assignment /
+    /// `resolve_agents`) builds bare locations — without this hook the
+    /// agent INVITE loses the screen-pop `Call-Info` / `User-to-User`
+    /// headers on those paths.
+    location_enricher: Option<QueueLocationEnricherSetup>,
     /// Call ID for tracking.
     call_id: String,
     /// When the call entered the queue.
@@ -494,6 +521,7 @@ impl QueueApp {
             dial_attempts: 0,
             dynamic_agents: None,
             agent_registry: None,
+            location_enricher: None,
             call_id: String::new(),
             enqueued_at: None,
             pending_agents: Vec::new(),
@@ -528,6 +556,13 @@ impl QueueApp {
     /// Set the call ID for tracking.
     pub fn with_call_id(mut self, call_id: String) -> Self {
         self.call_id = call_id;
+        self
+    }
+
+    /// Attach the queue location enricher + per-call context. See
+    /// [`QueueLocationEnricherSetup`].
+    pub fn with_location_enricher(mut self, setup: QueueLocationEnricherSetup) -> Self {
+        self.location_enricher = Some(setup);
         self
     }
 
@@ -905,6 +940,7 @@ impl QueueApp {
                 ..Default::default()
             })
             .collect();
+        let locations = self.enrich_locations(locations).await;
         self.dynamic_agents = Some(locations);
         self.current_agent_idx = 0;
         self.dial_attempts = 0;
@@ -1048,6 +1084,59 @@ impl QueueApp {
         }
     }
 
+    /// Re-apply the queue location enricher to a dynamically (re)built dial
+    /// list. `SipSession::start_queue_app` enriches the plan's own locations;
+    /// every later re-resolution (`resolve_agents`, wait-retention
+    /// assignment) builds bare `Location`s that need this to keep the
+    /// screen-pop `Call-Info` / `User-to-User` headers on the agent INVITE.
+    async fn enrich_locations(&self, locations: Vec<Location>) -> Vec<Location> {
+        let Some(setup) = &self.location_enricher else {
+            return locations;
+        };
+        let ctx = crate::proxy::call::QueueEnrichContext {
+            session_id: &setup.session_id,
+            queue_name: &setup.queue_name,
+            queue_id: &setup.queue_id,
+            caller: &setup.caller,
+            callee: &setup.callee,
+            direction: &setup.direction,
+            skill_group_id: setup.skill_group_id.as_deref(),
+            ivr_node_id: setup.ivr_node_id.as_deref(),
+            caller_headers: &setup.caller_headers,
+        };
+        setup.enricher.enrich(locations, &ctx).await
+    }
+
+    /// Structural guarantee for EVERY queue-originated agent INVITE:
+    /// `User-to-User` (queue/skill-group context) is always present,
+    /// `Call-Info;purpose=render` whenever screen-pop URLs are configured.
+    ///
+    /// Locations already enriched (plan / dynamic lists) pass through
+    /// unchanged; raw-URI dials (escalation `dial_agents`, autonomous
+    /// auto-select, overflow) are enriched on the fly.
+    async fn leg_headers_for(&self, uri: &str) -> Vec<rsipstack::sip::Header> {
+        if let Some(loc) = self
+            .get_agents()
+            .into_iter()
+            .find(|l| l.aor.to_string() == uri)
+            && let Some(headers) = &loc.headers
+            && headers.iter().any(|h| h.name().eq_ignore_ascii_case("User-to-User"))
+        {
+            return headers.clone();
+        }
+        let loc = Location {
+            aor: uri.parse().unwrap_or_default(),
+            contact_raw: Some(uri.to_string()),
+            ..Default::default()
+        };
+        let enriched = self.enrich_locations(vec![loc]).await;
+        enriched
+            .into_iter()
+            .next()
+            .and_then(|l| l.headers)
+            .unwrap_or_default()
+    }
+
     /// Check if we should use parallel dialing.
     fn is_parallel(&self) -> bool {
         matches!(self.plan.dial_strategy, Some(DialStrategy::Parallel(_)))
@@ -1120,6 +1209,7 @@ impl QueueApp {
                         ..Default::default()
                     })
                     .collect();
+                let locations = self.enrich_locations(locations).await;
 
                 info!(
                     "Queue: resolved {} dynamic agents for queue '{}'",
@@ -1479,10 +1569,7 @@ impl QueueApp {
         if let Some(ref registry) = self.agent_registry {
             registry.fifo_begin_dispatch(&self.call_id).await;
         }
-        let leg_headers = agents[self.current_agent_idx]
-            .headers
-            .clone()
-            .unwrap_or_default();
+        let leg_headers = self.leg_headers_for(&uri).await;
         info!(
             "Queue: dialing next agent {} (idx={})",
             uri, self.current_agent_idx
@@ -1798,7 +1885,11 @@ impl QueueApp {
             let agent_id = self.agent_id_for_uri(uri).await;
             self.record_attempted_agent(agent_id.clone());
             self.pin_agent_for_dial(ctrl, &agent_id, uri).await;
-            match ctrl.originate_call(uri, Some(self.call_id.clone())).await {
+            let leg_headers = self.leg_headers_for(uri).await;
+            match ctrl
+                .originate_call_with_headers(uri, Some(self.call_id.clone()), leg_headers)
+                .await
+            {
                 Ok(call_id) => {
                     info!(agent = %uri, call_id = %call_id, "{success_log}");
                     self.pending_agents.push((uri.clone(), call_id));
@@ -2069,8 +2160,9 @@ impl CallApp for QueueApp {
                 // Originate call to agent
                 self.pin_agent_for_dial(ctrl, &agent.agent_id, &agent.uri)
                     .await;
+                let leg_headers = self.leg_headers_for(&agent.uri).await;
                 let call_id = ctrl
-                    .originate_call(&agent.uri, Some(self.call_id.clone()))
+                    .originate_call_with_headers(&agent.uri, Some(self.call_id.clone()), leg_headers)
                     .await?;
 
                 self.record_attempted_agent(agent.agent_id.clone());
@@ -2169,14 +2261,12 @@ impl CallApp for QueueApp {
                     "Queue: originating {} parallel calls to static agents",
                     agents.len()
                 );
-                let mut pending = Vec::with_capacity(agents.len());
-                let parallel_uris: Vec<(String, Option<Vec<rsipstack::sip::Header>>)> = agents
-                    .iter()
-                    .map(|a| (a.aor.to_string(), a.headers.clone()))
-                    .collect();
+                let parallel_uris: Vec<String> =
+                    agents.iter().map(|a| a.aor.to_string()).collect();
                 drop(agents);
-                for (idx, (uri, leg_headers)) in parallel_uris.into_iter().enumerate() {
-                    let leg_headers = leg_headers.unwrap_or_default();
+                let mut pending = Vec::with_capacity(parallel_uris.len());
+                for (idx, uri) in parallel_uris.into_iter().enumerate() {
+                    let leg_headers = self.leg_headers_for(&uri).await;
                     let attempt_agent_id = self.agent_id_for_uri(&uri).await;
                     self.record_attempted_agent(attempt_agent_id.clone());
                     self.pin_agent_for_dial(ctrl, &attempt_agent_id, &uri).await;

@@ -425,42 +425,55 @@ async def wait_dispatch_agent(
     )
 
 
+async def _wait_dispatch_excluding(
+    event_checker,
+    exclude_call_ids: set[str],
+    timeout: float,
+) -> tuple[str, str]:
+    """Wait for the first skill_group_agent_assigned whose call_id is new.
+
+    Anchored on call_id rather than the count of attributed call_ringing
+    events: that count varies with per-leg events, so a stale ring from the
+    previous call could satisfy an index filter instantly and skip the real
+    verification.
+    """
+    webhook = event_checker.webhook
+    assert webhook is not None, "webhook receiver not configured"
+    deadline = asyncio.get_event_loop().time() + timeout
+    while True:
+        assigned = [
+            e
+            for e in webhook.all_events()
+            if e.event_type == "skill_group_agent_assigned"
+            and (e.call_id or "") not in exclude_call_ids
+        ]
+        if assigned:
+            ev = assigned[0]
+            return ev.call_id, ((ev.payload or {}).get("agent_id") or "")
+        if asyncio.get_event_loop().time() >= deadline:
+            raise asyncio.TimeoutError(
+                f"no new dispatch (excluding {sorted(exclude_call_ids)}) within {timeout}s"
+            )
+        await asyncio.sleep(0.2)
+
+
 async def wait_second_dispatch(
     event_checker,
     sipbot_pool,
     pbx,
     route_point: str,
     *,
-    after_call_ringing_count: int = 1,
+    exclude_call_ids: set[str],
     timeout: float = 45.0,
     retry_hangup: int = 60,
 ) -> tuple[str, str]:
-    """Wait for the Nth call_ringing; if a queued caller was lost, place a fresh call."""
+    """Wait for a NEW dispatch whose call_id is not in ``exclude_call_ids``;
+    if the queued caller was lost (reload/drain race), place a fresh call."""
     try:
-        return await wait_dispatch_agent(
-            event_checker,
-            timeout=timeout,
-            after_call_ringing_count=after_call_ringing_count,
-        )
-    except BaseException:
+        return await _wait_dispatch_excluding(event_checker, exclude_call_ids, timeout)
+    except asyncio.TimeoutError:
         await place_queue_call(sipbot_pool, pbx, route_point, hangup=retry_hangup)
-        # Stray rings may have landed while the original queued caller was
-        # lost (transfer legs, readiness probes). Anchor on the CURRENT
-        # ATTRIBUTED ring count (same filter wait_dispatch_agent indexes
-        # with) and wait for the next NEW dispatch instead of a fixed index.
-        base = len(
-            [
-                e
-                for e in event_checker.webhook.all_events()
-                if e.event_type == "call_ringing"
-                and (e.payload or {}).get("agent_id")
-            ]
-        )
-        return await wait_dispatch_agent(
-            event_checker,
-            timeout=timeout,
-            after_call_ringing_count=base,
-        )
+        return await _wait_dispatch_excluding(event_checker, exclude_call_ids, timeout)
 
 
 async def wait_call_hangup(event_checker, call_id: str, *, timeout: float = 40.0) -> None:

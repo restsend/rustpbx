@@ -78,6 +78,7 @@ async fn test_queue_bridge_connected_info_on_agent_answer() -> Result<()> {
     let server = E2eTestServer::start_with_inject(
         create_queue_proxy_config(portpicker::pick_unused_port().unwrap_or(15060)),
         E2eTestServerInject {
+            queue_enricher: None,
             users: vec![
                 SipUser {
                     id: 1,

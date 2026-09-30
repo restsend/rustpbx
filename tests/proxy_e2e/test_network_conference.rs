@@ -17,7 +17,8 @@ async fn test_network_conference_factory_and_existing_calls() {
     config.conference_factory_uri = Some(factory.clone());
     let mut users = crate::common::test_helpers::standard_test_users();
     for user in &mut users { user.is_support_webrtc = false; }
-    let server = Arc::new(E2eTestServer::start_with_inject(config, E2eTestServerInject { users, ..Default::default() }).await.unwrap());
+    let server = Arc::new(E2eTestServer::start_with_inject(config, E2eTestServerInject {
+            queue_enricher: None, users, ..Default::default() }).await.unwrap());
     let factory = format!("sip:conference@{}", server.proxy_addr);
     let mut effective = (*server.server_ref.proxy_config.load_full()).clone();
     effective.conference_factory_uri = Some(factory.clone());

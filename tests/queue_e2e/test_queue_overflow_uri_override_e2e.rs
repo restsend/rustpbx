@@ -254,6 +254,7 @@ action = {{ type = "transfer", target = "{queue_target}" }}
         let server = crate::common::e2e_test_server::E2eTestServer::start_with_inject(
             proxy_config(port, &ivr_path),
             crate::common::e2e_test_server::E2eTestServerInject {
+            queue_enricher: None,
                 users: ["caller", "agent_sales", "agent_l2"]
                     .into_iter()
                     .enumerate()

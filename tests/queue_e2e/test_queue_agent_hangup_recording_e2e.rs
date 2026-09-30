@@ -224,6 +224,7 @@ async fn start_harness(capture: &WebhookCapture) -> Result<HangupFirstHarness> {
     let server = E2eTestServer::start_with_inject(
         proxy_config,
         E2eTestServerInject {
+            queue_enricher: None,
             users,
             session_hook: Some(Arc::new(session_hook)),
             agent_registry: Some(adapter),
