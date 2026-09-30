@@ -22,6 +22,9 @@ mod test_inbound_refer;
 #[path = "proxy_e2e/webhook_context_e2e.rs"]
 mod webhook_context_e2e;
 
+#[path = "proxy_e2e/agent_attribution_e2e.rs"]
+mod agent_attribution_e2e;
+
 #[path = "proxy_e2e/test_trunk_options.rs"]
 mod test_trunk_options;
 

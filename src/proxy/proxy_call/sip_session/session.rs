@@ -9,6 +9,7 @@ use super::util::{
 use super::{live_transcription, transfer};
 use crate::call::app::queue::QueueSignal;
 use crate::proxy::call::parse_allowed_codecs;
+use rsipstack::sip::{HeadersExt, ToTypedHeader};
 
 const CMD_CHANNEL_CAPACITY: usize = 256;
 const RUSTPBX_COMMAND_CT: &str = "application/vnd.rustpbx+json";
@@ -1356,6 +1357,95 @@ impl SipSession {
         })
     }
 
+    /// Seed the RWI `CallMeta` + session attribution with the originating
+    /// agent for direct softphone outbound INVITEs (UAS path; the RWI
+    /// originate path seeds its own meta in `rwi/processor.rs`).
+    ///
+    /// Resolution prefers the **authenticated** user (proxy auth validated the
+    /// INVITE's `X-Auth-Token` → `cookie.get_user()`; survives hotline-style
+    /// From overrides), then the From user part, then the Contact user part
+    /// (non-JWT deployments). Registry-confirmed only — every candidate must
+    /// resolve to a registered agent before anything is attributed.
+    ///
+    /// Guards keep the previous behaviour for every non-agent-dial path:
+    /// outbound direction only (inbound trunk/customer calls unaffected) and
+    /// non-application flow (`cc_app_routed` rationale — a caller that merely
+    /// happens to be a registered agent must not claim a self-service IVR/
+    /// queue session). A2A dials seed `CallMeta` but skip the session
+    /// attribution pin, leaving callee-side hook attribution intact at
+    /// connect (mirrors the originate path guard in `rwi/processor.rs`).
+    async fn seed_originating_agent_attribution(
+        server: &SipServerRef,
+        session: &SipSession,
+        auth_user: &Option<String>,
+        initial_request: rsipstack::sip::Request,
+        original_callee: &str,
+    ) {
+        if session.context.dialplan.direction != crate::call::DialDirection::Outbound {
+            return;
+        }
+        if matches!(
+            session.context.dialplan.flow,
+            crate::call::DialplanFlow::Application { .. }
+        ) {
+            return;
+        }
+        let (Some(registry), Some(gw)) = (&server.agent_registry, &server.rwi_gateway) else {
+            return;
+        };
+
+        let from_user = extract_sip_username(&session.context.original_caller);
+        let contact_user = initial_request
+            .contact_header()
+            .ok()
+            .and_then(|c| c.typed().ok())
+            .map(|c| c.uri)
+            .and_then(|u| u.user().map(str::to_string))
+            .filter(|s| !s.trim().is_empty());
+
+        let mut candidates: Vec<String> = Vec::new();
+        for c in [auth_user.clone(), from_user, contact_user].into_iter().flatten() {
+            let c = c.trim().to_string();
+            if !c.is_empty() && !candidates.contains(&c) {
+                candidates.push(c);
+            }
+        }
+        if candidates.is_empty() {
+            return;
+        }
+        let dest_user = extract_sip_username(original_callee).unwrap_or_default();
+
+        for cand in candidates {
+            let Some(agent) = registry.get_agent(&cand).await else {
+                continue;
+            };
+            if let Some(meta) = gw.read().meta_store.get_sync(&session.context.session_id) {
+                let mut meta = meta;
+                meta.agent_id = Some(cand.clone());
+                meta.agent_name = Some(agent.display_name.clone());
+                gw.read()
+                    .meta_store
+                    .insert(session.context.session_id.clone(), meta);
+            }
+            // Pin the session attribution so the CC hook's priority-1 read
+            // (`agent_attribution()`) drives ringing/connect attribution —
+            // this repairs hotline-overridden-From dials that used to lose
+            // busy marking / CDR agent. A2A dials (callee also a registered
+            // agent) stay unpinned: the hook attributes them to the callee.
+            let dest_is_agent =
+                !dest_user.is_empty() && registry.get_agent(&dest_user).await.is_some();
+            if !dest_is_agent {
+                session.extensions.set_agent_attribution(&cand);
+            }
+            debug!(
+                session_id = %session.context.session_id,
+                agent_id = %cand,
+                "outbound INVITE attributed to originating agent"
+            );
+            return;
+        }
+    }
+
     pub async fn serve(
         server: SipServerRef,
         context: CallContext,
@@ -1369,6 +1459,15 @@ impl SipSession {
         // Save commonly-needed fields before consuming context
         let original_caller = context.original_caller.clone();
         let original_callee = context.original_callee.clone();
+        // Authenticated caller identity (proxy auth validated the INVITE's
+        // `X-Auth-Token` and stamped the cookie; non-JWT deployments carry a
+        // From-derived fallback here). Consumed by the originating-agent
+        // attribution seed below.
+        let auth_user = context
+            .cookie
+            .get_user()
+            .map(|u| u.username)
+            .filter(|s| !s.trim().is_empty());
         let max_ring_time = Self::effective_ring_timeout(&context.dialplan, &server);
 
         let local_contact = context
@@ -1416,6 +1515,20 @@ impl SipSession {
 
         let (callee_state_tx, callee_state_rx) = mpsc::unbounded_channel();
         session.callee_event_tx = Some(callee_state_tx);
+
+        // Attribute the call to the originating agent (direct softphone
+        // INVITE) before any RWI event fans out — same goal as the RWI
+        // originate path seeding `CallMeta.agent_id` in `rwi/processor.rs`
+        // (the CC hook only publishes agent context at ringing, too late for
+        // `call_created`).
+        Self::seed_originating_agent_attribution(
+            &server,
+            &session,
+            &auth_user,
+            server_dialog.initial_request(),
+            &original_callee,
+        )
+        .await;
 
         server
             .active_call_registry
