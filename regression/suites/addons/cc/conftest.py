@@ -47,7 +47,14 @@ PROJECT_ROOT = find_project_root(SCRIPT_DIR)
 # config/cc/cc.toml wiping the global [csat] section). rustpbx still resolves
 # repo assets (sounds/locales/templates) through symlinks created by
 # PbxServer.start().
-WORK_DIR = PROJECT_ROOT / "target" / "e2e-cc-regression"
+# Per xdist worker: with -n N each worker boots its own session-scoped PBX in
+# its own work dir. Sharing one dir made each worker's stale-listener port
+# guard SIGKILL the other workers' rustpbx (the reason this lane used to be
+# capped at a single serial worker).
+_xdist_worker = os.environ.get("PYTEST_XDIST_WORKER", "")
+WORK_DIR = PROJECT_ROOT / "target" / (
+    "e2e-cc-regression" + (f"-{_xdist_worker}" if _xdist_worker else "")
+)
 REPORT_DIR = Path(os.environ.get("RUSTPBX_E2E_REPORT_DIR", SCRIPT_DIR / "report"))
 SCREENSHOT_DIR = REPORT_DIR / "screenshots"
 
