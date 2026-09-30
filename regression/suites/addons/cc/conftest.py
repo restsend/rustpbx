@@ -347,10 +347,16 @@ async def api(pbx: PbxServer):
         # recovery window can span ~60 s. Wait for readiness so this test
         # doesn't hit ConnectionRefused at setup. Normal path: the first
         # probe succeeds and the loop breaks immediately.
+        #
+        # Probe /console/ (dashboard, template ships in repo templates/) —
+        # NOT /console/cc: the cc SPA template resolves via
+        # src/addons/cc/templates relative to the PBX CWD, which does not
+        # exist in isolated e2e work dirs, so /console/cc can 500 forever
+        # and probing it burned the full 75 s loop on EVERY test.
         import asyncio as _asyncio
         for _ in range(150):
             try:
-                async with session.get(f"{pbx.http_url}/console/cc", timeout=2) as resp:
+                async with session.get(f"{pbx.http_url}/console/", timeout=2) as resp:
                     if resp.status < 500:
                         break
             except Exception:

@@ -1161,6 +1161,13 @@ class ConfigBuilder:
             f'agents_files = ["{agents_rel}"]',
             f'skillgroup_files = ["{sg_rel}"]',
             "",
+            # Keep e2e wrapup short (3s): the built-in default is 30s and
+            # every call end / ring-no-answer otherwise parks the agent in
+            # wrapup, adding ~30s per call cycle to hundreds of tests.
+            # NOTE: 0 is treated as "unset" (falls back to 30s), so use 3.
+            "[cc.desk.acw]",
+            "wrapup_time_secs = 3",
+            "",
         ])
 
         if self.acd_file:
