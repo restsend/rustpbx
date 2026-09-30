@@ -266,6 +266,9 @@
                                         <th class="py-2 pr-4">{{ "call_record_detail.child_leg_to" | t }}</th>
                                         <th class="py-2 pr-4">{{ "call_record_detail.child_leg_status" | t }}</th>
                                         <th class="py-2 pr-4">{{ "call_record_detail.child_leg_duration" | t }}</th>
+                                        <th class="py-2 pr-4">{{ "call_record_detail.child_leg_rtp" | t }}</th>
+                                        <th class="py-2 pr-4">{{ "call_record_detail.child_leg_recording" | t }}</th>
+                                        <th class="py-2 pr-4">{{ "call_record_detail.child_leg_signaling" | t }}</th>
                                         <th class="py-2 pr-4">Call-ID</th>
                                         <th class="py-2"></th>
                                     </tr>
@@ -274,9 +277,42 @@
                                     <template x-for="leg in childLegs" :key="leg.id">
                                         <tr class="border-b border-slate-100 text-slate-600">
                                             <td class="py-2 pr-4 font-medium text-slate-800" x-text="leg.from || '—'"></td>
-                                            <td class="py-2 pr-4" x-text="leg.to || '—'"></td>
+                                            <td class="py-2 pr-4">
+                                                <div x-text="leg.to || '—'"></div>
+                                                <div class="text-[11px] text-slate-400" x-show="leg.agent || leg.queue">
+                                                    <span x-text="leg.agent || ''"></span><span x-show="leg.agent && leg.queue"> · </span><span x-text="leg.queue || ''"></span>
+                                                </div>
+                                            </td>
                                             <td class="py-2 pr-4" x-text="leg.status"></td>
-                                            <td class="py-2 pr-4" x-text="leg.duration_secs"></td>
+                                            <td class="py-2 pr-4" x-text="formatDuration(leg.duration_secs)"></td>
+                                            <td class="py-2 pr-4 text-xs font-mono"
+                                                :class="legWorstLoss(leg) != null ? packetLossClass(legWorstLoss(leg)) : ''"
+                                                x-text="formatLegQuality(leg)"></td>
+                                            <td class="py-2 pr-4">
+                                                <div class="flex items-center gap-2">
+                                                    <template x-if="leg.recording && leg.recording.url">
+                                                        <audio controls preload="none"
+                                                            class="h-8 w-36 align-middle"
+                                                            :src="leg.recording.url"></audio>
+                                                    </template>
+                                                    <template x-if="!leg.recording || !leg.recording.url">
+                                                        <span class="text-xs text-slate-300">—</span>
+                                                    </template>
+                                                    <template x-if="leg.recording && leg.recording.url">
+                                                        <a :href="leg.recording.url" target="_blank" rel="noopener"
+                                                            class="text-xs font-semibold text-sky-600 hover:text-sky-700"
+                                                            :title="'{{ "call_record_detail.child_leg_download_recording" | t }}'">⬇</a>
+                                                    </template>
+                                                </div>
+                                            </td>
+                                            <td class="py-2 pr-4">
+                                                <div class="flex flex-col gap-1">
+                                                    <a :href="leg.sip_flow_url" target="_blank" rel="noopener"
+                                                        class="text-xs font-semibold text-sky-600 hover:text-sky-700">{{ "call_record_detail.child_leg_view_flow" | t }}</a>
+                                                    <a :href="leg.cdr_json_url" target="_blank" rel="noopener"
+                                                        class="text-xs text-slate-400 hover:text-sky-600">CDR JSON</a>
+                                                </div>
+                                            </td>
                                             <td class="py-2 pr-4 font-mono text-xs text-slate-400" x-text="leg.call_id"></td>
                                             <td class="py-2">
                                                 <a :href="leg.detail_url"
@@ -647,6 +683,12 @@
                         <div x-show="diagnosticsExpanded" x-transition.opacity class="p-4 space-y-3">
                             <!-- Summary badges -->
                             <div class="flex flex-wrap gap-2 text-xs">
+                                <template x-if="sipFlowDiagnostics && sipFlowDiagnostics.scope === 'session'">
+                                    <span class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-1 font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-500/20"
+                                        x-title="sipFlowDiagnostics.session_id || ''">
+                                        {{ "call_record_detail.diag_scope_session" | t }}
+                                    </span>
+                                </template>
                                 <span class="inline-flex items-center rounded-md bg-slate-100 px-2 py-1 font-medium text-slate-600 ring-1 ring-inset ring-slate-500/10">
                                     <span class="text-slate-400">{{ "call_record_detail.diag_backend" | t }}:</span>
                                     <span class="ml-1 font-mono" x-text="sipFlowDiagnostics ? sipFlowDiagnostics.backend_type : '-'"></span>
@@ -2749,6 +2791,33 @@
                 }
                 return 'text-rose-600';
             },
+            // Per-leg RTCP quality (metadata.media_quality: one entry per
+            // bridged side, camelCase) summarized for the child-legs table:
+            // "A 0.10%/1.2ms · B 0.00%/0.8ms" or '—' when absent.
+            formatLegQuality(leg) {
+                const sides = Array.isArray(leg && leg.media_quality) ? leg.media_quality : [];
+                if (!sides.length) {
+                    return '—';
+                }
+                return sides.map((side) => {
+                    const loss = Number(side.lossPct);
+                    const jitterMs = Number(side.jitterUs) > 0 ? Number(side.jitterUs) / 1000 : null;
+                    const label = side.side || '?';
+                    const lossText = Number.isFinite(loss) ? `${loss.toFixed(2)}%` : '—';
+                    const jitterText = jitterMs !== null ? `/${jitterMs.toFixed(1)}ms` : '';
+                    return `${label} ${lossText}${jitterText}`;
+                }).join(' · ');
+            },
+            legWorstLoss(leg) {
+                const sides = Array.isArray(leg && leg.media_quality) ? leg.media_quality : [];
+                if (!sides.length) {
+                    return null;
+                }
+                const losses = sides
+                    .map((side) => Number(side.lossPct))
+                    .filter((value) => Number.isFinite(value));
+                return losses.length ? Math.max(...losses) : null;
+            },
             formatWaveformTimestamp(value) {
                 if (value === null || value === undefined) {
                     return '00:00.0';
@@ -2846,7 +2915,13 @@
                 if (!this.actions.download_sip_flow) return;
                 this.sipFlowLoading = true;
                 try {
-                    const response = await fetch(this.actions.download_sip_flow);
+                    // Multi-leg calls: ask for the merged session flow so the
+                    // REFER/transfer target leg shows up in the same diagram.
+                    let flowUrl = this.actions.download_sip_flow;
+                    if (this.childLegs && this.childLegs.length) {
+                        flowUrl += (flowUrl.includes('?') ? '&' : '?') + 'scope=session';
+                    }
+                    const response = await fetch(flowUrl);
                     if (!response.ok) return;
                     const data = await response.json();
 
@@ -2926,6 +3001,12 @@
                 }
                 if (role === 'primary') {
                     return 'caller';
+                }
+                // Session-merged flows tag every sibling CDR leg (queue
+                // dispatch, REFER transfer) as "child" — they all sit on the
+                // PBX's callee side of the ladder.
+                if (role === 'child') {
+                    return 'callee';
                 }
                 return null;
             },

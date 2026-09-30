@@ -110,6 +110,7 @@ async fn start_server() -> Result<(Arc<E2eTestServer>, u16)> {
     };
 
     let inject = E2eTestServerInject {
+            queue_enricher: None,
         users: vec![sip_user("1001", 1), sip_user("1002", 2)],
         cc_policy_db: Some(cc_db_with_policy().await),
         ..Default::default()

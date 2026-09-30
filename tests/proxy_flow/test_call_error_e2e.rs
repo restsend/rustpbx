@@ -137,6 +137,7 @@ async fn test_routing_failure_emits_call_error_and_cdr_trace() -> Result<()> {
     let server = E2eTestServer::start_with_inject(
         base_proxy_config(),
         E2eTestServerInject {
+            queue_enricher: None,
             rwi_gateway: Some(gateway),
             ..Default::default()
         },

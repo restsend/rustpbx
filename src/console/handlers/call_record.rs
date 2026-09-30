@@ -128,11 +128,25 @@ struct SipFlowRequestQuery {
     /// Set to `0`/`false` to skip the pre-query flush (stale-but-fast reads).
     #[serde(default)]
     flush: Option<bool>,
+    /// `leg` (default): only the signaling legs known to this CDR.
+    /// `session`: merge every CDR leg of the logical call — all rows sharing
+    /// this record's `session_id` contribute their `sip_leg_roles`, and the
+    /// query window widens to cover every leg. This is what makes the
+    /// REFER/transfer target leg visible on the primary's flow diagram.
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 impl SipFlowRequestQuery {
     fn flush_enabled(&self) -> bool {
         self.flush.unwrap_or(true)
+    }
+
+    fn session_scope(&self) -> bool {
+        self.scope
+            .as_deref()
+            .map(|scope| scope.eq_ignore_ascii_case("session"))
+            .unwrap_or(false)
     }
 }
 
@@ -630,29 +644,40 @@ async fn download_call_record_sip_flow(
         Err(resp) => return resp,
     };
 
+    // Session scope aggregates every CDR leg of the logical call, so the
+    // single-leg archived-JSONL shortcut below must not short-circuit it.
+    let session_scope = query.session_scope();
+    let session_legs = if session_scope {
+        load_session_leg_records(db, &record).await
+    } else {
+        Vec::new()
+    };
+
     // New records persist the exact uploaded JSONL URL. Prefer that archived
     // artifact; older records without it continue through the live-backend
     // query path below.
-    if let Some(location) = record
-        .metadata
-        .as_ref()
-        .and_then(|m| m.get("sipflow_jsonl"))
-        .and_then(|v| v.as_str())
-    {
-        let resolved = if location.starts_with("http://")
-            || location.starts_with("https://")
-            || location.starts_with("s3://")
+    if !session_scope {
+        if let Some(location) = record
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("sipflow_jsonl"))
+            .and_then(|v| v.as_str())
         {
-            if let Some(signed_url) = presign_artifact_url(&state, location).await {
-                signed_url
+            let resolved = if location.starts_with("http://")
+                || location.starts_with("https://")
+                || location.starts_with("s3://")
+            {
+                if let Some(signed_url) = presign_artifact_url(&state, location).await {
+                    signed_url
+                } else {
+                    location.to_string()
+                }
             } else {
-                location.to_string()
-            }
-        } else {
-            resolve_archived_artifact_path(location, record.started_at)
-        };
-        return serve_archived_jsonl_flow(&record, &resolved, query.detail, state.http_client())
-            .await;
+                resolve_archived_artifact_path(location, record.started_at)
+            };
+            return serve_archived_jsonl_flow(&record, &resolved, query.detail, state.http_client())
+                .await;
+        }
     }
 
     let Some(server) = state.sip_server() else {
@@ -679,9 +704,23 @@ async fn download_call_record_sip_flow(
             .into_response();
     };
 
-    let call_time = record.created_at;
-    let start_time = (call_time - chrono::Duration::hours(1)).with_timezone(&chrono::Local);
-    let end_time = (call_time + chrono::Duration::hours(2)).with_timezone(&chrono::Local);
+    // Query window. Session scope widens it to span every leg of the logical
+    // call — a REFER transfer leg can start minutes after the primary CDR was
+    // created, so a window derived from the primary row alone misses it.
+    let window_start_base = session_legs
+        .iter()
+        .map(|leg| leg.created_at)
+        .chain(std::iter::once(record.created_at))
+        .min()
+        .unwrap_or(record.created_at);
+    let window_end_base = session_legs
+        .iter()
+        .map(|leg| leg.ended_at.unwrap_or(leg.created_at))
+        .chain(std::iter::once(record.ended_at.unwrap_or(record.created_at)))
+        .max()
+        .unwrap_or(record.created_at);
+    let start_time = (window_start_base - chrono::Duration::hours(1)).with_timezone(&chrono::Local);
+    let end_time = (window_end_base + chrono::Duration::hours(2)).with_timezone(&chrono::Local);
 
     let mut call_id_roles: HashMap<String, String> = HashMap::new();
     // Track where each call_id came from, for diagnostics.
@@ -692,8 +731,9 @@ async fn download_call_record_sip_flow(
 
     // Load sip_leg_roles from DB metadata first (faster, no file I/O),
     // then fall back to the CDR JSON file.
-    let mut sip_leg_roles_loaded = false;
     let mut sip_leg_roles_source = "default_only";
+    let mut cdr_loaded = false;
+    let mut sip_leg_roles_loaded = false;
     if let Some(ref meta) = record.metadata {
         if let Some(meta_map) = meta.as_object() {
             if let Some(json_str) = meta_map.get("sip_leg_roles").and_then(|v| v.as_str()) {
@@ -709,7 +749,6 @@ async fn download_call_record_sip_flow(
         }
     }
 
-    let mut cdr_loaded = false;
     if !sip_leg_roles_loaded {
         let cdr_data = load_cdr_data(&state, &record).await;
         if let Some(cdr) = &cdr_data {
@@ -720,6 +759,20 @@ async fn download_call_record_sip_flow(
             }
             sip_leg_roles_source = "cdr_file";
         }
+    }
+
+    // Session scope: fold in every sibling CDR's own legs so the transfer /
+    // queue-dispatch / cluster-hop Call-IDs are queried alongside the
+    // primary's. The primary's own map wins on conflicts (insert-if-absent).
+    if session_scope {
+        for leg in &session_legs {
+            if call_id_roles.contains_key(&leg.call_id) {
+                continue;
+            }
+            call_id_roles.insert(leg.call_id.clone(), leg_role(leg).to_string());
+            call_id_sources.insert(leg.call_id.clone(), "session_leg");
+        }
+        sip_leg_roles_source = "session_merged";
     }
 
     let mut flow_items = Vec::new();
@@ -843,10 +896,12 @@ async fn download_call_record_sip_flow(
         "backend_configured": true,
         "backend_type": backend.kind(),
         "detail_requested": query.detail,
+        "scope": if session_scope { "session" } else { "leg" },
+        "session_id": record.session_id,
         "time_window": {
             "start": start_time.to_rfc3339(),
             "end": end_time.to_rfc3339(),
-            "base": "created_at",
+            "base": if session_scope { "session_legs" } else { "created_at" },
             "before_secs": 3600,
             "after_secs": 7200,
         },
@@ -859,6 +914,80 @@ async fn download_call_record_sip_flow(
     });
 
     Json(response).into_response()
+}
+
+/// Every CDR row of the logical call that a session-scope sip-flow query must
+/// cover: all rows sharing the record's `session_id`, plus the root row that
+/// predates the `session_id` column (`call_id` equals the session key).
+async fn load_session_leg_records(
+    db: &DatabaseConnection,
+    record: &CallRecordModel,
+) -> Vec<CallRecordModel> {
+    let session_key = record
+        .session_id
+        .clone()
+        .unwrap_or_else(|| record.call_id.clone());
+    let mut session_match = Condition::any();
+    session_match = session_match.add(CallRecordColumn::SessionId.eq(session_key.clone()));
+    session_match = session_match.add(CallRecordColumn::CallId.eq(session_key));
+    match CallRecordEntity::find()
+        .filter(session_match)
+        .order_by_asc(CallRecordColumn::StartedAt)
+        .all(db)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            warn!(
+                call_id = %record.call_id,
+                "failed to load session legs for session-scope sip flow: {}",
+                err
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// CDR count per logical call for one page of (primary) rows. Counts every
+/// row whose `session_id` matches a page session key, plus legacy root rows
+/// (`session_id` NULL) matched through `call_id`. Includes the primary row
+/// itself, so a plain single-leg call counts 1.
+async fn count_session_legs(
+    db: &DatabaseConnection,
+    records: &[CallRecordModel],
+) -> HashMap<String, i64> {
+    let mut keys: Vec<String> = records
+        .iter()
+        .map(|record| {
+            record
+                .session_id
+                .clone()
+                .unwrap_or_else(|| record.call_id.clone())
+        })
+        .collect();
+    keys.sort();
+    keys.dedup();
+    if keys.is_empty() {
+        return HashMap::new();
+    }
+
+    let mut condition = Condition::any();
+    condition = condition.add(CallRecordColumn::SessionId.is_in(keys.clone()));
+    condition = condition.add(CallRecordColumn::CallId.is_in(keys));
+    let rows = match CallRecordEntity::find().filter(condition).all(db).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            warn!("failed to count session legs for call record list: {}", err);
+            return HashMap::new();
+        }
+    };
+
+    let mut counts: HashMap<String, i64> = HashMap::new();
+    for row in rows {
+        let key = row.session_id.unwrap_or_else(|| row.call_id.clone());
+        *counts.entry(key).or_insert(0) += 1;
+    }
+    counts
 }
 
 async fn stream_call_recording(
@@ -1244,6 +1373,20 @@ async fn query_call_records(
     let mut items: Vec<Value> = Vec::with_capacity(pagination.items.len());
     for (record, inline) in pagination.items.iter().zip(inline_recordings.iter()) {
         items.push(build_record_payload(record, &related, &state, inline.as_deref()).await);
+    }
+
+    // Related-leg counts for the page's logical calls: powers the "N legs"
+    // badge in the list UI so a multi-leg (queued / transferred) call is
+    // recognizable before opening its detail page.
+    let leg_counts = count_session_legs(&cdb, &pagination.items).await;
+    for (record, item) in pagination.items.iter().zip(items.iter_mut()) {
+        let session_key = record
+            .session_id
+            .clone()
+            .unwrap_or_else(|| record.call_id.clone());
+        if let Some(count) = leg_counts.get(&session_key) {
+            item["leg_count"] = json!(count);
+        }
     }
 
     let summary = match build_summary(&cdb, condition).await {
@@ -2514,6 +2657,49 @@ async fn build_detail_payload(
             })
         });
 
+    // Sibling CDR legs of the same logical call (queue dispatch, REFER
+    // transfer, cluster hops). Empty for single-leg calls. Each entry carries
+    // its own diagnostics affordances — recording playback URL, merged
+    // session flow link and per-leg RTCP quality — so the primary's detail
+    // page can triage every leg without navigating away.
+    let mut child_legs_payload = Vec::with_capacity(child_legs.len());
+    for leg in child_legs {
+        let recording_url = derive_recording_download_url(state, leg).await;
+        let media_quality = leg
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("media_quality"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        child_legs_payload.push(json!({
+            "id": leg.id,
+            "call_id": leg.call_id,
+            "leg_role": leg_role(leg),
+            "direction": leg.direction,
+            "status": leg.status,
+            "from": leg.from_number,
+            "to": leg.to_number,
+            "agent": leg.agent_name,
+            "queue": leg.queue,
+            "duration_secs": leg.duration_secs,
+            "started_at": leg.started_at.to_rfc3339(),
+            "detail_url": state.url_for(&format!("/call-records/{}", leg.id)),
+            // Playback/download through this leg's own endpoint (falls back
+            // to a sipflow-synthesized WAV when no local file exists).
+            "recording": {
+                "url": recording_url,
+                "duration_secs": leg.recording_duration_secs,
+            },
+            // Merged session-scope flow: covers this leg plus the primary's.
+            "sip_flow_url": state.url_for(&format!(
+                "/call-records/{}/sip-flow?detail=true&scope=session",
+                leg.id
+            )),
+            "cdr_json_url": state.url_for(&format!("/call-records/{}/cdr-json", leg.id)),
+            "media_quality": media_quality,
+        }));
+    }
+
     json!({
         "back_url": state.url_for("/call-records"),
         "error_codes_url": state.url_for("/error-codes"),
@@ -2525,27 +2711,7 @@ async fn build_detail_payload(
         "participants": participants,
         "signaling": signaling,
         "rewrite": rewrite,
-        // Sibling CDR legs of the same logical call (queue dispatch, REFER
-        // transfer, cluster hops). Empty for single-leg calls.
-        "child_legs": child_legs
-            .iter()
-            .map(|leg| {
-                json!({
-                    "id": leg.id,
-                    "call_id": leg.call_id,
-                    "leg_role": leg_role(leg),
-                    "direction": leg.direction,
-                    "status": leg.status,
-                    "from": leg.from_number,
-                    "to": leg.to_number,
-                    "agent": leg.agent_name,
-                    "queue": leg.queue,
-                    "duration_secs": leg.duration_secs,
-                    "started_at": leg.started_at.to_rfc3339(),
-                    "detail_url": state.url_for(&format!("/call-records/{}", leg.id)),
-                })
-            })
-            .collect::<Vec<_>>(),
+        "child_legs": child_legs_payload,
         "actions": json!({
             "download_recording": download_recording,
             "download_sip_flow": sip_flow_download,
@@ -4152,6 +4318,11 @@ mod tests {
         assert_eq!(payload["items"][0]["call_id"], "root-s1");
         assert_eq!(payload["items"][0]["leg_role"], "primary");
         assert_eq!(payload["items"][0]["session_id"], "root-s1");
+        assert_eq!(
+            payload["items"][0]["leg_count"].as_i64(),
+            Some(3),
+            "primary row must carry the logical call's leg count for the list badge: {payload}"
+        );
 
         // allLegs: every leg of the logical call.
         let response = query_call_records(
@@ -4231,5 +4402,172 @@ mod tests {
             vec!["primary", "child", "child"],
             "legs must carry primary/child roles ordered by start time"
         );
+    }
+
+    #[test]
+    fn sip_flow_request_query_parses_session_scope() {
+        let query: SipFlowRequestQuery =
+            serde_qs_config_deserialize("detail=true&scope=session");
+        assert!(query.session_scope());
+
+        let query: SipFlowRequestQuery = serde_qs_config_deserialize("detail=true&scope=SESSION");
+        assert!(query.session_scope(), "scope match must be case-insensitive");
+
+        let query: SipFlowRequestQuery = serde_qs_config_deserialize("detail=true&scope=leg");
+        assert!(!query.session_scope());
+
+        let query: SipFlowRequestQuery = serde_qs_config_deserialize("detail=true");
+        assert!(!query.session_scope(), "absent scope defaults to leg");
+    }
+
+    fn serde_qs_config_deserialize(query: &str) -> SipFlowRequestQuery {
+        serde_urlencoded::from_str(query).expect("parse sip flow query")
+    }
+
+    /// Session-scope leg loading must return the root row plus every child
+    /// leg of the logical call — this is the set whose `sip_leg_roles` merge
+    /// into the merged flow query.
+    #[tokio::test]
+    async fn load_session_leg_records_returns_all_legs() {
+        let db = setup_db().await;
+        let now = Utc::now();
+        for (call_id, session_id) in [
+            ("root-ss", Some("root-ss".to_string())),
+            ("agent-ss", Some("root-ss".to_string())),
+            ("transfer-ss", Some("root-ss".to_string())),
+            ("unrelated", Some("other-session".to_string())),
+        ] {
+            call_record::ActiveModel {
+                call_id: Set(call_id.into()),
+                session_id: Set(session_id),
+                direction: Set("inbound".into()),
+                status: Set("completed".into()),
+                started_at: Set(now),
+                duration_secs: Set(5),
+                has_transcript: Set(false),
+                transcript_status: Set("none".into()),
+                created_at: Set(now),
+                updated_at: Set(now),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .expect("insert leg");
+        }
+
+        let root = CallRecordEntity::find()
+            .filter(CallRecordColumn::CallId.eq("root-ss"))
+            .one(&db)
+            .await
+            .unwrap()
+            .expect("root record");
+        let legs = load_session_leg_records(&db, &root).await;
+        let mut call_ids: Vec<&str> = legs.iter().map(|leg| leg.call_id.as_str()).collect();
+        call_ids.sort();
+        assert_eq!(
+            call_ids,
+            vec!["agent-ss", "root-ss", "transfer-ss"],
+            "session legs must include the root and both child legs, excluding other sessions"
+        );
+    }
+
+    /// The detail payload's `child_legs` entries must expose per-leg
+    /// diagnostics affordances (recording playback URL, merged session flow
+    /// link, CDR JSON link, RTCP quality) so the primary's page can triage
+    /// every leg without navigating away.
+    #[tokio::test]
+    async fn build_detail_payload_enriches_child_legs() {
+        let db = setup_db().await;
+        let state = create_console_state(db.clone()).await;
+        let now = Utc::now();
+
+        call_record::ActiveModel {
+            call_id: Set("root-enrich".into()),
+            session_id: Set(Some("root-enrich".into())),
+            direction: Set("inbound".into()),
+            status: Set("completed".into()),
+            started_at: Set(now),
+            duration_secs: Set(30),
+            has_transcript: Set(false),
+            transcript_status: Set("none".into()),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert root");
+
+        call_record::ActiveModel {
+            call_id: Set("transfer-enrich".into()),
+            session_id: Set(Some("root-enrich".into())),
+            direction: Set("inbound".into()),
+            status: Set("completed".into()),
+            started_at: Set(now),
+            duration_secs: Set(12),
+            has_transcript: Set(false),
+            transcript_status: Set("none".into()),
+            created_at: Set(now),
+            updated_at: Set(now),
+            recording_url: Set(Some("recordings/transfer-enrich.wav".into())),
+            metadata: Set(Some(json!({
+                "media_quality": [
+                    {"side": "A", "codec": "PCMU", "ingressPackets": 500,
+                     "egressPackets": 500, "jitterUs": 1200, "rttUs": 0,
+                     "lossPct": 0.4},
+                    {"side": "B", "codec": "PCMU", "ingressPackets": 480,
+                     "egressPackets": 490, "jitterUs": 800, "rttUs": 0,
+                     "lossPct": 2.5}
+                ],
+            }))),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert transfer leg");
+
+        let root = CallRecordEntity::find()
+            .filter(CallRecordColumn::CallId.eq("root-enrich"))
+            .one(&db)
+            .await
+            .unwrap()
+            .expect("root record");
+        let related = load_related_context(&db, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        let session_key = root.session_id.clone().unwrap_or_else(|| root.call_id.clone());
+        let child_legs = CallRecordEntity::find()
+            .filter(CallRecordColumn::SessionId.eq(session_key))
+            .filter(CallRecordColumn::CallId.ne(root.call_id.clone()))
+            .all(&db)
+            .await
+            .unwrap();
+
+        let payload = build_detail_payload(&root, &related, &state, None, &child_legs).await;
+        let legs = payload["child_legs"].as_array().expect("child_legs array");
+        assert_eq!(legs.len(), 1);
+        let leg = &legs[0];
+        assert_eq!(leg["call_id"], "transfer-enrich");
+        assert_eq!(leg["leg_role"], "child");
+        assert_eq!(
+            leg["recording"]["url"].as_str(),
+            Some(state.url_for("/call-records/2/recording").as_str()),
+            "child leg recording must play through its own endpoint: {leg}"
+        );
+        assert!(
+            leg["sip_flow_url"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("scope=session"),
+            "child leg flow link must request the merged session scope: {leg}"
+        );
+        assert!(
+            leg["cdr_json_url"].as_str().is_some(),
+            "child leg must expose its CDR JSON: {leg}"
+        );
+        let quality = leg["media_quality"].as_array().expect("media_quality");
+        assert_eq!(quality.len(), 2);
+        assert_eq!(quality[0]["lossPct"].as_f64(), Some(0.4));
+        assert_eq!(quality[1]["lossPct"].as_f64(), Some(2.5));
     }
 }

@@ -82,3 +82,5 @@ src/addons/cc/acceptance-e2e/
 *-snapshots/
 regression/suites/addons/cc/report/
 /*.html
+scripts/seed_verif_session.py
+scripts/verif_shots.py

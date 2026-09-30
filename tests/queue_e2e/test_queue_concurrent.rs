@@ -272,6 +272,7 @@ async fn start_server(port: u16, flavor: Flavor, bob_idle_first_secs: u64) -> Re
     let server = E2eTestServer::start_with_inject(
         queue_proxy_config(port, flavor),
         E2eTestServerInject {
+            queue_enricher: None,
             users,
             session_hook: Some(hook),
             agent_registry: Some(adapter),

@@ -42,6 +42,7 @@ async fn test_inbound_refer_success() {
     let mut users = crate::common::test_helpers::standard_test_users();
     for user in &mut users { user.is_support_webrtc = false; }
     let server = Arc::new(E2eTestServer::start_with_inject(config, E2eTestServerInject {
+                queue_enricher: None,
         users, ..Default::default()
     }).await.expect("E2E server start failed"));
 
@@ -433,6 +434,7 @@ async fn test_inbound_refer_to_queue_route() {
         E2eTestServer::start_with_inject(
             config,
             E2eTestServerInject {
+                queue_enricher: None,
                 users: vec![
                     SipUser {
                         id: 1,

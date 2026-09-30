@@ -513,6 +513,14 @@ impl BuiltinAppFactory {
                 if pending.joined_emitted {
                     app = app.with_joined_emitted_externally();
                 }
+                // Dynamic dial-list re-resolution (wait-retention assignment /
+                // `resolve_agents`) must re-apply the enricher, or those
+                // paths deliver the agent INVITE without the screen-pop
+                // headers (prod: IVR → queue → queued → assigned = no
+                // `Call-Info` / `User-to-User`).
+                if let Some(setup) = pending.queue_enricher {
+                    app = app.with_location_enricher(setup);
+                }
                 // The primary skill-group id must be visible to post-call
                 // hooks (CSAT/wrapup/hold-music) even when no agent registry
                 // is attached — QueueApp writes it to CallMeta via SipSession.

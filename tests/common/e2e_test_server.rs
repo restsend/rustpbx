@@ -39,6 +39,11 @@ pub struct E2eTestServerInject {
     /// (same wiring as the cc addon's `proxy_server_hook`) enforces.
     #[cfg(feature = "addon-cc")]
     pub cc_policy_db: Option<sea_orm::DatabaseConnection>,
+    /// Queue location enricher (screen-pop `Call-Info` / `User-to-User`
+    /// injection on queue-dispatched agent legs). The cc addon attaches its
+    /// `CcQueueLocationEnricher` in production; tests supply one (backed by
+    /// a seeded `CcAddonState`) to exercise the same injection path.
+    pub queue_enricher: Option<Arc<dyn rustpbx::proxy::call::QueueLocationEnricher>>,
 }
 
 impl Default for E2eTestServerInject {
@@ -50,6 +55,7 @@ impl Default for E2eTestServerInject {
             rwi_gateway: None,
             #[cfg(feature = "addon-cc")]
             cc_policy_db: None,
+            queue_enricher: None,
         }
     }
 }
@@ -240,6 +246,12 @@ impl E2eTestServer {
                 Some(registry) => builder.with_agent_registry(registry.clone()),
                 None => builder,
             };
+
+            // Queue location enricher (screen-pop / UUI on agent legs) —
+            // same wiring as `with_queue_location_enricher` in production.
+            if let Some(enricher) = &inject.queue_enricher {
+                builder = builder.with_queue_location_enricher(enricher.clone());
+            }
 
             // CC outbound-policy chain node, same wiring as the cc addon.
             #[cfg(feature = "addon-cc")]

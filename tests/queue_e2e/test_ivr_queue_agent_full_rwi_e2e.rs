@@ -280,6 +280,7 @@ async fn start_harness(capture: &WebhookCapture) -> Result<FullChainHarness> {
     let server = E2eTestServer::start_with_inject(
         proxy_config,
         E2eTestServerInject {
+            queue_enricher: None,
             users,
             session_hook: None,
             agent_registry: Some(adapter.clone()),

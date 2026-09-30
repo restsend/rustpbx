@@ -125,6 +125,7 @@ async fn test_outbound_enqueue_starts_queue_and_rings_agent() -> Result<()> {
         E2eTestServer::start_with_inject(
             cfg,
             E2eTestServerInject {
+            queue_enricher: None,
                 rwi_gateway: Some(gateway.clone()),
                 ..Default::default()
             },

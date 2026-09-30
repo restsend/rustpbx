@@ -172,6 +172,11 @@ pub struct PendingQueuePlan {
     /// queue event. The queue app factory forwards this to `QueueApp` so
     /// `on_enter` does not emit a duplicate.
     pub joined_emitted: bool,
+    /// Enricher + per-call context for the queue app's dynamic dial-list
+    /// re-resolution (wait-retention assignment / `resolve_agents`). Those
+    /// paths build bare locations — without the setup the agent INVITE
+    /// loses the screen-pop `Call-Info` / `User-to-User` headers.
+    pub queue_enricher: Option<crate::call::app::queue::QueueLocationEnricherSetup>,
 }
 
 impl ApplicationContext {

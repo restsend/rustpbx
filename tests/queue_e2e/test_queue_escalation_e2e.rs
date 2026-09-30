@@ -214,6 +214,7 @@ mod escalation_e2e {
         let server = crate::common::e2e_test_server::E2eTestServer::start_with_inject(
             escalation_proxy_config(port),
             crate::common::e2e_test_server::E2eTestServerInject {
+            queue_enricher: None,
                 users: ["caller", "agent1", "agent2", "agent3"]
                     .into_iter()
                     .enumerate()
