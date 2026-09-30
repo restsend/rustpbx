@@ -262,7 +262,10 @@ def _seed_cc_sync(pbx) -> None:
         finally:
             await session.close()
 
-    _asyncio.get_event_loop().run_until_complete(_run())
+    # asyncio.run: sync pytest fixture context has no current event loop
+    # (asyncio.get_event_loop() raises RuntimeError on modern Python), and
+    # pytest-asyncio's loop is only active inside async tests.
+    _asyncio.run(_run())
 
 
 # ---------------------------------------------------------------------------

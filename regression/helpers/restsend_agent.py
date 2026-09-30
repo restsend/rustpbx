@@ -21,7 +21,25 @@ import asyncio
 import json
 import os
 import shutil
+import socket
+import subprocess
+import threading
 from typing import Any, Optional
+
+
+def _udp_free_port(preferred: int) -> int:
+    """Return `preferred` if it can be bound on 127.0.0.1, else a free
+    ephemeral port."""
+    for port in (preferred, 0):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.bind(("127.0.0.1", port))
+            return sock.getsockname()[1]
+        except (OSError, OverflowError):
+            continue
+        finally:
+            sock.close()
+    return preferred
 
 CLI = os.environ.get(
     "RESTSEND_CLI",
@@ -63,6 +81,11 @@ class RestsendAgent:
     async def start(self) -> None:
         if not os.path.exists(CLI):
             raise FileNotFoundError(f"restsend-cli not built: {CLI}")
+        # Suites hardcode 25xxx local bind ports; in parallel `all` runs those
+        # fall inside OTHER lanes' UA port windows → instant bind failure and
+        # a cryptic "REGISTER failed". Probe the preferred port and fall back
+        # to a free ephemeral one when busy.
+        self.local_port = _udp_free_port(self.local_port)
         env = dict(os.environ, RUST_LOG=self.log_level)
         if self.tone_hz:
             env["RESTSEND_TONE_HZ"] = str(self.tone_hz)
