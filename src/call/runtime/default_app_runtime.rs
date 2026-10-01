@@ -154,13 +154,40 @@ impl AppRuntime for DefaultAppRuntime {
         auto_answer: bool,
         route_context: crate::call::app::AppRouteContext,
     ) -> AppResult<()> {
-        // Claim the next generation *before* installing the event sender.
+        // Claim the next generation while reserving the running slot.
         // Transfer → stop_app → start_app races with the predecessor event-loop
         // teardown: if we only bump after `create_app` awaits, the predecessor
         // can still see its own generation as current and call
         // `set_app_event_sender(None)`, dropping the successor's channel and
         // killing the new IVR with ExitReason::Normal.
+        let cancel_token = CancellationToken::new();
+
+        // Reserve the running slot: the AlreadyRunning check and the install
+        // happen under ONE write lock, so concurrent start_app calls
+        // serialize instead of both installing (the loser's event loop would
+        // run unreferenced and both would consume session events).
+        let generation = {
+            let mut running = self.running.write().await;
+            if let Some(current) = running.as_ref() {
+                // Report the app that actually occupies the slot — callers
+                // (e.g. the CSAT hook) branch on this name.
+                return Err(AppRuntimeError::AlreadyRunning(current.name.clone()));
+            }
         let generation = self.app_generation.fetch_add(1, Ordering::SeqCst) + 1;
+            let invocation = crate::call::app::AppInvocationContext {
+                app_execution_id: generation,
+                callee: route_context.callee.clone(),
+                sip_headers: route_context.sip_headers.clone(),
+                variables: route_context.variables.clone(),
+            };
+            *running = Some(RunningApp {
+                name: app_name.to_string(),
+                cancel_token: cancel_token.clone(),
+                generation,
+                invocation,
+            });
+            generation
+        };
         let invocation = crate::call::app::AppInvocationContext {
             app_execution_id: generation,
             callee: route_context.callee,
@@ -170,27 +197,6 @@ impl AppRuntime for DefaultAppRuntime {
         let mut invocation_context = (*self.context).clone();
         invocation_context.invocation = Some(invocation.clone());
         let invocation_context = Arc::new(invocation_context);
-
-        let cancel_token = CancellationToken::new();
-
-        // Reserve the running slot: the AlreadyRunning check and the install
-        // happen under ONE write lock, so concurrent start_app calls
-        // serialize instead of both installing (the loser's event loop would
-        // run unreferenced and both would consume session events).
-        {
-            let mut running = self.running.write().await;
-            if let Some(current) = running.as_ref() {
-                // Report the app that actually occupies the slot — callers
-                // (e.g. the CSAT hook) branch on this name.
-                return Err(AppRuntimeError::AlreadyRunning(current.name.clone()));
-            }
-            *running = Some(RunningApp {
-                name: app_name.to_string(),
-                cancel_token: cancel_token.clone(),
-                generation,
-                invocation: invocation.clone(),
-            });
-        }
 
         // Create event channel for app events (DTMF, hangup, etc.)
         let (event_tx, event_rx) = mpsc::unbounded_channel::<ControllerEvent>();
@@ -306,9 +312,13 @@ impl AppRuntime for DefaultAppRuntime {
                             error = %e,
                             "Failed to start pending return app after sub-app exit"
                         );
-                        let _ = handle.send_command(CallCommand::AppExited);
+                        let _ = handle.send_command(CallCommand::AppExited {
+                            app_execution_id: generation,
+                        });
                     }
-                } else if let Err(e) = handle.send_command(CallCommand::AppExited) {
+                } else if let Err(e) = handle.send_command(CallCommand::AppExited {
+                    app_execution_id: generation,
+                }) {
                     tracing::warn!(
                         "Failed to send AppExited for session {}: {}",
                         session_id_for_log,
@@ -684,7 +694,7 @@ mod tests {
         // The teardown also notified the session with AppExited.
         let mut got_app_exited = false;
         while let Ok(cmd) = cmd_rx.try_recv() {
-            if matches!(cmd, CallCommand::AppExited) {
+            if matches!(cmd, CallCommand::AppExited { .. }) {
                 got_app_exited = true;
             }
         }
@@ -695,6 +705,57 @@ mod tests {
             .start_app("exit_app", None, false)
             .await
             .expect("restart after natural exit must succeed directly");
+    }
+
+    #[tokio::test]
+    async fn rejected_start_does_not_orphan_running_app_exit() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(64);
+        let handle = SipSessionHandle::new_for_test("runtime-test", cmd_tx);
+        let call_info = crate::call::app::CallInfo {
+            session_id: "runtime-test".into(),
+            caller: "1001".into(),
+            callee: "1002".into(),
+            direction: "inbound".into(),
+            started_at: chrono::Utc::now(),
+            sip_headers: Default::default(),
+            route_name: None,
+        };
+        let context = crate::call::app::ApplicationContext::new(
+            Default::default(),
+            call_info,
+            std::sync::Arc::new(crate::config::Config::default()),
+            reqwest::Client::new(),
+        );
+        let runtime = DefaultAppRuntime::new(AppRuntimeConfig {
+            session_id: "runtime-test".into(),
+            handle,
+            context: std::sync::Arc::new(context),
+        })
+        .with_factory(std::sync::Arc::new(CaptureFactory {
+            contexts: std::sync::Mutex::new(Vec::new()),
+        }));
+
+        runtime
+            .start_app("first", None, false)
+            .await
+            .expect("first app must start");
+        assert!(matches!(
+            runtime.start_app("second", None, false).await,
+            Err(AppRuntimeError::AlreadyRunning(name)) if name == "first"
+        ));
+
+        assert!(runtime.handle.send_app_event(ControllerEvent::Hangup(None)));
+        let command = tokio::time::timeout(std::time::Duration::from_secs(1), cmd_rx.recv())
+            .await
+            .expect("the first app must still notify its exit")
+            .expect("command channel must remain open");
+        assert!(matches!(
+            command,
+            CallCommand::AppExited {
+                app_execution_id: 1
+            }
+        ));
+        assert!(!runtime.is_running());
     }
 
     /// An explicit `stop_app` still clears the slot immediately and cancels

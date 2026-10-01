@@ -3,6 +3,448 @@ use crate::proxy::proxy_call::dtmf::RtpDtmfDetector;
 use crate::proxy::proxy_call::sip_session::builtin_app_factory::BuiltinAppFactory;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+struct InvocationHeadersRuntime {
+    invocation: crate::call::app::AppInvocationContext,
+}
+
+#[async_trait::async_trait]
+impl AppRuntime for InvocationHeadersRuntime {
+    async fn start_app(
+        &self,
+        _app_name: &str,
+        _params: Option<serde_json::Value>,
+        _auto_answer: bool,
+    ) -> crate::call::runtime::AppResult<()> {
+        Ok(())
+    }
+
+    async fn stop_app(&self, _reason: Option<String>) -> crate::call::runtime::AppResult<()> {
+        Ok(())
+    }
+
+    fn inject_event(&self, _event: serde_json::Value) -> crate::call::runtime::AppResult<()> {
+        Ok(())
+    }
+
+    fn is_running(&self) -> bool {
+        true
+    }
+
+    fn current_app(&self) -> Option<String> {
+        Some("current-app".to_string())
+    }
+
+    async fn current_app_invocation(&self) -> Option<crate::call::app::AppInvocationContext> {
+        Some(self.invocation.clone())
+    }
+}
+
+#[tokio::test]
+async fn ivr_exec_route_point_resolves_application_route_and_preserves_identity() {
+    use crate::call::{DialDirection, Dialplan};
+    use crate::proxy::routing::{MatchConditions, RewriteRules, RouteAction, RouteRule};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_config};
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+
+    let mut config = crate::config::ProxyConfig::default();
+    config.routes = Some(vec![RouteRule {
+        name: "routed-ivr".to_string(),
+        priority: 2000,
+        match_conditions: MatchConditions {
+            request_uri_user: Some("^(ivr-entry-a|ivr-entry-b)$".to_string()),
+            ..Default::default()
+        },
+        rewrite: Some(RewriteRules {
+            headers: std::collections::HashMap::from([(
+                "header.flowname".to_string(),
+                "RoutedFlow".to_string(),
+            )]),
+            ..Default::default()
+        }),
+        action: RouteAction {
+            action: Some("application".to_string()),
+            app: Some("ivr".to_string()),
+            app_params: Some(serde_json::json!({
+                "file": "step-ivr",
+                "ivr_params": {
+                    "operation": "route-default",
+                    "route_default": "kept"
+                }
+            })),
+            ..Default::default()
+        },
+        ..Default::default()
+    }]);
+    let (server, _) = create_test_server_with_config(config).await;
+    for route_point in ["ivr-entry-a", "ivr-entry-b"] {
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let dialplan = Dialplan::new(
+            format!("ivr-exec-route-{route_point}"),
+            request,
+            DialDirection::Inbound,
+        )
+        .with_caller("sip:alice@rustpbx.com".try_into().unwrap());
+        let (mut session, _handle, mut cmd_rx) =
+            build_session_with_cmd_rx_on(server.clone(), dialplan).await;
+        let (info_tx, _response_rx) = TransactionHandle::new();
+
+        session
+            .handle_ivr_exec_command(
+                Some(serde_json::json!({
+                    "route_point": route_point,
+                    "hold_agent": false,
+                    "ivr_params": {
+                        "route_point": "untrusted-duplicate",
+                        "workflow_id": "workflow-test",
+                        "operation": "confirm"
+                    }
+                })),
+                None,
+                &info_tx,
+            )
+            .await
+            .unwrap();
+
+        let command = cmd_rx
+            .recv()
+            .await
+            .expect("ivr.exec should enqueue StartApp");
+        match command {
+            CallCommand::StartAppWithRouteContext {
+                app_name,
+                params,
+                route_context,
+                ..
+            } => {
+                let params = params.expect("route application should provide params");
+                assert_eq!(app_name, "ivr");
+                assert_eq!(params["file"], "step-ivr");
+                assert_eq!(route_context.sip_headers["flowname"], "RoutedFlow");
+                assert_eq!(params["ivr_params"]["route_point"], route_point);
+                assert_eq!(params["ivr_params"]["workflow_id"], "workflow-test");
+                assert_eq!(params["ivr_params"]["operation"], "confirm");
+                assert_eq!(params["ivr_params"]["route_default"], "kept");
+            }
+            other => panic!("expected StartApp, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn ivr_exec_does_not_trust_inherited_route_dispatch_header() {
+    use crate::call::{DialDirection, Dialplan};
+    use crate::proxy::routing::{MatchConditions, RouteAction, RouteRule};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_config};
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+
+    let mut config = crate::config::ProxyConfig::default();
+    config.routes = Some(vec![RouteRule {
+        name: "route-without-dispatch-header".to_string(),
+        priority: 2000,
+        match_conditions: MatchConditions {
+            request_uri_user: Some("^plain-entry$".to_string()),
+            ..Default::default()
+        },
+        action: RouteAction {
+            action: Some("application".to_string()),
+            app: Some("ivr".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    }]);
+    let (server, _) = create_test_server_with_config(config).await;
+    let mut request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    request.headers.push(rsipstack::sip::Header::Other(
+        "FlowName".to_string(),
+        "ForgedFlow".to_string(),
+    ));
+    let dialplan = Dialplan::new(
+        "ivr-exec-route-header-provenance".to_string(),
+        request,
+        DialDirection::Inbound,
+    )
+    .with_caller("sip:alice@rustpbx.com".try_into().unwrap());
+    let (mut session, _handle, mut cmd_rx) =
+        build_session_with_cmd_rx_on(server, dialplan).await;
+    session.app_runtime = Arc::new(InvocationHeadersRuntime {
+        invocation: crate::call::app::AppInvocationContext {
+            app_execution_id: 7,
+            sip_headers: std::collections::HashMap::from([
+                ("FlowName".to_string(), "ForgedFlow".to_string()),
+                ("X-Context".to_string(), "kept".to_string()),
+            ]),
+            ..Default::default()
+        },
+    });
+    let (info_tx, _response_rx) = TransactionHandle::new();
+
+    session
+        .handle_ivr_exec_command(
+            Some(serde_json::json!({
+                "route_point": "plain-entry", "hold_agent": false
+            })),
+            None,
+            &info_tx,
+        )
+        .await
+        .unwrap();
+
+    let command = cmd_rx
+        .recv()
+        .await
+        .expect("ivr.exec should enqueue StartApp");
+    let CallCommand::StartAppWithRouteContext { route_context, .. } = command else {
+        panic!("expected routed application command");
+    };
+    assert!(
+        route_context
+            .sip_headers
+            .keys()
+            .all(|name| !name.eq_ignore_ascii_case("flowname"))
+    );
+    assert_eq!(route_context.sip_headers["X-Context"], "kept");
+}
+
+#[tokio::test]
+async fn ivr_exec_explicit_ivr_name_keeps_direct_execution_available() {
+    use crate::call::{DialDirection, Dialplan};
+    use crate::proxy::tests::common::{create_test_request, create_test_server};
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+
+    let (server, _) = create_test_server().await;
+    let expected_file = server.data_context.resolve_ivr_file("direct-test").await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let dialplan = Dialplan::new(
+        "ivr-exec-direct".to_string(),
+        request,
+        DialDirection::Inbound,
+    )
+    .with_caller("sip:alice@rustpbx.com".try_into().unwrap());
+    let (mut session, _handle, mut cmd_rx) = build_session_with_cmd_rx_on(server, dialplan).await;
+    let (info_tx, _response_rx) = TransactionHandle::new();
+
+    session
+        .handle_ivr_exec_command(
+            Some(serde_json::json!({
+                "ivr_name": "direct-test",
+                "hold_agent": false,
+                "ivr_params": { "business_key": "business-value" }
+            })),
+            None,
+            &info_tx,
+        )
+        .await
+        .unwrap();
+
+    let command = cmd_rx
+        .recv()
+        .await
+        .expect("ivr.exec should enqueue StartApp");
+    match command {
+        CallCommand::StartApp {
+            app_name, params, ..
+        } => {
+            let params = params.expect("direct IVR should provide params");
+            assert_eq!(app_name, "ivr");
+            assert_eq!(params["file"], expected_file);
+            assert_eq!(params["ivr_params"]["business_key"], "business-value");
+        }
+        other => panic!("expected StartApp, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn ivr_exec_requires_exactly_one_target_selector() {
+    use crate::call::{DialDirection, Dialplan};
+    use crate::proxy::tests::common::{create_test_request, create_test_server};
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+
+    let (server, _) = create_test_server().await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let dialplan = Dialplan::new(
+        "ivr-exec-conflicting-targets".to_string(),
+        request,
+        DialDirection::Inbound,
+    )
+    .with_caller("sip:alice@rustpbx.com".try_into().unwrap());
+    let (mut session, _handle, mut cmd_rx) = build_session_with_cmd_rx_on(server, dialplan).await;
+    let (info_tx, mut response_rx) = TransactionHandle::new();
+
+    for (case, params) in [
+        (
+            "conflicting targets",
+            serde_json::json!({
+                "route_point": "ivr-entry-a",
+                "ivr_name": "direct-test",
+                "hold_agent": false
+            }),
+        ),
+        (
+            "missing target",
+            serde_json::json!({
+                "hold_agent": false,
+                "ivr_params": { "file": "raw-ivr.toml" }
+            }),
+        ),
+    ] {
+        session
+            .handle_ivr_exec_command(Some(params), None, &info_tx)
+            .await
+            .unwrap();
+
+        let response = response_rx
+            .recv()
+            .await
+            .unwrap_or_else(|| panic!("{case} should receive a final response"));
+        let rsipstack::dialog::dialog::TransactionCommand::Respond { status, .. } = response;
+        assert_eq!(status, rsipstack::sip::StatusCode::BadRequest, "{case}");
+        assert!(cmd_rx.try_recv().is_err(), "{case} must not start an app");
+    }
+}
+
+async fn ivr_exec_test_session(
+    name: &str,
+) -> (SipSession, tokio::sync::mpsc::Receiver<CallCommand>) {
+    use crate::call::{DialDirection, Dialplan};
+    use crate::proxy::tests::common::{create_test_request, create_test_server};
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+    let (server, _) = create_test_server().await;
+    let request = create_test_request(rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None);
+    let dialplan = Dialplan::new(name.to_string(), request, DialDirection::Inbound)
+        .with_caller("sip:alice@rustpbx.com".try_into().unwrap());
+    let (session, _handle, cmd_rx) = build_session_with_cmd_rx_on(server, dialplan).await;
+    (session, cmd_rx)
+}
+
+#[tokio::test]
+async fn ivr_exec_enqueue_failure_returns_error_and_releases_invocation() {
+    use crate::proxy::proxy_call::ivr_exec_hook::IvrExecState;
+    let (mut session, cmd_rx) = ivr_exec_test_session("ivr-exec-enqueue-failure").await;
+    drop(cmd_rx);
+    let (info_tx, mut response_rx) = TransactionHandle::new();
+    session.handle_ivr_exec_command(Some(serde_json::json!({
+        "ivr_name": "direct-test", "hold_agent": false, "request_id": "request-a"
+    })), None, &info_tx).await.unwrap();
+    let rsipstack::dialog::dialog::TransactionCommand::Respond { status, .. } =
+        response_rx.recv().await.expect("INFO must receive a response");
+    assert_eq!(status, rsipstack::sip::StatusCode::ServerInternalError);
+    assert!(session.extensions.read().get::<IvrExecState>().is_none());
+}
+
+#[tokio::test]
+async fn ivr_exec_route_point_must_resolve_to_application() {
+    use crate::proxy::proxy_call::ivr_exec_hook::IvrExecState;
+    let (mut session, mut cmd_rx) = ivr_exec_test_session("ivr-exec-missing-route").await;
+    let (info_tx, mut response_rx) = TransactionHandle::new();
+    session.handle_ivr_exec_command(Some(serde_json::json!({
+        "route_point": "missing-route", "hold_agent": false
+    })), None, &info_tx).await.unwrap();
+    let rsipstack::dialog::dialog::TransactionCommand::Respond { status, .. } =
+        response_rx.recv().await.expect("INFO must receive a response");
+    assert_eq!(status, rsipstack::sip::StatusCode::NotFound);
+    assert!(cmd_rx.try_recv().is_err());
+    assert!(session.extensions.read().get::<IvrExecState>().is_none());
+}
+
+#[tokio::test]
+async fn ivr_exec_invalid_route_point_receives_final_bad_request() {
+    use crate::proxy::proxy_call::ivr_exec_hook::IvrExecState;
+    let (mut session, mut cmd_rx) = ivr_exec_test_session("ivr-exec-invalid-route").await;
+    let (info_tx, mut response_rx) = TransactionHandle::new();
+
+    let result = session.handle_ivr_exec_command(Some(serde_json::json!({
+        "route_point": "sip:route@example.invalid:99999", "hold_agent": false
+    })), None, &info_tx).await;
+
+    assert!(result.is_ok(), "malformed user input must not escape the INFO handler");
+    let rsipstack::dialog::dialog::TransactionCommand::Respond { status, .. } =
+        response_rx.recv().await.expect("INFO must receive a final response");
+    assert_eq!(status, rsipstack::sip::StatusCode::BadRequest);
+    assert!(cmd_rx.try_recv().is_err());
+    assert!(session.extensions.read().get::<IvrExecState>().is_none());
+}
+
+#[tokio::test]
+async fn ivr_exec_busy_rejects_before_replacing_active_invocation() {
+    use crate::proxy::proxy_call::ivr_exec_hook::IvrExecState;
+    let (mut session, mut cmd_rx) = ivr_exec_test_session("ivr-exec-busy").await;
+    session.extensions.write().insert(IvrExecState {
+        app_execution_id: None,
+        request_id: "first-request".to_string(), held_leg: None,
+        initiator_leg: LegId::from("callee"), webhook_url: None,
+        app_name: "ivr".to_string(), metadata: serde_json::Value::Null,
+    });
+    let (info_tx, mut response_rx) = TransactionHandle::new();
+    session.handle_ivr_exec_command(Some(serde_json::json!({
+        "ivr_name": "direct-test", "hold_agent": false, "request_id": "second-request"
+    })), None, &info_tx).await.unwrap();
+    let rsipstack::dialog::dialog::TransactionCommand::Respond { status, .. } =
+        response_rx.recv().await.expect("INFO must receive a response");
+    assert_eq!(status, rsipstack::sip::StatusCode::BusyHere);
+    assert!(cmd_rx.try_recv().is_err());
+    assert_eq!(session.extensions.read().get::<IvrExecState>().unwrap().request_id, "first-request");
+}
+
+#[tokio::test]
+async fn connectivity_regression_ivr_exec_hold_failure_prevents_app_start() {
+    use crate::proxy::proxy_call::ivr_exec_hook::IvrExecState;
+    let (mut failed_session, mut failed_cmd_rx) =
+        ivr_exec_test_session("ivr-exec-hold-failure").await;
+    let (failed_info_tx, mut failed_response_rx) = TransactionHandle::new();
+    failed_session
+        .handle_ivr_exec_command(
+            Some(serde_json::json!({
+                "ivr_name": "direct-test",
+                "request_id": "hold-failure"
+            })),
+            Some(LegId::from("missing-agent-leg")),
+            &failed_info_tx,
+        )
+        .await
+        .unwrap();
+
+    let rsipstack::dialog::dialog::TransactionCommand::Respond { status, .. } = failed_response_rx
+        .recv()
+        .await
+        .expect("INFO must receive a final response");
+    assert_eq!(status, rsipstack::sip::StatusCode::ServerInternalError);
+    assert!(
+        failed_cmd_rx.try_recv().is_err(),
+        "failed hold must not start IVR"
+    );
+    assert!(
+        failed_session
+            .extensions
+            .read()
+            .get::<IvrExecState>()
+            .is_none()
+    );
+}
+
 struct DtmfAppRuntime {
     running: bool,
     inject_calls: AtomicUsize,
@@ -61,6 +503,37 @@ fn forward_dtmf_skips_app_injection_when_no_app_is_running() {
     );
 
     assert_eq!(runtime.inject_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn forward_dtmf_rejects_non_caller_leg_as_application_input() {
+    let runtime = Arc::new(DtmfAppRuntime {
+        running: true,
+        inject_calls: AtomicUsize::new(0),
+    });
+    let app_runtime: Arc<dyn AppRuntime> = runtime.clone();
+    let (tx, mut bridge_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let bridge_dtmf_tx = Arc::new(parking_lot::RwLock::new(Some(tx)));
+    let buffered = Arc::new(parking_lot::Mutex::new(Vec::new()));
+
+    let accepted = forward_dtmf_event(
+        '1',
+        "callee",
+        "test-session",
+        &app_runtime,
+        &None,
+        &bridge_dtmf_tx,
+        &Arc::new(parking_lot::Mutex::new(None)),
+        &buffered,
+        "1001",
+        "2000",
+        None,
+    );
+
+    assert!(!accepted);
+    assert_eq!(runtime.inject_calls.load(Ordering::SeqCst), 0);
+    assert!(bridge_rx.try_recv().is_err());
+    assert!(buffered.lock().is_empty());
 }
 
 /// While a bridge is active (armed `bridge_dtmf_tx`), the bridge owns the
@@ -6520,23 +6993,32 @@ async fn test_record_snapshot_carries_transferred_and_leg_timeline() {
 
 
 #[tokio::test]
-async fn reinvite_hold_resume_restores_both_relay_directions() {
+async fn dynamic_hold_resume_targets_current_bridge_pair() {
     use crate::call::{DialDirection, Dialplan, MediaConfig};
     use crate::config::MediaProxyMode;
     use crate::media::leg::{LegConfig, LegInner};
     use crate::proxy::tests::common::create_test_request;
     use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx;
 
-    for side in [DialogSide::Caller, DialogSide::Callee] {
+    for (leg_names, source_index, side) in [
+        (["caller", "callee"], 0, DialogSide::Caller),
+        (["caller", "callee"], 1, DialogSide::Callee),
+        (["dynamic-a", "dynamic-b"], 0, DialogSide::Callee),
+        (["dynamic-a", "dynamic-b"], 1, DialogSide::Callee),
+    ] {
         let request = create_test_request(rsipstack::sip::Method::Invite, "caller", None, "rustpbx.com", None);
         let dialplan = Dialplan::new("hold-resume".into(), request, DialDirection::Inbound)
             .with_media(MediaConfig::new().with_proxy_mode(MediaProxyMode::All));
         let (mut session, _handle, _commands) = build_session_with_cmd_rx(dialplan).await;
         let _guard = session.cancel_token.clone().drop_guard();
-        let callee = LegId::from("callee");
-        session.legs.insert(callee.clone(), Leg::new(callee));
         let mut remotes = Vec::new();
-        for name in ["caller", "callee"] {
+        for name in leg_names {
+            let leg_id = LegId::from(name);
+            if !session.legs.contains_key(&leg_id) {
+                session
+                    .legs
+                    .insert(leg_id.clone(), crate::call::domain::Leg::new(leg_id.clone()));
+            }
             let local = LegInner::new(name, &LegConfig::rtp_pcmu(), None).unwrap();
             let remote = LegInner::new(format!("remote-{name}"), &LegConfig::rtp_pcmu(), None).unwrap();
             let offer = remote.create_offer().await.unwrap();
@@ -6544,12 +7026,24 @@ async fn reinvite_hold_resume_restores_both_relay_directions() {
             remote.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
             local.accept();
             remote.accept();
-            session.legs.set_media_leg(&LegId::from(name), local);
-            session.update_leg_state(&LegId::from(name), LegState::Connected);
+            session.legs.set_media_leg(&leg_id, local);
+            session.update_leg_state(&leg_id, LegState::Connected);
             remotes.push(remote);
         }
-        assert!(session.setup_bridge(LegId::from("caller"), LegId::from("callee")).await);
-        let remote = &remotes[if matches!(side, DialogSide::Caller) { 0 } else { 1 }];
+        let source_leg = LegId::from(leg_names[source_index]);
+        let peer_leg = LegId::from(leg_names[1 - source_index]);
+        let bridged = session
+            .execute_command(
+                CallCommand::Bridge {
+                    leg_a: source_leg.clone(),
+                    leg_b: peer_leg.clone(),
+                    mode: crate::call::domain::P2PMode::Audio,
+                },
+                None,
+            )
+            .await;
+        assert!(bridged.success, "{:?}", bridged.message);
+        let remote = &remotes[source_index];
         // Exercise the same negotiation -> hold transition sequence as an
         // incoming re-INVITE, twice to catch stale route state after resume.
         for _ in 0..2 {
@@ -6557,23 +7051,50 @@ async fn reinvite_hold_resume_restores_both_relay_directions() {
                 let offer = remote.create_offer().await.unwrap();
                 let offer = rustrtc::modify_sdp_direction(&offer, direction);
                 let parsed = rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, &offer).unwrap();
-                let leg_id = LegId::from(if matches!(side, DialogSide::Caller) { "caller" } else { "callee" });
-                let answer = session.build_local_dialog_answer(side, &leg_id, rsipstack::sip::Method::Invite, &offer).await.unwrap();
+                let answer = session.build_local_dialog_answer(side, &source_leg, rsipstack::sip::Method::Invite, &offer).await.unwrap();
                 remote.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
-                session.apply_reinvite_hold_transition(side, &leg_id, &parsed, &[]).await;
+                session.apply_reinvite_hold_transition(side, &source_leg, &parsed, &[]).await;
                 let resumed = direction == "sendrecv";
                 if !resumed {
+                    if leg_names[0].starts_with("dynamic-") {
+                        let connected = session
+                            .execute_command(
+                                CallCommand::LegConnected {
+                                    leg_id: source_leg.clone(),
+                                    answer_sdp: None,
+                                    dialog_id: None,
+                                },
+                                None,
+                            )
+                            .await;
+                        assert!(connected.success, "{:?}", connected.message);
+                        let bridged = session
+                            .execute_command(
+                                CallCommand::Bridge {
+                                    leg_a: source_leg.clone(),
+                                    leg_b: peer_leg.clone(),
+                                    mode: crate::call::domain::P2PMode::Audio,
+                                },
+                                None,
+                            )
+                            .await;
+                        assert!(bridged.success, "{:?}", bridged.message);
+                        assert_eq!(session.legs.get(&source_leg).unwrap().state, LegState::Hold);
+                        assert!(!session.bridge().unwrap().is_bridged());
+                    }
                     // Playback completion / unmute while held must preserve the
                     // intended pair without resuming live media prematurely.
                     session.execute_command(CallCommand::ResumeMedia, None).await;
-                    session.handle_unmute_track("caller".into()).await.unwrap();
-                    assert_eq!(session.bridge.legs, vec![LegId::from("caller"), LegId::from("callee")]);
+                    session.handle_unmute_track(source_leg.to_string()).await.unwrap();
+                    assert_eq!(session.bridge.legs, vec![source_leg.clone(), peer_leg.clone()]);
                 }
                 assert_eq!(session.bridge().unwrap().is_bridged(), resumed);
+                let expected_state = if resumed { LegState::Connected } else { LegState::Hold };
+                for leg_id in [&source_leg, &peer_leg] {
+                    assert_eq!(session.legs.get(leg_id).unwrap().state, expected_state);
                 if resumed {
-                    for name in ["caller", "callee"] {
-                        assert!(session.media_leg(&LegId::from(name)).unwrap().egress_is_relay(),
-                            "{side:?} resume must restore {name} relay, not merely mark the bridge active");
+                        assert!(session.media_leg(leg_id).unwrap().egress_is_relay(),
+                            "{side:?} resume must restore {leg_id} relay, not merely mark the bridge active");
                     }
                 }
             }
@@ -6758,7 +7279,7 @@ async fn blind_transfer_detaches_agent_before_independent_target_answers() {
 }
 
 #[tokio::test]
-async fn cancel_before_queued_answer_sends_bye_to_late_dialog() {
+async fn dynamic_hold_before_connected_command_keeps_answered_dialog_owned() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::proxy::tests::common::{create_test_request, create_test_server};
     use rsipstack::sip::{Header, Method, SipMessage, StatusCode};
@@ -6790,6 +7311,8 @@ async fn cancel_before_queued_answer_sends_bye_to_late_dialog() {
         let cancel = CancellationToken::new();
         let _cancel_on_exit = cancel.clone().drop_guard();
         let (mut session, handle, mut commands) = SipSession::new_uac(server.clone(), cancel.clone(), None, context, true);
+        let (callee_tx, callee_rx) = mpsc::unbounded_channel();
+        session.callee_event_tx = Some(callee_tx);
         server
             .active_call_registry
             .register_handle(session.id.to_string(), handle.clone());
@@ -6806,8 +7329,9 @@ async fn cancel_before_queued_answer_sends_bye_to_late_dialog() {
         };
         assert_eq!(invite.method, Method::Invite);
         let call_id = invite.call_id_header().unwrap().value().to_string();
+        let local_to = invite.from_header().unwrap().value().to_string();
 
-        // Hold command processing: removal is queued before the real SIP 200
+        // Leg removal is queued before the real SIP 200
         // causes the dial task to append LegConnected to the same channel.
         handle.send_command(CallCommand::LegRemove { leg_id: leg_id.clone() }).unwrap();
         let mut answer = server.endpoint.inner.make_response(&invite, StatusCode::OK, Some(invite.body.clone()));
@@ -6844,6 +7368,59 @@ async fn cancel_before_queued_answer_sends_bye_to_late_dialog() {
             "the dialog key must resolve before LegConnected is consumed"
         );
         assert!(!dialogs[0].state().is_terminated());
+
+        // The answered dialog must own immediate in-dialog traffic before the
+        // separately queued LegConnected command reaches the session actor.
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let (size, _) = target.recv_from(&mut buffer).await.unwrap();
+                if matches!(
+                    SipMessage::try_from(std::str::from_utf8(&buffer[..size]).unwrap()).unwrap(),
+                    SipMessage::Request(ref request) if request.method == Method::Ack
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("dynamic leg receives ACK");
+        let hold_sdp = String::from_utf8_lossy(&invite.body).replace("a=sendrecv", "a=inactive");
+        let reinvite = format!(
+            "INVITE sip:pbx@{pbx_addr} SIP/2.0\r\n\
+             Via: SIP/2.0/UDP {target_addr};branch=z9hG4bKdynamicHold\r\n\
+             From: <sip:alice@{target_addr}>;tag=late-peer\r\n\
+             To: {local_to}\r\n\
+             Call-ID: {call_id}\r\n\
+             CSeq: 2 INVITE\r\n\
+             Contact: <sip:alice@{target_addr}>\r\n\
+             Max-Forwards: 70\r\n\
+             Content-Type: application/sdp\r\n\
+             Content-Length: {}\r\n\r\n{}",
+            hold_sdp.len(), hold_sdp,
+        );
+        let SipMessage::Request(reinvite) = SipMessage::try_from(reinvite.as_str()).unwrap() else {
+            panic!("expected hold re-INVITE request");
+        };
+        let (tx_handle, mut response_rx) = TransactionHandle::new();
+        session
+            .handle_callee_state(DialogState::Updated(
+                confirmed_id.clone(),
+                reinvite,
+                tx_handle,
+            ))
+            .await
+            .unwrap();
+        let response = timeout(Duration::from_secs(3), response_rx.recv())
+            .await
+            .expect("immediate hold produces a final response")
+            .expect("response channel stays open");
+        let rsipstack::dialog::dialog::TransactionCommand::Respond { status, body, .. } = response;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            String::from_utf8_lossy(body.as_deref().unwrap_or_default()).contains("a=inactive"),
+            "hold answer must keep the audio leg inactive"
+        );
+
         for command in queued {
             if matches!(&command, CallCommand::LegConnected { .. }) {
                 assert!(!session.legs.contains_key(&leg_id));
@@ -6867,7 +7444,6 @@ async fn cancel_before_queued_answer_sends_bye_to_late_dialog() {
             drop(session);
             None
         } else {
-            let (_callee_tx, callee_rx) = mpsc::unbounded_channel();
             Some(tokio::spawn(async move { session.run_main_loop(None, callee_rx, commands).await }))
         };
         let bye = timeout(Duration::from_secs(3), async {
@@ -7681,6 +8257,116 @@ async fn caller_confirmation_does_not_rearm_rtp_watchdog_while_held() {
             .load(std::sync::atomic::Ordering::SeqCst),
         "Confirmed must not re-arm the RTP watchdog on a held (silent) leg"
     );
+}
+
+#[tokio::test]
+async fn queue_agent_answer_restores_held_caller_media() {
+    use crate::call::app::queue::{QueueApp, QueueConfig};
+    use crate::call::app::testing::MockCallStack;
+    use crate::call::{DialDirection, DialStrategy, Dialplan, Location, MediaConfig};
+    use crate::config::MediaProxyMode;
+    use crate::media::leg::{LegConfig, LegInner};
+    use crate::proxy::tests::common::create_test_request;
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx;
+
+    let target = "sip:agent@example.com";
+    let location = Location {
+        aor: target.parse().unwrap(),
+        ..Default::default()
+    };
+    let config = QueueConfig {
+        name: "support".into(),
+        accept_immediately: true,
+        agents: vec![location.clone()],
+        strategy: DialStrategy::Sequential(vec![location]),
+        ..Default::default()
+    };
+    let plan = config.to_plan();
+    let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "support");
+    stack.custom("dial_next_agent", serde_json::json!({}));
+    // The harness runs the real queue event loop; replace only the outbound
+    // SIP dial with negotiated local RTP peers before delivering its answer.
+    let agent = loop {
+        match stack
+            .next_cmd(2000)
+            .await
+            .expect("queue must dial an agent")
+        {
+            CallCommand::LegAdd {
+                leg_id: Some(id), ..
+            } => break id,
+            _ => {}
+        }
+    };
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "caller",
+        None,
+        "example.com",
+        None,
+    );
+    let dialplan = Dialplan::new("queue-held-caller".into(), request, DialDirection::Inbound)
+        .with_media(MediaConfig::new().with_proxy_mode(MediaProxyMode::All));
+    let (mut session, _handle, _commands) = build_session_with_cmd_rx(dialplan).await;
+    let _guard = session.cancel_token.clone().drop_guard();
+    // Signaling is outside this media regression; these peers have no SIP dialog.
+    session.caller_dialog = None;
+    session
+        .legs
+        .insert(agent.clone(), crate::call::domain::Leg::new(agent.clone()));
+    let mut remotes = Vec::new();
+    for id in [LegId::from("caller"), agent.clone()] {
+        let local = LegInner::new(id.as_str(), &LegConfig::rtp_pcmu(), None).unwrap();
+        let remote = LegInner::new(format!("remote-{id}"), &LegConfig::rtp_pcmu(), None).unwrap();
+        let offer = remote.create_offer().await.unwrap();
+        let answer = local
+            .apply_sdp(&offer, rustrtc::SdpType::Offer)
+            .await
+            .unwrap();
+        remote
+            .apply_sdp(&answer, rustrtc::SdpType::Answer)
+            .await
+            .unwrap();
+        local.accept();
+        remote.accept();
+        session.legs.set_media_leg(&id, local);
+        session.update_leg_state(&id, LegState::Connected);
+        remotes.push(remote);
+    }
+    session.update_leg_state(&LegId::from("caller"), LegState::Hold);
+    stack.custom(
+        "agent_connected",
+        serde_json::json!({
+            "agent_uri": target,
+            "leg_id": agent.to_string(),
+        }),
+    );
+    while let Some(command) = stack.next_cmd(2000).await {
+        // Run the queue's media decisions through the production session;
+        // its notifications belong to the separate app event loop above.
+        if matches!(
+            command,
+            CallCommand::Bridge { .. } | CallCommand::Unhold { .. }
+        ) {
+            let result = session.execute_command(command, None).await;
+            assert!(result.success, "{:?}", result.message);
+        }
+    }
+    stack.join().await.unwrap();
+    assert_eq!(
+        session.legs.get(&LegId::from("caller")).unwrap().state,
+        LegState::Connected
+    );
+    assert!(
+        session.bridge().unwrap().is_bridged(),
+        "queue handoff must resume live media"
+    );
+    for id in [LegId::from("caller"), agent] {
+        assert!(
+            session.media_leg(&id).unwrap().egress_is_relay(),
+            "{id} must forward live audio"
+        );
+    }
 }
 
 /// A held leg unholding while the bridge is down must restore the media path.

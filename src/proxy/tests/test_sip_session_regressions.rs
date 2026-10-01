@@ -2720,7 +2720,7 @@ pub(crate) async fn build_session_with_cmd_rx(
 
 /// [`build_session_with_cmd_rx`] on a caller-provided server (e.g. one with
 /// session hooks pre-installed).
-async fn build_session_with_cmd_rx_on(
+pub(crate) async fn build_session_with_cmd_rx_on(
     server: Arc<crate::proxy::server::SipServerInner>,
     dialplan: Dialplan,
 ) -> (
@@ -3039,6 +3039,7 @@ async fn ivr_exec_app_exit_restores_held_route() {
         .extensions
         .write()
         .insert(crate::proxy::proxy_call::ivr_exec_hook::IvrExecState {
+            app_execution_id: Some(1),
             request_id: "req-test".to_string(),
             held_leg: Some(LegId::from("callee")),
             initiator_leg: LegId::from("callee"),
@@ -3046,7 +3047,14 @@ async fn ivr_exec_app_exit_restores_held_route() {
             app_name: "ivr".to_string(),
             metadata: serde_json::Value::Null,
         });
-    let result = session.execute_command(CallCommand::AppExited, None).await;
+    let result = session
+        .execute_command(
+            CallCommand::AppExited {
+                app_execution_id: 1,
+            },
+            None,
+        )
+        .await;
     assert!(
         result.success,
         "AppExited must succeed: {:?}",
@@ -3056,6 +3064,236 @@ async fn ivr_exec_app_exit_restores_held_route() {
         session.media.bridge.as_ref().unwrap().is_bridged(),
         "AppExited must restore the route held by ivr.exec"
     );
+}
+
+#[tokio::test]
+async fn ivr_exec_resumable_app_exit_preserves_hold_until_terminal_exit() {
+    use crate::proxy::proxy_call::ivr_exec_hook::{
+        IvrExecResult, IvrExecRouteHints, IvrExecState,
+    };
+
+    let (server, _) = create_test_server_with_session_hooks(
+        crate::config::ProxyConfig::default(),
+        vec![Arc::new(
+            crate::proxy::proxy_call::ivr_exec_hook::IvrExecHook,
+        )],
+    )
+    .await;
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+        "ivr".to_string(),
+        None,
+        true,
+    );
+    let (mut session, _handle, mut _cmd_rx) = build_session_with_cmd_rx_on(server, dialplan).await;
+    let mut mb = playable_bridge("ivr-exec-resume").await;
+    mb.accept(crate::media::media_bridge::LegSide::A).await;
+    mb.accept(crate::media::media_bridge::LegSide::B).await;
+    session.media.bridge = Some(mb);
+    session.media.callee_offer = Some(recording_test_offer());
+    session
+        .legs
+        .insert(LegId::from("callee"), Leg::new(LegId::from("callee")));
+
+    for (side, id) in [
+        (crate::media::media_bridge::LegSide::A, "caller"),
+        (crate::media::media_bridge::LegSide::B, "callee"),
+    ] {
+        let peer = session.media.bridge.as_ref().unwrap().leg(side).unwrap();
+        session.legs.set_media_leg(&LegId::from(id), peer);
+        session.update_leg_state(&LegId::from(id), LegState::Connected);
+    }
+
+    let result = session
+        .execute_command(
+            CallCommand::Hold {
+                leg_id: LegId::from("callee"),
+                music: None,
+            },
+            None,
+        )
+        .await;
+    assert!(result.success, "Hold must succeed: {:?}", result.message);
+    assert!(!session.media.bridge.as_ref().unwrap().is_bridged());
+
+    {
+        let mut extensions = session.extensions.write();
+        extensions.insert(IvrExecState {
+            app_execution_id: Some(1),
+            request_id: "request-resume".to_string(),
+            held_leg: Some(LegId::from("callee")),
+            initiator_leg: LegId::from("callee"),
+            webhook_url: None,
+            app_name: "ivr".to_string(),
+            metadata: serde_json::Value::Null,
+        });
+        extensions.insert(IvrExecResult {
+            app_execution_id: Some(1),
+            status: "transferred".to_string(),
+            reason: "transfer".to_string(),
+            routing_target: Some(
+                "bridge:wss://bridge.example.invalid/session".to_string(),
+            ),
+            collected: Default::default(),
+            trace: Vec::new(),
+            duration_ms: 0,
+            completion_time: "2026-09-29T00:00:00Z".to_string(),
+        });
+        extensions.insert(IvrExecRouteHints::new(
+            crate::config::DialplanHints::default(),
+        ));
+    }
+    assert!(crate::proxy::proxy_call::ivr_exec_hook::suspend_ivr_exec(
+        &session.extensions,
+    ));
+
+    let result = session
+        .execute_command(
+            CallCommand::AppExited {
+                app_execution_id: 1,
+            },
+            None,
+        )
+        .await;
+    assert!(result.success, "AppExited must succeed: {:?}", result.message);
+    assert!(
+        !session.media.bridge.as_ref().unwrap().is_bridged(),
+        "resumable app exit must keep the agent held"
+    );
+    {
+        let extensions = session.extensions.read();
+        assert_eq!(
+            extensions
+                .get::<IvrExecState>()
+                .expect("ivr.exec state must survive the hand-off")
+                .app_execution_id,
+            None,
+            "return app must be able to bind its execution id"
+        );
+        assert!(
+            extensions.get::<IvrExecRouteHints>().is_some(),
+            "route resources remain owned by the logical ivr.exec flow"
+        );
+    }
+    assert!(
+        crate::proxy::proxy_call::ivr_exec_hook::combined_ivr_exec_result(
+            &session.extensions,
+            Some(1),
+        )
+        .is_some(),
+        "intermediate result must remain available for final aggregation"
+    );
+
+    let mut runtime = RoutePointRuntime::new(&[]);
+    runtime.invocation = Some(AppInvocationContext {
+        app_execution_id: 2,
+        callee: "return-ivr".to_string(),
+        sip_headers: HashMap::new(),
+        variables: HashMap::new(),
+    });
+    session.app_runtime = Arc::new(runtime);
+    session.meta.ivr_flow_suspended = true;
+    session.meta.transfer_return_app = Some(ReturnAppSpec {
+        app_name: "ivr".to_string(),
+        params: serde_json::json!({"file": "return-ivr"}),
+    });
+    let result = session
+        .execute_command(CallCommand::StartReturnApp, None)
+        .await;
+    assert!(result.success, "return app must start");
+    assert_eq!(
+        session
+            .extensions
+            .read()
+            .get::<IvrExecState>()
+            .expect("return app must reuse the ivr.exec state")
+            .app_execution_id,
+        Some(2)
+    );
+    crate::call::app::ivr::exec::write_ivr_exec_result(
+        &session.extensions,
+        2,
+        crate::call::app::ivr::exec::build_ivr_exec_result(
+            "completed",
+            "normal",
+            None,
+            Default::default(),
+            0,
+        ),
+    );
+
+    let result = session
+        .execute_command(
+            CallCommand::AppExited {
+                app_execution_id: 2,
+            },
+            None,
+        )
+        .await;
+    assert!(result.success, "AppExited must succeed: {:?}", result.message);
+    assert!(
+        session.media.bridge.as_ref().unwrap().is_bridged(),
+        "terminal app exit must restore the agent route"
+    );
+    let extensions = session.extensions.read();
+    assert!(extensions.get::<IvrExecState>().is_none());
+    assert!(extensions.get::<IvrExecResult>().is_none());
+    assert!(extensions.get::<IvrExecRouteHints>().is_none());
+}
+
+#[tokio::test]
+async fn suspended_ivr_exec_hangup_emits_failed_completion_and_cleans_up() {
+    use crate::call::domain::HangupCommand;
+    use crate::proxy::proxy_call::ivr_exec_hook::{
+        IvrExecResult, IvrExecRouteHints, IvrExecState,
+    };
+
+    let (server, _) = create_test_server_with_session_hooks(
+        crate::config::ProxyConfig::default(),
+        vec![Arc::new(
+            crate::proxy::proxy_call::ivr_exec_hook::IvrExecHook,
+        )],
+    )
+    .await;
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let (mut session, _handle, _cmd_rx) = build_session_with_cmd_rx_on(server, dialplan).await;
+    session.meta.ivr_flow_suspended = true;
+    {
+        let mut extensions = session.extensions.write();
+        extensions.insert(IvrExecState {
+            app_execution_id: None,
+            request_id: "request-hangup".to_string(),
+            held_leg: None,
+            initiator_leg: LegId::from("callee"),
+            webhook_url: None,
+            app_name: "ivr".to_string(),
+            metadata: serde_json::Value::Null,
+        });
+        extensions.insert(IvrExecResult {
+            app_execution_id: Some(1),
+            status: "transferred".to_string(),
+            reason: "transfer_to_queue".to_string(),
+            routing_target: Some("queue:support".to_string()),
+            collected: [("dtmf_input".to_string(), "7".to_string())]
+                .into_iter()
+                .collect(),
+            trace: Vec::new(),
+            duration_ms: 0,
+            completion_time: "2026-09-29T00:00:00Z".to_string(),
+        });
+        extensions.insert(IvrExecRouteHints::new(
+            crate::config::DialplanHints::default(),
+        ));
+    }
+
+    let result = session
+        .execute_command(CallCommand::Hangup(HangupCommand::all(None, None)), None)
+        .await;
+
+    assert!(result.success, "session hangup must complete");
+    let extensions = session.extensions.read();
+    assert!(extensions.get::<IvrExecState>().is_none());
+    assert!(extensions.get::<IvrExecResult>().is_none());
+    assert!(extensions.get::<IvrExecRouteHints>().is_none());
 }
 
 // ─── queue agent connect activates the caller↔agent media bridge ─────────────
@@ -4993,6 +5231,7 @@ async fn route_point_queue_result_starts_direct_ivr_fallback_once() {
 #[tokio::test]
 async fn route_point_app_and_fallback_start_failure_terminates() {
     use crate::proxy::routing::RouteAction;
+    use crate::proxy::proxy_call::ivr_exec_hook::{IvrExecResult, IvrExecState};
 
     let mut config = route_point_config(RouteAction {
         action: Some("application".to_string()),
@@ -5003,11 +5242,51 @@ async fn route_point_app_and_fallback_start_failure_terminates() {
         default: Some("safe-ivr".to_string()),
         rules: vec![],
     });
-    let mut session = build_session_with_config(route_point_dialplan(), config).await;
+    let (server, _) = create_test_server_with_session_hooks(
+        config,
+        vec![Arc::new(
+            crate::proxy::proxy_call::ivr_exec_hook::IvrExecHook,
+        )],
+    )
+    .await;
+    let mut session = build_session_on_server(server, route_point_dialplan()).await;
     let runtime = Arc::new(RoutePointRuntime::new(&["step_ivr", "ivr"]));
     session.app_runtime = runtime.clone();
+    {
+        let mut extensions = session.extensions.write();
+        extensions.insert(IvrExecState {
+            app_execution_id: Some(1),
+            request_id: "request-route-failure".to_string(),
+            held_leg: None,
+            initiator_leg: LegId::from("callee"),
+            webhook_url: None,
+            app_name: "ivr".to_string(),
+            metadata: serde_json::Value::Null,
+        });
+        extensions.insert(IvrExecResult {
+            app_execution_id: Some(1),
+            status: "transferred".to_string(),
+            reason: "transfer_to_ivr".to_string(),
+            routing_target: Some("toivr:39230".to_string()),
+            collected: Default::default(),
+            trace: Vec::new(),
+            duration_ms: 0,
+            completion_time: "2026-09-29T00:00:00Z".to_string(),
+        });
+    }
 
-    let result = execute_route_point_transfer(&mut session).await;
+    assert!(session.update_leg_state(&LegId::from("caller"), LegState::Connected));
+    let (_callee_tx, mut callee_rx) = mpsc::unbounded_channel();
+    let result = session
+        .execute_command(
+            CallCommand::Transfer {
+                leg_id: LegId::from("caller"),
+                target: "toivr:39230?_ivr_resume=1".to_string(),
+                attended: false,
+            },
+            Some(&mut callee_rx),
+        )
+        .await;
 
     assert!(!result.success);
     assert_eq!(
@@ -5019,6 +5298,7 @@ async fn route_point_app_and_fallback_start_failure_terminates() {
         vec!["step_ivr".to_string(), "ivr".to_string()]
     );
     assert_route_point_handoff_terminated(&session);
+    assert!(session.extensions.read().get::<IvrExecState>().is_none());
 }
 
 /// With no `[proxy.ivr_fallback]` configured the original start error must
@@ -5145,6 +5425,90 @@ async fn toivr_transfer_injects_origin_into_route_variables() {
     assert_eq!(
         vars[0].get("source_node").map(String::as_str),
         Some("menu-1")
+    );
+}
+
+#[tokio::test]
+async fn ivr_exec_toivr_handoff_rebinds_the_successor_generation() {
+    use crate::proxy::proxy_call::ivr_exec_hook::{IvrExecResult, IvrExecState};
+    use crate::proxy::routing::RouteAction;
+
+    let config = route_point_config(RouteAction {
+        action: Some("application".to_string()),
+        app: Some("ivr".to_string()),
+        ..Default::default()
+    });
+    let mut session = build_session_with_config(route_point_dialplan(), config).await;
+    let mut runtime = RoutePointRuntime::new(&[]).with_current_app("ivr");
+    runtime.invocation = Some(AppInvocationContext {
+        app_execution_id: 2,
+        callee: "39230".to_string(),
+        sip_headers: HashMap::new(),
+        variables: HashMap::new(),
+    });
+    session.app_runtime = Arc::new(runtime);
+    {
+        let mut extensions = session.extensions.write();
+        extensions.insert(IvrExecState {
+            app_execution_id: Some(1),
+            request_id: "request-resume".to_string(),
+            held_leg: None,
+            initiator_leg: LegId::from("callee"),
+            webhook_url: None,
+            app_name: "ivr".to_string(),
+            metadata: serde_json::Value::Null,
+        });
+        extensions.insert(IvrExecResult {
+            app_execution_id: Some(1),
+            status: "transferred".to_string(),
+            reason: "transfer_to_ivr".to_string(),
+            routing_target: Some("toivr:39230".to_string()),
+            collected: [("dtmf_input".to_string(), "7".to_string())]
+                .into_iter()
+                .collect(),
+            trace: Vec::new(),
+            duration_ms: 0,
+            completion_time: "2026-09-29T00:00:00Z".to_string(),
+        });
+    }
+    assert!(session.update_leg_state(&LegId::from("caller"), LegState::Connected));
+    let (_callee_tx, mut callee_rx) = mpsc::unbounded_channel();
+
+    let result = session
+        .execute_command(
+            CallCommand::Transfer {
+                leg_id: LegId::from("caller"),
+                target: "toivr:39230?_ivr_resume=1".to_string(),
+                attended: false,
+            },
+            Some(&mut callee_rx),
+        )
+        .await;
+
+    assert!(result.success, "resumable toivr transfer must succeed");
+    {
+        let extensions = session.extensions.read();
+        assert_eq!(
+            extensions
+                .get::<IvrExecState>()
+                .expect("logical ivr.exec invocation must survive")
+                .app_execution_id,
+            Some(2),
+            "the successor app must own the logical ivr.exec invocation"
+        );
+    }
+    let previous_result =
+        crate::proxy::proxy_call::ivr_exec_hook::combined_ivr_exec_result(
+            &session.extensions,
+            Some(1),
+        );
+    assert_eq!(
+        previous_result
+            .as_ref()
+            .and_then(|result| result.collected.get("dtmf_input"))
+            .map(String::as_str),
+        Some("7"),
+        "handoff must preserve values collected by the previous segment"
     );
 }
 
