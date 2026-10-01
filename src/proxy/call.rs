@@ -1084,9 +1084,10 @@ impl CallModule {
         // target(s) before moving `targets` into the dialplan. Internal
         // destinations (same realm / registered / home proxy) always
         // passthrough custom headers; external destinations use the destination
-        // trunk's `header_passthrough` config, else none. App/queue flows
-        // resolve their targets later inside the session, so those legs rely on
-        // the per-target fallback in `build_target_invite_option`.
+        // trunk's `header_passthrough` config (a trunk without one forwards no
+        // custom headers). App/queue flows resolve their targets later inside
+        // the session, so those legs rely on the per-target fallback in
+        // `build_target_invite_option`.
         let header_passthrough = {
             let locs: Vec<&Location> = match &targets {
                 DialStrategy::Sequential(l) | DialStrategy::Parallel(l) => l.iter().collect(),
@@ -1098,9 +1099,19 @@ impl CallModule {
             if internal {
                 Some(crate::proxy::routing::HeaderPassthrough::all())
             } else if let Some(target) = locs.first().copied() {
+                let trunk_dest = dialplan_hints.as_ref().and_then(|h| {
+                    h.extensions
+                        .get::<crate::call::OutboundTrunkContext>()
+                        .and_then(|ctx| ctx.dest.clone())
+                });
                 self.inner
                     .server
-                    .header_passthrough_for(target, false, &original.uri)
+                    .header_passthrough_for(
+                        target,
+                        false,
+                        &original.uri,
+                        trunk_dest.as_deref(),
+                    )
                     .await
             } else {
                 None

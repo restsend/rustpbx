@@ -89,6 +89,16 @@ pub struct IvrProviderConfig {
     /// Action when provider HTTP retries are exhausted and session IVR fallback is off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_action: Option<ActionNode>,
+    /// Wire format for the resumed-flow first event (`ProviderEvent::Resume`).
+    ///
+    /// - `"resume"` (default): POST `{"type":"resume", …}`; an endpoint that
+    ///   rejects the event is auto-downgraded to `session_start` for the
+    ///   process lifetime (per `/step` URL).
+    /// - `"session_start"`: never emit `resume` on the wire (legacy provider
+    ///   escape hatch). The `ivr_status=resuming` and
+    ///   `ivr_resume_from_step_id` variables still mark the continuation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_event_mode: Option<String>,
 }
 
 impl IvrProviderConfig {
@@ -974,6 +984,7 @@ mod tests {
                 retry_delay_ms: default_provider_delay(),
                 timeout_secs: default_provider_timeout(),
                 fallback_action: None,
+                resume_event_mode: None,
             };
             assert_eq!(
                 provider.validate_address().is_ok(),

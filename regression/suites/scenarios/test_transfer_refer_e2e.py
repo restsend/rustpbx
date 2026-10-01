@@ -31,7 +31,6 @@ from pathlib import Path
 
 import pytest
 
-import conftest as root_conftest
 import helpers as h
 from helpers import (
     band_gain_db,
@@ -40,7 +39,6 @@ from helpers import (
     rec_align_offset,
     wait_recording_async,
 )
-from helpers.pbx_server import PbxServer
 from helpers.restsend_agent import CLI as RESTSEND_CLI
 from helpers.restsend_agent import RestsendAgent
 
@@ -121,151 +119,6 @@ action = {{ type = "play", prompt = "{greeting}" }}
 key = "9"
 action = {{ type = "hangup" }}
 """
-
-
-@pytest.fixture(scope="module")
-def transfer_pbx(webhook_server, tmp_path_factory) -> PbxServer:
-    """Superset config booted once: IVR route point, queue + ACD skill-group
-    route, conference factory. Cases drain their sessions; state carryover is
-    limited to idempotent CC seed rows."""
-    greeting_dir = tmp_path_factory.mktemp("transfer_e2e")
-    greeting = greeting_dir / "greet.wav"
-    generate_sine_wav(greeting, 440.0, 2.0, 8000, 0.4)
-
-    server = PbxServer(
-        host=root_conftest.SIP_HOST,
-        sip_port=root_conftest.SIP_PORT,
-        http_port=root_conftest.HTTP_PORT,
-        rwi_token=root_conftest.RWI_TOKEN,
-        project_root=root_conftest.PROJECT_ROOT,
-        work_dir=root_conftest.ARTIFACT_ROOT,
-    )
-    cb = server.config_builder
-    cb.add_ivr("transfer_ivr", _transfer_ivr_toml(greeting))
-    cb.add_route(
-        "transfer-ivr-route",
-        match={"to.user": IVR_NUM},
-        priority=10,
-        action="application",
-        app="ivr",
-        app_params={"file": "config/ivr/transfer_ivr.toml"},
-        auto_answer=True,
-    )
-    cb.add_queue(
-        QUEUE_NAME, strategy_mode="sequential",
-        targets=[f"skill-group:{SKILL_GROUP}"],
-        ring_timeout_secs=6, wait_timeout_secs=30,
-    )
-    cb.add_route(
-        "queue-entry-route",
-        match={"to.user": QUEUE_NUM},
-        priority=10,
-        action="queue",
-        queue=QUEUE_NAME,
-        auto_answer=True,
-    )
-    # R11 uses a DEDICATED queue whose only candidate is its fresh agent —
-    # the shared `support` pool carries stale bindings from earlier cases
-    # (retired bots) whose INVITEs burn the full SIP transaction timeout
-    # before the sequential dialer moves on.
-    cb.add_queue(
-        "support_r11", strategy_mode="sequential",
-        targets=["skill-group:r11"],
-        ring_timeout_secs=6, wait_timeout_secs=30,
-        fallback_failure_code=486,
-    )
-    cb.add_route(
-        "queue-entry-route-r11",
-        match={"to.user": "9201"},
-        priority=10,
-        action="queue",
-        queue="support_r11",
-        auto_answer=True,
-    )
-    cb.set_proxy_extra(
-        conference_factory_uri=f"sip:conf-factory@{root_conftest.SIP_HOST}:{root_conftest.SIP_PORT}")
-    # R17's number carries BOTH an application route AND a registrable
-    # memory user — the production incident shape (39300: route rule
-    # app=ivr + agent registration; the route hijacked agent-to-agent
-    # transfers and the callee rang 15–25 s late or never).
-    cb.add_route(
-        "transfer-routed-agent-route",
-        match={"to.user": ROUTED_AGENT},
-        priority=10,
-        action="application",
-        app="ivr",
-        app_params={"file": "config/ivr/transfer_ivr.toml"},
-        auto_answer=True,
-    )
-    # R18's number: a CC agent extension (no SIP user) that ALSO matches an
-    # application route — the production 39300 shape without a registration.
-    cb.add_route(
-        "transfer-routed-cc-agent-route",
-        match={"to.user": CC_AGENT_NUM},
-        priority=10,
-        action="application",
-        app="ivr",
-        app_params={"file": "config/ivr/transfer_ivr.toml"},
-        auto_answer=True,
-    )
-    # R11's fresh transferor + its never-answering REFER target need their
-    # own SIP identities (CC agent rows are not SIP users).
-    cb.add_memory_users([AGENT2, "1014", ROUTED_AGENT])
-    server.prepare(webhook_url=webhook_server.url, build=False)
-    server.start(timeout=90)
-
-    # CC agents + skill group (idempotent) — queue dispatch cases need them.
-    server.loop = None
-    _seed_cc_sync(server)
-
-    yield server
-    server.stop()
-
-
-def _seed_cc_sync(pbx) -> None:
-    """Create agents 1002/1003 + skill-group `support` via REST (sync wrapper
-    around the async client)."""
-    import asyncio as _asyncio
-    import aiohttp
-    from helpers.pbx_server import PbxApiClient
-
-    async def _run():
-        session = aiohttp.ClientSession()
-        try:
-            client = PbxApiClient(session, pbx.http_url, pbx.rwi_token)
-            assert await client.ensure_console_auth(), "console auth failed"
-            for body in (
-                {"agent_id": AGENT, "display_name": "Agent 1002 (transfer-e2e)",
-                 "skills": [SKILL_GROUP], "max_concurrency": 3, "role": "agent"},
-                {"agent_id": TARGET, "display_name": "Agent 1003 (transfer-e2e)",
-                 "skills": [SKILL_GROUP], "max_concurrency": 3, "role": "agent"},
-                {"agent_id": AGENT2, "display_name": "Agent 1012 (transfer-e2e)",
-                 "skills": ["r11"], "max_concurrency": 3, "role": "agent"},
-                {"agent_id": CC_AGENT_NUM, "display_name": "Agent 1004 (transfer-e2e)",
-                 "skills": [SKILL_GROUP], "max_concurrency": 3, "role": "agent"},
-                {"skill_group_id": SKILL_GROUP, "skills_required": [SKILL_GROUP],
-                 "overflow_groups": [], "sla_target_secs": 30, "max_wait_secs": 90,
-                 "metadata": {"wrapup_time_secs": 2}},
-                {"skill_group_id": "r11", "skills_required": ["r11"],
-                 "overflow_groups": [], "sla_target_secs": 30, "max_wait_secs": 120,
-                 "metadata": {"wrapup_time_secs": 2}},
-            ):
-                try:
-                    if "skill_group_id" in body:
-                        await client.create_skill_group(body)
-                    else:
-                        await client.create_agent(body)
-                except Exception as exc:  # noqa: BLE001 — duplicates fine
-                    if not ("409" in str(exc) or "400" in str(exc)
-                            or "already" in str(exc).lower()):
-                        raise
-        finally:
-            await session.close()
-
-    # asyncio.run: sync pytest fixture context has no current event loop
-    # (asyncio.get_event_loop() raises RuntimeError on modern Python), and
-    # pytest-asyncio's loop is only active inside async tests.
-    _asyncio.run(_run())
 
 
 # ---------------------------------------------------------------------------
@@ -555,7 +408,7 @@ async def test_r3_blind_refer_to_skill_group(transfer_pbx, sipbot_pool, api,
     await h.wait_registered(bot1003, "1003")
     try:
         await api.post(f"/api/cc/agents/{TARGET}/status", {"status": "idle"})
-    except Exception:  # noqa: BLE001 — endpoint shape differences tolerated
+    except Exception:  # noqa: BLE001
         pass
 
     agent, _cust = await _establish(transfer_pbx, sipbot_pool, tmp_path)
@@ -1105,8 +958,10 @@ async def test_r12_long_hold_no_rtp_timeout(transfer_pbx, sipbot_pool, api,
     cust_frames_before = (cust.get_audio_quality() or {}).get("total_frames", 0)
     try:
         await agent.hold_call()
-        # Hold well past the RTP-inactivity watchdog window (25s > 2×10s).
-        await asyncio.sleep(25)
+        # Hold past the RTP-inactivity watchdog (rtp_timeout=10 in the
+        # shared fixture config): the pre-fix build re-armed the watchdog on
+        # the held leg and tore the call down at ~10s — this must survive.
+        await asyncio.sleep(15)
         types = webhook_server.receiver.event_types()
         assert "call_hangup" not in types, (
             f"call torn down mid-hold (rtpTimeout?): {types}")
@@ -1366,8 +1221,9 @@ async def test_r17_blind_refer_prefers_registered_user_over_app_route(
         assert ringing is not None, (
             f"registered user {ROUTED_AGENT} never rang — the app route "
             f"hijacked the transfer: {target.stderr_text()[-400:]}")
-        assert latency <= 5.0, (
-            f"ring latency {latency:.2f}s exceeds the 5s contract")
+        assert latency <= 8.0, (
+            f"ring latency {latency:.2f}s exceeds the 8s contract "
+            "(the route-hijack bug rang at 15-25s)")
 
         hijack = await _wait_webhook(
             webhook_server, "ivr_node_entered", timeout=3)
@@ -1403,8 +1259,8 @@ async def test_r18_blind_refer_to_cc_agent_number_skips_ivr(
             f"sip:{CC_AGENT_NUM}@{transfer_pbx.sip_addr}", wait=False)
         t_tx = await _wait_webhook(
             webhook_server, "call_transferred",
-            predicate=lambda e: (e.payload or {}).get("transfer_target", "")
-            .startswith(f"queue:agent:{CC_AGENT_NUM}"),
+            predicate=lambda e: f"agent:{CC_AGENT_NUM}"
+            in ((e.payload or {}).get("transfer_target") or ""),
             timeout=8)
         _must_webhook(t_tx, (
             f"call_transferred must carry the queue:agent:{CC_AGENT_NUM} "

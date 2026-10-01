@@ -132,6 +132,21 @@ pub struct ProviderContext {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProviderEvent {
     SessionStart,
+    /// Continuation of a suspended flow (voip_bridge / queue return with no
+    /// buffered digits). This is NOT a fresh session: the flow already emitted
+    /// `session_start` at its true first entry, so the provider must resume
+    /// from its stored per-session position instead of re-entering the flow
+    /// (re-entering is the "caller hears the menu again" regression).
+    ///
+    /// `resume_from_step_id` is the step the flow was suspended on when a
+    /// voip_bridge owned the media (`bridge_step_ctx`), so a stateless
+    /// provider can still route to the successor. It is `None` for returns
+    /// that carry no bridge context (queue return, JumpIvr) — consumers must
+    /// not rely on its presence.
+    Resume {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        resume_from_step_id: Option<String>,
+    },
     AudioComplete {
         interrupted: bool,
     },
@@ -285,6 +300,61 @@ impl From<&IvrProviderConfig> for RetryConfig {
 
 // ── StepProvider (HTTP) ──────────────────────────────────────────────────────
 
+/// Wire format used for the executor's `Resume` first event (voip_bridge /
+/// queue return with no buffered digits).
+///
+/// - `Resume` (default): POST `{"type":"resume","resume_from_step_id":…}`.
+///   If the remote rejects it (legacy `/step` endpoint), the endpoint is
+///   automatically downgraded to `SessionStart` for the process lifetime and
+///   the request is re-sent — see `next_action`.
+/// - `SessionStart`: never emit `resume` on the wire; resumed instances POST
+///   the legacy `session_start` event (the trace trigger still says
+///   `resume`). Escape hatch for providers that hard-fail on unknown event
+///   types; the `ivr_status=resuming` variable + `ivr_resume_from_step_id`
+///   variable still disambiguate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeEventMode {
+    Resume,
+    SessionStart,
+}
+
+impl ResumeEventMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "resume" => Some(Self::Resume),
+            "session_start" | "sessionstart" => Some(Self::SessionStart),
+            _ => None,
+        }
+    }
+}
+
+/// Endpoints that rejected the `resume` event (auto-downgrade fuse). Keyed
+/// by `/step` URL for the process lifetime: one legacy endpoint must not
+/// cost every subsequent resumed call a failed round-trip, while distinct
+/// endpoints (multi-tenant) keep their own verdict.
+static RESUME_DOWNGRADED_ENDPOINTS: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+    std::sync::Mutex::new(None);
+
+fn resume_downgraded_for(url: &str) -> bool {
+    match RESUME_DOWNGRADED_ENDPOINTS.lock() {
+        Ok(guard) => guard.as_ref().is_some_and(|set| set.contains(url)),
+        Err(_) => false,
+    }
+}
+
+fn mark_resume_downgraded(url: &str) {
+    if let Ok(mut guard) = RESUME_DOWNGRADED_ENDPOINTS.lock() {
+        guard.get_or_insert_with(Default::default).insert(url.to_string());
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_resume_downgrades_for_test() {
+    if let Ok(mut guard) = RESUME_DOWNGRADED_ENDPOINTS.lock() {
+        *guard = None;
+    }
+}
+
 pub struct StepProvider {
     url: String,
     headers: HashMap<String, String>,
@@ -293,6 +363,8 @@ pub struct StepProvider {
     /// When true, exhausted `/step` retries return `Err` instead of
     /// `retry.fallback_action` so the executor can jump to session IVR fallback.
     prefer_ivr_fallback: bool,
+    /// Wire format for the executor's `Resume` event (see [`ResumeEventMode`]).
+    resume_event_mode: ResumeEventMode,
 }
 
 impl StepProvider {
@@ -303,6 +375,7 @@ impl StepProvider {
             http_client,
             retry: RetryConfig::default(),
             prefer_ivr_fallback: false,
+            resume_event_mode: ResumeEventMode::Resume,
         }
     }
 
@@ -318,6 +391,11 @@ impl StepProvider {
 
     pub fn with_prefer_ivr_fallback(mut self, prefer: bool) -> Self {
         self.prefer_ivr_fallback = prefer;
+        self
+    }
+
+    pub fn with_resume_event_mode(mut self, mode: ResumeEventMode) -> Self {
+        self.resume_event_mode = mode;
         self
     }
 
@@ -351,10 +429,21 @@ impl StepProvider {
         ctx: &ProviderContext,
         label: &str,
     ) -> anyhow::Result<ActionNode> {
+        self.post_action_node_with_retry(url, ctx, label, &self.retry)
+            .await
+    }
+
+    async fn post_action_node_with_retry(
+        &self,
+        url: &str,
+        ctx: &ProviderContext,
+        label: &str,
+        retry: &RetryConfig,
+    ) -> anyhow::Result<ActionNode> {
         let mut last_err = anyhow::anyhow!("no retry attempted");
         // Serialize once — the same bytes go into the debug log and the body.
         let body_str = serde_json::to_string(ctx).unwrap_or_default();
-        for attempt in 0..self.retry.max_retries {
+        for attempt in 0..retry.max_retries {
             let start = std::time::Instant::now();
             debug!(
                 url = %url,
@@ -371,7 +460,7 @@ impl StepProvider {
             match crate::http_util::execute_request(
                 req,
                 &self.headers,
-                Some(Duration::from_millis(self.retry.timeout_ms)),
+                Some(Duration::from_millis(retry.timeout_ms)),
             )
             .await
             {
@@ -379,7 +468,7 @@ impl StepProvider {
                     let status = resp.status();
                     let elapsed = start.elapsed();
                     let body = crate::http_util::read_body_with_timeout(
-                        Duration::from_millis(self.retry.timeout_ms),
+                        Duration::from_millis(retry.timeout_ms),
                         resp.text(),
                     )
                     .await
@@ -405,8 +494,8 @@ impl StepProvider {
                     );
                 }
             }
-            if attempt < self.retry.max_retries - 1 {
-                tokio::time::sleep(Duration::from_millis(self.retry.retry_delay_ms)).await;
+            if attempt < retry.max_retries - 1 {
+                tokio::time::sleep(Duration::from_millis(retry.retry_delay_ms)).await;
             }
         }
         Err(last_err)
@@ -421,10 +510,69 @@ impl ActionProvider for StepProvider {
 
     async fn next_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode> {
         let url = self.endpoint_url(None);
-        match self
-            .post_action_node(&url, &ctx, "StepProvider next_action")
-            .await
-        {
+
+        // ── Resume wire-format adaptation + auto-downgrade fuse ────────────
+        // The executor emits `ProviderEvent::Resume` for suspended-flow
+        // continuations. Per config / observed endpoint capability it is
+        // either sent as `{"type":"resume"}` or adapted to the legacy
+        // `session_start` event. The executor renders the ivr_step_trace
+        // trigger from its own event, so the trace says `resume` either way.
+        let mut ctx = ctx;
+        let mut probing_resume = false;
+        if matches!(ctx.event, Some(ProviderEvent::Resume { .. })) {
+            if self.resume_event_mode == ResumeEventMode::SessionStart
+                || resume_downgraded_for(&url)
+            {
+                ctx.event = Some(ProviderEvent::SessionStart);
+            } else {
+                probing_resume = true;
+            }
+        }
+
+        let result = if probing_resume {
+            // Probe with a SINGLE attempt: a legacy endpoint must not cost
+            // the caller the full retry budget of dead air before the fuse
+            // blows.
+            let probe_retry = RetryConfig {
+                max_retries: 1,
+                ..self.retry.clone()
+            };
+            match self
+                .post_action_node_with_retry(
+                    &url,
+                    &ctx,
+                    "StepProvider next_action (resume probe)",
+                    &probe_retry,
+                )
+                .await
+            {
+                Ok(node) => return Ok(node),
+                Err(probe_err) => {
+                    // Fuse blown for this endpoint (process lifetime).
+                    mark_resume_downgraded(&url);
+                    error!(
+                        url = %url,
+                        error = %probe_err,
+                        event = "ivr_resume_downgraded",
+                        "endpoint rejected the resume event; re-sending as session_start and downgrading this endpoint"
+                    );
+                    let mut retry_ctx = ctx.clone();
+                    retry_ctx.event = Some(ProviderEvent::SessionStart);
+                    self.post_action_node_with_retry(
+                        &url,
+                        &retry_ctx,
+                        "StepProvider next_action (resume downgraded)",
+                        &self.retry,
+                    )
+                    .await
+                }
+            }
+        } else {
+            self.post_action_node_with_retry(&url, &ctx, "StepProvider next_action", &self.retry)
+                .await
+        };
+
+        match result {
             Ok(node) => Ok(node),
             Err(last_err) => {
                 // Prefer session-level IVR fallback when configured.

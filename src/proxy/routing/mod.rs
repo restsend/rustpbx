@@ -186,6 +186,10 @@ pub struct TrunkConfig {
 /// Rule precedence:
 /// - `Whitelist` — forward only the listed headers.
 /// - `Blacklist` — forward all custom headers except the listed ones.
+/// - `XOnly` — forward only `X-`-prefixed headers (the desk dial-out
+///   metadata contract: `X-aid`, `X-callright`, `X-taskid`, …). Opt-in per
+///   trunk: `header_passthrough = { mode = "x_only" }` on the CCF/carrier
+///   facing trunk.
 /// - `All` (default) — forward all custom headers; if `whitelist` is non-empty
 ///   it behaves like a whitelist, otherwise a non-empty `blacklist` is honored.
 ///
@@ -207,12 +211,23 @@ pub enum HeaderPassthroughMode {
     All,
     Whitelist,
     Blacklist,
+    XOnly,
 }
 
 impl HeaderPassthrough {
     /// Passthrough every custom header — used for internal destinations.
     pub fn all() -> Self {
         Self::default()
+    }
+
+    /// Forward only `X-`-prefixed custom headers — opt-in per trunk for
+    /// dial-out-metadata destinations (e.g. the CCF-facing trunk).
+    pub fn x_custom() -> Self {
+        Self {
+            mode: HeaderPassthroughMode::XOnly,
+            whitelist: Vec::new(),
+            blacklist: Vec::new(),
+        }
     }
 
     /// Returns `true` if a header with the given (case-insensitive) name should
@@ -224,6 +239,9 @@ impl HeaderPassthrough {
             }
             HeaderPassthroughMode::Blacklist => {
                 !self.blacklist.iter().any(|b| b.eq_ignore_ascii_case(name))
+            }
+            HeaderPassthroughMode::XOnly => {
+                name.get(..2).is_some_and(|p| p.eq_ignore_ascii_case("x-"))
             }
             HeaderPassthroughMode::All => {
                 if !self.whitelist.is_empty() {

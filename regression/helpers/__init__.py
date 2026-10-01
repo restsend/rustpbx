@@ -37,6 +37,7 @@ from .audio_verifier import (  # noqa: F401
     goertzel_magnitude_normalized,
     band_peak_db,
     band_gain_db,
+    tone_returns,
     rec_align_offset,
     window_rms_db,
     goertzel_timeline,

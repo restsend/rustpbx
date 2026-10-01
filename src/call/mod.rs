@@ -1860,6 +1860,36 @@ mod tests {
         assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("x-token")));
     }
 
+    /// The per-trunk `x_only` mode (CCF-facing dial-out metadata trunks):
+    /// `X-` headers ride, other custom headers do not. Case-insensitive on
+    /// the `x-` prefix.
+    #[test]
+    fn select_passthrough_headers_x_only_rule() {
+        use crate::proxy::routing::HeaderPassthrough;
+        let original = vec![
+            custom_header("X-Aid", "agent-1"),
+            custom_header("x-callright", "domestic"),
+            custom_header("X-taskid", "t-42"),
+            custom_header("P-Asserted-Identity", "<sip:02188886666@pbx>"),
+            custom_header("XToken", "no-dash-stays"),
+        ];
+        let rule = HeaderPassthrough::x_custom();
+
+        assert!(rule.allows("X-Aid"));
+        assert!(rule.allows("x-callright"));
+        assert!(!rule.allows("P-Asserted-Identity"));
+        assert!(!rule.allows("XToken"), "bare X without dash is not x- prefixed");
+
+        let sel = Dialplan::select_passthrough_headers(&original, &[], &rule);
+        let names: Vec<String> = sel.iter().map(|h| h.name().to_string()).collect();
+        assert_eq!(names.len(), 3, "exactly the three x- headers ride: {names:?}");
+        assert!(names.contains(&"X-Aid".to_string()));
+        assert!(names.contains(&"x-callright".to_string()));
+        assert!(names.contains(&"X-taskid".to_string()));
+        assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("p-asserted-identity")));
+        assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("xtoken")));
+    }
+
     /// Mirrors the refer -> PBX -> WebRTC agent scenario: the incoming refer
     /// INVITE carries the X-Smart* / X-Referred-* headers, and a registered
     /// (internal) agent destination resolves to the "all" passthrough rule.

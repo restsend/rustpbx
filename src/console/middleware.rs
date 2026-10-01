@@ -173,7 +173,17 @@ impl IntoResponse for RenderTemplate<'_> {
     fn into_response(self) -> Response {
         match self.tmpl_env.get_template(self.template_name) {
             Ok(tmpl) => match tmpl.render(self.context) {
-                Ok(body) => Html(body).into_response(),
+                Ok(body) => {
+                    let mut resp = Html(body).into_response();
+                    // Console pages are authenticated, per-session HTML.
+                    // Never let browsers heuristically cache them, or a stale
+                    // page (old inline JS/handlers) survives template updates.
+                    resp.headers_mut().insert(
+                        axum::http::header::CACHE_CONTROL,
+                        HeaderValue::from_static("no-store, must-revalidate"),
+                    );
+                    resp
+                }
                 Err(err) => {
                     warn!(
                         "failed to render template {}: {:?}",
