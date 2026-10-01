@@ -116,6 +116,8 @@ pub struct IvrApp {
     /// Session extensions clone stashed in `on_enter`, used in `on_exit` to
     /// write an `IvrExecResult` when the IVR was started via `ivr.exec`.
     session_extensions: Option<crate::proxy::proxy_call::session_hooks::SessionExtensions>,
+    /// Runtime generation paired with `session_extensions` for result ownership.
+    app_execution_id: Option<u64>,
     /// Set when a terminal action already emitted `IvrFlowCompleted`, so
     /// `on_exit` does not double-report an aborted flow.
     flow_completed: bool,
@@ -148,6 +150,7 @@ impl IvrApp {
             rwi_gateway: None,
             session_id: None,
             session_extensions: None,
+            app_execution_id: None,
             flow_completed: false,
             pending_post_delay_ms: 0,
         }
@@ -202,8 +205,11 @@ impl IvrApp {
         // If this IVR was started via ivr.exec, write result to extensions.
         super::exec::write_ivr_exec_result(
             &ctx.session_extensions,
+            ctx.invocation
+                .as_ref()
+                .map_or(0, |value| value.app_execution_id),
             super::exec::build_ivr_exec_result(
-                status,
+                super::exec::ivr_exec_status(status),
                 reason,
                 target.map(|s| s.to_string()),
                 self.collected_variables.clone(),
@@ -1321,6 +1327,7 @@ impl CallApp for IvrApp {
         self.rwi_gateway = ctx.rwi_gateway.clone();
         self.session_id = Some(ctx.call_info.session_id.clone());
         self.session_extensions = Some(ctx.session_extensions.clone());
+        self.app_execution_id = ctx.invocation.as_ref().map(|value| value.app_execution_id);
         ctrl.answer().await?;
 
         // Check business hours
@@ -1740,8 +1747,9 @@ impl CallApp for IvrApp {
             if let Some(ref ext) = self.session_extensions {
                 super::exec::write_ivr_exec_result(
                     ext,
+                    self.app_execution_id.unwrap_or(0),
                     super::exec::build_ivr_exec_result(
-                        end_reason_label,
+                        super::exec::ivr_exec_status(end_reason_label),
                         end_reason_label,
                         None,
                         self.collected_variables.clone(),
@@ -1882,6 +1890,76 @@ mod tests {
             Some("remote_hangup"),
             "remote hangup must publish remote_hangup end reason"
         );
+    }
+
+    #[tokio::test]
+    async fn ivr_exec_exit_status_uses_the_stable_result_contract() {
+        use crate::call::domain::LegId;
+        use crate::proxy::proxy_call::ivr_exec_hook::{IvrExecResult, IvrExecState};
+
+        for (reason, expected_status, expected_reason) in [
+            (ExitReason::Normal, "completed", "normal"),
+            (ExitReason::Hangup, "failed", "hangup"),
+            (ExitReason::Error("provider failed".to_string()), "failed", "error"),
+        ] {
+            let extensions =
+                crate::proxy::proxy_call::session_hooks::SessionExtensions::new();
+            extensions.write().insert(IvrExecState {
+                app_execution_id: Some(3),
+                request_id: "request-tree".to_string(),
+                held_leg: None,
+                initiator_leg: LegId::from("callee"),
+                webhook_url: None,
+                app_name: "ivr".to_string(),
+                metadata: serde_json::Value::Null,
+            });
+            let mut app = IvrApp::new(test_definition());
+            app.session_id = Some("test-session".to_string());
+            app.session_extensions = Some(extensions.clone());
+            app.app_execution_id = Some(3);
+
+            app.on_exit(reason).await.expect("tree IVR exit must succeed");
+
+            let guard = extensions.read();
+            let result = guard
+                .get::<IvrExecResult>()
+                .expect("tree IVR must publish its ivr.exec result");
+            assert_eq!(result.status, expected_status);
+            assert_eq!(result.reason, expected_reason);
+        }
+    }
+
+    #[tokio::test]
+    async fn ivr_exec_terminal_hangup_action_reports_failed() {
+        use crate::call::domain::LegId;
+        use crate::proxy::proxy_call::ivr_exec_hook::{IvrExecResult, IvrExecState};
+
+        let ctx = test_context();
+        ctx.session_extensions.write().insert(IvrExecState {
+            app_execution_id: Some(4),
+            request_id: "request-hangup".to_string(),
+            held_leg: None,
+            initiator_leg: LegId::from("callee"),
+            webhook_url: None,
+            app_name: "ivr".to_string(),
+            metadata: serde_json::Value::Null,
+        });
+        let mut ctx = ctx;
+        ctx.invocation = Some(crate::call::app::AppInvocationContext {
+            app_execution_id: 4,
+            ..Default::default()
+        });
+        let mut app = IvrApp::new(test_definition());
+
+        app.ivr_flow_completed(&ctx, "hangup", "caller_hangup", None)
+            .await;
+
+        let guard = ctx.session_extensions.read();
+        let result = guard
+            .get::<IvrExecResult>()
+            .expect("terminal hangup must publish an ivr.exec result");
+        assert_eq!(result.status, "failed");
+        assert_eq!(result.reason, "caller_hangup");
     }
 
     #[tokio::test]

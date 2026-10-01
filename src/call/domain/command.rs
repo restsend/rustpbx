@@ -425,6 +425,18 @@ pub enum CallCommand {
         auto_answer: bool,
     },
 
+    /// Start an application selected by routing with invocation-local metadata.
+    StartAppWithRouteContext {
+        /// Application name
+        app_name: String,
+        /// Application parameters
+        params: Option<serde_json::Value>,
+        /// Whether to auto-answer the call
+        auto_answer: bool,
+        /// Matched route identity, headers, and variables
+        route_context: crate::call::app::AppRouteContext,
+    },
+
     /// Stop the current application
     StopApp {
         /// Reason for stopping
@@ -583,7 +595,10 @@ pub enum CallCommand {
 
     /// Application exited (async notification sent by app runtime when the
     /// running CallApp event loop finishes, for any reason).
-    AppExited,
+    AppExited {
+        /// Immutable runtime generation of the application that exited.
+        app_execution_id: u64,
+    },
 
     /// Start the post-disconnect return app (if any) after agent/B-leg hangs
     /// up.  The handler reads `meta.transfer_return_app` and dispatches via

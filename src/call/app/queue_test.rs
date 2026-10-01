@@ -342,6 +342,11 @@ mod tests {
         stack.assert_cmd(2000, "Bridge winner", |c| {
             matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
         }).await;
+        stack
+            .assert_cmd(2000, "Resume caller", |c| {
+                matches!(c, CallCommand::Unhold { leg_id } if leg_id.as_str() == "caller")
+            })
+            .await;
 
         // Should connect (app exits cleanly)
         stack
@@ -394,6 +399,11 @@ mod tests {
         stack.assert_cmd(2000, "Bridge winner", |c| {
             matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
         }).await;
+        stack
+            .assert_cmd(2000, "Resume caller", |c| {
+                matches!(c, CallCommand::Unhold { leg_id } if leg_id.as_str() == "caller")
+            })
+            .await;
 
         // Should connect (app exits cleanly)
         stack
@@ -612,6 +622,11 @@ mod tests {
         stack.assert_cmd(2000, "Bridge winner", |c| {
             matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
         }).await;
+        stack
+            .assert_cmd(2000, "Resume caller", |c| {
+                matches!(c, CallCommand::Unhold { leg_id } if leg_id.as_str() == "caller")
+            })
+            .await;
 
         // The session bridge replaces hold music; the app must not stop it afterward.
         assert!(stack.next_cmd(2000).await.is_none(), "connect must not queue playback cleanup");
@@ -795,6 +810,11 @@ mod tests {
         stack.assert_cmd(2000, "Bridge winner", |c| {
             matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
         }).await;
+        stack
+            .assert_cmd(2000, "Resume caller", |c| {
+                matches!(c, CallCommand::Unhold { leg_id } if leg_id.as_str() == "caller")
+            })
+            .await;
         let service_cmd = stack.next_cmd(2000).await.expect("service prompt Play");
         assert!(
             play_path(&service_cmd).ends_with("queue-service-zh.wav"),
@@ -863,6 +883,11 @@ mod tests {
         stack.assert_cmd(2000, "Bridge winner", |c| {
             matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
         }).await;
+        stack
+            .assert_cmd(2000, "Resume caller", |c| {
+                matches!(c, CallCommand::Unhold { leg_id } if leg_id.as_str() == "caller")
+            })
+            .await;
         let service_cmd = stack.next_cmd(2000).await.expect("service prompt Play");
         let service_tid = play_track_id(&service_cmd);
         stack.audio_complete(service_tid);
@@ -912,6 +937,11 @@ mod tests {
         stack.assert_cmd(2000, "Bridge winner", |c| {
             matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
         }).await;
+        stack
+            .assert_cmd(2000, "Resume caller", |c| {
+                matches!(c, CallCommand::Unhold { leg_id } if leg_id.as_str() == "caller")
+            })
+            .await;
         assert!(stack.next_cmd(2000).await.is_none(),
             "agent answer must not enqueue a stop after the session has bridged the call");
 
@@ -949,6 +979,11 @@ mod tests {
         stack.assert_cmd(2000, "Bridge winner", |c| {
             matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
         }).await;
+        stack
+            .assert_cmd(2000, "Resume caller", |c| {
+                matches!(c, CallCommand::Unhold { leg_id } if leg_id.as_str() == "caller")
+            })
+            .await;
 
         stack
             .join()
@@ -1082,6 +1117,11 @@ mod tests {
         stack.assert_cmd(2000, "Bridge winner", |c| {
             matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
         }).await;
+        stack
+            .assert_cmd(2000, "Resume caller", |c| {
+                matches!(c, CallCommand::Unhold { leg_id } if leg_id.as_str() == "caller")
+            })
+            .await;
         let service_cmd = stack.next_cmd(2000).await.expect("service prompt Play");
         assert!(
             play_path(&service_cmd).ends_with("queue-service-en.wav"),
@@ -1352,6 +1392,11 @@ mod tests {
         stack.assert_cmd(2000, "Bridge winner", |c| {
             matches!(c, CallCommand::Bridge { leg_a, leg_b, .. } if leg_a.as_str() == "caller" && leg_b == &leg_id_0)
         }).await;
+        stack
+            .assert_cmd(2000, "Resume caller", |c| {
+                matches!(c, CallCommand::Unhold { leg_id } if leg_id.as_str() == "caller")
+            })
+            .await;
 
         // Bridging replaces hold music; only the losing agent needs cleanup.
         // Should cancel agent 2's leg via LegRemove (NOT agent 1's leg)
@@ -3423,6 +3468,11 @@ mod tests {
         stack.assert_cmd(2000, "Bridge winner", |c| {
             matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
         }).await;
+        stack
+            .assert_cmd(2000, "Resume caller", |c| {
+                matches!(c, CallCommand::Unhold { leg_id } if leg_id.as_str() == "caller")
+            })
+            .await;
         let service_cmd = stack
             .next_cmd(2000)
             .await
@@ -3560,6 +3610,11 @@ mod tests {
         stack.assert_cmd(2000, "Bridge winner", |c| {
             matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
         }).await;
+        stack
+            .assert_cmd(2000, "Resume caller", |c| {
+                matches!(c, CallCommand::Unhold { leg_id } if leg_id.as_str() == "caller")
+            })
+            .await;
         stack
             .next_cmd(2000)
             .await
@@ -3771,6 +3826,11 @@ mod tests {
         stack.assert_cmd(2000, "Bridge winner", |c| {
             matches!(c, CallCommand::Bridge { leg_a, .. } if leg_a.as_str() == "caller")
         }).await;
+        stack
+            .assert_cmd(2000, "Resume caller", |c| {
+                matches!(c, CallCommand::Unhold { leg_id } if leg_id.as_str() == "caller")
+            })
+            .await;
         stack
             .assert_cmd(2000, "LegRemove-agent2", |c| {
                 matches!(c, CallCommand::LegRemove { .. })
