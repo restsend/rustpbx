@@ -62,16 +62,23 @@ def _start_step_provider(tmp_path):
         bridge_hits.append(body)
         ws = web.WebSocketResponse()
         await ws.prepare(request)
-        # Consume audio for a moment, then close WITHOUT any DTMF —
-        # the "TTS prompt finished naturally" case.
-        try:
-            async with asyncio.timeout(1.5):
-                async for msg in ws:
-                    if msg.type == WSMsgType.ERROR:
-                        break
-        except TimeoutError:
-            pass
+
+        # Consume audio for a moment, then close WITHOUT any DTMF — the
+        # "TTS prompt finished naturally" case. `asyncio.wait` returns on
+        # timeout without raising, so no exception is swallowed here.
+        received = {"frames": 0}
+
+        async def _drain() -> None:
+            async for msg in ws:
+                if msg.type == WSMsgType.BINARY:
+                    received["frames"] += 1
+
+        drain_task = asyncio.ensure_future(_drain())
+        await asyncio.wait([drain_task], timeout=1.5)
+        drain_task.cancel()
         await ws.close()
+        body["audio_frames"] = received["frames"]
+        bridge_hits.append(body)
         return ws
 
     async def handle_step(request: web.Request) -> web.Response:
