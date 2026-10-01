@@ -30,7 +30,7 @@ pub struct CallInfo {
     pub route_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppRouteContext {
     pub callee: String,
     pub sip_headers: HashMap<String, String>,

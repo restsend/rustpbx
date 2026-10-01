@@ -3186,6 +3186,7 @@ action = { type = "transfer", target = "100" }
         {
             let mut guard = ext.write();
             guard.insert(IvrExecState {
+                app_execution_id: Some(1),
                 request_id: "test-req".into(),
                 held_leg: Some(crate::call::domain::LegId::from("callee")),
                 initiator_leg: crate::call::domain::LegId::from("callee"),
@@ -3209,7 +3210,10 @@ action = { type = "transfer", target = "100" }
                 sip_headers: HashMap::new(),
                 route_name: None,
             },
-            invocation: None,
+            invocation: Some(crate::call::app::AppInvocationContext {
+                app_execution_id: 1,
+                ..Default::default()
+            }),
             config: std::sync::Arc::new(crate::config::Config::default()),
             rwi_gateway: None,
             ivr_trace: None,

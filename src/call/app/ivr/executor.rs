@@ -141,6 +141,8 @@ pub struct StepIvrApp {
     /// Session extensions clone stashed in on_enter for use in on_exit.
     /// Only populated when the IVR was started via `ivr.exec`.
     session_extensions: Option<crate::proxy::proxy_call::session_hooks::SessionExtensions>,
+    /// Runtime generation paired with `session_extensions` for result ownership.
+    app_execution_id: Option<u64>,
     /// DTMF digits received while the current step is non-interruptible (or the
     /// step provider response is in flight). Delivered to the provider on the
     /// next step instead of being silently dropped, so caller input is never lost.
@@ -219,6 +221,7 @@ impl StepIvrApp {
             runtime_vars: None,
             ivr_params: None,
             session_extensions: None,
+            app_execution_id: None,
             pending_dtmf: VecDeque::new(),
             max_repeat_prompts: DEFAULT_MAX_REPEAT_PROMPTS,
             no_input_prompts: 0,
@@ -1941,6 +1944,10 @@ impl CallApp for StepIvrApp {
     ) -> anyhow::Result<AppAction> {
         self.runtime_vars = Some(context.session_vars.clone());
         self.session_extensions = Some(context.session_extensions.clone());
+        self.app_execution_id = context
+            .invocation
+            .as_ref()
+            .map(|value| value.app_execution_id);
         // Capture the session handle so step-level failures can be routed
         // through the unified `ReportCallError` path (log + RWI + CDR trace).
         self.session_handle = Some(ctrl.session.clone());
@@ -2682,20 +2689,10 @@ impl CallApp for StepIvrApp {
             });
         }
 
-        if !skip_provider_end {
-            let provider_session = self.provider_session_context();
-            self.provider
-                .on_session_end_context(&end_reason, &provider_session)
-                .await
-                .ok();
-        }
         let status = serde_json::to_string(&end_sr.reason)
             .unwrap_or_else(|_| "\"unknown\"".to_string())
             .trim_matches('"')
             .to_string();
-        if !resumable_handoff {
-            self.record_session_end(&status).await;
-        }
         if let Some(name) = &self.ivr_name {
             self.sess
                 .variables
@@ -2715,9 +2712,11 @@ impl CallApp for StepIvrApp {
         }
         self.pending_menu = None;
 
-        // If this IVR was started via ivr.exec, write result to extensions.
+        // Publish the segment snapshot before the provider `/end` request can
+        // block. A fast successor may otherwise complete and consume the
+        // logical ivr.exec result before this segment becomes available.
         if let Some(ref ext) = self.session_extensions {
-            let collected: std::collections::HashMap<String, String> = self
+            let mut collected: std::collections::HashMap<String, String> = self
                 .sess
                 .variables
                 .iter()
@@ -2726,16 +2725,35 @@ impl CallApp for StepIvrApp {
                 })
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
+            if let Some(node) = self
+                .current_node
+                .as_ref()
+                .filter(|node| matches!(node.action, EntryAction::Exit))
+            {
+                collected.extend(node.result_variables.clone());
+            }
             super::exec::write_ivr_exec_result(
                 ext,
+                self.app_execution_id.unwrap_or(0),
                 super::exec::build_ivr_exec_result(
-                    &status,
+                    super::exec::ivr_exec_status(&end_reason_label),
                     &end_reason_label,
                     self.last_transfer_target.clone(),
                     collected,
                     0,
                 ),
             );
+        }
+
+        if !skip_provider_end {
+            let provider_session = self.provider_session_context();
+            self.provider
+                .on_session_end_context(&end_reason, &provider_session)
+                .await
+                .ok();
+        }
+        if !resumable_handoff {
+            self.record_session_end(&status).await;
         }
 
         Ok(())
@@ -2917,7 +2935,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn step_provider_uses_invocation_identity_and_keeps_business_variables_separate() {
+    async fn ivr_exec_step_provider_uses_invocation_identity_and_variables() {
         let provider = Arc::new(MockProvider::new(vec![ActionNode::new(
             EntryAction::Transfer {
                 target: "2001".into(),
@@ -2937,7 +2955,14 @@ mod tests {
                 ("order_id".into(), "order-001".into()),
             ]),
         });
-        let app = StepIvrApp::with_provider(Box::new(MockProviderHandle(provider.clone())));
+        let app = StepIvrApp::with_provider(Box::new(MockProviderHandle(provider.clone())))
+            .with_name("routed-menu")
+            .with_ivr_params(serde_json::json!({
+                "workflow_id": "workflow-test",
+                "subject_id": "subject-test",
+                "operation": "confirm",
+                "source": "source-test"
+            }));
         let mut stack = MockCallStack::run_with_context(Box::new(app), context);
 
         stack
@@ -2959,10 +2984,63 @@ mod tests {
         assert_eq!(start.callee, "39230");
         assert_eq!(start.sip_headers.as_ref().unwrap()["X-Business-Type"], "34");
         assert_eq!(start.variables["session_id"], "business-value");
+        assert_eq!(start.variables["ivr_name"], "routed-menu");
+        assert_eq!(start.variables["workflow_id"], "workflow-test");
+        assert_eq!(start.variables["subject_id"], "subject-test");
+        assert_eq!(start.variables["operation"], "confirm");
+        assert_eq!(start.variables["source"], "source-test");
         let contexts = provider.contexts.lock().unwrap();
         assert_eq!(contexts[0].session_id, "test-session");
         assert_eq!(contexts[0].app_execution_id, 2);
         assert_eq!(contexts[0].variables["session_id"], "business-value");
+        assert_eq!(contexts[0].variables["ivr_name"], "routed-menu");
+        assert_eq!(contexts[0].variables["operation"], "confirm");
+    }
+
+    #[tokio::test]
+    async fn ivr_exec_returns_exit_result_variables() {
+        let mut node = ActionNode::new(EntryAction::Exit);
+        node.result_variables = HashMap::from([
+            ("decision".into(), "accepted".into()),
+            ("payload".into(), "result-value".into()),
+            ("result_kind".into(), "post_flow".into()),
+        ]);
+        let mut context = make_test_context();
+        context.invocation = Some(crate::call::app::AppInvocationContext {
+            app_execution_id: 2,
+            ..Default::default()
+        });
+        let extensions = context.session_extensions.clone();
+        extensions
+            .write()
+            .insert(crate::proxy::proxy_call::ivr_exec_hook::IvrExecState {
+                app_execution_id: Some(2),
+                request_id: "request-test".into(),
+                held_leg: None,
+                initiator_leg: crate::call::domain::LegId::from("callee"),
+                webhook_url: None,
+                app_name: "ivr".into(),
+                metadata: serde_json::Value::Null,
+            });
+        let app = StepIvrApp::with_provider(Box::new(MockProvider::new(vec![node])));
+        let mut stack = MockCallStack::run_with_context(Box::new(app), context);
+
+        stack
+            .assert_cmd(2000, "accept", |command| {
+                matches!(command, CallCommand::Answer { .. })
+            })
+            .await;
+        stack.join().await.expect("exit flow must complete");
+
+        let guard = extensions.read();
+        let result = guard
+            .get::<crate::proxy::proxy_call::ivr_exec_hook::IvrExecResult>()
+            .expect("IVR result must be available for the completion hook");
+        assert_eq!(result.status, "completed");
+        assert_eq!(result.reason, "normal");
+        assert_eq!(result.collected["decision"], "accepted");
+        assert_eq!(result.collected["payload"], "result-value");
+        assert_eq!(result.collected["result_kind"], "post_flow");
     }
 
     struct BlockingProvider {
@@ -5340,7 +5418,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_on_exit_records_session_end_for_terminal_transfer() {
+    async fn ivr_exec_terminal_transfer_reports_transferred_and_session_end() {
         use crate::call::app::ivr::trace::IvrTraceCollector;
 
         // Regression guard for the suppression: a plain Transfer (no
@@ -5354,7 +5432,24 @@ mod tests {
         })]);
         let trace = IvrTraceCollector::new();
         app.trace = Some(trace.clone());
-        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+        let mut context = make_test_context();
+        context.invocation = Some(crate::call::app::AppInvocationContext {
+            app_execution_id: 3,
+            ..Default::default()
+        });
+        let extensions = context.session_extensions.clone();
+        extensions
+            .write()
+            .insert(crate::proxy::proxy_call::ivr_exec_hook::IvrExecState {
+                app_execution_id: Some(3),
+                request_id: "request-transfer".into(),
+                held_leg: None,
+                initiator_leg: crate::call::domain::LegId::from("callee"),
+                webhook_url: None,
+                app_name: "ivr".into(),
+                metadata: serde_json::Value::Null,
+            });
+        let mut stack = MockCallStack::run_with_context(Box::new(app), context);
         stack
             .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
@@ -5387,6 +5482,12 @@ mod tests {
             .expect("transfer node trace must exist");
         assert_eq!(node_entry.end_reason, None);
         assert_eq!(node_entry.end_detail, None);
+        let guard = extensions.read();
+        let result = guard
+            .get::<crate::proxy::proxy_call::ivr_exec_hook::IvrExecResult>()
+            .expect("terminal transfer must produce an ivr.exec result");
+        assert_eq!(result.status, "transferred");
+        assert_eq!(result.reason, "transfer");
     }
 
     #[tokio::test]
@@ -7064,7 +7165,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_remote_hangup_notifies_provider_session_end() {
+    async fn ivr_exec_remote_hangup_reports_failed_and_notifies_provider() {
         let provider = Arc::new(MockProvider::new(vec![ActionNode::new(
             EntryAction::Prompt {
                 file: Some("hello.wav".into()),
@@ -7080,6 +7181,20 @@ mod tests {
         )]));
         let mut app = StepIvrApp::with_provider(Box::new(MockProviderHandle(provider.clone())));
         app.ivr_name = Some("test-ivr".to_string());
+        let extensions = crate::proxy::proxy_call::session_hooks::SessionExtensions::new();
+        extensions
+            .write()
+            .insert(crate::proxy::proxy_call::ivr_exec_hook::IvrExecState {
+                app_execution_id: Some(4),
+                request_id: "request-hangup".into(),
+                held_leg: None,
+                initiator_leg: crate::call::domain::LegId::from("callee"),
+                webhook_url: None,
+                app_name: "ivr".into(),
+                metadata: serde_json::Value::Null,
+            });
+        app.session_extensions = Some(extensions.clone());
+        app.app_execution_id = Some(4);
         app.sess
             .variables
             .insert("session_id".into(), "test-session".into());
@@ -7092,6 +7207,12 @@ mod tests {
             *provider.end_called.lock().unwrap(),
             "caller hangup is a session end — the provider must receive /end (user_hangup)"
         );
+        let guard = extensions.read();
+        let result = guard
+            .get::<crate::proxy::proxy_call::ivr_exec_hook::IvrExecResult>()
+            .expect("caller hangup must produce an ivr.exec result");
+        assert_eq!(result.status, "failed");
+        assert_eq!(result.reason, "remote_hangup");
     }
 
     #[tokio::test]
@@ -7790,7 +7911,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_http_provider_remote_hangup_skips_end_webhook() {
+    async fn test_http_provider_remote_hangup_reports_one_end_webhook() {
         use axum::{Json, Router, extract::State, routing::post};
 
         #[derive(Default)]
@@ -7870,16 +7991,9 @@ mod tests {
             .await
             .expect("step provider should receive first /step request");
 
-        // The step handler blocks until released below; the HTTP client times
-        // out (RetryConfig::timeout_ms) and the executor enters the IVR
-        // fallback, which terminates the session and notifies the provider's
-        // /step/end. A queued remote hangup does not abort the in-flight
-        // provider request; once the fallback session-end has run, the hangup
-        // path delivers its own `/end` (user_hangup) — caller hangup IS a
-        // session end under the notification protocol. Here we pin the
-        // deterministic loop behavior: exactly one /step call, no retry
-        // storm, and one session-end notification per termination (fallback
-        // hangup + caller hangup) = two.
+        // The step handler blocks until released below. A queued remote hangup
+        // must terminate the application with one user_hangup /end notification;
+        // the event loop owns on_exit and must not emit a second fallback /end.
         stack.remote_hangup();
         stack
             .join()
@@ -7888,11 +8002,9 @@ mod tests {
 
         assert_eq!(state.start_calls.lock().await.len(), 1);
         assert_eq!(state.step_calls.lock().await.len(), 1);
-        assert_eq!(
-            state.end_calls.lock().await.len(),
-            2,
-            "one /end per termination: fallback session end + caller hangup"
-        );
+        let end_calls = state.end_calls.lock().await;
+        assert_eq!(end_calls.len(), 1, "remote hangup must emit exactly one /end");
+        assert_eq!(end_calls[0]["reason"], "user_hangup");
 
         state.release_step.notify_waiters();
     }

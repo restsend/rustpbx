@@ -550,6 +550,9 @@ pub struct ActionNode {
     pub step_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra: Option<serde_json::Value>,
+    /// Variables returned to the invoker when this node exits an injected IVR.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub result_variables: HashMap<String, String>,
 }
 
 impl ActionNode {
@@ -562,6 +565,7 @@ impl ActionNode {
             step_id: None,
             step_name: None,
             extra: None,
+            result_variables: HashMap::new(),
         }
     }
 
@@ -574,6 +578,7 @@ impl ActionNode {
             step_id: None,
             step_name: None,
             extra: None,
+            result_variables: HashMap::new(),
         }
     }
 }

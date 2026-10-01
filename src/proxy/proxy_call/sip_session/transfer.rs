@@ -1016,6 +1016,9 @@ impl SipSession {
             }
             _ => false,
         };
+        if self.meta.ivr_flow_suspended {
+            crate::proxy::proxy_call::ivr_exec_hook::suspend_ivr_exec(&self.extensions);
+        }
 
         // Recording lifecycle: an app-scoped IVR segment ends with its owning
         // app. Close it here — before any successor (queue / IVR / route point /
@@ -1034,8 +1037,22 @@ impl SipSession {
                 overflow_overrides,
             } => {
                 info!(session_id = %self.id, %leg_id, queue = %name, ?return_app, overrides = %target_overrides.len(), overflow = ?overflow_overrides, "Handling queue transfer");
-                self.handle_queue_transfer(&name, return_app, target_overrides, overflow_overrides)
-                    .await
+                let result = self
+                    .handle_queue_transfer(
+                        &name,
+                        return_app,
+                        target_overrides,
+                        overflow_overrides,
+                    )
+                    .await;
+                if let Err(error) = &result {
+                    self.fail_suspended_ivr_handoff(
+                        "handoff_start_failed",
+                        format!("Queue '{name}' handoff failed: {error}"),
+                    )
+                    .await;
+                }
+                result
             }
             TransferTarget::Ivr { name, params } => {
                 info!(session_id = %self.id, %leg_id, ivr = %name, "Handling IVR transfer by starting IvrApp");
@@ -1052,22 +1069,10 @@ impl SipSession {
                 let result = self.start_ivr_app(&name, params).await;
                 if result.is_ok() && resumed {
                     self.meta.ivr_flow_suspended = false;
-                } else if result.is_err() && self.meta.ivr_flow_suspended {
-                    // JumpIvr target (and its fallback) failed to start — the
-                    // logical flow died here. Emit the compensating
-                    // session_end NOW with the real cause instead of letting
-                    // it surface as a misleading user_hangup at teardown.
-                    self.meta.ivr_flow_suspended = false;
-                    let err = result
-                        .as_ref()
-                        .err()
-                        .map(ToString::to_string)
-                        .unwrap_or_default();
-                    self.emit_suspended_flow_session_end(
-                        crate::call::app::ivr::provider::SessionEndReason {
-                            reason: crate::call::app::ivr::provider::SessionEndTag::Error,
-                            detail: Some(format!("JumpIvr target '{name}' failed to start: {err}")),
-                        },
+                } else if let Err(error) = &result {
+                    self.fail_suspended_ivr_handoff(
+                        "handoff_start_failed",
+                        format!("JumpIvr target '{name}' failed to start: {error}"),
                     )
                     .await;
                 }
@@ -1083,6 +1088,7 @@ impl SipSession {
                     .await;
                 let result = self.start_route_point_app(&name, params, headers).await;
                 if result.is_ok() {
+                    self.bind_suspended_ivr_exec_to_current_app().await;
                     self.meta.ivr_flow_suspended = false;
                     if disposition != TransferDisposition::Refer && leg_id != LegId::from("caller") {
                         self.mark_transferred_with(Some(
@@ -1090,21 +1096,10 @@ impl SipSession {
                         ));
                         self.handle_remove_leg(leg_id).await?;
                     }
-                } else if self.meta.ivr_flow_suspended {
-                    // Route-point successor failed to start — the logical
-                    // flow died here. Emit the compensating session_end NOW
-                    // with the real cause (see the JumpIvr arm above).
-                    self.meta.ivr_flow_suspended = false;
-                    let err = result
-                        .as_ref()
-                        .err()
-                        .map(ToString::to_string)
-                        .unwrap_or_default();
-                    self.emit_suspended_flow_session_end(
-                        crate::call::app::ivr::provider::SessionEndReason {
-                            reason: crate::call::app::ivr::provider::SessionEndTag::Error,
-                            detail: Some(format!("RoutePoint '{name}' failed to start: {err}")),
-                        },
+                } else if let Err(error) = &result {
+                    self.fail_suspended_ivr_handoff(
+                        "handoff_start_failed",
+                        format!("RoutePoint '{name}' failed to start: {error}"),
                     )
                     .await;
                 }
@@ -1155,6 +1150,13 @@ impl SipSession {
                     crate::call::domain::ReferNotifyEventType::Notify,
                 )
                 .await;
+                if let Err(error) = &result {
+                    self.fail_suspended_ivr_handoff(
+                        "handoff_start_failed",
+                        format!("Bridge handoff failed: {error}"),
+                    )
+                    .await;
+                }
                 result
             }
             TransferTarget::Sip {
@@ -1993,6 +1995,7 @@ impl SipSession {
                     .await;
                 if result.is_ok() {
                     // Flow resumed — the return app owns the lifecycle now.
+                    self.bind_suspended_ivr_exec_to_current_app().await;
                     self.meta.ivr_flow_suspended = false;
                 }
                 return result;
@@ -2027,10 +2030,6 @@ impl SipSession {
             .caller
             .clone()
             .ok_or_else(|| anyhow!("route-point transfer has no caller identity"))?;
-        let realm = self.server.proxy_config.load().select_realm("");
-        let target = crate::call::build_sip_uri(route_point, &realm);
-        let target_uri = rsipstack::sip::Uri::try_from(target.as_str())
-            .map_err(|error| anyhow!("invalid route-point target: {error}"))?;
         let current_invocation = self.app_runtime.current_app_invocation().await;
         let current_headers = current_invocation
             .as_ref()
@@ -2045,14 +2044,11 @@ impl SipSession {
             .iter()
             .map(|(name, value)| rsipstack::sip::Header::Other(name.clone(), value.clone()))
             .collect::<Vec<_>>();
-        let routed = super::util::route_leg(
-            &self.server,
-            &target_uri,
+        let routed = self
+            .resolve_route_point(
+            route_point,
             &caller,
-            &caller, // Routing placeholder; this path starts an app, not a SIP leg.
             (!carry_headers.is_empty()).then_some(carry_headers),
-            &self.context.dialplan.direction,
-            self.context.cookie.clone(),
         )
         .await?;
 
@@ -2257,7 +2253,7 @@ impl SipSession {
         if !query_params.is_empty() {
             app_params["ivr_params"] = serde_json::json!(query_params);
         }
-        match self
+        let result = match self
             .ensure_app_running("ivr", Some(app_params), &format!("IVR '{}'", ivr_name))
             .await
         {
@@ -2266,7 +2262,11 @@ impl SipSession {
                 self.try_ivr_fallback_after_start_failure(e, ivr_name, &query_params)
                     .await
             }
+        };
+        if result.is_ok() {
+            self.bind_suspended_ivr_exec_to_current_app().await;
         }
+        result
     }
 
     /// When starting a named IVR fails, try once more with `[proxy.ivr_fallback]`.

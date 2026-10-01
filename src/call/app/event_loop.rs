@@ -15,6 +15,7 @@ pub struct AppEventLoop {
     cancel_token: CancellationToken,
     /// Receives timer IDs fired by `CallController::set_timeout`.
     fired_timer_rx: mpsc::UnboundedReceiver<String>,
+    exit_reason: Option<ExitReason>,
 }
 
 impl AppEventLoop {
@@ -44,6 +45,7 @@ impl AppEventLoop {
             context,
             cancel_token,
             fired_timer_rx,
+            exit_reason: None,
         }
     }
 
@@ -82,7 +84,9 @@ impl AppEventLoop {
                     // writes the IvrExecResult (collected digits) there.
                     // Skipping it left those results unwritten and the
                     // ivr.exec hook fell back to an empty default payload.
-                    self.app.on_exit(ExitReason::Normal).await?;
+                    self.app
+                        .on_exit(self.exit_reason.take().unwrap_or(ExitReason::Normal))
+                        .await?;
                     break;
                 }
                 AppAction::Hangup { reason, code } => {
@@ -125,7 +129,7 @@ impl AppEventLoop {
                         match Self::await_or_cancel(&self.cancel_token, self.app.on_dtmf(digit, &mut self.controller, &self.context)).await {
                             WaitResult::Completed(res) => res,
                             WaitResult::Cancelled => {
-                                self.app.on_exit(ExitReason::Cancelled).await?;
+                                self.exit_reason = Some(ExitReason::Cancelled);
                                 Ok(AppAction::Exit)
                             }
                         }
@@ -137,7 +141,7 @@ impl AppEventLoop {
                             match Self::await_or_cancel(&self.cancel_token, self.app.on_audio_complete(track_id, &mut self.controller, &self.context)).await {
                                 WaitResult::Completed(res) => res,
                                 WaitResult::Cancelled => {
-                                    self.app.on_exit(ExitReason::Cancelled).await?;
+                                    self.exit_reason = Some(ExitReason::Cancelled);
                                     Ok(AppAction::Exit)
                                 }
                             }
@@ -147,20 +151,20 @@ impl AppEventLoop {
                         match Self::await_or_cancel(&self.cancel_token, self.app.on_record_complete(info, &mut self.controller, &self.context)).await {
                             WaitResult::Completed(res) => res,
                             WaitResult::Cancelled => {
-                                self.app.on_exit(ExitReason::Cancelled).await?;
+                                self.exit_reason = Some(ExitReason::Cancelled);
                                 Ok(AppAction::Exit)
                             }
                         }
                     }
                     Some(ControllerEvent::Hangup(reason)) => {
-                        self.app.on_exit(ExitReason::RemoteHangup(reason)).await?;
+                        self.exit_reason = Some(ExitReason::RemoteHangup(reason));
                         Ok(AppAction::Exit)
                     }
                     Some(ControllerEvent::Timeout(id)) => {
                         match Self::await_or_cancel(&self.cancel_token, self.app.on_timeout(id, &mut self.controller, &self.context)).await {
                             WaitResult::Completed(res) => res,
                             WaitResult::Cancelled => {
-                                self.app.on_exit(ExitReason::Cancelled).await?;
+                                self.exit_reason = Some(ExitReason::Cancelled);
                                 Ok(AppAction::Exit)
                             }
                         }
@@ -173,7 +177,7 @@ impl AppEventLoop {
                         )).await {
                             WaitResult::Completed(res) => res,
                             WaitResult::Cancelled => {
-                                self.app.on_exit(ExitReason::Cancelled).await?;
+                                self.exit_reason = Some(ExitReason::Cancelled);
                                 Ok(AppAction::Exit)
                             }
                         }
@@ -186,13 +190,13 @@ impl AppEventLoop {
                         )).await {
                             WaitResult::Completed(res) => res,
                             WaitResult::Cancelled => {
-                                self.app.on_exit(ExitReason::Cancelled).await?;
+                                self.exit_reason = Some(ExitReason::Cancelled);
                                 Ok(AppAction::Exit)
                             }
                         }
                     }
                     None => {
-                        self.app.on_exit(ExitReason::Normal).await?;
+                        self.exit_reason = Some(ExitReason::Normal);
                         Ok(AppAction::Exit)
                     }
                 }
@@ -201,13 +205,13 @@ impl AppEventLoop {
                 match Self::await_or_cancel(&self.cancel_token, self.app.on_timeout(timer_id, &mut self.controller, &self.context)).await {
                     WaitResult::Completed(res) => res,
                     WaitResult::Cancelled => {
-                        self.app.on_exit(ExitReason::Cancelled).await?;
+                        self.exit_reason = Some(ExitReason::Cancelled);
                         Ok(AppAction::Exit)
                     }
                 }
             }
             _ = self.cancel_token.cancelled() => {
-                self.app.on_exit(ExitReason::Cancelled).await?;
+                self.exit_reason = Some(ExitReason::Cancelled);
                 Ok(AppAction::Exit)
             }
         }
@@ -216,4 +220,56 @@ impl AppEventLoop {
 enum WaitResult<T> {
     Completed(T),
     Cancelled,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::call::app::{CallAppType, testing::MockCallStack};
+    use std::sync::{Arc, Mutex};
+
+    struct ExitCaptureApp {
+        exits: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CallApp for ExitCaptureApp {
+        fn app_type(&self) -> CallAppType {
+            CallAppType::Custom
+        }
+
+        fn name(&self) -> &str {
+            "exit-capture"
+        }
+
+        async fn on_enter(
+            &mut self,
+            _controller: &mut CallController,
+            _context: &ApplicationContext,
+        ) -> anyhow::Result<AppAction> {
+            Ok(AppAction::Continue)
+        }
+
+        async fn on_exit(&mut self, reason: ExitReason) -> anyhow::Result<()> {
+            self.exits.lock().unwrap().push(reason.to_string());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_hangup_exits_once_with_original_reason() {
+        let exits = Arc::new(Mutex::new(Vec::new()));
+        let stack = MockCallStack::run(
+            Box::new(ExitCaptureApp {
+                exits: exits.clone(),
+            }),
+            "caller",
+            "callee",
+        );
+
+        stack.remote_hangup();
+        stack.join().await.expect("event loop should exit cleanly");
+
+        assert_eq!(exits.lock().unwrap().as_slice(), ["remote_hangup(None)"]);
+    }
 }

@@ -1,16 +1,22 @@
 use crate::call::domain::LegId;
 use crate::proxy::proxy_call::session_hooks::{
-    CallSessionContext, CallSessionHook, IvrExecCompletion, SendInfoSpec,
+    CallSessionContext, CallSessionHook, IvrExecCompletion, SendInfoSpec, SessionExtensions,
 };
 use async_trait::async_trait;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+use std::time::Duration;
 use tracing::{info, warn};
+
+const HANDOFF_RESULT_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Per-session state written before an IVR exec starts.
 /// Only present when `ivr.exec` is the active flow.
 #[derive(Clone)]
 pub struct IvrExecState {
+    /// Runtime generation bound after the application starts successfully.
+    pub app_execution_id: Option<u64>,
     /// Correlator that will be echoed back in the result.
     pub request_id: String,
     /// The leg that was put on hold (typically "callee"), or `None` if
@@ -29,6 +35,7 @@ pub struct IvrExecState {
 /// Result collected by the IVR app on exit and stored in extensions.
 #[derive(Clone)]
 pub struct IvrExecResult {
+    pub app_execution_id: Option<u64>,
     pub status: String,
     pub reason: String,
     pub routing_target: Option<String>,
@@ -36,6 +43,167 @@ pub struct IvrExecResult {
     pub trace: Vec<serde_json::Value>,
     pub duration_ms: u64,
     pub completion_time: String,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct IvrExecHandoff {
+    pub pending_app_execution_ids: HashMap<u64, u64>,
+    pub completed_results: BTreeMap<u64, IvrExecResult>,
+    pub next_segment_index: u64,
+    pub result_ready: Arc<tokio::sync::Notify>,
+}
+
+/// Routing policy resources owned by one ivr.exec invocation.
+#[derive(Clone)]
+pub struct IvrExecRouteHints(
+    std::sync::Arc<parking_lot::Mutex<Option<crate::config::DialplanHints>>>,
+);
+
+impl IvrExecRouteHints {
+    pub fn new(hints: crate::config::DialplanHints) -> Self {
+        Self(std::sync::Arc::new(parking_lot::Mutex::new(Some(hints))))
+    }
+
+    fn take(&self) -> Option<crate::config::DialplanHints> {
+        self.0.lock().take()
+    }
+}
+
+/// Suspend the current app segment without ending its logical `ivr.exec` flow.
+/// The return app will bind its new execution id through the normal start path.
+pub(crate) fn suspend_ivr_exec(extensions: &SessionExtensions) -> bool {
+    let mut guard = extensions.write();
+    let Some(app_execution_id) = guard
+        .get::<IvrExecState>()
+        .and_then(|state| state.app_execution_id)
+    else {
+        return false;
+    };
+    if let Some(state) = guard.get_mut::<IvrExecState>() {
+        state.app_execution_id = None;
+    }
+    let completed_result = guard
+        .remove::<IvrExecResult>()
+        .filter(|result| result.app_execution_id == Some(app_execution_id));
+    if guard.get::<IvrExecHandoff>().is_none() {
+        guard.insert(IvrExecHandoff::default());
+    }
+    if let Some(handoff) = guard.get_mut::<IvrExecHandoff>() {
+        let segment_index = handoff.next_segment_index;
+        handoff.next_segment_index = handoff.next_segment_index.saturating_add(1);
+        if let Some(result) = completed_result {
+            handoff.completed_results.insert(segment_index, result);
+        } else {
+            handoff
+                .pending_app_execution_ids
+                .insert(app_execution_id, segment_index);
+        }
+    }
+    true
+}
+
+/// Bind a resumed app generation to the logical `ivr.exec` invocation.
+pub(crate) fn bind_ivr_exec(extensions: &SessionExtensions, app_execution_id: u64) -> bool {
+    let mut guard = extensions.write();
+    let Some(state) = guard
+        .get_mut::<IvrExecState>()
+        .filter(|state| state.app_execution_id.is_none())
+    else {
+        return false;
+    };
+    state.app_execution_id = Some(app_execution_id);
+    true
+}
+
+/// Convert a suspended logical flow into a terminal failure without losing
+/// values collected before the hand-off.
+pub(crate) fn fail_suspended_ivr_exec(extensions: &SessionExtensions, reason: &str) -> bool {
+    let mut guard = extensions.write();
+    if !guard
+        .get::<IvrExecState>()
+        .is_some_and(|state| state.app_execution_id.is_none())
+    {
+        return false;
+    }
+    guard.insert(IvrExecResult {
+        app_execution_id: None,
+        status: "failed".to_string(),
+        reason: reason.to_string(),
+        routing_target: None,
+        collected: HashMap::new(),
+        trace: Vec::new(),
+        duration_ms: 0,
+        completion_time: chrono::Utc::now().to_rfc3339(),
+    });
+    true
+}
+
+pub(crate) async fn wait_for_pending_ivr_exec_results(extensions: &SessionExtensions) {
+    let wait = async {
+        loop {
+            let result_ready = {
+                let guard = extensions.read();
+                let Some(handoff) = guard.get::<IvrExecHandoff>() else {
+                    return;
+                };
+                if handoff.pending_app_execution_ids.is_empty() {
+                    return;
+                }
+                handoff.result_ready.clone()
+            };
+            result_ready.notified().await;
+        }
+    };
+    if tokio::time::timeout(HANDOFF_RESULT_WAIT_TIMEOUT, wait)
+        .await
+        .is_err()
+    {
+        warn!("Timed out waiting for suspended IVR result snapshots");
+    }
+}
+
+pub(crate) fn combined_ivr_exec_result(
+    extensions: &SessionExtensions,
+    app_execution_id: Option<u64>,
+) -> Option<IvrExecResult> {
+    let guard = extensions.read();
+    let mut result = guard
+        .get::<IvrExecResult>()
+        .cloned()
+        .filter(|result| result.app_execution_id == app_execution_id);
+    let completed_results = guard
+        .get::<IvrExecHandoff>()
+        .map(|handoff| &handoff.completed_results);
+
+    if result.is_none() {
+        result = completed_results
+            .and_then(|results| {
+                results
+                    .values()
+                    .rev()
+                    .find(|result| result.app_execution_id == app_execution_id)
+                    .cloned()
+            });
+    }
+    let mut result = result?;
+    if let Some(results) = completed_results {
+        for previous in results.values().rev() {
+            if previous.app_execution_id == result.app_execution_id {
+                continue;
+            }
+            for (name, value) in &previous.collected {
+                result
+                    .collected
+                    .entry(name.clone())
+                    .or_insert_with(|| value.clone());
+            }
+            let mut trace = previous.trace.clone();
+            trace.extend(result.trace);
+            result.trace = trace;
+            result.duration_ms = previous.duration_ms.saturating_add(result.duration_ms);
+        }
+    }
+    Some(result)
 }
 
 /// Payload sent via webhook POST or SIP INFO result.
@@ -71,7 +239,11 @@ pub struct IvrExecHook;
 
 #[async_trait]
 impl CallSessionHook for IvrExecHook {
-    async fn on_app_exited(&self, ctx: &CallSessionContext) -> Option<IvrExecCompletion> {
+    async fn on_app_exited(
+        &self,
+        ctx: &CallSessionContext,
+        app_execution_id: Option<u64>,
+    ) -> Option<IvrExecCompletion> {
         let session_id = ctx.session_id.clone();
 
         // Read IvrExecState — if absent this is not an ivr.exec flow.
@@ -79,6 +251,9 @@ impl CallSessionHook for IvrExecHook {
             let guard = ctx.extensions.read();
             guard.get::<IvrExecState>().cloned()?
         };
+        if exec_state.app_execution_id != app_execution_id {
+            return None;
+        }
         let app_name = exec_state.app_name;
         let request_id = exec_state.request_id;
         let metadata = exec_state.metadata;
@@ -86,12 +261,10 @@ impl CallSessionHook for IvrExecHook {
         let unhold_leg = exec_state.held_leg;
         let initiator_leg = exec_state.initiator_leg;
 
+        wait_for_pending_ivr_exec_results(&ctx.extensions).await;
+
         // Read result produced by the app.
-        let result = {
-            let guard = ctx.extensions.read();
-            guard
-                .get::<IvrExecResult>()
-                .cloned()
+        let result = combined_ivr_exec_result(&ctx.extensions, app_execution_id)
                 .map(|r| IvrExecResultPayload {
                     event: "ivr_exec_completed".to_string(),
                     request_id: request_id.clone(),
@@ -107,14 +280,13 @@ impl CallSessionHook for IvrExecHook {
                     completion_time: r.completion_time,
                     end: true,
                 })
-        }
         .unwrap_or_else(|| IvrExecResultPayload {
             event: "ivr_exec_completed".to_string(),
             request_id: request_id.clone(),
             call_id: session_id.clone(),
             app: app_name.clone(),
-            status: "completed".to_string(),
-            reason: "app_exit".to_string(),
+            status: "failed".to_string(),
+            reason: "app_exit_without_result".to_string(),
             routing_target: None,
             duration_ms: 0,
             collected: HashMap::new(),
@@ -163,16 +335,21 @@ impl CallSessionHook for IvrExecHook {
 
         // Clean up extensions after consumption to prevent re-triggering
         // when a subsequent app exits in the same session.
-        {
+        let route_hints = {
             let mut guard = ctx.extensions.write();
             guard.remove::<IvrExecState>();
             guard.remove::<IvrExecResult>();
-        }
+            guard.remove::<IvrExecHandoff>();
+            guard
+                .remove::<IvrExecRouteHints>()
+                .and_then(|value| value.take())
+        };
 
         let body = serde_json::to_vec(&result).unwrap_or_default();
 
         Some(IvrExecCompletion {
             unhold_leg,
+            route_hints,
             result_info: Some(SendInfoSpec {
                 leg_id: initiator_leg,
                 content_type: RESULT_CT.to_string(),
@@ -193,6 +370,7 @@ mod tests {
         {
             let mut guard = ext.write();
             guard.insert(IvrExecState {
+                app_execution_id: Some(1),
                 request_id: "test-req".into(),
                 held_leg: Some(LegId::from("callee")),
                 initiator_leg: LegId::from("callee"),
@@ -201,6 +379,7 @@ mod tests {
                 metadata: serde_json::Value::Null,
             });
             guard.insert(IvrExecResult {
+                app_execution_id: Some(1),
                 status: "transferred".into(),
                 reason: "agent_transfer".into(),
                 routing_target: Some("sip:agent@test".into()),
@@ -243,7 +422,7 @@ mod tests {
             started_at: None,
             extensions: ext,
         };
-        let result = hook.on_app_exited(&ctx).await;
+        let result = hook.on_app_exited(&ctx, None).await;
         assert!(result.is_none(), "hook should no-op without IvrExecState");
     }
 
@@ -252,7 +431,7 @@ mod tests {
         let hook = IvrExecHook;
         let (ctx, _ext) = make_ctx_with_exec_state();
 
-        let result = hook.on_app_exited(&ctx).await;
+        let result = hook.on_app_exited(&ctx, Some(1)).await;
         assert!(result.is_some(), "hook should return completion");
         let completion = result.unwrap();
 
@@ -276,6 +455,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hook_reports_failed_when_the_app_exits_without_a_result() {
+        let hook = IvrExecHook;
+        let (ctx, ext) = make_ctx_with_exec_state();
+        ext.write().remove::<IvrExecResult>();
+
+        let completion = hook
+            .on_app_exited(&ctx, Some(1))
+            .await
+            .expect("matching app exit must produce a terminal completion");
+        let info = completion
+            .result_info
+            .expect("terminal completion must include result INFO");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&info.body).expect("valid result payload");
+
+        assert_eq!(payload["status"], "failed");
+        assert_eq!(payload["reason"], "app_exit_without_result");
+        assert!(ext.read().get::<IvrExecState>().is_none());
+    }
+
+    #[tokio::test]
+    async fn pending_ivr_exec_result_is_included_before_terminal_completion() {
+        let hook = IvrExecHook;
+        let (ctx, ext) = make_ctx_with_exec_state();
+        ext.write().remove::<IvrExecResult>();
+        assert!(suspend_ivr_exec(&ext));
+        assert!(bind_ivr_exec(&ext, 2));
+        crate::call::app::ivr::exec::write_ivr_exec_result(
+            &ext,
+            2,
+            crate::call::app::ivr::exec::build_ivr_exec_result(
+                "completed",
+                "normal",
+                None,
+                [("successor".to_string(), "done".to_string())]
+                    .into_iter()
+                    .collect(),
+                20,
+            ),
+        );
+
+        let completion_task = tokio::spawn(async move {
+            hook.on_app_exited(&ctx, Some(2)).await
+        });
+        tokio::pin!(completion_task);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                completion_task.as_mut()
+            )
+            .await
+            .is_err(),
+            "terminal completion must wait for the pending segment snapshot"
+        );
+
+        crate::call::app::ivr::exec::write_ivr_exec_result(
+            &ext,
+            1,
+            crate::call::app::ivr::exec::build_ivr_exec_result(
+                "transferred",
+                "transfer_to_ivr",
+                None,
+                [("previous".to_string(), "saved".to_string())]
+                    .into_iter()
+                    .collect(),
+                10,
+            ),
+        );
+        let completion = completion_task
+            .await
+            .expect("completion task must finish")
+            .expect("matching app exit must complete");
+        let payload: serde_json::Value = serde_json::from_slice(
+            &completion.result_info.expect("result INFO").body,
+        )
+        .expect("valid result payload");
+        assert_eq!(payload["status"], "completed");
+        assert_eq!(payload["collected"]["previous"], "saved");
+        assert_eq!(payload["collected"]["successor"], "done");
+        assert_eq!(payload["duration_ms"], 30);
+    }
+
+    #[tokio::test]
     async fn hook_cleans_up_extensions() {
         let hook = IvrExecHook;
         let (ctx, ext) = make_ctx_with_exec_state();
@@ -284,7 +546,7 @@ mod tests {
         assert!(ext.read().get::<IvrExecState>().is_some());
         assert!(ext.read().get::<IvrExecResult>().is_some());
 
-        let _result = hook.on_app_exited(&ctx).await;
+        let _result = hook.on_app_exited(&ctx, Some(1)).await;
 
         // Verify state is removed after hook.
         assert!(
@@ -294,6 +556,55 @@ mod tests {
         assert!(
             ext.read().get::<IvrExecResult>().is_none(),
             "IvrExecResult should be removed after hook"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_app_exit_cannot_consume_current_invocation() {
+        let hook = IvrExecHook;
+        let (ctx, ext) = make_ctx_with_exec_state();
+
+        let result = hook.on_app_exited(&ctx, Some(0)).await;
+
+        assert!(result.is_none());
+        assert!(ext.read().get::<IvrExecState>().is_some());
+        assert!(ext.read().get::<IvrExecResult>().is_some());
+}
+
+    #[tokio::test]
+    async fn route_capacity_remains_owned_until_invocation_cleanup() {
+        let hook = IvrExecHook;
+        let (ctx, ext) = make_ctx_with_exec_state();
+        let limiter = std::sync::Arc::new(
+            crate::call::concurrent_call_limiter::ConcurrentCallLimiter::new(1),
+        );
+        let permit = limiter
+            .try_acquire()
+            .expect("route capacity should be available");
+        let lease = crate::call::concurrent_call_limiter::ConcurrentCallLease::default();
+        lease.push(permit);
+        ext.write()
+            .insert(IvrExecRouteHints::new(crate::config::DialplanHints {
+                concurrent_call_lease: lease,
+                ..Default::default()
+            }));
+        assert_eq!(limiter.current(), 1);
+
+        let completion = hook
+            .on_app_exited(&ctx, Some(1))
+            .await
+            .expect("matching app exit should own invocation cleanup");
+
+        assert_eq!(
+            limiter.current(),
+            1,
+            "cleanup owns the route lease until applied"
+        );
+        drop(completion);
+        assert_eq!(
+            limiter.current(),
+            0,
+            "route capacity must be released after cleanup"
         );
     }
 }
