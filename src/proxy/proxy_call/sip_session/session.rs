@@ -4832,10 +4832,22 @@ impl SipSession {
                     return Ok(());
                 }
                 _ => {
-                    warn!(session_id = %self.id, route_point,
-                        "ivr.exec route point did not resolve to an application");
-                    tx_handle.respond(rsipstack::sip::StatusCode::NotFound, None, None).await.ok();
-                    return Ok(());
+                    // Legacy fallback (pre-routed-IVR behavior, cc-phone
+                    // `insertIvr` compat): when the route table has no
+                    // application for the route point, resolve it as an IVR
+                    // config file name. Route-table matches keep the richer
+                    // context (hints, routed headers); this only restores the
+                    // plain-file path so integrations that register bare IVR
+                    // files keep working.
+                    let file = self
+                        .server
+                        .data_context
+                        .resolve_ivr_file(route_point)
+                        .await;
+                    info!(session_id = %self.id, route_point, %file,
+                        "ivr.exec route point resolved as IVR file (no application route)");
+                    app_name = "ivr".to_string();
+                    base_params = Some(serde_json::json!({ "file": file }));
                 }
             }
         } else if let Some(ivr_name) = ivr_name {

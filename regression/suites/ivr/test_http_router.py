@@ -34,10 +34,20 @@ class MockHttpRouter:
         self.requests.append(body)
         return web.json_response(self.response)
 
+    async def _handle_lifecycle(self, request: web.Request) -> web.Response:
+        """StepProvider `/start` and `/end` lifecycle POSTs.
+
+        The provider ignores the response payload but degrades every step to
+        the fallback action when these 404 (session_start failure -> retry
+        exhaustion -> error prompt). """
+        return web.json_response({"status": "ok"})
+
     async def start(self) -> None:
         app = web.Application()
         app.router.add_post("/route", self._handle)
         app.router.add_post("/ivr", self._handle)
+        app.router.add_post("/ivr/start", self._handle_lifecycle)
+        app.router.add_post("/ivr/end", self._handle_lifecycle)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, "127.0.0.1", 0)
@@ -105,9 +115,9 @@ async def test_http_router_reject(pbx, http_router, sipbot_pool):
 async def test_ivr_step_provider(pbx, http_router, sipbot_pool):
     """Step-mode IVR driven by an HTTP provider returns actions (prompt -> queue)."""
     http_router.response = {
-        "action": "prompt",
-        "text": "Welcome to step IVR.",
-        "next": {"action": "transfer", "target": "1002"},
+        "type": "prompt",
+        "tts_text": "Welcome to step IVR.",
+        "next": {"type": "transfer", "target": "1002"},
     }
     pbx.config_builder.add_route(
         "to-step-ivr",

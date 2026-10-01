@@ -175,7 +175,10 @@ type = "hangup"
             if pbx.log_file_path else ""
         for needle in (
             "SIP INFO rustpbx command accepted",
-            "Propagating hold",
+            # ivr.exec hold now flows through the SDP-renegotiation path
+            # ("preserve hold and routed IVR lifecycle") instead of the old
+            # propagate_hold_to_leg logging site.
+            "Handling hold with SDP renegotiation",
         ):
             assert needle in log, (
                 f"missing PBX log {needle!r}. PBX log tail:\n{log[-2500:]}"
