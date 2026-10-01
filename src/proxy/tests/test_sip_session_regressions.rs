@@ -1019,6 +1019,86 @@ async fn bridge_rtp_dtmf_reaches_return_app_once_without_stale_app_injection() {
     );
 }
 
+/// Bridge return WITHOUT buffered digits (prompt finished / remote close):
+/// the return-app start must still attach `bridge_step_ctx` — the resumed
+/// executor needs it to self-describe the resume (`resume_from_step_id`) so
+/// the provider can continue the flow instead of re-entering it (the
+/// "caller hears the menu again" regression). Snapshot is consumed exactly
+/// once, so a later unrelated return can never attach a stale context.
+#[tokio::test]
+async fn bridge_close_without_digits_still_carries_step_ctx_to_return_app() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+        "ivr".to_string(),
+        None,
+        true,
+    );
+    let mut session = build_session(dialplan).await;
+    let runtime = Arc::new(BridgeReturnRuntime::new());
+    session.app_runtime = runtime.clone();
+
+    session.meta.transfer_return_app = Some(ReturnAppSpec {
+        app_name: "ivr".to_string(),
+        params: serde_json::json!({"file": "main-menu"}),
+    });
+
+    // Simulate a bridge hand-off + close: the live context is armed at
+    // connect time and snapshotted into `resumed_bridge_ctx` at
+    // `VoipBridgeClosed` — here we arm both directly, the way the real
+    // paths leave them.
+    *session.bridge_trace_context.lock() = Some(crate::proxy::proxy_call::sip_session::BridgeTraceContext {
+        step_id: Some("1000141102024500020003".to_string()),
+        step_name: Some("菜单".to_string()),
+        resumable: true,
+        ..Default::default()
+    });
+    *session.resumed_bridge_ctx.lock() = session.bridge_trace_context.lock().clone();
+
+    session
+        .execute_command(CallCommand::StartReturnApp, None)
+        .await;
+
+    // Scope the guard: BridgeReturnRuntime::start_app re-locks the same
+    // mutex on this thread — holding it across the second execute_command
+    // would self-deadlock.
+    {
+        let started_params = runtime.started_params.lock().unwrap();
+        assert_eq!(started_params.len(), 1);
+        let params = started_params[0].as_ref().unwrap();
+        let step_ctx = params["ivr_params"]["bridge_step_ctx"]
+            .as_str()
+            .expect("no-digit bridge return must attach bridge_step_ctx to the return ivr_params");
+        assert!(
+            step_ctx.contains("1000141102024500020003"),
+            "bridge_step_ctx must carry the suspension point, got: {step_ctx}"
+        );
+        assert!(
+            !step_ctx.contains("resumable") || step_ctx.contains("\"resumable\":true"),
+            "serialized ctx must survive the round-trip: {step_ctx}"
+        );
+        assert!(
+            params["ivr_params"].get("bridge_dtmf_digits").is_none(),
+            "no digits were buffered — the key must be absent, got: {params:?}"
+        );
+    }
+
+    // Snapshot consumed exactly once: a later return (e.g. CSAT) must NOT
+    // re-attach the stale bridge context.
+    session.meta.transfer_return_app = Some(ReturnAppSpec {
+        app_name: "ivr".to_string(),
+        params: serde_json::json!({"file": "main-menu"}),
+    });
+    session
+        .execute_command(CallCommand::StartReturnApp, None)
+        .await;
+    let started_params = runtime.started_params.lock().unwrap();
+    assert_eq!(started_params.len(), 2);
+    let second = started_params[1].as_ref().unwrap();
+    assert!(
+        second["ivr_params"].get("bridge_step_ctx").is_none(),
+        "stale bridge ctx must not leak into an unrelated return, got: {second:?}"
+    );
+}
+
 #[tokio::test]
 async fn test_media_proxy_auto_keeps_plain_targets_bypass_without_recording() {
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)

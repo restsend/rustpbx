@@ -335,6 +335,20 @@ impl BuiltinAppFactory {
                         }
                         provider = provider
                             .with_retry(crate::call::app::ivr::RetryConfig::from(provider_cfg));
+                        if let Some(mode) = provider_cfg
+                            .resume_event_mode
+                            .as_deref()
+                            .and_then(
+                                crate::call::app::ivr::ResumeEventMode::parse,
+                            )
+                        {
+                            provider = provider.with_resume_event_mode(mode);
+                        } else if let Some(raw) = provider_cfg.resume_event_mode.as_deref() {
+                            tracing::warn!(
+                                value = %raw,
+                                "invalid ivr provider resume_event_mode (expected \"resume\" or \"session_start\"); using default \"resume\""
+                            );
+                        }
                         if Self::prefer_session_ivr_fallback(
                             context,
                             file_config.ivr.ivr_fallback.as_ref(),

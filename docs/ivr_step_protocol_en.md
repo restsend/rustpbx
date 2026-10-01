@@ -110,6 +110,34 @@ POST {url}/end            ──→ your provider (session cleanup, fire‑and�
 | `error` | `reason: string` | An execution error occurred, e.g. TTS playback failed (TTS service not configured and edge-cli fallback unavailable) — see §Error Handling |
 | `dtmf_menu_invalid` | `digit: string` | Menu mode: user pressed a key not in `entries`, and no `invalid_action` was set |
 | `dtmf_menu_timeout` | (none) | Menu mode: no key pressed before timeout, and no `timeout_action` was set |
+| `resume` | `resume_from_step_id: string?` | **Continuation**, not a fresh entry: the first request of a resumed flow after a `voip_bridge` ended with no buffered digits. Uses `resume` instead of a second `session_start` (see [Resume Event](#resume-event--continuation-of-a-suspended-flow) below) |
+
+#### Resume Event — continuation of a suspended flow
+
+When a node hands the media to an external service via `voip_bridge` (e.g. a TTS
+bridge), the IVR executor suspends. When the bridge closes, rustpbx restarts an
+IVR instance to **continue** the same logical flow:
+
+- **Buffered digits exist**: the first request is still `{"type":"dtmf"}` (keys
+  the caller pressed while the bridge owned the media).
+- **No buffered digits** (prompt finished / remote close / timeout): the first
+  request is `{"type":"resume","resume_from_step_id":"…"}`. `resume_from_step_id`
+  is the `step_id` of the node the bridge was suspended on; it **may be absent**
+  (queue return / JumpIvr carry no bridge context) — consumers must not rely on
+  its presence.
+- `resume` is **not** a repeated `session_start`: the logical flow's
+  `session_start` is emitted exactly once, at its true first entry. On `resume`
+  a provider must continue from its stored per-session position — **never**
+  restart from the entry node; replaying the menu is precisely the regression
+  this event eliminates.
+- Stateless-provider fallback signals: the request `variables` also carry
+  `ivr_status=resuming` and `ivr_resume_from_step_id=<suspended node>` (the
+  latter only for bridge suspensions).
+- Compatibility: legacy providers that cannot accept the `resume` type can set
+  `resume_event_mode = "session_start"` in the provider config to keep the old
+  wire format. If a `resume` request is rejected by the remote (non-2xx / parse
+  failure), rustpbx auto-downgrades that `/step` endpoint to `session_start`
+  (for the process lifetime) and retries once with `session_start`.
 
 ---
 

@@ -244,6 +244,17 @@ class IvrSession:
             self._state = "menu"
             return self._menu_prompt()
 
+        if ev_type == "resume":
+            # Continuation of a suspended flow (voip_bridge returned with no
+            # buffered digits). NOT a fresh session: continue from wherever
+            # this state machine was suspended. `resume_from_step_id` (event)
+            # and the `ivr_resume_from_step_id` / `ivr_status=resuming`
+            # variables carry the suspension point for stateless providers.
+            # Re-entering from scratch here would replay the welcome prompt —
+            # the regression the `resume` event exists to prevent.
+            self._state = "menu"
+            return self._menu_prompt()
+
         if self._state == "start":
             self._state = "menu"
             return action_prompt(file=self._audio("welcome"), interruptible=True)

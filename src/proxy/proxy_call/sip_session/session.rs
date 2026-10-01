@@ -172,6 +172,15 @@ pub struct SipSession {
     pub(crate) bridge_trace_context:
         Arc<parking_lot::Mutex<Option<super::transfer::BridgeTraceContext>>>,
 
+    /// Snapshot of `bridge_trace_context` taken when the voip bridge WS
+    /// closes (`VoipBridgeClosed`). Consumed by `handle_start_return_app` so
+    /// a resume WITHOUT buffered digits can still self-describe
+    /// (`bridge_step_ctx` → provider `resume_from_step_id`), while an
+    /// unrelated later return (CSAT / agent disconnect) can never attach a
+    /// stale context from a bridge that ended long ago.
+    pub(crate) resumed_bridge_ctx:
+        Arc<parking_lot::Mutex<Option<super::transfer::BridgeTraceContext>>>,
+
     /// DTMF digits captured while a bridge was active, replayed into the
     /// return-app IVR params when the bridge disconnects.
     pub(crate) bridge_dtmf_digits: Arc<parking_lot::Mutex<Vec<String>>>,
@@ -1353,6 +1362,7 @@ impl SipSession {
             conference_bridge: crate::call::runtime::SessionConferenceBridge::new(),
             bridge_dtmf_tx: Arc::new(parking_lot::RwLock::new(None)),
             bridge_trace_context: Arc::new(parking_lot::Mutex::new(None)),
+            resumed_bridge_ctx: Arc::new(parking_lot::Mutex::new(None)),
             bridge_dtmf_digits: Arc::new(parking_lot::Mutex::new(Vec::new())),
             external_bridge: None,
             cmd_tx: Some(cmd_tx.clone()),
@@ -3735,10 +3745,35 @@ impl SipSession {
             Some(rule) => Some(rule),
             None => {
                 self.server
-                    .header_passthrough_for(target, false, &callee_uri)
+                    .header_passthrough_for(target, false, &callee_uri, None)
                     .await
             }
         };
+        if passthrough_rule.is_none() {
+            // No trunk rule resolved: any custom header on the original
+            // request is dropped from this leg — surface that, field loss on
+            // dial-out metadata is exactly the class of bug that is brutal
+            // to debug from CDRs alone.
+            let dropped: Vec<String> = self
+                .context
+                .dialplan
+                .original
+                .headers
+                .0
+                .iter()
+                .filter(|h| crate::call::Dialplan::should_forward_header(h))
+                .map(|h| h.name().to_string())
+                .collect();
+            if !dropped.is_empty() {
+                warn!(
+                    session_id = %self.id,
+                    session_id = %self.context.session_id,
+                    header_count = dropped.len(),
+                    headers = ?dropped,
+                    "outbound leg drops original custom headers (destination trunk has no header_passthrough rule)"
+                );
+            }
+        }
         if let Some(rule) = &passthrough_rule {
             let selected = crate::call::Dialplan::select_passthrough_headers(
                 &self.context.dialplan.original.headers.0,
@@ -12521,6 +12556,14 @@ impl SipSession {
                     h.kind == crate::proxy::proxy_call::media_state::ExternalBridgeKind::Voip
                 }) {
                     self.teardown_external_bridge("voip bridge closed");
+                    // Snapshot the bridge's originating step context for the
+                    // imminent return-app start: a resume WITHOUT buffered
+                    // digits must still carry `bridge_step_ctx` (→ provider
+                    // `resume_from_step_id`). Snapshotting HERE — at bridge
+                    // close — guarantees the context belongs to the bridge
+                    // that just ended, never a stale one from an earlier
+                    // hand-off.
+                    *self.resumed_bridge_ctx.lock() = self.bridge_trace_context.lock().clone();
                     debug!(session_id = %self.id, "Voip bridge closed; re-evaluating media path");
                 }
                 self.update_media_path().await;
@@ -12673,24 +12716,31 @@ impl SipSession {
             // params so the resumed flow (and its step provider) can see the
             // keys the caller pressed while the bridge owned the media.
             let digits: Vec<String> = std::mem::take(&mut *self.bridge_dtmf_digits.lock());
-            if !digits.is_empty()
-                && spec.app_name == "ivr"
+            // Consume the bridge-close snapshot unconditionally so it can
+            // never leak into an unrelated later return (CSAT / agent
+            // disconnect with no bridge in between).
+            let resumed_bridge_ctx = self.resumed_bridge_ctx.lock().take();
+            if spec.app_name == "ivr"
                 && let Some(obj) = spec.params.as_object_mut()
             {
                 let ivr_params = obj
                     .entry("ivr_params")
                     .or_insert_with(|| serde_json::json!({}));
                 if let Some(ip) = ivr_params.as_object_mut() {
-                    ip.insert(
-                        "bridge_dtmf_digits".to_string(),
-                        serde_json::Value::String(digits.join(",")),
-                    );
+                    if !digits.is_empty() {
+                        ip.insert(
+                            "bridge_dtmf_digits".to_string(),
+                            serde_json::Value::String(digits.join(",")),
+                        );
+                    }
                     // Originating bridge-step context (serialized —
-                    // `with_ivr_params` keeps string values only): the
-                    // resumed executor reports the suppressed bridge-DTMF
-                    // trace itself (with `next_node_id`) once the successor
-                    // node resolves.
-                    if let Some(ctx) = self.bridge_trace_context.lock().clone()
+                    // `with_ivr_params` keeps string values only): attached
+                    // on EVERY bridge return, not just digit-carrying ones —
+                    // a no-digit resume needs it to self-describe
+                    // (`resume_from_step_id` in the provider request) so the
+                    // provider can continue the flow instead of re-entering
+                    // it. Snapshot taken at `VoipBridgeClosed`, consumed here.
+                    if let Some(ctx) = resumed_bridge_ctx
                         && let Ok(s) = serde_json::to_string(&ctx)
                     {
                         ip.insert("bridge_step_ctx".to_string(), serde_json::Value::String(s));

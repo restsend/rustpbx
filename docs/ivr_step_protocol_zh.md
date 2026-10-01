@@ -112,6 +112,26 @@ POST {url}/end            ──→ your provider (session cleanup, fire‑and�
 | `error` | `reason: string` | 执行错误，例如 TTS 播放失败（未配置 TTS 服务且 edge-cli 回退不可用）；见“错误处理” |
 | `dtmf_menu_invalid` | `digit: string` | 菜单模式中按键不在 `entries` 内，且未设置 `invalid_action` |
 | `dtmf_menu_timeout` | 无 | 菜单模式中超时前没有按键，且未设置 `timeout_action` |
+| `resume` | `resume_from_step_id: string?` | **续接**而非新进入：voip_bridge 播报结束后返回、且没有缓冲按键时，续流程的首次请求用 `resume` 而不是二次 `session_start`（见下文 [Resume 事件](#resume-事件挂起流程的续接)） |
+
+#### Resume 事件（挂起流程的续接）
+
+当节点以 `voip_bridge`（如 TTS bridge）把媒体交给外部服务时，IVR 执行器挂起；bridge 关闭后
+rustpbx 重启一个 IVR 实例**续接**原流程：
+
+- **有缓冲按键**：首个请求仍是 `{"type":"dtmf"}`（用户在 bridge 期间按的键）。
+- **无缓冲按键**（提示音播完 / 对端关闭 / 超时）：首个请求是
+  `{"type":"resume","resume_from_step_id":"…"}`。`resume_from_step_id` 是挂起时 bridge
+  所在节点的 `step_id`；**可能缺省**（queue return / JumpIvr 没有桥上下文）——消费方不得依赖必现。
+- `resume` **不是** `session_start` 的重复：逻辑流程的 `session_start` 只在其真正首次进入时发出
+  （exactly-once 契约）。Provider 收到 `resume` 时应从自己按 `session_id` 保存的挂起位置继续，
+  **不要**重新从入口节点开始——重新播菜单正是本事件要消除的回归。
+- 无状态 Provider 的兜底信号：请求 `variables` 中同时携带 `ivr_status=resuming` 与
+  `ivr_resume_from_step_id=<挂起节点>`（仅 bridge 挂起时有值）。
+- 兼容性：无法识别 `resume` 类型的旧 Provider 可在 provider 配置中设
+  `resume_event_mode = "session_start"` 保持旧线格式；若 `resume` 请求被远端拒绝
+  （非 2xx / 解析失败），rustpbx 会对该 `/step` 端点**自动降级**为 `session_start`
+  （进程生命周期内生效），并发送一次 `session_start` 重试。
 
 ---
 

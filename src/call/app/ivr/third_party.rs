@@ -570,6 +570,45 @@ impl ActionProvider for ThirdPartyTreeProvider {
                 Ok(self.action_for_node(&tree, &next, &mut state))
             }
 
+            Some(ProviderEvent::Resume { .. }) => {
+                // Resumed continuation of a suspended flow: re-present the
+                // node the tree was suspended on. NEVER re-enter from the
+                // tree entry — that is the "caller hears the menu again"
+                // regression this event exists to prevent. A resumed tree
+                // with no current node (suspension before the first node
+                // ran) falls back to entry semantics.
+                let tree = self.tree.lock();
+                match state.current_node_id.clone() {
+                    Some(cid) => {
+                        let node = tree.nodes.get(&cid).cloned();
+                        let Some(node) = node else {
+                            return Ok(ActionNode::new(EntryAction::hangup_none()));
+                        };
+                        info!(
+                            node = %cid,
+                            nodetype = %node.nodetype,
+                            "ThirdPartyTree: resuming at suspended node"
+                        );
+                        Ok(self.action_for_node(&tree, &node, &mut state))
+                    }
+                    None => {
+                        let entry = tree.nodes.get(&tree.entry_id).cloned();
+                        let Some(entry) = entry else {
+                            return Ok(ActionNode::new(EntryAction::hangup_none()));
+                        };
+                        let first_child_id =
+                            entry.children.get("0").cloned().filter(|s| !s.is_empty());
+                        let node_id = first_child_id.unwrap_or_else(|| tree.entry_id.clone());
+                        let node = tree.nodes.get(&node_id).cloned();
+                        let Some(node) = node else {
+                            return Ok(ActionNode::new(EntryAction::hangup_none()));
+                        };
+                        state.current_node_id = Some(node_id);
+                        Ok(self.action_for_node(&tree, &node, &mut state))
+                    }
+                }
+            }
+
             _ => Ok(ActionNode::new(EntryAction::Repeat)),
         }
     }
@@ -912,6 +951,56 @@ mod tests {
             other => panic!("expected DtmfMenu, got {other:?}"),
         }
         menu
+    }
+
+    /// `Resume` must continue at the suspended node — never re-enter from the
+    /// tree entry. Re-entering is the "caller hears the menu again" regression
+    /// this event exists to prevent (a fresh entry would replay the api node).
+    #[tokio::test]
+    async fn test_resume_continues_at_suspended_node() {
+        let provider =
+            ThirdPartyTreeProvider::from_json(&sample_tree_json(), "http://localhost".into())
+                .unwrap();
+        // Drive to the menu (current_node_id == menu_1), simulating a flow
+        // suspended while a bridge owned the media.
+        let _menu = drive_to_menu_tts(&provider).await;
+
+        let resumed = provider
+            .next_action(test_provider_ctx(ProviderEvent::Resume {
+                resume_from_step_id: Some("200003".into()),
+            }))
+            .await
+            .unwrap();
+        match &resumed.action {
+            EntryAction::DtmfMenu { greeting_text, .. } => {
+                assert_eq!(
+                    greeting_text.as_deref(),
+                    Some("主菜单请按1，人工请按0"),
+                    "resume must re-present the suspended menu node"
+                );
+            }
+            other => panic!("resume must continue at the suspended node, got {other:?}"),
+        }
+    }
+
+    /// `Resume` with no current node (suspension before the first node ran)
+    /// falls back to entry semantics.
+    #[tokio::test]
+    async fn test_resume_without_current_node_falls_back_to_entry() {
+        let provider =
+            ThirdPartyTreeProvider::from_json(&sample_tree_json(), "http://localhost".into())
+                .unwrap();
+        let resumed = provider
+            .next_action(test_provider_ctx(ProviderEvent::Resume {
+                resume_from_step_id: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            matches!(resumed.action, EntryAction::Api { .. }),
+            "cold resume must behave like a fresh entry (api child), got {:?}",
+            resumed.action
+        );
     }
 
     #[tokio::test]

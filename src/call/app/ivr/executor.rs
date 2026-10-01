@@ -1612,11 +1612,19 @@ impl StepIvrApp {
         self.current_trigger = Some(match &ctx.event {
             // A resumed flow's first node must carry the `resume` lifecycle
             // trigger — the flow already emitted session_start at its true
-            // first entry (provider protocol unchanged: still SessionStart).
+            // first entry. (Kept for the `session_start` wire-mode fallback:
+            // `StepProvider` may downgrade the `Resume` event to
+            // `session_start` for legacy endpoints.)
             Some(ProviderEvent::SessionStart) if self.resumed_flow => {
                 crate::rwi::TriggerInfo::new("resume")
             }
             Some(ProviderEvent::SessionStart) => crate::rwi::TriggerInfo::new("session_start"),
+            Some(ProviderEvent::Resume {
+                resume_from_step_id,
+            }) => crate::rwi::TriggerInfo::with_detail(
+                "resume",
+                serde_json::json!({ "resume_from_step_id": resume_from_step_id }),
+            ),
             Some(ProviderEvent::AudioComplete { .. }) => {
                 crate::rwi::TriggerInfo::new("audio_complete")
             }
@@ -2049,8 +2057,12 @@ impl CallApp for StepIvrApp {
         // instance's first node therefore carries a `dtmf` trigger (digits
         // buffered while suspended — the consumer contract for menu nodes
         // via voip_bridge) or a `resume` trigger (no digits), never a second
-        // `session_start`. The provider protocol is unchanged: it still
-        // receives SessionStart for this new instance.
+        // `session_start`. The provider protocol mirrors the trace: the
+        // resumed instance's first event is `Resume` (with
+        // `resume_from_step_id` when a bridge context is available), so a
+        // stateless provider can continue the flow instead of re-entering
+        // it. `StepProvider` adapts this to the configured wire format and
+        // auto-downgrades to `session_start` for endpoints that reject it.
         let jump_resume_marker = self
             .sess
             .variables
@@ -2084,6 +2096,18 @@ impl CallApp for StepIvrApp {
         if !resume_digits.is_empty() {
             self.clear_reentry_state(context);
         }
+        // Originating bridge-step context (`bridge_step_ctx` ivr param,
+        // written by the proxy's return-app start path when a voip_bridge
+        // suspended the flow). Parsed once here — it feeds both the
+        // no-digit resume's `Resume` event (`resume_from_step_id`, so a
+        // stateless provider can still route to the successor) and the
+        // buffered-digits pending-trace rebuild below.
+        let bridge_step_ctx: Option<BridgeStepTraceCtx> = self
+            .ivr_params
+            .as_ref()
+            .and_then(|p| p.get("bridge_step_ctx"))
+            .and_then(|v| serde_json::from_str::<BridgeStepTraceCtx>(v).ok());
+        let resume_from_step_id = bridge_step_ctx.as_ref().and_then(|c| c.step_id.clone());
         let first_event = match resume_digits.first().cloned() {
             Some(digit) => {
                 for d in resume_digits.iter().skip(1) {
@@ -2099,13 +2123,39 @@ impl CallApp for StepIvrApp {
             None => {
                 if resumed {
                     tracing::info!(
-                        "StepIvrApp: resuming suspended flow without buffered digits — first trace trigger is resume"
+                        resume_from_step_id = ?resume_from_step_id,
+                        "StepIvrApp: resuming suspended flow without buffered digits — first provider event is resume"
                     );
+                    ProviderEvent::Resume {
+                        resume_from_step_id: resume_from_step_id.clone(),
+                    }
+                } else {
+                    ProviderEvent::SessionStart
                 }
-                ProviderEvent::SessionStart
             }
         };
         self.resumed_flow = resumed;
+        if resumed {
+            // A resumed instance is a CONTINUATION, not a fresh flow: mark
+            // the runtime status and expose the suspension point so the
+            // provider request self-describes the resume even when the
+            // wire event is downgraded to `session_start`.
+            self.set_runtime_status(context, "resuming");
+            // The provider payload reads `sess.variables` (seeded from the
+            // shared vars BEFORE this point) — refresh the status there too.
+            self.sess
+                .variables
+                .insert(IVR_STATUS_KEY.to_string(), "resuming".to_string());
+            if let Some(step_id) = &resume_from_step_id {
+                self.sess
+                    .variables
+                    .insert("ivr_resume_from_step_id".to_string(), step_id.clone());
+                if let Some(runtime) = &self.runtime_vars {
+                    runtime
+                        .insert("ivr_resume_from_step_id".to_string(), step_id.clone());
+                }
+            }
+        }
 
         // Resumable bridge return with buffered digits: the proxy suppressed
         // its eager per-digit `ivr_step_trace` for this hand-off. Rebuild the
@@ -2115,12 +2165,7 @@ impl CallApp for StepIvrApp {
         // no digits → nothing to re-report (the successor's own trace carries
         // the `resume` trigger).
         if let Some(first_digit) = resume_digits.first().cloned() {
-            let bridge_ctx = self
-                .ivr_params
-                .as_ref()
-                .and_then(|p| p.get("bridge_step_ctx"))
-                .and_then(|v| serde_json::from_str::<BridgeStepTraceCtx>(v).ok());
-            if let Some(ctx) = bridge_ctx {
+            if let Some(ctx) = bridge_step_ctx.clone() {
                 self.pending_trace = Some(IvrTraceEntry {
                     session_id: context.call_info.session_id.clone(),
                     caller: context.call_info.caller.clone(),
@@ -4804,6 +4849,7 @@ mod tests {
             .map(|e| match e {
                 Some(ProviderEvent::Dtmf { digit }) => format!("dtmf:{digit}"),
                 Some(ProviderEvent::SessionStart) => "session_start".into(),
+                Some(ProviderEvent::Resume { .. }) => "resume".into(),
                 Some(ProviderEvent::AudioComplete { .. }) => "audio_complete".into(),
                 Some(other) => format!("{other:?}"),
                 None => "none".into(),
@@ -4865,6 +4911,108 @@ mod tests {
                 .as_ref()
                 .and_then(|d| d.get("digit").and_then(|v| v.as_str())),
             Some("1")
+        );
+    }
+
+    /// Bridge return WITHOUT buffered digits (prompt finished / remote close /
+    /// timeout): the resumed instance's first provider event must be `resume`
+    /// — carrying `resume_from_step_id` from the proxy-attached bridge context
+    /// — never a second `session_start`, which is what made providers
+    /// re-enter the flow (the "caller hears the menu again" regression).
+    #[tokio::test]
+    async fn test_bridge_return_no_digits_sends_resume_event_with_step_id() {
+        let provider = Arc::new(MockProvider::new(vec![ActionNode::new(EntryAction::Transfer {
+            target: "2001".into(),
+            headers: HashMap::new(),
+            params: HashMap::new(),
+            return_app: None,
+            return_target: None,
+        })]));
+
+        let mut app = StepIvrApp::with_provider(Box::new(MockProviderHandle(provider.clone())))
+            .with_name("bridge-return-ivr")
+            .with_ivr_params(serde_json::json!({
+                "ivr_resumed": "1",
+                // Serialized bridge snapshot, as the proxy's return-app start
+                // injects it on every bridge return (digit-carrying or not).
+                "bridge_step_ctx": serde_json::json!({
+                    "step_id": "1000141102024500020003",
+                    "step_name": "菜单",
+                    "extra": { "nodetype": "menu_tts" },
+                    "step_start_time": "2026-01-01T00:00:00+00:00",
+                    "step_index": 2
+                }).to_string()
+            }));
+        let trace = crate::call::app::ivr::trace::IvrTraceCollector::new();
+        app.trace = Some(trace.clone());
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+
+        stack
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(
+                2000,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        let events = first_events(&provider, 2);
+        assert_eq!(
+            events.first().map(String::as_str),
+            Some("resume"),
+            "a no-digit bridge resume must open with the resume event, got: {events:?}"
+        );
+        assert!(
+            !events.contains(&"session_start".to_string()),
+            "a resumed instance must never re-send session_start. events: {events:?}"
+        );
+
+        // The provider request must self-describe the resume even for a
+        // stateless consumer: suspension point as a variable, status
+        // `resuming` (not `starting`), and the step id on the wire event.
+        let contexts = provider.contexts.lock().unwrap();
+        let first_ctx = contexts.first().expect("provider must have been called");
+        assert_eq!(
+            first_ctx
+                .variables
+                .get("ivr_resume_from_step_id")
+                .map(String::as_str),
+            Some("1000141102024500020003"),
+            "the bridge suspension point must be exposed as a variable"
+        );
+        assert_eq!(
+            first_ctx.variables.get("ivr_status").map(String::as_str),
+            Some("resuming"),
+            "a resumed instance must not advertise itself as starting"
+        );
+        let wire_step_id = match &first_ctx.event {
+            Some(ProviderEvent::Resume {
+                resume_from_step_id,
+            }) => resume_from_step_id.clone(),
+            other => panic!("unexpected first provider event: {other:?}"),
+        };
+        assert_eq!(
+            wire_step_id.as_deref(),
+            Some("1000141102024500020003"),
+            "the resume event must carry the bridge suspension point"
+        );
+
+        // Trace contract unchanged: the executed node's trigger is `resume`.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let entries = trace.query_by_session("test-session").await;
+        let traced = entries
+            .iter()
+            .find(|e| e.trigger.r#type == "resume")
+            .expect("expected a trace entry triggered by resume");
+        assert_eq!(
+            traced
+                .trigger
+                .detail
+                .as_ref()
+                .and_then(|d| d.get("resume_from_step_id").and_then(|v| v.as_str())),
+            Some("1000141102024500020003")
         );
     }
 
@@ -5016,10 +5164,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_bridge_return_without_digits_uses_resume_trigger() {
-        // No digits buffered while suspended: the provider protocol still
-        // receives SessionStart, but the lifecycle trace trigger of the first
-        // node must be `resume` — the flow already emitted its session_start
-        // at the true first entry (exactly-once contract).
+        // No digits buffered while suspended: the provider protocol receives
+        // the explicit `Resume` event (mirroring the lifecycle trace), and
+        // the first node's trace trigger is `resume` — the flow already
+        // emitted its session_start at the true first entry (exactly-once
+        // contract). The legacy `session_start` wire shape is covered by the
+        // StepProvider downgrade test (`resume_event_mode=session_start`).
         let provider = MockProvider::new(vec![ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
             headers: HashMap::new(),
@@ -5048,8 +5198,8 @@ mod tests {
         let events = first_events(&handle.0, 1);
         assert_eq!(
             events.first().map(String::as_str),
-            Some("session_start"),
-            "provider protocol unchanged: a resume still opens with SessionStart. events: {events:?}"
+            Some("resume"),
+            "a no-digit resume must open with the explicit Resume event. events: {events:?}"
         );
 
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -5968,6 +6118,128 @@ mod tests {
                 )
             })
             .await;
+    }
+
+    /// Auto-downgrade fuse: a legacy `/step` endpoint that rejects the
+    /// `resume` event gets the request re-sent as `session_start` (single
+    /// probe attempt first — the caller must not pay the full retry budget
+    /// of dead air), and the endpoint is downgraded for the process lifetime
+    /// so later resumes skip the probe entirely.
+    #[tokio::test]
+    async fn test_step_provider_downgrades_rejected_resume_event() {
+        use axum::{Router, http::StatusCode, response::IntoResponse, routing::post};
+
+        crate::call::app::ivr::provider::reset_resume_downgrades_for_test();
+
+        let hits = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let hits_for_server = hits.clone();
+        // Legacy facade: 400 on `type=resume`, transfer on anything else.
+        let app = Router::new().route(
+            "/ivr/step",
+            post(move |body: String| {
+                let hits = hits_for_server.clone();
+                async move {
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(&body).unwrap_or_default();
+                    hits.lock().unwrap().push(parsed.clone());
+                    if parsed["event"]["type"] == "resume" {
+                        StatusCode::BAD_REQUEST.into_response()
+                    } else {
+                        axum::Json(serde_json::json!({
+                            "type": "transfer",
+                            "target": "2001"
+                        }))
+                        .into_response()
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        crate::utils::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let url = format!("http://{}:{}/ivr/step", addr.ip(), addr.port());
+
+        let provider = StepProvider::new(&url, reqwest::Client::new()).with_retry(RetryConfig {
+            max_retries: 1,
+            timeout_ms: 2000,
+            retry_delay_ms: 10,
+            fallback_action: None,
+        });
+        let mut stack = MockCallStack::run(
+            Box::new(
+                StepIvrApp::with_provider(Box::new(provider))
+                    .with_name("resume-downgrade")
+                    .with_ivr_params(serde_json::json!({ "ivr_resumed": "1" })),
+            ),
+            "1001",
+            "2000",
+        );
+        stack
+            .assert_cmd(2000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack
+            .assert_cmd(
+                2000,
+                "transfer after downgrade",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
+            .await;
+
+        let bodies = hits.lock().unwrap().clone();
+        assert!(
+            bodies.iter().any(|b| b["event"]["type"] == "resume"),
+            "the resume event must be attempted first, bodies={bodies:?}"
+        );
+        assert!(
+            bodies.iter().any(|b| b["event"]["type"] == "session_start"),
+            "the rejected resume must be re-sent as session_start, bodies={bodies:?}"
+        );
+
+        // Fuse blown for this endpoint: a brand-new provider instance must
+        // skip the resume probe entirely.
+        let probe_provider = StepProvider::new(&url, reqwest::Client::new());
+        let ctx = ProviderContext {
+            session_id: "downgrade-probe".into(),
+            app_execution_id: 2,
+            caller: "1001".into(),
+            callee: "2000".into(),
+            direction: "internal".into(),
+            tenant_id: None,
+            ivr_id: None,
+            variables: HashMap::new(),
+            sip_headers: None,
+            event: Some(ProviderEvent::Resume {
+                resume_from_step_id: None,
+            }),
+            route_name: None,
+            custom_data: None,
+            step_start_time: None,
+            step_end_time: None,
+            step_duration_ms: None,
+            step_index: Some(0),
+            transferred_from: None,
+        };
+        let node = probe_provider.next_action(ctx).await.unwrap();
+        assert!(
+            matches!(node.action, EntryAction::Transfer { .. }),
+            "downgraded endpoint must still serve the flow"
+        );
+        let bodies = hits.lock().unwrap().clone();
+        let last = bodies.last().expect("probe must have hit the endpoint");
+        assert_eq!(
+            last["event"]["type"], "session_start",
+            "downgraded endpoint must not be probed with resume again"
+        );
+        assert_eq!(
+            bodies
+                .iter()
+                .filter(|b| b["event"]["type"] == "resume")
+                .count(),
+            1,
+            "exactly one resume probe (from the full-flow episode) is expected"
+        );
     }
 
     #[tokio::test]
