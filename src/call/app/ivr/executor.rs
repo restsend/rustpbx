@@ -2836,7 +2836,7 @@ impl CallApp for StepIvrApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::call::app::ivr::{RetryConfig, StepProvider};
+    use crate::call::app::ivr::{ResumeEventMode, RetryConfig, StepProvider};
     use crate::call::app::testing::MockCallStack;
     use crate::call::app::{ApplicationContext, CallInfo};
     use crate::call::domain::CallCommand;
@@ -6118,6 +6118,92 @@ mod tests {
                 )
             })
             .await;
+    }
+
+    /// resume_event_mode = "session_start": the executor's `Resume` event is
+    /// rewritten to the legacy `session_start` on the wire WITHOUT any probe
+    /// or 400 round-trip — the escape hatch for providers that hard-fail on
+    /// unknown event types.
+    #[tokio::test]
+    async fn test_step_provider_session_start_mode_never_sends_resume() {
+        use axum::{Router, response::IntoResponse, routing::post};
+
+        let hits = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let hits_for_server = hits.clone();
+        let app = Router::new().route(
+            "/ivr/step",
+            post(move |body: String| {
+                let hits = hits_for_server.clone();
+                async move {
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(&body).unwrap_or_default();
+                    hits.lock().unwrap().push(parsed);
+                    axum::Json(serde_json::json!({
+                        "type": "transfer",
+                        "target": "2001"
+                    }))
+                    .into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        crate::utils::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let url = format!("http://{}:{}/ivr/step", addr.ip(), addr.port());
+
+        let provider = StepProvider::new(&url, reqwest::Client::new())
+            .with_resume_event_mode(ResumeEventMode::SessionStart);
+        let ctx = ProviderContext {
+            session_id: "wire-mode-test".into(),
+            app_execution_id: 2,
+            caller: "1001".into(),
+            callee: "2000".into(),
+            direction: "internal".into(),
+            tenant_id: None,
+            ivr_id: None,
+            variables: HashMap::new(),
+            sip_headers: None,
+            event: Some(ProviderEvent::Resume {
+                resume_from_step_id: Some("1000141102024500020003".into()),
+            }),
+            route_name: None,
+            custom_data: None,
+            step_start_time: None,
+            step_end_time: None,
+            step_duration_ms: None,
+            step_index: Some(0),
+            transferred_from: None,
+        };
+        let node = provider.next_action(ctx).await.unwrap();
+        assert!(
+            matches!(node.action, EntryAction::Transfer { .. }),
+            "session_start wire mode must still serve the flow"
+        );
+
+        let bodies = hits.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 1, "exactly one request, bodies={bodies:?}");
+        assert_eq!(
+            bodies[0]["event"]["type"], "session_start",
+            "session_start wire mode must never emit resume on the wire"
+        );
+    }
+
+    /// `ResumeEventMode::parse` contract: accepted spellings and rejection.
+    #[test]
+    fn test_resume_event_mode_parse() {
+        assert_eq!(ResumeEventMode::parse("resume"), Some(ResumeEventMode::Resume));
+        assert_eq!(
+            ResumeEventMode::parse("session_start"),
+            Some(ResumeEventMode::SessionStart)
+        );
+        assert_eq!(
+            ResumeEventMode::parse("sessionstart"),
+            Some(ResumeEventMode::SessionStart)
+        );
+        assert_eq!(ResumeEventMode::parse(" BOGUS "), None);
+        assert_eq!(ResumeEventMode::parse(""), None);
     }
 
     /// Auto-downgrade fuse: a legacy `/step` endpoint that rejects the
