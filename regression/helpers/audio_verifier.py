@@ -256,6 +256,23 @@ def window_rms_db(samples: np.ndarray, sample_rate: int, t0: float, t1: float):
     return rms, best_freq
 
 
+def tone_returns(rec: str | Path, freq: float,
+                 from_s: float, within_s: float = 8.0, span_s: float = 1.0,
+                 min_gain: float = -12.0, step_s: float = 0.4) -> bool:
+    """Scan a recording forward from *from_s*: True when *freq* dominates a
+    `span_s` window at ANY point within `within_s` (mapping-skew-tolerant
+    presence)."""
+    samples, sample_rate = read_wav_mono(rec)
+    total = samples.size / sample_rate
+    t = max(from_s, 0.0)
+    end = min(from_s + within_s, total - span_s)
+    while t <= end:
+        if band_gain_db(samples, sample_rate, freq, t0=t, t1=t + span_s) >= min_gain:
+            return True
+        t += step_s
+    return False
+
+
 def band_gain_db(samples: np.ndarray, sample_rate: int, freq: float,
                  width: float = 12.0, t0: float | None = None,
                  t1: float | None = None) -> float:

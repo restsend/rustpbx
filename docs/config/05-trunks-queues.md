@@ -48,7 +48,7 @@ inbound_hosts = ["203.0.113.50"] # Whitelist IPs
 | `external_ip` | string | none | Override the IP advertised in SDP `c=`/`o=` lines and ICE candidates for this trunk's legs. Replaces the profile/global RTP external IP. Essential when some trunks terminate on an overlay network (Tailscale/WireGuard) that needs a different advertised IP than the public NAT address |
 | `bind_ip` | string | none | Override the local IP RTP sockets bind to for this trunk's legs. Replaces the profile/global RTP bind IP |
 | `profile` | string | none | Network profile id from `[[network_profile]]` in the main config (Console: trunk **Media Option → Network profile**). Applies grouped RTP/SDP and SIP Contact settings; per-trunk `external_ip` / `bind_ip` override the profile when set |
-| `header_passthrough` | table | none | Control which custom headers from the original INVITE are forwarded to this trunk's outbound INVITE. `mode` is `"all"` (default), `"whitelist"`, or `"blacklist"`; `whitelist`/`blacklist` are header-name lists (case-insensitive). Standard SIP headers (`Via`/`From`/`To`/`Call-ID`/`CSeq`/`Contact`/...) are never forwarded. Unset (default) = forward nothing to external trunks; internal destinations (same realm / registered / home-proxy) always forward everything unless overridden by the route's `with_original_headers` |
+| `header_passthrough` | table | none | Control which custom headers from the original INVITE are forwarded to this trunk's outbound INVITE. `mode` is `"all"` (default), `"whitelist"`, `"blacklist"`, or `"x_only"`; `whitelist`/`blacklist` are header-name lists (case-insensitive). Standard SIP headers (`Via`/`From`/`To`/`Call-ID`/`CSeq`/`Contact`/...) are never forwarded. Unset (default) = forward nothing to external trunks; internal destinations (same realm / registered / home-proxy) always forward everything unless overridden by the route's `with_original_headers` |
 
 ### Custom Header Passthrough
 
@@ -67,7 +67,15 @@ Example trunk configuration:
 header_passthrough = { mode = "all" }                # forward all custom headers
 # header_passthrough = { mode = "whitelist", whitelist = ["X-Smart2Agent", "X-SmartParams"] }
 # header_passthrough = { mode = "blacklist", blacklist = ["X-Token"] }
+# header_passthrough = { mode = "x_only" }           # only X- prefixed headers
 ```
+
+> Desk dial-out metadata (per-key `X-<key>` headers: `X-taskid` / `X-aid` /
+> `X-callright` / …) reaches a CCF/carrier-facing trunk by configuring that
+> trunk with `header_passthrough = { mode = "x_only" }` (X- headers only) or
+> `mode = "all"`. When a trunk has no rule and the original INVITE carries
+> custom headers, the dropped header names are logged (warn) so field loss
+> is never silent.
 
 Standard SIP headers are never forwarded; only custom (non-standard) headers are subject to this rule.
 

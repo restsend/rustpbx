@@ -391,11 +391,13 @@ class RestsendAgent:
     async def publish_idle(self) -> None:
         await self.cmd({"cmd": "sip_publish", "ready": True})
 
-    async def answer(self, timeout: float = 20.0) -> bool:
-        """Wait for a NEW `sip_incoming` (the phone rang), then `sip_answer`
-        and wait for `connected`. History-safe: only events appended after
-        the call count as ringing."""
-        mark = len(self.events)
+    async def answer(self, timeout: float = 20.0,
+                     since: Optional[int] = None) -> bool:
+        """Wait for a `sip_incoming` arriving AFTER `since` (an events-list
+        index captured BEFORE triggering the dial — the INVITE can land on
+        the wire within milliseconds), answer, and wait for `connected`.
+        When `since` is omitted the mark is taken at entry."""
+        mark = len(self.events) if since is None else since
         if not await self.wait_event_after("sip_incoming", mark, timeout=timeout):
             return False
         await self.cmd({"cmd": "sip_answer"})

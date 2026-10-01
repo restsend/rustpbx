@@ -51,7 +51,7 @@ inbound_hosts = ["203.0.113.50"] # Whitelist IPs
 | `external_ip` | string | 无 | 覆盖此中继通话腿在 SDP `c=`/`o=` 行和 ICE 候选中公布的 IP，替代配置档/全局 RTP 外部 IP。当中继在 Tailscale/WireGuard 等覆盖网络终结，需要与公网 NAT 不同的公布地址时尤其重要 |
 | `bind_ip` | string | 无 | 覆盖此中继通话腿 RTP socket 绑定的本地 IP，替代配置档/全局 RTP 绑定 IP |
 | `profile` | string | 无 | 主配置 `[[network_profile]]` 的配置档 ID（Console：中继 **Media Option → Network profile**）。成组应用 RTP/SDP 和 SIP Contact 设置；设置了中继级 `external_ip` / `bind_ip` 时仍由其覆盖 |
-| `header_passthrough` | table | 无 | 控制原 INVITE 的哪些自定义头转发到该中继的出站 INVITE。`mode` 为 `"all"`（默认）、`"whitelist"` 或 `"blacklist"`；`whitelist`/`blacklist` 为头名称列表（不区分大小写）。标准 SIP 头（`Via`/`From`/`To`/`Call-ID`/`CSeq`/`Contact`/…）始终不转发。未设置（默认）时不向外部中继转发任何自定义头；内部目标（同 Realm/已注册/home-proxy）始终全部转发，除非路由的 `with_original_headers` 覆盖 |
+| `header_passthrough` | table | 无 | 控制原 INVITE 的哪些自定义头转发到该中继的出站 INVITE。`mode` 为 `"all"`（默认）、`"whitelist"`、`"blacklist"` 或 `"x_only"`；`whitelist`/`blacklist` 为头名称列表（不区分大小写）。标准 SIP 头（`Via`/`From`/`To`/`Call-ID`/`CSeq`/`Contact`/…）始终不转发。未设置（默认）时不向外部中继转发任何自定义头；内部目标（同 Realm/已注册/home-proxy）始终全部转发，除非路由的 `with_original_headers` 覆盖 |
 
 ### 自定义头透传
 
@@ -70,7 +70,14 @@ inbound_hosts = ["203.0.113.50"] # Whitelist IPs
 header_passthrough = { mode = "all" }                # forward all custom headers
 # header_passthrough = { mode = "whitelist", whitelist = ["X-Smart2Agent", "X-SmartParams"] }
 # header_passthrough = { mode = "blacklist", blacklist = ["X-Token"] }
+# header_passthrough = { mode = "x_only" }           # only X- prefixed headers
 ```
+
+> 坐席软电话外呼随路元数据（`X-taskid`/`X-aid`/`X-callright`/…，逐键
+> `X-<key>`）要到达 CCF/运营商方向的 trunk，给该 trunk 配
+> `header_passthrough = { mode = "x_only" }`（仅 X- 头）或 `mode = "all"`。
+> 中继未配置规则而原始 INVITE 携带自定义头时，丢弃的头会打 warn 日志
+> （列出被丢头名），避免「静默丢字段」。
 
 标准 SIP 头始终不转发；此规则只作用于自定义（非标准）头。
 
