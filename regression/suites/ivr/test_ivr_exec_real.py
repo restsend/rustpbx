@@ -69,6 +69,15 @@ key = "1"
 [ivr.root.entries.action]
 type = "hangup"
 ''')
+    pbx.config_builder.add_route(
+        "to-e2e-collect",
+        match={"to.user": "e2e_collect"},
+        priority=10,
+        action="application",
+        app="ivr",
+        app_params={"file": "config/ivr/e2e_collect.toml"},
+        auto_answer=True,
+    )
     pbx.config_builder.media_proxy = "all"
 
     # ── 2. Dedicated capture endpoint for ivr_exec_completed.              ─
@@ -164,11 +173,11 @@ type = "hangup"
         # exit. sipbot may or may not log these depending on version/build;
         # treat as best-effort signal, not a hard requirement (the strong
         # signals are the webhooks above).
-        try:
-            await agent.wait_output_async(r"Received re-INVITE: HOLD", timeout=5)
-            print(f"[ivr] agent hold re-INVITE observed ✓")
-        except Exception:
-            print(f"[ivr] agent hold re-INVITE not observed in sipbot log (best-effort)")
+        observed = await agent.wait_output_async(r"Received re-INVITE: HOLD", timeout=5)
+        if observed:
+            print("[ivr] agent hold re-INVITE observed ✓")
+        else:
+            print("[ivr] agent hold re-INVITE not observed in sipbot log (best-effort)")
 
         # ── 8. Assert: PBX log shows the full server-side lifecycle.      ─
         log = pbx.log_file_path.read_text(encoding="utf-8", errors="replace") \
@@ -179,6 +188,9 @@ type = "hangup"
             # ("preserve hold and routed IVR lifecycle") instead of the old
             # propagate_hold_to_leg logging site.
             "Handling hold with SDP renegotiation",
+            # hold_agent=true: after the app exits the agent leg must be
+            # unheld (sendrecv re-INVITE) so the conversation resumes.
+            "Handling unhold with SDP renegotiation",
         ):
             assert needle in log, (
                 f"missing PBX log {needle!r}. PBX log tail:\n{log[-2500:]}"

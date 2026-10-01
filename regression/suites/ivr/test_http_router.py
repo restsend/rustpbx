@@ -77,7 +77,7 @@ async def _reg_callee(sipbot_pool, pbx, port):
     return ua
 
 
-@pytest.mark.xfail(reason="WIP media layer: http_router forward bridge media allocation fails with WebRTC callers (500)")
+@pytest.mark.xfail(reason="WIP media layer: http_router forward bridge media allocation fails for WebRTC callers with a 5xx response")
 @pytest.mark.asyncio
 async def test_http_router_forwards_call(pbx, http_router, sipbot_pool):
     """[proxy.http_router] consulted for a call; response routes to the target."""
@@ -106,7 +106,8 @@ async def test_http_router_reject(pbx, http_router, sipbot_pool):
     caller = sipbot_pool.caller(
         target=f"sip:anyone@{pbx.sip_addr}", username="1001", password="123456", hangup=4,
     )
-    await caller.wait_output_async(r"403|Rejected|4[0-9][0-9]", timeout=20)
+    rejected = await caller.wait_output_async(r"403|Rejected|4[0-9][0-9]", timeout=20)
+    assert rejected, f"caller never rejected:\n{caller.output[-300:]}"
     assert not caller.get_rtp_stats().has_rx, "rejected call should have no RTP"
     assert http_router.requests, "http_router was not consulted"
 
