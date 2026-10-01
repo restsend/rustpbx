@@ -21,6 +21,80 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
+async fn connectivity_regression_ws_options_gets_200_ok() {
+    use futures::{SinkExt, StreamExt};
+    use rsipstack::transport::SipAddr;
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+
+    let port = portpicker::pick_unused_port().expect("free WS port");
+    let config = Arc::new(ProxyConfig {
+        addr: "127.0.0.1".to_string(),
+        udp_port: None,
+        ws_port: Some(port),
+        modules: Some(vec![]),
+        ..Default::default()
+    });
+    let token = CancellationToken::new();
+    let server = Arc::new(
+        SipServerBuilder::new(config)
+            .with_cancel_token(token.clone())
+            .with_user_backend(Box::new(MemoryUserBackend::new(None)))
+            .build()
+            .await
+            .expect("build WS proxy"),
+    );
+    let serving = crate::utils::spawn({
+        let server = server.clone();
+        async move { server.serve().await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let target: SipAddr = format!("127.0.0.1:{port}")
+        .parse::<std::net::SocketAddr>()
+        .unwrap()
+        .into();
+    let mut request = format!("ws://{}/", target.addr).into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("sec-websocket-protocol", "sip".parse().unwrap());
+    let (mut ws, _) = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio_tungstenite::connect_async(request),
+    )
+    .await
+    .expect("WS connect timed out")
+    .expect("WS connect failed");
+    let options = format!(
+        "OPTIONS sip:127.0.0.1:{port} SIP/2.0\r\n\
+         Via: SIP/2.0/WS 127.0.0.1;branch=z9hG4bK-ws-options\r\n\
+         From: <sip:probe@example.invalid>;tag=probe\r\n\
+         To: <sip:127.0.0.1:{port}>\r\n\
+         Call-ID: ws-options@example.invalid\r\n\
+         CSeq: 1 OPTIONS\r\n\
+         Max-Forwards: 70\r\n\
+         Content-Length: 0\r\n\r\n"
+    );
+    ws.send(Message::Text(options.into()))
+        .await
+        .expect("send OPTIONS");
+    let response = tokio::time::timeout(Duration::from_secs(2), ws.next())
+        .await
+        .expect("WS OPTIONS response timed out")
+        .expect("WS connection closed")
+        .expect("read WS response");
+    let Message::Text(response) = response else {
+        panic!("expected SIP text response, got {response:?}");
+    };
+    assert!(
+        response.starts_with("SIP/2.0 200"),
+        "WS OPTIONS must receive 200 OK, got {response}"
+    );
+
+    token.cancel();
+    serving.abort();
+}
+
+#[tokio::test]
 async fn test_proxy_full_flow() {
     // 1. Set up proxy server configuration
     let config = ProxyConfig {
