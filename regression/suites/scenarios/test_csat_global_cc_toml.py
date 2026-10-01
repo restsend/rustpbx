@@ -196,9 +196,11 @@ async def test_csat_global_cc_toml_with_post_call_ivr(
     call_id = hangup_ev.call_id
 
     # CDR must carry the surveyed score (queryable only after the call ends).
+    # The primary session ends at the caller's safety-net BYE (hangup=35),
+    # which can land well after the agent-leg call_hangup matched above.
     score = None
     cdr = None
-    for _ in range(12):
+    for _ in range(45):
         await asyncio.sleep(1)
         detail = await api.get(f"/api/cc/calls/{call_id}")
         if isinstance(detail, dict):
@@ -254,6 +256,15 @@ async def test_ivr_exec_mid_call_then_csat(
 
     pbx.config_builder.add_ivr("csat-flow", _flow_ivr(greeting))
     pbx.config_builder.add_ivr("csat-exec", _exec_collect_ivr())
+    pbx.config_builder.add_route(
+        "csat-exec-route",
+        match={"to.user": "csat-exec"},
+        priority=10,
+        action="application",
+        app="ivr",
+        app_params={"file": "config/ivr/csat-exec.toml"},
+        auto_answer=True,
+    )
     pbx.config_builder.add_queue(
         "support",
         strategy_mode="sequential",
@@ -363,7 +374,9 @@ async def test_ivr_exec_mid_call_then_csat(
 
         score = None
         cdr = None
-        for _ in range(12):
+        # Primary session ends at the caller's safety-net BYE (hangup=45),
+        # after the agent-leg call_hangup — give the CDR time to appear.
+        for _ in range(45):
             await asyncio.sleep(1)
             detail = await api.get(f"/api/cc/calls/{call_id}")
             if isinstance(detail, dict):

@@ -4832,22 +4832,10 @@ impl SipSession {
                     return Ok(());
                 }
                 _ => {
-                    // Legacy fallback (pre-routed-IVR behavior, cc-phone
-                    // `insertIvr` compat): when the route table has no
-                    // application for the route point, resolve it as an IVR
-                    // config file name. Route-table matches keep the richer
-                    // context (hints, routed headers); this only restores the
-                    // plain-file path so integrations that register bare IVR
-                    // files keep working.
-                    let file = self
-                        .server
-                        .data_context
-                        .resolve_ivr_file(route_point)
-                        .await;
-                    info!(session_id = %self.id, route_point, %file,
-                        "ivr.exec route point resolved as IVR file (no application route)");
-                    app_name = "ivr".to_string();
-                    base_params = Some(serde_json::json!({ "file": file }));
+                    warn!(session_id = %self.id, route_point,
+                        "ivr.exec route point did not resolve to an application");
+                    tx_handle.respond(rsipstack::sip::StatusCode::NotFound, None, None).await.ok();
+                    return Ok(());
                 }
             }
         } else if let Some(ivr_name) = ivr_name {
@@ -4875,13 +4863,22 @@ impl SipSession {
         // The initiating leg is whoever sent the INFO on (the agent's dynamic
         // leg in the multi-leg model — NOT necessarily the legacy "callee").
         // Falling back to "callee" keeps the single-callee behaviour intact.
+        let caller_initiated = dialog_leg
+            .as_ref()
+            .map(|leg| leg.as_str() == "caller")
+            .unwrap_or(true);
         let initiator_leg = dialog_leg
             .filter(|leg| leg.as_str() != "caller")
             .unwrap_or_else(|| LegId::from("callee"));
-        // The dialog that sent ivr.exec is the authoritative agent leg. This
-        // remains stable when consult/transfer leaves other connected legs in
-        // the session, where HashMap iteration cannot identify the owner.
-        let held_leg_id = initiator_leg.clone();
+        let held_leg_id = if caller_initiated {
+            self.legs
+                .iter()
+                .find(|(id, leg)| id.as_str() != "caller" && leg.state == LegState::Connected)
+                .map(|(id, _)| id.clone())
+                .unwrap_or_else(|| LegId::from("callee"))
+        } else {
+            initiator_leg.clone()
+        };
         {
             let mut ext = self.extensions.write();
             ext.insert(crate::proxy::proxy_call::ivr_exec_hook::IvrExecState {

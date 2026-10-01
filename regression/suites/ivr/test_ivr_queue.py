@@ -181,6 +181,15 @@ timeout_ms = 3000
 max_retries = 1
 max_retries_action = { type = "hangup" }
 ''')
+    pbx.config_builder.add_route(
+        "to-exec-target",
+        match={"to.user": "exec-target"},
+        priority=10,
+        action="application",
+        app="ivr",
+        app_params={"file": "config/ivr/exec-target.toml"},
+        auto_answer=True,
+    )
     pbx.config_builder.media_proxy = "all"
     h.boot_pbx(pbx)
 
@@ -220,6 +229,117 @@ max_retries_action = { type = "hangup" }
     )
     assert "SIP INFO rustpbx command accepted" in log, (
         f"rustpbx did not accept ivr.exec command"
+    )
+
+
+# ---------------------------------------------------------------------------
+# C2b: ivr.exec protocol error contract
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_ivr_exec_protocol_rejections(pbx, sipbot_pool, tmp_path):
+    """ivr.exec error contract pins the routed-IVR semantics:
+
+    1. unknown route_point  → route resolution warns, NO app starts — 404 semantics
+    2. route_point+ivr_name → 400 (exactly-one-of)
+    3. neither              → 400
+    4. second exec while one runs → Busy: probe app must never start
+
+    The malformed probes fire BEFORE the valid exec so the first three
+    assertions hold regardless of app state; the busy probe lands inside
+    the valid exec's run window (state spans ~5.1s → app exit ~13s).
+    """
+    from helpers import generate_sine_wav
+
+    other_greeting = tmp_path / "exec_other_never_play.wav"
+    generate_sine_wav(other_greeting, 880.0, 1.0, 8000, 0.3)
+
+    pbx.config_builder.add_ivr("exec-target", '''\
+[ivr]
+name = "exec-target"
+ivr_mode = "tree"
+[ivr.root]
+greeting_text = "You are being surveyed."
+timeout_ms = 3000
+max_retries = 1
+max_retries_action = { type = "hangup" }
+''')
+    pbx.config_builder.add_ivr("exec-other", f'''\
+[ivr]
+name = "exec-other"
+ivr_mode = "tree"
+[ivr.root]
+greeting = "{other_greeting}"
+timeout_ms = 3000
+max_retries = 1
+max_retries_action = {{ type = "hangup" }}
+''')
+    pbx.config_builder.add_route(
+        "to-exec-target",
+        match={"to.user": "exec-target"},
+        priority=10,
+        action="application",
+        app="ivr",
+        app_params={"file": "config/ivr/exec-target.toml"},
+        auto_answer=True,
+    )
+    pbx.config_builder.add_route(
+        "to-exec-other",
+        match={"to.user": "exec-other"},
+        priority=10,
+        action="application",
+        app="ivr",
+        app_params={"file": "config/ivr/exec-other.toml"},
+        auto_answer=True,
+    )
+    pbx.config_builder.media_proxy = "all"
+    h.boot_pbx(pbx)
+
+    await _reg_callee(sipbot_pool, pbx, h.ua_port(15440), "1002")
+
+    def _exec(**params):
+        return json.dumps({"action": "ivr.exec", "params": params})
+
+    info_flows_str = ";".join([
+        f"2s:application/vnd.rustpbx+json:{_exec(route_point='no-such-route-point')}",
+        f"3s:application/vnd.rustpbx+json:{_exec(route_point='exec-target', ivr_name='also-given')}",
+        f"4s:application/vnd.rustpbx+json:{_exec(request_id='no-target')}",
+        f"5s:application/vnd.rustpbx+json:{_exec(route_point='exec-target', request_id='req-valid')}",
+        f"6.5s:application/vnd.rustpbx+json:{_exec(route_point='exec-other', request_id='req-busy')}",
+    ])
+
+    caller = sipbot_pool.caller(
+        target=f"sip:1002@{pbx.sip_addr}", username="1001", password="123456",
+        hangup=16, info_flows=info_flows_str,
+    )
+    answered = await caller.wait_output_async(r"200 OK|Call established", timeout=20)
+    assert answered, f"call not answered:\n{caller.output[-1000:]}"
+
+    # 1. 404 semantics: unresolved route_point warns and starts nothing.
+    await h.wait_log(
+        pbx, r"did not resolve to an application", 10, "unknown route_point rejected"
+    )
+    # 2. 400: exactly-one-of validation (fires for both malformed probes).
+    await h.wait_log(
+        pbx, r"requires exactly one of route_point or ivr_name", 10,
+        "malformed exec rejected",
+    )
+    # 3. The valid exec is still accepted and runs.
+    await h.wait_log(pbx, r"SIP INFO rustpbx command accepted", 10, "valid exec accepted")
+
+    # Settle: let the valid exec run past the busy probe, then read the log.
+    await asyncio.sleep(4)
+
+    log = pbx.log_file_path.read_text(encoding="utf-8", errors="replace") \
+        if pbx.log_file_path else ""
+    accepted = log.count("SIP INFO rustpbx command accepted")
+    assert accepted == 1, (
+        f"expected exactly 1 accepted ivr.exec (the valid one), got {accepted} — "
+        f"busy/malformed probes must not start apps. Log tail:\n{log[-2000:]}"
+    )
+    assert "exec_other_never_play" not in log, (
+        f"busy probe (second exec while one runs) was not rejected — "
+        f"exec-other app started. Log tail:\n{log[-2000:]}"
     )
 
 

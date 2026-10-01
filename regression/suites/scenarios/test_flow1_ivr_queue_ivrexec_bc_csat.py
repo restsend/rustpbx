@@ -257,6 +257,15 @@ async def test_flow1_ivr_queue_ivrexec_bc_transfer_csat(
         # ── 1. Config: IVRs + queue + route; CSAT after_transfer on group. ─
         pbx.config_builder.add_ivr("flow1", _flow1_ivr(greeting))
         pbx.config_builder.add_ivr("flow1_collect", _collect_ivr())
+        pbx.config_builder.add_route(
+            "flow1-collect-route",
+            match={"to.user": "flow1_collect"},
+            priority=10,
+            action="application",
+            app="ivr",
+            app_params={"file": "config/ivr/flow1_collect.toml"},
+            auto_answer=True,
+        )
         pbx.config_builder.add_queue(
             "support",
             strategy_mode="sequential",
@@ -389,16 +398,12 @@ async def test_flow1_ivr_queue_ivrexec_bc_transfer_csat(
         assert tid, f"no transfer_id: {body!r:.200}"
 
         # Consult leg must actually answer before merge (merge 409s otherwise).
-        # NOTE: no RTP assertion here — the B↔consult private-talk bridge
-        # carries no audio until the merge; the UA's 200 OK is the answer
-        # signal. (PUT /connected is skipped: a same-session consult is
-        # already marked Connected-pending-answer at /consult time, and the
-        # LegConnected hook unblocks merge/complete.)
-        answered_a = await agent_a.wait_output_async(
-            r"200 OK|Answered|Call established", timeout=20,
-        )
-        assert answered_a, (
-            f"consult target {AGENT_A} never answered:\n{agent_a.output[-800:]}"
+        # agent_a's stdout still carries the earlier bc-transfer answer, so a
+        # UA output match fires instantly — wait for the PBX LegConnected
+        # marker instead. (PUT /connected is skipped: a same-session consult
+        # is already marked Connected-pending-answer at /consult time.)
+        await h.wait_log(
+            pbx, r"Consult leg connected", 20, "consult leg answered"
         )
 
         status, merge_body = await api.raw_request(
@@ -450,7 +455,9 @@ async def test_flow1_ivr_queue_ivrexec_bc_transfer_csat(
         # ── 9. CDR must carry the surveyed score.                            ─
         score = None
         cdr = None
-        for _ in range(12):
+        # Primary session ends at the caller's safety-net BYE, after the
+        # agent-leg call_hangup — give the CDR time to appear.
+        for _ in range(45):
             await asyncio.sleep(1)
             detail = await api.get(f"/api/cc/calls/{call_id}")
             if isinstance(detail, dict):
