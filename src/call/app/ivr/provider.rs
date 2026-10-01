@@ -266,6 +266,7 @@ impl Default for RetryConfig {
                 step_id: None,
                 step_name: None,
                 extra: None,
+                result_variables: HashMap::new(),
             }),
         }
     }

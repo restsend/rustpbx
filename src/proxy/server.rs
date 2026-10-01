@@ -1516,6 +1516,11 @@ impl SipServer {
                 .as_ref()
                 .and_then(|conn| conn.get_remote_addr())
                 .and_then(crate::proxy::routing::source_addr_ip);
+            let source_transport = tx
+                .connection
+                .as_ref()
+                .and_then(|conn| conn.get_remote_addr())
+                .and_then(|addr| addr.r#type);
 
             if let Some(max_concurrency) = self.inner.proxy_config.load().max_concurrency
                 && runnings_tx.load(Ordering::Relaxed) >= max_concurrency
@@ -1590,6 +1595,10 @@ impl SipServer {
                         .map(|ip| ip.to_string())
                         .unwrap_or_else(|| "unknown".to_string());
                     if tx.original.method == rsipstack::sip::Method::Options {
+                        let from_websocket = matches!(
+                            source_transport,
+                            Some(Transport::Ws | Transport::Wss)
+                        );
                         let from_trusted_proxy = source_ip.is_some_and(|ip| {
                             self.inner
                                 .proxy_config
@@ -1611,8 +1620,8 @@ impl SipServer {
                         } else {
                             false
                         };
-                        if is_trunk || from_trusted_proxy {
-                            info!(key = %tx.key, via_ip = %via_ip_str, ?source_ip, "responding 200 OK OPTIONS (trunk or proxy health probe)");
+                        if from_websocket || is_trunk || from_trusted_proxy {
+                            info!(key = %tx.key, via_ip = %via_ip_str, ?source_ip, ?source_transport, "responding 200 OK to connectivity OPTIONS");
                             tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
                             continue;
                         }

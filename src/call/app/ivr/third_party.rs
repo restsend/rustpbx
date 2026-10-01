@@ -321,6 +321,7 @@ impl ThirdPartyTreeProvider {
             step_id: None,
             step_name: None,
             extra: None,
+            result_variables: HashMap::new(),
         }
     }
 

@@ -170,6 +170,8 @@ impl fmt::Debug for CallSessionContext {
 pub struct IvrExecCompletion {
     /// If set, the session will unhold this leg (restore to sendrecv).
     pub unhold_leg: Option<LegId>,
+    /// Policy resources acquired while resolving the application route.
+    pub route_hints: Option<crate::config::DialplanHints>,
     /// If set, the session will send a SIP INFO to this leg with the given
     /// content-type and body.
     pub result_info: Option<SendInfoSpec>,
@@ -247,7 +249,11 @@ pub trait CallSessionHook: Send + Sync {
     /// post-exit actions (unhold, send INFO result, etc.).
     ///
     /// The default implementation returns `None` (no action).
-    async fn on_app_exited(&self, _ctx: &CallSessionContext) -> Option<IvrExecCompletion> {
+    async fn on_app_exited(
+        &self,
+        _ctx: &CallSessionContext,
+        _app_execution_id: Option<u64>,
+    ) -> Option<IvrExecCompletion> {
         None
     }
 }

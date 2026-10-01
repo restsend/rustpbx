@@ -259,6 +259,12 @@ pub(super) fn forward_dtmf_event(
     callee: &str,
     sip_headers: Option<std::collections::HashMap<String, String>>,
 ) -> bool {
+    // Call applications are attached to the caller leg. Agent-side INFO must
+    // still be forwarded to its SIP peer, but it is never authoritative input
+    // for an IVR/menu application (the RTP path already listens to caller only).
+    if leg_id != "caller" {
+        return false;
+    }
     let digit_str = digit.to_string();
     if let Some(tx) = bridge_dtmf_tx.read().as_ref() {
         let _ = tx.send(

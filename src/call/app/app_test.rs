@@ -163,7 +163,9 @@ mod tests {
 
     // ── 3. Remote hangup handled gracefully ───────────────────────────────────
 
-    struct WaitForeverApp;
+    struct WaitForeverApp {
+        exits: EventLog,
+    }
 
     #[async_trait]
     impl CallApp for WaitForeverApp {
@@ -182,11 +184,23 @@ mod tests {
             ctrl.answer().await?;
             Ok(AppAction::Continue)
         }
+
+        async fn on_exit(&mut self, reason: crate::call::app::ExitReason) -> Result<()> {
+            self.exits.lock().unwrap().push(format!("{reason:?}"));
+            Ok(())
+        }
     }
 
     #[tokio::test]
     async fn test_remote_hangup_exits_loop() {
-        let mut stack = MockCallStack::run(Box::new(WaitForeverApp), "1001", "9000");
+        let exits = new_log();
+        let mut stack = MockCallStack::run(
+            Box::new(WaitForeverApp {
+                exits: exits.clone(),
+            }),
+            "1001",
+            "9000",
+        );
         stack
             .assert_cmd(100, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })
@@ -199,6 +213,7 @@ mod tests {
             .join()
             .await
             .expect("loop should exit without error after remote hangup");
+        assert_eq!(logged(&exits), vec!["RemoteHangup(None)"]);
     }
 
     struct BlockingApp {
@@ -659,7 +674,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancel_exits_cleanly() {
-        let mut stack = MockCallStack::run(Box::new(WaitForeverApp), "1001", "9999");
+        let mut stack = MockCallStack::run(
+            Box::new(WaitForeverApp { exits: new_log() }),
+            "1001",
+            "9999",
+        );
         stack
             .assert_cmd(100, "AcceptCall", |c| {
                 matches!(c, CallCommand::Answer { .. })

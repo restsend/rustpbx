@@ -4,7 +4,9 @@
 use crate::call::app::ApplicationContext;
 use crate::call::app::CallApp;
 use crate::call::domain::ReturnAppSpec;
-use crate::proxy::proxy_call::ivr_exec_hook::{IvrExecResult, IvrExecState};
+use crate::proxy::proxy_call::ivr_exec_hook::{
+    IvrExecHandoff, IvrExecResult, IvrExecState,
+};
 use crate::proxy::proxy_call::session_hooks::SessionExtensions;
 use dashmap::DashMap;
 use std::collections::HashMap;
@@ -174,9 +176,46 @@ pub fn append_return_app_to_uri(
 }
 
 /// Write an [`IvrExecResult`] when the session was started via `ivr.exec`.
-pub fn write_ivr_exec_result(extensions: &SessionExtensions, result: IvrExecResult) {
-    if extensions.read().get::<IvrExecState>().is_some() {
-        extensions.write().insert(result);
+pub fn write_ivr_exec_result(
+    extensions: &SessionExtensions,
+    app_execution_id: u64,
+    mut result: IvrExecResult,
+) {
+    let mut guard = extensions.write();
+    let active_app_execution_id = guard
+        .get::<IvrExecState>()
+        .and_then(|state| state.app_execution_id);
+    let is_active_generation = active_app_execution_id == Some(app_execution_id);
+    let suspended_segment_index = if is_active_generation {
+        None
+    } else {
+        guard
+            .get_mut::<IvrExecHandoff>()
+            .and_then(|handoff| {
+                handoff.pending_app_execution_ids.remove(&app_execution_id)
+            })
+    };
+    if let Some(segment_index) = suspended_segment_index {
+        result.app_execution_id = Some(app_execution_id);
+        if let Some(handoff) = guard.get_mut::<IvrExecHandoff>() {
+            handoff.completed_results.insert(segment_index, result);
+            handoff.result_ready.notify_one();
+        }
+    } else if is_active_generation {
+        if let Some(previous) = guard
+            .remove::<IvrExecResult>()
+            .filter(|previous| previous.app_execution_id != Some(app_execution_id))
+        {
+            for (name, value) in previous.collected {
+                result.collected.entry(name).or_insert(value);
+            }
+            let mut trace = previous.trace;
+            trace.extend(result.trace);
+            result.trace = trace;
+            result.duration_ms = previous.duration_ms.saturating_add(result.duration_ms);
+        }
+        result.app_execution_id = Some(app_execution_id);
+        guard.insert(result);
     }
 }
 
@@ -202,6 +241,7 @@ pub fn build_ivr_exec_result(
     duration_ms: u64,
 ) -> IvrExecResult {
     IvrExecResult {
+        app_execution_id: None,
         status: status.to_string(),
         reason: reason.to_string(),
         routing_target,
@@ -212,10 +252,23 @@ pub fn build_ivr_exec_result(
     }
 }
 
+/// Map detailed IVR end reasons to the stable `ivr.exec` status contract.
+pub(super) fn ivr_exec_status(reason: &str) -> &'static str {
+    match reason {
+        "normal" => "completed",
+        "transfer" | "transferred" | "transfer_to_queue" | "transfer_to_ivr" => {
+            "transferred"
+        }
+        _ => "failed",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::call::app::CallInfo;
+    use crate::call::domain::LegId;
+    use crate::proxy::proxy_call::ivr_exec_hook::{IvrExecResult, IvrExecState};
     use std::sync::Arc;
 
     fn make_ctx() -> ApplicationContext {
@@ -253,5 +306,269 @@ mod tests {
         publish_sub_app_exit(&ctx, "csat_survey", "completed");
         assert_eq!(ctx.get_var(SUB_APP_NAME_KEY), Some("csat_survey".into()));
         assert_eq!(ctx.get_var(SUB_APP_STATUS_KEY), Some("completed".into()));
+    }
+
+    #[test]
+    fn resumed_ivr_exec_result_preserves_collected_values_from_previous_segments() {
+        let extensions = crate::proxy::proxy_call::session_hooks::SessionExtensions::new();
+        {
+            let mut guard = extensions.write();
+            guard.insert(IvrExecState {
+                app_execution_id: Some(2),
+                request_id: "request-resume".to_string(),
+                held_leg: None,
+                initiator_leg: LegId::from("callee"),
+                webhook_url: None,
+                app_name: "ivr".to_string(),
+                metadata: serde_json::Value::Null,
+            });
+            guard.insert(IvrExecResult {
+                app_execution_id: Some(1),
+                status: "transferred".to_string(),
+                reason: "transfer_to_ivr".to_string(),
+                routing_target: Some("toivr:next".to_string()),
+                collected: [
+                    ("dtmf_input".to_string(), "7".to_string()),
+                    ("decision".to_string(), "old".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                trace: vec![serde_json::json!({"segment": 1})],
+                duration_ms: 10,
+                completion_time: "2026-09-29T00:00:00Z".to_string(),
+            });
+}
+
+        write_ivr_exec_result(
+            &extensions,
+            2,
+            build_ivr_exec_result(
+                "completed",
+                "normal",
+                None,
+                [
+                    ("api_result".to_string(), "ok".to_string()),
+                    ("decision".to_string(), "new".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                20,
+            ),
+        );
+
+        let result = crate::proxy::proxy_call::ivr_exec_hook::combined_ivr_exec_result(
+            &extensions,
+            Some(2),
+        )
+            .expect("resumed flow must publish one combined result");
+        assert_eq!(result.status, "completed");
+        assert_eq!(result.reason, "normal");
+        assert_eq!(result.collected["dtmf_input"], "7");
+        assert_eq!(result.collected["api_result"], "ok");
+        assert_eq!(result.collected["decision"], "new");
+        assert_eq!(result.trace, vec![serde_json::json!({"segment": 1})]);
+        assert_eq!(result.duration_ms, 30);
+    }
+
+    #[test]
+    fn suspended_generation_can_publish_its_intermediate_result_after_transfer() {
+        let extensions = crate::proxy::proxy_call::session_hooks::SessionExtensions::new();
+        extensions.write().insert(IvrExecState {
+            app_execution_id: Some(1),
+            request_id: "request-late-result".to_string(),
+            held_leg: None,
+            initiator_leg: LegId::from("callee"),
+            webhook_url: None,
+            app_name: "ivr".to_string(),
+            metadata: serde_json::Value::Null,
+        });
+
+        assert!(crate::proxy::proxy_call::ivr_exec_hook::suspend_ivr_exec(
+            &extensions,
+        ));
+        write_ivr_exec_result(
+            &extensions,
+            1,
+            build_ivr_exec_result(
+                "transferred",
+                "transfer_to_ivr",
+                Some("toivr:next".to_string()),
+                [("dtmf_input".to_string(), "7".to_string())]
+                    .into_iter()
+                    .collect(),
+                10,
+            ),
+        );
+        assert!(crate::proxy::proxy_call::ivr_exec_hook::bind_ivr_exec(
+            &extensions,
+            2,
+        ));
+        write_ivr_exec_result(
+            &extensions,
+            2,
+            build_ivr_exec_result(
+                "completed",
+                "normal",
+                None,
+                [("api_result".to_string(), "ok".to_string())]
+                    .into_iter()
+                    .collect(),
+                20,
+            ),
+        );
+
+        let result = crate::proxy::proxy_call::ivr_exec_hook::combined_ivr_exec_result(
+            &extensions,
+            Some(2),
+        )
+            .expect("final result must combine both app generations");
+        assert_eq!(result.status, "completed");
+        assert_eq!(result.collected["dtmf_input"], "7");
+        assert_eq!(result.collected["api_result"], "ok");
+        assert_eq!(result.duration_ms, 30);
+    }
+
+    #[test]
+    fn late_suspended_result_does_not_replace_the_successor_completion() {
+        let extensions = crate::proxy::proxy_call::session_hooks::SessionExtensions::new();
+        extensions.write().insert(IvrExecState {
+            app_execution_id: Some(1),
+            request_id: "request-late-result".to_string(),
+            held_leg: None,
+            initiator_leg: LegId::from("callee"),
+            webhook_url: None,
+            app_name: "ivr".to_string(),
+            metadata: serde_json::Value::Null,
+        });
+
+        assert!(crate::proxy::proxy_call::ivr_exec_hook::suspend_ivr_exec(
+            &extensions,
+        ));
+        assert!(crate::proxy::proxy_call::ivr_exec_hook::bind_ivr_exec(
+            &extensions,
+            2,
+        ));
+        write_ivr_exec_result(
+            &extensions,
+            2,
+            build_ivr_exec_result(
+                "completed",
+                "normal",
+                None,
+                [("decision".to_string(), "new".to_string())]
+                    .into_iter()
+                    .collect(),
+                20,
+            ),
+        );
+        write_ivr_exec_result(
+            &extensions,
+            1,
+            build_ivr_exec_result(
+                "transferred",
+                "transfer_to_ivr",
+                Some("toivr:next".to_string()),
+                [
+                    ("dtmf_input".to_string(), "7".to_string()),
+                    ("decision".to_string(), "old".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                10,
+            ),
+        );
+
+        let result = crate::proxy::proxy_call::ivr_exec_hook::combined_ivr_exec_result(
+            &extensions,
+            Some(2),
+        )
+            .expect("successor completion must remain authoritative");
+        assert_eq!(result.app_execution_id, Some(2));
+        assert_eq!(result.status, "completed");
+        assert_eq!(result.reason, "normal");
+        assert_eq!(result.routing_target, None);
+        assert_eq!(result.collected["dtmf_input"], "7");
+        assert_eq!(result.collected["decision"], "new");
+        assert_eq!(result.duration_ms, 30);
+    }
+
+    #[test]
+    fn pending_ivr_exec_results_follow_segment_order() {
+        let extensions = crate::proxy::proxy_call::session_hooks::SessionExtensions::new();
+        extensions.write().insert(IvrExecState {
+            app_execution_id: Some(1),
+            request_id: "request-ordered-results".to_string(),
+            held_leg: None,
+            initiator_leg: LegId::from("callee"),
+            webhook_url: None,
+            app_name: "ivr".to_string(),
+            metadata: serde_json::Value::Null,
+        });
+
+        assert!(crate::proxy::proxy_call::ivr_exec_hook::suspend_ivr_exec(
+            &extensions,
+        ));
+        assert!(crate::proxy::proxy_call::ivr_exec_hook::bind_ivr_exec(
+            &extensions,
+            2,
+        ));
+        assert!(crate::proxy::proxy_call::ivr_exec_hook::suspend_ivr_exec(
+            &extensions,
+        ));
+        assert!(crate::proxy::proxy_call::ivr_exec_hook::bind_ivr_exec(
+            &extensions,
+            3,
+        ));
+
+        let mut second = build_ivr_exec_result(
+            "transferred",
+            "transfer_to_ivr",
+            None,
+            [("decision".to_string(), "new".to_string())]
+                .into_iter()
+                .collect(),
+            20,
+        );
+        second.trace = vec![serde_json::json!({"segment": 2})];
+        write_ivr_exec_result(&extensions, 2, second);
+
+        let mut first = build_ivr_exec_result(
+            "transferred",
+            "transfer_to_ivr",
+            None,
+            [("decision".to_string(), "old".to_string())]
+                .into_iter()
+                .collect(),
+            10,
+        );
+        first.trace = vec![serde_json::json!({"segment": 1})];
+        write_ivr_exec_result(&extensions, 1, first);
+
+        let mut third = build_ivr_exec_result(
+            "completed",
+            "normal",
+            None,
+            HashMap::new(),
+            30,
+        );
+        third.trace = vec![serde_json::json!({"segment": 3})];
+        write_ivr_exec_result(&extensions, 3, third);
+
+        let result = crate::proxy::proxy_call::ivr_exec_hook::combined_ivr_exec_result(
+            &extensions,
+            Some(3),
+        )
+            .expect("all segments must produce one ordered result");
+        assert_eq!(result.status, "completed");
+        assert_eq!(result.collected["decision"], "new");
+        assert_eq!(
+            result.trace,
+            vec![
+                serde_json::json!({"segment": 1}),
+                serde_json::json!({"segment": 2}),
+                serde_json::json!({"segment": 3}),
+            ]
+        );
+        assert_eq!(result.duration_ms, 60);
     }
 }

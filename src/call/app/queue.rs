@@ -2463,6 +2463,9 @@ impl CallApp for QueueApp {
                         }
                         ctrl.bridge(crate::call::domain::LegId::from("caller"),
                             crate::call::domain::LegId::from(agent_leg.clone()))?;
+                        // Queue handoff resumes the held caller only after selecting
+                        // the new agent, so the previous pair cannot resume briefly.
+                        ctrl.unhold("caller").await?;
                         info!(agent = %agent_uri, "Queue: agent connected");
                         // The requested bridge replaces queue playback.
                         // A queued stop could run after
