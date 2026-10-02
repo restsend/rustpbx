@@ -122,9 +122,30 @@ pub async fn check_update(
     Ok(info)
 }
 
-/// Compute a short digest of the first configured license key (first 8
-/// characters of the key sorted by key name for determinism). Returns `None`
-/// when no license key is configured.
+/// Stable, non-reversible digest of a license key.
+///
+/// `SHA-256(trim(key))` truncated to the first 8 bytes, rendered as 16
+/// lowercase hex characters. The full key is never sent; the digest is stable
+/// across restarts and precise enough to identify one license among thousands
+/// (the previous implementation took the first 8 *characters*, which for
+/// `TRIAL-…` keys left only two meaningful characters).
+///
+/// The server stores this as `licenses.license_key_hash`, so the algorithm
+/// must stay byte-identical on both sides.
+#[cfg(feature = "commerce")]
+pub fn license_key_digest(key: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(key.trim().as_bytes());
+    let mut out = String::with_capacity(16);
+    for byte in digest.as_slice().iter().take(8) {
+        out.push_str(&format!("{:02x}", byte));
+    }
+    out
+}
+
+/// Compute the digest of the first configured license key (sorted by key name
+/// for determinism). Returns `None` when no license key is configured.
 #[cfg(feature = "commerce")]
 fn compute_license_digest(state: &crate::app::AppState) -> Option<String> {
     let licenses = state.config().licenses.as_ref()?;
@@ -132,7 +153,7 @@ fn compute_license_digest(state: &crate::app::AppState) -> Option<String> {
     if key.is_empty() {
         return None;
     }
-    Some(key.chars().take(8).collect())
+    Some(license_key_digest(key))
 }
 
 /// Spawn a background task that periodically checks for updates (at startup and
@@ -207,4 +228,30 @@ pub fn spawn_update_checker(
             }
         }
     });
+}
+
+#[cfg(all(test, feature = "commerce"))]
+mod license_digest_tests {
+    use super::license_key_digest;
+
+    #[test]
+    fn digest_is_stable_unique_and_does_not_leak_the_key() {
+        let key = "TRIAL-8M9NkEuvTrpaPaGMSgde";
+        let d = license_key_digest(key);
+
+        assert_eq!(d.len(), 16, "8 bytes rendered as hex");
+        assert!(d.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // Deterministic and whitespace-insensitive.
+        assert_eq!(d, license_key_digest(key));
+        assert_eq!(d, license_key_digest(&format!("  {key}  ")));
+
+        // Distinct keys must not collide.
+        assert_ne!(d, license_key_digest("TRIAL-8M9NkEuvTrpaPaGMSgdf"));
+
+        // The old scheme sent the first 8 characters of the key verbatim;
+        // for TRIAL- keys that was a two-character discriminator.
+        assert_ne!(d, "TRIAL-8M");
+        assert!(!d.to_uppercase().contains("TRIAL"));
+    }
 }
