@@ -21,7 +21,10 @@ use std::{
     future::{Future, pending},
     path::Path,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::{
@@ -425,6 +428,50 @@ pub trait CallRecordHook: Send + Sync {
     /// Side-effect phase: runs **after** the batch has been saved. Used for
     /// uploads, webhook emission, billing, CSAT linkage, metrics, etc.
     async fn on_record_completed(&self, _records: &mut [CallRecord]) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// Core hook that maintains the in-process lifetime call counters exposed by
+/// `/ami/v1/health`, the stats log and the `total_calls` update-check
+/// telemetry.
+///
+/// * `total_calls` counts **every** completed call record, whatever the result
+///   (this matches the `rustpbx_calls_total` Prometheus counter).
+/// * `total_failed_calls` is the subset with a status code of 400 or above.
+///
+/// The counters are plain in-memory atomics that start at zero on every
+/// process start; consumers pair them with the reported `uptime` to know over
+/// what period they accumulated.
+pub struct CallCountHook {
+    total_calls: Arc<AtomicU64>,
+    total_failed_calls: Arc<AtomicU64>,
+}
+
+impl CallCountHook {
+    pub fn new(total_calls: Arc<AtomicU64>, total_failed_calls: Arc<AtomicU64>) -> Self {
+        Self {
+            total_calls,
+            total_failed_calls,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl CallRecordHook for CallCountHook {
+    async fn on_record_completed(&self, records: &mut [CallRecord]) -> anyhow::Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+
+        let failed = records.iter().filter(|r| r.status_code >= 400).count() as u64;
+
+        self.total_calls
+            .fetch_add(records.len() as u64, Ordering::Relaxed);
+        if failed > 0 {
+            self.total_failed_calls.fetch_add(failed, Ordering::Relaxed);
+        }
+
         Ok(())
     }
 }

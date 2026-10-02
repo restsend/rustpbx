@@ -79,8 +79,12 @@ pub struct AppStateInner {
     pub sip_server: SipServer,
     pub http_client: reqwest::Client,
     pub skip_migrate: bool,
-    pub total_calls: AtomicU64,
-    pub total_failed_calls: AtomicU64,
+    /// In-process lifetime counters, shared with `CallCountHook` (registered on
+    /// the call-record manager). `Arc` because the hook is built before the app
+    /// state exists. They reset on process restart — `uptime` is reported
+    /// alongside so consumers can tell since when they accumulated.
+    pub total_calls: Arc<AtomicU64>,
+    pub total_failed_calls: Arc<AtomicU64>,
     pub uptime: DateTime<Utc>,
     pub config_loaded_at: DateTime<Utc>,
     pub config_path: Option<String>,
@@ -366,6 +370,13 @@ impl AppStateBuilder {
         // has been built below.
         let sipflow_slot: crate::callrecord::sipflow::SipFlowSlot =
             Arc::new(std::sync::OnceLock::new());
+
+        // Lifetime call counters. Created here (before the app state exists) so
+        // the same `Arc`s can be handed to `CallCountHook`, which is registered
+        // on the call-record manager below.
+        let total_calls_counter = Arc::new(AtomicU64::new(0));
+        let total_failed_calls_counter = Arc::new(AtomicU64::new(0));
+
         let callrecord_sender = if let Some(sender) = self.callrecord_sender {
             Some(sender)
         } else {
@@ -448,6 +459,14 @@ impl AppStateBuilder {
             for hook in addon_registry.get_call_record_hooks(&config, &db_conn) {
                 builder = builder.with_hook(hook);
             }
+
+            // Core hook maintaining the lifetime call counters read by
+            // `/ami/v1/health`, the stats log and the `total_calls`
+            // update-check telemetry.
+            builder = builder.with_hook(Box::new(crate::callrecord::CallCountHook::new(
+                total_calls_counter.clone(),
+                total_failed_calls_counter.clone(),
+            )));
 
             let manager = builder.build().await?;
             let sender = manager.sender.clone();
@@ -640,8 +659,8 @@ impl AppStateBuilder {
             sip_server,
             http_client,
             skip_migrate: self.skip_migrate,
-            total_calls: AtomicU64::new(0),
-            total_failed_calls: AtomicU64::new(0),
+            total_calls: total_calls_counter.clone(),
+            total_failed_calls: total_failed_calls_counter.clone(),
             uptime: chrono::Utc::now(),
             config_loaded_at,
             config_path,

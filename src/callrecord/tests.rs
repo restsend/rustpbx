@@ -1934,3 +1934,35 @@ async fn test_ensure_session_id_column_patches_legacy_table() {
     );
     assert_eq!(count_rows(&db, table).await, 1);
 }
+
+/// `CallCountHook` counts every completed call record (all results, which is
+/// what the `total_calls` telemetry field is defined to mean) and tracks the
+/// >= 400 subset in `total_failed_calls`.
+#[tokio::test]
+async fn call_count_hook_counts_all_and_failed() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let total = Arc::new(AtomicU64::new(0));
+    let failed = Arc::new(AtomicU64::new(0));
+    let hook = CallCountHook::new(total.clone(), failed.clone());
+
+    // An empty batch must not bump anything.
+    let mut empty: Vec<CallRecord> = Vec::new();
+    hook.on_record_completed(&mut empty).await.unwrap();
+    assert_eq!(total.load(Ordering::Relaxed), 0);
+    assert_eq!(failed.load(Ordering::Relaxed), 0);
+
+    let mut ok = make_record();
+    ok.status_code = 200;
+    let mut rejected = make_record();
+    rejected.status_code = 486;
+    let mut server_err = make_record();
+    server_err.status_code = 503;
+
+    hook.on_record_completed(&mut [ok, rejected, server_err])
+        .await
+        .unwrap();
+
+    assert_eq!(total.load(Ordering::Relaxed), 3, "every completed leg counts");
+    assert_eq!(failed.load(Ordering::Relaxed), 2, ">=400 counts as failed");
+}

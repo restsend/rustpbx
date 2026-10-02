@@ -343,7 +343,10 @@ async fn healthz_handler(State(state): State<AppState>) -> impl IntoResponse {
             "status": "ok",
             "uptime_seconds": uptime_seconds,
             "version": crate::version::get_short_version(),
-            "active_calls": state.total_calls.load(std::sync::atomic::Ordering::Relaxed),
+            // Currently active (in-progress) calls. This used to report
+            // `state.total_calls`, a lifetime counter, which was both the wrong
+            // source and the wrong semantic for an "active" gauge.
+            "active_calls": state.sip_server().inner.active_call_registry.count(),
         })),
     )
 }
