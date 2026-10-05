@@ -86,7 +86,7 @@ pub async fn handle_locator_webhook(config: LocatorWebhookConfig, mut rx: Locato
         };
 
         let (event_name, dto) = match event {
-            LocatorEvent::Registered(loc) => (
+            LocatorEvent::Registered(loc) | LocatorEvent::Refreshed(loc) => (
                 "registered",
                 LocatorEventDto {
                     event: "registered".to_string(),

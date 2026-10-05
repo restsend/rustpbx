@@ -92,6 +92,8 @@ async fn test_registrar_register_success() {
     // Create test server with user backend and locator
     let (server_inner, config) = create_test_server().await;
 
+    let mut events = server_inner.locator_events.as_ref().unwrap().subscribe();
+
     // Create REGISTER request
     let request = create_register_request("alice", "rustpbx.com", Some(50));
 
@@ -138,6 +140,87 @@ async fn test_registrar_register_success() {
         location.home_proxy.is_some(),
         "registrar should stamp home_proxy for clustered routing"
     );
+
+    #[cfg(feature = "contact-center")]
+    {
+        use crate::addons::cc::agent::{AgentRegistry, AgentStatus};
+        use crate::addons::cc::registrar_bridge::CcRegistrarBridge;
+        use crate::proxy::cluster_event::{ClusterEventHandler, ClusterLocatorMessage, EventSource};
+        use crate::proxy::presence::{PresenceManager, PresenceStatus};
+        use sea_orm::ActiveModelTrait;
+        use sea_orm_migration::MigratorTrait;
+
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        crate::models::migration::Migrator::up(&db, None).await.unwrap();
+        crate::addons::cc::migration::Migrator::up(&db, None).await.unwrap();
+        crate::addons::cc::models::cc_agent::ActiveModel {
+            agent_id: sea_orm::Set("agent-alice".to_string()),
+            primary_endpoint: sea_orm::Set(Some("alice".to_string())),
+            skills: sea_orm::Set(serde_json::json!([])),
+            max_concurrency: sea_orm::Set(1),
+            is_active: sea_orm::Set(true),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        let local = Arc::new(AgentRegistry::with_db(db.clone()));
+        let peer = Arc::new(AgentRegistry::with_db(db));
+        let local_bridge = CcRegistrarBridge::new(local.clone());
+        let peer_bridge = CcRegistrarBridge::new(peer.clone());
+        let local_presence = PresenceManager::new(None);
+        let peer_presence = PresenceManager::new(None);
+        let remote_source = EventSource::Remote("127.0.0.2:5060".parse().unwrap());
+
+        for stage in ["initial", "refresh", "unregister", "relogin", "new-contact", "explicit"] {
+            if matches!(stage, "refresh" | "new-contact" | "explicit") {
+                for registry in [&local, &peer] {
+                    registry.update_status("agent-alice", AgentStatus::Offline).await.unwrap();
+                }
+                for manager in [&local_presence, &peer_presence] {
+                    let mut state = manager.get_state("alice");
+                    state.status = PresenceStatus::Offline;
+                    manager.update_state("alice", state, &EventSource::Local).await;
+                }
+            }
+            if stage != "initial" {
+                let mut request = create_register_request(
+                    "alice", "rustpbx.com", Some(if stage == "unregister" { 0 } else { 50 }),
+                );
+                if matches!(stage, "new-contact" | "explicit") {
+                    request.headers.retain(|h| !matches!(h, Header::Contact(_)));
+                    request.headers.push(Header::Contact("<sip:alice-new@127.0.0.1:5060>".into()));
+                }
+                if stage == "explicit" {
+                    request.headers.push(Header::Other("X-CC-Presence".into(), "idle".into()));
+                }
+                let (mut tx, _) = create_transaction(request).await;
+                module.on_transaction_begin(CancellationToken::new(), &mut tx, TransactionCookie::default())
+                    .await.unwrap();
+            }
+            let event = events.try_recv().unwrap();
+            let wire = serde_json::to_vec(&ClusterLocatorMessage::from(&event)).unwrap();
+            let peer_event = serde_json::from_slice::<ClusterLocatorMessage>(&wire).unwrap().to_event().unwrap();
+            local_presence.handle_locator_event(event.clone(), &EventSource::Local).await;
+            peer_presence.handle_locator_event(peer_event.clone(), &remote_source).await;
+            local_bridge.on_locator_event(&event, &EventSource::Local).await;
+            peer_bridge.on_locator_event(&peer_event, &remote_source).await;
+            let expected = if matches!(stage, "refresh" | "unregister" | "new-contact" | "explicit") {
+                "offline"
+            } else {
+                "idle"
+            };
+            for registry in [&local, &peer] {
+                assert_eq!(registry.get_agent("agent-alice").await.unwrap().status.to_string(), expected,
+                    "registration stage {stage} must preserve the agent's business state");
+            }
+            assert_eq!(local_presence.get_state("alice").status.to_string(),
+                if stage == "explicit" { "idle" } else { expected }, "presence stage {stage}");
+            if stage != "explicit" {
+                assert_eq!(peer_presence.get_state("alice").status.to_string(), expected, "peer presence stage {stage}");
+            }
+        }
+    }
 }
 
 #[tokio::test]

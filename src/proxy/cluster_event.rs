@@ -125,6 +125,7 @@ impl ClusterLocatorMessage {
         };
         match self.event.as_str() {
             "registered" => Some(LocatorEvent::Registered(loc)),
+            "refreshed" => Some(LocatorEvent::Refreshed(loc)),
             "unregistered" => Some(LocatorEvent::Unregistered(loc)),
             _ => None,
         }
@@ -159,11 +160,11 @@ impl ClusterPresenceMessage {
 impl From<&LocatorEvent> for ClusterLocatorMessage {
     fn from(ev: &LocatorEvent) -> Self {
         match ev {
-            LocatorEvent::Registered(loc) | LocatorEvent::Unregistered(loc) => {
-                let event = if matches!(ev, LocatorEvent::Registered(_)) {
-                    "registered"
-                } else {
-                    "unregistered"
+            LocatorEvent::Registered(loc) | LocatorEvent::Refreshed(loc) | LocatorEvent::Unregistered(loc) => {
+                let event = match ev {
+                    LocatorEvent::Registered(_) => "registered",
+                    LocatorEvent::Refreshed(_) => "refreshed",
+                    _ => "unregistered",
                 };
                 ClusterLocatorMessage {
                     event: event.to_string(),
