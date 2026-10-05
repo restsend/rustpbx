@@ -542,19 +542,28 @@ impl AppStateBuilder {
                 let call_record_hooks = addon_registry.get_call_record_hooks(&config, &db_conn);
 
                 let bans = match config.security.as_ref() {
-                    Some(security) => match crate::security::BanStore::load(
-                        db_conn.clone(),
-                        security.bans.clone(),
-                        security.alerts.webhook_url.clone(),
-                    )
-                    .await
-                    {
-                        Ok(store) => Some(store),
-                        Err(e) => {
-                            tracing::error!("failed to load ban store: {e}");
-                            None
+                    Some(security) => {
+                        let mail = config.mail.as_ref().and_then(|mail_config| {
+                            crate::mail::transport_from_config(Some(mail_config))
+                                .map(|transport| (transport, mail_config.to.clone()))
+                        });
+                        match crate::security::BanStore::load(
+                            db_conn.clone(),
+                            security.bans.clone(),
+                            security.alerts.webhook_url.clone(),
+                            mail,
+                        )
+                        .await
+                        {
+                            Ok(store) => Some(
+                                store.with_branding(addon_registry.branding_provider()),
+                            ),
+                            Err(e) => {
+                                tracing::error!("failed to load ban store: {e}");
+                                None
+                            }
                         }
-                    },
+                    }
                     None => None,
                 };
 

@@ -76,6 +76,8 @@ pub struct ConsoleState {
     callrecord_cfg: Option<CallRecordConfig>,
     /// Connection cache for daily rotated SQLite files.
     cdr_conn_cache: Arc<DashMap<String, DatabaseConnection>>,
+    #[cfg(test)]
+    test_branding_provider: Arc<RwLock<Option<Arc<dyn crate::branding::BrandingProvider>>>>,
 }
 
 /// Trait for addon state types that can be stored in ConsoleState.
@@ -113,6 +115,8 @@ impl ConsoleState {
             addon_extensions: Arc::new(std::sync::RwLock::new(http::Extensions::new())),
             callrecord_cfg,
             cdr_conn_cache: Arc::new(DashMap::new()),
+            #[cfg(test)]
+            test_branding_provider: Arc::new(RwLock::new(None)),
         }))
     }
 
@@ -265,17 +269,24 @@ impl ConsoleState {
                     serde_json::Value::String("community".to_string())
                 }
             });
-            let brand = if let Some(app_state) = self.app_state() {
+            let brand = {
                 let request_host = map
                     .get("request_host")
                     .and_then(|value| value.as_str())
                     .map(|value| value.to_string());
-                crate::branding::resolve_for_host(
-                    app_state.addon_registry.branding_provider().as_ref(),
-                    request_host.as_deref(),
-                )
-            } else {
-                crate::branding::BrandContext::default()
+                #[cfg(test)]
+                let test_provider = self
+                    .test_branding_provider
+                    .read()
+                    .ok()
+                    .and_then(|guard| guard.clone());
+                #[cfg(not(test))]
+                let test_provider: Option<Arc<dyn crate::branding::BrandingProvider>> = None;
+                let provider = test_provider.or_else(|| {
+                    self.app_state()
+                        .and_then(|app_state| app_state.addon_registry.branding_provider())
+                });
+                crate::branding::resolve_for_host(provider.as_ref(), request_host.as_deref())
             };
             map.entry("site_name").or_insert_with(|| {
                 serde_json::Value::String(brand.site_name.clone())
@@ -606,6 +617,16 @@ impl ConsoleState {
         }
     }
 
+    #[cfg(test)]
+    pub fn set_test_branding_provider(
+        &self,
+        provider: Option<Arc<dyn crate::branding::BrandingProvider>>,
+    ) {
+        if let Ok(mut slot) = self.test_branding_provider.write() {
+            *slot = provider;
+        }
+    }
+
     pub fn app_state(&self) -> Option<Arc<AppStateInner>> {
         self.app_state
             .read()
@@ -792,9 +813,12 @@ mod tests {
     use crate::config::ConsoleConfig;
     use crate::models::migration::Migrator;
     use crate::models::rbac::{self, user_role};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
     use chrono::Utc;
     use sea_orm::{ActiveValue::Set, Database};
     use sea_orm_migration::MigratorTrait;
+    use tower::ServiceExt;
 
     fn make_user(id: i64, is_superuser: bool) -> crate::models::user::Model {
         let now = Utc::now();
@@ -1005,5 +1029,137 @@ mod tests {
 
         let non_object = state.inject_request_host(serde_json::json!("plain"), &headers);
         assert_eq!(non_object, serde_json::json!("plain"));
+    }
+
+    async fn login_cookie(app: &axum::Router, base_path: &str) -> String {
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("{base_path}/login"))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from("identifier=admin&password=password123"))
+            .expect("build login request");
+        let response = app.clone().oneshot(request).await.expect("login request");
+        assert!(
+            response.status().is_redirection(),
+            "expected login redirect, got {}",
+            response.status()
+        );
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(';'))
+            .map(|part| part.trim())
+            .find(|part| part.starts_with("rustpbx_session="))
+            .map(|part| part.to_string())
+            .expect("session cookie set on login")
+    }
+
+    async fn response_body(response: Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    #[tokio::test]
+    async fn login_then_render_dashboard_over_http() {
+        let state = setup_state().await;
+        state
+            .create_user("admin@example.com", "admin", "password123")
+            .await
+            .expect("seed admin user");
+        let app = router(state.clone());
+        let cookie = login_cookie(&app, state.base_path()).await;
+
+        let request = Request::builder()
+            .uri(format!("{}/", state.base_path()))
+            .header(header::COOKIE, cookie)
+            .body(Body::empty())
+            .expect("build dashboard request");
+        let response = app.oneshot(request).await.expect("dashboard request");
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = response_body(response).await;
+        assert!(!html.is_empty(), "dashboard body should not be empty");
+        assert!(html.contains("<html"), "expected an HTML document");
+    }
+
+    #[tokio::test]
+    async fn host_branding_renders_tenant_brand() {
+        use crate::branding::{BrandContext, BrandingProvider};
+        use std::sync::Arc as StdArc;
+
+        struct TestBranding;
+
+        impl BrandingProvider for TestBranding {
+            fn brand(&self) -> BrandContext {
+                BrandContext {
+                    site_name: "Global Site".to_string(),
+                    ..Default::default()
+                }
+            }
+
+            fn brand_for_host(&self, host: &str) -> Option<BrandContext> {
+                if host == "tenant.example.com" {
+                    Some(BrandContext {
+                        site_name: "Tenant Site".to_string(),
+                        ..Default::default()
+                    })
+                } else {
+                    None
+                }
+            }
+        }
+
+        let state = setup_state().await;
+        state.set_test_branding_provider(Some(StdArc::new(TestBranding)));
+        state
+            .create_user("admin@example.com", "admin", "password123")
+            .await
+            .expect("seed admin user");
+        let app = router(state.clone());
+        let cookie = login_cookie(&app, state.base_path()).await;
+
+        let tenant = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("{}/", state.base_path()))
+                    .header(header::COOKIE, cookie.clone())
+                    .header(header::HOST, "tenant.example.com")
+                    .body(Body::empty())
+                    .expect("build tenant request"),
+            )
+            .await
+            .expect("tenant request");
+        assert_eq!(tenant.status(), StatusCode::OK);
+        let tenant_html = response_body(tenant).await;
+        assert!(
+            tenant_html.contains("Tenant Site"),
+            "tenant host should render the tenant brand"
+        );
+
+        let other = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("{}/", state.base_path()))
+                    .header(header::COOKIE, cookie)
+                    .header(header::HOST, "other.example.com")
+                    .body(Body::empty())
+                    .expect("build fallback request"),
+            )
+            .await
+            .expect("fallback request");
+        assert_eq!(other.status(), StatusCode::OK);
+        let other_html = response_body(other).await;
+        assert!(
+            other_html.contains("Global Site"),
+            "unmatched host should fall back to the global brand"
+        );
+        assert!(
+            !other_html.contains("Tenant Site"),
+            "unmatched host must not render the tenant brand"
+        );
     }
 }

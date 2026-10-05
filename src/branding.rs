@@ -37,6 +37,18 @@ pub trait BrandingProvider: Send + Sync {
     fn brand_for_host(&self, _host: &str) -> Option<BrandContext> {
         None
     }
+
+    fn email_from_name(&self) -> Option<String> {
+        None
+    }
+
+    fn email_footer(&self) -> Option<String> {
+        None
+    }
+
+    fn email_template(&self) -> Option<crate::mail::EmailTemplate> {
+        None
+    }
 }
 
 pub struct DefaultBranding;

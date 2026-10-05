@@ -1,3 +1,4 @@
+use crate::mail::MailConfig;
 use crate::rwi::auth::RwiConfig;
 use crate::{
     call::{CallRecordingConfig, DialDirection, QueuePlan, user::SipUser},
@@ -570,6 +571,8 @@ pub struct Config {
     /// Security hardening (auth-failure bans, alert webhook).
     #[serde(default)]
     pub security: Option<SecurityConfig>,
+    #[serde(default)]
+    pub mail: Option<MailConfig>,
     #[serde(default)]
     pub rwi: Option<RwiConfig>,
     #[serde(default)]
@@ -2394,6 +2397,7 @@ impl Default for Config {
             sso: None,
             addons: HashMap::new(),
             security: None,
+            mail: None,
             rwi_webhook: None,
             cluster: None,
             outbound: None,

@@ -22,6 +22,7 @@ pub mod handler;
 pub mod license;
 pub mod log_reload;
 pub mod log_viewer;
+pub mod mail;
 
 pub use rustpbx_http_util as http_util;
 pub use rustpbx_media as media;

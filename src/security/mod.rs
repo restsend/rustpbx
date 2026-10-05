@@ -21,6 +21,8 @@ pub struct BanStore {
     db: DatabaseConnection,
     config: BanConfig,
     webhook_url: Option<String>,
+    mail: Option<(Arc<dyn crate::mail::MailTransport>, Vec<String>)>,
+    branding: parking_lot::RwLock<Option<Arc<dyn crate::branding::BrandingProvider>>>,
     http: reqwest::Client,
     banned: ArcSwap<HashMap<IpAddr, Instant>>,
     failures: parking_lot::Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
@@ -32,11 +34,14 @@ impl BanStore {
         db: DatabaseConnection,
         config: BanConfig,
         webhook_url: Option<String>,
+        mail: Option<(Arc<dyn crate::mail::MailTransport>, Vec<String>)>,
     ) -> anyhow::Result<Arc<Self>> {
         let store = Self {
             db,
             config,
             webhook_url,
+            mail,
+            branding: parking_lot::RwLock::new(None),
             http: reqwest::Client::new(),
             banned: ArcSwap::from_pointee(HashMap::new()),
             failures: parking_lot::Mutex::new(HashMap::new()),
@@ -56,11 +61,30 @@ impl BanStore {
             db,
             config,
             webhook_url,
+            mail: None,
+            branding: parking_lot::RwLock::new(None),
             http: reqwest::Client::new(),
             banned: ArcSwap::from_pointee(HashMap::new()),
             failures: parking_lot::Mutex::new(HashMap::new()),
             now,
         }
+    }
+
+    pub fn with_branding(
+        self: Arc<Self>,
+        provider: Option<Arc<dyn crate::branding::BrandingProvider>>,
+    ) -> Arc<Self> {
+        *self.branding.write() = provider;
+        self
+    }
+
+    pub fn with_mail(
+        mut self,
+        transport: Arc<dyn crate::mail::MailTransport>,
+        recipients: Vec<String>,
+    ) -> Self {
+        self.mail = Some((transport, recipients));
+        self
     }
 
     pub async fn reload(&self) -> anyhow::Result<()> {
@@ -230,11 +254,78 @@ impl BanStore {
     }
 
     fn emit_alert(&self, payload: serde_json::Value) {
+        self.emit_webhook_alert(&payload);
+        self.emit_mail_alert(&payload);
+    }
+
+    fn emit_mail_alert(&self, payload: &serde_json::Value) {
+        let Some((transport, recipients)) = self.mail.clone() else {
+            return;
+        };
+        let alert_type = payload
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("alert");
+        let ip = payload
+            .get("ip")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let default_subject = format!("rustpbx {}: {}", alert_type, ip);
+        let default_body = serde_json::to_string_pretty(payload).unwrap_or_default();
+        let branding = self.branding.read().clone();
+        let (subject, body) = match branding.as_ref().and_then(|p| p.email_template()) {
+            Some(template) => {
+                let vars = [
+                    ("alert_type", alert_type),
+                    ("ip", ip),
+                    ("payload", default_body.as_str()),
+                ];
+                let rendered_subject = crate::mail::render_template(&template.subject, &vars);
+                let rendered_body = crate::mail::render_template(&template.body, &vars);
+                let subject = if rendered_subject.is_empty() {
+                    default_subject.clone()
+                } else {
+                    rendered_subject
+                };
+                let body = if rendered_body.is_empty() {
+                    default_body.clone()
+                } else {
+                    rendered_body
+                };
+                (subject, body)
+            }
+            None => (default_subject.clone(), default_body.clone()),
+        };
+        crate::utils::spawn(async move {
+            for delay_secs in [1u64, 5u64, 15u64] {
+                let mut mail = crate::mail::OutboundMail {
+                    to: recipients.clone(),
+                    subject: subject.clone(),
+                    body: body.clone(),
+                    from_name: None,
+                    footer: None,
+                    attachments: Vec::new(),
+                };
+                crate::mail::apply_brand(&mut mail, branding.as_ref());
+                match transport.send(&mail).await {
+                    Ok(()) => return,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "alert mail send failed");
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+            }
+            tracing::error!("alert mail delivery abandoned after retries");
+        });
+    }
+
+    fn emit_webhook_alert(&self, payload: &serde_json::Value) {
         let Some(url) = self.webhook_url.as_ref() else {
             return;
         };
         let url = url.clone();
         let http = self.http.clone();
+        let payload = payload.clone();
         crate::utils::spawn(async move {
             for delay_secs in [1u64, 5u64, 15u64] {
                 match http.post(&url).json(&payload).send().await {
@@ -428,5 +519,156 @@ mod tests {
         store.record_auth_failure(external, "u", "REGISTER").await;
         store.record_auth_failure(external, "u", "REGISTER").await;
         assert!(store.is_banned(&external));
+    }
+
+    #[derive(Default)]
+    struct CapturingMail {
+        messages: parking_lot::Mutex<Vec<(Vec<String>, String)>>,
+        bodies: parking_lot::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::mail::MailTransport for CapturingMail {
+        async fn send(&self, mail: &crate::mail::OutboundMail) -> anyhow::Result<()> {
+            self.messages
+                .lock()
+                .push((mail.to.clone(), mail.subject.clone()));
+            self.bodies.lock().push(mail.body.clone());
+            Ok(())
+        }
+    }
+
+    struct TemplateBrand;
+
+    impl crate::branding::BrandingProvider for TemplateBrand {
+        fn brand(&self) -> crate::branding::BrandContext {
+            crate::branding::BrandContext::default()
+        }
+
+        fn email_template(&self) -> Option<crate::mail::EmailTemplate> {
+            Some(crate::mail::EmailTemplate {
+                subject: "alert {{alert_type}} at {{ip}}".to_string(),
+                body: "type={{alert_type}}\nip={{ip}}\ndata={{payload}}".to_string(),
+            })
+        }
+    }
+
+    async fn wait_for_mail(capture: &CapturingMail) {
+        for _ in 0..100 {
+            if !capture.messages.lock().is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn ban_emits_mail_when_configured() {
+        let db = migrated_db().await;
+        let (_clock, now) = FakeClock::new();
+        let capture = Arc::new(CapturingMail::default());
+        let store = BanStore::with_clock(db, cfg(2, vec![60], vec![]), None, now).with_mail(
+            capture.clone() as Arc<dyn crate::mail::MailTransport>,
+            vec!["ops@example.com".to_string()],
+        );
+        let target = ip("7.7.7.7");
+        store.record_auth_failure(target, "u", "REGISTER").await;
+        store.record_auth_failure(target, "u", "REGISTER").await;
+
+        for _ in 0..100 {
+            if !capture.messages.lock().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let messages = capture.messages.lock();
+        assert_eq!(messages.len(), 1, "ban must produce exactly one mail");
+        assert_eq!(messages[0].0, vec!["ops@example.com".to_string()]);
+        assert!(messages[0].1.starts_with("rustpbx auth_ban"));
+    }
+
+    struct PartialTemplateBrand;
+
+    impl crate::branding::BrandingProvider for PartialTemplateBrand {
+        fn brand(&self) -> crate::branding::BrandContext {
+            crate::branding::BrandContext::default()
+        }
+
+        fn email_template(&self) -> Option<crate::mail::EmailTemplate> {
+            Some(crate::mail::EmailTemplate {
+                subject: String::new(),
+                body: "custom {{alert_type}} {{ip}}".to_string(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn ban_mail_uses_branding_template_when_configured() {
+        let db = migrated_db().await;
+        let (_clock, now) = FakeClock::new();
+        let capture = Arc::new(CapturingMail::default());
+        let store = BanStore::with_clock(db, cfg(2, vec![60], vec![]), None, now).with_mail(
+            capture.clone() as Arc<dyn crate::mail::MailTransport>,
+            vec!["ops@example.com".to_string()],
+        );
+        let store = Arc::new(store).with_branding(Some(Arc::new(TemplateBrand)));
+
+        let target = ip("7.7.7.7");
+        store.record_auth_failure(target, "u", "REGISTER").await;
+        store.record_auth_failure(target, "u", "REGISTER").await;
+        wait_for_mail(&capture).await;
+
+        let messages = capture.messages.lock();
+        let bodies = capture.bodies.lock();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].1, "alert auth_ban at 7.7.7.7");
+        assert!(bodies[0].starts_with("type=auth_ban\nip=7.7.7.7\n"));
+        assert!(bodies[0].contains("\"type\": \"auth_ban\""));
+    }
+
+    #[tokio::test]
+    async fn ban_mail_keeps_default_when_no_branding_template() {
+        let db = migrated_db().await;
+        let (_clock, now) = FakeClock::new();
+        let capture = Arc::new(CapturingMail::default());
+        let store = BanStore::with_clock(db, cfg(2, vec![60], vec![]), None, now).with_mail(
+            capture.clone() as Arc<dyn crate::mail::MailTransport>,
+            vec!["ops@example.com".to_string()],
+        );
+
+        let target = ip("7.7.7.7");
+        store.record_auth_failure(target, "u", "REGISTER").await;
+        store.record_auth_failure(target, "u", "REGISTER").await;
+        wait_for_mail(&capture).await;
+
+        let messages = capture.messages.lock();
+        let bodies = capture.bodies.lock();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].1, "rustpbx auth_ban: 7.7.7.7");
+        assert!(bodies[0].starts_with("{\n"));
+        assert!(bodies[0].contains("\"type\": \"auth_ban\""));
+    }
+
+    #[tokio::test]
+    async fn ban_mail_template_falls_back_for_empty_rendered_field() {
+        let db = migrated_db().await;
+        let (_clock, now) = FakeClock::new();
+        let capture = Arc::new(CapturingMail::default());
+        let store = BanStore::with_clock(db, cfg(2, vec![60], vec![]), None, now).with_mail(
+            capture.clone() as Arc<dyn crate::mail::MailTransport>,
+            vec!["ops@example.com".to_string()],
+        );
+        let store = Arc::new(store).with_branding(Some(Arc::new(PartialTemplateBrand)));
+
+        let target = ip("7.7.7.7");
+        store.record_auth_failure(target, "u", "REGISTER").await;
+        store.record_auth_failure(target, "u", "REGISTER").await;
+        wait_for_mail(&capture).await;
+
+        let messages = capture.messages.lock();
+        let bodies = capture.bodies.lock();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].1, "rustpbx auth_ban: 7.7.7.7");
+        assert_eq!(bodies[0], "custom auth_ban 7.7.7.7");
     }
 }
