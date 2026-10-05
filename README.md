@@ -30,6 +30,27 @@ docker exec rustpbx /app/rustpbx --conf /app/config.toml \
   --super-username admin --super-password changeme
 ```
 
+#### Editions
+
+RustPBX ships as four Docker images — the same core, with more addons baked in:
+
+| Edition | Image | Highlights |
+|---|---|---|
+| Community | `ghcr.io/restsend/rustpbx:latest` | Core PBX + queue / archive / transcript / acme addons |
+| Commerce | `docker.cnb.cool/miuda.ai/rustpbx:commerce` | + license platform, branded outbound mail |
+| Wholesale | `docker.cnb.cool/miuda.ai/rustpbx:wholesale` | + voice wholesale trading (rates, billing, trunks) |
+| Contact Center | `docker.cnb.cool/miuda.ai/rustpbx:cc` | + agents, skill groups, ACD, wallboards |
+
+```bash
+# e.g. run the Contact Center edition
+docker run -d --name rustpbx --net host \
+  -v $(pwd)/config.toml:/app/config.toml \
+  docker.cnb.cool/miuda.ai/rustpbx:cc --conf /app/config.toml
+```
+
+> Commercial editions run in trial mode out of the box; set `[licenses]` in
+> your config to activate a key. See the [addon guide](src/addons/README.md).
+
 ### Option 2: Build from source
 
 ```bash
