@@ -393,15 +393,4 @@ pub mod acme;
 pub mod archive;
 #[cfg(feature = "addon-transcript")]
 pub mod transcript;
-#[cfg(feature = "addon-wholesale")]
-pub mod wholesale;
-
-#[cfg(feature = "addon-cc")]
-pub mod cc;
 pub mod queue;
-
-#[cfg(feature = "addon-voicemail")]
-pub mod voicemail;
-
-#[cfg(feature = "addon-ivr-editor")]
-pub mod ivr_editor;
