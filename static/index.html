@@ -190,6 +190,34 @@
             word-break: normal;
         }
 
+        .probe-table {
+            width: 100%;
+            max-width: 760px;
+            margin: 0 auto 30px;
+            border-collapse: collapse;
+            background: var(--white);
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+        }
+
+        .probe-table th,
+        .probe-table td {
+            padding: 10px 16px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+            font-size: 0.95rem;
+        }
+
+        .probe-table th {
+            background: #fafafa;
+            color: var(--secondary);
+        }
+
+        .probe-table tr:last-child td {
+            border-bottom: none;
+        }
+
         .programmable {
             padding: 60px 0;
             background-color: var(--white);
@@ -504,6 +532,48 @@ docker exec rustpbx /app/rustpbx --conf /app/config.toml \
         </div>
     </section>
 
+    <section id="probe" class="programmable">
+        <div class="container">
+            <div class="section-title">
+                <h2>Verify Your Deployment</h2>
+                <p>Dial our live probe — full SIP + audio, end to end. No signup.</p>
+            </div>
+            <table class="probe-table">
+                <tr>
+                    <th>Dial</th>
+                    <th>You get</th>
+                </tr>
+                <tr>
+                    <td><code class="inline">sip:echo@probe.rustpbx.com</code></td>
+                    <td>Answers and echoes your audio back</td>
+                </tr>
+                <tr>
+                    <td><code class="inline">sip:ivr@probe.rustpbx.com</code></td>
+                    <td>IVR menu — press 1 / 2 / *</td>
+                </tr>
+                <tr>
+                    <td><code class="inline">sip:voicemail@probe.rustpbx.com</code></td>
+                    <td>Rings 5s, then records a voicemail</td>
+                </tr>
+                <tr>
+                    <td><code class="inline">sip:reject@probe.rustpbx.com</code></td>
+                    <td>Rejects with 486</td>
+                </tr>
+                <tr>
+                    <td><code class="inline">sip:busy@probe.rustpbx.com</code></td>
+                    <td>486 Busy</td>
+                </tr>
+                <tr>
+                    <td><code class="inline">sip:offline@probe.rustpbx.com</code></td>
+                    <td>480 Offline</td>
+                </tr>
+            </table>
+            <p style="text-align: center;">Dial from any SIP client or your outbound trunk, or open the web tester at
+                <a href="https://probe.rustpbx.com">probe.rustpbx.com</a>.
+            </p>
+        </div>
+    </section>
+
     <footer>
         <div class="container">
             <p>&copy; 2026 Miuda.ai. All rights reserved.</p>
@@ -513,6 +583,7 @@ docker exec rustpbx /app/rustpbx --conf /app/config.toml \
                 <a href="https://github.com/restsend/rustpbx/blob/main/docs/configuration.md">Configuration</a>
                 <a href="https://github.com/restsend/rustpbx/blob/main/docs/api_integration_guide.md">API Guide</a>
                 <a href="https://github.com/restsend/rustpbx/blob/main/docs/rwi.md">RWI Protocol</a>
+                <a href="https://probe.rustpbx.com">SIP Probe</a>
             </div>
         </div>
     </footer>

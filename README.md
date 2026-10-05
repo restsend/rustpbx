@@ -56,6 +56,19 @@ That's it — the example config boots a full PBX out of the box:
 
 > No config at all? `cargo run --release` also works — built-in defaults: HTTP `0.0.0.0:8080`, SQLite, SIP UDP `5060`.
 
+### Verify your install
+
+Dial our live probe from any registered extension (e.g. `bob`) or point an outbound trunk at it — no signup:
+
+| Dial | You get |
+|---|---|
+| `sip:echo@probe.rustpbx.com` | Answers and echoes your audio back |
+| `sip:ivr@probe.rustpbx.com` | IVR menu — press 1 / 2 / * |
+| `sip:voicemail@probe.rustpbx.com` | Rings 5s, then records a voicemail |
+| `sip:reject` / `busy` / `offline` | 486 / 486 / 480 |
+
+Full SIP + bidirectional RTP, end to end. Interactive tester: **[probe.rustpbx.com](https://probe.rustpbx.com)**
+
 ### Minimal config
 
 Want your own `config.toml`? This is all you need:
@@ -130,6 +143,8 @@ SIP 401 behind NAT/Docker — set the realm explicitly:
 [proxy]
 realms = ["your-public-ip:5060"]
 ```
+
+Not sure your outbound path works? Dial `sip:echo@probe.rustpbx.com` — if you hear yourself, signaling and RTP are fine.
 
 ## Contributors
 

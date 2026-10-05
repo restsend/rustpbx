@@ -68,6 +68,7 @@ tests/bench/
 todo_lists/
 recordings/
 e2e-artifacts/
+e2e-screenshots/
 tests/logs/
 regression/artifacts/
 regression/report*
