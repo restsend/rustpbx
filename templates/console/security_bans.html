@@ -1,0 +1,52 @@
+{% extends "console/layout.html" %}
+{% block title %}{{ "security_bans.title" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
+{% block content %}
+<div class="p-6">
+    <div class="mx-auto max-w-5xl space-y-6">
+        <header class="space-y-1">
+            <h1 class="text-xl font-semibold text-slate-900">{{ "security_bans.title" | t }}</h1>
+            <p class="text-sm text-slate-500">{{ "security_bans.description" | t }}</p>
+        </header>
+
+        <div class="overflow-hidden rounded-lg border border-slate-200 bg-white">
+            <table class="min-w-full divide-y divide-slate-200 text-sm">
+                <thead class="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                    <tr>
+                        <th class="px-4 py-3">{{ "security_bans.ip" | t }}</th>
+                        <th class="px-4 py-3">{{ "security_bans.reason" | t }}</th>
+                        <th class="px-4 py-3">{{ "security_bans.offense_count" | t }}</th>
+                        <th class="px-4 py-3">{{ "security_bans.last_username" | t }}</th>
+                        <th class="px-4 py-3">{{ "security_bans.banned_until" | t }}</th>
+                        <th class="px-4 py-3 text-right">{{ "security_bans.actions" | t }}</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100">
+                    {% for ban in bans %}
+                    <tr>
+                        <td class="px-4 py-3 font-mono text-slate-900">{{ ban.ip }}</td>
+                        <td class="px-4 py-3 text-slate-600">{{ ban.reason }}</td>
+                        <td class="px-4 py-3 text-slate-600">{{ ban.offense_count }}</td>
+                        <td class="px-4 py-3 text-slate-600">{{ ban.last_username | default('-') }}</td>
+                        <td class="px-4 py-3 text-slate-600">{{ ban.banned_until }}</td>
+                        <td class="px-4 py-3 text-right">
+                            <form method="post" action="{{ base_path }}/security/bans/{{ ban.ip }}/release">
+                                <button type="submit"
+                                    class="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700">
+                                    {{ "security_bans.release" | t }}
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="6" class="px-4 py-8 text-center text-slate-400">
+                            {{ "security_bans.empty" | t }}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -18,6 +18,7 @@ async fn test_network_conference_factory_and_existing_calls() {
     let mut users = crate::common::test_helpers::standard_test_users();
     for user in &mut users { user.is_support_webrtc = false; }
     let server = Arc::new(E2eTestServer::start_with_inject(config, E2eTestServerInject {
+            bans: None,
             queue_enricher: None, users, ..Default::default() }).await.unwrap());
     let factory = format!("sip:conference@{}", server.proxy_addr);
     let mut effective = (*server.server_ref.proxy_config.load_full()).clone();
@@ -174,6 +175,7 @@ async fn test_attended_refer_existing_cross_session_dialogs() {
     let gateway = rustpbx::rwi::gateway::RwiGateway::new();
     let mut rwi_events = gateway.subscribe_events();
     let server = Arc::new(E2eTestServer::start_with_inject(config, E2eTestServerInject {
+            bans: None,
         users, rwi_gateway: Some(Arc::new(parking_lot::RwLock::new(gateway))), ..Default::default()
     }).await.unwrap());
     let factory = format!("sip:conference@{}", server.proxy_addr);
@@ -398,6 +400,7 @@ timeout_action = { type = "repeat" }
     let gateway = rustpbx::rwi::gateway::RwiGateway::new();
     let mut rwi_events = gateway.subscribe_events();
     let server = Arc::new(E2eTestServer::start_with_inject(config, E2eTestServerInject {
+            bans: None,
         users, rwi_gateway: Some(Arc::new(parking_lot::RwLock::new(gateway))), ..Default::default()
     }).await.unwrap());
     let alice = server.create_ua("alice").await.unwrap();

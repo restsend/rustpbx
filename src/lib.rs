@@ -34,6 +34,7 @@ pub mod proc_stats;
 pub mod proxy;
 pub mod report;
 pub mod rwi;
+pub mod security;
 pub mod shutdown;
 pub use rustpbx_sipflow as sipflow;
 pub use rustpbx_storage as storage;

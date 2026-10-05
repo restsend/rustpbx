@@ -21,6 +21,7 @@ impl MigratorTrait for Migrator {
             Box::new(super::add_leg_timeline_column::Migration),
             Box::new(super::add_rewrite_columns::Migration),
             Box::new(super::system_notification::Migration),
+            Box::new(super::security_ban::Migration),
             Box::new(super::add_user_mfa_columns::Migration),
             Box::new(super::add_sip_trunk_register_columns::Migration),
             Box::new(super::rbac::Migration),

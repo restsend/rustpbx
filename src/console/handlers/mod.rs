@@ -22,6 +22,7 @@ pub mod routing;
 pub mod setting;
 pub mod sip_trunk;
 mod sip_trunk_tenants;
+pub mod security;
 pub mod sipflow;
 pub mod user;
 pub mod utils;
@@ -69,6 +70,7 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(licenses::urls())
         .merge(sipflow::urls())
         .merge(notifications::urls())
+        .merge(security::urls())
         .merge(metrics::urls())
         .merge(reports::urls());
 

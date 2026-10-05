@@ -137,6 +137,7 @@ async fn test_routing_failure_emits_call_error_and_cdr_trace() -> Result<()> {
     let server = E2eTestServer::start_with_inject(
         base_proxy_config(),
         E2eTestServerInject {
+            bans: None,
             queue_enricher: None,
             rwi_gateway: Some(gateway),
             ..Default::default()
@@ -243,6 +244,7 @@ action = { type = "hangup" }
     let server = E2eTestServer::start_with_inject(
         config,
         E2eTestServerInject {
+            bans: None,
             rwi_gateway: Some(gateway),
             ..Default::default()
         },
@@ -344,6 +346,7 @@ async fn test_step_ivr_next_failure_emits_call_error_and_cdr_trace() -> Result<(
     let server = E2eTestServer::start_with_inject(
         config,
         E2eTestServerInject {
+            bans: None,
             rwi_gateway: Some(gateway),
             ..Default::default()
         },
@@ -442,6 +445,7 @@ async fn test_queue_no_agents_emits_call_error_and_cdr_trace() -> Result<()> {
     let server = E2eTestServer::start_with_inject(
         config,
         E2eTestServerInject {
+            bans: None,
             rwi_gateway: Some(gateway),
             ..Default::default()
         },

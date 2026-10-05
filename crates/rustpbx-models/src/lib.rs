@@ -12,6 +12,7 @@ pub mod add_call_record_quality_columns;
 pub mod add_long_text_columns;
 pub mod cdr_daily;
 pub mod runtime_snapshot;
+pub mod security_ban;
 pub mod add_rewrite_columns;
 pub mod add_sip_trunk_register_columns;
 pub mod add_sip_trunk_rewrite_hostport;

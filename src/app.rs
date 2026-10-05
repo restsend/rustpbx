@@ -541,6 +541,23 @@ impl AppStateBuilder {
                 let proxy_config = Arc::new(proxy_config);
                 let call_record_hooks = addon_registry.get_call_record_hooks(&config, &db_conn);
 
+                let bans = match config.security.as_ref() {
+                    Some(security) => match crate::security::BanStore::load(
+                        db_conn.clone(),
+                        security.bans.clone(),
+                        security.alerts.webhook_url.clone(),
+                    )
+                    .await
+                    {
+                        Ok(store) => Some(store),
+                        Err(e) => {
+                            tracing::error!("failed to load ban store: {e}");
+                            None
+                        }
+                    },
+                    None => None,
+                };
+
                 // Derive cluster peer SocketAddrs from Config.cluster peers
                 let cluster_peers: Vec<SocketAddr> = config
                     .cluster
@@ -574,6 +591,7 @@ impl AppStateBuilder {
                     .with_no_bind(self.skip_sip_bind)
                     .with_skip_migrate(self.skip_migrate)
                     .with_addon_registry(Some(addon_registry.clone()))
+                    .with_bans(bans.clone())
                     .register_module("acl", AclModule::create)
                     .register_module("auth", AuthModule::create)
                     .register_module("presence", PresenceModule::create)

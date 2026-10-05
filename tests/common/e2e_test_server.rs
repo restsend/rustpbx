@@ -44,7 +44,9 @@ pub struct E2eTestServerInject {
     /// `CcQueueLocationEnricher` in production; tests supply one (backed by
     /// a seeded `CcAddonState`) to exercise the same injection path.
     pub queue_enricher: Option<Arc<dyn rustpbx::proxy::call::QueueLocationEnricher>>,
+    pub bans: Option<Arc<rustpbx::security::BanStore>>,
 }
+
 
 impl Default for E2eTestServerInject {
     fn default() -> Self {
@@ -56,6 +58,7 @@ impl Default for E2eTestServerInject {
             #[cfg(feature = "addon-cc")]
             cc_policy_db: None,
             queue_enricher: None,
+            bans: None,
         }
     }
 }
@@ -326,6 +329,9 @@ impl E2eTestServer {
             .with_locator(Box::new(locator))
             .with_cancel_token(cancel_token.clone())
             .with_callrecord_sender(Some(cdr_sender));
+        if let Some(bans) = &inject.bans {
+            builder = builder.with_bans(Some(bans.clone()));
+        }
         if let Some(hook) = &inject.session_hook {
             builder = builder.with_session_hook(hook.clone());
         }

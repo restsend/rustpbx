@@ -567,6 +567,9 @@ pub struct Config {
     /// fields; each addon deserializes its own section in initialize().
     #[serde(default)]
     pub addons: HashMap<String, toml::Value>,
+    /// Security hardening (auth-failure bans, alert webhook).
+    #[serde(default)]
+    pub security: Option<SecurityConfig>,
     #[serde(default)]
     pub rwi: Option<RwiConfig>,
     #[serde(default)]
@@ -691,6 +694,58 @@ pub struct LicenseConfig {
     pub addons: HashMap<String, String>,
     #[serde(default)]
     pub keys: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SecurityConfig {
+    #[serde(default)]
+    pub bans: BanConfig,
+    #[serde(default)]
+    pub alerts: AlertsConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BanConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_ban_max_failures")]
+    pub max_failures: u32,
+    #[serde(default = "default_ban_window_secs")]
+    pub window_secs: u64,
+    #[serde(default = "default_ban_durations")]
+    pub ban_durations_secs: Vec<u64>,
+    #[serde(default)]
+    pub protected_cidrs: Vec<String>,
+}
+
+impl Default for BanConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_failures: default_ban_max_failures(),
+            window_secs: default_ban_window_secs(),
+            ban_durations_secs: default_ban_durations(),
+            protected_cidrs: Vec::new(),
+        }
+    }
+}
+
+fn default_ban_max_failures() -> u32 {
+    5
+}
+
+fn default_ban_window_secs() -> u64 {
+    600
+}
+
+fn default_ban_durations() -> Vec<u64> {
+    vec![3600, 86400, 604800]
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct AlertsConfig {
+    #[serde(default)]
+    pub webhook_url: Option<String>,
 }
 
 #[cfg(feature = "commerce")]
@@ -2338,6 +2393,7 @@ impl Default for Config {
             #[cfg(feature = "commerce")]
             sso: None,
             addons: HashMap::new(),
+            security: None,
             rwi_webhook: None,
             cluster: None,
             outbound: None,

@@ -1017,6 +1017,7 @@ async fn test_originate_agent_click_to_call_emits_agent_attributed_call_events()
     let mut tap = gateway.read().subscribe_events();
 
     let inject = E2eTestServerInject {
+            bans: None,
             queue_enricher: None,
         session_hook: Some(hook),
         agent_registry: Some(adapter),
@@ -1295,6 +1296,7 @@ async fn test_originate_rejected_releases_agent_and_emits_call_hangup() {
     let mut tap = gateway.read().subscribe_events();
 
     let inject = E2eTestServerInject {
+            bans: None,
         session_hook: Some(hook),
         rwi_gateway: Some(gateway.clone()),
         ..Default::default()

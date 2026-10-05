@@ -45,6 +45,10 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
             "/frequency_limits",
             get(list_frequency_limits).delete(clear_frequency_limits),
         )
+        .route(
+            "/bans",
+            get(list_bans).delete(release_ban),
+        )
         .route("/sipflow/flow/{call_id}", get(query_sipflow_flow))
         .route("/sipflow/media/{call_id}", get(query_sipflow_media));
     #[cfg(feature = "commerce")]
@@ -779,6 +783,68 @@ struct FrequencyLimitQuery {
     scope: Option<String>,
     scope_value: Option<String>,
     limit_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct BanReleaseQuery {
+    ip: String,
+}
+
+async fn list_bans(State(state): State<AppState>) -> Response {
+    let Some(bans) = state.sip_server().inner.bans.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({
+                "status": "unavailable",
+                "reason": "ban_store_not_configured",
+            })),
+        )
+            .into_response();
+    };
+
+    match bans.list_active().await {
+        Ok(records) => Json(records).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "status": "error",
+                "message": err.to_string(),
+            })),
+        )
+            .into_response(),
+    }
+}
+
+async fn release_ban(
+    State(state): State<AppState>,
+    Query(params): Query<BanReleaseQuery>,
+) -> Response {
+    let Some(bans) = state.sip_server().inner.bans.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({
+                "status": "unavailable",
+                "reason": "ban_store_not_configured",
+            })),
+        )
+            .into_response();
+    };
+
+    match bans.release(&params.ip, "api").await {
+        Ok(released) => Json(serde_json::json!({
+            "status": "ok",
+            "released": released,
+        }))
+        .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "status": "error",
+                "message": err.to_string(),
+            })),
+        )
+            .into_response(),
+    }
 }
 
 async fn list_frequency_limits(

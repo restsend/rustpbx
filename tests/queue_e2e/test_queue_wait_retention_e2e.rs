@@ -223,6 +223,7 @@ async fn start_harness(
     let server = E2eTestServer::start_with_inject(
         queue_proxy_config(port),
         E2eTestServerInject {
+            bans: None,
             queue_enricher: None,
             users,
             session_hook: None,

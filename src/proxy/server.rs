@@ -106,6 +106,7 @@ pub struct SipServerInner {
     pub storage: Option<crate::storage::Storage>,
     pub presence_manager: Arc<PresenceManager>,
     pub addon_registry: Option<Arc<crate::addons::registry::AddonRegistry>>,
+    pub bans: Option<Arc<crate::security::BanStore>>,
     pub rwi_gateway: Option<crate::rwi::RwiGatewayRef>,
     /// IVR step trace collector (set by IVR Editor addon, accessed by StepIvrApp).
     pub ivr_trace: Option<Arc<crate::call::app::ivr::trace::IvrTraceCollector>>,
@@ -208,6 +209,7 @@ pub struct SipServerBuilder {
     no_bind: bool,
     /// Addon registry for accessing call applications (voicemail, ivr, etc.)
     addon_registry: Option<Arc<crate::addons::registry::AddonRegistry>>,
+    bans: Option<Arc<crate::security::BanStore>>,
     /// RWI gateway to wire into the server for call-app factory use.
     rwi_gateway: Option<crate::rwi::RwiGatewayRef>,
     ivr_trace: Option<Arc<crate::call::app::ivr::trace::IvrTraceCollector>>,
@@ -260,6 +262,7 @@ impl SipServerBuilder {
             sipflow_backend: None,
             no_bind: false,
             addon_registry: None,
+            bans: None,
             rwi_gateway: None,
             ivr_trace: None,
             agent_registry: None,
@@ -467,6 +470,11 @@ impl SipServerBuilder {
         registry: Option<Arc<crate::addons::registry::AddonRegistry>>,
     ) -> Self {
         self.addon_registry = registry;
+        self
+    }
+
+    pub fn with_bans(mut self, bans: Option<Arc<crate::security::BanStore>>) -> Self {
+        self.bans = bans;
         self
     }
 
@@ -1241,6 +1249,7 @@ impl SipServerBuilder {
             storage: self.storage,
             presence_manager,
             addon_registry: self.addon_registry,
+            bans: self.bans,
             rwi_gateway: self.rwi_gateway,
             ivr_trace: self.ivr_trace,
             tls_listener: tls_listener_clone,

@@ -226,6 +226,7 @@ async fn start_harness(
     let server = E2eTestServer::start_with_inject(
         proxy_config,
         E2eTestServerInject {
+            bans: None,
             users,
             agent_registry: Some(adapter),
             queue_enricher: Some(Arc::new(enricher)),
@@ -553,6 +554,7 @@ async fn queue_overflow_escalation_agent_invite_carries_screenpop_headers() -> R
     let server = E2eTestServer::start_with_inject(
         config,
         E2eTestServerInject {
+            bans: None,
             users: ["caller", "agent1", "agent2"]
                 .into_iter()
                 .enumerate()

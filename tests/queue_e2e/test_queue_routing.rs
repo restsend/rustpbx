@@ -91,6 +91,7 @@ async fn test_call_queue_routing_e2e() -> Result<()> {
     let server = E2eTestServer::start_with_inject(
         create_queue_proxy_config(portpicker::pick_unused_port().unwrap_or(15060)),
         E2eTestServerInject {
+            bans: None,
             queue_enricher: None,
             users: vec![
                 SipUser {

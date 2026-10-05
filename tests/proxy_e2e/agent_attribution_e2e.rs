@@ -294,6 +294,7 @@ async fn start_server(
         E2eTestServer::start_with_inject(
             config,
             E2eTestServerInject {
+            bans: None,
                 agent_registry: Some(registry.clone()),
                 session_hook: Some(Arc::new(hook.clone())),
                 users,

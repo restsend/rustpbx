@@ -20,7 +20,7 @@ use rsipstack::transport::SipAddr;
 use std::net::IpAddr;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 #[derive(Debug)]
 pub enum AuthError {
@@ -100,19 +100,29 @@ impl AuthModule {
         &self,
         tx: &Transaction,
     ) -> Result<Option<SipUser>, AuthError> {
+        self.authenticate_request_with_outcome(tx)
+            .await
+            .map(|(user, _, _)| user)
+    }
+
+    pub async fn authenticate_request_with_outcome(
+        &self,
+        tx: &Transaction,
+    ) -> Result<(Option<SipUser>, Option<AuthAttemptOutcome>, String), AuthError> {
         let (user, outcome, username, realm) = self.authenticate_request_inner(tx).await?;
         if outcome != AuthAttemptOutcome::NoCredentials
             && let Some(registry) = self.server.addon_registry.as_ref()
         {
             registry.dispatch_auth_attempt(&AuthAttempt {
-                username,
+                username: username.clone(),
                 realm,
                 method: tx.original.method.to_string(),
                 source: self.get_source_addr(tx).map(|a| a.to_string()),
                 outcome,
             });
         }
-        Ok(user)
+        let observable = (outcome != AuthAttemptOutcome::NoCredentials).then_some(outcome);
+        Ok((user, observable, username))
     }
 
     async fn authenticate_request_inner(
@@ -325,6 +335,20 @@ impl ProxyModule for AuthModule {
             .map(|d| d.to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
+        if let Some(bans) = self.server.bans.as_ref()
+            && let Some(source_addr) = self.get_source_addr(tx)
+            && let Some(ip) = crate::security::ip_from_source(&source_addr.to_string())
+            && bans.is_banned(&ip)
+        {
+            warn!(
+                %ip,
+                %source,
+                method = %tx.original.method,
+                "request from banned source, aborting"
+            );
+            return Ok(ProxyAction::Abort);
+        }
+
         // Check if this is an in-dialog request and if we can skip authentication
         if self.is_in_dialog_request(tx) {
             // First, try the dialog auth cache
@@ -420,8 +444,8 @@ impl ProxyModule for AuthModule {
             }
         }
 
-        match self.authenticate_request(tx).await {
-            Ok(authenticated) => {
+        match self.authenticate_request_with_outcome(tx).await {
+            Ok((authenticated, outcome, attempt_username)) => {
                 if let Some(user) = authenticated {
                     cookie.set_user(user);
 
@@ -435,6 +459,19 @@ impl ProxyModule for AuthModule {
                     }
 
                     return Ok(ProxyAction::Continue);
+                }
+                if let (Some(bans), Some(outcome)) = (self.server.bans.as_ref(), outcome)
+                    && outcome.is_failure()
+                    && let Some(ip) = self
+                        .get_source_addr(tx)
+                        .and_then(|a| crate::security::ip_from_source(&a.to_string()))
+                {
+                    bans.record_auth_failure(
+                        ip,
+                        &attempt_username,
+                        &tx.original.method.to_string(),
+                    )
+                    .await;
                 }
 
                 let to_header = tx.original.to_header()?.uri()?;

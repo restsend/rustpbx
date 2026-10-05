@@ -168,6 +168,7 @@ async fn create_test_server_with_dependencies(
         storage: None,
         presence_manager: Arc::new(crate::proxy::presence::PresenceManager::new(None)),
         addon_registry: None,
+        bans: None,
         rwi_gateway,
         ivr_trace: None,
         tls_listener: None,
