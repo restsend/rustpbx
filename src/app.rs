@@ -116,6 +116,7 @@ pub struct AppStateBuilder {
     pub config_path: Option<String>,
     pub skip_sip_bind: bool,
     pub skip_migrate: bool,
+    pub extra_addons: Arc<Vec<Arc<dyn crate::addons::Addon>>>,
 }
 
 impl AppStateInner {
@@ -249,7 +250,13 @@ impl AppStateBuilder {
             config_path: None,
             skip_sip_bind: false,
             skip_migrate: false,
+            extra_addons: Arc::new(Vec::new()),
         }
+    }
+
+    pub fn with_extra_addons(mut self, extra: Arc<Vec<Arc<dyn crate::addons::Addon>>>) -> Self {
+        self.extra_addons = extra;
+        self
     }
 
     pub fn with_skip_sip_bind(mut self) -> Self {
@@ -308,7 +315,9 @@ impl AppStateBuilder {
             crate::models::create_db(&config.database_url, pool_cfg).await?
         };
 
-        let addon_registry = Arc::new(crate::addons::registry::AddonRegistry::new());
+        let addon_registry = Arc::new(crate::addons::registry::AddonRegistry::with_extra_addons(
+            (*self.extra_addons).clone(),
+        ));
 
         // Run addon migrations if not skipped
         if !self.skip_migrate

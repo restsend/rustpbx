@@ -14,7 +14,7 @@ fn normalize_static_url(url: &str, config: &crate::config::Config) -> String {
 }
 
 pub struct AddonRegistry {
-    addons: Vec<Box<dyn Addon>>,
+    addons: Vec<Arc<dyn Addon>>,
     pub export_reload: ExportReloadRegistry,
 }
 
@@ -26,45 +26,51 @@ impl Default for AddonRegistry {
 
 impl AddonRegistry {
     pub fn new() -> Self {
-        let mut addons: Vec<Box<dyn Addon>> = Vec::new();
+        Self::with_extra_addons(Vec::new())
+    }
+
+    pub fn with_extra_addons(extra: Vec<Arc<dyn Addon>>) -> Self {
+        let mut addons: Vec<Arc<dyn Addon>> = Vec::new();
 
         // Observability addon (/metrics + /healthz)
         #[cfg(feature = "addon-observability")]
         {
             super::observability::ObservabilityAddon::install_recorder().ok();
-            addons.push(Box::new(super::observability::ObservabilityAddon::new()));
+            addons.push(Arc::new(super::observability::ObservabilityAddon::new()));
         }
 
         // ACME Addon (Free/Built-in for now as per request)
         #[cfg(feature = "addon-acme")]
-        addons.push(Box::new(super::acme::AcmeAddon::new()));
+        addons.push(Arc::new(super::acme::AcmeAddon::new()));
 
         // Archive Addon
         #[cfg(feature = "addon-archive")]
-        addons.push(Box::new(super::archive::ArchiveAddon::new()));
+        addons.push(Arc::new(super::archive::ArchiveAddon::new()));
 
         // Wholesale Addon
         #[cfg(feature = "addon-wholesale")]
-        addons.push(Box::new(super::wholesale::WholesaleAddon::new()));
+        addons.push(Arc::new(super::wholesale::WholesaleAddon::new()));
 
         // Transcript Addon
         #[cfg(feature = "addon-transcript")]
-        addons.push(Box::new(super::transcript::TranscriptAddon::new()));
+        addons.push(Arc::new(super::transcript::TranscriptAddon::new()));
 
         // Voicemail Addon (Commercial)
         #[cfg(feature = "addon-voicemail")]
-        addons.push(Box::new(super::voicemail::VoicemailAddon::new()));
+        addons.push(Arc::new(super::voicemail::VoicemailAddon::new()));
 
         // IVR Editor Addon (Commercial)
         #[cfg(feature = "addon-ivr-editor")]
-        addons.push(Box::new(super::ivr_editor::IvrEditorAddon::new()));
+        addons.push(Arc::new(super::ivr_editor::IvrEditorAddon::new()));
 
         // Queue Addon
-        addons.push(Box::new(super::queue::QueueAddon::new()));
+        addons.push(Arc::new(super::queue::QueueAddon::new()));
 
         // CC Addon (Contact Center)
         #[cfg(feature = "addon-cc")]
-        addons.push(Box::new(super::cc::CcAddon::new()));
+        addons.push(Arc::new(super::cc::CcAddon::new()));
+
+        addons.extend(extra);
 
         // Collect export/reload handlers from addons (not gated by feature)
         let mut export_reload = ExportReloadRegistry::default();

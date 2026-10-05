@@ -1,0 +1,33 @@
+FROM docker.m.daocloud.io/library/debian:trixie
+
+LABEL maintainer="shenjindi@miuda.ai"
+LABEL org.opencontainers.image.source="https://github.com/restsend/rustpbx"
+LABEL org.opencontainers.image.description="RustPBX Wholesale App (ITSP carrier edition)"
+
+ARG DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+ENV TZ=UTC
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources
+RUN --mount=type=cache,target=/var/cache/apt \
+    apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    tzdata
+
+WORKDIR /app
+RUN mkdir -p /app/config /app/templates
+
+ARG TARGETARCH
+COPY --chmod=0755 bin/${TARGETARCH}/wholesale-app /app/wholesale-app
+COPY --chmod=0755 bin/${TARGETARCH}/sipflow /app/sipflow
+
+COPY ./static /app/static
+COPY ./templates /app/templates
+COPY ./locales /app/locales
+
+ENV RUSTPBX_STATIC_PATH=/app/static
+EXPOSE 8080/udp
+EXPOSE 8080/tcp
+EXPOSE 5060/udp
+
+ENTRYPOINT ["/app/wholesale-app"]
+CMD ["--conf", "/app/config/config.toml"]
