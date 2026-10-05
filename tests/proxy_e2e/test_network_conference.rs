@@ -366,7 +366,6 @@ async fn test_blind_refer_from_replacement_leg() {
 /// no originate, no transfer room; the customer lands in the IVR.
 #[tokio::test]
 async fn test_attended_refer_to_ivr_moves_customer_into_app() {
-    use crate::common::rtp_utils::RtpPacket;
     let _ = tracing_subscriber::fmt::try_init();
     let port = portpicker::pick_unused_port().unwrap();
     let mut config = crate::common::test_helpers::test_proxy_config(port);
@@ -562,7 +561,6 @@ async fn test_attended_refer_attachment_failure_rolls_back_atomically() {
     let replaces = format!("{};to-tag={};from-tag={}", consult.call_id, consult.remote_tag, consult.local_tag);
     let target = format!("sip:charlie@{}?Replaces={}", server.proxy_addr, urlencoding::encode(&replaces));
     assert_eq!(bob.send_refer(&original[0].1, &target).await.unwrap(), 202);
-    let mut failure_notified = false;
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             for event in bob.process_dialog_events().await.unwrap() {
@@ -576,10 +574,8 @@ async fn test_attended_refer_attachment_failure_rolls_back_atomically() {
             sleep(Duration::from_millis(20)).await;
         }
     }).await.expect("failed attachment must notify with an error status");
-    failure_notified = true;
 
     // Atomic rollback: all four dialogs, both sessions, C's room membership.
-    assert!(failure_notified);
     sleep(Duration::from_millis(400)).await;
     assert_eq!(registry.count(), 2, "both sessions must survive the failed transfer");
     assert!(!bob.process_dialog_events().await.unwrap().iter().any(|event|
