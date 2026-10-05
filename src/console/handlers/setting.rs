@@ -197,6 +197,7 @@ struct UserView {
     pub is_active: bool,
     pub is_staff: bool,
     pub is_superuser: bool,
+    pub mfa_enabled: bool,
 }
 
 impl From<UserModel> for UserView {
@@ -212,6 +213,7 @@ impl From<UserModel> for UserView {
             is_active: model.is_active,
             is_staff: model.is_staff,
             is_superuser: model.is_superuser,
+            mfa_enabled: model.mfa_enabled,
         }
     }
 }
@@ -288,6 +290,10 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
         .route(
             "/settings/users/{id}/roles",
             get(get_user_roles).post(assign_user_roles),
+        )
+        .route(
+            "/settings/users/{id}/mfa/reset",
+            post(reset_user_mfa),
         )
         .route("/settings/roles", get(list_roles).post(create_role))
         .route(
@@ -367,6 +373,10 @@ pub fn api_urls() -> Router<Arc<ConsoleState>> {
         .route(
             "/settings/users/{id}/roles",
             get(get_user_roles).post(assign_user_roles),
+        )
+        .route(
+            "/settings/users/{id}/mfa/reset",
+            post(reset_user_mfa),
         )
         .route("/settings/roles", get(list_roles).post(create_role))
         .route(
@@ -1454,6 +1464,42 @@ async fn delete_user(
         Ok(_) => Json(json!({"status": "ok"})).into_response(),
         Err(err) => {
             warn!("failed to delete user {}: {}", id, err);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"message": err.to_string()})),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn reset_user_mfa(
+    AxumPath(id): AxumPath<i64>,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+) -> Response {
+    if let Err(resp) = state.require_permission(&user, "users", "manage").await {
+        return resp;
+    }
+    match UserEntity::find_by_id(id).one(state.db()).await {
+        Ok(Some(target)) => match state.disable_mfa(&target).await {
+            Ok(_) => Json(json!({"status": "ok"})).into_response(),
+            Err(err) => {
+                warn!("failed to reset MFA for user {}: {}", id, err);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"message": err.to_string()})),
+                )
+                    .into_response()
+            }
+        },
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"message": "User not found"})),
+        )
+            .into_response(),
+        Err(err) => {
+            warn!("failed to load user {}: {}", id, err);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"message": err.to_string()})),
@@ -4186,6 +4232,81 @@ mod tests {
         let items = parsed["items"].as_array().expect("items");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["name"], "viewer");
+    }
+
+    #[tokio::test]
+    async fn user_listing_reports_mfa_and_reset_clears_it() {
+        let state = setup_state().await;
+        let admin = superuser();
+        state
+            .create_user("mfa-target@rustpbx.com", "mfatarget", "password123")
+            .await
+            .expect("seed target user");
+        let target = state
+            .find_user_by_email("mfa-target@rustpbx.com")
+            .await
+            .expect("lookup target")
+            .expect("target exists");
+
+        let secret = totp_rs::Secret::generate_secret().to_encoded().to_string();
+        let code = {
+            use totp_rs::{Algorithm, Secret, TOTP};
+            let bytes = Secret::Encoded(secret.clone()).to_bytes().expect("bytes");
+            let totp = TOTP::new(
+                Algorithm::SHA1,
+                6,
+                1,
+                30,
+                bytes,
+                Some(crate::config::BRAND_NAME.to_string()),
+                target.email.clone(),
+            )
+            .expect("totp");
+            totp.generate_current().expect("code")
+        };
+        state
+            .enable_mfa(&target, &secret, &code)
+            .await
+            .expect("enable mfa");
+
+        let query_resp = query_users(
+            State(state.clone()),
+            AuthRequired(admin.clone()),
+            Json(forms::ListQuery::<QueryUserFilters>::default()),
+        )
+        .await;
+        assert_eq!(query_resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(query_resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("parse json");
+        let items = parsed["items"].as_array().expect("items");
+        let row = items
+            .iter()
+            .find(|item| item["username"] == "mfatarget")
+            .expect("target row");
+        assert_eq!(row["mfa_enabled"], true);
+
+        let detail_resp =
+            get_user(AxumPath(target.id), State(state.clone()), AuthRequired(admin.clone())).await;
+        assert_eq!(detail_resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(detail_resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("parse json");
+        assert_eq!(parsed["mfa_enabled"], true);
+
+        let reset_resp =
+            reset_user_mfa(AxumPath(target.id), State(state.clone()), AuthRequired(admin)).await;
+        assert_eq!(reset_resp.status(), StatusCode::OK);
+
+        let reloaded = state
+            .find_user_by_email("mfa-target@rustpbx.com")
+            .await
+            .expect("reload target")
+            .expect("target exists");
+        assert!(!reloaded.mfa_enabled);
+        assert!(reloaded.mfa_secret.is_none());
     }
 
     fn anonymous_s3_callrecord_config() -> CallRecordConfig {

@@ -11,12 +11,75 @@
                     <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12c0 1.268-.63 2.39-1.593 3.068a3.745 3.745 0 01-1.043 3.296 3.745 3.745 0 01-3.296 1.043A3.745 3.745 0 0112 21c-1.268 0-2.39-.63-3.068-1.593a3.746 3.746 0 01-3.296-1.043 3.745 3.745 0 01-1.043-3.296A3.745 3.745 0 013 12c0-1.268.63-2.39 1.593-3.068a3.745 3.745 0 011.043-3.296 3.746 3.746 0 013.296-1.043A3.746 3.746 0 0112 3c1.268 0 2.39.63 3.068 1.593a3.746 3.746 0 013.296 1.043 3.746 3.746 0 011.043 3.296A3.745 3.745 0 0121 12z" />
                 </svg>
             </div>
+            {% if enroll %}
+            <h1 class="text-2xl font-semibold text-slate-900">{{ "auth.mfa_enroll_title" | t }}</h1>
+            <p class="text-sm text-slate-500">{{ "auth.mfa_enroll_subtitle" | t }}</p>
+            {% else %}
             <h1 class="text-2xl font-semibold text-slate-900">{{ "auth.mfa_title" | t }}</h1>
             <p class="text-sm text-slate-500">{{ "auth.mfa_subtitle" | t }}</p>
+            {% endif %}
         </div>
-        {% if error_message %}
+        {% if enroll %}
+        <div class="space-y-5">
+            {% if error_kind == "locked" %}
+            <div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+                {{ "auth.mfa_locked" | tvars({"seconds": lockout_seconds | default(0) | string}) }}
+            </div>
+            {% elif error_kind == "invalid_code" %}
+            <div class="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+                {{ "auth.mfa_invalid_code" | t }}
+            </div>
+            {% endif %}
+            <div class="flex flex-col items-center gap-2">
+                <img id="mfa-qr" alt="{{ "auth.mfa_scan_qr" | t }}"
+                    class="h-48 w-48 rounded-xl border border-slate-200 bg-white p-2" src="" />
+                <p class="text-xs text-slate-500">{{ "auth.mfa_scan_qr" | t }}</p>
+            </div>
+            <div class="space-y-1 text-left">
+                <label for="mfa-secret-text" class="block text-sm font-medium text-slate-700">{{ "auth.mfa_secret_label" | t }}</label>
+                <code id="mfa-secret-text"
+                    class="block rounded-lg bg-slate-100 px-3 py-2 font-mono text-sm break-all text-slate-700 select-all"></code>
+            </div>
+            <form action="{{ enroll_action }}" method="post" class="space-y-6">
+                <input type="hidden" name="secret" id="mfa-secret-input" value="" />
+                <div class="space-y-2 text-left">
+                    <label for="code" class="block text-sm font-medium text-slate-700">{{ "auth.mfa_code_label" | t }}</label>
+                    <input type="text" name="code" id="code" required maxlength="6" pattern="[0-9]*" inputmode="numeric"
+                        class="w-full rounded-xl border border-slate-200 px-4 py-3 text-center text-2xl tracking-widest font-mono shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                        placeholder="000000" autocomplete="one-time-code" />
+                </div>
+                <button type="submit"
+                    class="w-full rounded-xl bg-sky-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-sky-200 transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-300">{{ "auth.mfa_enroll_button" | t }}</button>
+            </form>
+        </div>
+        <script>
+            (function () {
+                fetch("{{ enroll_secret_url | safe }}", { credentials: "same-origin" })
+                    .then(function (res) {
+                        if (!res.ok) throw new Error("failed to load enrollment secret");
+                        return res.json();
+                    })
+                    .then(function (data) {
+                        var secretEl = document.getElementById("mfa-secret-text");
+                        var inputEl = document.getElementById("mfa-secret-input");
+                        var qrEl = document.getElementById("mfa-qr");
+                        if (secretEl && data.secret) secretEl.textContent = data.secret;
+                        if (inputEl && data.secret) inputEl.value = data.secret;
+                        if (qrEl && data.qr_png_base64) {
+                            qrEl.src = "data:image/png;base64," + data.qr_png_base64;
+                        }
+                    })
+                    .catch(function (err) { console.error(err); });
+            })();
+        </script>
+        {% else %}
+        {% if error_kind == "locked" %}
+        <div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+            {{ "auth.mfa_locked" | tvars({"seconds": lockout_seconds | default(0) | string}) }}
+        </div>
+        {% elif error_kind == "invalid_code" %}
         <div class="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
-            {{ error_message | default("") }}
+            {{ "auth.mfa_invalid_code" | t }}
         </div>
         {% endif %}
         <form action="{{ login_action }}" method="post" class="space-y-6">
@@ -34,6 +97,7 @@
                 {{ "auth.mfa_back" | t }}
             </a>
         </div>
+        {% endif %}
     </div>
 </section>
 {% endblock %}

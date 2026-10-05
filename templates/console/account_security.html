@@ -1,0 +1,151 @@
+{% extends "console/layout.html" %}
+{% block title %}{{ "account_security.title" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
+{% block content %}
+<div class="p-6" x-data="accountSecurity()">
+    <div class="mx-auto max-w-3xl space-y-6 account-security">
+        <header class="space-y-1">
+            <h1 class="text-xl font-semibold text-slate-900">{{ "account_security.title" | t }}</h1>
+            <p class="text-sm text-slate-500">{{ "account_security.description" | t }}</p>
+        </header>
+
+        <div class="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+            <div class="flex items-start justify-between gap-4">
+                <div>
+                    <h2 class="text-base font-semibold text-slate-900">{{ "account_security.card_title" | t }}</h2>
+                    <p class="mt-1 text-sm text-slate-500">{{ "account_security.card_desc" | t }}</p>
+                </div>
+                <span class="rounded-full px-3 py-1 text-xs font-semibold"
+                    :class="enabled ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-100' : 'bg-slate-100 text-slate-600 ring-1 ring-slate-200'"
+                    x-text="enabled ? tt('account_security.status_enabled') : tt('account_security.status_disabled')"></span>
+            </div>
+
+            {% if required %}
+            <div class="mt-4 rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-700">
+                {{ "account_security.required_hint" | t }}
+            </div>
+            {% endif %}
+
+            <div class="mt-5 space-y-4">
+                {% if mfa_enabled %}
+                <div class="space-y-2">
+                    <label for="disable-password" class="block text-sm font-medium text-slate-700">
+                        {{ "account_security.password_label" | t }}
+                    </label>
+                    <input type="password" id="disable-password" x-model="password" autocomplete="current-password"
+                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" />
+                    <p class="text-xs text-slate-400">{{ "account_security.password_hint" | t }}</p>
+                </div>
+                <div class="flex items-center gap-3">
+                    <button type="button" @click="disableMfa()"
+                        class="rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-rose-500">
+                        {{ "account_security.disable_button" | t }}
+                    </button>
+                </div>
+                {% else %}
+                <template x-if="!setup">
+                    <div>
+                        <button type="button" @click="startSetup()"
+                            class="rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500">
+                            {{ "account_security.setup_button" | t }}
+                        </button>
+                    </div>
+                </template>
+                <template x-if="setup">
+                    <div class="space-y-4">
+                        <div class="flex flex-col items-center gap-2">
+                            <img :src="'data:image/png;base64,' + setup.qr_png_base64"
+                                alt="{{ "account_security.scan_qr" | t }}"
+                                class="h-48 w-48 rounded-xl border border-slate-200 bg-white p-2" />
+                            <p class="text-xs text-slate-500">{{ "account_security.scan_qr" | t }}</p>
+                        </div>
+                        <div class="space-y-1">
+                            <p class="text-sm font-medium text-slate-700">{{ "account_security.secret_label" | t }}</p>
+                            <code
+                                class="block rounded-lg bg-slate-100 px-3 py-2 font-mono text-sm break-all text-slate-700 select-all"
+                                x-text="setup.secret"></code>
+                        </div>
+                        <div class="space-y-2">
+                            <label for="enable-code" class="block text-sm font-medium text-slate-700">
+                                {{ "account_security.code_label" | t }}
+                            </label>
+                            <input type="text" id="enable-code" x-model="code" maxlength="6" inputmode="numeric"
+                                autocomplete="one-time-code"
+                                class="w-40 rounded-lg border border-slate-200 px-3 py-2 text-center font-mono text-lg tracking-widest text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200" />
+                        </div>
+                        <button type="button" @click="enableMfa()"
+                            class="rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500">
+                            {{ "account_security.enable_button" | t }}
+                        </button>
+                    </div>
+                </template>
+                {% endif %}
+                <p class="text-sm text-rose-600" x-show="error" x-text="error" x-cloak></p>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+    window.accountSecurity = function () {
+        return {
+            enabled: {{ mfa_enabled }},
+            setup: null,
+            code: '',
+            password: '',
+            error: '',
+            tt(key) {
+                return window.t(key);
+            },
+            async startSetup() {
+                this.error = '';
+                try {
+                    const res = await fetch("{{ url_for('/mfa/setup') | safe }}", {
+                        headers: { Accept: 'application/json' },
+                    });
+                    const data = await res.json();
+                    if (!res.ok) {
+                        throw new Error(data.message || 'Failed to start setup');
+                    }
+                    this.setup = data;
+                } catch (err) {
+                    this.error = err.message || 'Failed to start setup';
+                }
+            },
+            async enableMfa() {
+                if (!this.setup) return;
+                this.error = '';
+                try {
+                    const res = await fetch("{{ url_for('/mfa/enable') | safe }}", {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+                        body: JSON.stringify({ secret: this.setup.secret, code: this.code }),
+                    });
+                    const data = await res.json().catch(() => ({}));
+                    if (!res.ok) {
+                        throw new Error(data.message || 'Invalid verification code');
+                    }
+                    window.location.reload();
+                } catch (err) {
+                    this.error = err.message || 'Failed to enable two-factor authentication';
+                }
+            },
+            async disableMfa() {
+                this.error = '';
+                try {
+                    const res = await fetch("{{ url_for('/mfa/disable') | safe }}", {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+                        body: JSON.stringify({ password: this.password }),
+                    });
+                    const data = await res.json().catch(() => ({}));
+                    if (!res.ok) {
+                        throw new Error(data.message || 'Incorrect password');
+                    }
+                    window.location.reload();
+                } catch (err) {
+                    this.error = err.message || 'Failed to disable two-factor authentication';
+                }
+            },
+        };
+    };
+</script>
+{% endblock %}

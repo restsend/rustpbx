@@ -697,6 +697,19 @@
                         </svg>
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.settings" | t }}</span>
                     </a>
+                    {% if edition == 'commercial' %}
+                    <a href="{{ bp }}/account/security"
+                        class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='account_security' else 'text-slate-700' }}"
+                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }"
+                        title="{{ 'nav.account_security' | t }}">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
+                            stroke="currentColor" class="size-5">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M15.75 5.75a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.5 20.25a7.5 7.5 0 0 1 15 0m-6-4.5-2 2 1.5 1.5-1.5 1.5 2 2" />
+                        </svg>
+                        <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.account_security" | t }}</span>
+                    </a>
+                    {% endif %}
                     <a href="{{ bp }}/security/bans"
                         x-show="can('system:read')" x-cloak
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='security' else 'text-slate-700' }}"

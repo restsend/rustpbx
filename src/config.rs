@@ -805,6 +805,8 @@ pub struct ConsoleConfig {
     #[serde(default)]
     pub allow_registration: bool,
     #[serde(default)]
+    pub require_mfa: bool,
+    #[serde(default)]
     pub secure_cookie: bool,
     pub alpine_js: Option<String>,
     pub tailwind_js: Option<String>,
@@ -838,6 +840,7 @@ impl Default for ConsoleConfig {
             base_path: default_console_base_path(),
             api_prefix: default_console_api_prefix(),
             allow_registration: false,
+            require_mfa: false,
             secure_cookie: false,
             alpine_js: None,
             tailwind_js: None,

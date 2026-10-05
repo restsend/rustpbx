@@ -14,6 +14,7 @@ pub mod extension;
 pub mod forms;
 pub mod licenses;
 pub mod locales;
+pub mod mfa;
 pub mod metrics;
 pub mod notifications;
 pub mod presence;
@@ -82,6 +83,9 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
             .get_console_page_routes(&state, &config)
         {
             page_routes = page_routes.merge(r);
+        }
+        if app_state.addon_registry.has_commercial() {
+            page_routes = page_routes.merge(mfa::urls());
         }
     }
 

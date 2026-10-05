@@ -11,7 +11,7 @@ use axum::{
     extract::{Form, Path as AxumPath, Query, State},
     http::{HeaderMap, StatusCode, header::SET_COOKIE},
     response::{IntoResponse, Redirect, Response},
-    routing::get,
+    routing::{get, post},
 };
 use sea_orm::EntityTrait;
 use serde_json::json;
@@ -44,6 +44,8 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
     Router::new()
         .route("/login", get(login_page).post(login_post))
         .route("/login/mfa", get(login_mfa_page).post(login_mfa_post))
+        .route("/login/mfa/enroll-secret", get(login_mfa_enroll_secret))
+        .route("/login/mfa/enroll", post(login_mfa_enroll_post))
         .route("/logout", get(logout))
         .route("/register", get(register_page).post(register_post))
         .route("/forgot", get(forgot_page).post(forgot_post))
@@ -143,6 +145,17 @@ pub async fn login_post(
             if user.mfa_enabled {
                 // Create MFA session and redirect to verification
                 let redirect_target = state.url_for("/login/mfa");
+                let mut response = Redirect::to(&redirect_target).into_response();
+                if let Some(header) =
+                    state.mfa_session_cookie_header(user.id, is_secure_request(&headers))
+                {
+                    response.headers_mut().append(SET_COOKIE, header);
+                }
+                return response;
+            }
+
+            if state.require_mfa() {
+                let redirect_target = format!("{}?mode=enroll", state.url_for("/login/mfa"));
                 let mut response = Redirect::to(&redirect_target).into_response();
                 if let Some(header) =
                     state.mfa_session_cookie_header(user.id, is_secure_request(&headers))
@@ -593,16 +606,49 @@ pub async fn reset_post(
 
 // MFA Login Handlers
 
+fn mfa_cookie_user(state: &Arc<ConsoleState>, headers: &HeaderMap) -> Option<i64> {
+    let mfa_cookie =
+        crate::console::i18n::get_cookie(headers, crate::console::auth::MFA_SESSION_COOKIE_NAME);
+    state.verify_mfa_session_token(mfa_cookie.as_deref())
+}
+
+enum MfaPageError {
+    InvalidCode,
+    Locked(u64),
+}
+
+fn render_mfa_page(
+    state: &Arc<ConsoleState>,
+    headers: &HeaderMap,
+    enroll: bool,
+    error: Option<MfaPageError>,
+) -> Response {
+    let (error_kind, lockout_seconds) = match error {
+        Some(MfaPageError::InvalidCode) => ("invalid_code", None::<u64>),
+        Some(MfaPageError::Locked(secs)) => ("locked", Some(secs)),
+        None => ("", None),
+    };
+    state.render_with_headers(
+        "console/login_mfa.html",
+        json!({
+            "login_action": state.url_for("/login/mfa"),
+            "enroll_action": state.url_for("/login/mfa/enroll"),
+            "enroll_secret_url": state.url_for("/login/mfa/enroll-secret"),
+            "enroll": enroll,
+            "required": state.require_mfa(),
+            "error_kind": error_kind,
+            "lockout_seconds": lockout_seconds,
+        }),
+        headers,
+    )
+}
+
 pub async fn login_mfa_page(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
+    Query(query): Query<LoginQuery>,
 ) -> Response {
-    // Check for MFA session cookie
-    let mfa_cookie = headers
-        .get(crate::console::auth::MFA_SESSION_COOKIE_NAME)
-        .and_then(|v| v.to_str().ok());
-
-    let user_id = match state.verify_mfa_session_token(mfa_cookie) {
+    let user_id = match mfa_cookie_user(&state, &headers) {
         Some(id) => id,
         None => {
             // No valid MFA session, redirect to login
@@ -610,15 +656,9 @@ pub async fn login_mfa_page(
         }
     };
 
+    let enroll = query.mode.as_deref() == Some("enroll");
     match load_mfa_user_or_redirect(&state, user_id).await {
-        Ok(_user) => state.render_with_headers(
-            "console/login_mfa.html",
-            json!({
-                "login_action": state.url_for("/login/mfa"),
-                "error_message": null,
-            }),
-            &headers,
-        ),
+        Ok(_user) => render_mfa_page(&state, &headers, enroll, None),
         Err(resp) => resp,
     }
 }
@@ -629,12 +669,7 @@ pub async fn login_mfa_post(
     State(state): State<Arc<ConsoleState>>,
     Form(form): Form<crate::console::handlers::forms::MfaForm>,
 ) -> Response {
-    // Check for MFA session cookie
-    let mfa_cookie = headers
-        .get(crate::console::auth::MFA_SESSION_COOKIE_NAME)
-        .and_then(|v| v.to_str().ok());
-
-    let user_id = match state.verify_mfa_session_token(mfa_cookie) {
+    let user_id = match mfa_cookie_user(&state, &headers) {
         Some(id) => id,
         None => {
             return Redirect::to(&state.url_for("/login")).into_response();
@@ -646,17 +681,28 @@ pub async fn login_mfa_post(
         Err(resp) => return resp,
     };
 
+    if state.mfa_is_locked(user.id) {
+        let remaining = state.mfa_lockout_remaining_secs(user.id).unwrap_or(0);
+        return render_mfa_page(&state, &headers, false, Some(MfaPageError::Locked(remaining)));
+    }
+
     // Verify MFA code
     if !ConsoleState::verify_mfa_code(&user, &form.code) {
-        return state.render_with_headers(
-            "console/login_mfa.html",
-            json!({
-                "login_action": state.url_for("/login/mfa"),
-                "error_message": "Invalid verification code",
-            }),
-            &headers,
+        state.mfa_record_failure(user.id);
+        state.report_mfa_attempt(
+            &user.username,
+            Some(client_addr.ip().to_string()),
+            crate::addons::AuthAttemptOutcome::BadCredentials,
         );
+        return render_mfa_page(&state, &headers, false, Some(MfaPageError::InvalidCode));
     }
+
+    state.mfa_clear_failures(user.id);
+    state.report_mfa_attempt(
+        &user.username,
+        Some(client_addr.ip().to_string()),
+        crate::addons::AuthAttemptOutcome::Success,
+    );
 
     // MFA verified, complete login
     if let Err(err) = state.mark_login(&user, client_addr.ip().to_string()).await {
@@ -678,4 +724,449 @@ pub async fn login_mfa_post(
     }
 
     response
+}
+
+pub async fn login_mfa_enroll_secret(
+    State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
+) -> Response {
+    let user_id = match mfa_cookie_user(&state, &headers) {
+        Some(id) => id,
+        None => {
+            return crate::console::config_helpers::json_error(
+                axum::http::StatusCode::UNAUTHORIZED,
+                "MFA session required",
+            );
+        }
+    };
+
+    let user = match load_mfa_user_or_redirect(&state, user_id).await {
+        Ok(user) => user,
+        Err(_) => {
+            return crate::console::config_helpers::json_error(
+                axum::http::StatusCode::UNAUTHORIZED,
+                "MFA session required",
+            );
+        }
+    };
+
+    match super::mfa::enrollment_payload(&user) {
+        Some(payload) => axum::Json(payload).into_response(),
+        None => crate::console::config_helpers::json_error(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to generate MFA secret",
+        ),
+    }
+}
+
+pub async fn login_mfa_enroll_post(
+    client_addr: ClientAddr,
+    headers: HeaderMap,
+    State(state): State<Arc<ConsoleState>>,
+    Form(form): Form<crate::console::handlers::forms::MfaEnrollForm>,
+) -> Response {
+    let user_id = match mfa_cookie_user(&state, &headers) {
+        Some(id) => id,
+        None => {
+            return Redirect::to(&state.url_for("/login")).into_response();
+        }
+    };
+
+    let user = match load_mfa_user_or_redirect(&state, user_id).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
+    };
+
+    if state.mfa_is_locked(user.id) {
+        let remaining = state.mfa_lockout_remaining_secs(user.id).unwrap_or(0);
+        return render_mfa_page(&state, &headers, true, Some(MfaPageError::Locked(remaining)));
+    }
+
+    match state.enable_mfa(&user, form.secret.trim(), form.code.trim()).await {
+        Ok(true) => {
+            state.mfa_clear_failures(user.id);
+            state.report_mfa_attempt(
+                &user.username,
+                Some(client_addr.ip().to_string()),
+                crate::addons::AuthAttemptOutcome::Success,
+            );
+
+            if let Err(err) = state.mark_login(&user, client_addr.ip().to_string()).await {
+                warn!("failed to update last_login: {}", err);
+            }
+
+            let mut response = Redirect::to(&state.url_for("/")).into_response();
+            if let Some(header) = state.session_cookie_header(user.id, is_secure_request(&headers))
+            {
+                response.headers_mut().append(SET_COOKIE, header);
+            }
+            if let Some(header) = state.clear_mfa_session_cookie(is_secure_request(&headers)) {
+                response.headers_mut().append(SET_COOKIE, header);
+            }
+            response
+        }
+        Ok(false) => {
+            state.mfa_record_failure(user.id);
+            state.report_mfa_attempt(
+                &user.username,
+                Some(client_addr.ip().to_string()),
+                crate::addons::AuthAttemptOutcome::BadCredentials,
+            );
+            render_mfa_page(&state, &headers, true, Some(MfaPageError::InvalidCode))
+        }
+        Err(err) => {
+            warn!("failed to enable MFA for {}: {}", user.username, err);
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Enrollment failed: {}", err),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ConsoleConfig;
+    use crate::console::handlers::test_helpers::setup_state;
+    use crate::models::migration::Migrator;
+    use axum::body::Body;
+    use axum::http::header;
+    use axum::http::Request;
+    use axum::http::StatusCode;
+    use sea_orm::Database;
+    use sea_orm_migration::MigratorTrait;
+    use tower::ServiceExt;
+
+    fn enrollment_secret() -> String {
+        use totp_rs::Secret;
+        Secret::generate_secret().to_encoded().to_string()
+    }
+
+    fn current_totp_code(secret: &str, email: &str) -> String {
+        use totp_rs::{Algorithm, Secret, TOTP};
+        let bytes = Secret::Encoded(secret.to_string())
+            .to_bytes()
+            .expect("valid base32 secret");
+        let totp = TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            bytes,
+            Some(crate::config::BRAND_NAME.to_string()),
+            email.to_string(),
+        )
+        .expect("build totp");
+        totp.generate_current().expect("generate code")
+    }
+
+    async fn state_with_config(config: ConsoleConfig) -> Arc<ConsoleState> {
+        let db = Database::connect("sqlite::memory:")
+            .await
+            .expect("connect sqlite memory");
+        Migrator::up(&db, None).await.expect("run migrations");
+        ConsoleState::initialize(db, config, None)
+            .await
+            .expect("initialize console state")
+    }
+
+    fn cookie_from(response: &Response, name: &str) -> Option<String> {
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find(|value| value.starts_with(&format!("{}=", name)))
+            .map(|value| {
+                value
+                    .split(';')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            })
+    }
+
+    fn set_cookie_header(response: &Response, name: &str) -> Option<String> {
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find(|value| value.starts_with(&format!("{}=", name)))
+            .map(|value| value.to_string())
+    }
+
+    async fn post_form(
+        app: &axum::Router,
+        uri: String,
+        cookie: Option<&str>,
+        body: String,
+    ) -> Response {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+        if let Some(cookie) = cookie {
+            builder = builder.header(header::COOKIE, cookie);
+        }
+        app.clone()
+            .oneshot(builder.body(Body::from(body)).expect("build request"))
+            .await
+            .expect("send request")
+    }
+
+    async fn get_uri(app: &axum::Router, uri: String, cookie: Option<&str>) -> Response {
+        let mut builder = Request::builder().uri(uri);
+        if let Some(cookie) = cookie {
+            builder = builder.header(header::COOKIE, cookie);
+        }
+        app.clone()
+            .oneshot(builder.body(Body::empty()).expect("build request"))
+            .await
+            .expect("send request")
+    }
+
+    #[tokio::test]
+    async fn login_with_mfa_full_flow() {
+        let state = setup_state().await;
+        let user = state
+            .create_user("mfa-e2e@rustpbx.com", "mfae2e", "password123")
+            .await
+            .expect("seed user");
+        let secret = enrollment_secret();
+        let code = current_totp_code(&secret, &user.email);
+        assert!(
+            state
+                .enable_mfa(&user, &secret, &code)
+                .await
+                .expect("enable mfa")
+        );
+
+        let app = crate::console::handlers::router(state.clone());
+        let base = state.base_path().to_string();
+
+        let response = post_form(
+            &app,
+            format!("{}/login", base),
+            None,
+            "identifier=mfae2e&password=password123".to_string(),
+        )
+        .await;
+        assert!(response.status().is_redirection());
+        assert!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.ends_with("/login/mfa"))
+                .unwrap_or(false)
+        );
+        let mfa_cookie = cookie_from(&response, "rustpbx_mfa").expect("mfa cookie issued");
+
+        let wrong = post_form(
+            &app,
+            format!("{}/login/mfa", base),
+            Some(&mfa_cookie),
+            "code=000000".to_string(),
+        )
+        .await;
+        assert_eq!(wrong.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(wrong.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let html = String::from_utf8_lossy(&body).into_owned();
+        assert!(html.contains("Invalid verification code"));
+
+        let good = post_form(
+            &app,
+            format!("{}/login/mfa", base),
+            Some(&mfa_cookie),
+            format!("code={}", code),
+        )
+        .await;
+        assert!(good.status().is_redirection());
+        let session_cookie = cookie_from(&good, "rustpbx_session").expect("session cookie issued");
+        let cleared = set_cookie_header(&good, "rustpbx_mfa").expect("mfa cookie cleared");
+        assert!(cleared.contains("Max-Age=0"), "mfa cookie should be cleared");
+
+        let dashboard = get_uri(&app, format!("{}/", base), Some(&session_cookie)).await;
+        assert_eq!(dashboard.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn forced_mfa_enrollment_flow_completes_login() {
+        let state = state_with_config(ConsoleConfig {
+            require_mfa: true,
+            ..Default::default()
+        })
+        .await;
+        let user = state
+            .create_user("enroll-e2e@rustpbx.com", "enrolle2e", "password123")
+            .await
+            .expect("seed user");
+
+        let app = crate::console::handlers::router(state.clone());
+        let base = state.base_path().to_string();
+
+        let response = post_form(
+            &app,
+            format!("{}/login", base),
+            None,
+            "identifier=enrolle2e&password=password123".to_string(),
+        )
+        .await;
+        assert!(response.status().is_redirection());
+        assert!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.ends_with("/login/mfa?mode=enroll"))
+                .unwrap_or(false)
+        );
+        let mfa_cookie = cookie_from(&response, "rustpbx_mfa").expect("mfa cookie issued");
+        assert!(
+            cookie_from(&response, "rustpbx_session").is_none(),
+            "no session cookie before enrollment"
+        );
+
+        let page = get_uri(
+            &app,
+            format!("{}/login/mfa?mode=enroll", base),
+            Some(&mfa_cookie),
+        )
+        .await;
+        assert_eq!(page.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(page.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let html = String::from_utf8_lossy(&body).into_owned();
+        assert!(html.contains("mfa-qr"));
+        assert!(html.contains("mfa-secret-input"));
+        assert!(html.contains("enroll"));
+
+        let secret_response =
+            get_uri(&app, format!("{}/login/mfa/enroll-secret", base), Some(&mfa_cookie)).await;
+        assert_eq!(secret_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(secret_response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("parse json");
+        let secret = payload["secret"].as_str().expect("secret").to_string();
+        assert!(!secret.is_empty());
+        assert!(payload["otpauth_uri"].as_str().unwrap_or_default().starts_with("otpauth://"));
+        assert!(!payload["qr_png_base64"].as_str().unwrap_or_default().is_empty());
+
+        let code = current_totp_code(&secret, &user.email);
+        let enroll = post_form(
+            &app,
+            format!("{}/login/mfa/enroll", base),
+            Some(&mfa_cookie),
+            format!(
+                "secret={}&code={}",
+                urlencoding::encode(&secret),
+                code
+            ),
+        )
+        .await;
+        assert!(enroll.status().is_redirection());
+        assert!(
+            enroll
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v == format!("{}/", base))
+                .unwrap_or(false)
+        );
+        let session_cookie = cookie_from(&enroll, "rustpbx_session").expect("session cookie issued");
+        let cleared = set_cookie_header(&enroll, "rustpbx_mfa").expect("mfa cookie cleared");
+        assert!(cleared.contains("Max-Age=0"), "mfa cookie cleared via Max-Age=0");
+
+        let reloaded = state
+            .find_user_by_email(&user.email)
+            .await
+            .expect("reload user")
+            .expect("user exists");
+        assert!(reloaded.mfa_enabled);
+
+        let dashboard = get_uri(&app, format!("{}/", base), Some(&session_cookie)).await;
+        assert_eq!(dashboard.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn mfa_step_locks_after_repeated_failures() {
+        let state = setup_state().await;
+        let user = state
+            .create_user("locked-e2e@rustpbx.com", "lockede2e", "password123")
+            .await
+            .expect("seed user");
+        let secret = enrollment_secret();
+        let code = current_totp_code(&secret, &user.email);
+        state
+            .enable_mfa(&user, &secret, &code)
+            .await
+            .expect("enable mfa");
+
+        let app = crate::console::handlers::router(state.clone());
+        let base = state.base_path().to_string();
+
+        let response = post_form(
+            &app,
+            format!("{}/login", base),
+            None,
+            "identifier=lockede2e&password=password123".to_string(),
+        )
+        .await;
+        let mfa_cookie = cookie_from(&response, "rustpbx_mfa").expect("mfa cookie issued");
+
+        for attempt in 0..crate::console::MFA_MAX_ATTEMPTS {
+            let response = post_form(
+                &app,
+                format!("{}/login/mfa", base),
+                Some(&mfa_cookie),
+                "code=000000".to_string(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "attempt {}", attempt);
+        }
+
+        let locked = post_form(
+            &app,
+            format!("{}/login/mfa", base),
+            Some(&mfa_cookie),
+            format!("code={}", code),
+        )
+        .await;
+        assert_eq!(locked.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(locked.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let html = String::from_utf8_lossy(&body).into_owned();
+        assert!(
+            html.contains("Too many failed attempts"),
+            "expected lockout message"
+        );
+    }
+
+    #[tokio::test]
+    async fn enroll_requires_mfa_session_cookie() {
+        let state = setup_state().await;
+        let app = crate::console::handlers::router(state.clone());
+        let base = state.base_path().to_string();
+
+        let response = get_uri(&app, format!("{}/login/mfa/enroll-secret", base), None).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = post_form(
+            &app,
+            format!("{}/login/mfa/enroll", base),
+            None,
+            "secret=ABC&code=123456".to_string(),
+        )
+        .await;
+        assert!(response.status().is_redirection());
+    }
 }

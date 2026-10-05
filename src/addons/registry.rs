@@ -298,6 +298,12 @@ impl AddonRegistry {
             .collect()
     }
 
+    pub fn has_commercial(&self) -> bool {
+        self.addons
+            .iter()
+            .any(|a| a.category() == crate::addons::AddonCategory::Commercial)
+    }
+
     pub fn is_enabled(&self, id: &str, config: &crate::config::Config) -> bool {
         let listed = config
             .proxy
@@ -917,6 +923,42 @@ mod asset_path_tests {
         other_enabled.proxy.addons = Some(vec!["other".into()]);
         assert!(registry.get_static_mounts(&other_enabled).is_empty());
         assert!(registry.get_static_mounts(&Config::default()).is_empty());
+    }
+
+    struct CommercialAddon;
+
+    #[async_trait::async_trait]
+    impl Addon for CommercialAddon {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn id(&self) -> &'static str {
+            "commercialaddon"
+        }
+        fn name(&self) -> &'static str {
+            "CommercialAddon"
+        }
+        fn category(&self) -> crate::addons::AddonCategory {
+            crate::addons::AddonCategory::Commercial
+        }
+        fn router(&self, _state: crate::app::AppState) -> Option<axum::Router> {
+            None
+        }
+        async fn initialize(&self, _state: crate::app::AppState) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn has_commercial_reflects_registered_addon_categories() {
+        assert!(!AddonRegistry::new().has_commercial());
+        assert!(
+            !AddonRegistry::with_extra_addons(vec![Arc::new(PathAddon)]).has_commercial()
+        );
+        assert!(AddonRegistry::with_extra_addons(vec![Arc::new(
+            PathAddon
+        ), Arc::new(CommercialAddon)])
+        .has_commercial());
     }
 
     #[test]

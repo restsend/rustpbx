@@ -13,7 +13,7 @@ use lru::LruCache;
 use minijinja::Environment;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Instant;
@@ -50,6 +50,15 @@ pub type PermCache = LruCache<i64, (Instant, HashSet<String>)>;
 /// keeping memory bounded if many distinct users log in briefly.
 pub const PERM_CACHE_CAP: usize = 1024;
 
+#[derive(Debug, Default)]
+struct MfaAttemptRecord {
+    failures: u32,
+    locked_until: Option<Instant>,
+}
+
+pub const MFA_MAX_ATTEMPTS: u32 = 5;
+pub const MFA_LOCKOUT_SECS: u64 = 300;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ReloadTarget {
     Routes,
@@ -76,6 +85,7 @@ pub struct ConsoleState {
     callrecord_cfg: Option<CallRecordConfig>,
     /// Connection cache for daily rotated SQLite files.
     cdr_conn_cache: Arc<DashMap<String, DatabaseConnection>>,
+    mfa_attempts: Arc<Mutex<HashMap<i64, MfaAttemptRecord>>>,
     #[cfg(test)]
     test_branding_provider: Arc<RwLock<Option<Arc<dyn crate::branding::BrandingProvider>>>>,
 }
@@ -115,6 +125,7 @@ impl ConsoleState {
             addon_extensions: Arc::new(std::sync::RwLock::new(http::Extensions::new())),
             callrecord_cfg,
             cdr_conn_cache: Arc::new(DashMap::new()),
+            mfa_attempts: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
             test_branding_provider: Arc::new(RwLock::new(None)),
         }))
@@ -263,11 +274,13 @@ impl ConsoleState {
                 serde_json::Value::String(env!("CARGO_PKG_VERSION").to_string())
             });
             map.entry("edition").or_insert_with(|| {
-                if cfg!(feature = "commerce") {
-                    serde_json::Value::String("commerce".to_string())
-                } else {
-                    serde_json::Value::String("community".to_string())
-                }
+                let edition = match self.app_state() {
+                    Some(app_state) if app_state.addon_registry.has_commercial() => {
+                        "commercial"
+                    }
+                    _ => "community",
+                };
+                serde_json::Value::String(edition.to_string())
             });
             let brand = {
                 let request_host = map
@@ -740,6 +753,10 @@ impl ConsoleState {
         self.config.allow_registration
     }
 
+    pub fn require_mfa(&self) -> bool {
+        self.config.require_mfa
+    }
+
     pub fn login_url(&self, next: Option<String>) -> String {
         let mut url = self.url_for("/login");
         if let Some(next) = next {
@@ -1083,6 +1100,31 @@ mod tests {
         let html = response_body(response).await;
         assert!(!html.is_empty(), "dashboard body should not be empty");
         assert!(html.contains("<html"), "expected an HTML document");
+    }
+
+    #[tokio::test]
+    async fn edition_defaults_to_community_without_app_state() {
+        let state = setup_state().await;
+        state
+            .create_user("edition@example.com", "admin", "password123")
+            .await
+            .expect("seed admin user");
+        assert!(state.app_state().is_none());
+        let app = router(state.clone());
+        let cookie = login_cookie(&app, state.base_path()).await;
+
+        let request = Request::builder()
+            .uri(format!("{}/", state.base_path()))
+            .header(header::COOKIE, cookie)
+            .body(Body::empty())
+            .expect("build dashboard request");
+        let response = app.oneshot(request).await.expect("dashboard request");
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = response_body(response).await;
+        assert!(
+            html.contains("edition=community"),
+            "edition should render as community without a commercial addon"
+        );
     }
 
     #[tokio::test]

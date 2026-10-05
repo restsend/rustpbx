@@ -3020,6 +3020,17 @@
                                                                 Edit
                                                             </button>
                                                             <button type="button"
+                                                                x-show="can('users:manage') && selectedUser.mfa_enabled" x-cloak
+                                                                class="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 font-semibold text-amber-700 transition hover:border-amber-300 hover:bg-amber-100"
+                                                                @click="resetUserMfa(selectedUser.id)">
+                                                                <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none"
+                                                                    stroke="currentColor" stroke-width="1.6">
+                                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                                        d="M13.5 4.5 16 7m-1.5-4.5 2.5 2.5-8.5 8.5H6v-2.5l8.5-8.5z" />
+                                                                </svg>
+                                                                {{ "settings_page.mfa_reset_button" | t }}
+                                                            </button>
+                                                            <button type="button"
                                                                 x-show="can('users:delete')"
                                                                 class="inline-flex items-center gap-1 rounded-md border border-rose-200 bg-rose-50 px-2 py-1 font-semibold text-rose-600 transition hover:border-rose-300 hover:bg-rose-100"
                                                                 @click="deleteUser(selectedUser.id)">
@@ -3055,10 +3066,14 @@
                                                             x-text="formatDateTime(selectedUser.updated_at)"></span>
                                                     </div>
                                                 </div>
-                                                <div class="flex flex-wrap gap-2 text-[11px]">
+                                                    <div class="flex flex-wrap gap-2 text-[11px]">
                                                     <span class="rounded-full px-2 py-0.5 font-semibold"
                                                         :class="selectedUser.is_active ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-100' : 'bg-amber-50 text-amber-600 ring-1 ring-amber-100'"
                                                         x-text="selectedUser.is_active ? tt('settings_page.login_enabled') : tt('settings_page.login_disabled')"></span>
+                                                    <span x-show="selectedUser.mfa_enabled" x-cloak
+                                                        class="rounded-full bg-teal-50 px-2 py-0.5 font-semibold text-teal-600 ring-1 ring-teal-100"
+                                                        :title="tt('settings_page.mfa_enabled_hint')"
+                                                        x-text="tt('settings_page.mfa_enabled_badge')"></span>
                                                     <span class="rounded-full px-2 py-0.5 font-semibold"
                                                         :class="selectedUser.is_staff ? 'bg-sky-50 text-sky-600 ring-1 ring-sky-100' : 'bg-slate-100 text-slate-600 ring-1 ring-slate-200'"
                                                         x-text="selectedUser.is_staff ? tt('settings_page.staff_privileges') : tt('settings_page.standard_user')"></span>
@@ -4749,6 +4764,34 @@
                     });
                 } finally {
                     this.userProcessing.delete = null;
+                }
+            },
+            async resetUserMfa(id) {
+                if (!this.ensureCanManageUsers(true)) {
+                    return;
+                }
+                try {
+                    const response = await fetch(this.userDetailEndpoint(id) + '/mfa/reset', {
+                        method: 'POST',
+                        headers: {
+                            Accept: 'application/json',
+                        },
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to reset MFA');
+                    }
+                    this.$dispatch('toast', {
+                        title: 'MFA reset',
+                        message: 'Two-factor authentication was disabled for this user.',
+                    });
+                    await this.fetchUsers();
+                } catch (err) {
+                    console.error(err);
+                    this.$dispatch('toast', {
+                        title: 'Reset failed',
+                        message: err.message || 'Unable to reset MFA.',
+                    });
                 }
             },
             generateId(prefix = 'id') {

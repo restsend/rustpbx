@@ -17,7 +17,7 @@ use sea_orm::{
     TransactionTrait,
 };
 use sha2::Sha256;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::warn;
 
 pub(super) const SESSION_COOKIE_NAME: &str = "rustpbx_session";
@@ -478,6 +478,85 @@ impl ConsoleState {
             .context("failed to disable MFA")
     }
 
+    pub fn verify_user_password(user: &UserModel, password: &str) -> bool {
+        match PasswordHash::new(&user.password_hash) {
+            Ok(parsed) => Argon2::default()
+                .verify_password(password.as_bytes(), &parsed)
+                .is_ok(),
+            Err(_) => false,
+        }
+    }
+
+    pub fn mfa_is_locked(&self, user_id: i64) -> bool {
+        let mut attempts = match self.mfa_attempts.lock() {
+            Ok(guard) => guard,
+            Err(_) => return false,
+        };
+        if let Some(record) = attempts.get_mut(&user_id)
+            && let Some(until) = record.locked_until
+        {
+            if Instant::now() < until {
+                return true;
+            }
+            record.locked_until = None;
+            record.failures = 0;
+        }
+        false
+    }
+
+    pub fn mfa_record_failure(&self, user_id: i64) -> bool {
+        let mut attempts = match self.mfa_attempts.lock() {
+            Ok(guard) => guard,
+            Err(_) => return false,
+        };
+        let record = attempts.entry(user_id).or_default();
+        record.failures += 1;
+        if record.failures >= crate::console::MFA_MAX_ATTEMPTS {
+            record.locked_until =
+                Some(Instant::now() + Duration::from_secs(crate::console::MFA_LOCKOUT_SECS));
+            record.failures = 0;
+            return true;
+        }
+        false
+    }
+
+    pub fn mfa_clear_failures(&self, user_id: i64) {
+        if let Ok(mut attempts) = self.mfa_attempts.lock() {
+            attempts.remove(&user_id);
+        }
+    }
+
+    pub fn mfa_lockout_remaining_secs(&self, user_id: i64) -> Option<u64> {
+        let attempts = self.mfa_attempts.lock().ok()?;
+        let record = attempts.get(&user_id)?;
+        let until = record.locked_until?;
+        let now = Instant::now();
+        if now < until {
+            Some((until - now).as_secs() + 1)
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn report_mfa_attempt(
+        &self,
+        username: &str,
+        source: Option<String>,
+        outcome: crate::addons::AuthAttemptOutcome,
+    ) {
+        if let Some(app_state) = self.app_state() {
+            app_state
+                .addon_registry
+                .dispatch_auth_attempt(&crate::addons::AuthAttempt {
+                    username: username.to_string(),
+                    realm: None,
+                    method: "LOGIN_MFA".to_string(),
+                    source,
+                    outcome,
+                });
+        }
+    }
+
     /// Verify an MFA code for a user
     pub fn verify_mfa_code(user: &UserModel, code: &str) -> bool {
         use totp_rs::{Algorithm, Secret, TOTP};
@@ -591,5 +670,119 @@ mod tests {
             .expect("create second user");
         assert!(!second.is_superuser);
         assert!(!second.is_staff);
+    }
+
+    fn current_totp_code(secret: &str, email: &str) -> String {
+        use totp_rs::{Algorithm, Secret, TOTP};
+        let bytes = Secret::Encoded(secret.to_string())
+            .to_bytes()
+            .expect("valid base32 secret");
+        let totp = TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            bytes,
+            Some(crate::config::BRAND_NAME.to_string()),
+            email.to_string(),
+        )
+        .expect("build totp");
+        totp.generate_current().expect("generate code")
+    }
+
+    fn enrollment_secret() -> String {
+        use totp_rs::Secret;
+        Secret::generate_secret().to_encoded().to_string()
+    }
+
+    #[tokio::test]
+    async fn enable_mfa_with_current_code_persists_and_verifies() {
+        let state = setup_state(false).await;
+        let user = state
+            .create_user("mfa@rustpbx.com", "mfauser", "password123")
+            .await
+            .expect("create user");
+        let secret = enrollment_secret();
+        let code = current_totp_code(&secret, &user.email);
+
+        assert!(
+            state
+                .enable_mfa(&user, &secret, &code)
+                .await
+                .expect("enable mfa")
+        );
+
+        let reloaded = state.find_user_by_email(&user.email).await.expect("reload");
+        let reloaded = reloaded.expect("user exists");
+        assert!(reloaded.mfa_enabled);
+        assert_eq!(reloaded.mfa_secret.as_deref(), Some(secret.as_str()));
+        assert!(ConsoleState::verify_mfa_code(&reloaded, &code));
+    }
+
+    #[tokio::test]
+    async fn enable_mfa_rejects_wrong_code() {
+        let state = setup_state(false).await;
+        let user = state
+            .create_user("wrongcode@rustpbx.com", "wrongcode", "password123")
+            .await
+            .expect("create user");
+        let secret = enrollment_secret();
+
+        assert!(
+            !state
+                .enable_mfa(&user, &secret, "000000")
+                .await
+                .expect("enable mfa returns false")
+        );
+
+        let reloaded = state.find_user_by_email(&user.email).await.expect("reload");
+        let reloaded = reloaded.expect("user exists");
+        assert!(!reloaded.mfa_enabled);
+        assert!(reloaded.mfa_secret.is_none());
+    }
+
+    #[tokio::test]
+    async fn disable_mfa_clears_secret_and_verification_fails() {
+        let state = setup_state(false).await;
+        let user = state
+            .create_user("disable@rustpbx.com", "disableuser", "password123")
+            .await
+            .expect("create user");
+        let secret = enrollment_secret();
+        let code = current_totp_code(&secret, &user.email);
+        state
+            .enable_mfa(&user, &secret, &code)
+            .await
+            .expect("enable mfa");
+
+        let enabled = state.find_user_by_email(&user.email).await.expect("reload");
+        let enabled = enabled.expect("user exists");
+        state.disable_mfa(&enabled).await.expect("disable mfa");
+
+        let reloaded = state.find_user_by_email(&user.email).await.expect("reload");
+        let reloaded = reloaded.expect("user exists");
+        assert!(!reloaded.mfa_enabled);
+        assert!(reloaded.mfa_secret.is_none());
+        assert!(!ConsoleState::verify_mfa_code(&reloaded, &code));
+    }
+
+    #[tokio::test]
+    async fn mfa_limiter_locks_after_five_failures_and_clears() {
+        let db = Database::connect("sqlite::memory:").await.expect("connect");
+        Migrator::up(&db, None).await.expect("migrations");
+        let state = ConsoleState::initialize(db, ConsoleConfig::default(), None)
+            .await
+            .expect("init console state");
+
+        assert!(!state.mfa_is_locked(7));
+        for _ in 0..(crate::console::MFA_MAX_ATTEMPTS - 1) {
+            assert!(!state.mfa_record_failure(7));
+            assert!(!state.mfa_is_locked(7));
+        }
+        assert!(state.mfa_record_failure(7));
+        assert!(state.mfa_is_locked(7));
+
+        state.mfa_clear_failures(7);
+        assert!(!state.mfa_is_locked(7));
     }
 }

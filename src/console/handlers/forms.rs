@@ -7,6 +7,7 @@ use std::cmp;
 #[derive(Deserialize, Default, Clone)]
 pub struct LoginQuery {
     pub next: Option<String>,
+    pub mode: Option<String>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -37,6 +38,12 @@ pub struct ResetForm {
 
 #[derive(Deserialize, Default, Clone)]
 pub struct MfaForm {
+    pub code: String,
+}
+
+#[derive(Deserialize, Default, Clone)]
+pub struct MfaEnrollForm {
+    pub secret: String,
     pub code: String,
 }
 
