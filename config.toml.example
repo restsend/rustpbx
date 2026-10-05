@@ -65,6 +65,20 @@ database_url = "sqlite://rustpbx.sqlite3"
 # registered with `;+sip.ice` are answered as ICE-lite automatically.
 # ice_lite = false
 
+# Optional per-bridge sliding diagnostics, separate from the 5s global stats log.
+# Rates use actual elapsed counter deltas; fresh RTCP reports describe remote reception.
+# Missing samples stay unavailable. Coalesced report counts disclose sampling limits.
+# [media.quality_stats]
+# enabled = false
+# sample_interval_ms = 500  # Valid: 250..10000; absent defaults to 5000.
+# window_ms = 2000          # Valid: sample interval..60000; absent defaults to 10000.
+# log_interval_ms = 2000    # Valid: 2000..60000; absent defaults to 10000.
+# Optional egress PCM energy before encoding; no extra decode on RTP direct forwarding.
+# RMS and peak use raw signed 16-bit PCM units. Attenuation is dBov: 0 loudest, 127 silence.
+# Window average uses sample-weighted energy, not an average of decibel values.
+# [media.volume_stats]
+# enabled = false
+
 # SIP Contact — host in Contact for dialogs (BYE, re-INVITE). Unset → follow external_ip.
 # sip_external_ip = "203.0.113.10"
 # auto_sip_external_ip = "http://ifconfig.me"

@@ -554,6 +554,8 @@ impl SipSession {
                 .zip(self.context.dialplan.media.rtp_end_port)
         };
         crate::media::leg::LegConfig {
+            quality_stats: self.context.dialplan.media.quality_stats.clone(),
+            volume_stats: self.context.dialplan.media.volume_stats.clone(),
             // WebRTC legs gather ICE candidates; relay-only (per dialplan)
             // strips host/srflx so the browser must use the TURN path.
             ice_servers: self
@@ -6545,8 +6547,9 @@ impl SipSession {
                             if self.media_profile.path == MediaPathMode::Anchored {
                                 if self.media.bridge.is_none() {
                                     self.media.bridge =
-                                        Some(crate::media::media_bridge::MediaBridge::new(
+                                        Some(crate::media::media_bridge::MediaBridge::new_with_quality_stats(
                                             self.id.to_string(),
+                                            self.context.dialplan.media.quality_stats.clone(),
                                         ));
                                     info!(
                                         session_id = %self.id,
@@ -7880,7 +7883,10 @@ impl SipSession {
                     .media_leg(&LegId::from("callee"))
                     .ok_or_else(|| anyhow!("Missing callee media peer"))?;
                 if self.media.bridge.is_none() {
-                    self.media.bridge = Some(MediaBridge::new(self.id.to_string()));
+                    self.media.bridge = Some(MediaBridge::new_with_quality_stats(
+                        self.id.to_string(),
+                        self.context.dialplan.media.quality_stats.clone(),
+                    ));
                 }
                 self.bridge_mut()
                     .unwrap()
@@ -9587,6 +9593,17 @@ impl SipSession {
             .rwi_gateway
             .as_ref()
             .map(|gw| crate::rwi::RwiCallRecordGuard::new(gw, self.context.session_id.clone()));
+
+        // Flush actor-owned partial PCM before the synchronous CDR snapshot.
+        // Missing media evidence must never prevent hangup or CDR publication.
+        for id in [LegId::from("caller"), self.resolve_transfer_leg()] {
+            if let Some(peer) = self.media_leg(&id) {
+                if let Err(error) = peer.finalize_volume().await {
+                    warn!(session_id = %self.context.session_id, leg_id = %id, %error,
+                        "Failed to finalize PCM volume before CDR");
+                }
+            }
+        }
 
         if let Some(reporter) = &self.reporter {
             let snapshot = self.record_snapshot();
@@ -13678,6 +13695,7 @@ impl SipSession {
         // A reused logical leg (e.g. consult after rejection) is a new SIP call.
         // Linphone remembers declined Call-IDs and rejects attempts reusing one.
         let bleg_call_id = format!("{}-{}-{}", self.id.0, leg_id, uuid::Uuid::new_v4());
+        self.meta.callee_call_ids.insert(bleg_call_id.clone());
         let invite_option = rsipstack::dialog::invitation::InviteOption {
             callee: callee_uri.clone(),
             caller: caller.clone(),
@@ -14013,7 +14031,10 @@ impl SipSession {
                 return true; // Keep the requested pair until usable media arrives.
             }
             if self.media.bridge.is_none() {
-                self.media.bridge = Some(MediaBridge::new(self.id.to_string()));
+                self.media.bridge = Some(MediaBridge::new_with_quality_stats(
+                    self.id.to_string(),
+                    self.context.dialplan.media.quality_stats.clone(),
+                ));
             }
             if !self.meta.media_health_monitor_spawned {
                 Self::arm_media_health_monitor(

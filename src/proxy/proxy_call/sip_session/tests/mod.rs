@@ -6989,6 +6989,32 @@ async fn test_record_snapshot_carries_transferred_and_leg_timeline() {
         Some("sip")
     );
     assert_eq!(events[3].event_type, LegTimelineEventType::Removed);
+
+
+    // Cleanup must archive the last short PCM window before reporting its CDR.
+    let mut config = crate::media::leg::LegConfig::rtp_pcmu();
+    config.call_id = Some(session.context.session_id.clone());
+    config.volume_stats.enabled = true;
+    config.quality_stats.sample_interval_ms = 500;
+    let caller = crate::media::leg::LegInner::new("caller", &config, None).unwrap();
+    session.legs.set_media_leg(&LegId::from("caller"), caller.clone());
+    caller.play(Box::new(crate::media::audio_source::ToneAudioSource::new(
+        440, Duration::from_secs(1), 8000,
+    ).unwrap()), true, None).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert!(serde_json::to_value(caller.quality_report("A")).unwrap()["pcmEgress"].is_null());
+    let (records, mut received) = mpsc::channel(1);
+    session.reporter = Some(CallReporter {
+        server: server.clone(), context: session.context.clone(), call_record_sender: Some(records),
+    });
+    session.cleanup().await;
+    let record = received.try_recv().expect("cleanup must report its CDR");
+    let metadata = serde_json::to_value(record).unwrap();
+    let volume = &metadata["metadata"]["media_quality"][0]["pcmEgress"]["volume"];
+    assert!(volume["sample_count"].as_u64().unwrap_or(0) > 0,
+        "the CDR must retain actual short PCM");
+    assert!(volume["rms"].as_f64().unwrap() > 0.0);
+    assert!(volume["observed_ms"].as_u64().unwrap() < 500);
 }
 
 

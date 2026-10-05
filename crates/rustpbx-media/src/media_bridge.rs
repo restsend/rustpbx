@@ -122,13 +122,15 @@ struct HealthShared {
     route_activated_at: parking_lot::Mutex<Option<std::time::Instant>>,
     /// Zero-inbound-RTP window before a leg is flagged stalled.
     stall_detect: parking_lot::RwLock<Duration>,
+    quality_stats: crate::quality_stats::QualityStatsConfig,
 }
 
 impl HealthShared {
-    fn new() -> Arc<Self> {
+    fn new(quality_stats: crate::quality_stats::QualityStatsConfig) -> Arc<Self> {
         let (tx, _) = watch::channel(None);
         Arc::new(Self {
             tx,
+            quality_stats,
             route_activated_at: parking_lot::Mutex::new(None),
             stall_detect: parking_lot::RwLock::new(
                 crate::media_health::DEFAULT_STALL_DETECT,
@@ -139,13 +141,20 @@ impl HealthShared {
 
 impl MediaBridge {
     pub fn new(session_id: impl Into<String>) -> Self {
+        Self::new_with_quality_stats(session_id, Default::default())
+    }
+
+    pub fn new_with_quality_stats(
+        session_id: impl Into<String>,
+        quality_stats: crate::quality_stats::QualityStatsConfig,
+    ) -> Self {
         let (dtmf_bus, _) = broadcast::channel(8);
         let legs_shared = Arc::new(parking_lot::Mutex::new((None, None)));
         let cancel = CancellationToken::new();
         let session = session_id.into();
         crate::telemetry::MediaTelemetry::register_bridge();
         let (relay_arm_failed, _) = watch::channel(false);
-        let health = HealthShared::new();
+        let health = HealthShared::new(quality_stats);
         spawn_bridge_stats_task(
             session.clone(),
             Arc::clone(&legs_shared),
@@ -1196,6 +1205,7 @@ impl MediaBridge {
     /// close path has no tokio::spawn, so this never panics during runtime
     /// teardown).
     fn teardown(&mut self) {
+        // The sampler drains the shared legs once before releasing its final quality window.
         self.root_cancel.cancel();
         if let Some(old) = self.rtcp_cancel.take() {
             old.cancel();
@@ -1204,7 +1214,6 @@ impl MediaBridge {
             cancel.cancel();
         }
         crate::telemetry::MediaTelemetry::unregister_bridge();
-        *self.legs_shared.lock() = (None, None);
         if let Some(la) = self.leg_a.take() {
             la.stop();
         }
@@ -1224,6 +1233,45 @@ impl Drop for MediaBridge {
 
 // ── Periodic per-bridge stats task ────────────────────────────────────────────
 
+#[derive(serde::Serialize)]
+struct BridgeQualityWindow {
+    #[serde(flatten)]
+    totals: crate::quality_stats::WindowSummary,
+    legs: Vec<LegQualityWindow>,
+}
+
+#[derive(serde::Serialize)]
+struct LegQualityWindow {
+    leg_id: String,
+    side: &'static str,
+    window_ms: u64,
+    observed_ms: u64,
+    rx_packets_per_second: Option<crate::quality_stats::Range>,
+    tx_packets_per_second: Option<crate::quality_stats::Range>,
+    partial_samples: usize,
+    sampling_gaps: usize,
+    counter_resets: usize,
+    egress_report: crate::quality_stats::ReportSummary,
+    ingress_report: Option<IngressQualityWindow>,
+}
+
+#[derive(serde::Serialize)]
+struct IngressQualityWindow {
+    ssrc: u32,
+    clock_rate: u32,
+    jitter_ms: Option<crate::quality_stats::Range>,
+    loss_percent: Option<crate::quality_stats::Range>,
+}
+
+#[derive(Debug, Clone)]
+struct IngressSample {
+    ssrc: u32,
+    clock_rate: u32,
+    received: u64,
+    lost: i64,
+    jitter_ms: Option<f64>,
+}
+
 /// One leg's transport/tap/RTCP counters at a single sample point.
 #[derive(Debug, Clone, Default)]
 struct LegSample {
@@ -1237,9 +1285,12 @@ struct LegSample {
     jitter_us: u64,
     rtt_us: u64,
     fraction_lost: u8,
+    recording_queue_drops: u64,
+    ingress_quality: Option<IngressSample>,
+    ingress_recovery: Option<std::time::Instant>,
 }
 
-fn sample_leg(leg: &Leg) -> LegSample {
+async fn sample_leg(leg: &Leg, quality: bool) -> LegSample {
     let tap = leg.stats();
     let rtcp = leg.rtcp_stats().snapshot();
     // Wire-level outbound RTP: sum the audio senders' counters (includes
@@ -1252,7 +1303,38 @@ fn sample_leg(leg: &Leg) -> LegSample {
         .filter_map(|t| t.sender())
         .map(|s| s.packets_sent() as u64)
         .sum();
+    let mut ingress_quality = None;
+    if quality {
+        let receiver = leg.pc().get_transceivers().into_iter()
+            .find(|transceiver| transceiver.kind() == MediaKind::Audio)
+            .and_then(|transceiver| transceiver.receiver());
+        if let (Some(receiver), Some(codec)) = (receiver, leg.negotiated().and_then(|profile| profile.audio)) {
+            if codec.clock_rate != 0 {
+                let ssrc = receiver.ssrc();
+                match leg.pc().get_stats().await {
+                    Ok(report) => {
+                        ingress_quality = report.entries.iter().find(|entry|
+                            entry.kind == rustrtc::stats::StatsKind::InboundRtp
+                            && entry.values.get("ssrc").and_then(serde_json::Value::as_u64) == Some(ssrc as u64))
+                            .and_then(|entry| {
+                                let received = entry.values.get("packetsReceived")?.as_u64()?;
+                                Some(IngressSample {
+                                    ssrc, clock_rate: codec.clock_rate,
+                                    received,
+                                    lost: entry.values.get("packetsLost")?.as_i64()?,
+                                    jitter_ms: (received > 1).then_some(
+                                        entry.values.get("jitter")?.as_f64()? * 1000.0 / codec.clock_rate as f64),
+                                })
+                            });
+                    }
+                    Err(error) => warn!(leg_id = %leg.id(), %error, "failed to sample inbound media quality"),
+                }
+            }
+        }
+    }
     LegSample {
+        ingress_quality,
+        ingress_recovery: None,
         ingress: tap.ingress_packets,
         egress: tap.egress_packets,
         transport_rx: leg.pc().received_rtp_packets(),
@@ -1263,6 +1345,7 @@ fn sample_leg(leg: &Leg) -> LegSample {
         jitter_us: rtcp.jitter_us,
         rtt_us: rtcp.rtt_us,
         fraction_lost: rtcp.fraction_lost,
+        recording_queue_drops: tap.recording_queue_drops,
     }
 }
 
@@ -1330,9 +1413,31 @@ fn spawn_bridge_stats_task(
     cancel: CancellationToken,
 ) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        let config = health.quality_stats.clone();
+        // Disabled quality logging retains only the original 5s health sampler.
+        let sample_interval_ms = if config.enabled {
+            config.sample_interval_ms.min(5000)
+        } else {
+            5000
+        };
+        let mut interval = tokio::time::interval(Duration::from_millis(sample_interval_ms));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        interval.tick().await; // skip the immediate first tick
+        let mut last_health = interval.tick().await; // skip the immediate first tick
+        let mut window = crate::quality_stats::QualityWindow::new(
+            Duration::from_millis(config.window_ms),
+            Duration::from_millis(config.sample_interval_ms),
+        );
+        let mut leg_windows = [0, 1].map(|_| crate::quality_stats::QualityWindow::new(
+            Duration::from_millis(config.window_ms),
+            Duration::from_millis(config.sample_interval_ms),
+        ));
+        let mut previous_sample = std::time::Instant::now();
+        let mut last_emit = previous_sample;
+        let mut sample_a: Option<LegSample> = None;
+        let mut sample_b: Option<LegSample> = None;
+        let mut report_counts = [0u64; 2];
+        let mut leg_report_counts = [0u64; 2];
+        let mut sampled_ids = [None, None];
         let mut prev_a: Option<LegSample> = None;
         let mut prev_b: Option<LegSample> = None;
         // First/last inbound-RTP observations per side (for
@@ -1342,211 +1447,339 @@ fn spawn_bridge_stats_task(
         let mut last_rx: (Option<std::time::Instant>, Option<std::time::Instant>) =
             (None, None);
         loop {
-            tokio::select! {
-                _ = cancel.cancelled() => break,
-                _ = interval.tick() => {
-                    let (la, lb) = {
-                        let g = legs_shared.lock();
-                        (g.0.clone(), g.1.clone())
-                    };
-                    let sa = la.as_ref().map(|l| sample_leg(l));
-                    let sb = lb.as_ref().map(|l| sample_leg(l));
+            let (tick, finishing) = tokio::select! {
+                _ = cancel.cancelled() => (tokio::time::Instant::now(), true),
+                tick = interval.tick() => (tick, false),
+            };
+            let (la, lb) = {
+                let mut g = legs_shared.lock();
+                if finishing { std::mem::take(&mut *g) } else { (g.0.clone(), g.1.clone()) }
+            };
+            let mut sa = if let Some(leg) = &la { Some(sample_leg(leg, config.enabled).await) } else { None };
+            let mut sb = if let Some(leg) = &lb { Some(sample_leg(leg, config.enabled).await) } else { None };
 
-                    let da = leg_delta(sa.as_ref(), prev_a.as_ref());
-                    let db = leg_delta(sb.as_ref(), prev_b.as_ref());
-
-                    // Same-codec relay fast-path? Only then is "ingress on one
-                    // leg minus egress on the peer" a clean internal-drop signal.
-                    // In transcode mode the two legs run at different packet
-                    // rates / ptime, so ingress-vs-egress is confounded by the
-                    // codec rate difference and MUST NOT be reported as drops.
-                    let relay_mode = match (la.as_ref(), lb.as_ref()) {
-                        (Some(a), Some(b)) => match (a.negotiated(), b.negotiated()) {
-                            (Some(pa), Some(pb)) => {
-                                matches!((pa.audio.as_ref(), pb.audio.as_ref()),
-                                    (Some(ca), Some(cb)) if ca.codec == cb.codec)
-                            }
-                            _ => false,
-                        },
+            let now = std::time::Instant::now();
+            let elapsed = now.duration_since(previous_sample);
+            // Normal teardown may clear selection first; absence is not evidence of counter reset.
+            if config.enabled && (!finishing || la.is_some() || lb.is_some())
+                && (finishing || config.sample_interval_ms <= 5000
+                || elapsed >= Duration::from_millis(config.sample_interval_ms)) {
+                previous_sample = now;
+                let observed_a = leg_delta(sa.as_ref(), sample_a.as_ref());
+                let observed_b = leg_delta(sb.as_ref(), sample_b.as_ref());
+                let ids = [la.as_ref().map(|leg| leg.id().to_string()), lb.as_ref().map(|leg| leg.id().to_string())];
+                let membership_changed = ids != sampled_ids;
+                let previous_ids = std::mem::replace(&mut sampled_ids, ids);
+                let reset = (membership_changed && (sample_a.is_some() || sample_b.is_some()))
+                    || [(sa.as_ref(), sample_a.as_ref()), (sb.as_ref(), sample_b.as_ref())]
+                    .into_iter().any(|(current, previous)| match (current, previous) {
+                        (Some(current), Some(previous)) => current.transport_rx < previous.transport_rx
+                            || current.transport_tx < previous.transport_tx
+                            || current.recording_queue_drops < previous.recording_queue_drops,
+                        (None, Some(_)) => true,
                         _ => false,
-                    };
-
-                    // ── rx bucket (system received) ──
-                    let rx_packets_d = da.transport_rx + db.transport_rx;
-                    let rx_expected_d = da.sr + db.sr;
-                    let rx_lost_d = rx_expected_d.saturating_sub(rx_packets_d);
-                    // Internal drops: received on one leg but not emitted on the
-                    // peer leg (rustrtc mpsc/SPSC saturation, relay stall, ...).
-                    // Relay-only (see `relay_mode`).
-                    let rx_idrop_d = if relay_mode {
-                        let dir_ab_drop = da.ingress.saturating_sub(db.egress);
-                        let dir_ba_drop = db.ingress.saturating_sub(da.egress);
-                        dir_ab_drop + dir_ba_drop
-                    } else {
-                        0
-                    };
-
-                    // ── tx bucket (system sent) ──
-                    let tx_packets_d = da.egress + db.egress;
-                    let tx_lost_d = (da.fraction_lost as f64 / 255.0 * da.egress as f64).round() as u64
-                        + (db.fraction_lost as f64 / 255.0 * db.egress as f64).round() as u64;
-
-                    let rx_loss_pct = if rx_expected_d > 0 {
-                        rx_lost_d as f64 / rx_expected_d as f64 * 100.0
-                    } else {
-                        0.0
-                    };
-                    let tx_loss_pct = if tx_packets_d > 0 {
-                        tx_lost_d as f64 / tx_packets_d as f64 * 100.0
-                    } else {
-                        0.0
-                    };
-
-                    crate::telemetry::MediaTelemetry::record_rx(rx_packets_d, rx_lost_d, rx_idrop_d);
-                    crate::telemetry::MediaTelemetry::record_tx(tx_packets_d, tx_lost_d, 0);
-
-                    let anomalous = rx_idrop_d > 0 || rx_loss_pct >= 1.0 || tx_loss_pct >= 1.0;
-                    if anomalous && rx_packets_d + tx_packets_d > 0 {
-                        info!(
-                            bridge_id = %session_id,
-                            relay = relay_mode,
-                            a_ingress = da.ingress, a_egress = da.egress, a_rx = da.transport_rx,
-                            a_jitter = fmt_ms(da.jitter_us), a_rtt = fmt_ms(da.rtt_us),
-                            a_flost = format!("{:.1}%", da.fraction_lost as f64 / 255.0 * 100.0),
-                            b_ingress = db.ingress, b_egress = db.egress, b_rx = db.transport_rx,
-                            b_jitter = fmt_ms(db.jitter_us), b_rtt = fmt_ms(db.rtt_us),
-                            b_flost = format!("{:.1}%", db.fraction_lost as f64 / 255.0 * 100.0),
-                            rx_packets = rx_packets_d,
-                            rx_loss = format!("{:.2}%", rx_loss_pct),
-                            rx_idrop = rx_idrop_d,
-                            tx_packets = tx_packets_d,
-                            tx_loss = format!("{:.2}%", tx_loss_pct),
-                            tx_idrop = 0u64,
-                            "bridge media quality anomaly [5s]"
-                        );
-                    } else if rx_packets_d + tx_packets_d > 0 {
-                        // Healthy interval: log the reconciliation counters
-                        // anyway. This is the per-call evidence trail for
-                        // disputes — five-second proof that every packet
-                        // received on one leg was emitted on the peer.
-                        info!(
-                            bridge_id = %session_id,
-                            relay = relay_mode,
-                            a_ingress = da.ingress, a_egress = da.egress,
-                            b_ingress = db.ingress, b_egress = db.egress,
-                            rx_idrop = rx_idrop_d,
-                            rx_loss = format!("{:.2}%", rx_loss_pct),
-                            tx_loss = format!("{:.2}%", tx_loss_pct),
-                            "bridge media quality [5s]"
-                        );
-                    }
-
-                    // ── media health snapshot (call-trace diagnostics) ──
-                    let stall_detect = *health.stall_detect.read();
-                    let activated = *health.route_activated_at.lock();
-                    let route_age_secs = activated
-                        .map(|t| t.elapsed().as_secs_f64())
-                        .unwrap_or(0.0);
-                    let stalled_by_age = match activated {
-                        Some(t) => t.elapsed() >= stall_detect,
-                        None => false,
-                    };
-                    let build_leg_health = |side: &'static str,
-                                            leg: &Option<Leg>,
-                                            sample: &Option<LegSample>,
-                                            delta: &LegSampleDelta,
-                                            first_rx: Option<std::time::Instant>,
-                                            last_rx: Option<std::time::Instant>|
-                     -> Option<crate::media_health::LegMediaHealth> {
-                        let leg = leg.as_ref()?;
-                        let sample = sample.as_ref()?;
-                        let transport_mode = format!("{:?}", leg.pc().config().transport_mode);
-                        let audio = leg
-                            .negotiated()
-                            .and_then(|p| p.audio.map(|c| (c.codec, c.payload_type)));
-                        let remote_addr = leg
-                            .pc()
-                            .ice_transport()
-                            .get_selected_pair()
-                            .map(|pair| pair.remote.address.to_string());
-                        let peer_advertised = leg.peer_advertised_addr();
-                        let latched = if leg.pc().config().transport_mode
-                            == rustrtc::TransportMode::Rtp
-                        {
-                            peer_advertised
-                                .as_deref()
-                                .map(|adv| remote_addr.as_deref() != Some(adv))
+                    });
+                if reset { window.reset(now); report_counts = [0, 0]; }
+                // A newly observed leg establishes counters; it has no prior interval.
+                else if !membership_changed && (la.is_some() || lb.is_some()) { window.observe(now, elapsed, [
+                    observed_a.transport_rx + observed_b.transport_rx,
+                    observed_a.transport_tx + observed_b.transport_tx,
+                    sa.as_ref().map(|sample| sample.recording_queue_drops.saturating_sub(
+                        sample_a.as_ref().map(|previous| previous.recording_queue_drops).unwrap_or(0))).unwrap_or(0)
+                        + sb.as_ref().map(|sample| sample.recording_queue_drops.saturating_sub(
+                        sample_b.as_ref().map(|previous| previous.recording_queue_drops).unwrap_or(0))).unwrap_or(0),
+                ]); }
+                for (side, leg) in [la.as_ref(), lb.as_ref()].into_iter().enumerate() {
+                    if let Some(leg) = leg {
+                        let (current, previous, delta) = if side == 0 {
+                            (sa.as_ref(), sample_a.as_ref(), &observed_a)
                         } else {
-                            None
+                            (sb.as_ref(), sample_b.as_ref(), &observed_b)
                         };
-                        let first_rx_after_s = activated.and_then(|activated| {
-                            first_rx
-                                .map(|first| {
-                                    first.saturating_duration_since(activated).as_secs_f64()
-                                })
-                        });
-                        let rtcp = leg.rtcp_stats().snapshot();
-                        Some(crate::media_health::LegMediaHealth {
-                            side,
-                            transport_mode,
-                            codec: audio.map(|(c, _)| format!("{c:?}")),
-                            payload_type: audio.map(|(_, pt)| pt),
-                            advertised_addr: leg.advertised_addr(),
-                            latched,
-                            remote_addr,
-                            peer_advertised_addr: peer_advertised,
-                            ingress_packets: sample.ingress,
-                            egress_packets: sample.egress,
-                            transport_rx_packets: sample.transport_rx,
-                            transport_tx_packets: sample.transport_tx,
-                            ingress_delta: delta.ingress,
-                            egress_delta: delta.egress,
-                            rx_delta: delta.transport_rx,
-                            tx_delta: delta.transport_tx,
-                            rx_gap_delta: delta.transport_rx.saturating_sub(delta.ingress),
-                            jitter_ms: rtcp.jitter_ms().unwrap_or(0.0),
-                            rtt_ms: rtcp.rtt_ms().unwrap_or(0.0),
-                            fraction_lost_pct: rtcp.fraction_lost as f64 / 255.0 * 100.0,
-                            ms_since_last_rx: last_rx.map(|t| t.elapsed().as_millis() as u64),
-                            first_rx_after_s,
-                            stalled: stalled_by_age && sample.transport_rx == 0,
-                        })
-                    };
-                    let legs_health: Vec<crate::media_health::LegMediaHealth> = [
-                        build_leg_health("caller", &la, &sa, &da, first_rx.0, last_rx.0),
-                        build_leg_health("callee", &lb, &sb, &db, first_rx.1, last_rx.1),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .collect();
-                    if !legs_health.is_empty() {
-                        let snapshot = Arc::new(crate::media_health::MediaHealthSnapshot {
-                            route_age_secs,
-                            relay_mode,
-                            legs: legs_health,
-                        });
-                        let _ = health.tx.send(Some(snapshot));
-                    }
-                    // Track first/last inbound observations from cumulative
-                    // counters (must run before prev_* is overwritten).
-                    let now = std::time::Instant::now();
-                    if sa.as_ref().is_some_and(|s| s.transport_rx > 0) {
-                        if first_rx.0.is_none() {
-                            first_rx.0 = Some(now);
+                        let mut recovery = previous.and_then(|sample| sample.ingress_recovery)
+                            .filter(|at| now.duration_since(*at) < Duration::from_millis(config.window_ms));
+                        let ingress = current.and_then(|sample| sample.ingress_quality.as_ref());
+                        let previous_ingress = previous.and_then(|sample| sample.ingress_quality.as_ref());
+                        let same_stream = ingress.zip(previous_ingress).filter(|(current, previous)|
+                            current.ssrc == previous.ssrc && current.clock_rate == previous.clock_rate
+                            && current.received >= previous.received);
+                        let stream_reset = ingress.is_some() && previous_ingress.is_some() && same_stream.is_none();
+                        let changed = sampled_ids[side] != previous_ids[side];
+                        let reset = previous.is_some_and(|previous| current.is_some_and(|current|
+                            current.transport_rx < previous.transport_rx
+                            || current.transport_tx < previous.transport_tx
+                            || current.recording_queue_drops < previous.recording_queue_drops));
+                        if reset || stream_reset || (changed && previous.is_some()) {
+                            leg_windows[side].reset(now);
+                            leg_report_counts[side] = 0;
+                            recovery = None;
+                        } else if !changed {
+                            leg_windows[side].observe(now, elapsed, [delta.transport_rx, delta.transport_tx,
+                                current.map(|sample| sample.recording_queue_drops.saturating_sub(
+                                    previous.map(|sample| sample.recording_queue_drops).unwrap_or(0))).unwrap_or(0)]);
                         }
-                        last_rx.0 = Some(now);
-                    }
-                    if sb.as_ref().is_some_and(|s| s.transport_rx > 0) {
-                        if first_rx.1.is_none() {
-                            first_rx.1 = Some(now);
+                        if let Some(ingress) = ingress {
+                            let loss = same_stream.and_then(|(current, previous)| {
+                                let received = current.received - previous.received;
+                                let lost = current.lost - previous.lost;
+                                if lost < 0 { recovery = Some(now); }
+                                // Late recovery and a fresh SSRC cannot establish a loss percentage.
+                                let expected = received as i128 + lost as i128;
+                                if lost < 0 || expected <= 0 { None }
+                                else { Some(lost as f64 / expected as f64 * 100.0) }
+                            });
+                            // The opposite report slot holds local ingress observations in this per-leg window only.
+                            leg_windows[side].report(now, 1 - side, [ingress.jitter_ms, None, loss], 1);
                         }
-                        last_rx.1 = Some(now);
+                        let report = leg.rtcp_stats().snapshot();
+                        if report.report_count != report_counts[side] || report.report_count != leg_report_counts[side] {
+                            let unix_now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                                .map(|duration| duration.as_micros() as u64).unwrap_or_default();
+                            let at = now.checked_sub(Duration::from_micros(
+                                unix_now.saturating_sub(report.report_observed_at_micros))).unwrap_or(now);
+                            let values = [report.jitter_ms(), report.rtt_ms(),
+                                Some(report.fraction_lost as f64 / 256.0 * 100.0)];
+                            if report.report_count != report_counts[side] {
+                                let observations = report.report_count.saturating_sub(report_counts[side]);
+                                window.report(at, side, values, observations);
+                                report_counts[side] = report.report_count;
+                            }
+                            if report.report_count != leg_report_counts[side] {
+                                let observations = report.report_count.saturating_sub(leg_report_counts[side]);
+                                leg_windows[side].report(at, side, values, observations);
+                                leg_report_counts[side] = report.report_count;
+                            }
+                        }
+                        if let Some(sample) = if side == 0 { sa.as_mut() } else { sb.as_mut() } {
+                            sample.ingress_recovery = recovery;
+                        }
                     }
-
-                    prev_a = sa;
-                    prev_b = sb;
+                }
+                sample_a = sa.clone();
+                sample_b = sb.clone();
+            }
+            let emit_interval = Duration::from_millis(config.log_interval_ms);
+            if finishing || now.duration_since(last_emit) >= emit_interval {
+                last_emit = now;
+                if config.enabled {
+                    if let Some(summary) = window.summary(now) {
+                        let legs = leg_windows.iter_mut().enumerate().filter_map(|(side, window)| {
+                            let id = sampled_ids[side].as_ref()?;
+                            let summary = window.summary(now)?;
+                            let [caller, callee] = summary.reports;
+                            let (egress, ingress) = if side == 0 { (caller, callee) } else { (callee, caller) };
+                            let current = if side == 0 { sample_a.as_ref() } else { sample_b.as_ref() };
+                            let recovering = current.and_then(|sample| sample.ingress_recovery).is_some_and(|at|
+                                now.duration_since(at) < Duration::from_millis(config.window_ms));
+                            Some(LegQualityWindow {
+                                leg_id: id.clone(), side: if side == 0 { "caller" } else { "callee" },
+                                window_ms: summary.window_ms, observed_ms: summary.observed_ms,
+                                rx_packets_per_second: summary.rx_packets_per_second,
+                                tx_packets_per_second: summary.tx_packets_per_second,
+                                partial_samples: summary.partial_samples, sampling_gaps: summary.sampling_gaps,
+                                counter_resets: summary.counter_resets,
+                                egress_report: egress,
+                                ingress_report: current.and_then(|sample| sample.ingress_quality.as_ref()).map(|sample|
+                                    IngressQualityWindow { ssrc: sample.ssrc, clock_rate: sample.clock_rate,
+                                        jitter_ms: ingress.jitter_ms,
+                                        loss_percent: if recovering { None } else { ingress.loss_percent } }),
+                            })
+                        }).collect();
+                        match serde_json::to_string(&BridgeQualityWindow { totals: summary, legs }) {
+                            Ok(stats) => info!(bridge_id = ?session_id,
+                            scope = "transport_counters_and_fresh_remote_reports",
+                            egress_a_mode = la.as_ref().map(|leg| if leg.egress_is_relay() { "direct_rtp_forwarding" } else { "pcm_pacing" }),
+                            egress_b_mode = lb.as_ref().map(|leg| if leg.egress_is_relay() { "direct_rtp_forwarding" } else { "pcm_pacing" }),
+                            volume_a_egress = ?la.as_ref().and_then(|leg| leg.volume_summary(Duration::from_millis(config.window_ms))),
+                            volume_b_egress = ?lb.as_ref().and_then(|leg| leg.volume_summary(Duration::from_millis(config.window_ms))),
+                            stats = %stats, "bridge media quality window"),
+                            Err(error) => warn!(bridge_id = ?session_id, %error,
+                                "failed to serialize bridge media quality window"),
+                        }
+                    }
                 }
             }
+            if finishing { break; }
+            // Preserve the existing 5s health/telemetry cadence and SR
+            // reconciliation; fast samples must not invent SR bursts.
+            // Use scheduled ticks: wake-up jitter must not skip a full health period.
+            if tick.duration_since(last_health) < Duration::from_secs(5) { continue; }
+            last_health = tick;
+            let da = leg_delta(sa.as_ref(), prev_a.as_ref());
+            let db = leg_delta(sb.as_ref(), prev_b.as_ref());
+
+            // Selected egress sources own the actual media path. Equal
+            // codecs can still transcode after video mismatch or fallback.
+            let relay_mode = match (la.as_ref(), lb.as_ref()) {
+                (Some(a), Some(b)) => a.egress_is_relay() && b.egress_is_relay(),
+                _ => false,
+            };
+
+            // ── rx bucket (system received) ──
+            let rx_packets_d = da.transport_rx + db.transport_rx;
+            let rx_expected_d = da.sr + db.sr;
+            let rx_lost_d = rx_expected_d.saturating_sub(rx_packets_d);
+            // Internal drops: received on one leg but not emitted on the
+            // peer leg (rustrtc mpsc/SPSC saturation, relay stall, ...).
+            // Relay-only (see `relay_mode`).
+            let rx_idrop_d = if relay_mode {
+                let dir_ab_drop = da.ingress.saturating_sub(db.egress);
+                let dir_ba_drop = db.ingress.saturating_sub(da.egress);
+                dir_ab_drop + dir_ba_drop
+            } else {
+                0
+            };
+
+            // ── tx bucket (system sent) ──
+            let tx_packets_d = da.egress + db.egress;
+            let tx_lost_d = (da.fraction_lost as f64 / 255.0 * da.egress as f64).round() as u64
+                + (db.fraction_lost as f64 / 255.0 * db.egress as f64).round() as u64;
+
+            let rx_loss_pct = if rx_expected_d > 0 {
+                rx_lost_d as f64 / rx_expected_d as f64 * 100.0
+            } else {
+                0.0
+            };
+            let tx_loss_pct = if tx_packets_d > 0 {
+                tx_lost_d as f64 / tx_packets_d as f64 * 100.0
+            } else {
+                0.0
+            };
+
+            crate::telemetry::MediaTelemetry::record_rx(rx_packets_d, rx_lost_d, rx_idrop_d);
+            crate::telemetry::MediaTelemetry::record_tx(tx_packets_d, tx_lost_d, 0);
+
+            let anomalous = rx_idrop_d > 0 || rx_loss_pct >= 1.0 || tx_loss_pct >= 1.0;
+            if anomalous && rx_packets_d + tx_packets_d > 0 {
+                info!(
+                    bridge_id = %session_id,
+                    relay = relay_mode,
+                    a_ingress = da.ingress, a_egress = da.egress, a_rx = da.transport_rx,
+                    a_jitter = fmt_ms(da.jitter_us), a_rtt = fmt_ms(da.rtt_us),
+                    a_flost = format!("{:.1}%", da.fraction_lost as f64 / 255.0 * 100.0),
+                    b_ingress = db.ingress, b_egress = db.egress, b_rx = db.transport_rx,
+                    b_jitter = fmt_ms(db.jitter_us), b_rtt = fmt_ms(db.rtt_us),
+                    b_flost = format!("{:.1}%", db.fraction_lost as f64 / 255.0 * 100.0),
+                    rx_packets = rx_packets_d,
+                    rx_loss = format!("{:.2}%", rx_loss_pct),
+                    rx_idrop = rx_idrop_d,
+                    tx_packets = tx_packets_d,
+                    tx_loss = format!("{:.2}%", tx_loss_pct),
+                    tx_idrop = 0u64,
+                    "bridge media quality anomaly [5s]"
+                );
+            }
+
+            // ── media health snapshot (call-trace diagnostics) ──
+            let stall_detect = *health.stall_detect.read();
+            let activated = *health.route_activated_at.lock();
+            let route_age_secs = activated
+                .map(|t| t.elapsed().as_secs_f64())
+                .unwrap_or(0.0);
+            let stalled_by_age = match activated {
+                Some(t) => t.elapsed() >= stall_detect,
+                None => false,
+            };
+            let build_leg_health = |side: &'static str,
+                                    leg: &Option<Leg>,
+                                    sample: &Option<LegSample>,
+                                    delta: &LegSampleDelta,
+                                    first_rx: Option<std::time::Instant>,
+                                    last_rx: Option<std::time::Instant>|
+             -> Option<crate::media_health::LegMediaHealth> {
+                let leg = leg.as_ref()?;
+                let sample = sample.as_ref()?;
+                let transport_mode = format!("{:?}", leg.pc().config().transport_mode);
+                let audio = leg
+                    .negotiated()
+                    .and_then(|p| p.audio.map(|c| (c.codec, c.payload_type)));
+                let remote_addr = leg
+                    .pc()
+                    .ice_transport()
+                    .get_selected_pair()
+                    .map(|pair| pair.remote.address.to_string());
+                let peer_advertised = leg.peer_advertised_addr();
+                let latched = if leg.pc().config().transport_mode
+                    == rustrtc::TransportMode::Rtp
+                {
+                    peer_advertised
+                        .as_deref()
+                        .map(|adv| remote_addr.as_deref() != Some(adv))
+                } else {
+                    None
+                };
+                let first_rx_after_s = activated.and_then(|activated| {
+                    first_rx
+                        .map(|first| {
+                            first.saturating_duration_since(activated).as_secs_f64()
+                        })
+                });
+                let rtcp = leg.rtcp_stats().snapshot();
+                Some(crate::media_health::LegMediaHealth {
+                    leg_id: leg.id().to_string(),
+                    egress_mode: if leg.egress_is_relay() {
+                        crate::media_health::MediaEgressMode::DirectRtpForwarding
+                    } else { crate::media_health::MediaEgressMode::PcmPacing },
+                    volume_egress: if leg.egress_is_relay() { None }
+                        else { leg.volume_summary(Duration::from_millis(config.window_ms)) },
+                    side,
+                    transport_mode,
+                    codec: audio.map(|(c, _)| format!("{c:?}")),
+                    payload_type: audio.map(|(_, pt)| pt),
+                    advertised_addr: leg.advertised_addr(),
+                    latched,
+                    remote_addr,
+                    peer_advertised_addr: peer_advertised,
+                    ingress_packets: sample.ingress,
+                    egress_packets: sample.egress,
+                    transport_rx_packets: sample.transport_rx,
+                    transport_tx_packets: sample.transport_tx,
+                    ingress_delta: delta.ingress,
+                    egress_delta: delta.egress,
+                    rx_delta: delta.transport_rx,
+                    tx_delta: delta.transport_tx,
+                    rx_gap_delta: delta.transport_rx.saturating_sub(delta.ingress),
+                    jitter_ms: rtcp.jitter_ms().unwrap_or(0.0),
+                    rtt_ms: rtcp.rtt_ms().unwrap_or(0.0),
+                    fraction_lost_pct: rtcp.fraction_lost as f64 / 255.0 * 100.0,
+                    ms_since_last_rx: last_rx.map(|t| t.elapsed().as_millis() as u64),
+                    first_rx_after_s,
+                    stalled: stalled_by_age && sample.transport_rx == 0,
+                })
+            };
+            let legs_health: Vec<crate::media_health::LegMediaHealth> = [
+                build_leg_health("caller", &la, &sa, &da, first_rx.0, last_rx.0),
+                build_leg_health("callee", &lb, &sb, &db, first_rx.1, last_rx.1),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            if !legs_health.is_empty() {
+                let snapshot = Arc::new(crate::media_health::MediaHealthSnapshot {
+                    route_age_secs,
+                    relay_mode,
+                    legs: legs_health,
+                });
+                let _ = health.tx.send(Some(snapshot));
+            }
+            // Track first/last inbound observations from cumulative
+            // counters (must run before prev_* is overwritten).
+            let now = std::time::Instant::now();
+            if sa.as_ref().is_some_and(|s| s.transport_rx > 0) {
+                if first_rx.0.is_none() {
+                    first_rx.0 = Some(now);
+                }
+                last_rx.0 = Some(now);
+            }
+            if sb.as_ref().is_some_and(|s| s.transport_rx > 0) {
+                if first_rx.1.is_none() {
+                    first_rx.1 = Some(now);
+                }
+                last_rx.1 = Some(now);
+            }
+
+            prev_a = sa;
+            prev_b = sb;
         }
     });
 }
@@ -1885,6 +2118,317 @@ mod tests {
     use crate::leg::{LegConfig, LegInner};
     use crate::negotiate::CodecInfo;
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn periodic_quality_disabled_restores_health_sampling_cadence() {
+        let mut bridge = MediaBridge::new_with_quality_stats(
+            "disabled-quality",
+            crate::quality_stats::QualityStatsConfig {
+                enabled: false,
+                sample_interval_ms: 500,
+                window_ms: 2000,
+                log_interval_ms: 2000,
+            },
+        );
+        bridge
+            .replace_leg(
+                LegSide::A,
+                LegInner::new("caller", &LegConfig::rtp_pcmu(), None).unwrap(),
+            )
+            .await;
+        let mut health = bridge.health_rx();
+        tokio::task::yield_now().await;
+
+        // Holding the snapshot lock exposes unexpected fast sampling as a
+        // blocked executor. The independent timeout always releases the lock.
+        let legs = bridge.legs_shared.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = legs.lock();
+            ready_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(Duration::from_secs(3));
+        });
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let started = std::time::Instant::now();
+        tokio::time::sleep(Duration::from_millis(750)).await;
+        let elapsed = started.elapsed();
+        let _ = release_tx.send(());
+        holder.join().unwrap();
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "disabled quality sampling must not acquire the leg lock at 500ms: {elapsed:?}"
+        );
+        tokio::time::timeout(Duration::from_secs(6), health.changed())
+            .await
+            .expect("existing health sampler must still publish")
+            .unwrap();
+        let snapshot = health.borrow().clone().unwrap();
+        assert_eq!(snapshot.legs.len(), 1);
+        assert_eq!(snapshot.legs[0].leg_id, "caller");
+        bridge.close();
+    }
+
+    #[test]
+    fn periodic_quality_logs_follow_configured_cadence_for_every_enabled_call() {
+        use std::sync::Mutex;
+        use tracing::span::{Attributes, Id, Record};
+        use tracing::{Event, Metadata, Subscriber};
+        #[derive(Clone, Default)]
+        struct Logs(Arc<Mutex<Vec<(std::time::Instant, String, String)>>>);
+        impl Subscriber for Logs {
+            fn enabled(&self, _: &Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &Attributes<'_>) -> Id {
+                Id::from_u64(1)
+            }
+            fn record(&self, _: &Id, _: &Record<'_>) {}
+            fn record_follows_from(&self, _: &Id, _: &Id) {}
+            fn enter(&self, _: &Id) {}
+            fn exit(&self, _: &Id) {}
+            fn event(&self, event: &Event<'_>) {
+                #[derive(Default)]
+                struct Fields {
+                    message: String,
+                    bridge: String,
+                    stats: String,
+                }
+                impl tracing::field::Visit for Fields {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        match field.name() {
+                            "message" => self.message = format!("{value:?}"),
+                            "bridge_id" => self.bridge = format!("{value:?}"),
+                            "stats" => self.stats = format!("{value:?}"),
+                            _ => {}
+                        }
+                    }
+                }
+                let mut fields = Fields::default();
+                event.record(&mut fields);
+                if fields.message == "bridge media quality window" {
+                    self.0
+                        .lock()
+                        .unwrap()
+                        .push((std::time::Instant::now(), fields.bridge, fields.stats));
+                }
+            }
+        }
+        let logs = Logs::default();
+        let captured = logs.0.clone();
+        let expected_ingress = Arc::new(Mutex::new(HashMap::new()));
+        let expected = expected_ingress.clone();
+        tracing::subscriber::with_default(logs, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let config = crate::quality_stats::QualityStatsConfig {
+                        enabled: true,
+                        sample_interval_ms: 250,
+                        window_ms: 2000,
+                        log_interval_ms: 2000,
+                    };
+                    let mut bridges = Vec::new();
+                    let mut remotes = Vec::new();
+                    let mut reports = Vec::new();
+                    for (name, enabled) in [
+                        ("disabled", false),
+                        ("enabled-a", true),
+                        ("enabled-b", true),
+                    ] {
+                        let mut settings = config.clone();
+                        settings.enabled = enabled;
+                        let mut bridge = MediaBridge::new_with_quality_stats(name, settings);
+                        let mut leg_config = LegConfig::rtp_pcmu();
+                        leg_config.bind_ip = Some("127.0.0.1".to_string());
+                        leg_config.external_ip = Some("127.0.0.1".to_string());
+                        leg_config.enable_latching = false;
+                        leg_config.comfort_noise = false;
+                        if name == "enabled-b" {
+                            leg_config.codecs[0].codec = audio_codec::CodecType::Opus;
+                            leg_config.codecs[0].payload_type = 111;
+                            leg_config.codecs[0].clock_rate = 48000;
+                            leg_config.codecs[0].channels = 2;
+                        }
+                        let leg = LegInner::new(name, &leg_config, None).unwrap();
+                        if enabled {
+                            let remote = LegInner::new("remote", &leg_config, None).unwrap();
+                            let offer = leg.create_offer().await.unwrap();
+                            let answer = remote.apply_sdp(&offer, rustrtc::SdpType::Offer).await.unwrap();
+                            leg.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
+                            let local_sender = leg.pc().get_transceivers()[0].sender().unwrap();
+                            let remote_sender = remote.pc().get_transceivers()[0].sender().unwrap();
+                            let mut rtcp = remote_sender.subscribe_rtcp();
+                            leg.accept();
+                            remote.accept();
+                            let ingress_sender = remote_sender.clone();
+                            let codec = remote_sender.params();
+                            reports.push(tokio::spawn(async move {
+                                let transport = ingress_sender.transport().unwrap();
+                                for (delay, sequence) in [(0, 100), (1000, 102), (1250, 101)] {
+                                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                                    transport.send_rtp(rustrtc::rtp::RtpPacket::new(
+                                        rustrtc::rtp::RtpHeader::new(codec.payload_type, sequence,
+                                            (sequence as u32 - 100) * codec.clock_rate / 50,
+                                            ingress_sender.ssrc()),
+                                        if codec.clock_rate == 8000 { vec![0xff; 160] } else { vec![0xf8, 0xff, 0xfe] },
+                                    )).await.unwrap();
+                                }
+                            }));
+                            if name == "enabled-a" {
+                                leg.play(Box::new(crate::audio_source::ToneAudioSource::new(
+                                    440, Duration::from_secs(1), 8000,
+                                ).unwrap()), true, None).await.unwrap();
+                                reports.push(tokio::spawn(async move {
+                                    let report = tokio::time::timeout(Duration::from_secs(5), async {
+                                        loop {
+                                            if let rustrtc::rtp::RtcpPacket::SenderReport(report) = rtcp.recv().await.unwrap() {
+                                                break report;
+                                            }
+                                        }
+                                    }).await.expect("peer must receive the automatic production SR");
+                                    remote_sender.transport().unwrap().send_rtcp(&[
+                                        rustrtc::rtp::RtcpPacket::ReceiverReport(rustrtc::rtp::ReceiverReport {
+                                            sender_ssrc: remote_sender.ssrc(),
+                                            report_blocks: vec![rustrtc::rtp::ReportBlock {
+                                                ssrc: local_sender.ssrc(), fraction_lost: 32,
+                                                packets_lost: 1, highest_sequence: 100, jitter: 16,
+                                                last_sender_report: (report.ntp_most << 16) | (report.ntp_least >> 16),
+                                                delay_since_last_sender_report: 0,
+                                            }],
+                                        }),
+                                    ]).await.unwrap();
+                                }));
+                            }
+                            remotes.push(remote);
+                        }
+                        bridge.replace_leg(LegSide::A, leg).await;
+                        if name == "enabled-a" {
+                            let idle = LegInner::new("idle-callee", &leg_config, None).unwrap();
+                            bridge.replace_leg(LegSide::B, idle).await;
+                        }
+                        bridges.push(bridge);
+                    }
+                    for report in reports {
+                        report.await.unwrap();
+                    }
+                    tokio::time::timeout(Duration::from_secs(1), async {
+                        loop {
+                            let report = bridges[1].leg(LegSide::A).unwrap().rtcp_stats().snapshot();
+                            // Playback may produce an earlier opportunistic RR; wait for the wire fixture's report.
+                            if report.jitter_us == 2000 && report.fraction_lost == 32 && report.packets_lost == 1 {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    }).await.expect("the bridge must receive the final remote report before closing");
+                    for bridge in &bridges[1..] {
+                        let leg = bridge.leg(LegSide::A).unwrap();
+                        let receiver = leg.pc().get_transceivers()[0].receiver().unwrap();
+                        let values = leg.pc().get_stats().await.unwrap().entries.into_iter().find(|entry|
+                            entry.kind == rustrtc::stats::StatsKind::InboundRtp
+                            && entry.values["ssrc"].as_u64() == Some(receiver.ssrc() as u64)).unwrap().values;
+                        let clock_rate = leg.negotiated().unwrap().audio.unwrap().clock_rate;
+                        expected.lock().unwrap().insert(leg.id().to_string(),
+                            (clock_rate, values["jitter"].as_f64().unwrap() * 1000.0 / clock_rate as f64));
+                    }
+                    bridges[2].clear_selection().await.unwrap();
+                    for bridge in &mut bridges {
+                        bridge.close();
+                        bridge.close();
+                    }
+                    tokio::time::timeout(Duration::from_secs(1), async {
+                        loop {
+                            if captured.lock().unwrap().len() >= 4 {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    }).await.expect("all enabled bridges must publish their final windows before runtime shutdown");
+                    drop(remotes);
+                    drop(bridges);
+                });
+        });
+        let lines = captured.lock().unwrap();
+        assert_eq!(
+            lines.len(),
+            4,
+            "every enabled bridge retains its periodic and final windows exactly once"
+        );
+        assert!(
+            lines.iter().all(|(_, id, _)| id.contains("enabled-")),
+            "default-off bridge must stay silent"
+        );
+        for id in ["enabled-a", "enabled-b"] {
+            let per_call: Vec<_> = lines.iter().filter(|(_, bridge, _)| bridge.contains(id)).collect();
+            assert_eq!(per_call.len(), 2, "each call must retain both windows");
+            assert!(per_call[1].0.duration_since(per_call[0].0) < Duration::from_millis(1900),
+                "the last report must survive closing before the next periodic window");
+            for (_, _, stats) in &per_call {
+                assert!(!stats.contains('\n'), "quality stats must stay on one line");
+                let stats: serde_json::Value = serde_json::from_str(stats)
+                    .expect("quality log stats must be JSON");
+                assert_eq!(stats["window_ms"], 2000);
+                assert_eq!(stats["reports"][0]["side"], "caller");
+                assert_eq!(stats["reports"][0]["direction"], "egress");
+                let legs = stats["legs"].as_array().expect("window must retain exact per-leg measurements");
+                assert_eq!(legs.len(), if id == "enabled-a" { 2 } else { 1 });
+                assert_eq!(legs[0]["leg_id"], id);
+                assert_eq!(legs[0]["side"], "caller");
+                assert_eq!(legs[0]["egress_report"]["side"], "caller");
+                assert_eq!(legs[0]["egress_report"]["direction"], "egress");
+                let ingress = &legs[0]["ingress_report"];
+                assert_eq!(ingress["clock_rate"], if id == "enabled-a" { 8000 } else { 48000 });
+                assert!(ingress["ssrc"].as_u64().unwrap() > 0);
+                assert!(ingress["jitter_ms"]["avg"].as_f64().unwrap() > 0.0);
+                assert_eq!(legs[0]["rx_packets_per_second"], stats["rx_packets_per_second"]);
+                assert_eq!(legs[0]["tx_packets_per_second"], stats["tx_packets_per_second"]);
+                if id == "enabled-a" {
+                    assert_eq!(legs[1]["leg_id"], "idle-callee");
+                    assert_eq!(legs[1]["side"], "callee");
+                    assert_eq!(legs[1]["rx_packets_per_second"]["avg"], 0.0);
+                    assert_eq!(legs[1]["tx_packets_per_second"]["avg"], 0.0);
+                    assert!(legs[1]["egress_report"]["rtt_ms"].is_null());
+                }
+                assert!(stats["reports"][1]["rtt_ms"].is_null());
+            }
+            let initial: serde_json::Value = serde_json::from_str(&per_call[0].2).unwrap();
+            assert_eq!(initial["counter_resets"], 0,
+                "the first observed leg establishes a baseline, not a counter reset");
+            assert_eq!(initial["sampling_gaps"], 0,
+                "initializing a bridge must not report a lost sample");
+            let stats: serde_json::Value = serde_json::from_str(&per_call[1].2).unwrap();
+            assert_eq!(stats["counter_resets"], 0,
+                "normal shutdown of a cleared selection must not invent a counter reset");
+            assert_eq!(stats["sampling_gaps"], 0,
+                "normal shutdown must retain the observed window without inventing a gap");
+            assert!(stats["observed_ms"].as_u64().unwrap() > 0,
+                "closing after clearing selection must retain observed transport coverage");
+            assert!(initial["legs"][0]["ingress_report"]["loss_percent"]["max"].as_f64().unwrap() > 0.0,
+                "a received RTP sequence hole must be observed on its own leg");
+            assert!(stats["legs"][0]["ingress_report"]["loss_percent"].is_null(),
+                "late packet recovery is not a measured zero-loss interval");
+            assert_eq!(stats["legs"][0]["ingress_report"]["jitter_ms"]["max"].as_f64().unwrap(),
+                expected_ingress.lock().unwrap()[id].1,
+                "inbound RTP-clock jitter must be converted using the actual negotiated codec clock");
+            let report = &stats["reports"][0];
+            if id == "enabled-a" {
+                assert_eq!(report["jitter_ms"]["avg"], 2.0);
+                assert_eq!(report["loss_percent"]["avg"], 12.5);
+                assert!(report["rtt_ms"]["avg"].as_f64().unwrap() > 0.0);
+            } else {
+                assert!(report["jitter_ms"].is_null());
+                assert!(report["loss_percent"].is_null());
+                assert!(report["rtt_ms"].is_null());
+            }
+        }
+    }
+
     #[tokio::test]
     async fn switching_pair_preserves_detached_hold_playback_and_peers() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -2037,6 +2581,8 @@ mod tests {
         // Two WebRTC (DTLS-SRTP) legs negotiate UAC/UAS-style SDP with each
         // other. Same codec (opus) → fast-path relay on both legs.
         let cfg = LegConfig {
+            volume_stats: Default::default(),
+            quality_stats: Default::default(),
             call_id: None,
             relay_ready_timeout: None,
             ice_servers: Vec::new(),
@@ -2101,6 +2647,8 @@ mod tests {
         use rustrtc::SdpType;
 
         let cfg = LegConfig {
+            volume_stats: Default::default(),
+            quality_stats: Default::default(),
             call_id: None,
             relay_ready_timeout: None,
             ice_servers: Vec::new(),
@@ -2165,6 +2713,8 @@ mod tests {
         // a WebRTC peer, leg B (RTP/PCMU) negotiates with an RTP peer, then the
         // bridge connects them. Different codecs → transcode (non-relay) route.
         let webrtc_cfg = LegConfig {
+            volume_stats: Default::default(),
+            quality_stats: Default::default(),
             call_id: None,
             relay_ready_timeout: None,
             ice_servers: Vec::new(),
@@ -2251,6 +2801,8 @@ mod tests {
                     use rustrtc::SdpType;
 
                     let webrtc_cfg = LegConfig {
+                        volume_stats: Default::default(),
+                        quality_stats: Default::default(),
                         call_id: None,
                         relay_ready_timeout: None,
                         ice_servers: Vec::new(),
@@ -2275,6 +2827,8 @@ mod tests {
                         probation_max_packets: None,
                     };
                     let rtp_opus_cfg = LegConfig {
+                        volume_stats: Default::default(),
+                        quality_stats: Default::default(),
                         call_id: None,
                         relay_ready_timeout: None,
                         ice_servers: Vec::new(),
@@ -2355,6 +2909,10 @@ mod tests {
         use rustrtc::SdpType;
 
         let webrtc_cfg = LegConfig {
+            volume_stats: crate::volume_stats::VolumeStatsConfig { enabled: true },
+            quality_stats: crate::quality_stats::QualityStatsConfig {
+                sample_interval_ms: 500, window_ms: 2000, log_interval_ms: 2000, ..Default::default()
+            },
             call_id: None,
             relay_ready_timeout: None,
             ice_servers: Vec::new(),
@@ -2379,6 +2937,10 @@ mod tests {
             probation_max_packets: None,
         };
         let rtp_pcmu_cfg = LegConfig {
+            volume_stats: crate::volume_stats::VolumeStatsConfig { enabled: true },
+            quality_stats: crate::quality_stats::QualityStatsConfig {
+                sample_interval_ms: 500, window_ms: 2000, log_interval_ms: 2000, ..Default::default()
+            },
             call_id: None,
             relay_ready_timeout: None,
             ice_servers: Vec::new(),
@@ -2430,20 +2992,25 @@ mod tests {
         let b2 = LegInner::new("b2", &rtp_pcmu_cfg, None).unwrap();
         let b_offer = b2.create_offer().await.expect("b2 offer");
         let b = LegInner::new("b", &rtp_pcmu_cfg, None).unwrap();
-        b.apply_sdp(&b_offer, SdpType::Offer)
+        let b_answer = b.apply_sdp(&b_offer, SdpType::Offer)
             .await
             .expect("b answers rtp offer");
+        b2.apply_sdp(&b_answer, SdpType::Answer).await.expect("RTP peer applies answer");
         assert!(
             b.negotiated().is_some(),
             "leg B profile should be negotiated"
         );
 
-        let mut mb = MediaBridge::new("s-no-deadlock");
+        let mut mb = MediaBridge::new_with_quality_stats("s-no-deadlock",
+            crate::quality_stats::QualityStatsConfig {
+                sample_interval_ms: 500, window_ms: 2000, ..Default::default()
+            });
         mb.replace_leg(LegSide::A, a).await;
         mb.replace_leg(LegSide::B, b).await;
 
         // Same codec on both legs → fast-path relay, with arming deferred to a
         // background task so accept never blocks on the unready WebRTC peer.
+        let mut initial_health = mb.health_rx();
         let start = std::time::Instant::now();
         mb.accept(LegSide::A).await;
         mb.accept(LegSide::B).await;
@@ -2480,6 +3047,19 @@ mod tests {
             "relay arming failure must be signaled for fallback to transcode"
         );
 
+        if initial_health.borrow().is_none() {
+            tokio::time::timeout(Duration::from_secs(6), initial_health.changed()).await
+                .expect("first health sample must arrive").expect("bridge stays alive");
+        }
+        let first_health = initial_health.borrow_and_update().clone().unwrap();
+        for leg in &first_health.legs {
+            assert_eq!(leg.egress_mode, crate::media_health::MediaEgressMode::DirectRtpForwarding);
+            assert!(leg.volume_egress.is_none(), "direct forwarding must not force PCM decode");
+            let peer = mb.leg_for_id(&leg.leg_id.clone().into()).unwrap();
+            assert!(serde_json::to_value(peer.quality_report(leg.side)).unwrap()["pcmEgress"].is_null(),
+                "a pure direct relay must not invent a historical PCM measurement");
+        }
+
         // Fallback must switch the session to transcode (relay un-selected).
         mb.force_transcode().await.expect("force transcode");
         for side in [LegSide::A, LegSide::B] {
@@ -2487,6 +3067,33 @@ mod tests {
                 !mb.leg(side).unwrap().egress_is_relay(),
                 "leg {side:?} should be on transcode after relay-arm fallback"
             );
+        }
+
+        b2.accept();
+        b2.play(Box::new(crate::audio_source::ToneAudioSource::new(
+            440, Duration::from_secs(1), 8000,
+        ).unwrap()), true, None).await.expect("RTP peer sends real PCM audio");
+
+        let mut health = mb.health_rx();
+        health.borrow_and_update();
+        tokio::time::timeout(Duration::from_secs(6), health.changed()).await
+            .expect("next 5s health sample must arrive").expect("bridge stays alive");
+        assert!(!health.borrow_and_update().as_ref().unwrap().relay_mode,
+            "same negotiated codecs do not make forced PCM transcoding a direct relay");
+        let sample = health.borrow_and_update().clone().unwrap();
+        for observed in &sample.legs {
+            assert!(matches!(observed.leg_id.as_str(), "a" | "b"));
+            assert_eq!(observed.egress_mode, crate::media_health::MediaEgressMode::PcmPacing);
+            if observed.leg_id == "b" {
+                assert!(observed.volume_egress.is_none(), "unconnected WebRTC peer supplied no PCM");
+                continue;
+            }
+            let volume = observed.volume_egress.as_ref().expect("decoded real RTP peer PCM must be projected");
+            assert!(volume.sample_count > 0);
+            assert_eq!(volume.window_ms, 2000);
+            assert!(volume.window_start_micros < volume.window_end_micros);
+            assert!(volume.observed_ms <= volume.window_ms);
+            assert!(volume.window_end_micros - volume.window_start_micros <= volume.window_ms * 1000 + 1000);
         }
 
         // Duplicate relay-arm-failure notifications (e.g. from two monitors

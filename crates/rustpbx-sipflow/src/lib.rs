@@ -64,6 +64,31 @@ pub struct SipFlowMediaStats {
     pub clock_rate: Option<u32>,
 }
 
+/// RTP observations at the end of an occupied time bucket, not endpoint RTCP reports.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SipFlowQualityPoint {
+    pub timestamp_micros: u64,
+    pub bucket_start_micros: u64,
+    pub leg: i32,
+    pub src: String,
+    pub dst: String,
+    /// Captured remote endpoint; older recordings may have no socket address.
+    pub peer_addr: Option<String>,
+    pub ssrc: u32,
+    pub payload_type: u8,
+    pub clock_rate: Option<u32>,
+    pub rtp_timestamp: u32,
+    pub packet_count: usize,
+    /// Captured RTP bytes in this bucket, including the RTP header.
+    pub packet_bytes: usize,
+    pub cumulative_packets: usize,
+    /// Monotonic loss confirmed after the existing RTP reorder window.
+    pub confirmed_lost_packets: u64,
+    /// Gaps still recoverable by late packets; never reported as confirmed loss.
+    pub pending_missing: usize,
+    pub jitter_ms: Option<f64>,
+}
+
 fn default_msg_type() -> SipFlowMsgType {
     SipFlowMsgType::Sip
 }

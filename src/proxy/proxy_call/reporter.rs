@@ -761,49 +761,103 @@ mod tests {
         assert!(from.is_some() || from.is_none()); // Behavior depends on implementation
     }
 
-    #[test]
-    fn test_build_sip_leg_roles_uses_callee_call_ids() {
-        let snapshot = CallSessionRecordSnapshot {
-            ring_time: None,
-            answer_time: None,
-            last_error: None,
-            root_session_id: None,
-            invite_final_status: None,
-            hangup_reason: None,
-            hangup_messages: vec![],
-            original_caller: None,
-            original_callee: None,
-            routed_caller: None,
-            routed_callee: None,
-            connected_callee: None,
-            routed_contact: None,
-            routed_destination: None,
-            callee_peer: None,
-            last_queue_name: None,
-            transferred: false,
-            leg_timeline: crate::callrecord::LegTimeline::default(),
-            callee_call_ids: vec!["callee-call-id".to_string()],
-            server_dialog_id: rsipstack::dialog::DialogId {
-                call_id: "caller-call-id".to_string(),
-                local_tag: "local".to_string(),
-                remote_tag: "remote".to_string(),
-            },
-            extensions: http::Extensions::new(),
-            metadata: std::collections::HashMap::new(),
-            media_quality: None,
-            recording_segments: Vec::new(),
+    #[tokio::test]
+    async fn test_call_record_preserves_dynamic_sip_leg_call_ids() {
+        use crate::call::domain::CallCommand;
+        use crate::call::{DialDirection, Dialplan};
+        use crate::media::leg_id::LegId;
+        use crate::proxy::tests::common::{create_test_request, create_test_server};
+        use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+        use rsipstack::sip::{Method, SipMessage, StatusCode};
+        use rsipstack::transport::SipAddr;
+        use rsipstack::transport::udp::UdpConnection;
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let (server, _) = create_test_server().await;
+        let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        server.endpoint.inner.transport_layer.del_transport(&SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Udp),
+            addr: "127.0.0.1:5060".try_into().unwrap(),
+        });
+        let transport =
+            UdpConnection::create_connection("127.0.0.1:0".parse().unwrap(), None, None)
+                .await
+                .unwrap();
+        server.endpoint.inner.transport_layer.add_transport(transport.into());
+        let endpoint = server.endpoint.inner.clone();
+        let serving = tokio::spawn(async move { endpoint.serve().await.unwrap(); });
+        let request = create_test_request(Method::Invite, "alice", None, "rustpbx.com", None);
+        let dialplan = Dialplan::new("dynamic-record".into(), request, DialDirection::Outbound);
+        let (mut session, _handle, mut commands) =
+            build_session_with_cmd_rx_on(server.clone(), dialplan).await;
+        let leg_id = LegId::from("agent");
+        let added = session
+            .execute_command(
+                CallCommand::LegAdd {
+                    source_leg: None,
+                    target: format!("sip:agent@{target_addr}"),
+                    leg_id: Some(leg_id.clone()),
+                    headers: vec![],
+                },
+                None,
+            )
+            .await;
+        assert!(added.success, "{:?}", added.message);
+        let mut buffer = [0u8; 65536];
+        let (size, peer) = timeout(Duration::from_secs(3), target.recv_from(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
+        let SipMessage::Request(invite) =
+            SipMessage::try_from(std::str::from_utf8(&buffer[..size]).unwrap()).unwrap()
+        else {
+            panic!("expected dynamic leg INVITE");
         };
+        assert_eq!(invite.method, Method::Invite);
+        let call_id = invite.call_id_header().unwrap().value().to_string();
+        let caller_id = session.record_snapshot().server_dialog_id.call_id;
+        let (sender, mut records) = tokio::sync::mpsc::channel(2);
+        let reporter = CallReporter {
+            server: server.clone(),
+            context: session.context.clone(),
+            call_record_sender: Some(sender),
+        };
+        reporter.report(session.record_snapshot());
+        let pending = records.recv().await.unwrap();
 
-        let roles = build_sip_leg_roles(&snapshot);
+        let rejected = server.endpoint.inner.make_response(&invite, StatusCode::BusyHere, None);
+        target.send_to(rejected.to_string().as_bytes(), peer).await.unwrap();
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let command = commands.recv().await.expect("dynamic leg result");
+                let failed = matches!(&command, CallCommand::LegFailed { leg_id: id, .. } if id == &leg_id);
+                session.execute_command(command, None).await;
+                if failed {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("rejected leg must finish");
+        assert!(!session.legs.contains_key(&leg_id));
+        reporter.report(session.record_snapshot());
+        let finished = records.recv().await.unwrap();
+        session.cancel_token.cancel();
+        serving.abort();
 
-        assert_eq!(
-            roles.get("caller-call-id").map(String::as_str),
-            Some("caller")
-        );
-        assert_eq!(
-            roles.get("callee-call-id").map(String::as_str),
-            Some("callee")
-        );
+        for record in [pending, finished] {
+            assert_eq!(
+                record.sip_leg_roles.get(&caller_id).map(String::as_str),
+                Some("caller")
+            );
+            assert_eq!(
+                record.sip_leg_roles.get(&call_id).map(String::as_str),
+                Some("callee")
+            );
+            assert_eq!(record.sip_leg_roles.len(), 2);
+        }
     }
 
     fn meta_str<'a>(meta: &'a HashMap<String, serde_json::Value>, key: &str) -> &'a str {

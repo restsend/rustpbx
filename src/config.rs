@@ -1194,6 +1194,11 @@ pub struct RtpConfig {
     /// periodic snapshots (stall events are still emitted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_trace_interval_secs: Option<u64>,
+    /// Sliding media diagnostics; disabled periodic logs preserve quiet defaults.
+    #[serde(default)]
+    pub quality_stats: crate::media::quality_stats::QualityStatsConfig,
+    #[serde(default)]
+    pub volume_stats: crate::media::volume_stats::VolumeStatsConfig,
 }
 
 fn default_comfort_noise() -> bool {
@@ -1232,6 +1237,11 @@ pub struct MediaSection {
     /// periodic snapshots (stall events are still emitted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_trace_interval_secs: Option<u64>,
+    /// Sliding media diagnostics; disabled periodic logs preserve quiet defaults.
+    #[serde(default)]
+    pub quality_stats: crate::media::quality_stats::QualityStatsConfig,
+    #[serde(default)]
+    pub volume_stats: crate::media::volume_stats::VolumeStatsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2418,6 +2428,8 @@ impl Config {
             relay_ready_timeout_secs: media.and_then(|m| m.relay_ready_timeout_secs),
             stall_detect_secs: media.and_then(|m| m.stall_detect_secs),
             media_trace_interval_secs: media.and_then(|m| m.media_trace_interval_secs),
+            quality_stats: media.map(|m| m.quality_stats.clone()).unwrap_or_default(),
+            volume_stats: media.map(|m| m.volume_stats.clone()).unwrap_or_default(),
         }
     }
 
@@ -3301,16 +3313,36 @@ bucket = "default-recordings"
     fn test_media_ice_lite_flows_into_rtp_config() {
         let config: Config = toml::from_str(r#"proxy = { addr = "127.0.0.1" }"#).unwrap();
         assert!(!config.rtp_config().ice_lite, "default must stay off");
+        assert!(!config.rtp_config().quality_stats.enabled);
 
         let config: Config = toml::from_str(
             r#"
             proxy = { addr = "127.0.0.1" }
             [media]
             ice_lite = true
+            [media.volume_stats]
+            enabled = true
+            [media.quality_stats]
+            enabled = true
+            sample_interval_ms = 500
+            window_ms = 2000
+            log_interval_ms = 2000
         "#,
         )
         .unwrap();
         assert!(config.rtp_config().ice_lite);
+        assert!(config.rtp_config().quality_stats.enabled);
+        assert!(config.rtp_config().volume_stats.enabled);
+        assert_eq!(config.rtp_config().quality_stats.sample_interval_ms, 500);
+        assert!(
+            toml::from_str::<Config>(
+                r#"proxy={addr="127.0.0.1"}
+            [media.quality_stats]
+            sample_interval_ms=1
+        "#
+            )
+            .is_err()
+        );
     }
 
     /// Trunk-level override parsing: `ice_lite` is optional per trunk and

@@ -53,6 +53,7 @@ pub(crate) struct CapturedRtp {
     pub(crate) direction: PacketDirection,
     pub(crate) packet: RtpPacket,
     pub(crate) received_at_micros: u64,
+    pub(crate) peer_addr: Option<std::net::SocketAddr>,
 }
 
 /// Result produced after a file recorder has drained queued RTP and rewritten
@@ -85,6 +86,7 @@ pub trait MediaRecorder: Send {
         direction: PacketDirection,
         packet: &RtpPacket,
         received_at_micros: u64,
+        peer_addr: Option<std::net::SocketAddr>,
     ) -> Result<()>;
 
     /// Finalize the backend. File recorders return metadata; streaming
@@ -150,6 +152,7 @@ impl MediaRecorder for FileRecorder {
         direction: PacketDirection,
         packet: &RtpPacket,
         _received_at_micros: u64,
+        _peer_addr: Option<std::net::SocketAddr>,
     ) -> Result<()> {
         let recorder = self
             .recorder
@@ -218,6 +221,7 @@ impl MediaRecorder for SipflowRecorder {
         direction: PacketDirection,
         packet: &RtpPacket,
         received_at_micros: u64,
+        peer_addr: Option<std::net::SocketAddr>,
     ) -> Result<()> {
         let raw = packet.marshal()?;
         self.backend.record(
@@ -227,7 +231,9 @@ impl MediaRecorder for SipflowRecorder {
                 seq: packet.header.sequence_number as u64,
                 leg: Some(direction_to_leg_id(direction)),
                 msg_type: SipFlowMsgType::Rtp,
-                src_addr: "synth".to_string(),
+                // Media storage uses `src` as the per-direction peer key;
+                // leg 0/1 identifies ingress/egress, including relay traffic.
+                src_addr: peer_addr.map(|addr| addr.to_string()).unwrap_or_default(),
                 dst_addr: String::new(),
                 payload: Bytes::from(raw),
             },
@@ -358,7 +364,12 @@ impl RecorderSender {
     }
 
     #[inline]
-    pub(crate) fn capture(&self, direction: PacketDirection, packet: &RtpPacket) {
+    pub(crate) fn capture(
+        &self,
+        direction: PacketDirection,
+        packet: &RtpPacket,
+        peer_addr: Option<std::net::SocketAddr>,
+    ) {
         let received_at_micros = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_micros() as u64)
@@ -367,6 +378,7 @@ impl RecorderSender {
             direction,
             packet: packet.clone(),
             received_at_micros,
+            peer_addr,
         };
         if let Err(error) = self.tx.try_send(captured)
             && matches!(error, mpsc::error::TrySendError::Full(_))
@@ -378,8 +390,12 @@ impl RecorderSender {
         }
     }
 
+    pub(crate) fn dropped_packets(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
     pub fn write_sample(&self, direction: PacketDirection, packet: &RtpPacket) {
-        self.capture(direction, packet);
+        self.capture(direction, packet, None);
     }
 }
 
@@ -498,6 +514,7 @@ impl RecorderTask {
                     captured.direction,
                     &captured.packet,
                     captured.received_at_micros,
+                    captured.peer_addr,
                 )
                 .await
         {
@@ -591,6 +608,7 @@ mod tests {
     struct CountingBackend {
         recorded: AtomicUsize,
         flushed: AtomicBool,
+        items: parking_lot::Mutex<Vec<(String, BackendSipFlowItem)>>,
     }
 
     impl CountingBackend {
@@ -598,13 +616,15 @@ mod tests {
             Self {
                 recorded: AtomicUsize::new(0),
                 flushed: AtomicBool::new(false),
+                items: parking_lot::Mutex::new(Vec::new()),
             }
         }
     }
 
     #[async_trait]
     impl SipFlowBackend for CountingBackend {
-        fn record(&self, _call_id: Cow<'_, str>, _item: BackendSipFlowItem) -> Result<()> {
+        fn record(&self, call_id: Cow<'_, str>, item: BackendSipFlowItem) -> Result<()> {
+            self.items.lock().push((call_id.into_owned(), item));
             self.recorded.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -674,8 +694,14 @@ mod tests {
                             RtpHeader::new(source_codec.payload_type(), seq, seq as u32 * 160, 1234),
                             encoder.encode(&pcm).to_vec(),
                         );
-                        recorder.write_rtp(PacketDirection::Ingress, &packet, 0).await.unwrap();
-                        recorder.write_rtp(PacketDirection::Egress, &packet, 0).await.unwrap();
+                        recorder
+                            .write_rtp(PacketDirection::Ingress, &packet, 0, None)
+                            .await
+                            .unwrap();
+                        recorder
+                            .write_rtp(PacketDirection::Egress, &packet, 0, None)
+                            .await
+                            .unwrap();
                     }
                     let result = Box::new(recorder).finalize().await.unwrap().unwrap();
                     let wav = std::fs::read(path).unwrap();
@@ -738,7 +764,10 @@ mod tests {
                                 RtpHeader::new(0, seq, seq as u32 * 160, 1234),
                                 encoder.encode(&vec![level; 160]).to_vec(),
                             );
-                            recorder.write_rtp(direction, &packet, 0).await.unwrap();
+                            recorder
+                                .write_rtp(direction, &packet, 0, None)
+                                .await
+                                .unwrap();
                         }
                     }
                     Box::new(recorder).finalize().await.unwrap();
@@ -916,10 +945,13 @@ mod tests {
         let initial = SipflowRecorder::new(backend.clone(), "call-1");
         let (handle, sender, mut recorder_finished_rx) = RecorderHandle::new();
         handle.set_recorder(Box::new(initial), None).await.unwrap();
-        sender.write_sample(PacketDirection::Ingress, &packet(0, 1, 160));
+        use rustrtc::peer_connection::RtpObserver;
+        let tap = crate::ingress_tap::IngressTap::new(8, vec![0], Some(sender));
+        tap.on_ingress(&packet(0, 1, 160), "127.0.0.1:4000".parse().unwrap());
+        tap.on_egress(&packet(0, 2, 320), "127.0.0.1:5000".parse().unwrap());
         drop(handle);
         tokio::time::timeout(Duration::from_secs(1), async {
-            while backend.recorded.load(Ordering::SeqCst) == 0 {
+            while backend.recorded.load(Ordering::SeqCst) < 2 {
                 tokio::task::yield_now().await;
             }
         })
@@ -931,7 +963,20 @@ mod tests {
                 .is_none()
         );
         assert_recorder_task_stopped(&mut recorder_finished_rx).await;
-        assert_eq!(backend.recorded.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.recorded.load(Ordering::SeqCst), 2);
+        let items = backend.items.lock();
+        assert_eq!(items[0].0, "call-1");
+        assert_eq!(items[0].1.src_addr, "127.0.0.1:4000");
+        assert_eq!(items[0].1.dst_addr, "");
+        assert_eq!(items[0].1.leg, Some(0));
+        assert_eq!(items[1].1.src_addr, "127.0.0.1:5000");
+        assert_eq!(items[1].1.dst_addr, "");
+        assert_eq!(items[1].1.leg, Some(1));
+        assert_eq!(
+            items[0].1.payload.as_ref(),
+            packet(0, 1, 160).marshal().unwrap().as_slice()
+        );
+        assert!(items[0].1.timestamp > 0);
         assert!(!backend.flushed.load(Ordering::SeqCst));
     }
 

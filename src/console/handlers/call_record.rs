@@ -30,7 +30,7 @@ use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection, DbErr,
     EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
@@ -182,6 +182,10 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
             get(download_call_record_sip_flow),
         )
         .route(
+            "/call-records/{id}/media-quality",
+            get(query_call_record_media_quality),
+        )
+        .route(
             "/call-records/{id}/cdr-json",
             get(download_call_record_cdr_json),
         )
@@ -206,6 +210,10 @@ pub fn api_urls() -> Router<Arc<ConsoleState>> {
         .route(
             "/call-records/{id}/sip-flow",
             get(download_call_record_sip_flow),
+        )
+        .route(
+            "/call-records/{id}/media-quality",
+            get(query_call_record_media_quality),
         )
         .route(
             "/call-records/{id}/cdr-json",
@@ -524,12 +532,28 @@ fn leg_role(record: &CallRecordModel) -> &'static str {
 
 /// Render an uploaded or local signaling-sidecar JSONL file in the same
 /// structured shape as the live backend path.
-async fn serve_archived_jsonl_flow(
+async fn read_record_archived_flow(
+    state: &ConsoleState,
+    record: &CallRecordModel,
+    detail: bool,
+) -> Option<Result<Value, Response>> {
+    let location = record.metadata.as_ref()?.get("sipflow_jsonl")?.as_str()?;
+    let resolved = if location.starts_with("http://")
+        || location.starts_with("https://") || location.starts_with("s3://")
+    {
+        presign_artifact_url(state, location).await.unwrap_or_else(|| location.to_string())
+    } else {
+        resolve_archived_artifact_path(location, record.started_at)
+    };
+    Some(read_archived_jsonl_flow(record, &resolved, detail, state.http_client()).await)
+}
+
+async fn read_archived_jsonl_flow(
     record: &CallRecordModel,
     location: &str,
     detail_requested: bool,
     client: &reqwest::Client,
-) -> Response {
+) -> Result<Value, Response> {
     let bytes_result: anyhow::Result<Vec<u8>> =
         if location.starts_with("http://") || location.starts_with("https://") {
             match client.get(location).send().await {
@@ -549,20 +573,24 @@ async fn serve_archived_jsonl_flow(
     let bytes = match bytes_result {
         Ok(bytes) => bytes,
         Err(err) => {
-            return (
+            return Err((
                 StatusCode::NOT_FOUND,
                 Json(json!({
                     "message": format!("Archived sipflow JSONL not found: {err}"),
                     "path": location,
                 })),
             )
-                .into_response();
+                .into_response());
         }
     };
 
     let text = String::from_utf8_lossy(&bytes);
     let mut flow: Vec<Value> = Vec::new();
     let mut malformed_lines = 0usize;
+    let roles = record.metadata.as_ref()
+        .and_then(|metadata| metadata.get("sip_leg_roles"))
+        .and_then(Value::as_str)
+        .and_then(|roles| serde_json::from_str::<HashMap<String, String>>(roles).ok());
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -576,11 +604,10 @@ async fn serve_archived_jsonl_flow(
                     .unwrap_or_default();
                 let item_call_id = crate::sipflow::storage::extract_callid(raw_message.as_bytes())
                     .unwrap_or_else(|| record.call_id.clone());
-                let role = if item_call_id == record.call_id {
-                    "caller"
-                } else {
-                    "callee"
-                };
+                // A logical session ID can differ from both SIP dialog IDs.
+                let role = roles.as_ref().and_then(|roles| roles.get(&item_call_id))
+                    .map(String::as_str)
+                    .unwrap_or(if item_call_id == record.call_id { "caller" } else { "callee" });
                 flow.push(json!({
                     "timestamp": obj.get("timestamp").cloned().unwrap_or(Value::Null),
                     "seq": obj.get("seq").cloned().unwrap_or(Value::Null),
@@ -605,7 +632,7 @@ async fn serve_archived_jsonl_flow(
     let total_sip_msgs = flow.len();
     let end_time = record.ended_at.unwrap_or(record.started_at);
 
-    Json(json!({
+    Ok(json!({
         "call_id": record.call_id,
         "start_time": record.started_at,
         "status": "success",
@@ -620,7 +647,7 @@ async fn serve_archived_jsonl_flow(
                 "end": end_time,
                 "base": "jsonl_file",
             },
-            "sip_leg_roles_source": "jsonl_payload",
+            "sip_leg_roles_source": if roles.is_some() { "db_metadata" } else { "jsonl_payload" },
             "cdr_loaded": false,
             "sip_dropped_count": 0,
             "malformed_lines": malformed_lines,
@@ -628,6 +655,231 @@ async fn serve_archived_jsonl_flow(
             "total_rtp_streams": 0,
             "legs": [],
         },
+    }))
+}
+
+const QUALITY_DEFAULT_BUCKET_MS: u64 = 1_000;
+const QUALITY_MAX_CALL_IDS: usize = 32;
+const QUALITY_CAPTURE_MAX_BYTES: usize = 64 * 1024 * 1024;
+const QUALITY_CAPTURE_MAX_PACKETS: usize = 250_000;
+const QUALITY_QUERY_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaQualityQuery {
+    start: DateTime<chrono::Local>,
+    end: DateTime<chrono::Local>,
+    #[serde(default = "default_quality_bucket_ms")]
+    bucket_ms: u64,
+    scope: Option<String>,
+}
+
+fn default_quality_bucket_ms() -> u64 {
+    QUALITY_DEFAULT_BUCKET_MS
+}
+
+#[derive(Serialize)]
+struct CallQualityPoint {
+    call_id: String,
+    role: String,
+    direction: &'static str,
+    #[serde(flatten)]
+    observation: crate::sipflow::SipFlowQualityPoint,
+}
+
+async fn query_call_record_media_quality(
+    AxumPath(identifier): AxumPath<String>,
+    Query(query): Query<MediaQualityQuery>,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+) -> Response {
+    match tokio::time::timeout(
+        QUALITY_QUERY_TIMEOUT,
+        call_record_media_quality(&identifier, &query, &state),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(json!({"status":"failed", "reason":"query_deadline_exceeded"})),
+        )
+            .into_response(),
+    }
+}
+
+async fn call_record_media_quality(
+    identifier: &str,
+    query: &MediaQualityQuery,
+    state: &Arc<ConsoleState>,
+) -> Response {
+    if let Err(err) =
+        crate::sipflow::storage::validate_quality_window(query.start, query.end, query.bucket_ms)
+    {
+        return bad_request(&err.to_string());
+    }
+    let scope = query.scope.as_deref().unwrap_or("leg");
+    if !scope.eq_ignore_ascii_case("leg") && !scope.eq_ignore_ascii_case("session") {
+        return bad_request("media quality scope must be leg or session");
+    }
+    let record = match resolve_call_record_by_id_or_call_id(state.db(), identifier).await {
+        Ok(record) => record,
+        Err(response) => return response,
+    };
+    let Some(server) = state.sip_server() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status":"unavailable", "reason":"sip_server_unavailable"})),
+        )
+            .into_response();
+    };
+    let Some(sipflow) = &server.sip_flow else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status":"unavailable", "reason":"sipflow_not_configured"})),
+        )
+            .into_response();
+    };
+    let Some(backend) = sipflow.backend() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status":"unavailable", "reason":"sipflow_backend_unavailable"})),
+        )
+            .into_response();
+    };
+    if backend.kind() != "local" {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({"status":"unavailable", "reason":"backend_series_unavailable"})),
+        )
+            .into_response();
+    }
+    let mut gaps = Vec::new();
+    let mut roles = HashMap::from([(record.call_id.clone(), "primary".to_string())]);
+    let mut records = if scope.eq_ignore_ascii_case("session") {
+        let records = load_session_leg_records_limited(
+            state.db(),
+            &record,
+            Some((QUALITY_MAX_CALL_IDS + 1) as u64),
+        )
+        .await;
+        if records.is_empty() {
+            gaps.push(json!({"call_id":record.call_id,"reason":"session_legs_unavailable"}));
+        }
+        records
+    } else {
+        Vec::new()
+    };
+    if !records.iter().any(|leg| leg.call_id == record.call_id) {
+        records.push(record.clone());
+    }
+    for leg in &records {
+        roles
+            .entry(leg.call_id.clone())
+            .or_insert_with(|| leg_role(leg).to_string());
+        if let Some(json_str) = leg
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("sip_leg_roles"))
+            .and_then(Value::as_str)
+        {
+            match serde_json::from_str::<HashMap<String, String>>(json_str) {
+                Ok(leg_roles) => {
+                    for (call_id, role) in leg_roles {
+                        roles.entry(call_id).or_insert(role);
+                    }
+                }
+                Err(_) => gaps.push(json!({"call_id":leg.call_id,"reason":"leg_roles_invalid"})),
+            }
+        } else if let Some(cdr) = load_cdr_data(state, leg).await {
+            for (call_id, role) in cdr.record.sip_leg_roles {
+                roles.entry(call_id).or_insert(role);
+            }
+        }
+    }
+    if roles.len() > QUALITY_MAX_CALL_IDS {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"status":"failed", "reason":"call_leg_limit_exceeded"})),
+        )
+            .into_response();
+    }
+    crate::callrecord::sipflow::flush_with_deadline(sipflow).await;
+    let mut roles: Vec<_> = roles.into_iter().collect();
+    roles.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut points: Vec<CallQualityPoint> = Vec::new();
+    let mut remaining_bytes = QUALITY_CAPTURE_MAX_BYTES;
+    let mut truncated = false;
+    let mut remaining_packets = QUALITY_CAPTURE_MAX_PACKETS;
+    for (call_id, role) in roles {
+        match backend
+            .query_media_quality(
+                &call_id,
+                query.start,
+                query.end,
+                query.bucket_ms,
+                remaining_bytes,
+                remaining_packets,
+            )
+            .await
+        {
+            Ok(observations) => {
+                if points.len() + observations.len() > crate::sipflow::storage::QUALITY_MAX_POINTS {
+                    gaps.push(json!({"call_id":call_id,"reason":"point_limit_exceeded"}));
+                    truncated = true;
+                    break;
+                }
+                remaining_bytes = remaining_bytes.saturating_sub(
+                    observations
+                        .iter()
+                        .map(|point| point.packet_bytes)
+                        .sum::<usize>(),
+                );
+                remaining_packets = remaining_packets.saturating_sub(
+                    observations
+                        .iter()
+                        .map(|point| point.packet_count)
+                        .sum::<usize>(),
+                );
+                for observation in observations {
+                    points.push(CallQualityPoint {
+                        call_id: call_id.clone(),
+                        role: role.clone(),
+                        direction: match observation.leg {
+                            0 => "ingress",
+                            1 => "egress",
+                            _ => "unknown",
+                        },
+                        observation,
+                    });
+                }
+            }
+            Err(err) => {
+                warn!(call_id = %call_id, "failed to query media quality: {}", err);
+                gaps.push(json!({"call_id":call_id,"reason":"captured_media_query_failed"}));
+                truncated = true;
+                break;
+            }
+        }
+    }
+    points.sort_by_key(|point| point.observation.timestamp_micros);
+    let partial = !gaps.is_empty();
+    Json(json!({
+        "status": if partial { "partial" } else { "success" },
+        "partial": partial,
+        "truncated": truncated,
+        "call_id": record.call_id,
+        "session_id": record.session_id,
+        "measurement": "pbx_plaintext_rtp_observer",
+        "loss_scope": "capture_sequence_gaps",
+        "capture_complete": false,
+        "bucket_ms": query.bucket_ms,
+        "points": points,
+        "availability": {
+            "rtp": if points.is_empty() { "empty" } else { "collected" },
+            "rtt": "not_captured", "one_way_delay": "not_measured", "volume": "not_captured",
+        },
+        "gaps": gaps,
     }))
     .into_response()
 }
@@ -644,8 +896,7 @@ async fn download_call_record_sip_flow(
         Err(resp) => return resp,
     };
 
-    // Session scope aggregates every CDR leg of the logical call, so the
-    // single-leg archived-JSONL shortcut below must not short-circuit it.
+    // Session scope aggregates every CDR leg of the logical call.
     let session_scope = query.session_scope();
     let session_legs = if session_scope {
         load_session_leg_records(db, &record).await
@@ -657,26 +908,11 @@ async fn download_call_record_sip_flow(
     // artifact; older records without it continue through the live-backend
     // query path below.
     if !session_scope {
-        if let Some(location) = record
-            .metadata
-            .as_ref()
-            .and_then(|m| m.get("sipflow_jsonl"))
-            .and_then(|v| v.as_str())
-        {
-            let resolved = if location.starts_with("http://")
-                || location.starts_with("https://")
-                || location.starts_with("s3://")
-            {
-                if let Some(signed_url) = presign_artifact_url(&state, location).await {
-                    signed_url
-                } else {
-                    location.to_string()
-                }
-            } else {
-                resolve_archived_artifact_path(location, record.started_at)
+        if let Some(archived) = read_record_archived_flow(&state, &record, query.detail).await {
+            return match archived {
+                Ok(flow) => Json(flow).into_response(),
+                Err(response) => response,
             };
-            return serve_archived_jsonl_flow(&record, &resolved, query.detail, state.http_client())
-                .await;
         }
     }
 
@@ -775,6 +1011,30 @@ async fn download_call_record_sip_flow(
         sip_leg_roles_source = "session_merged";
     }
 
+    let mut archived_flow = Vec::new();
+    let mut archived_ids = HashSet::new();
+    let mut malformed_lines = 0;
+    if session_scope && query.detail {
+        // Completed signaling is shared in archives; instance-local stores are not shared.
+        for leg in std::iter::once(&record).chain(session_legs.iter().filter(|leg| leg.id != record.id)) {
+            if let Some(archived) = read_record_archived_flow(&state, leg, true).await {
+                let mut archived = match archived {
+                    Ok(flow) => flow,
+                    Err(response) => return response,
+                };
+                malformed_lines += archived["diagnostics"]["malformed_lines"].as_u64().unwrap_or(0);
+                if let Some(flow) = archived["flow"].as_array_mut() {
+                    for item in flow.drain(..) {
+                        if let Some(cid) = item["call_id"].as_str() {
+                            archived_ids.insert(cid.to_string());
+                        }
+                        archived_flow.push(item);
+                    }
+                }
+            }
+        }
+    }
+
     let mut flow_items = Vec::new();
     let mut rtp_streams = Vec::new();
     let mut legs_diag: Vec<Value> = Vec::new();
@@ -785,7 +1045,7 @@ async fn download_call_record_sip_flow(
         let mut rtp_stream_count: usize = 0;
         let mut leg_error: Option<String> = None;
 
-        if query.detail {
+        if query.detail && !archived_ids.contains(cid) {
             // Flush first (bounded) so a query issued right after a call
             // ends sees the tail messages still in the write pipeline.
             if query.flush_enabled() {
@@ -804,6 +1064,8 @@ async fn download_call_record_sip_flow(
                     leg_error = Some(msg);
                 }
             }
+        } else if query.detail {
+            sip_msg_count = archived_flow.iter().filter(|item| item["call_id"] == *cid).count();
         }
 
         match backend.query_media_stats(cid, start_time, end_time).await {
@@ -864,14 +1126,7 @@ async fn download_call_record_sip_flow(
     });
 
     if query.detail {
-        // Sort combined SIP flow by timestamp
-        flow_items.sort_by(|(a, _, _), (b, _, _)| {
-            a.timestamp
-                .partial_cmp(&b.timestamp)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        let mut flow_json = Vec::new();
+        let mut flow_json = archived_flow;
 
         for (item, role, cid) in flow_items {
             let raw_message = String::from_utf8_lossy(&item.payload).to_string();
@@ -887,6 +1142,10 @@ async fn download_call_record_sip_flow(
             }));
         }
 
+        flow_json.sort_by(|a, b| {
+            let timestamp = |item: &Value| item["timestamp"].as_f64().unwrap_or(0.0);
+            timestamp(a).partial_cmp(&timestamp(b)).unwrap_or(std::cmp::Ordering::Equal)
+        });
         response["flow"] = Value::Array(flow_json);
     }
 
@@ -908,6 +1167,7 @@ async fn download_call_record_sip_flow(
         "sip_leg_roles_source": sip_leg_roles_source,
         "cdr_loaded": cdr_loaded,
         "sip_dropped_count": sipflow.dropped_count(),
+        "malformed_lines": malformed_lines,
         "total_sip_msgs": total_sip_msgs,
         "total_rtp_streams": total_rtp_streams,
         "legs": legs_diag,
@@ -923,6 +1183,14 @@ async fn load_session_leg_records(
     db: &DatabaseConnection,
     record: &CallRecordModel,
 ) -> Vec<CallRecordModel> {
+    load_session_leg_records_limited(db, record, None).await
+}
+
+async fn load_session_leg_records_limited(
+    db: &DatabaseConnection,
+    record: &CallRecordModel,
+    limit: Option<u64>,
+) -> Vec<CallRecordModel> {
     let session_key = record
         .session_id
         .clone()
@@ -930,12 +1198,13 @@ async fn load_session_leg_records(
     let mut session_match = Condition::any();
     session_match = session_match.add(CallRecordColumn::SessionId.eq(session_key.clone()));
     session_match = session_match.add(CallRecordColumn::CallId.eq(session_key));
-    match CallRecordEntity::find()
+    let mut query = CallRecordEntity::find()
         .filter(session_match)
-        .order_by_asc(CallRecordColumn::StartedAt)
-        .all(db)
-        .await
-    {
+        .order_by_asc(CallRecordColumn::StartedAt);
+    if let Some(limit) = limit {
+        query = query.limit(limit);
+    }
+    match query.all(db).await {
         Ok(rows) => rows,
         Err(err) => {
             warn!(
@@ -1976,6 +2245,7 @@ async fn build_record_payload(
     let answer_time = metadata_string(record.metadata.as_ref(), "answer_time");
     let hangup_reason = Option::<String>::None;
     let hangup_messages = Vec::<Value>::new();
+    let callrecord: CallRecord = record.clone().into();
 
     json!({
         "id": record.id,
@@ -2009,10 +2279,10 @@ async fn build_record_payload(
         "transcript_language": record.transcript_language,
         "duration_secs": record.duration_secs,
         "recording": recording,
-        "started_at": record.started_at.to_rfc3339(),
+        "started_at": callrecord.start_time.to_rfc3339(),
         "ring_time": ring_time,
         "answer_time": answer_time,
-        "ended_at": record.ended_at.map(|dt| dt.to_rfc3339()),
+        "ended_at": record.ended_at.map(|_| callrecord.end_time.to_rfc3339()),
         "detail_url": state.url_for(&format!("/call-records/{}", record.id)),
         "status_code": status_code,
         "hangup_reason": hangup_reason,
@@ -2974,6 +3244,18 @@ mod tests {
     use sea_orm_migration::MigratorTrait;
     use std::sync::Arc;
 
+    async fn serve_archived_jsonl_flow(
+        record: &CallRecordModel,
+        location: &str,
+        detail_requested: bool,
+        client: &reqwest::Client,
+    ) -> Response {
+        match read_archived_jsonl_flow(record, location, detail_requested, client).await {
+            Ok(flow) => Json(flow).into_response(),
+            Err(response) => response,
+        }
+    }
+
     async fn setup_db() -> DatabaseConnection {
         let db = Database::connect("sqlite::memory:")
             .await
@@ -2986,6 +3268,124 @@ mod tests {
         ConsoleState::initialize(db, ConsoleConfig::default(), None)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn cdr_json_database_fallback_preserves_call_outcome() {
+        use crate::callrecord::{CallDetails, CallRecordHangupReason, CallRecordSaver};
+        use sea_orm::{ConnectionTrait, Statement};
+
+        let db = setup_db().await;
+        let state = create_console_state(db.clone()).await;
+        let start = chrono::DateTime::parse_from_rfc3339("2026-10-05T06:29:14.674280865Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        for (mode, code, reason, wire_reason, answered) in [
+            ("answer", 200, CallRecordHangupReason::ByCaller, "byCaller", true),
+            ("busy", 486, CallRecordHangupReason::Rejected, "rejected", false),
+            ("cancel", 487, CallRecordHangupReason::Canceled, "canceled", false),
+            ("rtp-timeout", 200, CallRecordHangupReason::RtpTimeout, "rtpTimeout", true),
+        ] {
+            let record = CallRecord {
+                call_id: format!("outbound-{mode}"),
+                session_id: Some(format!("session-{mode}")),
+                start_time: start,
+                ring_time: Some(start + chrono::Duration::milliseconds(50)),
+                answer_time: answered.then_some(start + chrono::Duration::nanoseconds(146_301_044)),
+                end_time: start + chrono::Duration::nanoseconds(2_317_512_941),
+                caller: "1001".into(),
+                callee: "2001".into(),
+                status_code: code,
+                hangup_reason: Some(reason),
+                details: CallDetails {
+                    direction: "outbound".into(),
+                    status: if answered { "completed" } else { "failed" }.into(),
+                    from_number: Some("1001".into()),
+                    to_number: Some("2001".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            if mode == "answer" {
+                crate::callrecord::CustomDatabaseSaver {
+                    db: db.clone(),
+                    table_name: "rustpbx_call_records".into(),
+                }
+                .save(std::slice::from_ref(&record))
+                .await
+                .unwrap();
+            } else {
+                crate::callrecord::database::persist_call_records(&db, std::slice::from_ref(&record))
+                    .await
+                    .unwrap();
+            }
+            // SQLite retains fractions; reproduce the observed TIMESTAMP(0) storage boundary.
+            db.execute_raw(Statement::from_sql_and_values(
+                db.get_database_backend(),
+                "UPDATE rustpbx_call_records SET started_at = ?, ended_at = ? WHERE call_id = ?",
+                vec![
+                    "2026-10-05 06:29:15+00:00".into(),
+                    "2026-10-05 06:29:17+00:00".into(),
+                    record.call_id.clone().into(),
+                ],
+            ))
+            .await
+            .unwrap();
+            let response = download_call_record_cdr_json(
+                AxumPath(record.call_id.clone()),
+                State(state.clone()),
+                AuthRequired(superuser()),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 1_000_000).await.unwrap();
+            let json: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["startTime"], json!(record.start_time), "{mode}");
+            assert_eq!(json["endTime"], json!(record.end_time), "{mode}");
+            assert_eq!(json["sessionId"], json!(record.session_id), "{mode}");
+            assert_eq!(json["statusCode"], code, "{mode}");
+            assert_eq!(json["hangupReason"], wire_reason, "{mode}");
+            assert_eq!(json["ringTime"], json!(record.ring_time), "{mode}");
+            assert_eq!(
+                json.get("answerTime"),
+                answered.then(|| json!(record.answer_time)).as_ref(),
+                "{mode}"
+            );
+            assert_eq!(json["direction"], "outbound");
+            assert_eq!(json["status"], record.details.status);
+            assert_eq!(json["fromNumber"], "1001");
+            assert_eq!(json["toNumber"], "2001");
+            assert!(json.get("details").is_none());
+            let response = query_call_records(
+                State(state.clone()),
+                AuthRequired(superuser()),
+                Json(forms::ListQuery::<QueryCallRecordFilters> {
+                    filters: Some(QueryCallRecordFilters {
+                        all_legs: Some(true),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 1_000_000).await.unwrap();
+            let list: Value = serde_json::from_slice(&body).unwrap();
+            let item = list["items"].as_array().unwrap().iter()
+                .find(|item| item["call_id"] == record.call_id)
+                .expect("requested leg appears in public list");
+            let time = |value: &Value| {
+                chrono::DateTime::parse_from_rfc3339(value.as_str().unwrap()).unwrap()
+            };
+            assert_eq!(time(&item["started_at"]), time(&json["startTime"]), "{mode}");
+            assert_eq!(time(&item["ended_at"]), time(&json["endTime"]), "{mode}");
+            assert_eq!(item["duration_secs"], if answered { 2 } else { 0 }, "{mode}");
+            if answered {
+                assert!(time(&json["startTime"]) < time(&json["ringTime"]));
+                assert!(time(&json["ringTime"]) < time(&json["answerTime"]));
+                assert!(time(&json["answerTime"]) < time(&json["endTime"]));
+            }
+        }
     }
 
     #[tokio::test]
@@ -3265,49 +3665,79 @@ mod tests {
     #[tokio::test]
     async fn serve_archived_jsonl_flow_reads_http_url() {
         let db = setup_db().await;
+        let state = create_console_state(db.clone()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(
+            crate::sipflow::backend::local::LocalBackend::new(
+                dir.path().to_str().unwrap().to_string(),
+                crate::config::SipFlowSubdirs::None,
+                1000, 3600, 128, None, 1, false, 16000, false,
+            ).unwrap(),
+        );
+        let (server, _) =
+            crate::proxy::tests::common::create_test_server_with_config_and_sipflow_backend(
+                crate::config::ProxyConfig::default(), Some(backend),
+            ).await;
+        state.set_sip_server(Some(server));
+        let mut jsonl = String::new();
+        for (seq, (call_id, message)) in [
+            ("caller-dialog", "INVITE sip:example.org SIP/2.0"),
+            ("callee-dialog", "INVITE sip:example.org SIP/2.0"),
+            ("callee-dialog", "SIP/2.0 200 OK"),
+            ("caller-dialog", "SIP/2.0 200 OK"),
+            ("caller-dialog", "ACK sip:example.org SIP/2.0"),
+            ("callee-dialog", "ACK sip:example.org SIP/2.0"),
+        ].into_iter().enumerate() {
+            jsonl.push_str(&json!({
+                "timestamp": seq + 1, "seq": seq, "msg_type": "Sip",
+                "src_addr": "a", "dst_addr": "b",
+                "payload": format!("{message}\r\nCall-ID: {call_id}\r\n"),
+            }).to_string());
+            jsonl.push('\n');
+        }
+        let app = Router::new().route("/flow.jsonl", get(move || {
+            let body = jsonl.clone();
+            async move { body }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let model = call_record::ActiveModel {
             call_id: Set("remote-jsonl-call".into()),
-            direction: Set("inbound".into()),
+            session_id: Set(Some("remote-jsonl-call".into())),
+            direction: Set("outbound".into()),
             status: Set("completed".into()),
             started_at: Set(Utc::now()),
             duration_secs: Set(10),
             has_transcript: Set(false),
             transcript_status: Set("pending".into()),
+            metadata: Set(Some(json!({
+                "sipflow_jsonl": format!("http://{address}/flow.jsonl"),
+                "sip_leg_roles": "{\"caller-dialog\":\"caller\",\"callee-dialog\":\"callee\"}",
+            }))),
             created_at: Set(Utc::now()),
             updated_at: Set(Utc::now()),
             ..Default::default()
+        }.insert(&db).await.unwrap();
+        for scope in ["session", "leg"] {
+            let response = download_call_record_sip_flow(
+                AxumPath(model.id.to_string()),
+                Query(SipFlowRequestQuery { detail: true, scope: Some(scope.into()), ..Default::default() }),
+                State(state.clone()), AuthRequired(superuser()),
+            ).await;
+            assert_eq!(response.status(), StatusCode::OK, "{scope}");
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            let flow = value["flow"].as_array().unwrap();
+            assert_eq!(flow.len(), 6, "{scope}: archived signaling must survive an empty instance store");
+            for (call_id, role) in [("caller-dialog", "caller"), ("callee-dialog", "callee")] {
+                let messages: Vec<_> = flow.iter().filter(|item| item["call_id"] == call_id).collect();
+                assert_eq!(messages.len(), 3, "{scope}: {call_id}");
+                assert!(messages.iter().all(|item| item["role"] == role), "{scope}: {call_id}");
+                assert!(messages.iter().any(|item| item["raw_message"].as_str().unwrap().starts_with("SIP/2.0 200")));
+            }
         }
-        .insert(&db)
-        .await
-        .expect("insert");
-
-        let app = Router::new().route(
-            "/flow.jsonl",
-            get(|| async {
-                "{\"timestamp\":1,\"seq\":0,\"msg_type\":\"Sip\",\"src_addr\":\"a\",\"dst_addr\":\"b\",\"payload\":\"INVITE sip:b SIP/2.0\\r\\n\"}\n"
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind JSONL server");
-        let address = listener.local_addr().expect("JSONL server address");
-        crate::utils::spawn(async move {
-            axum::serve(listener, app).await.ok();
-        });
-
-        let client = crate::http_util::build_keepalive_client(None, None).unwrap();
-        let response = serve_archived_jsonl_flow(
-            &model,
-            &format!("http://{address}/flow.jsonl"),
-            true,
-            &client,
-        )
-        .await;
-        let (parts, body) = response.into_parts();
-        assert_eq!(parts.status, StatusCode::OK);
-        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
-        let value: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["flow"].as_array().unwrap().len(), 1);
+        task.abort();
     }
 
     #[tokio::test]
@@ -4402,6 +4832,138 @@ mod tests {
             vec!["primary", "child", "child"],
             "legs must carry primary/child roles ordered by start time"
         );
+    }
+
+    #[tokio::test]
+    async fn media_quality_api_reads_real_session_packets_and_validates_window() {
+        use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMsgType};
+        let db = setup_db().await;
+        let state = create_console_state(db.clone()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(
+            crate::sipflow::backend::local::LocalBackend::new(
+                dir.path().to_str().unwrap().to_string(),
+                crate::config::SipFlowSubdirs::None,
+                1000,
+                3600,
+                128,
+                None,
+                1,
+                false,
+                16000,
+                false,
+            )
+            .unwrap(),
+        );
+        let (server, _) =
+            crate::proxy::tests::common::create_test_server_with_config_and_sipflow_backend(
+                crate::config::ProxyConfig::default(),
+                Some(backend.clone()),
+            )
+            .await;
+        state.set_sip_server(Some(server));
+        let now = Utc::now();
+        for (call_id, ssrc) in [("quality-root", 1u32), ("quality-child", 2)] {
+            call_record::ActiveModel {
+                call_id: Set(call_id.into()),
+                session_id: Set(Some("quality-root".into())),
+                direction: Set("inbound".into()),
+                status: Set("completed".into()),
+                started_at: Set(now),
+                duration_secs: Set(3),
+                has_transcript: Set(false),
+                transcript_status: Set("none".into()),
+                created_at: Set(now),
+                updated_at: Set(now),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .unwrap();
+            for (offset, sequence) in [(10_000, 10u16), (1_010_000, 11), (1_020_000, 12)] {
+                let mut payload = vec![0x80, 0];
+                payload.extend_from_slice(&sequence.to_be_bytes());
+                payload.extend_from_slice(&(u32::from(sequence) * 160).to_be_bytes());
+                payload.extend_from_slice(&ssrc.to_be_bytes());
+                backend
+                    .record(
+                        std::borrow::Cow::Borrowed(call_id),
+                        SipFlowItem {
+                            timestamp: now.timestamp_micros() as u64 + offset,
+                            seq: 0,
+                            leg: Some(0),
+                            msg_type: SipFlowMsgType::Rtp,
+                            src_addr: "127.0.0.1:4000".into(),
+                            dst_addr: "127.0.0.1:5000".into(),
+                            payload: bytes::Bytes::from(payload),
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+        backend.flush().await.unwrap();
+        let start = now.with_timezone(&chrono::Local);
+        let end = start + chrono::Duration::seconds(3);
+        let response = query_call_record_media_quality(
+            AxumPath("quality-root".into()),
+            Query(MediaQualityQuery {
+                start,
+                end,
+                bucket_ms: 1000,
+                scope: Some("session".into()),
+            }),
+            State(state.clone()),
+            AuthRequired(superuser()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["status"], "success");
+        assert_eq!(payload["partial"], false);
+        assert_eq!(payload["points"].as_array().unwrap().len(), 4);
+        for call_id in ["quality-root", "quality-child"] {
+            let points: Vec<_> = payload["points"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|point| point["call_id"] == call_id)
+                .collect();
+            assert_eq!(points.len(), 2);
+            assert_eq!(points[1]["packet_count"], 2);
+            assert!(points[1]["jitter_ms"].is_number());
+        }
+        assert_eq!(payload["availability"]["rtt"], "not_captured");
+        assert!(payload["gaps"].as_array().unwrap().is_empty());
+        let invalid = query_call_record_media_quality(
+            AxumPath("quality-root".into()),
+            Query(MediaQualityQuery {
+                start: end,
+                end: start,
+                bucket_ms: 1000,
+                scope: None,
+            }),
+            State(state.clone()),
+            AuthRequired(superuser()),
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        state.set_sip_server(None);
+        let unavailable = query_call_record_media_quality(
+            AxumPath("quality-root".into()),
+            Query(MediaQualityQuery {
+                start,
+                end,
+                bucket_ms: 1000,
+                scope: None,
+            }),
+            State(state),
+            AuthRequired(superuser()),
+        )
+        .await;
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]

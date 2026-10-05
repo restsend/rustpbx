@@ -155,23 +155,7 @@ async fn build_active_model(
         hangup_reason: Set(hangup_reason),
         sip_status_code: Set(sip_status_code),
         metadata: Set({
-            let mut m = details.metadata.clone().unwrap_or_default();
-            if !record.sip_leg_roles.is_empty() {
-                let json = serde_json::to_string(&record.sip_leg_roles).unwrap_or_default();
-                m.insert("sip_leg_roles".to_string(), serde_json::Value::String(json));
-            }
-            if let Some(ring_time) = record.ring_time {
-                m.insert(
-                    "ring_time".to_string(),
-                    serde_json::Value::String(ring_time.to_rfc3339()),
-                );
-            }
-            if let Some(answer_time) = record.answer_time {
-                m.insert(
-                    "answer_time".to_string(),
-                    serde_json::Value::String(answer_time.to_rfc3339()),
-                );
-            }
+            let mut m = record.persistence_metadata();
             // Remember the path the CDR file was actually written to so the
             // console can still locate it after the storage root is changed in
             // config (issue #237). Stored in the existing metadata JSON column

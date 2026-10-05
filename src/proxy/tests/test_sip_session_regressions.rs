@@ -5962,6 +5962,18 @@ async fn media_stalled_fires_when_connected_leg_receives_nothing() {
             break;
         }
     }
+    let health = session.meta.trace.iter()
+        .find(|event| event.kind == crate::call_errors::TraceKind::MediaHealth)
+        .expect("health sample reaches persistent trace metadata");
+    let detail = health.detail.as_ref().unwrap();
+    assert_eq!(detail["relay_mode"], true);
+    let legs = detail["legs"].as_array().unwrap();
+    assert_eq!(legs.len(), 2);
+    for leg in legs {
+        assert!(matches!(leg["leg_id"].as_str(), Some("caller" | "callee")));
+        assert_eq!(leg["egress_mode"], "direct_rtp_forwarding");
+        assert!(leg.get("volume_egress").is_none(), "disabled or direct media has no PCM volume");
+    }
     assert!(seen_health_trace, "periodic media_health trace entry expected");
     assert!(seen_stall, "proxy.media_stalled call_error expected for silent legs");
     assert!(

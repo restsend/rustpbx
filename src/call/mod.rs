@@ -830,6 +830,9 @@ pub struct MediaConfig {
     /// Unset = 30s; 0 disables periodic snapshots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_trace_interval_secs: Option<u64>,
+    #[serde(default)]
+    pub quality_stats: crate::media::quality_stats::QualityStatsConfig,
+    pub volume_stats: crate::media::volume_stats::VolumeStatsConfig,
 }
 
 impl Default for MediaConfig {
@@ -860,6 +863,8 @@ impl MediaConfig {
             relay_ready_timeout_secs: None,
             stall_detect_secs: None,
             media_trace_interval_secs: None,
+            quality_stats: Default::default(),
+            volume_stats: Default::default(),
         }
     }
 
@@ -915,6 +920,22 @@ impl MediaConfig {
 
     pub fn with_media_trace_interval_secs(mut self, secs: Option<u64>) -> Self {
         self.media_trace_interval_secs = secs;
+        self
+    }
+
+    pub fn with_volume_stats(
+        mut self,
+        config: crate::media::volume_stats::VolumeStatsConfig,
+    ) -> Self {
+        self.volume_stats = config;
+        self
+    }
+
+    pub fn with_quality_stats(
+        mut self,
+        config: crate::media::quality_stats::QualityStatsConfig,
+    ) -> Self {
+        self.quality_stats = config;
         self
     }
 
