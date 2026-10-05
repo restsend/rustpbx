@@ -7,6 +7,7 @@ use crate::call::cookie::SpamResult;
 use crate::call::user::SipUser;
 use crate::call::{CalleeDisplayName, TransactionCookie, TrunkContext};
 use crate::config::ProxyConfig;
+use crate::addons::events::{AuthAttempt, AuthAttemptOutcome};
 use anyhow::{Error, Result};
 use async_trait::async_trait;
 use rsipstack::dialog::authenticate::verify_digest;
@@ -99,6 +100,25 @@ impl AuthModule {
         &self,
         tx: &Transaction,
     ) -> Result<Option<SipUser>, AuthError> {
+        let (user, outcome, username, realm) = self.authenticate_request_inner(tx).await?;
+        if outcome != AuthAttemptOutcome::NoCredentials
+            && let Some(registry) = self.server.addon_registry.as_ref()
+        {
+            registry.dispatch_auth_attempt(&AuthAttempt {
+                username,
+                realm,
+                method: tx.original.method.to_string(),
+                source: self.get_source_addr(tx).map(|a| a.to_string()),
+                outcome,
+            });
+        }
+        Ok(user)
+    }
+
+    async fn authenticate_request_inner(
+        &self,
+        tx: &Transaction,
+    ) -> Result<(Option<SipUser>, AuthAttemptOutcome, String, Option<String>), AuthError> {
         let mut auth_inner: Option<(Authorization, &str)> = None;
         for header in tx.original.headers.iter() {
             match header {
@@ -120,10 +140,12 @@ impl AuthModule {
         let (auth_inner, raw_auth_header) = match auth_inner {
             Some(auth) => auth,
             None => {
-                return Ok(None);
+                return Ok((None, AuthAttemptOutcome::NoCredentials, String::new(), None));
             }
         };
         let user = SipUser::try_from(tx).map_err(AuthError::Other)?;
+        let username = user.username.clone();
+        let realm = user.realm.clone();
         // Check if user exists and is enabled
         match self
             .server
@@ -134,13 +156,13 @@ impl AuthModule {
             Some(mut stored_user) => {
                 if !stored_user.enabled {
                     info!(username = user.username, realm = ?user.realm, "User is disabled");
-                    return Ok(None);
+                    return Ok((None, AuthAttemptOutcome::Disabled, username, realm));
                 }
-                if let Some(realm) = user.realm.as_ref()
-                    && !self.server.is_same_realm(realm).await
+                if let Some(request_realm) = user.realm.as_ref()
+                    && !self.server.is_same_realm(request_realm).await
                 {
                     info!(username = user.username, realm = ?user.realm, "User is not in the same realm");
-                    return Ok(None);
+                    return Ok((None, AuthAttemptOutcome::RealmMismatch, username, realm));
                 }
                 stored_user.merge_with(&user);
                 match self.verify_credentials(
@@ -149,13 +171,18 @@ impl AuthModule {
                     &auth_inner,
                     raw_auth_header,
                 ) {
-                    true => Ok(Some(stored_user)),
-                    false => Ok(None),
+                    true => Ok((
+                        Some(stored_user),
+                        AuthAttemptOutcome::Success,
+                        username,
+                        realm,
+                    )),
+                    false => Ok((None, AuthAttemptOutcome::BadCredentials, username, realm)),
                 }
             }
             None => {
                 info!(username = user.username, realm = ?user.realm, "authenticate_request missing");
-                Ok(None)
+                Ok((None, AuthAttemptOutcome::UnknownUser, username, realm))
             }
         }
     }

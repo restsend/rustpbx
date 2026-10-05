@@ -43,7 +43,7 @@ use axum::{Json, Router};
 
 /// Shared report window parameters (from/to/bucket/tz/direction).
 #[derive(Debug, Default, Clone, serde::Deserialize)]
-pub(crate) struct DomainReportParams {
+pub struct DomainReportParams {
     pub from: Option<String>,
     pub to: Option<String>,
     pub bucket: Option<String>,
@@ -88,7 +88,7 @@ impl DomainReportParams {
         Some((time - chrono::Duration::seconds(tz_offset)).and_utc())
     }
 
-    pub(crate) fn resolve(self) -> crate::report::domain_report::DomainQuery {
+    pub fn resolve(self) -> crate::report::domain_report::DomainQuery {
         let tz = self.tz_offset_secs();
         let now = chrono::Utc::now();
         let to = self
@@ -122,7 +122,7 @@ impl DomainReportParams {
 /// Unified report access: the dedicated `reports:read` point, the existing
 /// CDR read permission, or (CC domains) the addon's `cc_reports:read`.
 /// Superusers pass through inside `has_permission`.
-pub(crate) async fn has_reports_access(
+pub async fn has_reports_access(
     state: &ConsoleState,
     user: &crate::models::user::Model,
     cc_domain: bool,
@@ -139,7 +139,7 @@ pub(crate) async fn has_reports_access(
     false
 }
 
-pub(crate) fn bucket_label(q: &crate::report::domain_report::DomainQuery) -> String {
+pub fn bucket_label(q: &crate::report::domain_report::DomainQuery) -> String {
     format!("{:?}", q.bucket).to_lowercase()
 }
 
@@ -460,7 +460,7 @@ async fn domain_locator_export(
 
 // ── shared helpers ──────────────────────────────────────────────────────
 
-pub(crate) fn csv_response(csv: String, filename: &str) -> Response {
+pub fn csv_response(csv: String, filename: &str) -> Response {
     let disposition = format!("attachment; filename=\"{filename}\"");
     (
         [
@@ -473,7 +473,7 @@ pub(crate) fn csv_response(csv: String, filename: &str) -> Response {
 }
 
 /// RFC4180 escaping shared by domain CSV exports.
-pub(crate) fn csv_escape(value: &str) -> String {
+pub fn csv_escape(value: &str) -> String {
     if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
         format!("\"{}\"", value.replace('"', "\"\""))
     } else {

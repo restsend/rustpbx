@@ -36,7 +36,7 @@ use crate::{
 pub struct ProxyDataContext {
     config: RwLock<Arc<ProxyConfig>>,
     pub trunks: DashMap<String, TrunkConfig>,
-    pub(crate) acl_inbound_trunks: ArcSwap<JointPrefixMap<IpNet, Vec<String>>>,
+    pub acl_inbound_trunks: ArcSwap<JointPrefixMap<IpNet, Vec<String>>>,
     pub queues: DashMap<String, RouteQueueConfig>,
     routes: RwLock<Vec<RouteRule>>,
     acl_rules: RwLock<Vec<String>>,
@@ -1305,7 +1305,7 @@ pub fn sbc_config_from_metadata(meta: &serde_json::Value) -> TrunkConfig {
     }
 }
 
-pub(crate) fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
+pub fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
     let dest = model
         .sip_server
         .clone()

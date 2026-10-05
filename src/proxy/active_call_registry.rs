@@ -147,8 +147,8 @@ impl ActiveProxyCallRegistry {
     }
 
     /// Test-only: backdate a session's heartbeat.
-    #[cfg(test)]
-    pub(crate) fn backdate_heartbeat_for_test(&self, session_id: &str, age_secs: u64) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn backdate_heartbeat_for_test(&self, session_id: &str, age_secs: u64) {
         let now = heartbeat_now_ms();
         let slot = self
             .heartbeats
@@ -162,8 +162,8 @@ impl ActiveProxyCallRegistry {
     }
 
     /// Test-only: drop a session's heartbeat entirely.
-    #[cfg(test)]
-    pub(crate) fn clear_heartbeat_for_test(&self, session_id: &str) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn clear_heartbeat_for_test(&self, session_id: &str) {
         self.heartbeats.remove(session_id);
     }
 

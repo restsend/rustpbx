@@ -77,7 +77,7 @@ fn resolve_archived_artifact_path(path: &str, at: DateTime<Utc>) -> String {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct QueryCallRecordFilters {
+pub struct QueryCallRecordFilters {
     #[serde(default)]
     q: Option<String>,
     #[serde(default)]
@@ -225,7 +225,7 @@ const EXPORT_MAX_ROWS: u64 = 50_000;
 /// CSV export of the CDR list with the same filters as the console list
 /// view. Batched fetch (cursor by id) so a large result does not need to be
 /// materialized as sea-orm models all at once.
-pub(crate) async fn export_call_records_csv(
+pub async fn export_call_records_csv(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
     Query(filters): Query<QueryCallRecordFilters>,

@@ -381,7 +381,7 @@ impl ConsoleState {
             paths.extend(
                 app_state
                     .addon_registry
-                    .get_template_dirs(app_state.clone()),
+                    .get_template_dirs(app_state.config()),
             );
         }
 

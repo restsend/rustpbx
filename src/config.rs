@@ -562,6 +562,11 @@ pub struct Config {
     #[cfg(feature = "commerce")]
     #[serde(default)]
     pub sso: Option<SsoConfig>,
+    /// Addon configuration sections (`[addons.<id>]`), passed through to
+    /// the matching addon as raw TOML. Core never names addon-specific
+    /// fields; each addon deserializes its own section in initialize().
+    #[serde(default)]
+    pub addons: HashMap<String, toml::Value>,
     #[serde(default)]
     pub rwi: Option<RwiConfig>,
     #[serde(default)]
@@ -2332,6 +2337,7 @@ impl Default for Config {
             licenses: None,
             #[cfg(feature = "commerce")]
             sso: None,
+            addons: HashMap::new(),
             rwi_webhook: None,
             cluster: None,
             outbound: None,
@@ -2637,6 +2643,40 @@ bucket = "test2"
         assert_eq!(sources["ivr"].bucket, "test1");
         assert!(sources["ivr"].endpoint.is_none());
         assert_eq!(sources["ringing"].bucket, "test2");
+    }
+
+    #[test]
+    fn addon_sections_parse_as_raw_toml() {
+        let raw = r#"
+http_addr = "127.0.0.1:8088"
+
+[proxy]
+addr = "127.0.0.1"
+udp_port = 15060
+
+[addons.fraud_guard]
+enabled = true
+daily_cap_usd = 500
+
+[addons."with.dots"]
+nested = { key = "value" }
+"#;
+        let config: Config = toml::from_str(raw).expect("parse config with addon sections");
+        let section = config.addons.get("fraud_guard").expect("fraud_guard section");
+        assert_eq!(section.get("enabled"), Some(&toml::Value::Boolean(true)));
+        assert_eq!(section.get("daily_cap_usd"), Some(&toml::Value::Integer(500)));
+        assert!(config.addons.contains_key("with.dots"));
+        assert!(config.addons.get("missing").is_none());
+    }
+
+    #[test]
+    fn config_without_addon_sections_defaults_to_empty() {
+        let config: Config = toml::from_str(
+            "http_addr = \"127.0.0.1:8088\"\n[proxy]\naddr = \"127.0.0.1\"\nudp_port = 15060",
+        )
+        .unwrap();
+        assert!(config.addons.is_empty());
+        assert!(Config::default().addons.is_empty());
     }
 
     #[test]

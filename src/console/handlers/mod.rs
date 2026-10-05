@@ -117,7 +117,7 @@ pub async fn pending_reloads_handler(State(state): State<Arc<ConsoleState>>) -> 
     }))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_helpers {
     use crate::{config::ConsoleConfig, console::ConsoleState, models::migration::Migrator};
     use sea_orm::Database;

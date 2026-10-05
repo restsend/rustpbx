@@ -4,8 +4,12 @@ use axum::Router;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+pub mod events;
+
 #[cfg(feature = "console")]
 use crate::console::ConsoleState;
+
+pub use events::{AuthAttempt, AuthAttemptOutcome};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SidebarItem {
@@ -209,6 +213,19 @@ pub trait Addon: Send + Sync {
         None
     }
 
+    /// Absolute or CWD-relative directory holding this addon's minijinja
+    /// templates. Searched BEFORE the conventional `src/addons/<id>/templates`
+    /// and `templates/<id>` paths, so external addon binaries (which have no
+    /// source-tree layout at runtime) can point at their own assets.
+    fn template_dir(&self) -> Option<String> {
+        None
+    }
+
+    /// Directory with static assets served under `/static/<addon_id>/`.
+    fn static_dir(&self) -> Option<String> {
+        None
+    }
+
     /// Return a hook for call record processing
     fn call_record_hook(
         &self,
@@ -251,6 +268,11 @@ pub trait Addon: Send + Sync {
     /// Shutdown the addon, releasing any resources (background tasks, connections, etc.).
     /// Called during application shutdown after all servers have stopped.
     async fn shutdown(&self) {}
+
+    /// Observe one SIP authentication attempt that carried credentials.
+    /// Called synchronously on the auth path: keep implementations cheap
+    /// (append to a buffer, bump counters) — never block or do I/O here.
+    fn on_auth_attempt(&self, _attempt: &AuthAttempt) {}
 
     /// Return database migrations for this addon.
     fn migrations(&self) -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {

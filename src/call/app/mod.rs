@@ -95,8 +95,9 @@ pub mod rwi;
 pub mod voicemail;
 
 /// Test helpers: build a mock call stack without a real SIP session.
-/// Only compiled in test builds.
-#[cfg(test)]
+/// Only compiled in test builds or when the `test-support` feature is on
+/// (downstream addon crates run their unit tests against these helpers).
+#[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 
 #[cfg(test)]

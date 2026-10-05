@@ -166,6 +166,11 @@ impl AppStateInner {
         &self.core.config
     }
 
+    /// Raw `[addons.<id>]` TOML section for an addon, if present.
+    pub fn addon_config(&self, id: &str) -> Option<&toml::Value> {
+        self.config().addons.get(id)
+    }
+
     pub fn http_client(&self) -> &reqwest::Client {
         &self.http_client
     }
@@ -1272,7 +1277,12 @@ pub fn create_router(state: AppState) -> Router {
             &ice_servers_path,
             get(iceservers_handler).with_state(state.config().clone()),
         )
-        .merge(state.addon_registry.get_routers(state.clone()))
+        .merge(state.addon_registry.get_routers(state.clone()));
+    for (addon_id, dir) in state.addon_registry.get_static_mounts(state.config()) {
+        let mount_path = format!("{}/{}", static_path, addon_id);
+        router = router.nest_service(&mount_path, ServeDir::new(dir));
+    }
+    router = router
         .nest_service(&static_path, static_files_service)
         .merge(call_routes)
         .layer(cors);

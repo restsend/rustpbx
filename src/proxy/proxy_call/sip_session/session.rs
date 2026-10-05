@@ -283,7 +283,7 @@ impl SipSessionHandle {
 }
 impl SipSessionHandle {
     /// Create a handle for testing (no real bridge/snapshot).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new_for_test(
         session_id: &str,
         cmd_tx: mpsc::Sender<crate::call::domain::CallCommand>,

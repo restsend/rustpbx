@@ -20,7 +20,7 @@ pub(crate) fn json_error(status: StatusCode, message: impl Into<String>) -> Resp
         .into_response()
 }
 
-pub(crate) fn permission_denied() -> Response {
+pub fn permission_denied() -> Response {
     json_error(StatusCode::FORBIDDEN, "Permission denied")
 }
 

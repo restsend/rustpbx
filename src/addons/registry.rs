@@ -187,17 +187,29 @@ impl AddonRegistry {
             .collect()
     }
 
-    pub fn get_template_dirs(&self, state: AppState) -> Vec<String> {
-        let config = state.config();
+    pub fn get_template_dirs(&self, config: &crate::config::Config) -> Vec<String> {
         self.addons
             .iter()
             .filter(|a| self.is_enabled(a.id(), config))
             .flat_map(|a| {
-                [
-                    format!("src/addons/{}/templates", a.id()),
-                    format!("templates/{}", a.id()),
-                ]
+                let mut dirs = Vec::with_capacity(3);
+                if let Some(dir) = a.template_dir() {
+                    dirs.push(dir);
+                }
+                dirs.push(format!("src/addons/{}/templates", a.id()));
+                dirs.push(format!("templates/{}", a.id()));
+                dirs
             })
+            .collect()
+    }
+
+    /// Static asset mounts for enabled addons declaring a static_dir,
+    /// as (addon_id, directory) pairs served under `/static/<addon_id>/`.
+    pub fn get_static_mounts(&self, config: &crate::config::Config) -> Vec<(String, String)> {
+        self.addons
+            .iter()
+            .filter(|a| self.is_enabled(a.id(), config))
+            .filter_map(|a| a.static_dir().map(|dir| (a.id().to_string(), dir)))
             .collect()
     }
 
@@ -572,21 +584,284 @@ impl AddonRegistry {
         }
     }
 
+    /// Dispatch one authentication attempt to every addon.
+    pub fn dispatch_auth_attempt(&self, attempt: &crate::addons::events::AuthAttempt) {
+        for addon in &self.addons {
+            addon.on_auth_attempt(attempt);
+        }
+    }
+
     /// Run database migrations for all enabled addons.
     pub async fn run_migrations(&self, db: &sea_orm::DatabaseConnection) -> anyhow::Result<()> {
-        let manager = sea_orm_migration::SchemaManager::new(db);
         for addon in &self.addons {
-            for migration in addon.migrations() {
-                if let Err(e) = migration.up(&manager).await {
-                    return Err(anyhow::anyhow!(
-                        "Migration '{}' for addon '{}' failed: {}",
-                        migration.name(),
-                        addon.name(),
-                        e
-                    ));
-                }
+            let migrations = addon.migrations();
+            if migrations.is_empty() {
+                continue;
             }
+            run_tracked_migrations(db, addon.id(), addon.name(), migrations).await?;
         }
         Ok(())
+    }
+}
+
+/// Apply an addon's migrations once, tracked in a per-addon table
+/// (`seaql_migrations_<addon_id>`) so subsequent boots skip them.
+/// Column layout matches sea-orm's own `seaql_migrations` convention.
+pub(crate) async fn run_tracked_migrations(
+    db: &sea_orm::DatabaseConnection,
+    addon_id: &str,
+    addon_name: &str,
+    migrations: Vec<Box<dyn sea_orm_migration::MigrationTrait>>,
+) -> anyhow::Result<()> {
+    use sea_orm::{ConnectionTrait, Statement};
+    use chrono::Utc;
+
+    let manager = sea_orm_migration::SchemaManager::new(db);
+    let tracking_table = format!("seaql_migrations_{}", addon_id);
+
+    if !manager
+        .has_table(tracking_table.as_str())
+        .await
+        .unwrap_or(false)
+    {
+        db.execute_unprepared(&format!(
+            "CREATE TABLE {} (version VARCHAR(255) PRIMARY KEY, applied_at BIGINT)",
+            tracking_table
+        ))
+        .await?;
+    }
+
+    let backend = db.get_database_backend();
+    let mut applied = std::collections::HashSet::new();
+    let rows = db
+        .query_all_raw(Statement::from_string(
+            backend.clone(),
+            format!("SELECT version FROM {}", tracking_table),
+        ))
+        .await?;
+    for row in rows {
+        if let Ok(v) = row.try_get_by_index::<String>(0) {
+            applied.insert(v);
+        }
+    }
+
+    for migration in migrations {
+        let name = migration.name().to_string();
+        if !name.starts_with(addon_id) {
+            tracing::warn!(
+                addon = addon_id,
+                migration = %name,
+                "migration name does not start with its addon id; expected prefix '{}_'",
+                addon_id
+            );
+        }
+        if applied.contains(&name) {
+            continue;
+        }
+        if let Err(e) = migration.up(&manager).await {
+            return Err(anyhow::anyhow!(
+                "Migration '{}' for addon '{}' failed: {}",
+                name,
+                addon_name,
+                e
+            ));
+        }
+        let mut insert = sea_orm::sea_query::Query::insert();
+        insert
+            .into_table(sea_orm::sea_query::Alias::new(tracking_table.as_str()))
+            .columns([
+                sea_orm::sea_query::Alias::new("version"),
+                sea_orm::sea_query::Alias::new("applied_at"),
+            ])
+            .values_panic([name.clone().into(), Utc::now().timestamp().into()]);
+        db.execute(&insert)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to record migration '{}' for addon '{}': {}",
+                    name,
+                    addon_name,
+                    e
+                )
+            })?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::run_tracked_migrations;
+    use sea_orm::Statement;
+    use sea_orm_migration::prelude::*;
+
+    struct FixedMigration {
+        name: &'static str,
+        sql: &'static str,
+    }
+
+    impl MigrationName for FixedMigration {
+        fn name(&self) -> &str {
+            self.name
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for FixedMigration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .get_connection()
+                .execute_unprepared(self.sql)
+                .await?;
+            Ok(())
+        }
+    }
+
+    fn one_migration(name: &'static str, sql: &'static str) -> Vec<Box<dyn MigrationTrait>> {
+        vec![Box::new(FixedMigration { name, sql })]
+    }
+
+    #[tokio::test]
+    async fn tracked_migrations_apply_exactly_once() {
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        let sql = "CREATE TABLE t_a (id INTEGER PRIMARY KEY)";
+
+        run_tracked_migrations(&db, "testaddon", "TestAddon", one_migration("testaddon_m0001_t", sql))
+            .await
+            .unwrap();
+        run_tracked_migrations(&db, "testaddon", "TestAddon", one_migration("testaddon_m0001_t", sql))
+            .await
+            .unwrap();
+
+        let backend = db.get_database_backend();
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                backend.clone(),
+                "SELECT version FROM seaql_migrations_testaddon",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].try_get_by_index::<String>(0).unwrap(),
+            "testaddon_m0001_t"
+        );
+    }
+
+    #[tokio::test]
+    async fn unprefixed_migration_applies_with_warning() {
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+
+        run_tracked_migrations(
+            &db,
+            "testaddon",
+            "TestAddon",
+            one_migration("legacy_name", "CREATE TABLE t_b (id INTEGER PRIMARY KEY)"),
+        )
+        .await
+        .unwrap();
+
+        let backend = db.get_database_backend();
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                backend.clone(),
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='t_b'",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn tracking_survives_fresh_connection_against_file_db() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustpbx_mig_test_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let url = format!("sqlite://{}/tracked.db?mode=rwc", dir.display());
+
+        let db = sea_orm::Database::connect(&url).await.unwrap();
+        run_tracked_migrations(&db, "testaddon", "TestAddon", one_migration("testaddon_m0001_t", "CREATE TABLE t_c (id INTEGER PRIMARY KEY)"))
+            .await
+            .unwrap();
+        db.close().await.unwrap();
+
+        let db2 = sea_orm::Database::connect(&url).await.unwrap();
+        run_tracked_migrations(&db2, "testaddon", "TestAddon", one_migration("testaddon_m0001_t", "CREATE TABLE t_c (id INTEGER PRIMARY KEY)"))
+            .await
+            .unwrap();
+        db2.close().await.unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod asset_path_tests {
+    use super::AddonRegistry;
+    use crate::addons::Addon;
+    use crate::config::Config;
+    use std::sync::Arc;
+
+    struct PathAddon;
+
+    #[async_trait::async_trait]
+    impl Addon for PathAddon {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn id(&self) -> &'static str {
+            "pathaddon"
+        }
+        fn name(&self) -> &'static str {
+            "PathAddon"
+        }
+        fn router(&self, _state: crate::app::AppState) -> Option<axum::Router> {
+            None
+        }
+        async fn initialize(&self, _state: crate::app::AppState) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn template_dir(&self) -> Option<String> {
+            Some("/opt/pathaddon/templates".into())
+        }
+        fn static_dir(&self) -> Option<String> {
+            Some("/opt/pathaddon/static".into())
+        }
+    }
+
+    fn enabled_config() -> Config {
+        let mut config = Config::default();
+        config.proxy.addons = Some(vec!["pathaddon".into()]);
+        config
+    }
+
+    #[test]
+    fn template_dir_takes_priority_over_conventions() {
+        let registry = AddonRegistry::with_extra_addons(vec![Arc::new(PathAddon)]);
+        let dirs = registry.get_template_dirs(&enabled_config());
+        assert_eq!(
+            dirs.first().map(String::as_str),
+            Some("/opt/pathaddon/templates")
+        );
+        assert!(dirs.contains(&"src/addons/pathaddon/templates".to_string()));
+        assert!(dirs.contains(&"templates/pathaddon".to_string()));
+    }
+
+    #[test]
+    fn static_mounts_cover_declaring_enabled_addons_only() {
+        let registry = AddonRegistry::with_extra_addons(vec![Arc::new(PathAddon)]);
+        let mounts = registry.get_static_mounts(&enabled_config());
+        assert_eq!(
+            mounts,
+            vec![(
+                "pathaddon".to_string(),
+                "/opt/pathaddon/static".to_string()
+            )]
+        );
+
+        let mut other_enabled = Config::default();
+        other_enabled.proxy.addons = Some(vec!["other".into()]);
+        assert!(registry.get_static_mounts(&other_enabled).is_empty());
+        assert!(registry.get_static_mounts(&Config::default()).is_empty());
     }
 }

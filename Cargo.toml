@@ -57,6 +57,7 @@ cross = []
 # TestUa / E2eTestServer / rtp_utils / test_helpers) to downstream crates so
 # they can drive real SIP+RTP flows against their own server assembly.
 e2e-testing = ["dep:portpicker"]
+test-support = []
 console = ["dep:minijinja"]
 # Addons below integrate the web console (crate::console handlers, AppState
 # fields), so they hard-depend on the `console` feature to stay compilable in

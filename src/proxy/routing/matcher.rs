@@ -1522,7 +1522,7 @@ pub fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig) -> Res
     Ok(())
 }
 
-pub(crate) fn merge_trunk_media_hints(hints: &mut Option<DialplanHints>, trunk: &TrunkConfig) {
+pub fn merge_trunk_media_hints(hints: &mut Option<DialplanHints>, trunk: &TrunkConfig) {
     if trunk.codec.is_empty()
         && trunk.media_mode.is_none()
         && trunk.video_policy.is_none()

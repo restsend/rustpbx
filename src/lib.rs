@@ -1,6 +1,8 @@
 #![recursion_limit = "256"]
 
 pub mod addons;
+
+extern crate self as rustpbx;
 #[cfg(feature = "console")]
 pub mod api;
 pub mod app;
@@ -27,6 +29,7 @@ pub use rustpbx_models as models;
 pub mod metrics_sampler;
 pub mod outbound;
 pub mod preflight;
+pub mod prelude;
 pub mod proc_stats;
 pub mod proxy;
 pub mod report;

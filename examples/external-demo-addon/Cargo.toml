@@ -1,0 +1,23 @@
+[workspace]
+
+[package]
+name = "demo-external-addon"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "demo_external_addon"
+
+[dependencies]
+rustpbx = { path = "../.." }
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+serde_json = "1"
+sea-orm-migration = "2"
+tokio = "1"
+
+[dev-dependencies]
+sea-orm = "2"
+toml = "1"
