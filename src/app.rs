@@ -981,7 +981,6 @@ impl AppStateBuilder {
 
         // Commerce: verify licenses for all commercial addons at startup and
         // populate the in-memory cache so the UI can show status without restart.
-        #[cfg(feature = "commerce")]
         {
             let commercial_ids: Vec<String> = addon_registry
                 .list_addons(app_state.clone())
@@ -1008,7 +1007,7 @@ impl AppStateBuilder {
         {
             if let Some(ref console_state) = app_state.console {
                 // Spawn background update checker only when the console is enabled
-                // (checks miuda.ai/api/check_update at startup, then every 24 hours).
+                // checks miuda.ai/api/check_update at startup, then every 24 hours.
                 crate::version::spawn_update_checker(app_state.clone(), token.clone());
                 console_state.set_sip_server(Some(app_state.sip_server().get_inner()));
                 // Register addon locale directories into the i18n manager before

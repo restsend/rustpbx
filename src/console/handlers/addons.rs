@@ -20,8 +20,6 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
         .route("/addons", get(index))
         .route("/addons/{id}", get(detail));
 
-    // License verification endpoint is commerce-only.
-    #[cfg(feature = "commerce")]
     let router = router.route("/addons/verify", post(verify_addon));
 
     router
@@ -63,8 +61,6 @@ pub async fn index(
             addon.enabled = enabled_in_disk;
             addon.restart_required = enabled_in_disk != enabled_in_mem;
 
-            // Populate license status from the startup-time cache (no network call).
-            #[cfg(feature = "commerce")]
             if addon.category == crate::addons::AddonCategory::Commercial {
                 if let Some(status) = crate::license::get_license_status(&addon.id) {
                     addon.license_status = Some(license_status_label(&status));
@@ -74,6 +70,8 @@ pub async fn index(
                     } else {
                         Some(status.plan.clone())
                     };
+                    addon.license_days_left = status.days_until_expiry();
+                    addon.license_expiring_soon = crate::license::expiring_soon(&status, 30);
                 } else {
                     // Startup check hasn't run or this addon wasn't checked.
                     addon.license_status = Some("Unknown".to_string());
@@ -85,25 +83,18 @@ pub async fn index(
         vec![]
     };
 
-    // Commerce-only: license banner and license rows.
-    #[cfg(feature = "commerce")]
     let has_unlicensed_commercial = addons.iter().any(|a| {
         a.category == crate::addons::AddonCategory::Commercial
             && a.license_status.as_deref() != Some("Valid")
     });
-    #[cfg(not(feature = "commerce"))]
-    let has_unlicensed_commercial = false;
 
-    #[cfg(feature = "commerce")]
+    let has_expiring_license = addons.iter().any(|a| {
+        a.category == crate::addons::AddonCategory::Commercial && a.license_expiring_soon
+    });
+
     let licenses = super::licenses::build_license_rows(&state);
-    #[cfg(not(feature = "commerce"))]
-    let licenses: Vec<super::licenses::LicenseRow> = vec![];
 
-    // Tell the template whether commerce features are available.
-    #[cfg(feature = "commerce")]
     let commerce_enabled = true;
-    #[cfg(not(feature = "commerce"))]
-    let commerce_enabled = false;
 
     let current_user = state.build_current_user_ctx(&user).await;
 
@@ -112,6 +103,7 @@ pub async fn index(
         serde_json::json!({
             "addons": addons,
             "has_unlicensed_commercial": has_unlicensed_commercial,
+            "has_expiring_license": has_expiring_license,
             "licenses": licenses,
             "commerce_enabled": commerce_enabled,
             "page_title": "Addons",
@@ -122,9 +114,6 @@ pub async fn index(
     )
 }
 
-/// `POST /addons/verify` — kept for backward compatibility; delegates to the
-/// licenses verify handler which no longer requires an addon ID.
-#[cfg(feature = "commerce")]
 pub async fn verify_addon(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
@@ -268,8 +257,6 @@ pub async fn detail(
             addon.enabled = enabled_in_disk;
             addon.restart_required = enabled_in_disk != enabled_in_mem;
 
-            // Populate license status from the startup-time cache (no network call).
-            #[cfg(feature = "commerce")]
             if addon.category == crate::addons::AddonCategory::Commercial {
                 if let Some(status) = crate::license::get_license_status(&addon.id) {
                     addon.license_status = Some(license_status_label(&status));
@@ -293,7 +280,7 @@ pub async fn detail(
                 "addon": addon,
                 "page_title": format!("Addon: {}", addon.name),
                 "nav_active": "addons",
-                "commerce_enabled": cfg!(feature = "commerce"),
+                "commerce_enabled": true,
                 "current_user": current_user,
             }),
             &headers,
@@ -377,8 +364,6 @@ fn ensure_table_mut<'doc>(doc: &'doc mut DocumentMut, key: &str) -> &'doc mut Ta
         .expect("table")
 }
 
-/// Convert a `LicenseStatus` to a human-readable label for the UI.
-#[cfg(feature = "commerce")]
 fn license_status_label(status: &crate::license::LicenseStatus) -> String {
     if status.is_trial {
         if status.valid {

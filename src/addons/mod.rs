@@ -36,12 +36,13 @@ pub struct AddonInfo {
     pub cost: String,
     pub screenshots: Vec<String>,
     pub restart_required: bool,
-    #[cfg(feature = "commerce")]
     pub license_status: Option<String>,
-    #[cfg(feature = "commerce")]
     pub license_expiry: Option<String>,
-    #[cfg(feature = "commerce")]
     pub license_plan: Option<String>,
+    #[serde(default)]
+    pub license_days_left: Option<i64>,
+    #[serde(default)]
+    pub license_expiring_soon: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

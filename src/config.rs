@@ -555,7 +555,6 @@ pub struct Config {
     pub storage: Option<StorageConfig>,
     #[serde(default)]
     pub sipflow: Option<SipFlowConfig>,
-    #[cfg(feature = "commerce")]
     #[serde(default)]
     pub licenses: Option<LicenseConfig>,
     /// SSO login broker (commerce builds only). Handlers are mounted only
@@ -690,13 +689,37 @@ fn default_locales() -> std::collections::HashMap<String, LocaleInfo> {
     m
 }
 
-#[cfg(feature = "commerce")]
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub const GLOBAL_KEY_NAME: &str = "global";
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LicenseConfig {
     #[serde(default)]
     pub addons: HashMap<String, String>,
     #[serde(default)]
     pub keys: HashMap<String, String>,
+    #[serde(default)]
+    pub enforce: bool,
+    #[serde(default)]
+    pub public_key: Option<String>,
+    #[serde(default = "default_true")]
+    pub allow_global: bool,
+    /// Authorized email for license keys restricted to a specific address.
+    /// Sent along with the key during online verification.
+    #[serde(default)]
+    pub email: Option<String>,
+}
+
+impl Default for LicenseConfig {
+    fn default() -> Self {
+        Self {
+            addons: HashMap::new(),
+            keys: HashMap::new(),
+            enforce: false,
+            public_key: None,
+            allow_global: true,
+            email: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -751,7 +774,6 @@ pub struct AlertsConfig {
     pub webhook_url: Option<String>,
 }
 
-#[cfg(feature = "commerce")]
 impl LicenseConfig {
     pub fn get_license_for_addon(&self, addon_id: &str) -> Option<(String, String)> {
         self.addons.get(addon_id).and_then(|key_name| {
@@ -2391,7 +2413,6 @@ impl Default for Config {
             demo_mode: false,
             storage: None,
             sipflow: None,
-            #[cfg(feature = "commerce")]
             licenses: None,
             #[cfg(feature = "commerce")]
             sso: None,

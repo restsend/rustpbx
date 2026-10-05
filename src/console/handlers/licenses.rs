@@ -7,24 +7,45 @@ use axum::{
 use serde::Serialize;
 use std::sync::Arc;
 
-// Only the commerce route module pulls in the `State` extractor; gate the
-// import so the default build does not warn about it being unused.
-#[cfg(feature = "commerce")]
 use axum::extract::State;
 
-/// Register license routes — only the commerce build exposes the
-/// `/licenses/verify` POST endpoint. The legacy `GET /licenses` redirect has
-/// been removed in favour of the unified `/addons#licenses` tab.
+/// Register license routes: `POST /licenses/verify` validates a license key
+/// (online via miuda.ai, or offline Ed25519 token against the configured
+/// public key). The legacy `GET /licenses` redirect has been removed in favour
+/// of the unified `/addons#licenses` tab.
 pub fn urls() -> Router<Arc<ConsoleState>> {
-    #[cfg(feature = "commerce")]
-    return commerce::urls();
-
-    #[cfg(not(feature = "commerce"))]
-    Router::new()
+    commerce::urls()
 }
 
-/// Core license-key verification logic — commerce builds only.
-#[cfg(feature = "commerce")]
+fn configured_public_key(state: &ConsoleState) -> Option<String> {
+    state
+        .app_state()
+        .and_then(|app| app.config().licenses.as_ref().and_then(|l| l.public_key.clone()))
+}
+
+fn configured_email(state: &ConsoleState) -> Option<String> {
+    state
+        .app_state()
+        .and_then(|app| app.config().licenses.as_ref().and_then(|l| l.email.clone()))
+}
+
+fn verify_offline_console_key(
+    license_key: &str,
+    public_key: Option<&str>,
+) -> Result<crate::license::LicenseInfo, &'static str> {
+    let Some(public_key) = public_key else {
+        return Err(
+            "Offline license tokens require [licenses].public_key in the configuration.",
+        );
+    };
+    match crate::license::verify_offline(license_key, Some(public_key)) {
+        Some(info) => Ok(info),
+        None => Err(
+            "This offline license token is invalid or does not match the configured public key.",
+        ),
+    }
+}
+
 pub async fn verify_license_key(_state: Arc<ConsoleState>, license_key: String) -> Response {
     use super::addons::{get_config_path, load_document, parse_config_from_str, persist_document};
     use crate::console::config_helpers::json_error;
@@ -35,14 +56,28 @@ pub async fn verify_license_key(_state: Arc<ConsoleState>, license_key: String) 
         return json_error(StatusCode::BAD_REQUEST, "License key cannot be empty.").into_response();
     }
 
-    let info = match crate::license::verify_license(&license_key).await {
-        Ok(i) => i,
-        Err(e) => {
-            return json_error(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("License verification failed: {e}"),
-            )
-            .into_response();
+    let info = if license_key.starts_with(crate::license::OFFLINE_TOKEN_PREFIX) {
+        match verify_offline_console_key(
+            &license_key,
+            configured_public_key(&_state).as_deref(),
+        ) {
+            Ok(info) => info,
+            Err(message) => {
+                return json_error(StatusCode::UNPROCESSABLE_ENTITY, message).into_response();
+            }
+        }
+    } else {
+        match crate::license::verify_license(&license_key, configured_email(&_state).as_deref())
+            .await
+        {
+            Ok(i) => i,
+            Err(e) => {
+                return json_error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("License verification failed: {e}"),
+                )
+                .into_response();
+            }
         }
     };
 
@@ -185,19 +220,6 @@ pub async fn verify_license_key(_state: Arc<ConsoleState>, license_key: String) 
     .into_response()
 }
 
-/// Non-commerce stub so `addons.rs` can still reference the symbol without errors.
-#[cfg(not(feature = "commerce"))]
-pub async fn verify_license_key(_state: Arc<ConsoleState>, _license_key: String) -> Response {
-    use crate::console::config_helpers::json_error;
-    json_error(
-        StatusCode::NOT_FOUND,
-        "License management is not available in this build.",
-    )
-    .into_response()
-}
-
-/// Per-key row shown on the licenses overview page (commerce only).
-#[cfg(feature = "commerce")]
 #[derive(Debug, Serialize)]
 pub(crate) struct LicenseRow {
     pub key_name: String,
@@ -209,12 +231,6 @@ pub(crate) struct LicenseRow {
     pub is_trial: bool,
 }
 
-/// Placeholder type so non-commerce code can write `Vec<LicenseRow>` without errors.
-#[cfg(not(feature = "commerce"))]
-#[derive(Debug, Serialize)]
-pub(crate) struct LicenseRow;
-
-#[cfg(feature = "commerce")]
 pub(crate) fn build_license_rows(state: &ConsoleState) -> Vec<LicenseRow> {
     use std::collections::HashMap;
 
@@ -287,9 +303,6 @@ pub(crate) fn build_license_rows(state: &ConsoleState) -> Vec<LicenseRow> {
     rows
 }
 
-// Commerce-specific route registration lives in its own inline module so the
-// Axum router types (Json, post) are not imported at the top level.
-#[cfg(feature = "commerce")]
 mod commerce {
     use super::*;
     use axum::{Json, extract::Json as AxJson, routing::post};
@@ -310,5 +323,69 @@ mod commerce {
     pub fn urls() -> Router<Arc<ConsoleState>> {
         let _ = Json::<()>;
         Router::new().route("/licenses/verify", post(verify_license))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minted_token(
+        keypair: &crate::license::LicenseKeypair,
+        expires_at: Option<i64>,
+    ) -> String {
+        crate::license::mint_offline_token(
+            &keypair.private_key_hex,
+            "pro",
+            &["branding".to_string()],
+            expires_at,
+            None,
+        )
+        .expect("mint")
+    }
+
+    #[test]
+    fn offline_console_key_requires_configured_public_key() {
+        let keypair = crate::license::generate_keypair().expect("keypair");
+        let token = minted_token(&keypair, Some(4102444800));
+        let err = verify_offline_console_key(&token, None).expect_err("must fail");
+        assert!(err.contains("public_key"));
+    }
+
+    #[test]
+    fn offline_console_key_rejects_unknown_token() {
+        let keypair = crate::license::generate_keypair().expect("keypair");
+        let other = crate::license::generate_keypair().expect("keypair");
+        let token = minted_token(&other, Some(4102444800));
+        let err =
+            verify_offline_console_key(&token, Some(&keypair.public_key_hex)).expect_err("must fail");
+        assert!(err.contains("invalid"));
+    }
+
+    #[test]
+    fn offline_console_key_accepts_valid_token() {
+        let keypair = crate::license::generate_keypair().expect("keypair");
+        let token = minted_token(&keypair, Some(4102444800));
+        let info =
+            verify_offline_console_key(&token, Some(&keypair.public_key_hex)).expect("valid");
+        assert!(info.valid);
+        assert_eq!(info.plan, "pro");
+        assert_eq!(info.scope, Some(vec!["branding".to_string()]));
+        assert!(!crate::license::is_expired(&info));
+    }
+
+    #[test]
+    fn offline_console_key_leaves_expired_tokens_to_the_expiry_check() {
+        let keypair = crate::license::generate_keypair().expect("keypair");
+        let token = minted_token(&keypair, Some(1));
+        let info =
+            verify_offline_console_key(&token, Some(&keypair.public_key_hex)).expect("signature");
+        assert!(crate::license::is_expired(&info));
+    }
+
+    #[test]
+    fn only_offline_prefixed_keys_take_the_offline_branch() {
+        assert!(!"LICENSE-XXXX-XXXX".starts_with(crate::license::OFFLINE_TOKEN_PREFIX));
+        assert!("PBX1.abc.def".starts_with(crate::license::OFFLINE_TOKEN_PREFIX));
     }
 }

@@ -48,6 +48,24 @@
         </div>
         {% endif %}
 
+        {% if commerce_enabled and has_expiring_license and not has_unlicensed_commercial %}
+        <div data-expiring-banner class="rounded-lg bg-amber-50 border border-amber-300 p-4 flex items-start gap-3">
+            <svg class="h-5 w-5 text-amber-600 flex-shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor">
+                <path fill-rule="evenodd"
+                    d="M10 18a8 8 0 100-16 8 8 0 000 16zm.75-13a.75.75 0 00-1.5 0v4c0 .2.08.39.22.53l2.5 2.5a.75.75 0 101.06-1.06L10.75 9.19V5z"
+                    clip-rule="evenodd" />
+            </svg>
+            <div class="flex-1">
+                <p class="text-sm font-medium text-amber-900">{{ "addons.expiring_title" | t }}</p>
+                <p class="text-xs text-amber-800 mt-0.5">
+                    {{ "addons.expiring_desc" | t }}
+                    <a href="https://miuda.ai/try" target="_blank" class="underline font-medium">{{
+                        "addons.get_license_at" | t }}</a>
+                </p>
+            </div>
+        </div>
+        {% endif %}
+
         <!-- Tab bar -->
         <div class="border-b border-slate-200">
             <nav class="-mb-px flex gap-6" aria-label="Tabs">
@@ -132,6 +150,10 @@
                                     {% endif %}
                                     {% if addon.license_expiry %}
                                     <div class="text-xs text-slate-500 mt-1">Exp: {{ addon.license_expiry }}</div>
+                                    {% endif %}
+                                    {% if addon.license_expiring_soon %}
+                                    <div class="text-xs text-amber-600 font-medium mt-1">{{
+                                        "addons.expires_in_days" | tvars({"days": addon.license_days_left | string}) }}</div>
                                     {% endif %}
                                     {% else %}
                                     {% if addon.category == "Commercial" %}

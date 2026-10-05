@@ -88,13 +88,41 @@ impl AddonRegistry {
 
     pub async fn initialize_all(&self, state: AppState) -> anyhow::Result<()> {
         let config = state.config();
+        let commercial_ids: Vec<String> = self
+            .addons
+            .iter()
+            .filter(|a| a.category() == crate::addons::AddonCategory::Commercial)
+            .map(|a| a.id().to_string())
+            .collect();
+        if !commercial_ids.is_empty() {
+            let results =
+                crate::license::check_all_addon_licenses(&commercial_ids, &config.licenses).await;
+            let enforce = config
+                .licenses
+                .as_ref()
+                .map(|c| c.enforce)
+                .unwrap_or(false);
+            if enforce {
+                for (id, status) in &results {
+                    if status.expired {
+                        tracing::warn!("Addon {} license expired", id);
+                    } else if status.valid {
+                        if let Some(days) = status.days_until_expiry()
+                            && days <= 30
+                        {
+                            tracing::warn!("Addon {} license expires in {} days", id, days);
+                        }
+                    }
+                }
+            }
+            crate::license::record_startup_results(results);
+        }
         for addon in &self.addons {
             if !self.is_enabled(addon.id(), config) {
                 tracing::info!("Addon {} is disabled", addon.name());
                 continue;
             }
             tracing::info!("Initializing addon: {}", addon.name());
-            // Commercial addons would check license here
             if let Err(e) = addon.initialize(state.clone()).await {
                 tracing::error!("Failed to initialize addon {}: {}", addon.name(), e);
             }
@@ -228,6 +256,7 @@ impl AddonRegistry {
             .iter()
             .map(|a| {
                 let config_url = a.config_url(state.clone());
+                let license = crate::license::get_license_status(a.id());
 
                 super::AddonInfo {
                     id: a.id().to_string(),
@@ -246,22 +275,43 @@ impl AddonRegistry {
                         .map(|s| normalize_static_url(s, &config))
                         .collect(),
                     restart_required: false, // Caller should set this
-                    #[cfg(feature = "commerce")]
-                    license_status: None,
-                    #[cfg(feature = "commerce")]
-                    license_expiry: None,
-                    #[cfg(feature = "commerce")]
-                    license_plan: None,
+                    license_status: license.as_ref().map(|s| {
+                        if !s.valid {
+                            "Invalid".to_string()
+                        } else if s.expired {
+                            "Expired".to_string()
+                        } else if s.is_trial {
+                            "Trial".to_string()
+                        } else {
+                            "Valid".to_string()
+                        }
+                    }),
+                    license_expiry: license.as_ref().and_then(|s| s.expiry.clone()),
+                    license_plan: license.as_ref().map(|s| s.plan.clone()),
+                    license_days_left: license.as_ref().and_then(|s| s.days_until_expiry()),
+                    license_expiring_soon: license
+                        .as_ref()
+                        .map(|s| crate::license::expiring_soon(s, 30))
+                        .unwrap_or(false),
                 }
             })
             .collect()
     }
 
     pub fn is_enabled(&self, id: &str, config: &crate::config::Config) -> bool {
-        if let Some(addons) = &config.proxy.addons {
-            return addons.iter().any(|a| a == id);
+        let listed = config
+            .proxy
+            .addons
+            .as_ref()
+            .map(|addons| addons.iter().any(|a| a == id))
+            .unwrap_or(false);
+        if !listed {
+            return false;
         }
-        false
+        match crate::license::get_license_status(id) {
+            Some(status) => status.valid,
+            None => true,
+        }
     }
 
     /// Collect routing-stack metadata from enabled addons.
@@ -867,5 +917,51 @@ mod asset_path_tests {
         other_enabled.proxy.addons = Some(vec!["other".into()]);
         assert!(registry.get_static_mounts(&other_enabled).is_empty());
         assert!(registry.get_static_mounts(&Config::default()).is_empty());
+    }
+
+    #[test]
+    fn license_status_gates_enabled_addons() {
+        use crate::license::{LicenseStatus, record_startup_results};
+        use std::collections::HashMap;
+
+        let registry = AddonRegistry::with_extra_addons(vec![Arc::new(PathAddon)]);
+        let config = enabled_config();
+
+        record_startup_results(HashMap::new());
+        assert!(registry.is_enabled("pathaddon", &config));
+
+        let mut denied = HashMap::new();
+        denied.insert(
+            "pathaddon".to_string(),
+            LicenseStatus {
+                key_name: "k".into(),
+                valid: false,
+                expired: false,
+                expiry: None,
+                plan: String::new(),
+                is_trial: false,
+                scope: None,
+            },
+        );
+        record_startup_results(denied);
+        assert!(!registry.is_enabled("pathaddon", &config));
+
+        let mut trial = HashMap::new();
+        trial.insert(
+            "pathaddon".to_string(),
+            LicenseStatus {
+                key_name: "trial".into(),
+                valid: true,
+                expired: false,
+                expiry: None,
+                plan: "trial".into(),
+                is_trial: true,
+                scope: None,
+            },
+        );
+        record_startup_results(trial);
+        assert!(registry.is_enabled("pathaddon", &config));
+
+        record_startup_results(HashMap::new());
     }
 }
