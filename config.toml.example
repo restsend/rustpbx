@@ -128,6 +128,8 @@ base_path = "/console"
 api_prefix = "/api"
 # allow self-service administrator signup after the first account
 allow_registration = false
+# require TOTP multi-factor enrollment before admins can log in
+require_mfa = false
 # set to true to force Secure cookie attribute, otherwise it is auto-detected based on request
 secure_cookie = false
 # Static files HTTP path prefix (default: "/static")
@@ -716,6 +718,13 @@ subdirs = "daily"  # "none" | "daily" | "hourly"
 # page will write these sections automatically.
 #
 # [licenses]
+# enforce = false               # when true, commercial addons without a valid
+#                              # license are disabled (default: trial mode)
+# allow_global = true          # accept the reserved "global" key name for any addon
+# public_key = ""              # hex Ed25519 public key verifying offline
+#                              # tokens ("PBX1.<payload>.<sig>")
+# email = "you@example.com"    # authorized email for email-restricted keys
+#
 # [licenses.addons]
 # wholesale         = "enterprise"   # addon id -> key name
 # endpoint-manager  = "enterprise"
@@ -724,6 +733,32 @@ subdirs = "daily"  # "none" | "daily" | "hourly"
 # [licenses.keys]
 # enterprise = "LICENSE-KEY-XXXX-XXXX-XXXX"
 # basic      = "LICENSE-KEY-YYYY-YYYY-YYYY"
+
+# ── Outbound Mail (SMTP) ──────────────────────────────────────────────────────
+# Used for branded outbound email (security alerts, notifications).
+#
+# [mail]
+# enabled = true
+# host = "smtp.example.com"
+# port = 25                        # e.g. 587 for submission
+# username = "noreply@example.com"
+# password = "secret"
+# from = "noreply@example.com"
+# to = ["ops@example.com"]         # default recipients
+# timeout_secs = 10
+
+# ── Security: auth-failure bans and alerts ────────────────────────────────────
+#
+# [security]
+# [security.bans]
+# enabled = true
+# max_failures = 5                 # failures within window_secs triggers a ban
+# window_secs = 300
+# ban_durations_secs = [300, 900, 3600]   # escalating ban ladder
+# protected_cidrs = ["10.0.0.0/8"]        # never banned
+#
+# [security.alerts]
+# webhook_url = "https://hooks.example.com/xyz"   # ban/alert notifications
 
 # ── Realtime (AI voice) endpoint presets ──────────────────────────────────────
 # Referenced from the `realtime` call app by name: app params carry
