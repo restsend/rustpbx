@@ -1,1 +1,13 @@
+# Keep image build contexts lean: the community image COPYs static/,
+# templates/, locales/, config/ and src/addons/**; the commercial edition
+# images embed this whole tree as the `core` named build context.
 target/
+recordings/
+storage/
+e2e-artifacts/
+e2e-screenshots/
+screenshots/
+regression/
+tests/bench/
+tests/logs/
+*.log
