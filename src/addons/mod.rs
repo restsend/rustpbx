@@ -57,6 +57,27 @@ pub struct ScriptInjection {
     pub script_url: String,
 }
 
+/// Resolve the locales directory for a built-in addon.
+///
+/// Prefers the compile-time source-tree path
+/// (`$CARGO_MANIFEST_DIR/src/addons/<addon_id>/locales`) so translations load
+/// regardless of the process working directory (IDE launches, scripts, systemd
+/// units, …). When that path does not exist — e.g. inside the Docker image,
+/// where addon locales are shipped as `locales/<addon_id>` — falls back to the
+/// CWD-relative deployment layout.
+pub(crate) fn addon_locales_dir(addon_id: &str) -> String {
+    let dev = format!(
+        "{}/src/addons/{}/locales",
+        env!("CARGO_MANIFEST_DIR"),
+        addon_id
+    );
+    if std::path::Path::new(&dev).is_dir() {
+        dev
+    } else {
+        format!("locales/{}", addon_id)
+    }
+}
+
 #[async_trait]
 pub trait Addon: Send + Sync {
     fn as_any(&self) -> &dyn std::any::Any;
@@ -399,3 +420,37 @@ pub mod archive;
 #[cfg(feature = "addon-transcript")]
 pub mod transcript;
 pub mod queue;
+
+#[cfg(test)]
+mod locale_dir_tests {
+    use super::addon_locales_dir;
+
+    /// In a dev build every built-in addon must resolve to its absolute,
+    /// source-tree locales directory containing translations for all
+    /// supported languages — independent of the process working directory.
+    #[test]
+    fn builtin_addon_locales_dirs_resolve_to_source_tree() {
+        for id in ["acme", "archive", "queue", "transcript"] {
+            let dir = addon_locales_dir(id);
+            let path = std::path::Path::new(&dir);
+            assert!(
+                path.is_absolute(),
+                "addon '{}' locales dir is not absolute: {}",
+                id,
+                dir
+            );
+            assert!(
+                path.join("en.toml").is_file(),
+                "addon '{}' missing en.toml at {}",
+                id,
+                dir
+            );
+            assert!(
+                path.join("zh.toml").is_file(),
+                "addon '{}' missing zh.toml at {}",
+                id,
+                dir
+            );
+        }
+    }
+}

@@ -40,6 +40,21 @@ impl From<&crate::config::ConsoleConfig> for LocaleConfig {
     }
 }
 
+/// Resolve the core locales directory.
+///
+/// Prefers the compile-time source-tree `locales/` (absolute via
+/// `CARGO_MANIFEST_DIR`) so development runs work from any working directory;
+/// falls back to the CWD-relative `locales/` used in deployment images, where
+/// the build-time source path does not exist.
+fn default_core_locales_dir() -> String {
+    let dev = concat!(env!("CARGO_MANIFEST_DIR"), "/locales");
+    if std::path::Path::new(dev).is_dir() {
+        dev.to_string()
+    } else {
+        "locales".to_string()
+    }
+}
+
 /// Central i18n manager.
 ///
 /// Loads TOML translation files from a base `locales/` directory and from
@@ -57,7 +72,7 @@ pub struct I18n {
 impl I18n {
     /// Create a new I18n instance and eagerly load translations from disk.
     pub fn new(config: LocaleConfig) -> Self {
-        Self::new_with_core_dir(config, "locales".to_string())
+        Self::new_with_core_dir(config, default_core_locales_dir())
     }
 
     fn new_with_core_dir(config: LocaleConfig, core_locales_dir: String) -> Self {
@@ -537,5 +552,13 @@ save = "保存"
             native_name: "English".into(),
         }];
         assert_eq!(detect_locale(&headers, &available, "en"), "en");
+    }
+
+    #[test]
+    fn default_core_locales_dir_points_at_source_tree() {
+        let dir = default_core_locales_dir();
+        let path = std::path::Path::new(&dir);
+        assert!(path.join("en.toml").is_file(), "missing en.toml under {}", dir);
+        assert!(path.join("zh.toml").is_file(), "missing zh.toml under {}", dir);
     }
 }

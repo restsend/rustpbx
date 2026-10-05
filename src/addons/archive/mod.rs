@@ -724,13 +724,7 @@ impl Addon for ArchiveAddon {
     }
 
     fn locales_dir(&self) -> Option<String> {
-        let dev = "src/addons/archive/locales";
-        let deployed = "locales/archive";
-        if std::path::Path::new(dev).exists() {
-            Some(dev.to_string())
-        } else {
-            Some(deployed.to_string())
-        }
+        Some(crate::addons::addon_locales_dir("archive"))
     }
 
     fn sidebar_items(&self, state: AppState) -> Vec<SidebarItem> {

@@ -121,15 +121,7 @@ impl Addon for QueueAddon {
     }
 
     fn locales_dir(&self) -> Option<String> {
-        // Prefer the source-tree path during development; fall back to the
-        // deployment path used inside the Docker image.
-        let dev = "src/addons/queue/locales";
-        let deployed = "locales/queue";
-        if std::path::Path::new(dev).exists() {
-            Some(dev.to_string())
-        } else {
-            Some(deployed.to_string())
-        }
+        Some(crate::addons::addon_locales_dir("queue"))
     }
 
     fn migrations(&self) -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {

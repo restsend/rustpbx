@@ -107,13 +107,7 @@ impl Addon for TranscriptAddon {
     }
 
     fn locales_dir(&self) -> Option<String> {
-        let dev = "src/addons/transcript/locales";
-        let deployed = "locales/transcript";
-        if std::path::Path::new(dev).exists() {
-            Some(dev.to_string())
-        } else {
-            Some(deployed.to_string())
-        }
+        Some(crate::addons::addon_locales_dir("transcript"))
     }
 
     fn inject_scripts(&self) -> Vec<ScriptInjection> {

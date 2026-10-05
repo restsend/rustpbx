@@ -184,13 +184,7 @@ impl Addon for AcmeAddon {
     }
 
     fn locales_dir(&self) -> Option<String> {
-        let dev = "src/addons/acme/locales";
-        let deployed = "locales/acme";
-        if std::path::Path::new(dev).exists() {
-            Some(dev.to_string())
-        } else {
-            Some(deployed.to_string())
-        }
+        Some(crate::addons::addon_locales_dir("acme"))
     }
 
     fn sidebar_items(&self, state: AppState) -> Vec<SidebarItem> {
