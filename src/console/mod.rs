@@ -19,6 +19,16 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Instant;
 use tracing::warn;
 
+fn request_host(headers: &HeaderMap) -> Option<String> {
+    ["x-forwarded-host", "host"]
+        .iter()
+        .filter_map(|name| headers.get(*name))
+        .filter_map(|value| value.to_str().ok())
+        .map(|value| value.trim())
+        .find(|value| !value.is_empty())
+        .map(|value| value.to_string())
+}
+
 pub mod auth;
 pub mod catalog;
 pub mod config_helpers;
@@ -188,7 +198,23 @@ impl ConsoleState {
             self.i18n.available_locales(),
             self.i18n.default_locale(),
         );
+        let ctx = self.inject_request_host(ctx, headers);
         self.render_with_locale(template, ctx, &locale)
+    }
+
+    fn inject_request_host(
+        &self,
+        mut ctx: serde_json::Value,
+        headers: &HeaderMap,
+    ) -> serde_json::Value {
+        if ctx.is_object()
+            && let Some(map) = ctx.as_object_mut()
+            && !map.contains_key("request_host")
+            && let Some(host) = request_host(headers)
+        {
+            map.insert("request_host".to_string(), serde_json::Value::String(host));
+        }
+        ctx
     }
 
     /// Render a template with a specific locale.
@@ -239,8 +265,20 @@ impl ConsoleState {
                     serde_json::Value::String("community".to_string())
                 }
             });
+            let brand = if let Some(app_state) = self.app_state() {
+                let request_host = map
+                    .get("request_host")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_string());
+                crate::branding::resolve_for_host(
+                    app_state.addon_registry.branding_provider().as_ref(),
+                    request_host.as_deref(),
+                )
+            } else {
+                crate::branding::BrandContext::default()
+            };
             map.entry("site_name").or_insert_with(|| {
-                serde_json::Value::String(crate::config::BRAND_NAME.to_string())
+                serde_json::Value::String(brand.site_name.clone())
             });
             map.entry("page_title")
                 .or_insert_with(|| serde_json::Value::String("RustPBX admin".to_string()));
@@ -250,19 +288,35 @@ impl ConsoleState {
             map.entry("site_url")
                 .or_insert_with(|| serde_json::Value::String("https://rustpbx.com".to_string()));
             map.entry("site_footer").or_insert_with(|| {
-                serde_json::Value::String("© 2025 RustPBX. All rights reserved.".to_string())
+                if brand.footer_text.is_empty() {
+                    serde_json::Value::String("© 2025 RustPBX. All rights reserved.".to_string())
+                } else {
+                    serde_json::Value::String(brand.footer_text.clone())
+                }
             });
             let static_path = self.config().static_path();
             map.entry("static_path")
                 .or_insert_with(|| serde_json::Value::String(static_path.clone()));
             map.entry("site_logo").or_insert_with(|| {
-                serde_json::Value::String(format!("{}/images/logo.png", static_path))
+                serde_json::Value::String(if brand.logo_url.is_empty() {
+                    format!("{}/images/logo.png", static_path)
+                } else if let Some(rest) = brand.logo_url.strip_prefix("/static") {
+                    format!("{}{}", static_path, rest)
+                } else {
+                    brand.logo_url.clone()
+                })
             });
             map.entry("site_logo_mini").or_insert_with(|| {
                 serde_json::Value::String(format!("{}/images/logo-mini.png", static_path))
             });
             map.entry("favicon_url").or_insert_with(|| {
-                serde_json::Value::String(format!("{}/images/favicon.png", static_path))
+                serde_json::Value::String(if brand.favicon_url.is_empty() {
+                    format!("{}/images/favicon.png", static_path)
+                } else if let Some(rest) = brand.favicon_url.strip_prefix("/static") {
+                    format!("{}{}", static_path, rest)
+                } else {
+                    brand.favicon_url.clone()
+                })
             });
             map.entry("demo_mode")
                 .or_insert_with(|| serde_json::Value::Bool(self.config().demo_mode));
@@ -920,5 +974,36 @@ mod tests {
             "/v1/api/pending-reloads"
         );
         assert_eq!(state.api_url_for(""), "/v1/api");
+    }
+
+    #[test]
+    fn request_host_prefers_forwarded_host_and_falls_back() {
+        let mut headers = HeaderMap::new();
+        assert!(request_host(&headers).is_none());
+        headers.insert("host", "pbx.example.com".parse().unwrap());
+        assert_eq!(request_host(&headers).as_deref(), Some("pbx.example.com"));
+        headers.insert("x-forwarded-host", "proxy.example.com".parse().unwrap());
+        assert_eq!(request_host(&headers).as_deref(), Some("proxy.example.com"));
+        headers.insert("x-forwarded-host", "   ".parse().unwrap());
+        assert_eq!(request_host(&headers).as_deref(), Some("pbx.example.com"));
+    }
+
+    #[tokio::test]
+    async fn inject_request_host_adds_and_preserves() {
+        let state = setup_state().await;
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "pbx.example.com:8443".parse().unwrap());
+
+        let ctx = state.inject_request_host(serde_json::json!({}), &headers);
+        assert_eq!(ctx["request_host"], "pbx.example.com:8443");
+
+        let reserved = state.inject_request_host(
+            serde_json::json!({"request_host": "explicit.example.com"}),
+            &headers,
+        );
+        assert_eq!(reserved["request_host"], "explicit.example.com");
+
+        let non_object = state.inject_request_host(serde_json::json!("plain"), &headers);
+        assert_eq!(non_object, serde_json::json!("plain"));
     }
 }

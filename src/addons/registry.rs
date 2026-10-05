@@ -584,6 +584,10 @@ impl AddonRegistry {
         }
     }
 
+    pub fn branding_provider(&self) -> Option<Arc<dyn crate::branding::BrandingProvider>> {
+        self.addons.iter().find_map(|a| a.branding())
+    }
+
     /// Dispatch one authentication attempt to every addon.
     pub fn dispatch_auth_attempt(&self, attempt: &crate::addons::events::AuthAttempt) {
         for addon in &self.addons {

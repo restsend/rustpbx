@@ -8,6 +8,7 @@ pub mod api;
 pub mod app;
 pub mod auth;
 pub mod auto_external_ip;
+pub mod branding;
 pub mod builder;
 pub mod call;
 pub mod call_errors;

@@ -274,6 +274,10 @@ pub trait Addon: Send + Sync {
     /// (append to a buffer, bump counters) — never block or do I/O here.
     fn on_auth_attempt(&self, _attempt: &AuthAttempt) {}
 
+    fn branding(&self) -> Option<Arc<dyn crate::branding::BrandingProvider>> {
+        None
+    }
+
     /// Return database migrations for this addon.
     fn migrations(&self) -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
         vec![]
