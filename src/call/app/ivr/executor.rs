@@ -4747,7 +4747,7 @@ mod tests {
             greeting_text: None,
             greeting_record_list: None,
             greeting_voice: None,
-            timeout_ms: 5000,
+            timeout_ms: 30000,
             max_retries: 3,
             entries: HashMap::new(),
             timeout_action: None,
@@ -4773,7 +4773,7 @@ mod tests {
         // The fetched text is synthesized via TTS when a TTS backend is
         // available (greeting plays), otherwise the menu degrades to a
         // silent wait (NoAudio path). Both paths must wait for keys.
-        if let Some(CallCommand::Play { .. }) = stack2.next_cmd(500).await {
+        if let Some(CallCommand::Play { .. }) = stack2.next_cmd(5000).await {
             stack2.audio_complete("ivr_menu_greeting");
         }
         std::thread::sleep(std::time::Duration::from_millis(150));

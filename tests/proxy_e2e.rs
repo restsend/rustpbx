@@ -51,3 +51,6 @@ mod test_cluster_session_registry;
 
 #[path = "proxy_e2e/test_network_conference.rs"]
 mod test_network_conference;
+
+#[path = "proxy_e2e/test_identity_passthrough_e2e.rs"]
+mod test_identity_passthrough_e2e;

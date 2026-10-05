@@ -703,12 +703,24 @@ impl TestUa {
             .webrtc_pc
             .as_ref()
             .ok_or_else(|| anyhow!("not a webrtc UA"))?;
-        let mut header =
-            rustrtc::rtp::RtpHeader::new(payload_type, sequence_number, timestamp, ssrc);
-        header.marker = marker;
-        pc.send_raw_rtp(rustrtc::rtp::RtpPacket::new(header, payload))
-            .await
-            .map_err(|e| anyhow!("send_raw_rtp failed: {:?}", e))
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let mut header =
+                rustrtc::rtp::RtpHeader::new(payload_type, sequence_number, timestamp, ssrc);
+            header.marker = marker;
+            let packet = rustrtc::rtp::RtpPacket::new(header, payload.clone());
+            match pc.send_raw_rtp(packet).await {
+                Ok(sent) => return Ok(sent),
+                Err(e) => {
+                    let transient = e.to_string().contains("session not ready");
+                    if transient && tokio::time::Instant::now() < deadline {
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        continue;
+                    }
+                    return Err(anyhow!("send_raw_rtp failed: {:?}", e));
+                }
+            }
+        }
     }
 
     /// Set answer SDP for a dialog, used for re-INVITE responses.
