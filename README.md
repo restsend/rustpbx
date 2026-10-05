@@ -23,7 +23,7 @@ curl -O https://raw.githubusercontent.com/restsend/rustpbx/main/config.toml.exam
 
 docker run -d --name rustpbx --net host \
   -v $(pwd)/config.toml.example:/app/config.toml \
-  ghcr.io/restsend/rustpbx:latest --conf /app/config.toml
+  docker.cnb.cool/miuda.ai/rustpbx:commerce --conf /app/config.toml
 
 # Create the admin account (first time only)
 docker exec rustpbx /app/rustpbx --conf /app/config.toml \
