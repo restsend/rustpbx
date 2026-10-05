@@ -230,6 +230,8 @@ pub async fn show_active_call_inner(state: &Arc<ConsoleState>, session_id: &str)
 
         if let Some(handle) = registry.get_handle(session_id) {
             return Json(json!({ "data": json!({
+                "node": server.cluster_self_addr.as_ref().map(|addr| addr.to_string())
+                    .unwrap_or_else(|| "local".to_string()),
                 "meta": registry.get(session_id),
                 "state": handle.snapshot(),
             }) }))
@@ -811,4 +813,36 @@ async fn fetch_peer_calls(state: &ConsoleState, limit: usize) -> Vec<serde_json:
         }
     }
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proxy::active_call_registry::{ActiveProxyCallEntry, ActiveProxyCallStatus};
+    use crate::proxy::proxy_call::sip_session::SipSessionHandle;
+    use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn active_call_read_identifies_the_node_that_holds_the_call() {
+        let app = crate::app::AppStateBuilder::new().with_config(crate::config::Config {
+            database_url: "sqlite::memory:".into(), ..Default::default()
+        }).with_skip_sip_bind().build().await.unwrap();
+        let state = ConsoleState::initialize(app.db().clone(), crate::config::ConsoleConfig::default(), None)
+            .await.unwrap();
+        state.set_sip_server(Some(app.sip_server().inner.clone()));
+        let registry = &app.sip_server().inner.active_call_registry;
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        registry.upsert(ActiveProxyCallEntry {
+            session_id: "owner-call".into(), caller: None, callee: None,
+            direction: "inbound".into(), started_at: chrono::Utc::now(), answered_at: None,
+            status: ActiveProxyCallStatus::Talking,
+        }, SipSessionHandle::new_for_test("owner-call", tx));
+        let response = show_active_call_inner(&state, "owner-call").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), 1024 * 1024).await.unwrap()).unwrap();
+        assert_eq!(body["data"]["meta"]["session_id"], "owner-call");
+        assert_eq!(body["data"]["node"], "local", "single-node owner must be explicit");
+        app.token().cancel();
+    }
 }
