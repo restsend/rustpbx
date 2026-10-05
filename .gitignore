@@ -34,6 +34,7 @@ __pycache__/
 *.dev
 *.log
 *.txt
+!regression/scripts/assertion_baseline.txt
 *.sql
 #
 # ignore commerce addon files
