@@ -416,7 +416,36 @@ impl TestUa {
         callee: &str,
         sdp_offer: Option<String>,
     ) -> Result<DialogId> {
-        self.make_call_inner(callee, sdp_offer, None, Vec::new()).await
+        let callee_uri = format!(
+            "sip:{}@{}:{}",
+            callee,
+            self.config.proxy_addr.ip(),
+            self.config.proxy_addr.port()
+        )
+        .try_into()
+        .map_err(|e| anyhow!("Invalid callee URI: {:?}", e))?;
+        self.make_call_uri_inner(callee_uri, sdp_offer, None, Vec::new())
+            .await
+    }
+
+    /// Dial an arbitrary callee URI — e.g. a canonical cluster address
+    /// (`sip:user@realm`) instead of this UA's proxy socket. Cluster fork
+    /// tests need this to exercise the home-hop vs canonical-realm
+    /// distinction.
+    pub async fn make_call_to_uri(
+        &self,
+        callee_uri: &str,
+        sdp_offer: Option<String>,
+    ) -> Result<DialogId> {
+        let callee_uri: rsipstack::sip::Uri = callee_uri
+            .parse()
+            .map_err(|e| anyhow!("Invalid callee URI '{callee_uri}': {e}"))?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.make_call_uri_inner(callee_uri.clone(), sdp_offer, None, Vec::new()),
+        )
+        .await
+        .map_err(|_| anyhow!("make_call_to_uri timed out after 30s for callee '{callee_uri}'"))?
     }
 
     /// Make a call whose initial INVITE carries extra application headers
@@ -427,9 +456,17 @@ impl TestUa {
         sdp_offer: Option<String>,
         extra_headers: Vec<(String, String)>,
     ) -> Result<DialogId> {
+        let callee_uri = format!(
+            "sip:{}@{}:{}",
+            callee,
+            self.config.proxy_addr.ip(),
+            self.config.proxy_addr.port()
+        )
+        .try_into()
+        .map_err(|e| anyhow!("Invalid callee URI: {:?}", e))?;
         tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            self.make_call_inner(callee, sdp_offer, None, extra_headers),
+            self.make_call_uri_inner(callee_uri, sdp_offer, None, extra_headers),
         )
         .await
         .map_err(|_| anyhow!("make_call_with_headers timed out after 30s for callee '{}'", callee))?
@@ -445,17 +482,25 @@ impl TestUa {
         callee: &str,
         fake_ip: &str,
     ) -> Result<DialogId> {
+        let callee_uri = format!(
+            "sip:{}@{}:{}",
+            callee,
+            self.config.proxy_addr.ip(),
+            self.config.proxy_addr.port()
+        )
+        .try_into()
+        .map_err(|e| anyhow!("Invalid callee URI: {:?}", e))?;
         tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            self.make_call_inner(callee, None, Some(fake_ip.to_string()), Vec::new()),
+            self.make_call_uri_inner(callee_uri, None, Some(fake_ip.to_string()), Vec::new()),
         )
         .await
         .map_err(|_| anyhow!("make_call_spoofed_cline timed out after 30s for callee '{callee}'"))?
     }
 
-    async fn make_call_inner(
+    async fn make_call_uri_inner(
         &self,
-        callee: &str,
+        callee_uri: rsipstack::sip::Uri,
         sdp_offer: Option<String>,
         spoof_cline_ip: Option<String>,
         extra_headers: Vec<(String, String)>,
@@ -475,15 +520,6 @@ impl TestUa {
             password: self.config.password.clone(),
             realm: Some(self.config.realm.clone()),
         };
-
-        let callee_uri = format!(
-            "sip:{}@{}:{}",
-            callee,
-            self.config.proxy_addr.ip(),
-            self.config.proxy_addr.port()
-        )
-        .try_into()
-        .map_err(|e| anyhow!("Invalid callee URI: {:?}", e))?;
 
         let proxy_uri: rsipstack::sip::Uri = format!(
             "sip:{}:{};lr",
