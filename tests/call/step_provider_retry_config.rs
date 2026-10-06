@@ -19,6 +19,7 @@ fn step_provider_uses_configured_timeout_and_retry_delay() {
         retry_delay_ms: 250,
         timeout_secs: 10,
         fallback_action: None,
+        resume_event_mode: None,
     };
 
     let retry = RetryConfig::from(&config);
