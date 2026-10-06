@@ -84,6 +84,7 @@ pub struct DtmfEvent {
 pub(crate) struct TapStats {
     pub ingress_packets: u64,
     pub egress_packets: u64,
+    pub recording_queue_drops: u64,
 }
 
 /// Plaintext observer for one leg: stats + DTMF detection + recording.
@@ -207,6 +208,11 @@ impl IngressTap {
         TapStats {
             ingress_packets: self.ingress_packets.load(Ordering::Relaxed),
             egress_packets: self.egress_packets.load(Ordering::Relaxed),
+            recording_queue_drops: self
+                .recorder_sender
+                .as_ref()
+                .map(|sender| sender.dropped_packets())
+                .unwrap_or(0),
         }
     }
 
@@ -230,7 +236,12 @@ impl IngressTap {
 
     /// Shared processing for both directions: stats + DTMF + record.
     #[inline]
-    fn process(&self, direction: PacketDirection, packet: &RtpPacket) {
+    fn process(
+        &self,
+        direction: PacketDirection,
+        packet: &RtpPacket,
+        peer_addr: std::net::SocketAddr,
+    ) {
         match direction {
             PacketDirection::Ingress => {
                 self.ingress_packets.fetch_add(1, Ordering::Relaxed);
@@ -281,18 +292,18 @@ impl IngressTap {
         if (self.is_audio_payload_type(pt) || self.is_dtmf_payload_type(pt))
             && let Some(sender) = self.recorder_sender.as_ref()
         {
-            sender.capture(direction, packet);
+            sender.capture(direction, packet, Some(peer_addr));
         }
     }
 }
 
 impl RtpObserver for IngressTap {
-    fn on_ingress(&self, packet: &RtpPacket, _src_addr: std::net::SocketAddr) {
-        self.process(PacketDirection::Ingress, packet);
+    fn on_ingress(&self, packet: &RtpPacket, src_addr: std::net::SocketAddr) {
+        self.process(PacketDirection::Ingress, packet, src_addr);
     }
 
-    fn on_egress(&self, packet: &RtpPacket, _dst_addr: std::net::SocketAddr) {
-        self.process(PacketDirection::Egress, packet);
+    fn on_egress(&self, packet: &RtpPacket, dst_addr: std::net::SocketAddr) {
+        self.process(PacketDirection::Egress, packet, dst_addr);
     }
 }
 

@@ -67,6 +67,7 @@ struct LogRecentQuery {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct LogFollowQuery {
+    pub file_identity: Option<String>,
     pub position: Option<u64>,
     pub limit: Option<usize>,
     pub node: Option<String>,
@@ -74,6 +75,7 @@ struct LogFollowQuery {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct LogStreamQuery {
+    pub file_identity: Option<String>,
     pub position: Option<u64>,
     pub limit: Option<usize>,
     pub node: Option<String>,
@@ -222,6 +224,7 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
         .route("/settings/logs/nodes", get(logs_nodes))
         .route("/settings/logs/recent", get(fetch_recent_logs))
         .route("/settings/logs/follow", get(follow_logs))
+        .route("/settings/logs/search", get(search_logs))
         .route("/settings/logs/stream", get(stream_logs))
         .route("/settings/config/platform", patch(update_platform_settings))
         .route(
@@ -301,6 +304,7 @@ pub fn api_urls() -> Router<Arc<ConsoleState>> {
         .route("/settings/logs/nodes", get(logs_nodes))
         .route("/settings/logs/recent", get(fetch_recent_logs))
         .route("/settings/logs/follow", get(follow_logs))
+        .route("/settings/logs/search", get(search_logs))
         .route("/settings/logs/stream", get(stream_logs))
         .route("/settings/config/platform", patch(update_platform_settings))
         .route(
@@ -3305,6 +3309,9 @@ async fn fetch_peer_log_payload(
                 .await
                 .unwrap_or(JsonValue::Null);
             if !status.is_success() {
+                if kind == "search" && matches!(status.as_u16(), 400 | 409 | 429) {
+                    return Err((StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY), Json(body)).into_response());
+                }
                 let detail = body
                     .get("message")
                     .and_then(|m| m.as_str())
@@ -3334,17 +3341,19 @@ fn peer_log_stream(
     target: ClusterLogTarget,
     start_position: u64,
     limit: usize,
+    file_identity: Option<String>,
 ) -> Response {
     let client = state.http_client().clone();
     let url = format!("{}/cluster/logs/follow", target.base_url);
     let label = target.label;
 
-    let stream = stream::unfold((start_position, url, label), move |(cursor, url, label)| {
+    let stream = stream::unfold((start_position, file_identity, url, label), move |(cursor, identity, url, label)| {
         let client = client.clone();
         async move {
             time::sleep(StdDuration::from_millis(1000)).await;
 
-            let fetch_url = format!("{url}?position={cursor}&limit={limit}");
+            let mut fetch_url = format!("{url}?position={cursor}&limit={limit}");
+            if let Some(ref identity) = identity { fetch_url.push_str(&format!("&file_identity={identity}")); }
             let opts = crate::http_util::HttpFetchOptions::new().with_timeout(
                 std::time::Duration::from_secs(CLUSTER_LOG_FETCH_TIMEOUT_SECS),
             );
@@ -3388,11 +3397,13 @@ fn peer_log_stream(
                     ),
                 };
 
+            let next_identity = payload.get("file_identity").and_then(JsonValue::as_str)
+                .filter(|value| crate::log_viewer::valid_file_identity(value)).map(str::to_owned).or(identity);
             tag_peer_log_path(&mut payload, &label);
             let event = axum::response::sse::Event::default()
                 .event("logs")
                 .data(payload.to_string());
-            Some((Ok::<_, Infallible>(event), (next_cursor, url, label)))
+            Some((Ok::<_, Infallible>(event), (next_cursor, next_identity, url, label)))
         }
     });
 
@@ -3422,18 +3433,13 @@ async fn logs_nodes(
 
     #[cfg(feature = "commerce")]
     {
-        let self_node_id = state.app_state().and_then(|app| {
-            app.sip_server()
-                .inner
-                .cluster_self_addr
-                .as_ref()
-                .map(|addr| addr.addr.to_string())
-        });
-        for peer in cluster_log_peers(&state) {
+        let peers = cluster_log_peers(&state);
+        // A load-balanced console cannot keep a "local" cursor pinned to one node.
+        if !peers.is_empty() {
+            nodes.clear();
+        }
+        for peer in peers {
             let id = format!("{}:{}", peer.addr, peer.sip_port);
-            if Some(&id) == self_node_id.as_ref() {
-                continue;
-            }
             nodes.push(json!({
                 "id": id,
                 "label": id,
@@ -3482,10 +3488,50 @@ async fn fetch_recent_logs(
     }
 
     let path = resolve_log_file_path(&state);
-    match crate::log_viewer::recent_log_payload(path.as_deref(), limit) {
-        Ok(payload) => Json(payload).into_response(),
+    match crate::log_viewer::recent_log_payload(path.as_deref(), limit).await {
+        Ok(mut payload) => {
+            if let Some(app) = state.app_state() {
+                payload["logging"] = crate::log_viewer::logging_metadata_from_config(app.config());
+            }
+            Json(payload).into_response()
+        }
         Err(message) => json_error(StatusCode::INTERNAL_SERVER_ERROR, message),
     }
+}
+
+async fn search_logs(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+    Query(query): Query<crate::log_viewer::SearchQuery>,
+) -> Response {
+    if !user.is_superuser {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied. Superuser required.");
+    }
+    if let Err(message) = query.validate() { return json_error(StatusCode::BAD_REQUEST, message); }
+    if query.node.as_deref().is_none_or(|node| node.trim().is_empty()) {
+        return json_error(StatusCode::BAD_REQUEST, "A specific log node is required");
+    }
+    #[cfg(feature = "commerce")]
+    if query.node.as_deref() == Some("local") && !cluster_log_peers(&state).is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "Use a configured node ID for a clustered log search");
+    }
+    match resolve_log_node_target(&state, query.node.as_deref().unwrap_or_default()) {
+        Err(message) => return json_error(StatusCode::NOT_FOUND, message),
+        #[cfg(feature = "commerce")]
+        Ok(Some(target)) => {
+            let mut peer_query = query.clone();
+            peer_query.node = None;
+            let encoded = match serde_urlencoded::to_string(peer_query) {
+                Ok(encoded) => encoded,
+                Err(_) => return json_error(StatusCode::BAD_REQUEST, "Invalid log search query"),
+            };
+            return match fetch_peer_log_payload(&state, &target, "search", &encoded).await {
+                Ok(payload) => Json(payload).into_response(), Err(response) => response,
+            };
+        }
+        _ => {}
+    }
+    crate::log_viewer::search_response(resolve_log_file_path(&state), query).await
 }
 
 async fn follow_logs(
@@ -3500,6 +3546,10 @@ async fn follow_logs(
         );
     }
 
+    if query.file_identity.as_deref().is_some_and(|identity| !crate::log_viewer::valid_file_identity(identity)) {
+        return json_error(StatusCode::BAD_REQUEST, "Invalid log file identity");
+    }
+
     let position = query.position.unwrap_or(0);
     let limit = crate::log_viewer::normalize_log_limit(query.limit);
 
@@ -3511,7 +3561,10 @@ async fn follow_logs(
                 &state,
                 &target,
                 "follow",
-                &format!("position={position}&limit={limit}"),
+                &match query.file_identity.as_deref() {
+                    Some(identity) => format!("position={position}&limit={limit}&file_identity={identity}"),
+                    None => format!("position={position}&limit={limit}"),
+                },
             )
             .await
             {
@@ -3523,7 +3576,7 @@ async fn follow_logs(
     }
 
     let path = resolve_log_file_path(&state);
-    match crate::log_viewer::follow_log_payload(path.as_deref(), position, limit) {
+    match crate::log_viewer::follow_log_payload(path.as_deref(), position, limit, query.file_identity.as_deref()).await {
         Ok(payload) => Json(payload).into_response(),
         Err(message) => json_error(StatusCode::INTERNAL_SERVER_ERROR, message),
     }
@@ -3541,6 +3594,10 @@ async fn stream_logs(
         );
     }
 
+    if query.file_identity.as_deref().is_some_and(|identity| !crate::log_viewer::valid_file_identity(identity)) {
+        return json_error(StatusCode::BAD_REQUEST, "Invalid log file identity");
+    }
+
     let start_position = query.position.unwrap_or(0);
     let limit = crate::log_viewer::normalize_log_limit(query.limit);
 
@@ -3548,7 +3605,7 @@ async fn stream_logs(
         Err(message) => return json_error(StatusCode::NOT_FOUND, message),
         #[cfg(feature = "commerce")]
         Ok(Some(target)) => {
-            return peer_log_stream(&state, target, start_position, limit);
+            return peer_log_stream(&state, target, start_position, limit, query.file_identity);
         }
         _ => {}
     }
@@ -3570,20 +3627,23 @@ async fn stream_logs(
 
     let path_for_stream = path.clone();
 
-    let stream = stream::unfold(start_position, move |mut cursor| {
+    let stream = stream::unfold((start_position, query.file_identity), move |(mut cursor, mut identity)| {
         let path = path_for_stream.clone();
         async move {
             time::sleep(StdDuration::from_millis(1000)).await;
 
-            let payload = crate::log_viewer::follow_log_stream_frame(&path, cursor, limit);
+            let payload = crate::log_viewer::follow_log_stream_frame(&path, cursor, limit, identity.as_deref()).await;
             if let Some(next) = payload.get("next_position").and_then(|v| v.as_u64()) {
                 cursor = next;
             }
 
+            if let Some(next) = payload.get("file_identity").and_then(JsonValue::as_str) {
+                identity = Some(next.to_owned());
+            }
             let event = axum::response::sse::Event::default()
                 .event("logs")
                 .data(payload.to_string());
-            Some((Ok::<_, Infallible>(event), cursor))
+            Some((Ok::<_, Infallible>(event), (cursor, identity)))
         }
     });
 
@@ -4096,6 +4156,523 @@ mod tests {
 
     use super::*;
     use crate::models::rbac;
+
+    #[cfg(feature = "commerce")]
+    #[tokio::test]
+    async fn log_nodes_pin_collection_to_configured_cluster_addresses() {
+        let app = crate::app::AppStateBuilder::new()
+            .with_config(Config { database_url: "sqlite::memory:".into(), ..Default::default() })
+            .with_skip_sip_bind().build().await.unwrap();
+        let peers = vec![
+            crate::config::ClusterPeer { addr: "127.0.0.1".into(), sip_port: 5060, ami_port: 8080 },
+            crate::config::ClusterPeer { addr: "127.0.0.2".into(), sip_port: 5060, ami_port: 8081 },
+        ];
+        app.update_cluster_config(Some(crate::config::ClusterConfig {
+            peers: peers.clone(), ..Default::default()
+        }));
+        let state = setup_state().await;
+        state.set_app_state(Some(Arc::downgrade(&app)));
+        let response = logs_nodes(State(state.clone()), AuthRequired(superuser())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body: JsonValue = serde_json::from_slice(&body).unwrap();
+        let nodes = body["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), peers.len(), "cluster collection must not include a load-balanced local alias");
+        for (node, peer) in nodes.iter().zip(peers) {
+            let id = format!("{}:{}", peer.addr, peer.sip_port);
+            assert_eq!(node["id"], id);
+            let target = resolve_log_node_target(&state, node["id"].as_str().unwrap()).unwrap().unwrap();
+            assert_eq!(target.base_url, format!("http://{}:{}{}", peer.addr, peer.ami_port,
+                crate::config::DEFAULT_AMI_PATH));
+        }
+        state.set_app_state(None);
+        let response = logs_nodes(State(state), AuthRequired(superuser())).await;
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body: JsonValue = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["nodes"][0]["id"], "local");
+    }
+
+    #[tokio::test]
+    async fn log_follow_resumes_rotated_files_and_reports_actual_loss() {
+        use std::io::Write;
+        use std::os::unix::fs::MetadataExt;
+        use tower::ServiceExt;
+        async fn router_for(path: &std::path::Path) -> (crate::app::AppState, axum::Router) {
+            let app = crate::app::AppStateBuilder::new()
+                .with_config(Config {
+                    database_url: "sqlite::memory:".into(),
+                    log_file: Some(path.to_string_lossy().into_owned()),
+                    media: Some(crate::config::MediaSection {
+                        quality_stats: crate::media::quality_stats::QualityStatsConfig {
+                            enabled: true, sample_interval_ms: 500, window_ms: 2000, log_interval_ms: 2000,
+                        },
+                        volume_stats: crate::media::volume_stats::VolumeStatsConfig { enabled: true },
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .with_skip_sip_bind()
+                .build()
+                .await
+                .unwrap();
+            let state = setup_state().await;
+            state.set_app_state(Some(Arc::downgrade(&app)));
+            let router = api_urls().with_state(state).layer(axum::Extension(
+                crate::console::middleware::ApiTokenAuth(superuser()),
+            ));
+            (app, router)
+        }
+        async fn get(
+            router: &axum::Router,
+            position: Option<u64>,
+            limit: usize,
+            identity: Option<&str>,
+        ) -> JsonValue {
+            let mut url = match position {
+                None => format!("/settings/logs/recent?node=local&limit={limit}"),
+                Some(position) => {
+                    format!("/settings/logs/follow?node=local&position={position}&limit={limit}")
+                }
+            };
+            if let Some(identity) = identity {
+                url.push_str(&format!("&file_identity={identity}"));
+            }
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(url)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        }
+        for new_text in ["new-1\n", "new-1\nnew-2\nnew-3\n"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let base = dir.path().join("runtime.log");
+            let first_old = chrono::NaiveDate::from_ymd_opt(2026, 7, 1).unwrap().and_hms_opt(0, 0, 0).unwrap();
+            for hour in 0..1100 {
+                let time = first_old + chrono::Duration::hours(hour);
+                std::fs::write(dir.path().join(format!("runtime.log.{}", time.format("%Y-%m-%d-%H"))),
+                    "historical-row\n").expect("write old hourly archive");
+            }
+            std::fs::write(&base, "old-prefix\n").expect("write old prefix");
+            let metadata = std::fs::metadata(&base).expect("old metadata");
+            let identity = format!("{}-{}", metadata.dev(), metadata.ino());
+            let position = metadata.len();
+            let (_app, router) = router_for(&base).await;
+            let recent = get(&router, None, 1, None).await;
+            assert_eq!(recent["logging"]["quality_stats"]["enabled"], true);
+            assert_eq!(recent["logging"]["quality_stats"]["sample_interval_ms"], 500);
+            assert_eq!(recent["logging"]["volume_stats"]["enabled"], true);
+            assert_eq!(recent["logging"]["sipflow_configured"], false);
+            assert!(recent["logging"]["revision"].as_str().is_some());
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&base)
+                .expect("open old")
+                .write_all(b"old-tail\n")
+                .expect("write old tail");
+            std::fs::rename(&base, dir.path().join("runtime.log.2026-10-04-08")).expect("rotate");
+            std::fs::write(&base, new_text).expect("write new active log");
+            std::fs::write(
+                dir.path().join("runtime.log.2026-10-04-08.2"),
+                "collision-2\n",
+            )
+            .expect("write first collision");
+            std::fs::write(
+                dir.path().join("runtime.log.2026-10-04-08.10"),
+                "collision-10\n",
+            )
+            .expect("write next collision");
+            let first = get(&router, Some(position), 200, Some(&identity)).await;
+            assert_eq!(first["lines"], json!(["old-tail"]));
+            assert_eq!(recent["file_identity"], identity);
+            assert_eq!(first["next_position"], 0);
+            assert_eq!(first["reset"], false);
+            assert_eq!(first["truncated"], true);
+            assert_eq!(first["gaps"], json!([]));
+            let mut cursor = first;
+            for expected in [
+                json!(["collision-2"]),
+                json!(["collision-10"]),
+                json!(new_text.lines().collect::<Vec<_>>()),
+            ] {
+                let next_identity = cursor["file_identity"].as_str().expect("next identity");
+                cursor = get(&router, Some(0), 200, Some(next_identity)).await;
+                assert_eq!(cursor["lines"], expected);
+                assert_eq!(cursor["reset"], false);
+                assert_eq!(cursor["gaps"], json!([]));
+            }
+            assert_eq!(cursor["truncated"], false);
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("runtime.log");
+        std::fs::write(&base, "old-1\n").expect("write old");
+        let (_app, router) = router_for(&base).await;
+        let recent = get(&router, None, 1, None).await;
+        std::fs::rename(&base, dir.path().join("runtime.log.2026-10-04-08"))
+            .expect("rename before create");
+        let identity = recent["file_identity"].as_str().expect("old identity");
+        let waiting = get(&router, Some(6), 200, Some(identity)).await;
+        assert_eq!(waiting["file_identity"], identity);
+        assert_eq!(waiting["next_position"], 6);
+        assert_eq!(waiting["gaps"], json!([]));
+        std::fs::write(&base, "new-1\n").expect("create active");
+        let switched = get(&router, Some(6), 200, Some(identity)).await;
+        assert_eq!(switched["next_position"], 0);
+        assert_eq!(switched["reset"], false);
+        assert_eq!(switched["gaps"], json!([]));
+
+        for loss in ["file_unavailable", "file_truncated", "directory_limit"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let base = dir.path().join("runtime.log");
+            std::fs::write(&base, "old-prefix-that-is-longer-than-new-file\n").expect("write old");
+            let metadata = std::fs::metadata(&base).expect("metadata");
+            let identity = format!("{}-{}", metadata.dev(), metadata.ino());
+            if loss != "file_truncated" {
+                let archive = dir.path().join("runtime.log.2026-10-04-08");
+                std::fs::rename(&base, &archive).expect("rotate old");
+                std::fs::write(&base, "new-1\nnew-2\n").expect("write new");
+                if loss == "file_unavailable" {
+                    std::fs::remove_file(archive).expect("delete old");
+                }
+                if loss == "directory_limit" {
+                    for index in 0..1024 {
+                        std::fs::write(dir.path().join(format!("runtime.log.2026-10-04-08.{}", index + 1)), "")
+                            .expect("write pending segment");
+                    }
+                }
+            } else {
+                std::fs::write(&base, "new-1\nnew-2\n").expect("truncate same file");
+            }
+            let (_app, router) = router_for(&base).await;
+            let recovered = get(&router, Some(metadata.len()), 1, Some(&identity)).await;
+            assert_eq!(recovered["lines"], json!(["new-1"]));
+            assert_eq!(recovered["next_position"], 6);
+            assert_eq!(recovered["reset"], true);
+            assert_eq!(recovered["truncated"], true);
+            assert_eq!(recovered["gaps"], json!([loss]));
+        }
+    }
+
+    #[tokio::test]
+    async fn historical_log_search_accepts_bare_relative_path() {
+        use tower::ServiceExt;
+        let file = tempfile::NamedTempFile::new_in(".").unwrap();
+        let path = file.path().file_name().unwrap().to_str().unwrap().to_owned();
+        let line = "2026-10-04T10:00:01+00:00 INFO call_id=call-abcdef relative";
+        std::fs::write(file.path(), format!("{line}\n")).unwrap();
+        let app = crate::app::AppStateBuilder::new().with_config(Config {
+            database_url: "sqlite::memory:".into(),
+            log_file: Some(path),
+            ..Default::default()
+        }).with_skip_sip_bind().build().await.unwrap();
+        let state = setup_state().await;
+        state.set_app_state(Some(Arc::downgrade(&app)));
+        let router = api_urls().with_state(state).layer(axum::Extension(
+            crate::console::middleware::ApiTokenAuth(superuser())));
+        let response = router.oneshot(axum::http::Request::builder().uri(
+            "/settings/logs/search?node=local&start=2026-10-04T10%3A00%3A00Z&end=2026-10-04T10%3A01%3A00Z&callIds=%5B%22call-abcdef%22%5D")
+            .body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body: JsonValue = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["lines"], json!([line]));
+        assert_eq!(body["complete"], true);
+    }
+
+    #[tokio::test]
+    async fn historical_log_search_reads_rotated_files_and_resumes_without_duplicates() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime.log");
+        std::fs::write(dir.path().join("runtime.log.2026-10-04-18"),
+            "2026-10-04T10:00:01+00:00 INFO call_id=call-abcdef first\n2026-10-04T10:00:03+00:00 INFO call_id=call-other unrelated\n2026-10-04T10:00:02+00:00 INFO call_id=call-abcdef second\n").unwrap();
+        std::fs::write(dir.path().join("runtime.log.2026-10-04-19"),
+            "2026-10-04T11:00:00+00:00 INFO call_id=call-other unrelated\n").unwrap();
+        std::fs::write(dir.path().join("runtime.log.2026-10-04-20"),
+            "2026-10-04T12:00:00+00:00 INFO call_id=call-abcdef third\n").unwrap();
+        std::fs::write(&path,
+            "2026-10-04T13:00:04+00:00 INFO call_id=call-abcdef fourth\n2026-10-04T13:00:05+00:00 INFO call_id=xcall-abcdef prefix\n").unwrap();
+        let app = crate::app::AppStateBuilder::new().with_config(Config {
+            database_url: "sqlite::memory:".into(),
+            log_file: Some(path.to_string_lossy().into_owned()),
+            ..Default::default()
+        }).with_skip_sip_bind().build().await.unwrap();
+        let state = setup_state().await;
+        state.set_app_state(Some(Arc::downgrade(&app)));
+        let router = api_urls().with_state(state.clone()).layer(axum::Extension(
+            crate::console::middleware::ApiTokenAuth(superuser())));
+        let mut cursor = None;
+        let mut lines = Vec::new();
+        for _ in 0..6 {
+            let mut url = "/settings/logs/search?node=local&start=2026-10-04T10%3A00%3A00Z&end=2026-10-04T13%3A01%3A00Z&callIds=%5B%22call-abcdef%22%5D&limit=1".to_string();
+            if let Some(value) = &cursor { url.push_str(&format!("&cursor={value}")); }
+            let response = router.clone().oneshot(axum::http::Request::builder().uri(url)
+                .body(axum::body::Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "historical search must be a public authenticated API");
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let body: JsonValue = serde_json::from_slice(&body).unwrap();
+            lines.extend(body["lines"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_owned()));
+            if body["complete"] == true { cursor = None; break; }
+            cursor = Some(body["nextCursor"].as_str().unwrap().to_owned());
+        }
+        assert!(cursor.is_none(), "bounded continuation must finish");
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].ends_with("first"));
+        assert!(lines[1].ends_with("second"), "timestamp disorder must not hide a matching event");
+        assert!(lines[2].ends_with("third"));
+        assert!(lines[3].ends_with("fourth"));
+        let request = |suffix: &str| axum::http::Request::builder().uri(format!(
+            "/settings/logs/search?node=local&start=2026-10-04T10%3A00%3A00Z&end=2026-10-04T13%3A01%3A00Z&callIds=%5B%22call-abcdef%22%5D{suffix}"))
+            .body(axum::body::Body::empty()).unwrap();
+        let denied = api_urls().with_state(state.clone()).oneshot(request("")).await.unwrap();
+        assert_eq!(denied.status(), StatusCode::SEE_OTHER, "existing authentication must protect log data");
+        let mut user = superuser(); user.is_superuser = false;
+        let denied = api_urls().with_state(state.clone()).layer(axum::Extension(
+            crate::console::middleware::ApiTokenAuth(user))).oneshot(request("")).await.unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        let malformed = router.clone().oneshot(request("&limit=201")).await.unwrap();
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+        let first_page = router.clone().oneshot(request("&limit=1")).await.unwrap();
+        let body = axum::body::to_bytes(first_page.into_body(), 1024 * 1024).await.unwrap();
+        let body: JsonValue = serde_json::from_slice(&body).unwrap();
+        let continuation = format!("&cursor={}", body["nextCursor"].as_str().unwrap());
+        let rotated = dir.path().join("runtime.log.2026-10-04-21");
+        std::fs::rename(&path, &rotated).unwrap();
+        std::fs::write(&path,
+            "2026-10-04T13:00:09+00:00 INFO call_id=call-abcdef new-file\n").unwrap();
+        let response = router.clone().oneshot(request(&continuation)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT,
+            "rotation must not silently omit a new base file and claim complete");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(rotated, &path).unwrap();
+        // Enqueue delay can put an earlier event in a later write period.
+        let delayed = dir.path().join("runtime.log.2026-10-04-23");
+        std::fs::write(&delayed,
+            "2026-10-04T10:00:01+00:00 INFO call_id=call-abcdef delayed\n").unwrap();
+        let mut suffix = String::new();
+        let mut found_delayed = false;
+        for _ in 0..4 {
+            let response = router.clone().oneshot(request(&suffix)).await.unwrap();
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let body: JsonValue = serde_json::from_slice(&body).unwrap();
+            found_delayed |= body["lines"].as_array().unwrap().iter().any(|line| line.as_str().unwrap().ends_with("delayed"));
+            if body["complete"] == true { break; }
+            suffix = format!("&cursor={}", body["nextCursor"].as_str().unwrap());
+        }
+        assert!(found_delayed, "later write periods must retain delayed matching events");
+        std::fs::remove_file(delayed).unwrap();
+        // Large files remain bounded and require explicit continuation.
+
+        use std::io::Write;
+        let mut output = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let unrelated = format!("2026-10-04T09:00:00+00:00 INFO unrelated {}\n", "x".repeat(1000));
+        for _ in 0..5000 { output.write_all(unrelated.as_bytes()).unwrap(); }
+        output.write_all(b"2026-10-04T13:00:06+00:00 INFO call_id=call-abcdef last\n").unwrap();
+        drop(output);
+        let mut suffix = String::new();
+        let mut found_last = false;
+        for _ in 0..6 {
+            let response = router.clone().oneshot(request(&suffix)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let body: JsonValue = serde_json::from_slice(&body).unwrap();
+            assert!(body["scannedBytes"].as_u64().unwrap() <= 4 * 1024 * 1024);
+            found_last |= body["lines"].as_array().unwrap().iter().any(|line| line.as_str().unwrap().ends_with("last"));
+            if body["complete"] == true { break; }
+            suffix = format!("&cursor={}", body["nextCursor"].as_str().unwrap());
+        }
+        assert!(found_last, "scan-budget continuation must reach a match beyond the first page");
+        let response = router.clone().oneshot(request("")).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body: JsonValue = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["complete"], false, "a fresh stateless query must disclose unscanned bytes");
+        assert!(body["nextCursor"].is_string());
+        assert!(body["scannedBytes"].as_u64().unwrap() <= 4 * 1024 * 1024);
+        // The same continuation contract applies when no rotation has ever happened.
+        for hour in [18, 19, 20] {
+            std::fs::remove_file(dir.path().join(format!("runtime.log.2026-10-04-{hour}"))).unwrap();
+        }
+        let response = router.clone().oneshot(request("")).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body: JsonValue = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["complete"], false);
+        let suffix = format!("&cursor={}", body["nextCursor"].as_str().unwrap());
+        let response = router.clone().oneshot(request(&suffix)).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body: JsonValue = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["complete"], true);
+        assert!(body["lines"].as_array().unwrap().iter().any(|line| line.as_str().unwrap().ends_with("last")));
+        // A full response page must stop at its result budget, without rescanning the same line.
+        let mut output = std::fs::File::create(&path).unwrap();
+        for index in 0..20 {
+            writeln!(output, "2026-10-04T13:00:00+00:00 INFO call_id=call-abcdef {} item-{index}",
+                "x".repeat(40000)).unwrap();
+        }
+        drop(output);
+        let response = router.clone().oneshot(request("")).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body: JsonValue = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["files"].as_array().unwrap().len(), 1,
+            "a result budget must end the page rather than rescan its unread line");
+        let mut matches = body["lines"].as_array().unwrap().clone();
+        let suffix = format!("&cursor={}", body["nextCursor"].as_str().unwrap());
+        let response = router.clone().oneshot(request(&suffix)).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body: JsonValue = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["complete"], true);
+        matches.extend(body["lines"].as_array().unwrap().iter().cloned());
+        assert_eq!(matches.len(), 20, "response-byte continuation must neither omit nor duplicate matches");
+        // All correlated IDs share one bounded file traversal; metacharacters remain literal.
+        let mut ids: Vec<String> = (0..72).map(|index| format!("alias-{index}")).collect();
+        ids[0] = "call-a".into(); ids[1] = "call-a-long".into();
+        ids[2] = "call.+[literal]".into(); ids[71] = "call-final".into();
+        let encoded_ids = urlencoding::encode(&serde_json::to_string(&ids).unwrap()).into_owned();
+        let batch_url = format!("/settings/logs/search?node=local&start=2026-10-04T10%3A00%3A00Z&end=2026-10-04T13%3A01%3A00Z&callIds={encoded_ids}");
+        let batch_request = |suffix: &str| axum::http::Request::builder().uri(format!("{batch_url}{suffix}"))
+            .body(axum::body::Body::empty()).unwrap();
+        let mut output = std::fs::File::create(&path).unwrap();
+        for _ in 0..5000 { output.write_all(unrelated.as_bytes()).unwrap(); }
+        output.write_all(b"2026-10-04T13:00:00Z INFO call_id=xcall-a excluded-prefix\n2026-10-04T13:00:00Z INFO call_id=other/call-a excluded-token\n2026-10-04T13:00:00Z INFO call_id=call-a-long long\n2026-10-04T13:00:00Z INFO call_id=call-a peer_id=call-a-long both\n2026-10-04T13:00:00Z INFO call_id=call.+[literal] literal\n2026-10-04T13:00:00Z INFO call_id=callXxLliteralZ excluded-regex\n2026-10-04T13:00:00Z INFO call_id=call-final final\n").unwrap();
+        drop(output);
+        let started = std::time::Instant::now();
+        let mut scanned = 0;
+        let mut response_bytes = 0;
+        let mut matches = Vec::new();
+        let mut suffix = String::new();
+        let mut finished = false;
+        for _ in 0..4 {
+            let response = router.clone().oneshot(batch_request(&suffix)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "batch Call-IDs must enter the same public search API");
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            response_bytes += body.len();
+            let body: JsonValue = serde_json::from_slice(&body).unwrap();
+            let page_bytes = body["scannedBytes"].as_u64().unwrap();
+            assert!(page_bytes <= 4 * 1024 * 1024);
+            scanned += page_bytes;
+            matches.extend(body["lines"].as_array().unwrap().iter().cloned());
+            if body["complete"] == true { finished = true; break; }
+            suffix = format!("&cursor={}", body["nextCursor"].as_str().unwrap());
+        }
+        assert!(finished);
+        assert_eq!(matches.len(), 4, "full IDs must match literally, and each line appears only once");
+        assert!(matches.iter().any(|line| line.as_str().unwrap().ends_with("literal")));
+        assert!(scanned <= path.metadata().unwrap().len() + 64 * 1024,
+            "72 IDs must not multiply physical file reads");
+        println!("batch history: ids=72 scannedBytes={scanned} responseBytes={response_bytes} elapsedMs={}",
+            started.elapsed().as_millis());
+        let encoded = urlencoding::encode(&serde_json::to_string(&vec!["too-many"; 73]).unwrap()).into_owned();
+        let response = router.clone().oneshot(axum::http::Request::builder()
+            .uri(batch_url.replace(&encoded_ids, &encoded)).body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        // Old closed periods cannot contain newer events under the writer's normal clock ordering.
+        let first_old = chrono::NaiveDate::from_ymd_opt(2026, 7, 1).unwrap().and_hms_opt(0, 0, 0).unwrap();
+        let mut old_paths = Vec::new();
+        for hour in 0..1100 {
+            let time = first_old + chrono::Duration::hours(hour);
+            let old = dir.path().join(format!("runtime.log.{}", time.format("%Y-%m-%d-%H")));
+            std::fs::write(&old, format!("{}+08:00 INFO call_id=old-call outside\n",
+                time.format("%Y-%m-%dT%H:%M:%S"))).unwrap();
+            old_paths.push(old);
+        }
+        let mut suffix = String::new();
+        let mut finished = false;
+        let mut returned = 0;
+        for _ in 0..4 {
+            let response = router.clone().oneshot(batch_request(&suffix)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let body: JsonValue = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["gaps"], json!([]),
+                "irrelevant old archives must not consume candidate or directory limits");
+            assert!(body["files"].as_array().unwrap().iter().all(|file| file["name"] == "runtime.log"),
+                "older closed periods must not be read for a newer query");
+            returned += body["lines"].as_array().unwrap().len();
+            if body["complete"] == true { finished = true; break; }
+            suffix = format!("&cursor={}", body["nextCursor"].as_str().unwrap());
+        }
+        assert!(finished, "1100 irrelevant archives must not prevent complete bounded search");
+        assert_eq!(returned, 4);
+        for old in old_paths { std::fs::remove_file(old).unwrap(); }
+        // Candidate limits must preserve the active file after prioritizing relevant archives.
+        for index in 0..33 {
+            std::fs::write(dir.path().join(format!("runtime.log.2026-10-04-18.{index}")),
+                "2026-10-04T10:00:00Z INFO unrelated\n").unwrap();
+        }
+        let mut suffix = String::new();
+        let mut found_base = false;
+        let mut saw_limit = false;
+        for _ in 0..16 {
+            let response = router.clone().oneshot(batch_request(&suffix)).await.unwrap();
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let body: JsonValue = serde_json::from_slice(&body).unwrap();
+            found_base |= body["lines"].as_array().unwrap().iter().any(|line| line.as_str().unwrap().ends_with("final"));
+            saw_limit |= body["gaps"].as_array().unwrap().iter().any(|gap| gap == "candidate_file_limit_exceeded");
+            if let Some(cursor) = body["nextCursor"].as_str() { suffix = format!("&cursor={cursor}"); } else { break; }
+        }
+        assert!(found_base, "the bounded catalogue must include the base file");
+        assert!(saw_limit, "omitted archives must remain an explicit evidence gap");
+        for index in 0..33 {
+            std::fs::remove_file(dir.path().join(format!("runtime.log.2026-10-04-18.{index}"))).unwrap();
+        }
+        for index in 0..1050 { std::fs::write(dir.path().join(format!("noise-{index}")), b"").unwrap(); }
+        let mut suffix = String::new();
+        let mut found_base = false;
+        let mut saw_directory_gap = false;
+        for _ in 0..4 {
+            let response = router.clone().oneshot(batch_request(&suffix)).await.unwrap();
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let body: JsonValue = serde_json::from_slice(&body).unwrap();
+            found_base |= body["lines"].as_array().unwrap().iter().any(|line| line.as_str().unwrap().ends_with("final"));
+            saw_directory_gap |= body["gaps"].as_array().unwrap().iter().any(|gap| gap == "directory_enumeration_incomplete");
+            if let Some(cursor) = body["nextCursor"].as_str() { suffix = format!("&cursor={cursor}"); } else { break; }
+        }
+        assert!(found_base, "a bounded directory scan must not hide its configured base file");
+        assert!(!saw_directory_gap, "unrelated directory entries must not make collection partial");
+        for index in 0..1050 { std::fs::remove_file(dir.path().join(format!("noise-{index}"))).unwrap(); }
+        // Exercise cancellation with an actually queued blocking worker. The HTTP handler
+        // must wait for its worker to exit before releasing the node's search slot.
+        let queued_router = router.clone();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all()
+                .max_blocking_threads(1).build().unwrap();
+            runtime.block_on(async move {
+                let (release, blocked) = std::sync::mpsc::channel();
+                let (ready, running) = std::sync::mpsc::channel();
+                let blocker = tokio::task::spawn_blocking(move || {
+                    ready.send(()).unwrap(); blocked.recv().unwrap();
+                });
+                running.recv().unwrap();
+                let query_url = "/settings/logs/search?node=local&start=2026-10-04T10%3A00%3A00Z&end=2026-10-04T13%3A01%3A00Z&callIds=%5B%22call-abcdef%22%5D";
+                let request = || axum::http::Request::builder().uri(query_url)
+                    .body(axum::body::Body::empty()).unwrap();
+                let pending = tokio::spawn(queued_router.clone().oneshot(request()));
+                tokio::task::yield_now().await;
+                let busy = queued_router.clone().oneshot(request()).await.unwrap();
+                assert_eq!(busy.status(), StatusCode::TOO_MANY_REQUESTS);
+                tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+                assert!(!pending.is_finished(), "timeout must not detach its still-queued worker");
+                release.send(()).unwrap(); blocker.await.unwrap();
+                let response = pending.await.unwrap().unwrap();
+                assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY,
+                    "the cancelled worker must stop before enumerating/reading logs");
+                let response = queued_router.oneshot(request()).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "the stopped worker must release capacity");
+            });
+        }).join().unwrap();
+        std::os::unix::fs::symlink(&path, dir.path().join("runtime.log.2026-10-04.1")).unwrap();
+        let response = router.oneshot(request("")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "a discovered symlink must never be followed");
+    }
 
     #[tokio::test]
     async fn list_roles_returns_seeded_roles() {

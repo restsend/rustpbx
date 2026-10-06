@@ -1945,6 +1945,8 @@ impl SipServerInner {
             .with_relay_ready_timeout_secs(rtp.relay_ready_timeout_secs)
             .with_stall_detect_secs(rtp.stall_detect_secs)
             .with_media_trace_interval_secs(rtp.media_trace_interval_secs)
+            .with_quality_stats(rtp.quality_stats.clone())
+            .with_volume_stats(rtp.volume_stats.clone())
     }
 
     /// Hot-reload the full `[proxy]` section plus related platform settings

@@ -35,6 +35,9 @@ impl FilterHandle {
     pub fn modify(&self, f: impl FnOnce(&mut EnvFilter)) {
         let mut guard = self.inner.lock();
         f(&mut *guard);
+        // Cache rebuilding re-enters this layer; release the filter lock first.
+        drop(guard);
+        tracing::callsite::rebuild_interest_cache();
     }
 }
 
@@ -86,4 +89,52 @@ pub fn apply_log_level(level: &str) -> Result<(), String> {
         .ok_or_else(|| "log filter handle not initialized".to_string())?;
     handle.modify(|f| *f = filter);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{self, Write};
+    use tracing_subscriber::prelude::*;
+
+    #[derive(Clone)]
+    struct LogBuffer(Arc<parking_lot::Mutex<Vec<u8>>>);
+
+    impl Write for LogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn media_diagnostic() {
+        tracing::debug!(target: "rustrtc::peer_connection", "media handshake diagnostic");
+    }
+
+    #[test]
+    fn log_level_reload_enables_and_disables_an_existing_diagnostic_callsite() {
+        let output = LogBuffer(Arc::new(parking_lot::Mutex::new(Vec::new())));
+        let writer = output.clone();
+        let (filter, handle) = ReloadableFilterLayer::new(EnvFilter::new("info,rustrtc=info"));
+        set_log_filter_handle(handle);
+        let subscriber = tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().with_ansi(false).without_time()
+                .with_writer(move || writer.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            media_diagnostic();
+            assert!(output.0.lock().is_empty());
+            apply_log_level("info,rustrtc::peer_connection=debug").unwrap();
+            media_diagnostic();
+            let enabled = String::from_utf8(output.0.lock().clone()).unwrap();
+            assert!(enabled.contains("media handshake diagnostic"), "{enabled}");
+            apply_log_level("info").unwrap();
+            media_diagnostic();
+            assert_eq!(String::from_utf8(output.0.lock().clone()).unwrap(), enabled);
+        });
+    }
 }

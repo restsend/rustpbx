@@ -39,6 +39,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use tracing::instrument::WithSubscriber;
 
 use anyhow::Result;
 use audio_codec::opus::OpusEncoder;
@@ -50,7 +51,7 @@ use rustrtc::media::MediaStreamTrack;
 use rustrtc::media::frame::{AudioFrame, MediaSample};
 use rustrtc::media::track::SampleStreamSource;
 use rustrtc::{PeerConnection, RtpRewriteBridgeOptions, RtpRewriteRule};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tracing::trace;
@@ -161,11 +162,20 @@ pub(crate) struct EgressCodec {
 /// (from `rustrtc::media::track::sample_track`, with the track added to the
 /// PeerConnection). Stop by dropping the pipeline or calling [`Self::stop`].
 pub(crate) struct EgressPipeline {
+    volume: crate::volume_stats::VolumeSink,
     cmd_tx: mpsc::Sender<EgressCmd>,
     cancel: CancellationToken,
 }
 
+const VOLUME_FINALIZE_TIMEOUT: Duration = Duration::from_secs(1);
+
 enum EgressCmd {
+    FinalizeVolume(oneshot::Sender<()>),
+    VolumeStats {
+        enabled: bool,
+        config: crate::quality_stats::QualityStatsConfig,
+        identity: Option<(String, String)>,
+    },
     SetSource(EgressSource),
     UpdateCodec(EgressCodec),
     /// Continue the paced timeline after rewrite relay released the wire.
@@ -195,7 +205,10 @@ impl EgressPipeline {
         let noise_amplitude = 10f32.powf(codec.comfort_noise_level_db / 20.0) * i16::MAX as f32;
 
         let playback_timestamp = rand::random::<u32>();
+        let volume = Arc::new(parking_lot::Mutex::new(Default::default()));
         let task = EgressTask {
+            volume: None,
+            volume_sink: volume.clone(),
             sender,
             codec,
             encoder: create_egress_encoder(codec.codec),
@@ -216,9 +229,38 @@ impl EgressPipeline {
             transcode_pending: Vec::new(),
             transcode_overflow_samples: 0,
         };
-        tokio::spawn(task.run(cmd_rx, ptime, cancel.clone()));
+        tokio::spawn(task.run(cmd_rx, ptime, cancel.clone()).with_current_subscriber());
 
-        Self { cmd_tx, cancel }
+        Self {
+            cmd_tx,
+            cancel,
+            volume,
+        }
+    }
+
+    pub(crate) fn set_volume_stats(&self, enabled: bool, config: crate::quality_stats::QualityStatsConfig,
+                                  identity: Option<(String, String)>) -> anyhow::Result<()> {
+        self.cmd_tx
+            .try_send(EgressCmd::VolumeStats { enabled, config, identity })
+            .map_err(|error| anyhow::anyhow!("volume stats configuration failed: {error}"))
+    }
+    pub(crate) async fn finalize_volume(&self) -> Result<()> {
+        let (completed, receiver) = oneshot::channel();
+        self.cmd_tx.try_send(EgressCmd::FinalizeVolume(completed))
+            .map_err(|error| anyhow::anyhow!("volume finalization command failed: {error}"))?;
+        tokio::time::timeout(VOLUME_FINALIZE_TIMEOUT, receiver).await
+            .map_err(|_| anyhow::anyhow!("volume finalization timed out"))?
+            .map_err(|_| anyhow::anyhow!("volume finalization actor stopped"))
+    }
+
+    pub(crate) fn recorded_volume(&self) -> Option<crate::volume_stats::VolumeSummary> {
+        self.volume.lock().last.clone()
+    }
+    pub(crate) fn volume_summary(
+        &self,
+        window: Duration,
+    ) -> Option<crate::volume_stats::VolumeSummary> {
+        crate::volume_stats::summary(&self.volume, window)
     }
 
     /// Switch the active source (applied between ticks; never drops a frame
@@ -298,6 +340,8 @@ fn media_source_for_codec(audio: Box<dyn AudioSource>, codec: CodecType) -> Box<
 }
 
 struct EgressTask {
+    volume: Option<crate::volume_stats::VolumeSampler>,
+    volume_sink: crate::volume_stats::VolumeSink,
     sender: SampleStreamSource,
     codec: EgressCodec,
     encoder: Box<dyn Encoder>,
@@ -384,7 +428,17 @@ impl EgressTask {
                 biased;
                 _ = cancel.cancelled() => break,
                 cmd = cmd_rx.recv() => match cmd {
+                    Some(EgressCmd::FinalizeVolume(completed)) => {
+                        // Terminal CDR capture owns the final window; later ticks cannot overwrite it.
+                        if let Some(mut volume) = self.volume.take() { volume.finish(); }
+                        let _ = completed.send(());
+                    }
+                    Some(EgressCmd::VolumeStats { enabled, config, identity }) => {
+                        self.volume = enabled.then(|| crate::volume_stats::VolumeSampler::new(config, self.volume_sink.clone(), identity));
+                        if !enabled { *self.volume_sink.lock() = Default::default(); }
+                    }
                     Some(EgressCmd::SetSource(s)) => {
+                        if let Some(volume) = self.volume.as_mut() { volume.reset(); }
                         let was_relay = matches!(&self.source, EgressSource::RewriteRelay { .. });
                         let will_relay = matches!(&s, EgressSource::RewriteRelay { .. });
                         // If we are switching AWAY from an active Media source,
@@ -501,6 +555,7 @@ impl EgressTask {
                 }
             }
         }
+        if let Some(volume) = self.volume.as_mut() { volume.finish(); }
     }
 
     /// Produce exactly one frame for this tick. Sources that have no data fall
@@ -814,20 +869,27 @@ impl EgressTask {
         })
     }
 
+    fn encode_observed_pcm(&mut self) -> Bytes {
+        if let Some(volume) = self.volume.as_mut() {
+            volume.observe(&self.pcm_buf);
+        }
+        self.encoder.encode(&self.pcm_buf).into()
+    }
+
     /// Encode a full ptime PCM frame. Short reads (EOF tail) are zero-padded
     /// so Opus/PCMU always see a complete frame matching the RTP timestamp step.
     fn encode_pcm_frame(&mut self, n: usize) -> Bytes {
         if n < self.pcm_buf.len() {
             self.pcm_buf[n..].fill(0);
         }
-        self.encoder.encode(&self.pcm_buf).into()
+        self.encode_observed_pcm()
     }
 
     /// True digital silence (zeros). Used for live underruns so the decoder
     /// does not hear comfort-noise → speech transitions as clicks.
     fn encode_digital_silence(&mut self) -> Bytes {
         self.pcm_buf.fill(0);
-        self.encoder.encode(&self.pcm_buf).into()
+        self.encode_observed_pcm()
     }
 
     /// Zero-fill the PCM buffer (silence).
@@ -849,7 +911,7 @@ impl EgressTask {
                 *s = 0;
             }
         }
-        self.encoder.encode(&self.pcm_buf).into()
+        self.encode_observed_pcm()
     }
 
     /// Encode exactly one ptime frame from the transcode accumulator,
@@ -859,7 +921,7 @@ impl EgressTask {
         self.pcm_buf
             .copy_from_slice(&self.transcode_pending[..frame_samples]);
         self.transcode_pending.drain(..frame_samples);
-        self.encoder.encode(&self.pcm_buf).into()
+        self.encode_observed_pcm()
     }
 
     /// Encode a zero-padded frame from a partial transcode accumulator
@@ -872,7 +934,7 @@ impl EgressTask {
         self.pcm_buf[..n].copy_from_slice(&self.transcode_pending[..n]);
         self.pcm_buf[n..].fill(0);
         self.transcode_pending.drain(..n);
-        self.encoder.encode(&self.pcm_buf).into()
+        self.encode_observed_pcm()
     }
 
     /// Build the outbound `AudioFrame` from an already-encoded payload.
@@ -994,6 +1056,22 @@ mod tests {
             None,
         );
 
+        assert!(pipe.volume_summary(Duration::from_secs(2)).is_none());
+        let config = crate::quality_stats::QualityStatsConfig {
+            sample_interval_ms: 250, ..Default::default()
+        };
+        pipe.set_volume_stats(true, config.clone(), None)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let volume = pipe.volume_summary(Duration::from_secs(2)).unwrap();
+        assert!(volume.sample_count > 0);
+        assert_eq!(volume.rms, 0.0);
+        assert_eq!(volume.peak, 0);
+        assert_eq!(volume.attenuation_dbov, 127, "observed silence is distinct from unavailable PCM");
+        pipe.set_volume_stats(false, config, None)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(pipe.volume_summary(Duration::from_secs(2)).is_none());
         // Let a few ticks elapse, then stop and inspect via the shared sender
         // drop_count isn't exposed; instead we just assert the task runs and
         // stops cleanly. The frame content is verified in the unit test below.
@@ -1015,6 +1093,8 @@ mod tests {
         };
         let spf = pcm_samples_per_frame(codec.codec, Duration::from_millis(20));
         let mut task = EgressTask {
+            volume: None,
+            volume_sink: Arc::new(parking_lot::Mutex::new(Default::default())),
             sender,
             codec,
             encoder: create_encoder(CodecType::PCMU),
@@ -1067,6 +1147,8 @@ mod tests {
         };
         let spf = pcm_samples_per_frame(codec.codec, Duration::from_millis(20));
         let mut task = EgressTask {
+            volume: None,
+            volume_sink: Arc::new(parking_lot::Mutex::new(Default::default())),
             sender: sender.clone(),
             codec,
             encoder: create_encoder(CodecType::PCMU),
@@ -1138,6 +1220,8 @@ mod tests {
         };
         let spf = pcm_samples_per_frame(codec.codec, Duration::from_millis(20));
         let mut task = EgressTask {
+            volume: None,
+            volume_sink: Arc::new(parking_lot::Mutex::new(Default::default())),
             sender,
             codec,
             encoder: create_encoder(CodecType::PCMU),
@@ -1218,6 +1302,8 @@ mod tests {
         };
         let spf = pcm_samples_per_frame(codec.codec, Duration::from_millis(20));
         let mut task = EgressTask {
+            volume: None,
+            volume_sink: Arc::new(parking_lot::Mutex::new(Default::default())),
             sender,
             codec,
             encoder: create_encoder(CodecType::PCMU),
@@ -1308,6 +1394,8 @@ mod tests {
         let spf = pcm_samples_per_frame(codec.codec, Duration::from_millis(20));
         assert_eq!(spf, 160);
         let mut task = EgressTask {
+            volume: None,
+            volume_sink: Arc::new(parking_lot::Mutex::new(Default::default())),
             sender,
             codec,
             encoder: create_encoder(CodecType::PCMU),
@@ -1558,6 +1646,8 @@ mod tests {
         let codec = pcmu_codec();
         let spf = pcm_samples_per_frame(codec.codec, Duration::from_millis(20));
         let mut task = EgressTask {
+            volume: None,
+            volume_sink: Arc::new(parking_lot::Mutex::new(Default::default())),
             sender: _sender,
             codec,
             encoder: create_encoder(CodecType::PCMU),
@@ -1683,6 +1773,8 @@ mod tests {
         let codec = pcmu_codec();
         let spf = pcm_samples_per_frame(codec.codec, Duration::from_millis(20));
         let mut task = EgressTask {
+            volume: None,
+            volume_sink: Arc::new(parking_lot::Mutex::new(Default::default())),
             sender,
             codec,
             encoder: create_encoder(CodecType::PCMU),
@@ -1764,6 +1856,8 @@ mod tests {
         }
 
         let mut task = EgressTask {
+            volume: None,
+            volume_sink: Arc::new(parking_lot::Mutex::new(Default::default())),
             sender,
             codec,
             encoder: create_encoder(CodecType::PCMU),
@@ -1958,6 +2052,8 @@ mod tests {
         let spf = pcm_samples_per_frame(codec.codec, Duration::from_millis(20));
         let tail = 3;
         let mut task = EgressTask {
+            volume: None,
+            volume_sink: Arc::new(parking_lot::Mutex::new(Default::default())),
             sender,
             codec,
             encoder: create_encoder(CodecType::PCMU),
@@ -2102,6 +2198,8 @@ mod transcode_drain_tests {
         codec: EgressCodec,
     ) -> EgressTask {
         EgressTask {
+            volume: None,
+            volume_sink: Arc::new(parking_lot::Mutex::new(Default::default())),
             sender,
             codec,
             encoder: create_egress_encoder(codec.codec),

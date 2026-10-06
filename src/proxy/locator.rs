@@ -26,6 +26,8 @@ use tracing::{debug, info, warn};
 #[derive(Clone, Debug)]
 pub enum LocatorEvent {
     Registered(Location),
+    /// An already registered identity renewed or added a live binding.
+    Refreshed(Location),
     Unregistered(Location),
     Offline(Vec<Location>),
 }

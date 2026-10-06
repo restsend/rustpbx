@@ -17,6 +17,14 @@
 //! localises them to the network path.
 
 use serde::Serialize;
+
+/// Selected per-leg egress path, independent of negotiated codec equality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaEgressMode {
+    DirectRtpForwarding,
+    PcmPacing,
+}
 use std::time::Duration;
 
 /// Default window after route activation with zero inbound RTP on a leg
@@ -27,6 +35,10 @@ pub const DEFAULT_STALL_DETECT: Duration = Duration::from_secs(15);
 /// Per-leg media health sample.
 #[derive(Debug, Clone, Serialize)]
 pub struct LegMediaHealth {
+    pub leg_id: String,
+    pub egress_mode: MediaEgressMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub volume_egress: Option<crate::volume_stats::VolumeSummary>,
     /// `"caller"` (A) or `"callee"` (B).
     pub side: &'static str,
     /// `"rtp"`, `"webrtc"`, … (rustrtc transport mode).
@@ -82,7 +94,7 @@ pub struct LegMediaHealth {
 pub struct MediaHealthSnapshot {
     /// Seconds since the media route was activated (both legs accepted).
     pub route_age_secs: f64,
-    /// Fast-path relay (true) vs transcoding (false).
+    /// Both selected legs use fast-path relay; false alone does not classify each leg.
     pub relay_mode: bool,
     /// A (caller) then B (callee).
     pub legs: Vec<LegMediaHealth>,

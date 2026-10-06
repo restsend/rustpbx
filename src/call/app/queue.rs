@@ -742,6 +742,12 @@ impl QueueApp {
     /// Resolve the registry agent_id behind a dialed URI (falls back to the
     /// URI user part).
     async fn agent_id_for_uri(&self, uri: &str) -> String {
+        // Browser Contacts have temporary user parts; the registration owns the agent identity.
+        let registered_uri = self.get_agents().into_iter()
+            .find(|location| location.aor.to_string() == uri)
+            .and_then(|location| location.registered_aor.as_ref())
+            .map(ToString::to_string);
+        let uri = registered_uri.as_deref().unwrap_or(uri);
         if let Some(ref registry) = self.agent_registry {
             let agents = registry.list_agents().await;
             if let Some(a) = agents.iter().find(|a| a.uri == uri) {
@@ -963,7 +969,7 @@ impl QueueApp {
             ),
             Some(QueueFallbackAction::Redirect { target }) => (
                 {
-                    info!(target = %target, "Queue: fallback redirect");
+                    info!(call_id = %self.call_id, target = %target, "Queue: fallback redirect");
                     AppAction::Transfer(target.to_string())
                 },
                 &crate::proxy::proxy_call::error_catalog::QUEUE_REDIRECT_FAILED,
@@ -1012,7 +1018,7 @@ impl QueueApp {
     fn get_fallback_action(&self, action: &FailureAction) -> AppAction {
         match action {
             FailureAction::Hangup { code, reason } => {
-                info!(?code, ?reason, "Queue: hangup fallback");
+                info!(call_id = %self.call_id, ?code, ?reason, "Queue: hangup fallback");
                 AppAction::Hangup {
                     reason: reason
                         .as_ref()
@@ -1026,7 +1032,7 @@ impl QueueApp {
                 status_code,
                 reason,
             } => {
-                info!("Queue: play then hangup fallback");
+                info!(call_id = %self.call_id, "Queue: play then hangup fallback");
                 AppAction::Hangup {
                     reason: reason
                         .as_ref()
@@ -1035,7 +1041,7 @@ impl QueueApp {
                 }
             }
             FailureAction::Transfer(endpoint) => {
-                info!(target = ?endpoint, "Queue: transfer fallback");
+                info!(call_id = %self.call_id, target = ?endpoint, "Queue: transfer fallback");
                 match endpoint {
                     crate::call::TransferEndpoint::Uri(uri) => AppAction::Transfer(uri.to_string()),
                     crate::call::TransferEndpoint::Queue(queue_name) => {
@@ -1701,6 +1707,7 @@ impl QueueApp {
                 && !self.escalated_groups.contains(&step.add_skill_group)
             {
                 info!(
+                    call_id = %self.call_id,
                     queue = %self.config.name,
                     wait_secs,
                     threshold = step.threshold_secs,
@@ -2034,7 +2041,7 @@ impl CallApp for QueueApp {
         ctx: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
         let queue_id = self.config.name.clone();
-        info!(queue = %queue_id, "Queue: entering queue application");
+        info!(call_id = %self.call_id, queue = %queue_id, "Queue: entering queue application");
         self.state = QueueState::Answering;
         self.enqueued_at = Some(Instant::now());
 
@@ -2629,7 +2636,7 @@ impl CallApp for QueueApp {
     ) -> anyhow::Result<AppAction> {
         match id.as_str() {
             "agent_ring_timeout" => {
-                info!("Queue: agent ring timeout, handling no-answer");
+                info!(call_id = %self.call_id, "Queue: agent ring timeout, handling no-answer");
 
                 // Second line of defense (the timer is cancelled on connect):
                 // if an agent already answered, a late fire must not reset
@@ -2734,7 +2741,7 @@ impl CallApp for QueueApp {
                     ctrl.set_timeout("max_wait_timeout", grace);
                     return Ok(AppAction::Continue);
                 }
-                info!("Queue: max wait timeout, executing fallback");
+                info!(call_id = %self.call_id, "Queue: max wait timeout, executing fallback");
                 ctrl.cancel_timeout("queue_retry");
                 // The wait is over — the fallback path owns the call now.
                 // Without this cancel a same-tick escalation_check could

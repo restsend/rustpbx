@@ -80,6 +80,8 @@ fn dtmf_event_duration_for_clock(clock_rate: u32) -> u16 {
 /// Configuration for creating a [`Leg`]'s PeerConnection.
 #[derive(Clone)]
 pub struct LegConfig {
+    pub volume_stats: crate::volume_stats::VolumeStatsConfig,
+    pub quality_stats: crate::quality_stats::QualityStatsConfig,
     pub transport: TransportMode,
     /// Codec preference (first entry is offered/used for the egress sender).
     pub codecs: Vec<CodecInfo>,
@@ -155,6 +157,8 @@ impl LegConfig {
             probation_max_packets: None,
             relay_ready_timeout: None,
             call_id: None,
+            volume_stats: Default::default(),
+            quality_stats: Default::default(),
         }
     }
 }
@@ -494,7 +498,7 @@ impl LegInner {
         cfg: &LegConfig,
         recorder_sender: Option<RecorderSender>,
     ) -> Result<Leg> {
-        Self::from_rtc_config(
+        let leg = Self::from_rtc_config(
             id,
             build_rtc_config(cfg),
             cfg.codecs.clone(),
@@ -502,7 +506,13 @@ impl LegInner {
             cfg.comfort_noise_level_db,
             cfg.relay_ready_timeout,
             recorder_sender,
-        )
+        )?;
+        leg.egress.set_volume_stats(
+            cfg.volume_stats.enabled,
+            cfg.quality_stats.clone(),
+            cfg.call_id.as_ref().map(|session_id| (session_id.clone(), leg.id().to_string())),
+        )?;
+        Ok(leg)
     }
 
     pub fn id(&self) -> &LegId {
@@ -537,6 +547,14 @@ impl LegInner {
 
     pub(crate) fn stats(&self) -> TapStats {
         self.tap.stats()
+    }
+
+    /// PCM already observed before encoding on this leg's egress.
+    pub(crate) fn volume_summary(
+        &self,
+        window: Duration,
+    ) -> Option<crate::volume_stats::VolumeSummary> {
+        self.egress.volume_summary(window)
     }
 
     /// RTCP-derived quality (jitter / RTT / fraction lost) for this leg.
@@ -903,6 +921,11 @@ impl LegInner {
             .map(|pair| pair.remote.address.to_string());
         crate::leg_stats::LegQualityReport {
             side,
+            pcm_egress: self.egress.recorded_volume().map(|volume| crate::leg_stats::PcmEgressWindow {
+                leg_id: self.id.to_string(),
+                egress_mode: crate::media_health::MediaEgressMode::PcmPacing,
+                volume,
+            }),
             codec: self.negotiated().and_then(|p| p.audio.map(|c| format!("{:?}", c.codec))),
             ingress_packets: tap.ingress_packets,
             egress_packets: tap.egress_packets,
@@ -1087,6 +1110,11 @@ impl LegInner {
         state.active.store(false, Ordering::Release);
         *state.armed_at.lock() = None;
         if let Some(tx) = state.fire_tx.lock().take() { let _ = tx.send(()); }
+    }
+
+    /// Archive actual PCM through the terminal call boundary before its CDR is read.
+    pub async fn finalize_volume(&self) -> Result<()> {
+        self.egress.finalize_volume().await
     }
 
     /// Stop the leg: cancel the egress pipeline and close the PeerConnection.
@@ -1525,6 +1553,8 @@ mod relay_policy_tests {
 
     fn webrtc_cfg(relay_only: bool, ice_servers: Vec<IceServer>) -> LegConfig {
         LegConfig {
+            volume_stats: Default::default(),
+            quality_stats: Default::default(),
             call_id: None,
             transport: TransportMode::WebRtc,
             codecs: vec![CodecInfo {
@@ -1824,15 +1854,133 @@ mod tests {
 
     #[tokio::test]
     async fn leg_create_and_close_rtp() {
+        use std::collections::BTreeMap;
+        use tracing::span::{Attributes, Id, Record};
+        use tracing::{Event, Metadata, Subscriber};
+        #[derive(Clone, Default)]
+        struct Logs(Arc<Mutex<Vec<BTreeMap<String, String>>>>);
+        impl Subscriber for Logs {
+            fn enabled(&self, _: &Metadata<'_>) -> bool { true }
+            fn new_span(&self, _: &Attributes<'_>) -> Id { Id::from_u64(1) }
+            fn record(&self, _: &Id, _: &Record<'_>) {}
+            fn record_follows_from(&self, _: &Id, _: &Id) {}
+            fn enter(&self, _: &Id) {}
+            fn exit(&self, _: &Id) {}
+            fn event(&self, event: &Event<'_>) {
+                #[derive(Default)]
+                struct Fields(BTreeMap<String, String>);
+                impl tracing::field::Visit for Fields {
+                    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                        self.0.insert(field.name().into(), format!("{value:?}"));
+                    }
+                }
+                let mut fields = Fields::default();
+                event.record(&mut fields);
+                if fields.0.get("message").is_some_and(|message| message == "PCM egress volume window") {
+                    self.0.lock().push(fields.0);
+                }
+            }
+        }
+        let logs = Logs::default();
+        let captured = logs.0.clone();
+        let _subscriber = tracing::subscriber::set_default(logs);
         // Two RTP legs bound to ephemeral ports must construct and stop
         // without panicking. Uses the loopback PC (no real network needed for
         // construction; add_track + observer are synchronous).
-        let a = LegInner::new("a", &LegConfig::rtp_pcmu(), None).expect("leg a");
+        let mut cfg = LegConfig::rtp_pcmu();
+        cfg.call_id = Some("pcm-session".into());
+        cfg.volume_stats.enabled = true;
+        cfg.quality_stats.sample_interval_ms = 250;
+        cfg.quality_stats.window_ms = 2000;
+        cfg.quality_stats.log_interval_ms = 500;
+        let a = LegInner::new("a", &cfg, None).expect("leg a");
         assert_eq!(a.id().as_str(), "a");
         assert!(a.negotiated().is_none());
         // Observer is installed: stats start at zero.
         assert_eq!(a.stats().ingress_packets, 0);
+        assert!(serde_json::to_value(a.quality_report("A")).unwrap()["pcmEgress"].is_null());
+        a.play(Box::new(crate::audio_source::ToneAudioSource::new(
+            440, Duration::from_secs(1), 8000,
+        ).unwrap()), true, None).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let report = serde_json::to_value(a.quality_report("A")).unwrap();
+        let observed = &report["pcmEgress"];
+        assert_eq!(observed["legId"], "a");
+        assert_eq!(observed["egressMode"], "pcm_pacing");
+        assert_eq!(observed["volume"]["measurement"], "pbx_pcm_pre_encode");
+        assert!(observed["volume"]["sample_count"].as_u64().unwrap() > 0);
+        assert!(observed["volume"]["rms"].as_f64().unwrap() > 0.0);
+        let rows = captured.lock();
+        let row = rows.last().expect("normal PCM owner must publish its completed window");
+        assert_eq!(row["session_id"], "pcm-session");
+        assert_eq!(row["leg_id"], "a");
+        assert_eq!(row["egress_mode"], "\"pcm_pacing\"");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&row["volume"]).unwrap(), observed["volume"]);
+        for pair in rows.windows(2) {
+            let earlier: serde_json::Value = serde_json::from_str(&pair[0]["volume"]).unwrap();
+            let later: serde_json::Value = serde_json::from_str(&pair[1]["volume"]).unwrap();
+            assert!(later["window_end_micros"].as_u64().unwrap()
+                - earlier["window_end_micros"].as_u64().unwrap() >= 500_000,
+                "PCM logs must follow the log interval rather than the sampling interval");
+        }
+        drop(rows);
+        a.stop_playback().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let completed = serde_json::to_value(a.quality_report("A")).unwrap()["pcmEgress"].clone();
+        assert!(completed["volume"]["window_end_micros"].as_u64().unwrap()
+            >= observed["volume"]["window_end_micros"].as_u64().unwrap());
+        a.play(Box::new(crate::audio_source::ToneAudioSource::new(
+            660, Duration::from_secs(1), 8000,
+        ).unwrap()), true, None).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        a.egress.set_source(EgressSource::RewriteRelay {
+            peer_pc: a.pc().clone(), options: Default::default(), rules: Vec::new(),
+            video_payload_types: Vec::new(), on_arm_failed: None,
+        }).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let direct = serde_json::to_value(a.quality_report("A")).unwrap()["pcmEgress"].clone();
+        assert!(direct["volume"]["observed_ms"].as_u64().unwrap() < 250);
+        assert!(a.volume_summary(Duration::from_secs(2)).is_none(),
+            "a parked direct source has no current PCM window");
+        let rows = captured.lock();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&rows.last().unwrap()["volume"]).unwrap(),
+            direct["volume"], "switching to direct forwarding must publish the short PCM window");
+        let count = rows.len();
+        drop(rows);
+        a.egress.set_source(EgressSource::RewriteRelay {
+            peer_pc: a.pc().clone(), options: Default::default(), rules: Vec::new(),
+            video_payload_types: Vec::new(), on_arm_failed: None,
+        }).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(captured.lock().len(), count, "finishing again without PCM must not duplicate logs");
+        a.play(Box::new(crate::audio_source::ToneAudioSource::new(
+            660, Duration::from_secs(1), 8000,
+        ).unwrap()), true, None).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
         a.stop();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let partial = serde_json::to_value(a.quality_report("A")).unwrap()["pcmEgress"].clone();
+        assert!(partial["volume"]["window_end_micros"].as_u64().unwrap()
+            > direct["volume"]["window_end_micros"].as_u64().unwrap());
+        assert!(partial["volume"]["observed_ms"].as_u64().unwrap() < 250);
+        let rows = captured.lock();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&rows.last().unwrap()["volume"]).unwrap(),
+            partial["volume"], "closing before the next periodic emit must publish the final PCM window");
+        let count = rows.len();
+        drop(rows);
+        a.stop();
+        cfg.volume_stats.enabled = false;
+        let disabled = LegInner::new("disabled", &cfg, None).unwrap();
+        disabled.play(Box::new(crate::audio_source::ToneAudioSource::new(
+            440, Duration::from_secs(1), 8000,
+        ).unwrap()), true, None).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        disabled.finalize_volume().await.unwrap();
+        disabled.stop();
+        assert_eq!(captured.lock().len(), count, "disabled sampling and repeated stop must remain quiet");
+        tokio::time::sleep(Duration::from_millis(2100)).await;
+        assert_eq!(serde_json::to_value(a.quality_report("A")).unwrap()["pcmEgress"], partial,
+            "teardown must retain the actual short PCM window after the live window expires");
     }
 
     #[test]
@@ -1854,6 +2002,8 @@ mod tests {
         // DTLS fingerprint, ICE creds and a UDP/TLS/RTP/SAVPF m-line — this is
         // the proxy-side capability P6 real WebRTC e2e relies on.
         let cfg = LegConfig {
+            volume_stats: Default::default(),
+            quality_stats: Default::default(),
             call_id: None,
             ice_servers: Vec::new(),
             relay_only: false,
@@ -1938,6 +2088,8 @@ mod tests {
         // codec. The `a=ssrc` lets the remote browser demux relayed video
         // immediately instead of waiting out the 2–3 s unsignaled-SSRC timeout.
         let cfg = LegConfig {
+            volume_stats: Default::default(),
+            quality_stats: Default::default(),
             call_id: None,
             ice_servers: Vec::new(),
             relay_only: false,
@@ -1999,6 +2151,8 @@ mod tests {
         // m-line was recvonly with no SSRC and the caller suffered the demux
         // delay.
         let cfg = LegConfig {
+            volume_stats: Default::default(),
+            quality_stats: Default::default(),
             call_id: None,
             ice_servers: Vec::new(),
             relay_only: false,
@@ -2102,6 +2256,8 @@ mod tests {
         use std::net::SocketAddr;
 
         let cfg = LegConfig {
+            volume_stats: Default::default(),
+            quality_stats: Default::default(),
             call_id: None,
             ice_servers: Vec::new(),
             relay_only: false,
@@ -2215,6 +2371,8 @@ mod p24_uac_test {
     #[tokio::test]
     async fn plain_rtp_av_offer_must_be_legacy_sip_compatible() {
         let cfg = LegConfig {
+            volume_stats: Default::default(),
+            quality_stats: Default::default(),
             call_id: None,
             ice_servers: Vec::new(),
             relay_only: false,

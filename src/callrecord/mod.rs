@@ -191,6 +191,38 @@ pub struct CallRecord {
     pub extensions: http::Extensions,
 }
 
+impl CallRecord {
+    fn persistence_metadata(&self) -> HashMap<String, Value> {
+        let mut metadata_map = self.details.metadata.clone().unwrap_or_default();
+        // SQL timestamp columns can round to seconds; retain the call's original precision.
+        metadata_map.insert(
+            "start_time".to_string(),
+            serde_json::Value::String(self.start_time.to_rfc3339()),
+        );
+        metadata_map.insert(
+            "end_time".to_string(),
+            serde_json::Value::String(self.end_time.to_rfc3339()),
+        );
+        if !self.sip_leg_roles.is_empty() {
+            let json = serde_json::to_string(&self.sip_leg_roles).unwrap_or_default();
+            metadata_map.insert("sip_leg_roles".to_string(), serde_json::Value::String(json));
+        }
+        if let Some(ring_time) = self.ring_time {
+            metadata_map.insert(
+                "ring_time".to_string(),
+                serde_json::Value::String(ring_time.to_rfc3339()),
+            );
+        }
+        if let Some(answer_time) = self.answer_time {
+            metadata_map.insert(
+                "answer_time".to_string(),
+                serde_json::Value::String(answer_time.to_rfc3339()),
+            );
+        }
+        metadata_map
+    }
+}
+
 /// Extension key stashing the enqueue instant on a `CallRecord` so the
 /// manager can measure queueing wait (enqueued → dequeued) for the
 /// opt-in `cdr_queue_latency_seconds` histogram without changing the
@@ -357,6 +389,7 @@ impl std::str::FromStr for CallRecordHangupReason {
             "canceled" => Ok(Self::Canceled),
             "rejected" => Ok(Self::Rejected),
             "failed" => Ok(Self::Failed),
+            "rtptimeout" => Ok(Self::RtpTimeout),
             "abandoned" => Ok(Self::Abandoned),
             _ => Ok(Self::Other(s.to_string())),
         }
@@ -993,24 +1026,7 @@ impl CallRecordRow {
             serde_json::to_value(&record.leg_timeline).ok()
         };
 
-        let mut metadata_map = details.metadata.clone().unwrap_or_default();
-        if !record.sip_leg_roles.is_empty() {
-            let json = serde_json::to_string(&record.sip_leg_roles).unwrap_or_default();
-            metadata_map.insert("sip_leg_roles".to_string(), serde_json::Value::String(json));
-        }
-        if let Some(ring_time) = record.ring_time {
-            metadata_map.insert(
-                "ring_time".to_string(),
-                serde_json::Value::String(ring_time.to_rfc3339()),
-            );
-        }
-        if let Some(answer_time) = record.answer_time {
-            metadata_map.insert(
-                "answer_time".to_string(),
-                serde_json::Value::String(answer_time.to_rfc3339()),
-            );
-        }
-        let metadata = serde_json::to_value(&metadata_map).ok();
+        let metadata = serde_json::to_value(record.persistence_metadata()).ok();
 
         let caller_uri = crate::models::call_record::normalize_endpoint_uri(&record.caller);
         let callee_uri = crate::models::call_record::normalize_endpoint_uri(&record.callee);
@@ -1617,6 +1633,35 @@ impl CallRecordManager {
 
 impl From<rustpbx_models::call_record::Model> for CallRecord {
     fn from(val: rustpbx_models::call_record::Model) -> Self {
+        let timestamp = |key: &str| {
+            let raw = val.metadata.as_ref()?.get(key)?.as_str()?;
+            match chrono::DateTime::parse_from_rfc3339(raw) {
+                Ok(time) => Some(time.with_timezone(&Utc)),
+                Err(err) => {
+                    warn!(call_id = %val.call_id, field = key, error = %err,
+                        "invalid persisted call timestamp");
+                    None
+                }
+            }
+        };
+        let start_time = timestamp("start_time").unwrap_or(val.started_at);
+        let end_time = timestamp("end_time").unwrap_or(val.ended_at.unwrap_or(val.started_at));
+        let ring_time = timestamp("ring_time");
+        let answer_time = timestamp("answer_time");
+        let status_code = val.sip_status_code.and_then(|code| match u16::try_from(code) {
+            Ok(code) => Some(code),
+            Err(err) => {
+                warn!(call_id = %val.call_id, error = %err, "invalid persisted SIP status code");
+                None
+            }
+        }).unwrap_or_default();
+        let hangup_reason = val.hangup_reason.as_deref().and_then(|reason| match reason.parse() {
+            Ok(reason) => Some(reason),
+            Err(err) => {
+                warn!(call_id = %val.call_id, error = %err, "invalid persisted hangup reason");
+                None
+            }
+        });
         let details = CallDetails {
             direction: val.direction,
             status: val.status,
@@ -1661,19 +1706,19 @@ impl From<rustpbx_models::call_record::Model> for CallRecord {
 
         CallRecord {
             call_id: val.call_id,
-            session_id: None,
-            start_time: val.started_at,
-            ring_time: None,
-            answer_time: None,
-            end_time: val.ended_at.unwrap_or(val.started_at),
+            session_id: val.session_id,
+            start_time,
+            ring_time,
+            answer_time,
+            end_time,
             caller: val
                 .caller_uri
                 .unwrap_or_else(|| val.from_number.unwrap_or_default()),
             callee: val
                 .callee_uri
                 .unwrap_or_else(|| val.to_number.unwrap_or_default()),
-            status_code: 0,
-            hangup_reason: None,
+            status_code,
+            hangup_reason,
             hangup_messages: Vec::new(),
             recorder: Vec::new(),
             sip_leg_roles: std::collections::HashMap::new(),

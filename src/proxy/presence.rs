@@ -648,8 +648,9 @@ impl PresenceManager {
         source: &EventSource,
     ) -> Vec<DialogId> {
         let mut pruned = Vec::new();
+        let is_refresh = matches!(event, LocatorEvent::Refreshed(_));
         match event {
-            LocatorEvent::Registered(loc) => {
+            LocatorEvent::Registered(loc) | LocatorEvent::Refreshed(loc) => {
                 if let Some(user) = Self::get_user(&loc) {
                     let current = self.get_state(&user);
                     info!(
@@ -675,7 +676,7 @@ impl PresenceManager {
 
                     let new_status = match header_status {
                         Some(s) => PresenceStatus::normalize(s),
-                        None if current.status == PresenceStatus::Offline => PresenceStatus::Idle,
+                        None if !is_refresh && current.status == PresenceStatus::Offline => PresenceStatus::Idle,
                         None => return pruned,
                     };
 

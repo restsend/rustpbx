@@ -594,6 +594,8 @@ impl CallModule {
                 .with_relay_ready_timeout_secs(rtp.relay_ready_timeout_secs)
                 .with_stall_detect_secs(rtp.stall_detect_secs)
                 .with_media_trace_interval_secs(rtp.media_trace_interval_secs)
+                .with_quality_stats(rtp.quality_stats.clone())
+                .with_volume_stats(rtp.volume_stats.clone())
         };
 
         let caller_is_same_realm = self
@@ -828,7 +830,15 @@ impl CallModule {
                 .map(|h| h.value().to_string())
                 .unwrap_or_default();
             match self.inner.server.locator.lookup(&callee_uri).await {
-                Ok(results) => {
+                Ok(mut results) => {
+                    // A hop addressed to a registration's home node is terminal:
+                    // do not fork shared contacts back to another cluster node.
+                    if let Some(home) = self.inner.server.cluster_self_addr.as_ref()
+                        && callee_uri.host_with_port == home.addr
+                    {
+                        results.retain(|location| location.home_proxy.as_ref()
+                            .is_none_or(|owner| owner.addr == home.addr));
+                    }
                     internal_lookup_empty = results.is_empty();
                     if internal_lookup_empty {
                         // NB: an empty locator result is NOT a failure yet — a
@@ -3022,6 +3032,47 @@ mod tests {
             dialplan.extensions.get::<CalleeOfflineMarker>().is_some(),
             "offline marker should be set"
         );
+    }
+
+    #[tokio::test]
+    async fn default_resolve_home_hop_does_not_fork_back_to_peer() {
+        let (mut server, config) = create_test_server_with_config(ProxyConfig {
+            realms: Some(vec!["10.0.0.1".into()]),
+            ..Default::default()
+        }).await;
+        let local = rsipstack::transport::SipAddr::try_from(
+            rsipstack::sip::Uri::try_from("sip:10.0.0.1:5060").unwrap()).unwrap();
+        Arc::get_mut(&mut server).unwrap().cluster_self_addr = Some(local.clone());
+        for (contact, home) in [("local", "10.0.0.1"), ("peer", "10.0.0.2")] {
+            server.locator.register("alice", Some("10.0.0.1"), Location {
+                aor: format!("sip:{contact}@device.invalid;transport=ws").parse().unwrap(),
+                registered_aor: Some("sip:alice@10.0.0.1:5060".parse().unwrap()),
+                home_proxy: Some(rsipstack::transport::SipAddr::try_from(
+                    rsipstack::sip::Uri::try_from(format!("sip:{home}:5060")).unwrap()).unwrap()),
+                destination: Some(rsipstack::transport::SipAddr::try_from(rsipstack::sip::Uri::try_from(
+                    format!("sip:192.0.2.1:{}", if contact == "local" { 7001 } else { 7002 })).unwrap()).unwrap()),
+                expires: 3600,
+                ..Default::default()
+            }).await.unwrap();
+        }
+        let module = CallModule::new(config, server);
+        let mut request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite, "bp", None, "rustpbx.com", None,
+        );
+        request.uri = "sip:alice@10.0.0.1:5060".parse().unwrap();
+        let caller = SipUser {
+            username: "bp".into(), realm: Some("rustpbx.com".into()), ..Default::default()
+        };
+        let dialplan = module.default_resolve(&request, Box::new(NotHandledRouteInvite), &caller,
+            &TransactionCookie::default()).await.unwrap();
+        let targets = dialplan.get_all_targets().unwrap();
+        assert_eq!(targets.len(), 1, "a home hop must not start another cluster fork");
+        assert_eq!(targets[0].home_proxy.as_ref(), Some(&local));
+        // A canonical address still rings contacts across the cluster.
+        request.uri = "sip:alice@rustpbx.com".parse().unwrap();
+        let dialplan = module.default_resolve(&request, Box::new(NotHandledRouteInvite), &caller,
+            &TransactionCookie::default()).await.unwrap();
+        assert_eq!(dialplan.get_all_targets().unwrap().len(), 2);
     }
 
     #[tokio::test]

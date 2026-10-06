@@ -15,7 +15,55 @@ mod tests {
         VoicePrompts,
     };
     use rsipstack::sip::Uri;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+
+    #[derive(Clone)]
+    struct QueueLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for QueueLogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_queue_logs() -> (
+        QueueLogWriter,
+        tracing::subscriber::DefaultGuard,
+        tracing::Dispatch,
+    ) {
+        // With one dispatch, tracing-core caches first-callsite interest from
+        // the registering thread, which may be an uncaptured parallel test.
+        let interest_guard = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::new());
+        let logs = QueueLogWriter(Arc::new(Mutex::new(Vec::new())));
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        (logs, tracing::subscriber::set_default(subscriber), interest_guard)
+    }
+
+    fn assert_queue_log_call(logs: &QueueLogWriter, call_id: &str, messages: &[&str]) {
+        let bytes = logs.0.lock().unwrap().clone();
+        let text = String::from_utf8(bytes).unwrap();
+        for message in messages {
+            let line = text
+                .lines()
+                .find(|line| line.contains(message))
+                .unwrap_or_else(|| panic!("Missing queue lifecycle log {message}: {text}"));
+            assert!(
+                line.split_whitespace().any(|field| field == format!("call_id={call_id}")),
+                "Queue lifecycle log must identify its owning call: {line}"
+            );
+        }
+    }
 
     /// Build a registered-agent [`Location`] for the given SIP URI.
     fn test_location(uri: &str) -> Location {
@@ -353,6 +401,59 @@ mod tests {
             .join()
             .await
             .expect("should exit after agent connected");
+    }
+
+    /// A registered browser Contact must not replace the answering agent identity.
+    #[cfg(feature = "contact-center")]
+    #[tokio::test]
+    async fn test_browser_contact_preserves_answering_agent_reservation() {
+        use crate::addons::cc::agent::AgentStatus;
+        use crate::addons::cc::agent_registry_adapter::CcAgentRegistryAdapter;
+        use std::sync::Arc;
+
+        let cc = crate::addons::cc::CcAddonState::new();
+        cc.agent_registry.register("agent1".into(), vec![], 1).await.unwrap();
+        cc.agent_registry.update_status("agent1", AgentStatus::Idle).await.unwrap();
+        cc.agent_registry.update_status("agent1", AgentStatus::Ringing {
+            call_id: "test-session".into(), since: Instant::now(),
+        }).await.unwrap();
+        let registry = Arc::new(CcAgentRegistryAdapter::new(
+            cc.agent_registry.clone(), cc.acd_engine.clone(), "pbx.invalid",
+        ));
+        let contact = "sip:browser-contact@browser.invalid;transport=WS";
+        let mut config = build_simple_queue_config();
+        config.hold = None;
+        config.agents = vec![Location {
+            aor: contact.parse().unwrap(),
+            registered_aor: Some("sip:agent1@pbx.invalid".parse().unwrap()),
+            registered_username: Some("agent1".into()),
+            expires: 3600,
+            ..Default::default()
+        }];
+        config.strategy = DialStrategy::Sequential(config.agents.clone());
+        let queue = QueueApp::new(config.to_plan(), config)
+            .with_agent_registry(registry)
+            .with_call_id("test-session".into());
+        let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
+        stack.assert_cmd(2000, "Answer", |cmd| matches!(cmd, CallCommand::Answer { .. })).await;
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        let dial = stack.next_cmd(2000).await.expect("agent INVITE");
+        let leg_id = match dial {
+            CallCommand::LegAdd { leg_id, .. } => leg_id,
+            other => panic!("expected agent leg, got {other:?}"),
+        };
+        let pinned = stack.pinned_agent_meta.lock().unwrap().last().unwrap().0.clone();
+        // Feed the SIP layer the identity actually produced by queue dispatch.
+        stack.custom("agent_connected", serde_json::json!({
+            "agent_uri": contact, "leg_id": leg_id, "agent_id": pinned,
+        }));
+        stack.assert_cmd(2000, "Bridge winner", |cmd| matches!(cmd, CallCommand::Bridge { .. })).await;
+        stack.assert_cmd(2000, "Unhold caller", |cmd| matches!(cmd, CallCommand::Unhold { .. })).await;
+        stack.join().await.expect("queue handoff");
+        let agent = cc.agent_registry.get_agent("agent1").await.unwrap();
+        assert!(matches!(agent.status, AgentStatus::Ringing { ref call_id, .. }
+            if call_id == "test-session"),
+            "queue must leave the answering agent bound for the connected hook, got {}", agent.status);
     }
 
     // ── 8. Queue with agent busy event - retry next agent ──
@@ -1138,11 +1239,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_busy_prompt_max_wait_timeout() {
+        let (logs, _log_guard, _interest_guard) = capture_queue_logs();
         let mut config = build_queue_config_with_prompts();
         config.max_wait_secs = 0;
         let plan = config.to_plan();
 
-        let app = QueueApp::new(plan, config);
+        let app = QueueApp::new(plan, config).with_call_id("call-timeout-1".to_string());
 
         let mut stack = MockCallStack::run(Box::new(app), "caller", "1000");
 
@@ -1171,6 +1273,16 @@ mod tests {
         stack
             .assert_cmd(2000, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
+        stack.join().await.unwrap();
+        assert_queue_log_call(
+            &logs,
+            "call-timeout-1",
+            &[
+                "Queue: entering queue application",
+                "Queue: max wait timeout, executing fallback",
+                "Queue: hangup fallback",
+            ],
+        );
     }
 
     #[tokio::test]
@@ -1871,6 +1983,7 @@ mod tests {
     #[tokio::test]
     async fn test_escalation_timer_auto_arms_and_widens_fairly() {
         use std::sync::Arc;
+        let (logs, _log_guard, _interest_guard) = capture_queue_logs();
 
         let mut config = build_simple_queue_config();
         config.escalation_mode = crate::call::app::queue::EscalationMode::Cumulative;
@@ -1931,6 +2044,15 @@ mod tests {
         assert_eq!(calls[0].0, "skill-group:support");
         assert_eq!(calls[0].1, vec!["support_l2".to_string()]);
         assert!(calls[0].2, "fair flag must reach the registry");
+
+        assert_queue_log_call(
+            &logs,
+            "call-esc-1",
+            &[
+                "Queue: entering queue application",
+                "Queue: escalation triggered",
+            ],
+        );
 
         stack.cancel();
         let _ = stack.join().await;
