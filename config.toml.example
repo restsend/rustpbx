@@ -130,9 +130,15 @@ database_url = "sqlite://rustpbx.sqlite3"
 # username = "rustpbx" # user-id suffix, must not contain ':'; default: rustpbx
 # lifetime = 3600 # seconds; clients must fetch fresh credentials before expiry
 
-# Shared SIP and HTTP AMI cluster peers.
+# Shared SIP and HTTP AMI cluster. The peers list is the full mesh
+# manifest: it must include THIS node's own entry (matched against the
+# local listener to resolve this node's cluster address, which arms the
+# home-hop fork guard and stamps registration home_proxy) AND each peer.
 # [cluster]
-# peers = [{ addr = "10.0.0.2", sip_port = 5060, ami_port = 8080 }]
+# peers = [
+#     { addr = "10.0.0.1", sip_port = 5060, ami_port = 8080 }, # this node
+#     { addr = "10.0.0.2", sip_port = 5060, ami_port = 8080 },
+# ]
 
 [console]
 #session_secret = "please_change_me_to_a_random_secret"
