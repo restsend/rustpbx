@@ -1498,6 +1498,7 @@ pub fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig) -> Res
     if let (Some(username), Some(password)) = (&trunk.username, &trunk.password) {
         option.credential = Some(Credential {
             username: username.clone(),
+            auth_username: None, // TrunkConfig.username already carries the auth ID (legacy mapping)
             password: password.clone(),
             realm: dest_uri.host().to_string().into(),
         });

@@ -364,7 +364,7 @@ async fn module_initial_subscribe_sends_ok_for_created_dialog() {
         .finished_transactions
         .get(&key)
         .expect("initial SUBSCRIBE must finish with a response");
-    let response = match finished.value().as_ref() {
+    let response = match finished.as_ref() {
         Some(SipMessage::Response(response)) => response,
         other => panic!("expected final SUBSCRIBE response, got {other:?}"),
     };

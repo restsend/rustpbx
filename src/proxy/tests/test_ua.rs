@@ -301,6 +301,7 @@ impl TestUa {
 
         let credential = Credential {
             username: self.config.username.clone(),
+            auth_username: None,
             password: self.config.password.clone(),
             realm: Some(self.config.realm.clone()),
         };
@@ -355,6 +356,7 @@ impl TestUa {
 
         let credential = Credential {
             username: self.config.username.clone(),
+            auth_username: None,
             password: self.config.password.clone(),
             realm: Some(self.config.realm.clone()),
         };

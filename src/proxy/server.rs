@@ -2453,7 +2453,7 @@ mod contact_uri_tests {
         let local = socket.local_addr()?;
         let external = SocketAddr::new("203.0.113.10".parse()?, local.port());
         let connection = UdpConnection::attach(
-            UdpInner { conn: socket, addr: local.into() }, Some(external), None,
+            UdpInner { conn: std::sync::Arc::new(socket), addr: local.into() }, Some(external), None,
         ).await;
         let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
         // The SIP headers claim a public host; only the packet source is LAN.
