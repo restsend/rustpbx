@@ -195,6 +195,28 @@ impl AddonRegistry {
             .collect()
     }
 
+    /// IDs of enabled addons with NO resolvable template directory — neither
+    /// the source tree (`src/addons/<id>/templates`, dev checkouts) nor the
+    /// deployed layout (`templates/<id>`, packaged images). Their console
+    /// pages render 500 TemplateNotFound; the images are mis-packaged.
+    pub fn enabled_addons_missing_templates(
+        &self,
+        config: &crate::config::Config,
+    ) -> Vec<String> {
+        self.addons
+            .iter()
+            .filter(|a| self.is_enabled(a.id(), config))
+            .filter(|a| {
+                let dirs = [
+                    format!("src/addons/{}/templates", a.id()),
+                    format!("templates/{}", a.id()),
+                ];
+                !dirs.iter().any(|d| std::path::Path::new(d).is_dir())
+            })
+            .map(|a| a.id().to_string())
+            .collect()
+    }
+
     /// Return locale directories for all addons that provide translations (not just enabled ones).
     /// This is needed because the admin UI needs to display all addons even if not enabled.
     pub fn get_locale_dirs(&self, _state: AppState) -> Vec<(String, String)> {
