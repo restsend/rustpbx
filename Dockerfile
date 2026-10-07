@@ -48,4 +48,19 @@ COPY ./src/addons/archive/locales /app/locales/archive
 COPY ./src/addons/queue/locales /app/locales/queue
 COPY ./src/addons/transcript/locales /app/locales/transcript
 
+# Copy commercial addon (submodule) static and templates — pages 500 with
+# TemplateNotFound and menus fall back to raw i18n keys when these are
+# missing from the image.
+COPY ./src/addons/wholesale/static /app/static/wholesale
+COPY ./src/addons/wholesale/templates /app/templates/wholesale
+COPY ./src/addons/wholesale/locales /app/locales/wholesale
+COPY ./src/addons/cc/static /app/static/cc
+COPY ./src/addons/cc/templates /app/templates/cc
+COPY ./src/addons/cc/locales /app/locales/cc
+COPY ./src/addons/voicemail/static /app/static/voicemail
+COPY ./src/addons/voicemail/templates /app/templates/voicemail
+COPY ./src/addons/voicemail/locales /app/locales/voicemail
+COPY ./src/addons/ivr_editor/templates /app/templates/ivr_editor
+COPY ./src/addons/ivr_editor/locales /app/locales/ivr_editor
+
 ENTRYPOINT ["/app/rustpbx"]
