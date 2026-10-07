@@ -1021,17 +1021,18 @@ impl AppStateBuilder {
                         .register_addon_locales(&addon_id, locale_dir);
                 }
                 // Fail fast on packaging gaps: an enabled addon whose template
-                // directory is missing renders 500 TemplateNotFound in
+                // directory resolves nowhere renders 500 TemplateNotFound in
                 // production images. Addon assets must ship as
                 // `templates/<addon_id>` / `locales/<addon_id>` when the
                 // source tree (`src/addons/<addon_id>`) is not packaged.
-                for dir in app_state.addon_registry.get_template_dirs(app_state.config()) {
-                    if !std::path::Path::new(&dir).is_dir() {
-                        tracing::warn!(
-                            "addon template dir '{}' does not exist — that addon's pages will fail with TemplateNotFound (image packaging: ship templates/<addon_id>)",
-                            dir
-                        );
-                    }
+                for addon_id in
+                    app_state.addon_registry.enabled_addons_missing_templates(app_state.config())
+                {
+                    tracing::warn!(
+                        "enabled addon '{}' has no template directory on disk — its console pages will fail with TemplateNotFound (image packaging: ship templates/{})",
+                        addon_id,
+                        addon_id
+                    );
                 }
                 console_state.set_app_state(Some(Arc::downgrade(&app_state)));
             }

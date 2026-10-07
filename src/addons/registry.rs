@@ -231,6 +231,31 @@ impl AddonRegistry {
             .collect()
     }
 
+    /// IDs of enabled addons with NO resolvable template directory — neither
+    /// the addon-declared dir, the source tree (`src/addons/<id>/templates`,
+    /// dev checkouts) nor the deployed layout (`templates/<id>`, packaged
+    /// images). Their console pages render 500 TemplateNotFound; the images
+    /// are mis-packaged.
+    pub fn enabled_addons_missing_templates(
+        &self,
+        config: &crate::config::Config,
+    ) -> Vec<String> {
+        self.addons
+            .iter()
+            .filter(|a| self.is_enabled(a.id(), config))
+            .filter(|a| {
+                let mut dirs = Vec::new();
+                if let Some(dir) = a.template_dir() {
+                    dirs.push(dir);
+                }
+                dirs.push(format!("src/addons/{}/templates", a.id()));
+                dirs.push(format!("templates/{}", a.id()));
+                !dirs.iter().any(|d| std::path::Path::new(d).is_dir())
+            })
+            .map(|a| a.id().to_string())
+            .collect()
+    }
+
     /// Static asset mounts for enabled addons declaring a static_dir,
     /// as (addon_id, directory) pairs served under `/static/<addon_id>/`.
     pub fn get_static_mounts(&self, config: &crate::config::Config) -> Vec<(String, String)> {
