@@ -144,7 +144,7 @@ chrono-tz = "0.10.4"
 hex = { version = "0.4.3", optional = true }
 rsipstack = "=0.6.13"
 audio-codec = "0.4.7"
-rustrtc = "=0.3.146"
+rustrtc = "=0.4.0"
 reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
     "stream",
