@@ -739,8 +739,8 @@ mod tests {
     }
 
     /// Test agent ring timeout handling (origin/0.5.1 semantics: the
-    /// no-answer event fires, the call hangs up via fallback, and the agent
-    /// is moved to Wrapup — no Bridge: nothing answered).
+    /// no-answer event fires, the ringing leg is CANCELLED, and the agent is
+    /// released back to Idle — no Bridge: nothing answered).
     /// NOTE: origin uses DbRegistry (pruned here in 179c4bef) — the memory
     /// registry stands in with identical presence semantics.
     #[tokio::test]
@@ -810,12 +810,26 @@ mod tests {
             .any(|c| matches!(c, CallCommand::InjectAppEvent { .. }));
         assert!(has_no_answer, "Expected queue.agent_no_answer event");
 
-        // After a ring timeout the agent must be left NON-idle (wrapup),
-        // not silently returned to Idle.
+        // The ringing leg must be CANCELLED at ring timeout.
+        let removed_legs: Vec<_> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                CallCommand::LegRemove { leg_id } => Some(leg_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            removed_legs.len(),
+            1,
+            "ring timeout must CANCEL the ringing agent leg, got {removed_legs:?}"
+        );
+
+        // After a ring timeout the agent must be released back to Idle
+        // (immediately schedulable — no-answer no longer costs a cooldown).
         let agent = registry.get_agent("agent-001").await.unwrap();
         assert!(
-            matches!(agent.presence, PresenceState::Wrapup { .. }),
-            "ring timeout must move the agent to Wrapup (non-idle), got {:?}",
+            matches!(agent.presence, PresenceState::Idle),
+            "ring timeout must release the agent to Idle, got {:?}",
             agent.presence
         );
         stack.cancel();
@@ -1443,10 +1457,21 @@ mod tests {
             })
             .await;
 
-        // Ring timeout triggers no-answer path (only 1 agent in simple queue)
+        // Ring timeout triggers no-answer path (only 1 agent in simple queue).
+        // A dialled ringing leg is CANCELLED first (LegRemove), then the
+        // no-answer prompt plays.
         stack.timeout("agent_ring_timeout");
 
-        let na_cmd = stack.next_cmd(2000).await.expect("no-answer prompt Play");
+        let na_cmd = loop {
+            let cmd = stack
+                .next_cmd(2000)
+                .await
+                .expect("no-answer prompt Play");
+            if matches!(cmd, CallCommand::LegRemove { .. }) {
+                continue;
+            }
+            break cmd;
+        };
         stack.audio_complete(play_track_id(&na_cmd));
 
         stack
@@ -1557,36 +1582,50 @@ mod tests {
             .await;
 
         // Should originate calls to both agents
-        stack
-            .assert_cmd(2000, "LegAdd-agent1", |c| {
-                matches!(c, CallCommand::LegAdd { target, .. } if target == "sip:agent1@example.com")
-            })
-            .await;
-        stack
-            .assert_cmd(2000, "LegAdd-agent2", |c| {
-                matches!(c, CallCommand::LegAdd { target, .. } if target == "sip:agent2@example.com")
-            })
-            .await;
+        let cmd0 = stack.next_cmd(2000).await.expect("LegAdd for agent1");
+        let leg_id_0 = match &cmd0 {
+            CallCommand::LegAdd { target, leg_id, .. } => {
+                assert_eq!(target, "sip:agent1@example.com");
+                leg_id.clone().expect("LegAdd should have leg_id")
+            }
+            other => panic!("expected LegAdd, got {other:?}"),
+        };
+        let cmd1 = stack.next_cmd(2000).await.expect("LegAdd for agent2");
+        let leg_id_1 = match &cmd1 {
+            CallCommand::LegAdd { target, leg_id, .. } => {
+                assert_eq!(target, "sip:agent2@example.com");
+                leg_id.clone().expect("LegAdd should have leg_id")
+            }
+            other => panic!("expected LegAdd, got {other:?}"),
+        };
 
-        // Both agents fail - ring timeout. Late-answer grace: the INVITEs
-        // are NOT cancelled at ring timeout (the late-answer Wrapup→Busy
-        // path needs them alive). The queue falls through to fallback
-        // directly — the INVITEs terminate naturally (UA timeout or the
-        // caller's eventual hangup cascade).
+        // Both agents fail - ring timeout. The ringing INVITEs are CANCELLED
+        // (the call leaves the dialing phase; softphones must stop ringing),
+        // then the queue falls through to the fallback.
         stack.timeout("agent_ring_timeout");
 
+        // The two ringing legs must be cancelled.
+        let mut removed = Vec::new();
         // Should hit no-answer fallback (may see InjectAppEvent for
-        // queue.agent_no_answer first — drain until the Hangup).
+        // queue.agent_no_answer first — drain until both LegRemoves and the
+        // Hangup arrived).
         let mut saw_hangup = false;
-        for _ in 0..10 {
+        for _ in 0..20 {
             match stack.next_cmd(2000).await {
+                Some(CallCommand::LegRemove { leg_id }) => removed.push(leg_id),
                 Some(CallCommand::Hangup(_)) => { saw_hangup = true; break; }
                 Some(CallCommand::InjectAppEvent { .. }) => continue,
-                Some(other) => panic!("expected Hangup or InjectAppEvent, got {other:?}"),
+                Some(other) => panic!("expected Hangup/LegRemove/InjectAppEvent, got {other:?}"),
                 None => break,
             }
         }
         assert!(saw_hangup, "expected fallback hangup after ring timeout");
+        for leg in [&leg_id_0, &leg_id_1] {
+            assert!(
+                removed.contains(leg),
+                "ring timeout must CANCEL ringing leg {leg}, removed {removed:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3198,17 +3237,18 @@ mod tests {
             vec![(Some("agent-001".to_string()), Some("Alice".to_string()))],
             "exactly one agent pin (id + display name) must precede the dial, got {pins:?}"
         );
-        let _ = dialed_leg;
 
         // The agent never answers → ring timeout → round exhausted → the app
         // must go back to waiting (hold restarts), not hang up.
         stack.timeout("agent_ring_timeout");
-        // Late-answer grace: no LegRemove at ring timeout — the INVITE
-        // stays alive; the queue falls through to wait retention directly.
+        // The ringing INVITE is CANCELLED (LegRemove) before the queue falls
+        // back to wait retention.
+        let mut removed_legs = Vec::new();
         let mut hold_restarted = false;
         let mut hung_up = false;
         for _ in 0..10 {
             match stack.next_cmd(300).await {
+                Some(CallCommand::LegRemove { leg_id }) => removed_legs.push(leg_id),
                 Some(CallCommand::Play { .. }) => {
                     hold_restarted = true;
                     break;
@@ -3220,6 +3260,11 @@ mod tests {
                 _ => continue,
             }
         }
+        assert_eq!(
+            removed_legs,
+            vec![dialed_leg],
+            "ring timeout must CANCEL exactly the dialled agent leg"
+        );
         assert!(hold_restarted, "must restart hold music in wait retention");
         assert!(
             !hung_up,
@@ -4054,6 +4099,233 @@ mod tests {
             .join()
             .await
             .expect("should exit after service prompt");
+    }
+
+    // ── Ring timeout CANCEL + stale-signal guards ──────────────────────────
+
+    /// Ring timeout must CANCEL the ringing leg, and a no-answer signal for
+    /// that cancelled leg (the 487 racing the CANCEL) must be swallowed:
+    /// the timeout handler already moved the call on, and a second round of
+    /// handle_agent_unavailable would skip the next sequential agent.
+    #[tokio::test]
+    async fn test_ring_timeout_cancels_leg_and_swallows_stale_no_answer() {
+        use std::sync::Arc;
+
+        let registry = Arc::new(
+            HookRecordingRegistry::new().with_resolve_uris(vec![
+                vec!["sip:agent1@example.com".to_string()],
+                vec![],
+            ]),
+        );
+        registry
+            .inner
+            .register(
+                "agent-001".to_string(),
+                "agent-001".to_string(),
+                "sip:agent1@example.com".to_string(),
+                vec!["support".to_string()],
+                1,
+            )
+            .await
+            .unwrap();
+        registry
+            .inner
+            .update_presence(
+                "agent-001",
+                crate::call::app::agent_registry::PresenceState::Idle,
+            )
+            .await
+            .unwrap();
+
+        let mut config = build_sequential_queue_config();
+        config.skill_routing_enabled = false;
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.skill_group = Some("support".to_string());
+        config.hold = Some(QueueHoldConfig {
+            audio_file: Some("sounds/hold_music.wav".to_string()),
+            loop_playback: true,
+        });
+        config.retry_interval_secs = 60;
+        config.max_wait_secs = 300;
+
+        let plan = config.to_plan();
+        let queue = QueueApp::new(plan, config)
+            .with_agent_registry(registry)
+            .with_call_id("call-stale-na".to_string())
+            .with_skill_group("support".to_string());
+        let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
+
+        stack
+            .assert_cmd(2000, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        let _hold = stack.next_cmd(2000).await.expect("hold music");
+
+        // Wait-retention poll resolves Idle agent1 → dial.
+        stack.timeout("queue_retry");
+        let mut leg = None;
+        for _ in 0..10 {
+            match stack.next_cmd(1000).await {
+                Some(CallCommand::LegAdd { leg_id, .. }) => {
+                    leg = leg_id.clone();
+                    break;
+                }
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        let leg = leg.expect("poll must originate the agent leg");
+
+        // Ring timeout: the leg is cancelled, the round is exhausted, the
+        // call returns to wait retention (hold restarts).
+        stack.timeout("agent_ring_timeout");
+        let mut removed = Vec::new();
+        let mut hold_restarted = false;
+        for _ in 0..10 {
+            match stack.next_cmd(1000).await {
+                Some(CallCommand::LegRemove { leg_id }) => removed.push(leg_id),
+                Some(CallCommand::Play { .. }) => {
+                    hold_restarted = true;
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        assert_eq!(removed, vec![leg.clone()], "the dialled leg must be cancelled");
+        assert!(hold_restarted, "must return to wait retention");
+
+        // The cancelled leg's 487 lands as a stale agent_no_answer — it must
+        // NOT advance the dialing state machine again (no new LegAdd, no
+        // fallback, no double hold/prompt).
+        stack.custom(
+            "agent_no_answer",
+            serde_json::json!({"agent_id": "agent-001", "leg_id": leg.to_string()}),
+        );
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let cmds = stack.drain_cmds();
+        assert!(
+            cmds.iter().all(|c| !matches!(c, CallCommand::LegAdd { .. })),
+            "stale no-answer for a cancelled leg must not dial the next agent, got {cmds:?}"
+        );
+        assert!(
+            cmds.iter().all(|c| !matches!(c, CallCommand::Hangup(_))),
+            "stale no-answer for a cancelled leg must not trigger the fallback"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// A late answer (200 OK racing the ring-timeout CANCEL) for an already
+    /// cancelled leg must not steal the bridge: the queue tears the stale leg
+    /// down instead of bridging it, and the call keeps waiting.
+    #[tokio::test]
+    async fn test_late_answer_for_timed_out_leg_is_not_bridged() {
+        use std::sync::Arc;
+
+        let registry = Arc::new(
+            HookRecordingRegistry::new().with_resolve_uris(vec![
+                vec!["sip:agent1@example.com".to_string()],
+                vec![],
+            ]),
+        );
+        registry
+            .inner
+            .register(
+                "agent-001".to_string(),
+                "agent-001".to_string(),
+                "sip:agent1@example.com".to_string(),
+                vec!["support".to_string()],
+                1,
+            )
+            .await
+            .unwrap();
+        registry
+            .inner
+            .update_presence(
+                "agent-001",
+                crate::call::app::agent_registry::PresenceState::Idle,
+            )
+            .await
+            .unwrap();
+
+        let mut config = build_simple_queue_config();
+        config.skill_routing_enabled = false;
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.skill_group = Some("support".to_string());
+        config.hold = Some(QueueHoldConfig {
+            audio_file: Some("sounds/hold_music.wav".to_string()),
+            loop_playback: true,
+        });
+        config.retry_interval_secs = 60;
+        config.max_wait_secs = 300;
+
+        let plan = config.to_plan();
+        let queue = QueueApp::new(plan, config)
+            .with_agent_registry(registry)
+            .with_call_id("call-late-answer".to_string())
+            .with_skill_group("support".to_string());
+        let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
+
+        stack
+            .assert_cmd(2000, "AcceptCall", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        let _hold = stack.next_cmd(2000).await.expect("hold music");
+
+        // Wait-retention poll resolves Idle agent1 → dial.
+        stack.timeout("queue_retry");
+        let mut leg = None;
+        for _ in 0..10 {
+            match stack.next_cmd(1000).await {
+                Some(CallCommand::LegAdd { leg_id, .. }) => {
+                    leg = leg_id.clone();
+                    break;
+                }
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        let leg = leg.expect("poll must originate the agent leg");
+
+        // Ring timeout: the leg is cancelled and the call parks in wait
+        // retention (still alive).
+        stack.timeout("agent_ring_timeout");
+        let mut removed = Vec::new();
+        let mut hold_restarted = false;
+        for _ in 0..10 {
+            match stack.next_cmd(1000).await {
+                Some(CallCommand::LegRemove { leg_id }) => removed.push(leg_id),
+                Some(CallCommand::Play { .. }) => {
+                    hold_restarted = true;
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        assert_eq!(removed, vec![leg.clone()], "the dialled leg must be cancelled");
+        assert!(hold_restarted, "must return to wait retention");
+
+        // The cancelled UA answered anyway (200 OK raced the CANCEL): the
+        // queue must NOT bridge the caller to the stale leg — it tears the
+        // leg down instead and keeps waiting.
+        stack.custom(
+            "agent_connected",
+            serde_json::json!({"agent_uri": "sip:agent1@example.com", "agent_id": "agent-001", "leg_id": leg.to_string()}),
+        );
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let cmds = stack.drain_cmds();
+        assert!(
+            cmds.iter().all(|c| !matches!(c, CallCommand::Bridge { .. })),
+            "late answer for a timed-out leg must not bridge, got {cmds:?}"
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(c, CallCommand::LegRemove { .. })),
+            "late answer for a timed-out leg must tear the stale dialog down, got {cmds:?}"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
     }
 
     // ── Regression: sequential fallback must skip agents that became

@@ -237,20 +237,15 @@ pub trait AgentRegistry: Send + Sync {
     async fn update_presence(&self, agent_id: &str, new_state: PresenceState)
     -> anyhow::Result<()>;
 
-    /// Called when a dialled agent fails to answer within the ring timeout:
-    /// the agent must end up NON-idle instead of silently returning to Idle,
-    /// so operators see the missed call and the ACD does not immediately
-    /// re-offer. Default wraps the agent into a `Wrapup` presence bound to
-    /// the call; implementations may add recovery (auto-idle timer, stats,
-    /// webhooks).
-    async fn note_agent_no_answer(&self, agent_id: &str, call_id: &str) {
+    /// Called when a dialled agent fails to answer within the ring timeout.
+    /// Default policy releases the agent back to `Idle` — immediately
+    /// schedulable again — so a call returning to the queue (wait retention)
+    /// can re-offer to the same agent right away. Implementations may
+    /// override to add a cooldown window (e.g. `no_answer_cooldown_secs`)
+    /// or stats/webhooks.
+    async fn note_agent_no_answer(&self, agent_id: &str, _call_id: &str) {
         let _ = self
-            .update_presence(
-                agent_id,
-                PresenceState::Wrapup {
-                    call_id: Some(call_id.to_string()),
-                },
-            )
+            .update_presence(agent_id, PresenceState::Idle)
             .await;
     }
 
@@ -456,8 +451,11 @@ pub trait AgentRegistry: Send + Sync {
     /// Semantics (only when the agent's current state carries exactly this
     /// `call_id`):
     /// - `Ringing{call_id}` (unanswered reservation, e.g. originate failure or
-    ///   a parallel leg cancelled by another agent's answer) → back to Idle —
-    ///   the agent never answered and is immediately schedulable again.
+    ///   a parallel leg cancelled by another agent's answer) → released so the
+    ///   agent becomes schedulable again. Implementations choose the exact
+    ///   target state: the default is Idle, the CC adapter uses a short Wrapup
+    ///   breathing window (abandoned-attempt cleanup, with its own auto-idle
+    ///   timer).
     /// - `Busy{call_id}` (phantom busy, e.g. the agent rejected with 486 while
     ///   the call was served by another agent) → Wrapup — short unschedulable
     ///   (the backend starts its own wrapup timer when available), guaranteeing

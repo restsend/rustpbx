@@ -28,6 +28,7 @@ use crate::callrecord::CallRecordHangupReason;
 use crate::models::call_record::extract_sip_username;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -451,6 +452,12 @@ pub struct QueueApp {
     /// (agent_uri, call_id) for agents being dialed concurrently (parallel mode).
     /// When the first agent answers, the rest are cancelled via LegRemove.
     pending_agents: Vec<(String, String)>,
+    /// Agent legs CANCELLED at ring timeout. Their late signaling (200 OK
+    /// racing the CANCEL, the resulting 487 leg-failure, a delayed 180) must
+    /// not re-enter the dialing state machine: the timeout handler already
+    /// resolved agent presence and moved the call on (wait retention / next
+    /// agent / fallback). Cleared per leg when the stale signal is consumed.
+    timed_out_legs: HashSet<String>,
     // ── Comfort announcement ──
     /// Comfort prompt playback state.
     comfort_index: usize,
@@ -525,6 +532,7 @@ impl QueueApp {
             call_id: String::new(),
             enqueued_at: None,
             pending_agents: Vec::new(),
+            timed_out_legs: HashSet::new(),
             comfort_index: 0,
             last_comfort_played: None,
             escalated_groups: Vec::new(),
@@ -2465,6 +2473,20 @@ impl CallApp for QueueApp {
                             warn!(agent = %agent_uri, "Queue: ignoring answer without an agent leg ID");
                             return Ok(AppAction::Continue);
                         };
+                        // A leg CANCELLED at ring timeout answering late (the
+                        // 200 OK raced the CANCEL) must not steal the bridge —
+                        // the call already moved on (wait retention / next
+                        // agent / fallback). Tear the stale dialog down; the
+                        // session layer also BYEs removed legs on LegConnected.
+                        if self.timed_out_legs.remove(&agent_leg) {
+                            warn!(
+                                agent = %agent_uri,
+                                leg = %agent_leg,
+                                "Queue: ignoring late answer for a ring-timeout-cancelled leg"
+                            );
+                            ctrl.remove_legs(&[agent_leg]);
+                            return Ok(AppAction::Continue);
+                        }
                         // Select the winner before prompts or cleanup can resume media.
                         if !self.answered {
                             ctrl.answer().await?;
@@ -2562,6 +2584,12 @@ impl CallApp for QueueApp {
                     leg_id,
                     ..
                 }) => {
+                    // Delayed 180 for a leg already cancelled at ring timeout:
+                    // must not flip the (already released) agent back to Ringing.
+                    if self.timed_out_legs.contains(&leg_id) {
+                        debug!(leg = %leg_id, "Queue: ignoring ringing for a ring-timeout-cancelled leg");
+                        return Ok(AppAction::Continue);
+                    }
                     if let Some(agent_id) = agent_id.as_deref() {
                         info!(agent = %agent_id, "Queue: agent ringing");
 
@@ -2595,6 +2623,17 @@ impl CallApp for QueueApp {
                         warn!("Queue: ignoring agent-busy after connect");
                         return Ok(AppAction::Continue);
                     }
+                    // The 486 crossed with a ring-timeout CANCEL: the timeout
+                    // handler already resolved the agent's presence and moved
+                    // the call on — a second round of
+                    // handle_agent_unavailable would skip the next sequential
+                    // agent / re-enter wait retention spuriously.
+                    if let Some(leg) = leg_id.as_deref()
+                        && self.timed_out_legs.remove(leg)
+                    {
+                        debug!(leg, "Queue: ignoring busy for a ring-timeout-cancelled leg");
+                        return Ok(AppAction::Continue);
+                    }
                     if !agent_id.is_empty()
                         && let Some(ref registry) = self.agent_registry
                     {
@@ -2609,9 +2648,25 @@ impl CallApp for QueueApp {
                         warn!("Queue: ignoring agent-no-answer after connect");
                         return Ok(AppAction::Continue);
                     }
+                    // 487/408 crossed with a ring-timeout CANCEL — already
+                    // handled by the timeout handler (see the busy case above).
+                    if let Some(leg) = leg_id.as_deref()
+                        && self.timed_out_legs.remove(leg)
+                    {
+                        debug!(leg, "Queue: ignoring no-answer for a ring-timeout-cancelled leg");
+                        return Ok(AppAction::Continue);
+                    }
                     if !agent_id.is_empty()
                         && let Some(ref registry) = self.agent_registry
                     {
+                        // Same no-answer policy as the ring-timeout handler:
+                        // the agent did not answer, so release them per
+                        // `no_answer_cooldown_secs` (default: straight back to
+                        // Idle). `release_call` then only mops up an exotic
+                        // phantom `Busy` (it no-ops once the agent is Idle).
+                        registry
+                            .note_agent_no_answer(&agent_id, &self.call_id)
+                            .await;
                         let _ = registry.release_call(&agent_id, &self.call_id).await;
                     }
                     self.handle_agent_unavailable(
@@ -2664,21 +2719,28 @@ impl CallApp for QueueApp {
                 // handled correctly (e.g. DbRegistry custom URIs).
                 let timed_out_agents = std::mem::take(&mut self.pending_agents);
 
-                // Late-answer grace (race1): do NOT cancel the INVITEs at
-                // ring timeout. The CC hook's on_call_connected has a
-                // Wrapup→Busy transition for late answers — the 200 OK that
-                // lands just after the timeout's Wrapup must still connect
-                // and bridge (via the LegConnected self-heal bridge). The
-                // INVITEs terminate naturally (UA timeout / CANCEL from
-                // caller / late 200 OK). pending_agents is already cleared,
-                // so the queue won't re-dial these agents.
-                //
-                // The previous `ctrl.remove_legs(&timed_out_legs)` sent
-                // CANCEL immediately — the late answer's 200 OK crossed with
-                // the CANCEL and the call never connected, defeating the
-                // Wrapup→Busy design in cc_call_session_hook.rs.
-                let _timed_out_legs: Vec<String> = timed_out_agents.iter()
+                // CANCEL the still-ringing INVITEs: the call is leaving the
+                // dialing phase (wait retention / next agent / fallback), so
+                // the agent softphones must stop ringing. A 200 OK that races
+                // the CANCEL is torn down by the session layer (LegConnected
+                // for a removed leg → BYE guard), and every stale signal for
+                // these legs (agent_connected / agent_busy / agent_no_answer /
+                // agent_ringing) is filtered below via `timed_out_legs` so it
+                // cannot re-enter the dialing state machine. The queue never
+                // re-dials these legs: pending_agents is already cleared (a
+                // later re-offer dials a FRESH leg id).
+                let timed_out_legs: Vec<String> = timed_out_agents.iter()
                     .map(|(_, leg_id)| leg_id.clone()).collect();
+                for leg_id in &timed_out_legs {
+                    self.timed_out_legs.insert(leg_id.clone());
+                }
+                if !timed_out_legs.is_empty() {
+                    info!(
+                        legs = ?timed_out_legs,
+                        "Queue: cancelling agent legs after ring timeout"
+                    );
+                    ctrl.remove_legs(&timed_out_legs);
+                }
 
                 if let Some(ref registry) = self.agent_registry {
                     let all_agents = registry.list_agents().await;
