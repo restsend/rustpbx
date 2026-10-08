@@ -532,14 +532,29 @@ impl RwiGateway {
 
     /// Get the user data object of a session (keyed by session_id).
     /// Returns an empty map when nothing was set.
+    ///
+    /// Transfer children inherit the ROOT call's user data: a child session's
+    /// `CallMeta.session_id` points at its root, and the payload was attached
+    /// to the root — reading it through either leg must return the same
+    /// shared object (screen-pop templates render it for consult legs too).
     pub fn get_user_data(
         &self,
         session_id: &SessionId,
     ) -> serde_json::Map<String, serde_json::Value> {
-        self.user_data
-            .get(session_id)
-            .map(|d| d.clone())
-            .unwrap_or_default()
+        if let Some(d) = self.user_data.get(session_id) {
+            return d.clone();
+        }
+        if let Some(root) = self
+            .meta_store
+            .get_sync(session_id)
+            .and_then(|meta| meta.session_id)
+            .filter(|root| *root != *session_id)
+        {
+            if let Some(d) = self.user_data.get(&root) {
+                return d.clone();
+            }
+        }
+        serde_json::Map::new()
     }
 
     /// Remove all user data for the given session (call hangup cleanup,
@@ -1117,6 +1132,45 @@ mod tests {
             .unwrap_err();
         assert_eq!(err, SetUserDataError::SessionNotFound);
         assert!(gw.get_user_data(&"ghost".to_string()).is_empty());
+    }
+
+    /// A transfer CHILD session (CallMeta.session_id pointing at its root)
+    /// reads the root's user data — the shared screen-pop payload travels
+    /// with the logical call, not the individual leg.
+    #[tokio::test]
+    async fn test_get_user_data_transfer_child_inherits_root() {
+        let mut gw = RwiGateway::new();
+        let mut rx = setup_owned_call(&mut gw, "sess-root");
+        gw.meta_store
+            .insert("sess-root".into(), crate::rwi::proto::CallMeta {
+                session_id: Some("sess-root".into()),
+                ..Default::default()
+            });
+        gw.meta_store
+            .insert("sess-child".into(), crate::rwi::proto::CallMeta {
+                session_id: Some("sess-root".into()),
+                ..Default::default()
+            });
+
+        let mut data = serde_json::Map::new();
+        data.insert("crm_id".to_string(), serde_json::json!("C-7"));
+        gw.set_user_data(&"sess-root".to_string(), data).unwrap();
+        let _ = rx.try_recv();
+
+        // Child has no entry of its own but resolves through its root meta.
+        let stored = gw.get_user_data(&"sess-child".to_string());
+        assert_eq!(stored.get("crm_id").and_then(|v| v.as_str()), Some("C-7"));
+
+        // Unknown session (no meta, no data) stays empty.
+        assert!(gw.get_user_data(&"sess-unknown".to_string()).is_empty());
+
+        // Self-referential meta must not loop or fabricate data.
+        gw.meta_store
+            .insert("sess-orphan".into(), crate::rwi::proto::CallMeta {
+                session_id: Some("sess-orphan".into()),
+                ..Default::default()
+            });
+        assert!(gw.get_user_data(&"sess-orphan".to_string()).is_empty());
     }
 
     #[tokio::test]
