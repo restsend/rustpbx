@@ -4,6 +4,24 @@ use crate::app::AppState;
 use std::sync::Arc;
 
 /// Replace `/static` prefix in a URL with the configured static_path.
+/// Template directories searched for one addon, in order: its own
+/// `template_dir()`, the run-directory layouts, then core's source tree
+/// (built-in addons, for runs outside this checkout).
+fn addon_template_dirs(addon: &dyn Addon) -> Vec<String> {
+    let mut dirs = Vec::with_capacity(4);
+    if let Some(dir) = addon.template_dir() {
+        dirs.push(dir);
+    }
+    dirs.push(format!("src/addons/{}/templates", addon.id()));
+    dirs.push(format!("templates/{}", addon.id()));
+    dirs.push(format!(
+        "{}/src/addons/{}/templates",
+        env!("CARGO_MANIFEST_DIR"),
+        addon.id()
+    ));
+    dirs
+}
+
 fn normalize_static_url(url: &str, config: &crate::config::Config) -> String {
     let prefix = config.static_path();
     if url.starts_with("/static/") && prefix != "/static" {
@@ -219,15 +237,7 @@ impl AddonRegistry {
         self.addons
             .iter()
             .filter(|a| self.is_enabled(a.id(), config))
-            .flat_map(|a| {
-                let mut dirs = Vec::with_capacity(3);
-                if let Some(dir) = a.template_dir() {
-                    dirs.push(dir);
-                }
-                dirs.push(format!("src/addons/{}/templates", a.id()));
-                dirs.push(format!("templates/{}", a.id()));
-                dirs
-            })
+            .flat_map(|a| addon_template_dirs(a.as_ref()))
             .collect()
     }
 
@@ -244,13 +254,9 @@ impl AddonRegistry {
             .iter()
             .filter(|a| self.is_enabled(a.id(), config))
             .filter(|a| {
-                let mut dirs = Vec::new();
-                if let Some(dir) = a.template_dir() {
-                    dirs.push(dir);
-                }
-                dirs.push(format!("src/addons/{}/templates", a.id()));
-                dirs.push(format!("templates/{}", a.id()));
-                !dirs.iter().any(|d| std::path::Path::new(d).is_dir())
+                !addon_template_dirs(a.as_ref())
+                    .iter()
+                    .any(|d| std::path::Path::new(d).is_dir())
             })
             .map(|a| a.id().to_string())
             .collect()

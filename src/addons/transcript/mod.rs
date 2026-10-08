@@ -58,8 +58,10 @@ impl Addon for TranscriptAddon {
             let api_prefix = console.api_prefix();
             let static_fs_path = if std::path::Path::new("src/addons/transcript/static").exists() {
                 "src/addons/transcript/static"
-            } else {
+            } else if std::path::Path::new("static/transcript").exists() {
                 "static/transcript"
+            } else {
+                concat!(env!("CARGO_MANIFEST_DIR"), "/src/addons/transcript/static")
             };
             let static_url_prefix = state.config().static_path();
 

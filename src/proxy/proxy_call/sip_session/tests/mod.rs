@@ -4869,6 +4869,53 @@ fn test_resolve_audio_file_path_falls_back_to_config_prefix() {
 }
 
 #[test]
+fn test_resolve_audio_file_path_falls_back_to_core_sounds_outside_checkout() {
+    // Edition binaries (cc, wholesale) run from their own repos, where neither
+    // `sounds/` nor `config/sounds/` holds core's bundled prompts. Re-run this
+    // test in a child process from an empty directory so the parent's working
+    // directory is left alone.
+    if std::env::var_os("RP_AUDIO_OUTSIDE_CHECKOUT").is_some() {
+        let expected = format!("{}/config/sounds/phone-calling.wav", env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(
+            SipSession::resolve_audio_file_path(crate::call::DEFAULT_QUEUE_HOLD_AUDIO),
+            expected
+        );
+        assert_eq!(
+            SipSession::resolve_audio_file_path("config/sounds/phone-calling.wav"),
+            expected
+        );
+        assert_eq!(
+            SipSession::resolve_audio_file_path("sounds/definitely_missing_zzz.wav"),
+            "sounds/definitely_missing_zzz.wav"
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("rp_audio_outside_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let module = module_path!()
+        .split_once("::")
+        .map(|(_, rest)| rest)
+        .unwrap_or(module_path!());
+    let name = format!(
+        "{module}::test_resolve_audio_file_path_falls_back_to_core_sounds_outside_checkout"
+    );
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([name.as_str(), "--exact", "--nocapture"])
+        .env("RP_AUDIO_OUTSIDE_CHECKOUT", "1")
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{}\n{}",
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn test_resolve_audio_file_path_packaged_sounds_resolve_to_config() {
     // Regression for the queue-hold-music bug: the default constant
     // `sounds/phone-calling.wav` does not exist at the workspace root but

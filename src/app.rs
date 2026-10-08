@@ -1264,15 +1264,20 @@ async fn phone_config_handler(State(state): State<AppState>) -> impl IntoRespons
 pub fn create_router(state: AppState) -> Router {
     let mut router = Router::new();
 
-    // Serve static files
-    let static_files_service = ServeDir::new("static");
+    // Serve static files: run directory first, then this crate's own static/
+    // so edition binaries work from any working directory.
+    let source_static = concat!(env!("CARGO_MANIFEST_DIR"), "/static");
+    let static_files_service = ServeDir::new("static").fallback(ServeDir::new(source_static));
 
     // If static/index.html exists, serve it at the root
-    if std::path::Path::new("static/index.html").exists() {
+    let index_path = ["static/index.html", concat!(env!("CARGO_MANIFEST_DIR"), "/static/index.html")]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).is_file());
+    if let Some(index_path) = index_path {
         router = router.route(
             "/",
-            get(|| async {
-                match tokio::fs::read_to_string("static/index.html").await {
+            get(move || async move {
+                match tokio::fs::read_to_string(index_path).await {
                     Ok(content) => Html(content).into_response(),
                     Err(_) => StatusCode::NOT_FOUND.into_response(),
                 }

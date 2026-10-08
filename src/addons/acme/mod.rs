@@ -130,8 +130,10 @@ impl Addon for AcmeAddon {
 
         let static_fs_path = if std::path::Path::new("src/addons/acme/static").exists() {
             "src/addons/acme/static"
-        } else {
+        } else if std::path::Path::new("static/acme").exists() {
             "static/acme"
+        } else {
+            concat!(env!("CARGO_MANIFEST_DIR"), "/src/addons/acme/static")
         };
         let static_url_prefix = state.config().static_path();
 

@@ -971,12 +971,20 @@ pub async fn download_audio_handler(
 }
 
 pub async fn serve_sound_handler(AxumPath(file_path): AxumPath<String>) -> Response {
-    let sounds_dir = if std::path::Path::new("config/sounds").exists() {
-        PathBuf::from("config/sounds")
-    } else {
-        PathBuf::from("sounds")
-    };
     let file_path = file_path.trim_start_matches('/');
+    // Run directory first, then core's bundled sounds for edition binaries
+    // run outside this checkout.
+    let source_sounds = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/config/sounds"));
+    let sounds_dir = [PathBuf::from("config/sounds"), PathBuf::from("sounds"), source_sounds]
+        .into_iter()
+        .find(|dir| dir.join(file_path).exists())
+        .unwrap_or_else(|| {
+            if std::path::Path::new("config/sounds").exists() {
+                PathBuf::from("config/sounds")
+            } else {
+                PathBuf::from("sounds")
+            }
+        });
     let full_path = sounds_dir.join(file_path);
 
     // Security: prevent path traversal

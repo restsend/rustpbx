@@ -469,7 +469,12 @@ impl ConsoleState {
             },
         );
 
-        let mut paths = vec!["templates".to_string()];
+        // Run directory first (packaged images, overrides), then this crate's
+        // own templates so edition binaries work from any working directory.
+        let mut paths = vec![
+            "templates".to_string(),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/templates").to_string(),
+        ];
         if let Some(app_state) = self.app_state() {
             paths.extend(
                 app_state

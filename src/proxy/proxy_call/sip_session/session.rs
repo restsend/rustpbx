@@ -9278,13 +9278,25 @@ impl SipSession {
             return audio_file.to_string();
         }
 
-        if audio_file.starts_with("config/") || audio_file.starts_with("./config/") {
-            return audio_file.to_string();
+        let relative = audio_file.trim_start_matches("./");
+        let is_config_path = relative.starts_with("config/");
+        if !is_config_path {
+            let fallback = Path::new("config").join(audio_file);
+            if fallback.exists() {
+                return fallback.to_string_lossy().to_string();
+            }
         }
 
-        let fallback = Path::new("config").join(audio_file);
-        if fallback.exists() {
-            fallback.to_string_lossy().to_string()
+        // Core's bundled sounds (config/sounds), for edition binaries run
+        // outside this checkout.
+        let source_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let source = if is_config_path {
+            source_root.join(relative)
+        } else {
+            source_root.join("config").join(relative)
+        };
+        if source.exists() {
+            source.to_string_lossy().to_string()
         } else {
             audio_file.to_string()
         }

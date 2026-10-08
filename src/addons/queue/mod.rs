@@ -61,8 +61,10 @@ impl Addon for QueueAddon {
 
         let static_fs_path = if std::path::Path::new("src/addons/queue/static").exists() {
             "src/addons/queue/static"
-        } else {
+        } else if std::path::Path::new("static/queue").exists() {
             "static/queue"
+        } else {
+            concat!(env!("CARGO_MANIFEST_DIR"), "/src/addons/queue/static")
         };
         let static_url_prefix = state.config().static_path();
 
