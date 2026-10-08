@@ -117,8 +117,12 @@ impl RtcTrack {
                 Ok(sdp)
             }
             Err(e) => {
-                let err_str = e.to_string();
-                if err_str.contains("HaveLocalOffer")
+                // Glare: create_offer refuses while the signaling state is
+                // HaveLocalOffer — reuse the pending local offer instead of
+                // failing. Checked via the typed signaling state, NOT error
+                // text: rustrtc's Display strings are not a stable contract
+                // (they churned across 0.3.x → 0.4.x).
+                if self.pc.signaling_state() == rustrtc::SignalingState::HaveLocalOffer
                     && let Some(desc) = self.pc.local_description()
                 {
                     return Ok(desc.to_sdp_string());

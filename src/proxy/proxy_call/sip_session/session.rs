@@ -12372,7 +12372,10 @@ impl SipSession {
                 if self.pending_refers.contains_key(&leg_id) {
                     self.emit_rwi_leg_hangup(&leg_id, Some(reason.clone()));
                     // Plain BYE from the target is a normal flow event:
-                    // report 486 instead of a phantom 500.
+                    // report 486 instead of a phantom 500. Timeout reasons
+                    // arrive in several spellings across the stack ("timeout",
+                    // "timed out" — rustrtc's RtcError::Timeout renders the
+                    // latter) — both map to 408.
                     let lower = reason.to_ascii_lowercase();
                     let status = reason
                         .split(|c: char| !c.is_ascii_digit())
@@ -12381,7 +12384,7 @@ impl SipSession {
                         .unwrap_or_else(|| {
                             if lower.contains("bye") {
                                 486
-                            } else if lower.contains("timeout") {
+                            } else if lower.contains("timeout") || lower.contains("timed out") {
                                 408
                             } else {
                                 500
