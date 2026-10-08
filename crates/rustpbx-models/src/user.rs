@@ -9,8 +9,8 @@ use sea_orm::ActiveValue::Set;
 use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{
-    boolean, string_len, string_len_null, string_len_uniq, timestamp_with_time_zone as timestamp,
-    timestamp_with_time_zone_null as timestamp_null,
+    big_integer, boolean, string_len, string_len_null, string_len_uniq,
+    timestamp_with_time_zone as timestamp, timestamp_with_time_zone_null as timestamp_null,
 };
 use sea_orm_migration::sea_query::ColumnDef;
 use serde::Serialize;
@@ -44,6 +44,11 @@ pub struct Model {
     pub mfa_secret: Option<String>,
     /// Auth source: "local", "ldap", "enterprise"
     pub auth_source: String,
+    /// Session epoch: bumped on password change/reset. Session tokens embed
+    /// the value they were issued with and are rejected once it no longer
+    /// matches, so a password change invalidates every existing session.
+    #[serde(skip_serializing)]
+    pub session_epoch: i64,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -96,6 +101,12 @@ impl Model {
         }
 
         if let Some(user) = user {
+            tracing::warn!(
+                "super-user upsert will OVERWRITE the credentials of existing account '{}' (email '{}'). \
+                 If this was not intended, abort now.",
+                user.username,
+                user.email
+            );
             let mut model: ActiveModel = user.into();
             model.username = Set(username.to_string());
             model.email = Set(email.clone());
@@ -164,6 +175,7 @@ impl MigrationTrait for Migration {
                     .col(boolean(Column::MfaEnabled).default(false))
                     .col(string_len_null(Column::MfaSecret, 64))
                     .col(string_len(Column::AuthSource, 32).default("local"))
+                    .col(big_integer(Column::SessionEpoch).default(0))
                     .to_owned(),
             )
             .await?;

@@ -143,17 +143,23 @@ pub enum ConsoleMediaSource {
 
 pub async fn list_active_calls(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Query(query): Query<ActiveCallListQuery>,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "callcontrol", "read").await {
+        return resp;
+    }
     list_active_calls_inner(&state, &query).await
 }
 
 pub async fn show_active_call(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     AxumPath(session_id): AxumPath<String>,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "callcontrol", "read").await {
+        return resp;
+    }
     show_active_call_inner(&state, &session_id).await
 }
 
@@ -163,6 +169,9 @@ pub async fn dispatch_call_command(
     AxumPath(session_id): AxumPath<String>,
     Json(payload): Json<CallCommandPayload>,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "callcontrol", "command").await {
+        return resp;
+    }
     let action = payload.action_name();
     tracing::info!(
         audit_event = "call_command",
@@ -548,6 +557,9 @@ pub async fn set_call_userdata(
     AxumPath(session_id): AxumPath<String>,
     Json(payload): Json<serde_json::Value>,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "callcontrol", "command").await {
+        return resp;
+    }
     match route_userdata_to_owner(&state, &session_id, &payload, false).await {
         UserdataRoute::Forwarded(resp) | UserdataRoute::RemoteError(resp) => resp,
         UserdataRoute::Local => set_call_userdata_inner(&state, &session_id, payload, &user.username),
@@ -657,9 +669,12 @@ pub fn set_call_userdata_inner(
 /// Read the whole user data object of an active call session.
 pub async fn get_call_userdata(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     AxumPath(session_id): AxumPath<String>,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "callcontrol", "read").await {
+        return resp;
+    }
     match route_userdata_to_owner(&state, &session_id, &serde_json::Value::Null, true).await {
         UserdataRoute::Forwarded(resp) | UserdataRoute::RemoteError(resp) => resp,
         UserdataRoute::Local => get_call_userdata_local(&state, &session_id),

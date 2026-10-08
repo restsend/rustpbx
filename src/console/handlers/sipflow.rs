@@ -59,8 +59,11 @@ pub fn api_urls() -> Router<Arc<ConsoleState>> {
 
 async fn get_settings(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_user): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "sipflow", "read").await {
+        return resp;
+    }
     let app_state = match state.app_state() {
         Some(app) => app,
         None => {
@@ -299,9 +302,13 @@ struct UpdateSettingsRequest {
 
 async fn update_settings(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_user): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<UpdateSettingsRequest>,
 ) -> Response {
+    // Writes backend credentials into the main config — system:write only.
+    if let Err(resp) = state.require_permission(&user, "system", "write").await {
+        return resp;
+    }
     // Get config file path
     let config_path = match get_config_path(&state) {
         Ok(path) => path,
@@ -460,10 +467,13 @@ async fn update_settings(
 
 async fn query_flow(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_user): AuthRequired,
+    AuthRequired(user): AuthRequired,
     AxumPath(call_id): AxumPath<String>,
     Query(params): Query<FlowQueryParams>,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "sipflow", "read").await {
+        return resp;
+    }
     let sip_server = match state.sip_server() {
         Some(server) => server,
         None => {
@@ -587,10 +597,13 @@ async fn query_flow(
 
 async fn query_media(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_user): AuthRequired,
+    AuthRequired(user): AuthRequired,
     AxumPath(call_id): AxumPath<String>,
     Query(params): Query<FlowQueryParams>,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "sipflow", "read").await {
+        return resp;
+    }
     let sip_server = match state.sip_server() {
         Some(server) => server,
         None => {

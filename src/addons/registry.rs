@@ -922,6 +922,7 @@ mod asset_path_tests {
 
     #[test]
     fn template_dir_takes_priority_over_conventions() {
+        let _guard = license_store_lock();
         let registry = AddonRegistry::with_extra_addons(vec![Arc::new(PathAddon)]);
         let dirs = registry.get_template_dirs(&enabled_config());
         assert_eq!(
@@ -934,6 +935,7 @@ mod asset_path_tests {
 
     #[test]
     fn static_mounts_cover_declaring_enabled_addons_only() {
+        let _guard = license_store_lock();
         let registry = AddonRegistry::with_extra_addons(vec![Arc::new(PathAddon)]);
         let mounts = registry.get_static_mounts(&enabled_config());
         assert_eq!(
@@ -976,7 +978,16 @@ mod asset_path_tests {
 
     #[test]
     fn has_commercial_reflects_registered_addon_categories() {
-        assert!(!AddonRegistry::new().has_commercial());
+        // The default registry may already contain commercial addons when
+        // commercial features are compiled in (e.g. `addon-cc`).
+        if cfg!(feature = "addon-cc") {
+            assert!(AddonRegistry::new().has_commercial());
+        } else {
+            assert!(!AddonRegistry::new().has_commercial());
+        }
+        // `with_extra_addons` also registers the feature-gated defaults, so
+        // the "no commercial" case only exists without those features.
+        #[cfg(not(feature = "addon-cc"))]
         assert!(
             !AddonRegistry::with_extra_addons(vec![Arc::new(PathAddon)]).has_commercial()
         );
@@ -986,11 +997,23 @@ mod asset_path_tests {
         .has_commercial());
     }
 
+    /// The license store is process-global; tests that write it
+    /// (`record_startup_results`) must not run concurrently with the tests
+    /// that read `is_enabled`, or the readers observe mid-test state.
+    fn license_store_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        match LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     #[test]
     fn license_status_gates_enabled_addons() {
         use crate::license::{LicenseStatus, record_startup_results};
         use std::collections::HashMap;
 
+        let _guard = license_store_lock();
         let registry = AddonRegistry::with_extra_addons(vec![Arc::new(PathAddon)]);
         let config = enabled_config();
 

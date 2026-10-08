@@ -298,6 +298,15 @@ impl CallSessionHook for IvrExecHook {
 
         // Fire-and-forget webhook POST if URL is configured.
         if let Some(url) = webhook_url {
+            // SSRF guard: the URL arrives via SIP INFO payload parameters, so
+            // any in-call client can supply it. Refuse non-public targets
+            // (loopback / private / link-local, including after DNS).
+            if !crate::utils::is_url_ssrf_safe_async(&url).await {
+                warn!(
+                    call_id = %session_id,
+                    "IVR exec webhook refused: URL does not point at a public host"
+                );
+            } else {
             let payload = result.clone();
             let session_id_clone = session_id.clone();
             tokio::spawn(async move {
@@ -331,6 +340,7 @@ impl CallSessionHook for IvrExecHook {
                     }
                 }
             });
+            }
         }
 
         // Clean up extensions after consumption to prevent re-triggering

@@ -3,6 +3,11 @@
 # cargo run . --bin rustpbx --conf config.toml
 
 http_addr = "0.0.0.0:8080"
+# Trust X-Forwarded-For / X-Real-IP / X-Forwarded-Proto headers when deriving
+# the client IP and request scheme. Only enable when RustPBX sits behind a
+# reverse proxy that overwrites these headers — otherwise any caller can spoof
+# its source IP (e.g. to pass the AMI allowlist). Default: false.
+# trust_forward_headers = true
 # http_gzip = true
 # Plain level ("info"/"debug") or an EnvFilter directive with per-target
 # overrides, e.g. "info,rsipstack=debug". Third-party chatter (hyper_util,
@@ -226,7 +231,10 @@ addons = ["acme", "wholesale"]
 # Don't responed the request when user not existed (slience for spam scanner)
 ensure_user = true
 
-# ACL rules
+# ACL rules — first match wins. NOTE: the defaults below allow everything.
+# Before going to production, replace them with an explicit allow-list, e.g.:
+#     acl_rules = ["allow 10.0.0.0/8", "deny all"]
+# (a warning is logged at startup while `allow all` is in effect)
 acl_rules = [
     # "allow 10.0.0.0/8",
     # "deny 0.123.4.0/16",

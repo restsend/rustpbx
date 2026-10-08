@@ -1,7 +1,7 @@
 use crate::{
     console::{
         ConsoleState,
-        auth::RegistrationPolicy,
+        auth::{RESET_TOKEN_VALID_MINUTES, RegistrationPolicy},
         handlers::forms::{ForgotForm, LoginForm, LoginQuery, RegisterForm, ResetForm},
     },
     handler::middleware::clientaddr::ClientAddr,
@@ -32,6 +32,10 @@ async fn load_mfa_user_or_redirect(
 }
 
 fn is_secure_request(headers: &HeaderMap) -> bool {
+    use crate::handler::middleware::clientaddr;
+    if !clientaddr::forwarded_headers_trusted() {
+        return false;
+    }
     if let Some(proto) = headers.get("x-forwarded-proto")
         && let Ok(proto_str) = proto.to_str()
     {
@@ -139,8 +143,28 @@ pub async fn login_post(
         );
     }
 
+    // Brute-force protection: lock out an IP / identifier that accumulates too
+    // many consecutive failures before touching the password verifier.
+    if state.login_is_locked(client_addr.ip().to_string().as_str(), identifier) {
+        tracing::warn!(identifier = %identifier, %client_addr, "login temporarily locked");
+        return state.render_with_headers(
+            "console/login.html",
+            json!({
+                "login_action": state.login_url(next.clone()),
+                "register_url": register_url,
+                "registration_allowed": policy.allowed,
+                "demo_mode": demo_mode,
+                "error_message": "Too many failed attempts. Please try again later.",
+                "identifier": identifier,
+                "next": next,
+            }),
+            &headers,
+        );
+    }
+
     match state.authenticate(identifier, password).await {
         Ok(Some(user)) => {
+            state.login_clear_failures(client_addr.ip().to_string().as_str(), identifier);
             // Check if MFA is required for this user
             if user.mfa_enabled {
                 // Create MFA session and redirect to verification
@@ -171,25 +195,28 @@ pub async fn login_post(
             }
             let redirect_target = resolve_next_redirect(state.as_ref(), next.clone());
             let mut response = Redirect::to(&redirect_target).into_response();
-            if let Some(header) = state.session_cookie_header(user.id, is_secure_request(&headers))
+            if let Some(header) = state.session_cookie_header(&user, is_secure_request(&headers))
             {
                 response.headers_mut().append(SET_COOKIE, header);
             }
             response
         }
-        Ok(None) => state.render_with_headers(
-            "console/login.html",
-            json!({
-                "login_action": state.login_url(next.clone()),
-                "register_url": register_url,
-                "registration_allowed": policy.allowed,
-                "demo_mode": demo_mode,
-                "error_message": "Invalid credentials",
-                "identifier": identifier,
-                "next": next,
-            }),
-            &headers,
-        ),
+        Ok(None) => {
+            state.login_record_failure(client_addr.ip().to_string().as_str(), identifier);
+            state.render_with_headers(
+                "console/login.html",
+                json!({
+                    "login_action": state.login_url(next.clone()),
+                    "register_url": register_url,
+                    "registration_allowed": policy.allowed,
+                    "demo_mode": demo_mode,
+                    "error_message": "Invalid credentials",
+                    "identifier": identifier,
+                    "next": next,
+                }),
+                &headers,
+            )
+        }
         Err(err) => {
             warn!("login error: {}", err);
             (
@@ -224,7 +251,9 @@ pub async fn logout(
     State(state): State<Arc<ConsoleState>>,
     Query(query): Query<LoginQuery>,
 ) -> Response {
-    let next = query.next.unwrap_or_else(|| state.url_for("/"));
+    // Validate `next` against the console base path — an unvalidated value here
+    // would make GET /logout an open redirect.
+    let next = resolve_next_redirect(state.as_ref(), query.next);
     let mut response = Redirect::to(&next).into_response();
     if let Some(header) = state.clear_session_cookie(is_secure_request(&headers)) {
         response.headers_mut().append(SET_COOKIE, header);
@@ -324,8 +353,12 @@ pub async fn register_post(
     }
 
     if error_message.is_none() {
+        // Single generic message for both cases: distinguishing them lets an
+        // attacker enumerate registered emails / usernames.
         match state.email_exists(&email).await {
-            Ok(true) => error_message = Some("Email is already registered".to_string()),
+            Ok(true) => {
+                error_message = Some("Email or username is not available".to_string())
+            }
             Ok(false) => {}
             Err(err) => {
                 warn!("failed to check email uniqueness: {}", err);
@@ -340,7 +373,9 @@ pub async fn register_post(
 
     if error_message.is_none() {
         match state.username_exists(&username).await {
-            Ok(true) => error_message = Some("Username is already taken".to_string()),
+            Ok(true) => {
+                error_message = Some("Email or username is not available".to_string())
+            }
             Ok(false) => {}
             Err(err) => {
                 warn!("failed to check username uniqueness: {}", err);
@@ -379,7 +414,7 @@ pub async fn register_post(
                 info!("created initial superuser account: {}", user.username);
             }
             let mut response = Redirect::to(&state.url_for("/")).into_response();
-            if let Some(header) = state.session_cookie_header(user.id, is_secure_request(&headers))
+            if let Some(header) = state.session_cookie_header(&user, is_secure_request(&headers))
             {
                 response.headers_mut().append(SET_COOKIE, header);
             }
@@ -432,8 +467,21 @@ pub async fn forgot_post(
         Ok(Some(user)) => match state.upsert_reset_token(&user).await {
             Ok((token, _)) => {
                 let link = state.url_for(&format!("/reset/{}", token));
-                info!("password reset link generated for {}: {}", email, link);
-                reset_link = Some(link);
+                // SECURITY: the reset link is a bearer credential for the
+                // account. It must only ever travel to the mailbox owner. Log
+                // the event without the token, and only render the link when
+                // the operator has explicitly enabled the development escape
+                // hatch (`expose_reset_link_dev = true` in [console]) on a
+                // non-production instance.
+                info!(
+                    "password reset requested for {} (token generated, expires in {} min)",
+                    email,
+                    RESET_TOKEN_VALID_MINUTES
+                );
+                if state.expose_reset_link_dev() {
+                    tracing::debug!(target: "rustpbx::dev", "dev reset link: {}", link);
+                    reset_link = Some(link);
+                }
             }
             Err(err) => {
                 warn!("failed to save reset token: {}", err);
@@ -459,7 +507,9 @@ pub async fn forgot_post(
         "console/forgot.html",
         json!({
             "forgot_action": state.url_for("/forgot"),
-            "info_message": "If the account exists, we've sent a reset link",
+            // Deliberately identical whether or not the address exists, so the
+            // endpoint cannot be used to enumerate registered accounts.
+            "info_message": "If the account exists, a password reset link has been generated. Contact your administrator if you did not receive it.",
             "error_message": null,
             "reset_link": reset_link,
         }),
@@ -567,7 +617,7 @@ pub async fn reset_post(
                 Ok(updated_user) => {
                     let mut response = Redirect::to(&state.url_for("/")).into_response();
                     if let Some(header) =
-                        state.session_cookie_header(updated_user.id, is_secure_request(&headers))
+                        state.session_cookie_header(&updated_user, is_secure_request(&headers))
                     {
                         response.headers_mut().append(SET_COOKIE, header);
                     }
@@ -714,7 +764,7 @@ pub async fn login_mfa_post(
     let mut response = Redirect::to(&redirect_target).into_response();
 
     // Add session cookie
-    if let Some(header) = state.session_cookie_header(user.id, is_secure_request(&headers)) {
+    if let Some(header) = state.session_cookie_header(&user, is_secure_request(&headers)) {
         response.headers_mut().append(SET_COOKIE, header);
     }
 
@@ -750,6 +800,17 @@ pub async fn login_mfa_enroll_secret(
         }
     };
 
+    // Enrollment is only for accounts without MFA yet. An account that already
+    // has TOTP enabled must verify its existing code — handing out fresh
+    // secrets here would let a password-only attacker replace the second
+    // factor.
+    if user.mfa_enabled {
+        return crate::console::config_helpers::json_error(
+            axum::http::StatusCode::FORBIDDEN,
+            "MFA is already enabled for this account",
+        );
+    }
+
     match super::mfa::enrollment_payload(&user) {
         Some(payload) => axum::Json(payload).into_response(),
         None => crate::console::config_helpers::json_error(
@@ -777,6 +838,15 @@ pub async fn login_mfa_enroll_post(
         Err(resp) => return resp,
     };
 
+    // Hard stop for accounts that already have MFA: accepting a client-supplied
+    // secret here would overwrite the victim's TOTP secret and complete the
+    // login without the real second factor (MFA bypass). The account owner can
+    // disable MFA from the security page with their password instead.
+    if user.mfa_enabled {
+        let redirect_target = state.url_for("/login/mfa");
+        return Redirect::to(&redirect_target).into_response();
+    }
+
     if state.mfa_is_locked(user.id) {
         let remaining = state.mfa_lockout_remaining_secs(user.id).unwrap_or(0);
         return render_mfa_page(&state, &headers, true, Some(MfaPageError::Locked(remaining)));
@@ -796,7 +866,7 @@ pub async fn login_mfa_enroll_post(
             }
 
             let mut response = Redirect::to(&state.url_for("/")).into_response();
-            if let Some(header) = state.session_cookie_header(user.id, is_secure_request(&headers))
+            if let Some(header) = state.session_cookie_header(&user, is_secure_request(&headers))
             {
                 response.headers_mut().append(SET_COOKIE, header);
             }

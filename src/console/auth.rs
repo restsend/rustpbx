@@ -16,17 +16,44 @@ use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
     TransactionTrait,
 };
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
 use tracing::warn;
 
 pub(super) const SESSION_COOKIE_NAME: &str = "rustpbx_session";
 pub(super) const MFA_SESSION_COOKIE_NAME: &str = "rustpbx_mfa";
 const SESSION_TTL_HOURS: u64 = 12;
-const RESET_TOKEN_VALID_MINUTES: u64 = 30;
+pub(crate) const RESET_TOKEN_VALID_MINUTES: u64 = 30;
 const MFA_SESSION_TTL_SECS: u64 = 300; // 5 minutes for MFA verification
 
 type HmacSha256 = Hmac<Sha256>;
+
+const LOGIN_MAX_FAILURES: u32 = 10;
+const LOGIN_LOCKOUT_SECS: u64 = 300;
+
+/// Hash a reset token for storage: only the digest is persisted so a leaked
+/// users table cannot be turned into working reset links.
+fn hash_reset_token(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest.iter() {
+        use std::fmt::Write;
+        let _ = write!(out, "{:02x}", byte);
+    }
+    out
+}
+
+/// Constant-time byte slice comparison to avoid timing oracles on HMAC checks.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RegistrationPolicy {
@@ -42,10 +69,16 @@ impl ConsoleState {
         Some(STANDARD_NO_PAD.encode(signature))
     }
 
-    pub(super) fn session_user_id(&self, cookie_value: Option<&str>) -> Option<i64> {
+    /// Verify a session cookie and return `(user_id, session_epoch)`.
+    ///
+    /// The token payload is `user_id:session_epoch:expires` plus an HMAC-SHA256
+    /// tag. The epoch binds the token to the user's `session_epoch` column so a
+    /// password change / reset invalidates every previously issued session.
+    fn parse_session_token(&self, cookie_value: Option<&str>) -> Option<(i64, i64)> {
         let value = cookie_value?;
         let mut segments = value.split(':');
         let user_id: i64 = segments.next()?.parse().ok()?;
+        let epoch: i64 = segments.next()?.parse().ok()?;
         let expires: i64 = segments.next()?.parse().ok()?;
         let signature = segments.next()?;
         if segments.next().is_some() {
@@ -54,12 +87,12 @@ impl ConsoleState {
         if expires <= Utc::now().timestamp() {
             return None;
         }
-        let payload = format!("{}:{}", user_id, expires);
+        let payload = format!("{}:{}:{}", user_id, epoch, expires);
         let expected = self.sign(&payload)?;
-        if expected != signature {
+        if !constant_time_eq(expected.as_bytes(), signature.as_bytes()) {
             return None;
         }
-        Some(user_id)
+        Some((user_id, epoch))
     }
 
     pub fn clear_session_cookie(&self, request_secure: bool) -> Option<HeaderValue> {
@@ -79,9 +112,9 @@ impl ConsoleState {
         }
     }
 
-    pub fn generate_session_token(&self, user_id: i64) -> Option<String> {
+    pub fn generate_session_token(&self, user_id: i64, session_epoch: i64) -> Option<String> {
         let expires_at = Utc::now() + Duration::from_secs(SESSION_TTL_HOURS * 3600);
-        let payload = format!("{}:{}", user_id, expires_at.timestamp());
+        let payload = format!("{}:{}:{}", user_id, session_epoch, expires_at.timestamp());
         let signature = match self.sign(&payload) {
             Some(sig) => sig,
             None => {
@@ -92,8 +125,8 @@ impl ConsoleState {
         Some(format!("{}:{}", payload, signature))
     }
 
-    pub fn session_cookie_header(&self, user_id: i64, request_secure: bool) -> Option<HeaderValue> {
-        let value = self.generate_session_token(user_id)?;
+    pub fn session_cookie_header(&self, user: &UserModel, request_secure: bool) -> Option<HeaderValue> {
+        let value = self.generate_session_token(user.id, user.session_epoch)?;
         let suffix = self.cookie_suffix(request_secure);
         let cookie = format!(
             "{}={}; Path={}; HttpOnly; Max-Age={}{}",
@@ -155,7 +188,7 @@ impl ConsoleState {
         }
         let payload = format!("{}:{}:mfa", user_id, expires);
         let expected = self.sign(&payload)?;
-        if expected != signature {
+        if !constant_time_eq(expected.as_bytes(), signature.as_bytes()) {
             return None;
         }
         Some(user_id)
@@ -276,6 +309,17 @@ impl ConsoleState {
             {
                 return Ok(Some(user));
             }
+        } else {
+            // Equalize response time for unknown identifiers so the endpoint
+            // cannot be used as a user-enumeration timing oracle.
+            let salt = SaltString::generate(&mut OsRng);
+            let dummy = Argon2::default()
+                .hash_password(password.as_bytes(), &salt)
+                .map(|h| h.to_string())
+                .unwrap_or_default();
+            let _ = PasswordHash::new(&dummy).map(|p| {
+                Argon2::default().verify_password(password.as_bytes(), &p)
+            });
         }
 
         Ok(None)
@@ -314,6 +358,11 @@ impl ConsoleState {
         username: &str,
         password: &str,
     ) -> Result<UserModel> {
+        use crate::models::config_entry;
+
+        const CLAIM_CATEGORY: &str = "console";
+        const CLAIM_NAME: &str = "first_user_claimed";
+
         let tx = self
             .db
             .begin()
@@ -337,7 +386,50 @@ impl ConsoleState {
             .to_string();
 
         let now = Utc::now();
-        let is_first_user = existing_users == 0;
+        // Arbitrate the "first user becomes superuser" decision atomically: the
+        // unique (category, entry_name) index on config_entries guarantees that
+        // exactly one concurrent registration can claim the spot.
+        let mut is_first_user = false;
+        if existing_users == 0 {
+            let claim = config_entry::ActiveModel {
+                category: Set(CLAIM_CATEGORY.to_string()),
+                entry_name: Set(CLAIM_NAME.to_string()),
+                content: Set("claimed".to_string()),
+                is_generated: Set(true),
+                created_at: Set(now),
+                updated_at: Set(now),
+                ..Default::default()
+            };
+            let claim_result = config_entry::Entity::insert(claim)
+                .on_conflict(
+                    sea_orm::sea_query::OnConflict::columns([
+                        config_entry::Column::Category,
+                        config_entry::Column::EntryName,
+                    ])
+                    .do_nothing()
+                    .to_owned(),
+                )
+                .exec(&tx)
+                .await;
+            match claim_result {
+                Ok(_) => is_first_user = true,
+                Err(sea_orm::DbErr::RecordNotInserted) => {
+                    // A stale claim from an earlier installation. Fail safe:
+                    // create a regular (unprivileged) account and let the
+                    // operator restore admin access via the CLI super-user
+                    // command instead of granting superuser in a race.
+                    warn!(
+                        "first-user claim already present but no users exist; \
+                         created account will NOT be superuser. Use the CLI \
+                         super-user command to restore administrator access."
+                    );
+                }
+                Err(err) => {
+                    tx.rollback().await.ok();
+                    return Err(err).context("failed to claim first-user slot");
+                }
+            }
+        }
         let model = UserActiveModel {
             email: Set(email.to_string()),
             username: Set(username.to_string()),
@@ -364,11 +456,16 @@ impl ConsoleState {
         Ok(created)
     }
 
+    /// Generate and persist a password-reset token.
+    ///
+    /// Returns the raw (single-use) token to be delivered out-of-band. Only the
+    /// SHA-256 digest is stored so a database leak does not yield usable links.
     pub async fn upsert_reset_token(&self, user: &UserModel) -> Result<(String, DateTime<Utc>)> {
         let token = uuid::Uuid::new_v4().to_string();
+        let token_hash = hash_reset_token(&token);
         let expires = Utc::now() + Duration::from_secs(RESET_TOKEN_VALID_MINUTES * 60);
         let mut model: UserActiveModel = user.clone().into();
-        model.reset_token = Set(Some(token.clone()));
+        model.reset_token = Set(Some(token_hash));
         model.reset_token_expires = Set(Some(expires));
         model.updated_at = Set(Utc::now());
         model
@@ -379,8 +476,9 @@ impl ConsoleState {
     }
 
     pub async fn find_by_reset_token(&self, token: &str) -> Result<Option<UserModel>> {
+        let token_hash = hash_reset_token(token);
         let user = UserEntity::find()
-            .filter(UserColumn::ResetToken.eq(token))
+            .filter(UserColumn::ResetToken.eq(token_hash))
             .one(&self.db)
             .await
             .context("failed to lookup reset token")?;
@@ -398,6 +496,9 @@ impl ConsoleState {
         model.password_hash = Set(hashed);
         model.reset_token = Set(None);
         model.reset_token_expires = Set(None);
+        // Invalidate every session issued before this point: tokens embed the
+        // epoch and are rejected once it no longer matches the stored value.
+        model.session_epoch = Set(user.session_epoch + 1);
         model.updated_at = Set(now);
         model
             .update(&self.db)
@@ -419,20 +520,30 @@ impl ConsoleState {
     }
 
     pub async fn current_user(&self, cookie_value: Option<&str>) -> Result<Option<UserModel>> {
-        if let Some(user_id) = self.session_user_id(cookie_value) {
+        if let Some((user_id, epoch)) = self.parse_session_token(cookie_value) {
             let user = UserEntity::find_by_id(user_id)
                 .one(&self.db)
                 .await
                 .context("failed to lookup current user")?;
-            Ok(user.filter(|u| u.is_active))
+            // Reject tokens issued before the last password change/reset: the
+            // token epoch must match the user's current `session_epoch`.
+            Ok(user.filter(|u| u.is_active && u.session_epoch == epoch))
         } else {
             Ok(None)
         }
     }
 
-    /// Enable MFA for a user with the provided secret and verify the first code
+    /// Enable MFA for a user with the provided secret and verify the first code.
+    ///
+    /// Refuses to run when MFA is already enabled: re-enrollment would let an
+    /// attacker who only knows the password (e.g. from the login challenge)
+    /// overwrite the victim's TOTP secret and bypass the second factor.
     pub async fn enable_mfa(&self, user: &UserModel, secret: &str, code: &str) -> Result<bool> {
         use totp_rs::{Algorithm, Secret, TOTP};
+
+        if user.mfa_enabled {
+            bail!("MFA is already enabled for this account; disable it first (password required)");
+        }
 
         let secret_bytes = match Secret::Encoded(secret.to_string()).to_bytes() {
             Ok(s) => s,
@@ -535,6 +646,63 @@ impl ConsoleState {
             Some((until - now).as_secs() + 1)
         } else {
             None
+        }
+    }
+
+    // ── Login rate limiting (brute-force protection) ────────────────────
+    //
+    // Failures are tracked per source IP and per identifier (username/email).
+    // Either bucket hitting the threshold locks new login attempts for
+    // LOGIN_LOCKOUT_SECS. State is in-memory per process, mirroring the MFA
+    // limiter above.
+
+    pub fn login_is_locked(&self, ip: &str, identifier: &str) -> bool {
+        let ip_key = format!("ip:{}", ip);
+        let id_key = format!("id:{}", identifier.to_lowercase());
+        let mut attempts = match self.login_attempts.lock() {
+            Ok(guard) => guard,
+            Err(_) => return false,
+        };
+        for key in [ip_key, id_key] {
+            if let Some(record) = attempts.get_mut(&key)
+                && let Some(until) = record.locked_until
+            {
+                if Instant::now() < until {
+                    return true;
+                }
+                record.locked_until = None;
+                record.failures = 0;
+            }
+        }
+        false
+    }
+
+    /// Record a failed login. Returns `true` when this failure triggered a lockout.
+    pub fn login_record_failure(&self, ip: &str, identifier: &str) -> bool {
+        let ip_key = format!("ip:{}", ip);
+        let id_key = format!("id:{}", identifier.to_lowercase());
+        let mut triggered = false;
+        if let Ok(mut attempts) = self.login_attempts.lock() {
+            for key in [ip_key, id_key] {
+                let record = attempts.entry(key).or_default();
+                record.failures += 1;
+                if record.failures >= LOGIN_MAX_FAILURES {
+                    record.locked_until =
+                        Some(Instant::now() + Duration::from_secs(LOGIN_LOCKOUT_SECS));
+                    record.failures = 0;
+                    triggered = true;
+                }
+            }
+        }
+        triggered
+    }
+
+    pub fn login_clear_failures(&self, ip: &str, identifier: &str) {
+        let ip_key = format!("ip:{}", ip);
+        let id_key = format!("id:{}", identifier.to_lowercase());
+        if let Ok(mut attempts) = self.login_attempts.lock() {
+            attempts.remove(&ip_key);
+            attempts.remove(&id_key);
         }
     }
 

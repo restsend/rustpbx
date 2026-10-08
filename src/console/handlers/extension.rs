@@ -263,7 +263,44 @@ pub fn api_urls() -> Router<Arc<ConsoleState>> {
             "/extensions/{id}",
             patch(update_extension).delete(delete_extension),
         )
+        .route(
+            "/extensions/{id}/sip-password",
+            get(reveal_extension_sip_password),
+        )
         .route("/extensions/import", post(csv_import_extensions))
+}
+
+/// Reveal the stored SIP password for one extension. Gated by
+/// `extensions:read` (same as the detail page) — the password is no longer
+/// embedded in page payloads, the UI fetches it on demand.
+async fn reveal_extension_sip_password(
+    AxumPath(id): AxumPath<i64>,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+) -> Response {
+    if let Err(resp) = state.require_permission(&user, "extensions", "read").await {
+        return resp;
+    }
+    match ExtensionEntity::find_by_id(id).one(state.db()).await {
+        Ok(Some(model)) => Json(json!({
+            "id": model.id,
+            "sip_password": model.sip_password,
+        }))
+        .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"message": "Extension not found"})),
+        )
+            .into_response(),
+        Err(err) => {
+            warn!("failed to load extension {} for password reveal: {}", id, err);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"message": err.to_string()})),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn build_filters(state: Arc<ConsoleState>) -> serde_json::Value {
@@ -342,6 +379,9 @@ async fn page_extensions(
     headers: HeaderMap,
     AuthRequired(user): AuthRequired,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "extensions", "read").await {
+        return resp;
+    }
     let current_user = state.build_current_user_ctx(&user).await;
     state.render_with_headers(
         "console/extensions.html",
@@ -361,6 +401,11 @@ async fn page_extension_detail(
     headers: HeaderMap,
     AuthRequired(user): AuthRequired,
 ) -> Response {
+    // Detail pages embed the full record in the page payload — gate them with
+    // the same permission the list API enforces.
+    if let Err(resp) = state.require_permission(&user, "extensions", "read").await {
+        return resp;
+    }
     let db = state.db();
 
     let (model, departments) = match ExtensionEntity::find_by_id_with_departments(db, id).await {
@@ -388,11 +433,18 @@ async fn page_extension_detail(
     let forwarding_catalog = build_forwarding_catalog(&state).await;
     let current_user = state.build_current_user_ctx(&user).await;
 
+    // Security: never embed the SIP password in the page payload. The UI can
+    // fetch it on demand via `GET /api/extensions/{id}/sip-password`.
+    let mut model_json = serde_json::to_value(&model).unwrap_or(json!({}));
+    if let Some(obj) = model_json.as_object_mut() {
+        obj.insert("sip_password".to_string(), serde_json::Value::Null);
+    }
+
     state.render_with_headers(
         "console/extension_detail.html",
         json!({
             "nav_active": "extensions",
-            "model": model,
+            "model": model_json,
             "departments": departments,
             "filters": build_filters(state.clone()).await,
             "create_url": state.url_for("/extensions/new"),
@@ -410,6 +462,9 @@ async fn page_extension_create(
     headers: HeaderMap,
     AuthRequired(user): AuthRequired,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "extensions", "write").await {
+        return resp;
+    }
     let forwarding_catalog = build_forwarding_catalog(&state).await;
     let current_user = state.build_current_user_ctx(&user).await;
     state.render_with_headers(

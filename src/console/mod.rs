@@ -56,6 +56,13 @@ struct MfaAttemptRecord {
     locked_until: Option<Instant>,
 }
 
+/// One brute-force bucket for console login attempts (per IP or per identifier).
+#[derive(Debug, Default)]
+pub struct LoginAttemptRecord {
+    failures: u32,
+    locked_until: Option<Instant>,
+}
+
 pub const MFA_MAX_ATTEMPTS: u32 = 5;
 pub const MFA_LOCKOUT_SECS: u64 = 300;
 
@@ -86,6 +93,12 @@ pub struct ConsoleState {
     /// Connection cache for daily rotated SQLite files.
     cdr_conn_cache: Arc<DashMap<String, DatabaseConnection>>,
     mfa_attempts: Arc<Mutex<HashMap<i64, MfaAttemptRecord>>>,
+    /// Brute-force buckets for console logins, keyed `ip:<addr>` / `id:<identifier>`.
+    login_attempts: Arc<Mutex<HashMap<String, LoginAttemptRecord>>>,
+    /// Permission sets for scoped static API tokens, keyed by the synthetic
+    /// (negative) user id embedded in the per-request principal. Populated by
+    /// the API auth middleware and consulted before the role tables.
+    api_token_permissions: Arc<Mutex<HashMap<i64, HashSet<String>>>>,
     #[cfg(test)]
     test_branding_provider: Arc<RwLock<Option<Arc<dyn crate::branding::BrandingProvider>>>>,
 }
@@ -126,6 +139,8 @@ impl ConsoleState {
             callrecord_cfg,
             cdr_conn_cache: Arc::new(DashMap::new()),
             mfa_attempts: Arc::new(Mutex::new(HashMap::new())),
+            login_attempts: Arc::new(Mutex::new(HashMap::new())),
+            api_token_permissions: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
             test_branding_provider: Arc::new(RwLock::new(None)),
         }))
@@ -493,6 +508,15 @@ impl ConsoleState {
             return s;
         }
 
+        // Scoped static API tokens carry their permission set in-memory (keyed
+        // by the synthetic negative user id); no role rows exist for them.
+        if user.id < 0
+            && let Ok(map) = self.api_token_permissions.lock()
+            && let Some(perms) = map.get(&user.id)
+        {
+            return perms.clone();
+        }
+
         const TTL_SECS: u64 = 300;
         if let Ok(mut cache) = self.perm_cache.lock()
             && let Some((ts, perms)) = cache.get(&user.id)
@@ -537,6 +561,86 @@ impl ConsoleState {
         }
     }
 
+    /// Register (or refresh) the permission set derived from a scoped static
+    /// API token. Synthetic principals use negative ids so they never collide
+    /// with real user ids; scoped tokens are never superusers.
+    pub fn register_api_token_permissions(&self, synthetic_id: i64, perms: HashSet<String>) {
+        if let Ok(mut map) = self.api_token_permissions.lock() {
+            map.insert(synthetic_id, perms);
+        }
+    }
+
+    /// Map configured API-token scopes to RBAC permission strings.
+    ///
+    /// Supported scope forms:
+    /// - `*` — full access (equivalent to an unscoped token)
+    /// - `resource:action` / `resource:*` — used verbatim as RBAC permissions
+    /// - known aliases (see below) — expanded to the matching permission set
+    /// - anything else — treated as a resource name granted `resource:*`
+    pub fn scopes_to_permissions(scopes: &[String]) -> HashSet<String> {
+        let mut perms = HashSet::new();
+        for scope in scopes {
+            let scope = scope.trim();
+            match scope {
+                "*" => {
+                    perms.insert("*".to_string());
+                    continue;
+                }
+                "" => continue,
+                "call.control" | "call" | "session" => {
+                    perms.insert("callcontrol:read".to_string());
+                    perms.insert("callcontrol:command".to_string());
+                    perms.insert("presence:read".to_string());
+                }
+                "recording" | "record" => {
+                    perms.insert("cdr:read".to_string());
+                    perms.insert("recording:read".to_string());
+                }
+                "media" => {
+                    perms.insert("sipflow:read".to_string());
+                    perms.insert("recording:read".to_string());
+                }
+                "system" => {
+                    perms.insert("system:read".to_string());
+                }
+                "system.admin" => {
+                    perms.insert("system:read".to_string());
+                    perms.insert("system:write".to_string());
+                }
+                "users" => {
+                    perms.insert("users:manage".to_string());
+                }
+                "extensions" => {
+                    perms.insert("extensions:read".to_string());
+                    perms.insert("extensions:write".to_string());
+                    perms.insert("extensions:delete".to_string());
+                }
+                "trunks" => {
+                    perms.insert("trunks:read".to_string());
+                    perms.insert("trunks:write".to_string());
+                }
+                "routes" => {
+                    perms.insert("routes:read".to_string());
+                    perms.insert("routes:write".to_string());
+                }
+                "departments" => {
+                    perms.insert("departments:read".to_string());
+                    perms.insert("departments:write".to_string());
+                }
+                _ => {
+                    if let Some((resource, action)) = scope.split_once(':') {
+                        let _ = resource;
+                        let _ = action;
+                        perms.insert(scope.to_string());
+                    } else {
+                        perms.insert(format!("{}:*", scope));
+                    }
+                }
+            }
+        }
+        perms
+    }
+
     pub async fn has_permission(
         &self,
         user: &crate::models::user::Model,
@@ -547,7 +651,9 @@ impl ConsoleState {
             return true;
         }
         let perms = self.user_permissions(user).await;
-        perms.contains(&format!("{}:{}", resource, action))
+        let exact = format!("{}:{}", resource, action);
+        let resource_wildcard = format!("{}:*", resource);
+        perms.contains("*") || perms.contains(&exact) || perms.contains(&resource_wildcard)
     }
 
     pub async fn require_permission(
@@ -753,6 +859,11 @@ impl ConsoleState {
         self.config.allow_registration
     }
 
+    /// DEVELOPMENT ONLY escape hatch: render password-reset links on the page.
+    pub fn expose_reset_link_dev(&self) -> bool {
+        self.config.expose_reset_link_dev
+    }
+
     pub fn require_mfa(&self) -> bool {
         self.config.require_mfa
     }
@@ -855,6 +966,7 @@ mod tests {
             is_superuser,
             mfa_enabled: false,
             mfa_secret: None,
+            session_epoch: 0,
             auth_source: "local".into(),
         }
     }

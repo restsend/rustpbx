@@ -227,9 +227,12 @@ const EXPORT_MAX_ROWS: u64 = 50_000;
 /// materialized as sea-orm models all at once.
 pub async fn export_call_records_csv(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Query(filters): Query<QueryCallRecordFilters>,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "cdr", "read").await {
+        return resp;
+    }
     let cdr_date = filters.date_from.as_deref();
     let cdb = state.cdr_db(cdr_date).await;
     let condition = build_condition(&Some(filters));
@@ -377,8 +380,11 @@ async fn resolve_call_record_by_id_or_call_id(
 async fn download_call_record_cdr_json(
     AxumPath(identifier): AxumPath<String>,
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "cdr", "read").await {
+        return resp;
+    }
     let record = match resolve_call_record_by_id_or_call_id(state.db(), &identifier).await {
         Ok(record) => record,
         Err(response) => return response,
@@ -430,8 +436,11 @@ async fn download_call_record_cdr_json(
 async fn list_session_artifacts(
     AxumPath(session_id): AxumPath<String>,
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "cdr", "read").await {
+        return resp;
+    }
     let db = state.db();
     let mut session_match = Condition::any();
     session_match = session_match.add(CallRecordColumn::SessionId.eq(session_id.clone()));
@@ -529,7 +538,12 @@ async fn serve_archived_jsonl_flow(
     location: &str,
     detail_requested: bool,
     client: &reqwest::Client,
+    storage_root: &str,
 ) -> Response {
+    // The location comes from stored CDR metadata (written by the server, not
+    // the request). Local reads are confined to the storage root. HTTP
+    // locations are fetched as-is — they legitimately point at the (often
+    // loopback) sipflow backend, so generic SSRF filtering does not apply.
     let bytes_result: anyhow::Result<Vec<u8>> =
         if location.starts_with("http://") || location.starts_with("https://") {
             match client.get(location).send().await {
@@ -543,6 +557,10 @@ async fn serve_archived_jsonl_flow(
                 },
                 Err(err) => Err(anyhow::Error::from(err.without_url())),
             }
+        } else if Path::new(location).is_absolute() && !is_under_root(location, storage_root) {
+            Err(anyhow::anyhow!(
+                "path outside the storage root is not readable"
+            ))
         } else {
             tokio::fs::read(location).await.map_err(anyhow::Error::from)
         };
@@ -636,8 +654,11 @@ async fn download_call_record_sip_flow(
     AxumPath(identifier): AxumPath<String>,
     Query(query): Query<SipFlowRequestQuery>,
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "cdr", "read").await {
+        return resp;
+    }
     let db = state.db();
     let record = match resolve_call_record_by_id_or_call_id(db, &identifier).await {
         Ok(model) => model,
@@ -675,8 +696,14 @@ async fn download_call_record_sip_flow(
             } else {
                 resolve_archived_artifact_path(location, record.started_at)
             };
-            return serve_archived_jsonl_flow(&record, &resolved, query.detail, state.http_client())
-                .await;
+            return serve_archived_jsonl_flow(
+                &record,
+                &resolved,
+                query.detail,
+                state.http_client(),
+                &callrecord_storage_root(&state),
+            )
+            .await;
         }
     }
 
@@ -994,9 +1021,12 @@ async fn stream_call_recording(
     AxumPath(pk): AxumPath<i64>,
     Query(query): Query<RecordingPlaybackQuery>,
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     headers: HeaderMap,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "cdr", "read").await {
+        return resp;
+    }
     let stream_leg = match parse_recording_stream_selector(query.stream.as_deref()) {
         Ok(selection) => selection,
         Err(message) => {
@@ -1294,9 +1324,12 @@ async fn page_call_records(
 
 async fn query_call_records(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<forms::ListQuery<QueryCallRecordFilters>>,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "cdr", "read").await {
+        return resp;
+    }
     let filters = payload.filters.clone();
     // Determine CDR date from filter date_from (fallback to today).
     let cdr_date = filters.as_ref().and_then(|f| f.date_from.as_deref());
@@ -1512,9 +1545,12 @@ async fn page_call_record_detail(
 async fn update_call_record(
     AxumPath(pk): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_user): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<UpdateCallRecordPayload>,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "cdr", "write").await {
+        return resp;
+    }
     if payload.tags.is_none() && payload.note.is_none() {
         return (
             StatusCode::BAD_REQUEST,
@@ -2322,8 +2358,45 @@ async fn build_recording_segments_payload(
     Some(Value::Array(segments))
 }
 
-fn strip_storage_root(state: &ConsoleState, path: &str) -> String {
-    if let Some(app) = state.app_state() {
+/// True when `path` lies under `root` (lexicographic + canonicalized check).
+/// Used to confine direct filesystem reads to the configured storage root.
+fn is_under_root(path: &str, root: &str) -> bool {
+    if root.is_empty() {
+        return false;
+    }
+    let root_path = std::path::Path::new(root);
+    let candidate = std::path::Path::new(path);
+    if candidate.starts_with(root_path) {
+        return true;
+    }
+    // Canonicalize to neutralize `..` segments when the paths exist on disk.
+    match (
+        std::fs::canonicalize(candidate),
+        std::fs::canonicalize(root_path),
+    ) {
+        (Ok(c), Ok(r)) => c.starts_with(r),
+        _ => false,
+    }
+}
+
+/// The configured CDR storage root (local dir or S3 prefix), or "" when unset.
+fn callrecord_storage_root(state: &ConsoleState) -> String {
+    state
+        .app_state()
+        .and_then(|app| {
+            app.config()
+                .callrecord
+                .as_ref()
+                .map(|config| match &config.storage {
+                    crate::config::CallRecordStorageConfig::Local { root } => root.clone(),
+                    crate::config::CallRecordStorageConfig::S3 { root, .. } => root.clone(),
+                    _ => String::new(),
+                })
+        })
+        .unwrap_or_default()
+}
+
+fn strip_storage_root(state: &ConsoleState, path: &str) -> String {    if let Some(app) = state.app_state() {
         if let Some(config) = &app.config().callrecord {
             match &config.storage {
                 crate::config::CallRecordStorageConfig::Local { root } => {
@@ -2411,7 +2484,11 @@ async fn read_cdr_raw(
         // historical CDRs whose file still lives under a previous storage root
         // (the absolute persisted path) after the operator changed the root —
         // see issue #237.
-        if is_local && Path::new(candidate).is_absolute() {
+        // Defense-in-depth: the direct read is confined to paths under the
+        // configured storage root. `cdr_path` comes from stored metadata, and
+        // honoring arbitrary absolute paths would let corrupted metadata turn
+        // this endpoint into an arbitrary-file-read primitive.
+        if is_local && Path::new(candidate).is_absolute() && is_under_root(candidate, root) {
             if let Ok(value) = tokio::fs::read_to_string(candidate).await {
                 content = Some(value);
                 resolved_path = Some(candidate.clone());
@@ -3067,7 +3144,8 @@ mod tests {
         assert_eq!(response.bytes().await.unwrap().as_ref(), wav.as_slice());
         let location = format!("{endpoint}/sipflow/call.jsonl");
         let signed = presign_artifact_url(&state, &location).await.unwrap();
-        let response = serve_archived_jsonl_flow(&record, &signed, true, state.http_client()).await;
+        let response =
+            serve_archived_jsonl_flow(&record, &signed, true, state.http_client(), "").await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -3218,8 +3296,14 @@ mod tests {
         .expect("write jsonl");
 
         let client = crate::http_util::build_keepalive_client(None, None).unwrap();
-        let response =
-            serve_archived_jsonl_flow(&model, jsonl.to_str().unwrap(), true, &client).await;
+        let response = serve_archived_jsonl_flow(
+            &model,
+            jsonl.to_str().unwrap(),
+            true,
+            &client,
+            dir.path().to_str().unwrap(),
+        )
+        .await;
         let (parts, body) = response.into_parts();
         assert_eq!(parts.status, StatusCode::OK);
         assert!(
@@ -3256,8 +3340,14 @@ mod tests {
 
         // Missing file yields 404, still JSON.
         let missing = dir.path().join("nope.jsonl");
-        let response =
-            serve_archived_jsonl_flow(&model, missing.to_str().unwrap(), true, &client).await;
+        let response = serve_archived_jsonl_flow(
+            &model,
+            missing.to_str().unwrap(),
+            true,
+            &client,
+            dir.path().to_str().unwrap(),
+        )
+        .await;
         let (parts, _) = response.into_parts();
         assert_eq!(parts.status, StatusCode::NOT_FOUND);
     }
@@ -3301,6 +3391,7 @@ mod tests {
             &format!("http://{address}/flow.jsonl"),
             true,
             &client,
+            "",
         )
         .await;
         let (parts, body) = response.into_parts();

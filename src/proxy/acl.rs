@@ -189,6 +189,20 @@ impl AclModule {
     fn with_server(config: Arc<ProxyConfig>, server: Option<SipServerRef>) -> Self {
         let fallback_rules = resolve_base_rules(&config);
 
+        // Loud nudge (without breaking LAN deployments): an effective
+        // `allow all` rule means the ACL layer is not actually restricting
+        // anything.
+        let allows_all = fallback_rules
+            .iter()
+            .any(|rule| rule.trim().eq_ignore_ascii_case("allow all"));
+        if allows_all {
+            tracing::warn!(
+                "ACL rules include 'allow all' — the SIP access-control layer is \
+                 effectively disabled. Restrict acl_rules to your trusted networks \
+                 before exposing this server beyond a trusted LAN."
+            );
+        }
+
         Self {
             inner: Arc::new(AclModuleInner {
                 config: ArcSwap::from_pointee(config.as_ref().clone()),

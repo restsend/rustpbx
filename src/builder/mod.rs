@@ -129,6 +129,15 @@ impl AppBuilder {
             Config::default()
         };
 
+        // Forwarding headers are only trusted when explicitly configured —
+        // see `ClientAddr` / `trust_forward_headers` for the reasoning.
+        crate::handler::middleware::clientaddr::set_trust_forwarded_headers(
+            config.trust_forward_headers,
+        );
+        if config.trust_forward_headers {
+            info!("trusting X-Forwarded-* headers (trust_forward_headers = true)");
+        }
+
         // ---- Handle one-shot commands before starting the server ----------------
         if let Some(Commands::Dump { database_url }) = &cli.command {
             let url = database_url.clone().unwrap_or(config.database_url.clone());
@@ -446,8 +455,14 @@ impl AppBuilder {
                         }
                     };
 
-                    // Auto-create demo superuser when demo_mode is enabled
+                    // Auto-create demo superuser when demo_mode is enabled.
+                    // Loud warning: the credentials are public knowledge.
                     if state.config().demo_mode {
+                        tracing::warn!(
+                            "demo_mode is ENABLED: a superuser demo@miuda.ai with the \
+                             publicly known password 'hello@miuda.ai' will be created. \
+                             NEVER enable demo_mode on an internet-reachable deployment."
+                        );
                         let db = state.db();
                         if let Err(e) = crate::models::user::Model::upsert_super_user(
                             db,

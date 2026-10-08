@@ -68,7 +68,43 @@ pub fn api_urls() -> Router<Arc<ConsoleState>> {
             "/sip-trunk/{id}",
             patch(update_sip_trunk).delete(delete_sip_trunk),
         )
+        .route(
+            "/sip-trunk/{id}/auth-password",
+            get(reveal_sip_trunk_auth_password),
+        )
         .route("/sip-trunk/{id}/dependencies", get(trunk_dependencies))
+}
+
+/// Reveal the stored auth password for one trunk (`trunks:read` required).
+/// Passwords are no longer embedded in list/detail page payloads.
+async fn reveal_sip_trunk_auth_password(
+    AxumPath(id): AxumPath<i64>,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+) -> Response {
+    if let Err(resp) = state.require_permission(&user, "trunks", "read").await {
+        return resp;
+    }
+    match SipTrunkEntity::find_by_id(id).one(state.db()).await {
+        Ok(Some(model)) => Json(json!({
+            "id": model.id,
+            "auth_password": model.auth_password,
+        }))
+        .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"message": "SIP trunk not found"})),
+        )
+            .into_response(),
+        Err(err) => {
+            warn!("failed to load sip trunk {} for password reveal: {}", id, err);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"message": format!("Failed to load SIP trunk: {}", err)})),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn page_sip_trunks(
@@ -76,6 +112,9 @@ async fn page_sip_trunks(
     headers: HeaderMap,
     AuthRequired(user): AuthRequired,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "trunks", "read").await {
+        return resp;
+    }
     let (filters, _) = build_filters_payload(&state).await;
     let current_user = state.build_current_user_ctx(&user).await;
     let has_file_trunks = state
@@ -119,6 +158,9 @@ async fn page_sip_trunk_create(
     headers: HeaderMap,
     AuthRequired(user): AuthRequired,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "trunks", "write").await {
+        return resp;
+    }
     let (filters, tenants) = build_filters_payload(&state).await;
     let current_user = state.build_current_user_ctx(&user).await;
     let ami_endpoint = state
@@ -149,6 +191,10 @@ async fn page_sip_trunk_detail(
     headers: HeaderMap,
     AuthRequired(user): AuthRequired,
 ) -> Response {
+    // Detail pages embed the full record — gate them with the list permission.
+    if let Err(resp) = state.require_permission(&user, "trunks", "read").await {
+        return resp;
+    }
     let db = state.db();
     let (filters, tenants) = build_filters_payload(&state).await;
 
@@ -157,8 +203,6 @@ async fn page_sip_trunk_detail(
     let tenant_id = sip_trunk_tenants::get_trunk_tenant_id(&state, id).await;
     if let Some(tid) = tenant_id {
         warn!("Found tenant link for trunk {}: tenant_id={}", id, tid);
-    } else {
-        warn!("No tenant link found for trunk {}", id);
     }
 
     let current_user = state.build_current_user_ctx(&user).await;
@@ -169,6 +213,12 @@ async fn page_sip_trunk_detail(
 
             if let (Some(tid), Some(obj)) = (tenant_id, model_json.as_object_mut()) {
                 obj.insert("tenant_id".to_string(), json!(tid));
+            }
+
+            // Security: never embed the trunk auth password in the page
+            // payload; the UI fetches it on demand via the reveal API.
+            if let Some(obj) = model_json.as_object_mut() {
+                obj.insert("auth_password".to_string(), serde_json::Value::Null);
             }
 
             let ami_endpoint = state
@@ -395,9 +445,12 @@ async fn delete_sip_trunk(
 
 async fn query_sip_trunks(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<ListQuery<QuerySipTrunkFilters>>,
 ) -> Response {
+    if let Err(resp) = state.require_permission(&user, "trunks", "read").await {
+        return resp;
+    }
     let db = state.db();
     let filters_payload;
     {
@@ -496,7 +549,14 @@ async fn query_sip_trunks(
 
     let enriched_items: Vec<Value> = items
         .into_iter()
-        .map(|model| serde_json::to_value(&model).unwrap_or_else(|_| json!({})))
+        .map(|model| {
+            let mut value = serde_json::to_value(&model).unwrap_or_else(|_| json!({}));
+            // Security: carrier credentials never leave through the list API.
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("auth_password".to_string(), serde_json::Value::Null);
+            }
+            value
+        })
         .collect();
 
     // Issue #179: collect file-sourced trunks from in-memory snapshot

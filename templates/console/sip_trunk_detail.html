@@ -265,9 +265,14 @@ default('RustPBX') }}{% endblock %}
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_auth_password" | t }}
-                            <input type="text" x-model.trim="form.auth_password" maxlength="160"
-                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ "sip_trunk_detail.field_auth_password_placeholder" | t }}">
+                            <div class="flex gap-2">
+                                <input type="text" x-model.trim="form.auth_password" maxlength="160"
+                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="{{ "sip_trunk_detail.field_auth_password_placeholder" | t }}">
+                                <button type="button" @click="revealAuthPassword()" x-show="mode === 'edit' && model?.id"
+                                    class="shrink-0 rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-50"
+                                    x-text="authPasswordRevealed ? '••••••••' : 'Show'"></button>
+                            </div>
                             <p class="text-xs text-sky-600">SIP password for authenticating with the provider</p>
                         </label>
                     </div>
@@ -608,6 +613,7 @@ default('RustPBX') }}{% endblock %}
             listUrl: `${options.basePath || '/console'}/sip-trunk`,
             createUrl: options.createUrl || null,
             updateUrl: options.updateUrl || null,
+            authPasswordRevealed: false,
             statusOptions: [],
             directionOptions: [],
             transportOptions: [
@@ -700,14 +706,14 @@ default('RustPBX') }}{% endblock %}
                 // Reset to empty first to force reactivity (needed when value equals default)
                 this.form.status = '';
                 this.form.direction = '';
-                this.form.sip_transport = '';
-                this.form.status = (model.status || 'healthy').toLowerCase();
+                this.form.sip_transport = '';                this.form.status = (model.status || 'healthy').toLowerCase();
                 this.form.direction = (model.direction || 'bidirectional').toLowerCase();
                 this.form.sip_transport = (model.sip_transport || 'udp').toLowerCase();
                 this.form.sip_server = model.sip_server || '';
                 this.form.outbound_proxy = model.outbound_proxy || '';
                 this.form.auth_username = model.auth_username || '';
                 this.form.auth_password = model.auth_password || '';
+                this.authPasswordRevealed = false;
                 this.form.max_cps = model.max_cps != null ? String(model.max_cps) : '';
                 this.form.max_concurrent = model.max_concurrent != null ? String(model.max_concurrent) : '';
                 this.form.max_call_duration = model.max_call_duration != null ? String(model.max_call_duration) : '';
@@ -790,8 +796,31 @@ default('RustPBX') }}{% endblock %}
             toggleActive() {
                 this.form.is_active = !this.form.is_active;
             },
-            async loadRegStatus() {
+            // Reveal the stored trunk auth password on demand — it is no
+            // longer embedded in the page payload (security).
+            async revealAuthPassword() {
+                if (!this.model?.id) return;
+                if (this.authPasswordRevealed) {
+                    this.authPasswordRevealed = false;
+                    this.form.auth_password = '';
+                    return;
+                }
                 try {
+                    const resp = await fetch(
+                        `${this.apiPrefix}/sip-trunk/${this.model.id}/auth-password`,
+                        { credentials: 'same-origin' }
+                    );
+                    if (!resp.ok) return;
+                    const data = await resp.json();
+                    if (typeof data.auth_password === 'string') {
+                        this.form.auth_password = data.auth_password;
+                        this.authPasswordRevealed = true;
+                    }
+                } catch (err) {
+                    console.error('failed to reveal auth password', err);
+                }
+            },
+            async loadRegStatus() {                try {
                     const amiPath = (this.amiEndpoint || '/ami/v1').replace(/\/+$/, '');
                     const resp = await fetch(`${amiPath}/trunk_registrations`);
                     if (resp.ok) {

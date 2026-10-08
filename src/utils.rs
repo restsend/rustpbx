@@ -55,52 +55,64 @@ pub fn validate_domain(domain: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
 }
 
-/// Check whether a URL points to a private / loopback / link-local IP address
-/// to prevent Server-Side Request Forgery (SSRF) to internal networks.
+/// Check whether a URL points at a public host. Blocks non-HTTP(S) schemes,
+/// private / loopback / link-local IP literals (including decimal / hex IPv4
+/// encodings — the `url` crate normalizes those), and internal-looking
+/// hostnames. Synchronous and DNS-free; use [`is_url_ssrf_safe_async`] when
+/// hostname resolution should be verified too.
 pub fn is_url_ssrf_safe(url: &str) -> bool {
-    let url_lower = url.trim().to_lowercase();
-    if !url_lower.starts_with("http://") && !url_lower.starts_with("https://") {
+    let parsed = match url::Url::parse(url.trim()) {
+        Ok(parsed) => parsed,
+        Err(_) => return false,
+    };
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let host_lower = host.to_lowercase();
+    if host_lower == "localhost"
+        || host_lower == "localhost6"
+        || host_lower.ends_with(".local")
+        || host_lower.ends_with(".internal")
+        || host_lower.ends_with(".lan")
+        || host_lower.ends_with(".localdomain")
+    {
         return false;
     }
 
-    // Strip protocol
-    let rest = url_lower
-        .strip_prefix("https://")
-        .or_else(|| url_lower.strip_prefix("http://"))
-        .unwrap_or(&url_lower);
+    match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => !is_private_ip(&IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => !is_private_ip(&IpAddr::V6(ip)),
+        Some(url::Host::Domain(_)) => !host_lower.is_empty(),
+        None => false,
+    }
+}
 
-    // Extract hostname (up to first /, ?, or :)
-    let host = rest
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .split('?')
-        .next()
-        .unwrap_or("")
-        .split(':')
-        .next()
-        .unwrap_or("");
-
-    if host.is_empty() {
+/// Like [`is_url_ssrf_safe`], but additionally resolves hostnames and rejects
+/// URLs whose DNS answers point at private / loopback ranges. This closes the
+/// DNS-rebinding and hostname→private-IP bypasses of the sync check.
+pub async fn is_url_ssrf_safe_async(url: &str) -> bool {
+    if !is_url_ssrf_safe(url) {
         return false;
     }
-
-    // Block hostnames that look like internal addresses
-    if host == "localhost" || host == "localhost6" || host == "127.0.0.1" || host == "::1" {
-        return false;
+    let parsed = match url::Url::parse(url.trim()) {
+        Ok(parsed) => parsed,
+        Err(_) => return false,
+    };
+    if let Some(url::Host::Domain(domain)) = parsed.host() {
+        let port = parsed.port_or_known_default().unwrap_or(80);
+        match tokio::net::lookup_host((domain, port)).await {
+            Ok(addrs) => {
+                let addrs: Vec<_> = addrs.collect();
+                !addrs.is_empty() && addrs.iter().all(|a| !is_private_ip(&a.ip()))
+            }
+            Err(_) => false,
+        }
+    } else {
+        true
     }
-
-    // Block internal TLDs
-    if host.ends_with(".local") || host.ends_with(".internal") || host.ends_with(".lan") {
-        return false;
-    }
-
-    // Try parsing as IP address
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return !is_private_ip(&ip);
-    }
-
-    true
 }
 
 fn is_private_ip(ip: &IpAddr) -> bool {

@@ -10,15 +10,40 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Derive a stable synthetic principal id from the token material. Negative so
+/// it can never collide with a real `rustpbx_users.id`; the API token scope map
+/// on [`ConsoleState`] is keyed by this id.
+fn synthetic_id_for_token(token: &str) -> i64 {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(token.as_bytes());
+    let mut id: i64 = 0;
+    for byte in digest.iter().take(8) {
+        id = (id << 8) | *byte as i64;
+    }
+    id & i64::MAX | i64::MIN // force negative, keep 63 bits of entropy
+}
+
 pub fn router(state: Arc<ConsoleState>) -> Router {
     let mut token_map: HashMap<String, Vec<String>> = HashMap::new();
+    let mut unscoped_tokens = 0usize;
     if let Some(console_cfg) = &state.config().console {
         for t in &console_cfg.api_tokens {
+            if t.scopes.is_empty() {
+                unscoped_tokens += 1;
+            }
             token_map
                 .entry(t.token.clone())
                 .or_default()
                 .extend_from_slice(&t.scopes);
         }
+    }
+    if unscoped_tokens > 0 {
+        tracing::warn!(
+            count = unscoped_tokens,
+            "[console.api_tokens] entries have no scopes and are treated as full \
+             superuser API keys. Give each token an explicit `scopes` list \
+             (e.g. scopes = [\"call.control\", \"recording\"]) to restrict it."
+        );
     }
 
     let phone_auth = build_phone_auth(&state);
@@ -94,6 +119,18 @@ struct ApiAuthState {
     phone_auth: Option<DynTokenValidator>,
 }
 
+/// Permission set granted to phone/agent tokens. These tokens authenticate a
+/// registered desk phone or agent client — they must not be superusers, but
+/// need call control and call media access to function.
+const PHONE_TOKEN_PERMISSIONS: &[&str] = &[
+    "callcontrol:read",
+    "callcontrol:command",
+    "cdr:read",
+    "sipflow:read",
+    "presence:read",
+    "dashboard:read",
+];
+
 async fn api_auth_middleware(
     axum::extract::State(auth_state): axum::extract::State<ApiAuthState>,
     mut req: axum::http::Request<axum::body::Body>,
@@ -102,16 +139,35 @@ async fn api_auth_middleware(
     let headers = req.headers().clone();
 
     if let Some(bearer) = extract_bearer_token(&headers) {
-        if auth_state.api_tokens.contains_key(&bearer) {
-            let user = make_synthetic_user();
+        if let Some(scopes) = auth_state.api_tokens.get(bearer.as_str()) {
+            let user = if scopes.is_empty() {
+                // Unscoped token: explicit opt-in to full access (warned about
+                // at startup).
+                make_synthetic_user(true)
+            } else {
+                let perms = ConsoleState::scopes_to_permissions(scopes);
+                let synthetic_id = synthetic_id_for_token(&bearer);
+                auth_state
+                    .console
+                    .register_api_token_permissions(synthetic_id, perms);
+                make_scoped_synthetic_user(synthetic_id)
+            };
             req.extensions_mut().insert(ApiTokenAuth(user));
             return next.run(req).await;
         }
 
         if let Some(ref validator) = auth_state.phone_auth {
             if let Some(_agent_id) = validator.validate_token(&bearer) {
-                let user = make_synthetic_user();
-                req.extensions_mut().insert(ApiTokenAuth(user));
+                let mut perms = std::collections::HashSet::new();
+                for p in PHONE_TOKEN_PERMISSIONS {
+                    perms.insert(p.to_string());
+                }
+                let synthetic_id = synthetic_id_for_token(&bearer);
+                auth_state
+                    .console
+                    .register_api_token_permissions(synthetic_id, perms);
+                req.extensions_mut()
+                    .insert(ApiTokenAuth(make_scoped_synthetic_user(synthetic_id)));
                 return next.run(req).await;
             }
         }
@@ -160,7 +216,7 @@ fn extract_bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-fn make_synthetic_user() -> crate::models::user::Model {
+fn make_synthetic_user(superuser: bool) -> crate::models::user::Model {
     use chrono::Utc;
     crate::models::user::Model {
         id: 0,
@@ -174,10 +230,44 @@ fn make_synthetic_user() -> crate::models::user::Model {
         created_at: Utc::now(),
         updated_at: Utc::now(),
         is_active: true,
-        is_staff: true,
-        is_superuser: true,
+        is_staff: superuser,
+        is_superuser: superuser,
         mfa_enabled: false,
         mfa_secret: None,
+        session_epoch: 0,
         auth_source: "api-token".to_string(),
+    }
+}
+
+/// A synthetic principal for a scoped token / phone token: authenticated, but
+/// restricted to the permissions registered for its synthetic id.
+fn make_scoped_synthetic_user(synthetic_id: i64) -> crate::models::user::Model {
+    let mut user = make_synthetic_user(false);
+    user.id = synthetic_id;
+    user.username = "api-token".to_string();
+    user.auth_source = "api-token-scoped".to_string();
+    user
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn synthetic_ids_are_negative_and_stable() {
+        let a = synthetic_id_for_token("token-a");
+        let b = synthetic_id_for_token("token-a");
+        let c = synthetic_id_for_token("token-b");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert!(a < 0);
+    }
+
+    #[test]
+    fn unscoped_is_superusers_only_via_explicit_flag() {
+        assert!(make_synthetic_user(true).is_superuser);
+        assert!(!make_synthetic_user(false).is_superuser);
+        assert!(make_scoped_synthetic_user(-42).id < 0);
+        assert!(!make_scoped_synthetic_user(-42).is_superuser);
     }
 }

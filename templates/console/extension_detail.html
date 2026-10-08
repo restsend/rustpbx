@@ -1003,12 +1003,37 @@
                     }
                 },
                 hasExistingSipPassword() {
-                    return !!this.sipPasswordStored;
+                    // The stored password is no longer embedded in the page
+                    // payload (security); the reveal toggle fetches it from
+                    // `GET {apiBase}/extensions/{id}/sip-password` on demand.
+                    return this.mode === 'edit' && !!(this.model?.id);
                 },
-                toggleSipPasswordVisibility() {
+                async fetchStoredSipPassword() {
+                    if (!this.model?.id) {
+                        return '';
+                    }
+                    try {
+                        const resp = await fetch(
+                            `${this.apiBase}/extensions/${this.model.id}/sip-password`,
+                            { credentials: 'same-origin' }
+                        );
+                        if (!resp.ok) {
+                            return '';
+                        }
+                        const data = await resp.json();
+                        return typeof data.sip_password === 'string' ? data.sip_password : '';
+                    } catch (err) {
+                        console.error('failed to reveal SIP password', err);
+                        return '';
+                    }
+                },
+                async toggleSipPasswordVisibility() {
                     if (!this.sipPasswordVisible) {
                         if (!this.sipPasswordDirty && this.hasExistingSipPassword()) {
-                            this.sipPasswordInput = this.sipPasswordStored;
+                            const revealed = await this.fetchStoredSipPassword();
+                            if (revealed) {
+                                this.sipPasswordInput = revealed;
+                            }
                         }
                         this.sipPasswordVisible = true;
                         return;

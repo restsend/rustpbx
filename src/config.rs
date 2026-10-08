@@ -479,6 +479,14 @@ pub struct Config {
     pub http_addr: String,
     #[serde(default)]
     pub http_gzip: bool,
+    /// Trust `X-Forwarded-For` / `X-Real-IP` / `X-Client-IP` / `CF-Connecting-IP`
+    /// (and `X-Forwarded-Proto`) headers when deriving the client address and
+    /// request scheme. Only enable this when RustPBX sits behind a reverse
+    /// proxy that overwrites these headers; otherwise any caller could spoof
+    /// its source IP (and e.g. pass the AMI IP allowlist with
+    /// `X-Forwarded-For: 127.0.0.1`). Default: false.
+    #[serde(default)]
+    pub trust_forward_headers: bool,
     pub https_addr: Option<String>,
     pub ssl_certificate: Option<String>,
     pub ssl_private_key: Option<String>,
@@ -824,6 +832,13 @@ pub struct ConsoleConfig {
     /// Each token has an optional list of scopes (e.g. ["call.control", "recording"]).
     #[serde(default)]
     pub api_tokens: Vec<ApiTokenConfig>,
+    /// DEVELOPMENT ONLY. When true, the forgot-password flow renders the
+    /// generated reset link on the page (and at debug log level) instead of
+    /// leaving delivery to an out-of-band channel such as e-mail. Never enable
+    /// on a production instance: anyone who can reach the page could reset any
+    /// account whose e-mail address they know.
+    #[serde(default)]
+    pub expose_reset_link_dev: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -850,6 +865,7 @@ impl Default for ConsoleConfig {
             locales: default_locales(),
             static_path: None,
             api_tokens: Vec::new(),
+            expose_reset_link_dev: false,
         }
     }
 }
@@ -2379,6 +2395,7 @@ impl Default for Config {
         Self {
             http_addr: default_config_http_addr(),
             http_gzip: false,
+            trust_forward_headers: false,
             https_addr: None,
             ssl_certificate: None,
             ssl_private_key: None,

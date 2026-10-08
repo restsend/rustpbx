@@ -35,6 +35,7 @@ impl MigratorTrait for Migrator {
             Box::new(super::m20260917_000001_cluster_session_target_session_id::Migration),
             Box::new(super::add_call_record_report_columns::Migration),
             Box::new(super::add_call_record_quality_columns::Migration),
+            Box::new(super::add_user_session_epoch::Migration),
             Box::new(super::cdr_daily::Migration),
             Box::new(super::runtime_snapshot::Migration),
             Box::new(super::add_long_text_columns::Migration),

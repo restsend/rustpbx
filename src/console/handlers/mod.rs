@@ -158,6 +158,7 @@ pub mod test_helpers {
             is_superuser: true,
             mfa_enabled: false,
             mfa_secret: None,
+            session_epoch: 0,
             auth_source: "local".into(),
         }
     }
@@ -180,6 +181,7 @@ pub mod test_helpers {
             is_superuser: false,
             mfa_enabled: false,
             mfa_secret: None,
+            session_epoch: 0,
             auth_source: "local".into(),
         }
     }

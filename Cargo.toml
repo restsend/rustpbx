@@ -69,6 +69,7 @@ default = [
 
 
 [dependencies]
+url = "2.5"
 instant-acme = { version = "0.8.5", default-features = false, features = [
     "hyper-rustls",
     "ring",

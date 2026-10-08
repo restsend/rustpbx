@@ -880,9 +880,13 @@ pub struct DownloadModelRequest {
 
 pub async fn download_model(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<DownloadModelRequest>,
 ) -> Response {
+    // Spawns a downloader process and writes multi-GB models — system:write.
+    if let Err(resp) = state.require_permission(&user, "system", "write").await {
+        return resp;
+    }
     let app_state = match state.app_state() {
         Some(app) => app,
         None => {
