@@ -100,7 +100,8 @@ async fn single_node_set_userdata_then_events_carry_it() {
         digit: "5".into(),
         leg_id: None,
         extra: None,
-    });
+        leg_role: None,
+});
     let dtmf = next_tap_event(&mut tap).await;
     assert_eq!(dtmf["event_type"], "dtmf", "{dtmf}");
     assert_eq!(dtmf["user_data"]["crm_id"], "C-1", "dtmf must carry user_data: {dtmf}");
@@ -290,7 +291,8 @@ async fn webhook_delivery_carries_user_data() {
         digit: "5".into(),
         leg_id: None,
         extra: None,
-    });
+        leg_role: None,
+});
     let posted = wait_webhook_envelope(&capture, "dtmf")
         .await
         .expect("webhook must receive dtmf");

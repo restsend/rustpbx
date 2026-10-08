@@ -500,6 +500,7 @@ fn forward_dtmf_skips_app_injection_when_no_app_is_running() {
         "1001",
         "2000",
         None,
+        None,
     );
 
     assert_eq!(runtime.inject_calls.load(Ordering::SeqCst), 0);
@@ -527,6 +528,7 @@ fn forward_dtmf_rejects_non_caller_leg_as_application_input() {
         &buffered,
         "1001",
         "2000",
+        None,
         None,
     );
 
@@ -583,6 +585,7 @@ fn forward_dtmf_with_active_bridge_owns_digit_without_app_injection() {
             "X-Business-Type".to_string(),
             "34".to_string(),
         )])),
+        None,
     );
 
     // 1. digit forwarded to the bridge websocket
@@ -690,6 +693,7 @@ fn forward_dtmf_resumable_bridge_defers_trace_to_resumed_ivr() {
         &digits,
         "sip:1001@x",
         "sip:2000@x",
+        None,
         None,
     );
 
@@ -5741,7 +5745,7 @@ async fn added_second_leg_relays_audio_and_dtmf_without_mixer() {
     // Supply the remote answer through the same LegConnected command the SIP
     // response task uses; no mixer/peer setup is injected by the test.
     let alice_id = session.handle_add_leg_inner(
-        "sip:alice@127.0.0.1:5099".into(), Some(LegId::from("alice-test")), vec![], None).await.unwrap();
+        "sip:alice@127.0.0.1:5099".into(), Some(LegId::from("alice-test")), vec![], None, None).await.unwrap();
     assert_eq!(session.bridge().and_then(|bridge| bridge.leg_for_id(&crate::media::leg_id::LegId::from(alice_id.as_str()))).map(|p| p.id().to_string()), None);
     assert!(session.legs.media_leg(&alice_id).is_some());
     let alice = LegInner::new("remote-alice", &cfg, None).unwrap();
@@ -5800,7 +5804,7 @@ async fn added_second_leg_relays_audio_and_dtmf_without_mixer() {
     // A subsequent add must not replace the connected Alice transport.
     let first_b = session.bridge().unwrap().leg_for_id(&crate::media::leg_id::LegId::from(alice_id.as_str())).unwrap().clone();
     let another = session.handle_add_leg_inner(
-        "sip:other@127.0.0.1:5098".into(), Some(LegId::from("another")), vec![], None).await.unwrap();
+        "sip:other@127.0.0.1:5098".into(), Some(LegId::from("another")), vec![], None, None).await.unwrap();
     assert!(Arc::ptr_eq(&first_b, &session.bridge().unwrap().leg_for_id(&crate::media::leg_id::LegId::from(alice_id.as_str())).unwrap()));
     assert!(session.legs.media_leg(&another).is_some());
     let third = LegInner::new("remote-third", &cfg, None).unwrap();
@@ -5851,7 +5855,7 @@ async fn added_second_leg_relays_audio_and_dtmf_without_mixer() {
     session.handle_remove_leg(another).await.unwrap();
     session.handle_remove_leg(alice_id).await.unwrap();
     let retry = session.handle_add_leg_inner(
-        "sip:alice@127.0.0.1:5099".into(), Some(LegId::from("alice-retry")), vec![], None).await.unwrap();
+        "sip:alice@127.0.0.1:5099".into(), Some(LegId::from("alice-retry")), vec![], None, None).await.unwrap();
     assert!(!Arc::ptr_eq(&first_b, &session.legs.media_leg(&retry).unwrap()));
     third.stop();
     session.bridge_mut().unwrap().close();
@@ -6836,7 +6840,7 @@ async fn consult_retry_uses_new_sip_call_id() {
             .handle_add_leg_inner(
                 "sip:alice@127.0.0.1:5099".into(),
                 Some(LegId::from("consult")),
-                vec![], None)
+                vec![], None, None)
             .await
             .unwrap();
         let message = tokio::time::timeout(Duration::from_secs(2), async {
@@ -7203,7 +7207,7 @@ async fn blind_transfer_detaches_agent_before_independent_target_answers() {
         session.callee_dialogs.insert(old_dialog.clone(), ());
         let target = LegId::new(format!("transfer-{}", uuid::Uuid::new_v4()));
         for command in [
-            CallCommand::LegAdd { source_leg: Some(LegId::from("caller")), target: "sip:alice@127.0.0.1:5099".into(), leg_id: Some(target.clone()), headers: vec![] },
+            CallCommand::LegAdd { source_leg: Some(LegId::from("caller")), target: "sip:alice@127.0.0.1:5099".into(), leg_id: Some(target.clone()), headers: vec![], purpose: None },
             CallCommand::HangupAgentLeg,
             CallCommand::Bridge { leg_a: LegId::from("caller"), leg_b: target.clone(), mode: crate::call::domain::P2PMode::Audio },
             CallCommand::MarkTransferred,
@@ -7345,7 +7349,8 @@ async fn dynamic_hold_before_connected_command_keeps_answered_dialog_owned() {
         let leg_id = LegId::from("late-target");
         let add = CallCommand::LegAdd {
             source_leg: None, target: format!("sip:alice@{target_addr}"), leg_id: Some(leg_id.clone()), headers: vec![],
-        };
+            purpose: None,
+};
         let added = session.execute_command(add, None).await;
         assert!(added.success, "{:?}", added.message);
         let mut buffer = [0u8; 65536];
@@ -7665,7 +7670,8 @@ async fn rwi_manual_parallel_retry_and_leg_cleanup() {
 
     let result = session.execute_command(CallCommand::LegAdd {
         source_leg: None, target: format!("sip:alice@{addr}"), leg_id: Some(LegId::from("retry")), headers: vec![],
-    }, None).await;
+        purpose: None,
+}, None).await;
     assert_eq!(result.affected_leg, Some(LegId::from("retry")));
     session.execute_command(CallCommand::LegFailed { leg_id: LegId::new(&rejected.0), reason: "late rejection".into() }, None).await;
     assert!(session.legs.contains_key(&LegId::from("retry")));
@@ -7684,7 +7690,8 @@ async fn rwi_manual_parallel_retry_and_leg_cleanup() {
     let failed = session.execute_command(CallCommand::LegAdd {
         source_leg: None, target: format!("sip:alice@{addr}"),
         leg_id: Some(LegId::from("setup-failure")), headers: vec![],
-    }, None).await;
+        purpose: None,
+}, None).await;
     assert!(!failed.success);
     session.cmd_tx = saved_sender;
     let mut leg_events = Vec::new();
@@ -7804,7 +7811,8 @@ async fn added_legs_require_explicit_bridge_and_allow_removed_ids() {
 
             let response = session.execute_command(CallCommand::LegAdd {
                 source_leg: None, target: "sip:alice@127.0.0.1:9".into(), leg_id: Some(LegId::from(id)), headers: vec![],
-            }, None).await;
+                purpose: None,
+}, None).await;
             assert!(!response.success, "must reject {id}");
         }
         // A removed ID can be dialed again, including to a different target.
@@ -7812,7 +7820,8 @@ async fn added_legs_require_explicit_bridge_and_allow_removed_ids() {
 
             let response = session.execute_command(CallCommand::LegAdd {
                 source_leg: None, target: target.into(), leg_id: Some(LegId::from("reused")), headers: vec![],
-            }, None).await;
+                purpose: None,
+}, None).await;
             assert!(response.success);
             assert_eq!(session.legs.get(&LegId::from("reused")).unwrap().endpoint.as_deref(), Some(target));
 
@@ -7827,7 +7836,8 @@ async fn added_legs_require_explicit_bridge_and_allow_removed_ids() {
 
         let response = session.execute_command(CallCommand::LegAdd {
             source_leg: None, target: "sip:alice@127.0.0.1:9".into(), leg_id: Some(LegId::from("bad-target")), headers: vec![],
-        }, None).await;
+            purpose: None,
+}, None).await;
         let result = response;
         assert!(!result.success);
         assert!(result.message.unwrap().contains("No command sender"));
@@ -7950,7 +7960,7 @@ async fn dynamic_leg_rejects_known_unregistered_user_before_dialing() {
     }).await.unwrap();
     let target = LegId::from("offline-target");
     let error = session.handle_add_leg_inner("sip:offline@rustpbx.com".into(),
-        Some(target.clone()), vec![], Some(LegId::from("caller"))).await.unwrap_err();
+        Some(target.clone()), vec![], Some(LegId::from("caller")), None).await.unwrap_err();
     assert_eq!(error.downcast_ref::<transfer::BlindTransferDialError>().unwrap().code, 480);
     assert!(!session.legs.contains_key(&target), "Offline resolution must finish before creating a SIP leg");
     assert!(session.callee_dialogs.is_empty());
@@ -8519,4 +8529,42 @@ async fn own_side_unhold_restores_media_path_when_bridge_down() {
         session.bridge().unwrap().is_bridged(),
         "own-side unhold with a bridged pair must restore the media path (stop hold music)"
     );
+}
+
+// ── Agent-leg Call-ID scheme (`LegPurpose::Agent` / `Consult`) ──────────────
+
+#[test]
+fn agent_leg_call_id_first_dial_uses_session_id() {
+    use crate::proxy::proxy_call::sip_session::SipSession;
+    assert_eq!(
+        SipSession::agent_leg_call_id("0b9e6c1e1b404e8f9c212f5a8d3e7b61", 0),
+        "0b9e6c1e1b404e8f9c212f5a8d3e7b61"
+    );
+}
+
+#[test]
+fn agent_leg_call_id_redials_get_retry_suffix() {
+    use crate::proxy::proxy_call::sip_session::SipSession;
+    let base = "0b9e6c1e1b404e8f9c212f5a8d3e7b61";
+    assert_eq!(SipSession::agent_leg_call_id(base, 1), format!("{base}-r2"));
+    assert_eq!(SipSession::agent_leg_call_id(base, 2), format!("{base}-r3"));
+}
+
+#[test]
+fn agent_leg_call_id_suffixes_stay_unique() {
+    use crate::proxy::proxy_call::sip_session::SipSession;
+    let base = "0b9e6c1e1b404e8f9c212f5a8d3e7b61";
+    let ids: std::collections::HashSet<String> = (0..8u32)
+        .map(|seq| SipSession::agent_leg_call_id(base, seq))
+        .collect();
+    assert_eq!(ids.len(), 8, "every dial attempt must get a unique Call-ID");
+}
+
+#[test]
+fn queue_dispatch_leg_gets_purpose_and_leg_role() {
+    let mut leg = crate::call::domain::Leg::new(LegId::new("f81d4fae-7dec-11d0-a765-00a0c91e6bf6"));
+    leg.purpose = Some(crate::call::domain::LegPurpose::Agent);
+    leg.agent_id = Some("1002".into());
+    // Queue-dispatched agent leg: RWI leg events carry leg_role "agent".
+    assert_eq!(leg.leg_role(), "agent");
 }

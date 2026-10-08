@@ -22,6 +22,31 @@ consult 咨询腿、外转外部网络后回落的通话。
   不依赖信令头)
 - **`session_id == call_id`** 表示该通话是根
 
+## agent 腿的 SIP Call-ID(queue 派发 / consult)
+
+带 `LegPurpose::Agent` / `LegPurpose::Consult` 的动态腿(queue 派发 agent、
+咨询转 C 腿)的外呼 INVITE **直接以根 `session_id` 作为 SIP Call-ID**:
+
+| 腿 | SIP Call-ID |
+|---|---|
+| 本 session 第 1 条 agent-facing 腿 | `session_id` 本身 |
+| 第 n 条(换 agent 重拨 / consult) | `{session_id}-r{n}` |
+
+- 话机 / CTI 看到的 agent 腿 Call-ID == RWI 事件 `call_id` == `session_id`,
+  一个 id 关联整通呼叫;cc-phone 合同 §3.3 的 CTI `{call_id}` 即此值
+- `-r{n}` 序号保证重拨不复用可能已被话机拒接的 Call-ID(Linphone 会拒绝
+  复用 declined Call-ID),同时兜底并行拨号场景的唯一性
+- 坐席主动外呼(agent UA 直接 INVITE):caller 腿的 wire Call-ID 由客户端生成,
+  服务端不可控;客户端 Call-ID 为 UUID 形态或携带 `Session-ID` 头时天然对齐
+  (`resolve_incoming` 解析规则),RWI 事件侧始终以 `session_id` 关联
+- 未声明 purpose 的动态腿(外部 leg_add 等)使用纯 UUID Call-ID(无前缀);
+  dialplan 直拨 B 腿与 REFER 转接 INVITE 的 Call-ID 生成不变
+- RWI 腿级事件(`call_ringing` / `call_hangup` / `call_held` / `call_unheld` /
+  `dtmf`)新增 `leg_role` 字段:`agent`(坐席腿)/ `consult`(咨询到非坐席)/
+  `caller` / `callee`;`leg_role == "agent"` 即"仅该坐席腿"的事件
+- `queue_agent_offered / connected / no_answer / rejected` 新增 `leg_id`,
+  可与腿级 `call_*` 事件串联
+
 ## User-to-User(RFC 7433)信令载体
 
 CC 场景(IVR / queue / transfer)下,`session_id` 通过 `User-to-User` 头跨网络传递:

@@ -1589,7 +1589,7 @@ impl QueueApp {
         }
         self.pin_agent_for_dial(ctrl, &attempt_agent_id, &uri).await;
         match ctrl
-            .originate_call_with_headers(&uri, Some(self.call_id.clone()), leg_headers)
+            .originate_call_with_headers(&uri, Some(self.call_id.clone()), leg_headers, Some(crate::call::domain::LegPurpose::Agent))
             .await
         {
             Ok(call_id) => {
@@ -1894,7 +1894,7 @@ impl QueueApp {
             self.pin_agent_for_dial(ctrl, &agent_id, uri).await;
             let leg_headers = self.leg_headers_for(uri).await;
             match ctrl
-                .originate_call_with_headers(uri, Some(self.call_id.clone()), leg_headers)
+                .originate_call_with_headers(uri, Some(self.call_id.clone()), leg_headers, Some(crate::call::domain::LegPurpose::Agent))
                 .await
             {
                 Ok(call_id) => {
@@ -2169,11 +2169,12 @@ impl CallApp for QueueApp {
                     .await;
                 let leg_headers = self.leg_headers_for(&agent.uri).await;
                 let call_id = ctrl
-                    .originate_call_with_headers(&agent.uri, Some(self.call_id.clone()), leg_headers)
+                    .originate_call_with_headers(&agent.uri, Some(self.call_id.clone()), leg_headers, Some(crate::call::domain::LegPurpose::Agent))
                     .await?;
 
                 self.record_attempted_agent(agent.agent_id.clone());
-                self.pending_agents.push((agent.uri.clone(), call_id));
+                self.pending_agents
+                    .push((agent.uri.clone(), call_id.clone()));
 
                 self.maybe_start_transfer_prompt(ctrl).await?;
 
@@ -2194,6 +2195,7 @@ impl CallApp for QueueApp {
                     call_id: self.call_id.clone(),
                     queue_id: queue_id.clone(),
                     agent_id: agent.agent_id.clone(),
+                    leg_id: Some(call_id),
                 });
 
                 self.state = QueueState::DialingAgents { attempt: 1 };
@@ -2278,7 +2280,7 @@ impl CallApp for QueueApp {
                     self.record_attempted_agent(attempt_agent_id.clone());
                     self.pin_agent_for_dial(ctrl, &attempt_agent_id, &uri).await;
                     match ctrl
-                        .originate_call_with_headers(&uri, Some(self.call_id.clone()), leg_headers)
+                        .originate_call_with_headers(&uri, Some(self.call_id.clone()), leg_headers, Some(crate::call::domain::LegPurpose::Agent))
                         .await
                     {
                         Ok(call_id) => {
@@ -2534,6 +2536,7 @@ impl CallApp for QueueApp {
                             call_id: self.call_id.clone(),
                             queue_id: queue_id.clone(),
                             agent_id: connected_agent_id.clone(),
+                            leg_id: Some(agent_leg.clone()),
                         });
                         self.emit_rwi(&crate::rwi::event::QueueLeft {
                             call_id: self.call_id.clone(),
@@ -2554,7 +2557,11 @@ impl CallApp for QueueApp {
                         return self.play_service_prompt_or_exit(ctrl, agent_uri).await;
                     }
                 }
-                Some(QueueSignal::AgentRinging { agent_id, .. }) => {
+                Some(QueueSignal::AgentRinging {
+                    agent_id,
+                    leg_id,
+                    ..
+                }) => {
                     if let Some(agent_id) = agent_id.as_deref() {
                         info!(agent = %agent_id, "Queue: agent ringing");
 
@@ -2574,6 +2581,7 @@ impl CallApp for QueueApp {
                             call_id: self.call_id.clone(),
                             queue_id: queue_id.clone(),
                             agent_id: agent_id.to_string(),
+                            leg_id: Some(leg_id),
                         });
                     }
                     Ok(AppAction::Continue)
@@ -2674,7 +2682,7 @@ impl CallApp for QueueApp {
 
                 if let Some(ref registry) = self.agent_registry {
                     let all_agents = registry.list_agents().await;
-                    for (uri, _) in &timed_out_agents {
+                    for (uri, leg_id) in &timed_out_agents {
                         let agent_id = all_agents
                             .iter()
                             .find(|a| a.uri == *uri)
@@ -2701,6 +2709,7 @@ impl CallApp for QueueApp {
                             queue_id: self.config.name.clone(),
                             agent_id: agent_id.clone(),
                             attempt: self.dial_attempts,
+                            leg_id: Some(leg_id.clone()),
                         });
                     }
                 }

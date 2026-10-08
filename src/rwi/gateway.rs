@@ -909,7 +909,8 @@ mod tests {
             early_media: false,
                 agent_id: None,
                 agent_name: None,
-        });
+            leg_role: None,
+            });
         let v = rx.recv().await.unwrap();
         assert!(v.to_string().contains("call_ringing"));
     }
@@ -926,7 +927,8 @@ mod tests {
         gw.send_to_owner(&crate::rwi::CallAnswered {
             leg_id: None,
             call_id: "c1".into(),
-        });
+            leg_role: None,
+            });
         let v = rx.recv().await.unwrap();
         assert!(v.to_string().contains("call_answered"));
     }
@@ -1041,7 +1043,8 @@ mod tests {
             hangup_by: Some("callee".into()),
             sip_status: None,
             duration_secs: None,
-        });
+            leg_role: None,
+            });
         assert_eq!(rx.recv().await.unwrap()["event_type"], "call_hangup");
 
         assert!(gw.call_finished(&"c1".to_string()));
@@ -1147,7 +1150,8 @@ mod tests {
         gw.send_to_owner(&crate::rwi::CallAnswered {
             leg_id: None,
             call_id: "sess-1".into(),
-        });
+            leg_role: None,
+            });
         let event = rx.recv().await.unwrap();
         assert_eq!(event["event_type"], "call_answered");
         assert_eq!(event["user_data"]["customer_id"], 42);
@@ -1182,7 +1186,8 @@ mod tests {
                 hangup_by: None,
                 sip_status: None,
                 duration_secs: None,
-            },
+                leg_role: None,
+},
             None,
         );
         let enriched = gw.enrich_flat_event(&flat);
@@ -1228,7 +1233,8 @@ mod tests {
         gw.send_to_owner(&crate::rwi::CallAnswered {
             leg_id: None,
             call_id: "sess-1".into(),
-        });
+            leg_role: None,
+            });
         let event = rx.recv().await.unwrap();
         assert_eq!(event["user_data"]["crm_id"], "C-9");
 
@@ -1236,7 +1242,8 @@ mod tests {
         gw.send_to_owner(&crate::rwi::CallAnswered {
             leg_id: None,
             call_id: "sess-1".into(),
-        });
+            leg_role: None,
+            });
         let event = rx.recv().await.unwrap();
         assert!(event.get("user_data").is_none());
     }
@@ -1256,7 +1263,8 @@ mod tests {
             early_media: false,
                 agent_id: None,
                 agent_name: None,
-        });
+            leg_role: None,
+            });
         let _ = rx.recv().await.unwrap();
 
         // User data set afterwards.
@@ -1330,7 +1338,8 @@ mod tests {
         gateway.read().send_to_owner(&crate::rwi::CallAnswered {
             leg_id: None,
             call_id: "c1".into(),
-        });
+            leg_role: None,
+            });
         let event = rx.recv().await.expect("final event must still flow");
         assert_eq!(event["event_type"], "call_answered");
         assert_eq!(
@@ -1472,7 +1481,8 @@ mod tests {
             &crate::rwi::CallAnswered {
                 leg_id: None,
                 call_id: "c1".into(),
-            },
+                leg_role: None,
+},
             None,
         ));
 
@@ -1496,7 +1506,8 @@ mod tests {
             &crate::rwi::CallAnswered {
                 leg_id: None,
                 call_id: "call-unknown".into(),
-            },
+                leg_role: None,
+},
             None,
         ));
 
@@ -1535,7 +1546,8 @@ mod tests {
             &crate::rwi::CallAnswered {
                 leg_id: None,
                 call_id: "c1".into(),
-            },
+                leg_role: None,
+},
             None,
         ));
 
@@ -1572,7 +1584,8 @@ mod tests {
             &crate::rwi::CallAnswered {
                 leg_id: None,
                 call_id: "leg-child".into(),
-            },
+                leg_role: None,
+},
             None,
         ));
 
@@ -1649,7 +1662,8 @@ mod tests {
             &crate::rwi::CallAnswered {
                 leg_id: None,
                 call_id: "c1".into(),
-            },
+                leg_role: None,
+},
             None,
         ));
 
@@ -1674,7 +1688,8 @@ mod tests {
             early_media: false,
                 agent_id: None,
                 agent_name: None,
-        });
+            leg_role: None,
+            });
 
         let v = rx.recv().await.unwrap();
         assert_eq!(v["node_ip"].as_str(), Some("10.0.0.2"));
@@ -1692,7 +1707,8 @@ mod tests {
             &crate::rwi::CallAnswered {
                 leg_id: None,
                 call_id: "c1".into(),
-            },
+                leg_role: None,
+},
             None,
         ));
 

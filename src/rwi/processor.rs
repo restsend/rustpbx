@@ -646,7 +646,7 @@ impl RwiCommandProcessor {
                 target,
                 leg_id,
             } => {
-                return self.leg_add(call_id, target, leg_id.as_deref()).await;
+                return self.leg_add(call_id, target, leg_id.as_deref(), None).await;
             }
             RwiCommandPayload::LegRemove { call_id, leg_id } => {
                 return self.leg_remove(call_id, leg_id).await;
@@ -1306,6 +1306,7 @@ impl RwiCommandProcessor {
                         let gw = gateway.read();
                         gw.send_to_owner(&crate::rwi::CallHangup {
                             leg_id: None,
+                                leg_role: None,
                             call_id: call_id.clone(),
                             reason: Some(format!("media_setup_failed: {}", e)),
                             hangup_by: None,
@@ -1496,6 +1497,7 @@ impl RwiCommandProcessor {
                                             let gw = gateway.read();
                                             gw.send_to_owner(&crate::rwi::CallRinging {
                                                 leg_id: None,
+                                                leg_role: None,
                                                 call_id: call_id.clone(),
                                                 early_media,
                                                 // Session-level event: agent
@@ -1700,6 +1702,7 @@ impl RwiCommandProcessor {
                                 let gw = gateway.read();
                                 gw.send_to_owner(&crate::rwi::CallHangup {
                                     leg_id: None,
+                                        leg_role: None,
                                     call_id: call_id.clone(),
                                     reason: Some(format!("media_setup_failed: {}", e)),
                                     hangup_by: None,
@@ -1810,6 +1813,7 @@ impl RwiCommandProcessor {
                             let gw = gateway.read();
                             gw.send_to_owner(&crate::rwi::CallAnswered {
                                 leg_id: None,
+                                leg_role: None,
                                 call_id: call_id.clone(),
                             });
                         }
@@ -1859,6 +1863,7 @@ impl RwiCommandProcessor {
                             } else {
                                 gw.send_to_owner(&crate::rwi::CallHangup {
                                     leg_id: None,
+                                        leg_role: None,
                                     call_id: call_id.clone(),
                                     reason: Some("originate_failed".to_string()),
                                     hangup_by: None,
@@ -1873,6 +1878,7 @@ impl RwiCommandProcessor {
                         let gw = gateway.read();
                         gw.send_to_owner(&crate::rwi::CallHangup {
                             leg_id: None,
+                                leg_role: None,
                             call_id: call_id.clone(),
                             reason: Some(e.to_string()),
                             hangup_by: None,
@@ -1887,6 +1893,7 @@ impl RwiCommandProcessor {
                         let gw = gateway.read();
                         gw.send_to_owner(&crate::rwi::CallHangup {
                             leg_id: None,
+                                leg_role: None,
                             call_id: call_id.clone(),
                             reason,
                             hangup_by: Some("system".to_string()),
@@ -2108,6 +2115,7 @@ impl RwiCommandProcessor {
 
     async fn leg_add(
         &self, call_id: &str, target: &str, leg_id: Option<&str>,
+        purpose: Option<crate::call::domain::LegPurpose>,
     ) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
         let leg_id = leg_id.map(str::to_owned)
@@ -2115,6 +2123,7 @@ impl RwiCommandProcessor {
         handle.send_command(CallCommand::LegAdd {
             source_leg: None, target: target.to_string(),
             leg_id: Some(LegId::new(&leg_id)), headers: Vec::new(),
+            purpose,
         }).map_err(|error| CommandError::CommandFailed(error.to_string()))?;
         Ok(CommandResult::LegAdded { leg_id })
     }
@@ -2510,6 +2519,7 @@ impl RwiCommandProcessor {
             call_id: call_id.to_string(),
             queue_id: queue_id.clone(),
             agent_id: agent_id.to_string(),
+            leg_id: None,
         });
 
         info!(call_id = %call_id, agent_id = %agent_id, "Agent assigned to queue call");

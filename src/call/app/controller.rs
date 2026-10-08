@@ -616,17 +616,23 @@ impl CallController {
         target_uri: impl Into<String>,
         _caller_id: Option<String>,
     ) -> anyhow::Result<String> {
-        self.originate_call_with_headers(target_uri, _caller_id, Vec::new())
+        self.originate_call_with_headers(target_uri, _caller_id, Vec::new(), None)
             .await
     }
 
     /// Like [`originate_call`](Self::originate_call) but attaches extra SIP
     /// headers (e.g. `Call-Info` / `User-to-User`) to the outgoing INVITE.
+    ///
+    /// `purpose` declares the dial intent to the session (`Agent` for
+    /// queue/skill-group dispatch, `Consult` for attended-transfer consult
+    /// legs): the session stamps the agent-leg SIP Call-ID with the primary
+    /// session id and emits `leg_role: "agent"` on the leg's RWI events.
     pub async fn originate_call_with_headers(
         &self,
         target_uri: impl Into<String>,
         _caller_id: Option<String>,
         headers: Vec<rsipstack::sip::Header>,
+        purpose: Option<crate::call::domain::LegPurpose>,
     ) -> anyhow::Result<String> {
         let target = target_uri.into();
         let call_id = uuid::Uuid::new_v4().to_string();
@@ -641,6 +647,7 @@ impl CallController {
             target: target.clone(),
             leg_id: Some(LegId::from(call_id.clone())),
             headers: header_pairs,
+            purpose,
         })?;
 
         info!(target = %target, call_id = %call_id, "Queue: originated call to agent");

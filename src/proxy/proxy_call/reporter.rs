@@ -586,6 +586,11 @@ fn build_sip_leg_roles(snapshot: &CallSessionRecordSnapshot) -> HashMap<String, 
     let mut sip_leg_roles = HashMap::new();
     let caller_call_id = snapshot.server_dialog_id.call_id.clone();
     sip_leg_roles.insert(caller_call_id.clone(), "caller".to_string());
+    // Agent-facing legs (`LegPurpose::Agent` / `Consult`) dial with the
+    // primary session id as their Call-ID. When the inbound Call-ID is
+    // UUID-shaped it normalizes to that SAME id, so the agent leg's Call-ID
+    // collides with the caller entry above — the guard keeps "caller"
+    // authoritative for it (one entry, never clobbered by the B side).
     for call_id in &snapshot.callee_call_ids {
         if call_id != &caller_call_id {
             sip_leg_roles.insert(call_id.clone(), "callee".to_string());
@@ -800,7 +805,8 @@ mod tests {
                     target: format!("sip:agent@{target_addr}"),
                     leg_id: Some(leg_id.clone()),
                     headers: vec![],
-                },
+                    purpose: None,
+},
                 None,
             )
             .await;

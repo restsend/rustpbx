@@ -18,6 +18,21 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{HangupCommand, LegId, MediaSource, RingbackPolicy};
 
+/// Declared intent of a session-originated dial (`CallCommand::LegAdd`).
+///
+/// Set by the DIALING side (the app / API that issues the command) so the
+/// session knows how to treat the new leg without inferring from session
+/// context: queue-dispatched agent legs and consult legs get the primary
+/// session id as their SIP Call-ID and an explicit RWI `leg_role`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegPurpose {
+    /// Queue / skill-group dispatch: the dialed party is a CC agent.
+    Agent,
+    /// Consult (attended transfer) leg: agent B consulting target C.
+    Consult,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransferOutcome {
@@ -550,6 +565,11 @@ pub enum CallCommand {
         /// for cluster forwarding.
         #[serde(default)]
         headers: Vec<(String, String)>,
+        /// Declared dial intent (`Agent` / `Consult`), set by the dialing app.
+        /// `None` for unspecific dynamic legs. Drives the agent-leg Call-ID
+        /// scheme (primary session id) and the RWI `leg_role` attribution.
+        #[serde(default)]
+        purpose: Option<LegPurpose>,
     },
 
     /// Remove a leg from the session

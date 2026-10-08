@@ -488,7 +488,8 @@ mod tests {
                     early_media: true,
                         agent_id: None,
                         agent_name: None,
-                },
+                    leg_role: None,
+},
                 None,
             ),
         };
@@ -529,7 +530,8 @@ mod tests {
         gateway.read().broadcast(&crate::rwi::CallAnswered {
             leg_id: None,
             call_id: "swap-1".into(),
-        });
+            leg_role: None,
+            });
         wait_for_events(&server_b.received, 1, 2000).await;
         assert!(
             server_a.received.lock().unwrap().is_empty(),
@@ -541,7 +543,8 @@ mod tests {
         gateway.read().broadcast(&crate::rwi::CallAnswered {
             leg_id: None,
             call_id: "swap-2".into(),
-        });
+            leg_role: None,
+            });
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(
             server_b.received.lock().unwrap().len(),
@@ -581,7 +584,8 @@ mod tests {
                 early_media: false,
                     agent_id: None,
                     agent_name: None,
-            },
+                leg_role: None,
+},
             None,
         ));
         let created = mk(crate::rwi::event::to_legacy_event(
@@ -644,7 +648,8 @@ mod tests {
                     early_media: false,
                         agent_id: None,
                         agent_name: None,
-                },
+                    leg_role: None,
+},
                 None,
             ),
         };
@@ -912,7 +917,8 @@ mod tests {
                 &crate::rwi::CallAnswered {
                     leg_id: None,
                     call_id: call_id.into(),
-                },
+                    leg_role: None,
+},
                 None,
             ),
         }

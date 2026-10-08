@@ -177,12 +177,14 @@ pub(super) fn parse_dtmf_digit(body_text: &str) -> Option<char> {
 /// the injection succeeds). Returns `true` only when a running app consumed
 /// the event — `false` means no app is running (starting up / between apps /
 /// none scheduled) and the caller may want to buffer the digit.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn inject_dtmf_into_app(
     digit: char,
     leg_id: &str,
     session_id: &str,
     app_runtime: &Arc<dyn AppRuntime>,
     rwi_gateway: &Option<crate::rwi::RwiGatewayRef>,
+    leg_role: Option<String>,
 ) -> bool {
     if !app_runtime.is_running() {
         return false;
@@ -207,6 +209,7 @@ pub(super) fn inject_dtmf_into_app(
                     call_id: session_id.to_string(),
                     digit: digit_str.clone(),
                     leg_id: Some(leg_id.to_string()),
+                    leg_role,
                     extra: None,
                 });
             }
@@ -258,6 +261,7 @@ pub(super) fn forward_dtmf_event(
     caller: &str,
     callee: &str,
     sip_headers: Option<std::collections::HashMap<String, String>>,
+    leg_role: Option<String>,
 ) -> bool {
     // Call applications are attached to the caller leg. Agent-side INFO must
     // still be forwarded to its SIP peer, but it is never authoritative input
@@ -326,7 +330,14 @@ pub(super) fn forward_dtmf_event(
         // the suspended app would replay one physical key as a second input.
         return true;
     }
-    inject_dtmf_into_app(digit, leg_id, session_id, app_runtime, rwi_gateway)
+    inject_dtmf_into_app(
+        digit,
+        leg_id,
+        session_id,
+        app_runtime,
+        rwi_gateway,
+        leg_role,
+    )
 }
 
 /// Map the session teardown cause to the compensating `session_end` reason

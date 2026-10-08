@@ -166,6 +166,25 @@ Webhook 处理器运行在专用的 tokio 运行时上,其 HTTP 推送不会与 
 - `dnis` vs `callee`：同上
 - 上下文由 `CallMetaStore` 在 gateway 分发时自动注入，事件生产者无需手动填充
 
+### leg_role（腿级事件语义标识）
+
+腿级事件（携带 `leg_id` 的 `call_ringing` / `call_hangup` / `call_held` /
+`call_unheld` / `dtmf`）额外携带 **`leg_role`** 字段，用于识别"这条事件只属于
+哪条腿"，特别是**坐席腿**：
+
+| 值 | 含义 |
+|------|------|
+| `agent` | **坐席腿** —— queue/技能组派发的 agent 腿、咨询转到已注册坐席的腿、坐席主动外呼的 caller 腿 |
+| `consult` | 咨询腿且目标非注册坐席（外部专家 / 外部号码） |
+| `caller` | 主叫腿（非坐席发起） |
+| `callee` | 其它被叫腿（dialplan 直拨、fork 等） |
+
+> **消费者规则**：`leg_role == "agent"` ⟺ 该事件只描述坐席腿（可再结合
+> `agent_id` / `agent_name`）。session 级事件（无 `leg_id`）不带 `leg_role`。
+> 配套：queue 派发 / consult 的 agent 腿 INVITE 以根 `session_id` 作为 SIP
+> Call-ID（重拨为 `{session_id}-r{n}`），详见 `docs/session_id_correlation.md`。
+> `media_play_*` 事件暂不携带 `leg_role`。
+
 ### user_data（会话用户数据自动注入）
 
 除上述字段外，gateway 还会把**会话用户数据**整体注入到**所有 call-scoped 事件**的 `user_data` 键下（嵌套对象，非扁平化）：
@@ -1139,6 +1158,7 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 | `call_id` | String | 呼叫标识 |
 | `queue_id` | String | 队列 ID |
 | `agent_id` | String | 坐席 ID |
+| `leg_id` | Option\<String\> | 指向该坐席的会话腿 ID —— 用于与腿级 `call_ringing` / `call_hangup`（`leg_role: "agent"`）串联；内置 queue 应用路径携带，ACD 桥路径暂缺省 |
 | *+ctx* | | 扁平化上下文 |
 
 #### queue_agent_no_answer / queue_agent_rejected
@@ -1151,6 +1171,7 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 | `queue_id` | String | 队列 ID |
 | `agent_id` | String | 坐席 ID |
 | `attempt` | u32 | 尝试次数 |
+| `leg_id` | Option\<String\> | 失败的会话腿 ID（同上，no_answer 由内置 queue 应用携带；rejected 暂缺省） |
 | *+ctx* | | 扁平化上下文 |
 
 #### queue_fallback_executed

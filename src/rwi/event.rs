@@ -120,6 +120,11 @@ pub struct CallRinging {
     /// Present for an individual leg event; absent for a session event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leg_id: Option<String>,
+    /// `agent` | `consult` | `caller` | `callee` — present only on leg events.
+    /// `agent` identifies the CC agent leg (queue dispatch, consult to a
+    /// registered agent, agent-initiated call).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
     pub call_id: String,
     /// `true` when the ringing provisional response carried SDP (183 Session
     /// Progress or 180 with SDP — early media), `false` for a plain 180
@@ -142,6 +147,9 @@ pub struct CallAnswered {
     /// Present for an individual leg event; absent for a session event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leg_id: Option<String>,
+    /// `agent` | `consult` | `caller` | `callee` — present only on leg events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
     pub call_id: String,
 }
 rwi_event!(CallAnswered, "call_answered");
@@ -151,6 +159,11 @@ pub struct CallHangup {
     /// Present for an individual leg event; absent for a session event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leg_id: Option<String>,
+    /// `agent` | `consult` | `caller` | `callee` — present only on leg events.
+    /// `agent` identifies the CC agent leg (queue dispatch, consult to a
+    /// registered agent, agent-initiated call).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
     pub call_id: String,
     pub reason: Option<String>,
     /// Normalized initiator: `"agent"` | `"caller"` | `"system"` | `"transfer"`
@@ -170,6 +183,9 @@ rwi_event!(CallHangup, "call_hangup");
 /// replaces the former `cc_held` event.
 #[derive(Debug, Clone, Serialize)]
 pub struct CallHeld {
+    /// `agent` | `consult` | `caller` | `callee`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
     pub call_id: String,
     pub leg_id: String,
 }
@@ -179,6 +195,9 @@ rwi_event!(CallHeld, "call_held");
 /// `cc_unheld` event.
 #[derive(Debug, Clone, Serialize)]
 pub struct CallUnheld {
+    /// `agent` | `consult` | `caller` | `callee`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
     pub call_id: String,
     pub leg_id: String,
 }
@@ -533,6 +552,10 @@ pub struct Dtmf {
     pub call_id: String,
     pub digit: String,
     pub leg_id: Option<String>,
+    /// `agent` | `consult` | `caller` | `callee` — present when the source leg
+    /// is tracked by the session (always, for session-originated DTMF).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
     pub extra: Option<serde_json::Value>,
 }
 rwi_event!(Dtmf, "dtmf");
@@ -576,6 +599,10 @@ pub struct QueueAgentOffered {
     pub call_id: String,
     pub queue_id: String,
     pub agent_id: String,
+    /// Session leg id of the dial toward this agent — joins `queue_agent_*`
+    /// with the leg-scoped `call_*` events (`call_ringing` / `call_hangup`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_id: Option<String>,
 }
 rwi_event!(QueueAgentOffered, "queue_agent_offered");
 
@@ -584,6 +611,9 @@ pub struct QueueAgentConnected {
     pub call_id: String,
     pub queue_id: String,
     pub agent_id: String,
+    /// Session leg id that connected (see [`QueueAgentOffered::leg_id`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_id: Option<String>,
 }
 rwi_event!(QueueAgentConnected, "queue_agent_connected");
 
@@ -593,6 +623,9 @@ pub struct QueueAgentNoAnswer {
     pub queue_id: String,
     pub agent_id: String,
     pub attempt: u32,
+    /// Session leg id of the failed dial (see [`QueueAgentOffered::leg_id`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_id: Option<String>,
 }
 rwi_event!(QueueAgentNoAnswer, "queue_agent_no_answer");
 
@@ -602,6 +635,9 @@ pub struct QueueAgentRejected {
     pub queue_id: String,
     pub agent_id: String,
     pub attempt: u32,
+    /// Session leg id of the rejected dial (see [`QueueAgentOffered::leg_id`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_id: Option<String>,
 }
 rwi_event!(QueueAgentRejected, "queue_agent_rejected");
 
@@ -1116,6 +1152,7 @@ mod tests {
                 call_id: "call-1".into(),
                 digit: "5".into(),
                 leg_id: None,
+                leg_role: None,
                 extra: None,
             },
             None,
@@ -1125,6 +1162,7 @@ mod tests {
                 call_id: "call-2".into(),
                 digit: "9".into(),
                 leg_id: Some("caller".into()),
+                leg_role: None,
                 extra: Some(serde_json::json!({"foo": "bar"})),
             },
             None,

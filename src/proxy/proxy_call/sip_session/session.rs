@@ -469,12 +469,21 @@ impl SipSession {
                 .flatten()
         });
         self.emit_typed_rwi_event(&crate::rwi::CallRinging {
+            leg_role: leg_id.as_deref().and_then(|id| self.leg_role_of(id)),
             leg_id,
             call_id: self.context.session_id.clone(),
             early_media,
             agent_id,
             agent_name,
         });
+    }
+
+    /// RWI `leg_role` for a leg id — `None` (omitted) for unknown legs or
+    /// session-scoped events. See [`crate::call::domain::Leg::leg_role`].
+    pub(crate) fn leg_role_of(&self, leg_id: &str) -> Option<String> {
+        self.legs
+            .get(&LegId::from(leg_id))
+            .map(|leg| leg.leg_role().to_string())
     }
 
     /// Session-scoped `call_answered` (`leg_id: None`), emitted at most once
@@ -488,6 +497,7 @@ impl SipSession {
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             self.emit_typed_rwi_event(&crate::rwi::CallAnswered {
                 leg_id: None,
+                leg_role: None,
                 call_id: self.context.session_id.clone(),
             });
         }
@@ -2601,6 +2611,10 @@ impl SipSession {
             self.context.dialplan.flow,
             crate::call::DialplanFlow::Application { .. } | crate::call::DialplanFlow::Queue { .. }
         );
+        // The forwarder only ever observes the caller leg — resolve its
+        // RWI `leg_role` once here (the caller leg exists and, for
+        // agent-initiated calls, is already agent-stamped by accept_call).
+        let caller_leg_role = self.leg_role_of(&leg_id);
         crate::utils::spawn(async move {
             const MAX_PENDING: usize = 16;
             const PENDING_TTL: std::time::Duration = std::time::Duration::from_secs(5);
@@ -2634,6 +2648,7 @@ impl SipSession {
                                 &original_caller,
                                 &original_callee,
                                 sip_headers,
+                                caller_leg_role.clone(),
                             );
                             if !injected && app_expected && !app_seen {
                                 pending.push_back((ev.digit, leg_id, std::time::Instant::now()));
@@ -2665,6 +2680,7 @@ impl SipSession {
                                 &session_id,
                                 &app_runtime,
                                 &rwi_gateway,
+                                caller_leg_role.clone(),
                             );
                         }
                     }
@@ -3122,10 +3138,35 @@ impl SipSession {
             .map(str::to_string)
     }
 
+    /// Scenario ③ (agent-initiated calls): resolve and stamp the caller leg's
+    /// agent identity when the inbound INVITE originates from a registered CC
+    /// agent. Leg-scoped RWI events for the caller leg then carry
+    /// `leg_role: "agent"`. Idempotent; no-op for non-agent callers.
+    async fn stamp_caller_agent_identity(&mut self) {
+        let caller_id = LegId::from("caller");
+        if self
+            .legs
+            .get(&caller_id)
+            .is_some_and(|leg| leg.agent_id.is_some())
+        {
+            return;
+        }
+        let Some(user) = Self::uri_user_part(&self.context.original_caller) else {
+            return;
+        };
+        let Some(registry) = self.server.agent_registry.as_ref() else {
+            return;
+        };
+        if registry.get_agent(&user).await.is_some()
+            && let Some(leg) = self.legs.get_mut(&caller_id)
+        {
+            leg.agent_id = Some(user);
+        }
+    }
+
     /// True while a queue app is driving this session — used to gate
     /// queue-specific extension bookkeeping.
-    fn in_queue_context(&self) -> bool {
-        self.app_runtime
+    fn in_queue_context(&self) -> bool {        self.app_runtime
             .current_app()
             .as_deref()
             .is_some_and(|app| app == "queue")
@@ -4290,6 +4331,7 @@ impl SipSession {
                     &self.context.original_caller,
                     &self.context.original_callee,
                     super::util::trace_sip_headers(&self.app_runtime).await,
+                    self.leg_role_of(leg_label),
                 );
             }
             // Forward DTMF INFO to the peer dialog
@@ -5171,6 +5213,7 @@ impl SipSession {
                         Some(target_leg.clone()),
                         vec![],
                         Some(LegId::from("caller")),
+                        None,
                     )
                     .await
                 {
@@ -8273,6 +8316,10 @@ impl SipSession {
     }
 
     pub async fn accept_call(&mut self, callee: Option<String>, sdp: Option<String>) -> Result<()> {
+        // Agent-initiated calls (the agent's UA INVITEs the proxy directly):
+        // the caller leg IS the agent leg — stamp its agent identity so every
+        // leg-scoped RWI event for it carries `leg_role: "agent"`. Idempotent.
+        self.stamp_caller_agent_identity().await;
         self.meta.connected_callee = callee.clone();
         // A real callee/agent leg answered. Record this permanently so the
         // queue-abandon detector can tell "served then hung up" apart from
@@ -9653,6 +9700,7 @@ impl SipSession {
         let sip_status = self.meta.last_error.as_ref().map(|(sc, _)| sc.code());
         self.emit_typed_rwi_event(&crate::rwi::CallHangup {
             leg_id: None,
+            leg_role: None,
             call_id: self.context.session_id.clone(),
             reason: hangup_reason_str,
             hangup_by,
@@ -11826,6 +11874,7 @@ impl SipSession {
                 target,
                 leg_id,
                 headers,
+                purpose,
             } => {
                 let headers: Vec<rsipstack::sip::Header> = headers
                     .into_iter()
@@ -11839,7 +11888,7 @@ impl SipSession {
                     }
                 });
                 match self
-                    .handle_add_leg(target, leg_id, headers, source_leg)
+                    .handle_add_leg(target, leg_id, headers, source_leg, purpose)
                     .await
                 {
                     Ok(new_leg_id) => CommandResult::success_with_leg(new_leg_id),
@@ -13046,6 +13095,7 @@ impl SipSession {
         self.emit_typed_rwi_event(&crate::rwi::CallHangup {
             call_id: self.context.session_id.clone(),
             leg_id: Some(id.to_string()),
+            leg_role: self.leg_role_of(id.as_str()),
             reason,
             sip_status,
             hangup_by: None,
@@ -13159,11 +13209,13 @@ impl SipSession {
         // already published at ringing/connected time).
         if entered_hold {
             self.emit_typed_rwi_event(&crate::rwi::CallHeld {
+                leg_role: self.leg_role_of(&leg_id_str),
                 call_id: ctx.session_id.clone(),
                 leg_id: leg_id_str,
             });
         } else {
             self.emit_typed_rwi_event(&crate::rwi::CallUnheld {
+                leg_role: self.leg_role_of(&leg_id_str),
                 call_id: ctx.session_id.clone(),
                 leg_id: leg_id_str,
             });
@@ -13311,10 +13363,11 @@ impl SipSession {
         leg_id: Option<LegId>,
         headers: Vec<rsipstack::sip::Header>,
         source_leg: Option<LegId>,
+        purpose: Option<crate::call::domain::LegPurpose>,
     ) -> Result<LegId> {
         let leg_id = leg_id.unwrap_or_else(|| LegId::new(format!("leg-{}", uuid::Uuid::new_v4())));
         let outcome = self
-            .handle_add_leg_inner(target, Some(leg_id.clone()), headers, source_leg)
+            .handle_add_leg_inner(target, Some(leg_id.clone()), headers, source_leg, purpose)
             .await;
         match outcome {
             Ok(id) => Ok(id),
@@ -13345,6 +13398,7 @@ impl SipSession {
         leg_id: Option<LegId>,
         headers: Vec<rsipstack::sip::Header>,
         source_leg: Option<LegId>,
+        purpose: Option<crate::call::domain::LegPurpose>,
     ) -> Result<LegId> {
         let new_leg_id =
             leg_id.unwrap_or_else(|| LegId::new(format!("leg-{}", uuid::Uuid::new_v4())));
@@ -13467,9 +13521,36 @@ impl SipSession {
         let mut leg =
             crate::call::domain::Leg::new(new_leg_id.clone()).with_endpoint(target.clone());
         leg.source_leg = source_leg;
-        // Snapshot the pinned agent attribution at insert time — the queue
-        // pins before LegAdd, so this is the dialed leg's own agent.
-        leg.agent_id = self.pinned_agent_id();
+        leg.purpose = purpose;
+        match purpose {
+            Some(crate::call::domain::LegPurpose::Agent) => {
+                // Snapshot the pinned agent attribution at insert time — the
+                // queue pins before LegAdd, so this is the dialed leg's own
+                // agent.
+                leg.agent_id = self.pinned_agent_id();
+            }
+            Some(crate::call::domain::LegPurpose::Consult) => {
+                // A consult leg dials target C — do NOT inherit the pinned
+                // (B-side) agent attribution and do NOT use `leg_agent_id`
+                // (it falls back to the session-pinned agent). Resolve C's
+                // own identity against the agent registry only: a registered
+                // agent target yields `leg_role: "agent"`, anything else
+                // stays `leg_role: "consult"`.
+                let target_agent = match (
+                    Self::uri_user_part(target.as_str()),
+                    self.server.agent_registry.as_ref(),
+                ) {
+                    (Some(user), Some(registry)) => registry
+                        .get_agent(&user)
+                        .await
+                        .is_some()
+                        .then(|| user.to_string()),
+                    _ => None,
+                };
+                leg.agent_id = target_agent;
+            }
+            None => {}
+        }
         self.legs.insert(new_leg_id.clone(), leg);
         self.update_leg_state(&new_leg_id, LegState::Initializing);
         self.record_leg_event(
@@ -13480,7 +13561,7 @@ impl SipSession {
         );
 
         // Create peer and initiate INVITE in background
-        if let Err(e) = self.initiate_sip_leg(&new_leg_id, location).await {
+        if let Err(e) = self.initiate_sip_leg(&new_leg_id, location, purpose).await {
             warn!(
                 session_id = %self.id,
                 error = %e,
@@ -13640,13 +13721,25 @@ impl SipSession {
         Ok((peer, offer))
     }
 
+    /// Call-ID for an agent-facing dial (`LegPurpose::Agent` / `Consult`):
+    /// the primary session id for the FIRST agent-facing leg of the session
+    /// (`seq == 0`), `{base}-r{n}` for every subsequent one — re-dials never
+    /// reuse a Call-ID a phone may have declined.
+    fn agent_leg_call_id(base: &str, seq: u32) -> String {
+        if seq == 0 {
+            base.to_string()
+        } else {
+            format!("{}-r{}", base, seq.saturating_add(1))
+        }
+    }
+
     /// Initiate a SIP INVITE for a dynamic leg.
     async fn initiate_sip_leg(
         &mut self,
         leg_id: &LegId,
         location: crate::call::Location,
-    ) -> Result<()> {
-        let callee_is_webrtc = Self::callee_supports_webrtc(&location);
+        purpose: Option<crate::call::domain::LegPurpose>,
+    ) -> Result<()> {        let callee_is_webrtc = Self::callee_supports_webrtc(&location);
         let transport_mode = self.callee_transport_mode(callee_is_webrtc);
         // Dialing owns a transport; bridge membership is selected only when
         // connecting. No queue/RWI distinction and no reserved B slot.
@@ -13692,9 +13785,34 @@ impl SipSession {
             )
             .unwrap_or_else(|| caller.clone());
 
-        // A reused logical leg (e.g. consult after rejection) is a new SIP call.
-        // Linphone remembers declined Call-IDs and rejects attempts reusing one.
-        let bleg_call_id = format!("{}-{}-{}", self.id.0, leg_id, uuid::Uuid::new_v4());
+        // Agent-leg Call-ID scheme (`LegPurpose::Agent` / `Consult` — queue
+        // dispatch, consult): the OUTGOING INVITE carries the primary session
+        // id as its SIP Call-ID so the agent's phone / CTI sees exactly the id
+        // every RWI event uses (`call_id` == `session_id` == this Call-ID).
+        // The first agent-facing leg of the session dials with `S` itself;
+        // every subsequent one appends `-r{n}` so re-dials (queue retries,
+        // consult legs after a declined attempt) never reuse a Call-ID the
+        // phone may have already declined (Linphone rejects those). The
+        // sequence also keeps parallel forks unique if that mode is ever
+        // enabled.
+        // Unsolicited dynamic legs keep a plain random UUID (no session
+        // prefix): uniqueness is what matters there, and consult legs may be
+        // re-dialed on a reused logical leg.
+        let is_agent_facing = matches!(
+            purpose,
+            Some(crate::call::domain::LegPurpose::Agent)
+                | Some(crate::call::domain::LegPurpose::Consult)
+        );
+        let bleg_call_id = if is_agent_facing {
+            let base = self
+                .session_id_for_outgoing_leg()
+                .unwrap_or_else(|| self.id.0.clone());
+            let seq = self.meta.agent_leg_seq;
+            self.meta.agent_leg_seq = seq.saturating_add(1);
+            Self::agent_leg_call_id(&base, seq)
+        } else {
+            uuid::Uuid::new_v4().to_string()
+        };
         self.meta.callee_call_ids.insert(bleg_call_id.clone());
         let invite_option = rsipstack::dialog::invitation::InviteOption {
             callee: callee_uri.clone(),
@@ -14500,6 +14618,7 @@ impl SipSession {
                 &self.id.to_string(),
                 &self.app_runtime,
                 &self.server.rwi_gateway,
+                self.leg_role_of(leg_id.as_str()),
             );
         }
         if let Some(peer) = self.media_leg(&leg_id) {
@@ -14744,6 +14863,7 @@ impl SipSession {
                 // queue_id) is injected from the RWI call meta published at
                 // ringing/connected time (replaces the former `cc_held`).
                 self.emit_typed_rwi_event(&crate::rwi::CallHeld {
+                    leg_role: self.leg_role_of(leg_id.as_str()),
                     call_id: self.context.session_id.clone(),
                     leg_id: leg_id.to_string(),
                 });
@@ -14908,6 +15028,7 @@ impl SipSession {
         }
         // Core unhold event (replaces the former `cc_unheld`).
         self.emit_typed_rwi_event(&crate::rwi::CallUnheld {
+            leg_role: self.leg_role_of(leg_id.as_str()),
             call_id: self.context.session_id.clone(),
             leg_id: leg_id.to_string(),
         });

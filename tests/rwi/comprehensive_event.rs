@@ -225,14 +225,16 @@ async fn test_comprehensive_core_event_structs() {
                 early_media: false,
                 agent_id: None,
                 agent_name: None,
-            },
+                leg_role: None,
+},
         );
         gw.fan_out(
             "default",
             &rustpbx::rwi::CallAnswered {
                 leg_id: None,
                 call_id: call_id.into(),
-            },
+                leg_role: None,
+},
         );
         gw.fan_out(
             "default",
@@ -390,7 +392,8 @@ async fn test_comprehensive_core_event_structs() {
                 digit: "1".into(),
                 leg_id: None,
                 extra: None,
-            },
+                leg_role: None,
+},
         );
         gw.fan_out(
             "default",
@@ -401,7 +404,8 @@ async fn test_comprehensive_core_event_structs() {
                 hangup_by: None,
                 sip_status: Some(200),
                 duration_secs: None,
-            },
+                leg_role: None,
+},
         );
 
         gw.broadcast(&rustpbx::rwi::ConferenceCreated {
@@ -503,7 +507,8 @@ async fn test_new_api_event_structs() {
             early_media: false,
             agent_id: None,
             agent_name: None,
-        });
+            leg_role: None,
+});
     }
 
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -519,7 +524,8 @@ async fn test_new_api_event_structs() {
             hangup_by: None,
             sip_status: Some(200),
             duration_secs: None,
-        });
+            leg_role: None,
+});
     }
 
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -533,7 +539,8 @@ async fn test_new_api_event_structs() {
             &rustpbx::rwi::CallAnswered {
                 leg_id: None,
                 call_id: call_id.into(),
-            },
+                leg_role: None,
+},
         );
     }
 

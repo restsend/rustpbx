@@ -19,6 +19,12 @@ pub struct CallMeta {
     pub connected_callee: Option<String>,
     pub connected_callee_dialog_id: Option<DialogId>,
     pub callee_call_ids: HashSet<String>,
+    /// Dial sequence for agent-leg Call-IDs (`LegPurpose::Agent` / `Consult`
+    /// legs). The first such leg dials with the primary session id as its SIP
+    /// Call-ID; every subsequent leg appends `-r{n}` so re-dials (queue
+    /// retries, consult legs) never reuse a Call-ID a phone may have already
+    /// declined (Linphone rejects reused declined Call-IDs).
+    pub agent_leg_seq: u32,
     pub ring_time: Option<Instant>,
     pub answer_time: Option<Instant>,
     pub hangup_reason: Option<CallRecordHangupReason>,
