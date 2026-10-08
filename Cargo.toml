@@ -51,6 +51,10 @@ cross = []
 e2e-testing = ["dep:portpicker"]
 test-support = []
 console = ["dep:minijinja"]
+# Commercial-edition core features (cluster reload/settings, cluster AMI,
+# SSO broker, license digest). Enabled by rustpbx-commerce, -cc and
+# -wholesale; off for the community build.
+commerce = ["console"]
 # Addons below integrate the web console (crate::console handlers, AppState
 # fields), so they hard-depend on the `console` feature to stay compilable in
 # every feature combination (--no-default-features included).
