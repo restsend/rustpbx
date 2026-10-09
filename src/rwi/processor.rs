@@ -2248,7 +2248,11 @@ impl RwiCommandProcessor {
         let gw = self.gateway.read();
         gw.send_to_owner(&crate::rwi::MediaPlayStarted {
             call_id: call_id.to_string(),
-            leg_id: event_leg_id,
+            leg_id: event_leg_id.clone(),
+            leg_role: event_leg_id.as_deref().and_then(|label| match label {
+                "caller" | "callee" | "consult" => Some(label.to_string()),
+                _ => None,
+            }),
             track_id: track_id.clone(),
         });
 
@@ -2520,6 +2524,7 @@ impl RwiCommandProcessor {
             queue_id: queue_id.clone(),
             agent_id: agent_id.to_string(),
             leg_id: None,
+            leg_role: Some("agent".to_string()),
         });
 
         info!(call_id = %call_id, agent_id = %agent_id, "Agent assigned to queue call");

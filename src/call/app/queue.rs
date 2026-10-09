@@ -2204,6 +2204,7 @@ impl CallApp for QueueApp {
                     queue_id: queue_id.clone(),
                     agent_id: agent.agent_id.clone(),
                     leg_id: Some(call_id),
+                    leg_role: Some("agent".to_string()),
                 });
 
                 self.state = QueueState::DialingAgents { attempt: 1 };
@@ -2559,6 +2560,7 @@ impl CallApp for QueueApp {
                             queue_id: queue_id.clone(),
                             agent_id: connected_agent_id.clone(),
                             leg_id: Some(agent_leg.clone()),
+                            leg_role: Some("agent".to_string()),
                         });
                         self.emit_rwi(&crate::rwi::event::QueueLeft {
                             call_id: self.call_id.clone(),
@@ -2610,6 +2612,7 @@ impl CallApp for QueueApp {
                             queue_id: queue_id.clone(),
                             agent_id: agent_id.to_string(),
                             leg_id: Some(leg_id),
+                            leg_role: Some("agent".to_string()),
                         });
                     }
                     Ok(AppAction::Continue)
@@ -2772,6 +2775,7 @@ impl CallApp for QueueApp {
                             agent_id: agent_id.clone(),
                             attempt: self.dial_attempts,
                             leg_id: Some(leg_id.clone()),
+                            leg_role: Some("agent".to_string()),
                         });
                     }
                 }

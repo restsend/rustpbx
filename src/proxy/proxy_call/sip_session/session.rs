@@ -14329,9 +14329,14 @@ impl SipSession {
             interrupted,
         });
         if let Some(gw) = rwi_gateway {
+            let leg_role = event_leg_id_str.as_deref().and_then(|label| match label {
+                "caller" | "callee" | "consult" => Some(label.to_string()),
+                _ => None,
+            });
             gw.read().send_to_owner(&crate::rwi::MediaPlayFinished {
                 call_id: session_id.to_string(),
                 leg_id: event_leg_id_str.clone(),
+                leg_role,
                 track_id: track_id.to_string(),
                 interrupted,
             });

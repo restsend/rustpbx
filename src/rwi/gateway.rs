@@ -993,6 +993,56 @@ mod tests {
         assert_eq!(v["agent_name"], "Alice");
     }
 
+    /// queue_agent_* events always describe the CC agent leg: `leg_role`
+    /// must serialize as `"agent"` (and stay absent when unset — the
+    /// `skip_serializing_if` contract leg-scoped consumers rely on).
+    #[test]
+    fn queue_agent_events_carry_agent_leg_role() {
+        let offered = crate::rwi::QueueAgentOffered {
+            call_id: "c1".into(),
+            queue_id: "support".into(),
+            agent_id: "1003".into(),
+            leg_id: Some("leg-1".into()),
+            leg_role: Some("agent".into()),
+        };
+        let v = serde_json::to_value(&offered).expect("serialize");
+        assert_eq!(
+            <crate::rwi::QueueAgentOffered as crate::rwi::RwiEventSpec>::TYPE,
+            "queue_agent_offered"
+        );
+        assert_eq!(v["leg_role"], "agent");
+        assert_eq!(v["leg_id"], "leg-1");
+
+        let no_answer = crate::rwi::QueueAgentNoAnswer {
+            call_id: "c1".into(),
+            queue_id: "support".into(),
+            agent_id: "1003".into(),
+            attempt: 1,
+            leg_id: None,
+            leg_role: Some("agent".into()),
+        };
+        let v = serde_json::to_value(&no_answer).expect("serialize");
+        assert_eq!(v["leg_role"], "agent");
+        assert!(v.get("leg_id").is_none(), "unset leg_id must be omitted");
+
+        // Session-scoped events keep the "leg_role only on leg events"
+        // contract: the field must not appear at all.
+        let session_hangup = crate::rwi::CallHangup {
+            leg_id: None,
+            leg_role: None,
+            call_id: "c1".into(),
+            reason: None,
+            hangup_by: None,
+            sip_status: None,
+            duration_secs: None,
+        };
+        let v = serde_json::to_value(&session_hangup).expect("serialize");
+        assert!(
+            v.get("leg_role").is_none(),
+            "session-scoped events must not carry leg_role"
+        );
+    }
+
     /// Transfers attributed to an agent keep the nested `transfer_source`
     /// object intact through enrichment — the flat agent context must not
     /// shadow or overwrite the nested attribution.
