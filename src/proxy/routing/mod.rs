@@ -49,6 +49,11 @@ impl ConfigOrigin {
 pub struct TrunkConfig {
     pub dest: String,
     pub backup_dest: Option<String>,
+    /// Outbound proxy (`host[:port]` or SIP URI) that trunk REGISTERs are
+    /// sent through; `dest` stays the registrar in Request-URI/From/To and
+    /// is not resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outbound_proxy: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
     #[serde(
@@ -462,6 +467,7 @@ impl Default for TrunkConfig {
         Self {
             dest: String::new(),
             backup_dest: None,
+            outbound_proxy: None,
             username: None,
             password: None,
             codec: Vec::new(),

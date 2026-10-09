@@ -677,6 +677,7 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
 
     Some(routing::TrunkConfig {
         dest,
+        outbound_proxy: backup_dest.clone(),
         backup_dest,
         username: model.auth_username.clone(),
         password: model.auth_password.clone(),

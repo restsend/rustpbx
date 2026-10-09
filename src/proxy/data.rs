@@ -1329,6 +1329,7 @@ pub fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
     // Base trunk config
     let mut trunk = TrunkConfig {
         dest,
+        outbound_proxy: backup_dest.clone(),
         backup_dest,
         username: model.auth_username,
         password: model.auth_password,
@@ -2499,6 +2500,31 @@ file = "db://ivr/lf-step-ivr.generated.toml"
         };
         let (_, trunk) = convert_trunk(model).expect("should convert");
         assert_eq!(trunk.ice_lite, None);
+    }
+
+    #[test]
+    fn convert_trunk_keeps_registrar_dest_and_outbound_proxy_apart() {
+        let model = sip_trunk::Model {
+            id: 3,
+            name: "via-sbc".to_string(),
+            sip_server: Some("sip:registrar.carrier.example".to_string()),
+            outbound_proxy: Some("sbc.carrier.example:5060".to_string()),
+            ..Default::default()
+        };
+        let (_, trunk) = convert_trunk(model).expect("should convert");
+        assert_eq!(trunk.dest, "sip:registrar.carrier.example");
+        assert_eq!(trunk.outbound_proxy.as_deref(), Some("sbc.carrier.example:5060"));
+
+        // Proxy alone becomes the destination itself, not a separate proxy.
+        let model = sip_trunk::Model {
+            id: 4,
+            name: "proxy-only".to_string(),
+            outbound_proxy: Some("sbc.carrier.example".to_string()),
+            ..Default::default()
+        };
+        let (_, trunk) = convert_trunk(model).expect("should convert");
+        assert_eq!(trunk.dest, "sbc.carrier.example");
+        assert_eq!(trunk.outbound_proxy, None);
     }
 
     #[test]

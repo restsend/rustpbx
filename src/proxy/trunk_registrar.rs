@@ -19,6 +19,7 @@ use rsipstack::{
 use serde::Serialize;
 use std::{
     collections::HashMap,
+    net::SocketAddr,
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -183,6 +184,24 @@ fn parse_server_uri(dest: &str) -> Result<rsipstack::sip::Uri> {
         .map_err(|e| anyhow::anyhow!("invalid SIP URI '{}': {}", uri_str, e))
 }
 
+/// Resolve the trunk's outbound proxy (`host[:port]` or SIP URI) to the
+/// address REGISTERs are sent to. `None` when no proxy is configured.
+async fn resolve_outbound_proxy(proxy: Option<&str>) -> Result<Option<SocketAddr>> {
+    let Some(proxy) = proxy.map(str::trim).filter(|p| !p.is_empty()) else {
+        return Ok(None);
+    };
+    let uri = parse_server_uri(proxy)?;
+    let port = uri.host_with_port.port.map(|p| p.0).unwrap_or(5060);
+    let host = uri.host().to_string();
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot resolve outbound proxy '{proxy}': {e}"))?
+        .next()
+        .map(Some)
+        .ok_or_else(|| anyhow::anyhow!("outbound proxy '{proxy}' resolved to no address"))
+}
+
 /// Long-running loop that maintains registration for a single trunk.
 async fn registration_loop(
     name: String,
@@ -236,10 +255,19 @@ async fn registration_loop(
 
     let mut registration = Registration::new(endpoint, credential);
 
+
     let remote_str = server_uri.to_string();
 
     loop {
-        let result = do_register(&name, &mut registration, &server_uri, expires).await;
+        // Send through the outbound proxy (re-resolved each round); the
+        // registrar in `dest` stays in Request-URI/From/To, unresolved.
+        let result = match resolve_outbound_proxy(config.outbound_proxy.as_deref()).await {
+            Ok(proxy) => {
+                registration.outbound_proxy = proxy;
+                do_register(&name, &mut registration, &server_uri, expires).await
+            }
+            Err(err) => Err(err),
+        };
 
         match result {
             Ok(actual_expires) => {
@@ -347,6 +375,22 @@ fn update_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_resolve_outbound_proxy() {
+        assert_eq!(resolve_outbound_proxy(None).await.unwrap(), None);
+        assert_eq!(resolve_outbound_proxy(Some("  ")).await.unwrap(), None);
+        assert_eq!(
+            resolve_outbound_proxy(Some("10.0.0.1:5080")).await.unwrap(),
+            Some("10.0.0.1:5080".parse().unwrap())
+        );
+        assert_eq!(
+            resolve_outbound_proxy(Some("sip:10.0.0.1;lr")).await.unwrap(),
+            Some("10.0.0.1:5060".parse().unwrap())
+        );
+        let local = resolve_outbound_proxy(Some("localhost:5070")).await.unwrap().unwrap();
+        assert!(local.ip().is_loopback() && local.port() == 5070);
+    }
 
     #[test]
     fn test_parse_server_uri() {
