@@ -689,6 +689,221 @@ async fn test_connected_dynamic_leg_ended_hangs_up_caller_even_without_bridge() 
     );
 }
 
+// ── Leg-scoped call_hangup attribution contract ─────────────────────────
+// `leg_role == "agent"` is the analytics / CTI filter surface: the leg event
+// must be complete (hangup_by + duration_secs) and exact (never attribute a
+// setup failure to the agent, never mislabel a local BYE), and teardown-
+// cascade leg exits must not race the session event with a contradictory
+// duplicate. 2026-10 customer regression: the event advertised
+// leg_role "agent" while shipping hangup_by null and no duration_secs.
+
+async fn build_rwi_session(
+    dialplan: Dialplan,
+) -> (
+    SipSession,
+    tokio::sync::broadcast::Receiver<crate::rwi::gateway::EventCacheEntry>,
+) {
+    use crate::rwi::gateway::RwiGateway;
+    use parking_lot::RwLock as PlRwLock;
+
+    let gateway = Arc::new(PlRwLock::new(RwiGateway::new()));
+    let events = gateway.read().subscribe_events();
+    let (server, _config) =
+        create_test_server_with_rwi_gateway(ProxyConfig::default(), gateway.clone()).await;
+    let session = build_session_on_server(server, dialplan).await;
+    (session, events)
+}
+
+fn leg_hangup_events(
+    events: &mut tokio::sync::broadcast::Receiver<crate::rwi::gateway::EventCacheEntry>,
+) -> Vec<serde_json::Value> {
+    let mut found = Vec::new();
+    while let Ok(entry) = events.try_recv() {
+        if entry.event.event_type == "call_hangup" {
+            found.push(entry.event.payload.clone());
+        }
+    }
+    found
+}
+
+fn connected_agent_leg(id: &str) -> Leg {
+    let mut leg = Leg::new(LegId::from(id));
+    leg.state = LegState::Connected;
+    leg.agent_id = Some("489218".into());
+    leg
+}
+
+#[tokio::test]
+async fn test_agent_leg_remote_bye_carries_complete_attribution() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let (mut session, mut events) = build_rwi_session(dialplan).await;
+    let agent_leg = LegId::from("queue-agent");
+    session.legs.insert(agent_leg.clone(), connected_agent_leg("queue-agent"));
+    session.meta.queue_name = Some("support".into());
+    session.meta.answer_time = Some(Instant::now());
+
+    let result = session
+        .execute_command(
+            CallCommand::LegEnded { leg_id: agent_leg, reason: "UasBye".to_string() },
+            None,
+        )
+        .await;
+    assert!(result.success, "{:?}", result.message);
+
+    let hangups = leg_hangup_events(&mut events);
+    let leg_event = hangups
+        .iter()
+        .find(|e| e["leg_id"] == "queue-agent")
+        .expect("agent leg remote BYE must emit the leg-scoped call_hangup");
+    assert_eq!(leg_event["leg_role"], "agent");
+    assert_eq!(leg_event["reason"], "UasBye");
+    assert_eq!(
+        leg_event["hangup_by"],
+        "agent",
+        "CC-normalized exactly like the session-scoped event"
+    );
+    assert!(
+        leg_event["duration_secs"].is_u64(),
+        "established dialog must carry talk time, got {leg_event}"
+    );
+}
+
+#[tokio::test]
+async fn test_plain_call_leg_remote_bye_downgrades_to_callee() {
+    // Without queue/agent context the same remote BYE must normalize to
+    // "callee", matching the session-scoped downgrade contract.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let (mut session, mut events) = build_rwi_session(dialplan).await;
+    let agent_leg = LegId::from("queue-agent");
+    // No agent_id on the leg: outside CC the role is the positional fallback.
+    let mut leg = Leg::new(agent_leg.clone());
+    leg.state = LegState::Connected;
+    session.legs.insert(agent_leg.clone(), leg);
+    session.meta.answer_time = Some(Instant::now());
+
+    session
+        .execute_command(
+            CallCommand::LegEnded { leg_id: agent_leg, reason: "UasBye".to_string() },
+            None,
+        )
+        .await;
+
+    let hangups = leg_hangup_events(&mut events);
+    let leg_event = hangups
+        .iter()
+        .find(|e| e["leg_id"] == "queue-agent")
+        .expect("remote BYE must emit the leg-scoped call_hangup");
+    assert_eq!(leg_event["hangup_by"], "callee", "no CC context → no agent attribution");
+    assert_eq!(leg_event["leg_role"], "callee", "positional fallback without agent_id");
+    assert!(leg_event["duration_secs"].is_u64());
+}
+
+#[tokio::test]
+async fn test_local_leg_bye_attributed_to_system() {
+    // On a dial leg WE are the UAC: a UAC-side BYE is our own teardown, never
+    // the remote party's — it must report "system", not "agent"/"callee".
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let (mut session, mut events) = build_rwi_session(dialplan).await;
+    let agent_leg = LegId::from("queue-agent");
+    session.legs.insert(agent_leg.clone(), connected_agent_leg("queue-agent"));
+    session.meta.queue_name = Some("support".into());
+    session.meta.answer_time = Some(Instant::now());
+
+    session
+        .execute_command(
+            CallCommand::LegEnded { leg_id: agent_leg, reason: "UacBye".to_string() },
+            None,
+        )
+        .await;
+
+    let hangups = leg_hangup_events(&mut events);
+    let leg_event = hangups
+        .iter()
+        .find(|e| e["leg_id"] == "queue-agent")
+        .expect("local BYE must emit the leg-scoped call_hangup");
+    assert_eq!(leg_event["hangup_by"], "system");
+    assert_eq!(leg_event["leg_role"], "agent");
+    assert!(leg_event["duration_secs"].is_u64());
+}
+
+#[tokio::test]
+async fn test_setup_failure_leg_hangup_claims_no_initiator() {
+    // A never-connected dial must claim NO initiator and NO talk time —
+    // labeling it "agent hung up" would corrupt hangup-initiator analytics;
+    // queue_agent_no_answer/rejected already describe failures.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let (mut session, mut events) = build_rwi_session(dialplan).await;
+    let agent_leg = LegId::from("queue-agent");
+    let mut leg = connected_agent_leg("queue-agent");
+    leg.state = LegState::Ringing;
+    session.legs.insert(agent_leg.clone(), leg);
+    session.meta.queue_name = Some("support".into());
+    session.meta.answer_time = Some(Instant::now());
+
+    session
+        .execute_command(
+            CallCommand::LegFailed {
+                leg_id: agent_leg,
+                reason: "Rejected with 486".to_string(),
+            },
+            None,
+        )
+        .await;
+
+    let hangups = leg_hangup_events(&mut events);
+    let leg_event = hangups
+        .iter()
+        .find(|e| e["leg_id"] == "queue-agent")
+        .expect("setup failure must still emit the leg lifecycle event");
+    assert_eq!(leg_event["sip_status"], 486);
+    assert!(
+        leg_event["hangup_by"].is_null(),
+        "failed dial must not claim an initiator, got {leg_event}"
+    );
+    assert!(
+        leg_event["duration_secs"].is_null(),
+        "never-connected leg must not inherit the session answer time"
+    );
+}
+
+#[tokio::test]
+async fn test_teardown_cascade_suppresses_leg_hangup_events() {
+    // Legs ended by the session teardown cascade are covered by the
+    // session-scoped call_hangup; a per-leg duplicate with null attribution
+    // racing it is exactly the 2026-10 regression. Cancelled session → no
+    // leg-scoped hangup at all.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let (mut session, mut events) = build_rwi_session(dialplan).await;
+    let agent_leg = LegId::from("queue-agent");
+    session.legs.insert(agent_leg.clone(), connected_agent_leg("queue-agent"));
+    session.cancel_token.cancel();
+
+    session
+        .execute_command(
+            CallCommand::LegEnded { leg_id: agent_leg, reason: "UasBye".to_string() },
+            None,
+        )
+        .await;
+
+    let hangups = leg_hangup_events(&mut events);
+    assert!(
+        !hangups.iter().any(|e| e["leg_id"] == "queue-agent"),
+        "teardown-cascade leg exit must not emit a leg-scoped call_hangup, got {hangups:?}"
+    );
+}
+
 // A RINGING agent leg failing must NOT release the caller (queue keeps dialing).
 #[tokio::test]
 async fn test_ringing_dynamic_leg_failure_does_not_hang_up_caller() {

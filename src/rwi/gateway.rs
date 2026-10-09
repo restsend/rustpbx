@@ -1041,6 +1041,26 @@ mod tests {
             v.get("leg_role").is_none(),
             "session-scoped events must not carry leg_role"
         );
+
+        // The leg-scoped `call_hangup` is the `leg_role == "agent"` filter
+        // surface: it must serialize the complete attribution payload
+        // (leg_id + leg_role + hangup_by + duration_secs), and the
+        // session-scoped variant must omit every leg-only field.
+        let leg_hangup = crate::rwi::CallHangup {
+            leg_id: Some("callee".into()),
+            leg_role: Some("agent".into()),
+            call_id: "c1".into(),
+            reason: Some("UasBye".into()),
+            hangup_by: Some("agent".into()),
+            sip_status: None,
+            duration_secs: Some(48),
+        };
+        let v = serde_json::to_value(&leg_hangup).expect("serialize");
+        assert_eq!(v["leg_role"], "agent");
+        assert_eq!(v["leg_id"], "callee");
+        assert_eq!(v["hangup_by"], "agent");
+        assert_eq!(v["duration_secs"], 48);
+        assert_eq!(v["reason"], "UasBye");
     }
 
     /// Transfers attributed to an agent keep the nested `transfer_source`

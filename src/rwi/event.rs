@@ -157,6 +157,11 @@ rwi_event!(CallAnswered, "call_answered");
 #[derive(Debug, Clone, Serialize)]
 pub struct CallHangup {
     /// Present for an individual leg event; absent for a session event.
+    ///
+    /// Leg-scoped events fire only for a mid-session leg exit the session
+    /// survives (setup failure, BYE on a dial leg, REFER / conference
+    /// detach). Legs ended by the session teardown cascade are covered by
+    /// the session-scoped event and emit no per-leg duplicate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leg_id: Option<String>,
     /// `agent` | `consult` | `caller` | `callee` — present only on leg events.
@@ -168,10 +173,19 @@ pub struct CallHangup {
     pub reason: Option<String>,
     /// Normalized initiator: `"agent"` | `"caller"` | `"system"` | `"transfer"`
     /// | `"unknown"`. Consistent with the former CC-layer `cc_hangup.hangup_by`.
+    ///
+    /// Leg-scoped events attribute only established-dialog terminations: a
+    /// remote BYE normalizes exactly like the session event (`"agent"` in a
+    /// CC context, `"callee"` otherwise), a locally issued BYE reports
+    /// `"system"`. Setup failures (never-connected dials) carry `None` —
+    /// `queue_agent_no_answer` / `queue_agent_rejected` already describe
+    /// those with `leg_role: "agent"`.
     pub hangup_by: Option<String>,
     pub sip_status: Option<u16>,
     /// Talk time in seconds (answer → hangup). `None` when the call was never
-    /// answered (originate setup failures).
+    /// answered (originate setup failures). Leg-scoped events carry it only
+    /// for a BYE-terminated established dialog; session-scoped events always
+    /// carry it once the session ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_secs: Option<u64>,
 }

@@ -13090,19 +13090,63 @@ impl SipSession {
         CommandResult::success()
     }
 
+    /// Leg-scoped `call_hangup` — fires ONLY for a mid-session leg exit the
+    /// session survives (setup failure, remote/local BYE on a dial leg, REFER
+    /// or conference detach). Legs ended by the session teardown cascade are
+    /// covered by the session-scoped `call_hangup` and emit nothing here, so
+    /// `leg_role == "agent"` consumers never see a contradictory duplicate
+    /// (no duration, no attribution) racing the authoritative session event.
+    ///
+    /// `reason` contract (see the `LegEnded`/`LegFailed` producers): the
+    /// dynamic-leg dialog monitor only produces `"UasBye"`/`"UacBye"` for an
+    /// ESTABLISHED dialog's BYE termination; every other value is a setup
+    /// failure whose leg never carried media. On dial/consult legs WE are the
+    /// UAC, so `UasBye` = the remote party hung up and `UacBye` = we tore the
+    /// leg down ourselves.
     fn emit_rwi_leg_hangup(&self, id: &LegId, reason: Option<String>) {
+        // A teardown consequence: the session-scoped `call_hangup` (with
+        // `hangup_by` + `duration_secs`) tells the whole story.
+        if self.cancel_token.is_cancelled() {
+            return;
+        }
         let sip_status = reason
             .as_deref()
             .and_then(|r| r.strip_prefix("Rejected with "))
             .and_then(|s| s.parse().ok());
+        let queue_name = self.meta.queue_name.clone();
+        let has_resolved_agent = self.pinned_agent_id().is_some();
+        // Attribution only where it is known with certainty: a remote BYE on
+        // an established dial leg normalizes exactly like the session-level
+        // event ("agent" in a CC context, "callee" otherwise); a local BYE is
+        // the system's doing. Setup failures claim NO initiator — the
+        // queue_agent_no_answer/rejected events (leg_role "agent") already
+        // describe them, and labeling a never-connected dial as "agent hung
+        // up" would corrupt hangup-initiator analytics.
+        let hangup_by = match reason.as_deref() {
+            Some("UasBye") => Some(normalize_call_hangup_by(
+                "agent",
+                queue_name.as_deref(),
+                has_resolved_agent,
+            )),
+            Some("UacBye") => Some("system".to_string()),
+            _ => None,
+        };
+        // Talk time exists only for a dialog that was established: a setup
+        // failure (including a re-dial after the session was answered) must
+        // not inherit the session's answer time.
+        let duration_secs = if matches!(reason.as_deref(), Some("UasBye") | Some("UacBye")) {
+            self.meta.answer_time.map(|t| t.elapsed().as_secs())
+        } else {
+            None
+        };
         self.emit_typed_rwi_event(&crate::rwi::CallHangup {
             call_id: self.context.session_id.clone(),
             leg_id: Some(id.to_string()),
             leg_role: self.leg_role_of(id.as_str()),
             reason,
             sip_status,
-            hangup_by: None,
-            duration_secs: None,
+            hangup_by,
+            duration_secs,
         });
     }
 
