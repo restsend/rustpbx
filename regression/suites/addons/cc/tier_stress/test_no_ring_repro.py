@@ -134,6 +134,19 @@ async def test_r0_real_client_rings_and_connects(pbx, sipbot_pool, api, event_ch
         caller = await _spawn_caller(pbx, sipbot_pool, hangup=18)
         ev = await agent.wait_event("sip_incoming", timeout=20)
         assert ev, "NO RING on real client within 20s (baseline broken!)"
+
+        # WP5 contract: the dispatch webhooks carry the agent leg role and
+        # the call direction (call-meta enrichment flattens them into every
+        # call-scoped payload).
+        offered = [e for e in event_checker.webhook.all_events()
+                   if e.event_type == "queue_agent_offered"]
+        assert offered, "queue_agent_offered webhook missing on dispatch"
+        payload = offered[-1].payload if isinstance(offered[-1].payload, dict) else {}
+        assert payload.get("leg_role") == "agent", (
+            f"queue_agent_offered.leg_role must be 'agent': {payload}")
+        assert payload.get("direction") == "outbound", (
+            f"queue_agent_offered.direction must be 'outbound': {payload}")
+
         assert await agent.answer(), "answer did not reach connected"
         await asyncio.sleep(6)
         await agent.hangup()
@@ -306,6 +319,23 @@ async def test_r2b_skills_mismatch_zero_offers(pbx, sipbot_pool, api, event_chec
 
 
 # ── R1c: dead contact + live agent — progressive cooldown steers dispatch ────
+async def _set_no_answer_cooldown(api, pbx, secs: int) -> None:
+    """Opt the session PBX's ACD into the ring-no-answer cooldown policy
+    (`no_answer_cooldown_secs > 0` → ring timeout parks the agent in a
+    Wrapup cooldown instead of releasing straight to Idle). Written to
+    `cc/acd.toml` + hot-reloaded via the console API — the policy is
+    opt-in by product design (acd/config.rs default 0)."""
+    from pathlib import Path
+
+    acd_dir = Path(pbx.work_dir) / "cc"
+    acd_dir.mkdir(parents=True, exist_ok=True)
+    (acd_dir / "acd.toml").write_text(
+        f"enabled = true\nno_answer_cooldown_secs = {secs}\n"
+    )
+    r = await api.post("/api/cc/acd/reload", {})
+    assert isinstance(r, dict) and r.get("success"), f"acd reload failed: {r}"
+
+
 async def test_r1c_dead_agent_cooldown_speeds_up_second_call(pbx, sipbot_pool, api, event_checker):
     """Customer-visible improvement: after agent 1001's UA dies (no
     unregister), the FIRST call may burn a ring_timeout on the dead contact,
@@ -313,6 +343,9 @@ async def test_r1c_dead_agent_cooldown_speeds_up_second_call(pbx, sipbot_pool, a
     so the SECOND call rings the LIVE agent (1002) almost immediately."""
     import time as _t
     await _setup(api)          # 1003 offline
+    # Opt into the cooldown policy BEFORE the calls (default release is
+    # straight to Idle — the rotation would keep picking the dead contact).
+    await _set_no_answer_cooldown(api, pbx, secs=60)
     dead = RestsendAgent(pbx, AGENT, local_port=25110)
     live = RestsendAgent(pbx, "1002", local_port=25111)
     await dead.start(); await live.start()
@@ -335,15 +368,22 @@ async def test_r1c_dead_agent_cooldown_speeds_up_second_call(pbx, sipbot_pool, a
         lat1 = _t.time() - t1
         await asyncio.sleep(4)
         await live.hangup()
-        await asyncio.sleep(6)  # wrapup on the live agent
+        # Wait out the live agent's ACW/wrapup (default 30s) — call 2 must
+        # observe 1002 IDLE so its latency isolates the dead-contact
+        # cooldown effect (1001's 60s cooldown outlives the ACW window).
+        assert await _await_idle(api, "1002", timeout=45) == "idle"
         pytest.log.info(f"R1c call1 latency (may include dead burn): {lat1:.0f}s")
 
         # call 2: dead agent is in no-answer cooldown — must ring live FAST.
+        # wait_event_after (NOT the history-scanning wait_event): call 1's
+        # sip_incoming is still in the event history and would satisfy a
+        # naive scan instantly, masking the dispatch.
         c2 = await _spawn_caller(pbx, sipbot_pool, hangup=110)
         t2 = _t.time()
-        ev2 = await live.wait_event("sip_incoming", timeout=60)
+        ev2_mark = len(live.events)
+        ev2 = await live.wait_event_after("sip_incoming", ev2_mark, timeout=60)
         assert ev2, "live agent never rang on call 2"
-        assert await live.answer()
+        assert await live.answer(since=ev2_mark)
         lat2 = _t.time() - t2
         pytest.log.info(f"R1c call2 latency (cooldown active): {lat2:.0f}s")
         assert lat2 < max(10.0, lat1 * 0.6), (
@@ -356,3 +396,9 @@ async def test_r1c_dead_agent_cooldown_speeds_up_second_call(pbx, sipbot_pool, a
         sipbot_pool.terminate_user("2205")
         await _drain(api)
         await dead.stop(); await live.stop()
+        # Restore the default (release-to-Idle) policy for the rest of the
+        # session — the cooldown is r1c's opt-in scenario only.
+        try:
+            await _set_no_answer_cooldown(api, pbx, secs=0)
+        except Exception:  # noqa: BLE001 — teardown best-effort
+            pass
