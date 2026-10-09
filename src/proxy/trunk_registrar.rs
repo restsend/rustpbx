@@ -173,7 +173,7 @@ impl TrunkRegistrar {
 /// Handles bare `host:port`, strips angle brackets, and prepends `sip:` if no
 /// scheme is present.  The `user@` part (if any) is kept — `Registration`
 /// overwrites `to.uri.auth` from the credential anyway.
-fn parse_server_uri(dest: &str) -> Result<rsipstack::sip::Uri> {
+pub(crate) fn parse_server_uri(dest: &str) -> Result<rsipstack::sip::Uri> {
     let trimmed = dest.trim().trim_matches(|c| c == '<' || c == '>');
     let uri_str = if trimmed.starts_with("sip:") || trimmed.starts_with("sips:") {
         trimmed.to_string()

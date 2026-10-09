@@ -1481,9 +1481,21 @@ pub fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig) -> Res
         .as_deref()
         .and_then(super::resolve_transport_from_str);
 
+    // Send through the outbound proxy when one is configured; `dest` stays
+    // the Request-URI/From/To host via `rewrite_hostport` below.
+    let next_hop = match trunk
+        .outbound_proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|proxy| !proxy.is_empty())
+    {
+        Some(proxy) => crate::proxy::trunk_registrar::parse_server_uri(proxy)
+            .map_err(|e| anyhow!("Invalid trunk outbound proxy '{}': {}", proxy, e))?,
+        None => dest_uri.clone(),
+    };
     option.destination = Some(SipAddr {
         r#type: transport,
-        addr: dest_uri.host_with_port.clone(),
+        addr: next_hop.host_with_port,
     });
 
     // Save original caller before potential rewrite for P-Asserted-Identity header
@@ -1635,5 +1647,51 @@ mod ice_lite_hint_tests {
         merge_trunk_media_hints(&mut hints, &trunk_with(Some(true)));
         merge_trunk_media_hints(&mut hints, &trunk_with(None));
         assert_eq!(hints.as_ref().and_then(|h| h.ice_lite), Some(true));
+    }
+}
+
+#[cfg(test)]
+mod apply_trunk_config_tests {
+    use super::*;
+
+    fn option() -> InviteOption {
+        InviteOption {
+            caller: "sip:alice@pbx.local".try_into().unwrap(),
+            callee: "sip:+15550100@pbx.local".try_into().unwrap(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn sends_to_outbound_proxy_but_keeps_dest_in_uris() {
+        let trunk = TrunkConfig {
+            dest: "sip:registrar.carrier.example".to_string(),
+            outbound_proxy: Some("sbc.carrier.example:5070".to_string()),
+            transport: Some("tcp".to_string()),
+            ..Default::default()
+        };
+        let mut option = option();
+        apply_trunk_config(&mut option, &trunk).unwrap();
+
+        let destination = option.destination.unwrap();
+        assert_eq!(destination.addr.to_string(), "sbc.carrier.example:5070");
+        assert_eq!(destination.r#type, Some(rsipstack::sip::Transport::Tcp));
+        assert_eq!(option.callee.to_string(), "sip:+15550100@registrar.carrier.example");
+        assert_eq!(option.caller.to_string(), "sip:alice@registrar.carrier.example");
+    }
+
+    #[test]
+    fn sends_to_dest_without_outbound_proxy() {
+        let trunk = TrunkConfig {
+            dest: "sip:registrar.carrier.example:5080".to_string(),
+            outbound_proxy: Some("  ".to_string()),
+            ..Default::default()
+        };
+        let mut option = option();
+        apply_trunk_config(&mut option, &trunk).unwrap();
+        assert_eq!(
+            option.destination.unwrap().addr.to_string(),
+            "registrar.carrier.example:5080"
+        );
     }
 }
