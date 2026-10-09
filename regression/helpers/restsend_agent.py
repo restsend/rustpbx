@@ -74,6 +74,9 @@ class RestsendAgent:
         self.tone_hz = tone_hz
         self.proc: Optional[asyncio.subprocess.Process] = None
         self.events: list[dict] = []
+        # Index into `events` just past the last answer this agent sent —
+        # lets answer() (legacy contract) target the NEXT fresh incoming.
+        self._answered_mark: int = 0
         self.last_consult_uri: str = ""
         self._reader: Optional[asyncio.Task] = None
 
@@ -150,6 +153,17 @@ class RestsendAgent:
             if ev.get("evt") == etype and (predicate is None or predicate(ev)):
                 return ev
         return None
+
+    def has_event_after(self, etype: str, since: int,
+                        predicate=None) -> Optional[dict]:
+        """Latest event of `etype` among events appended AFTER index
+        `since` (no historical matches)."""
+        found = None
+        for ev in self.events[since:]:
+            if ev.get("evt") == etype and (
+                    predicate is None or predicate(ev)):
+                found = ev
+        return found
 
     async def wait_event(self, etype: str, predicate=None,
                          timeout: float = 15.0) -> Optional[dict]:
@@ -393,14 +407,40 @@ class RestsendAgent:
 
     async def answer(self, timeout: float = 20.0,
                      since: Optional[int] = None) -> bool:
-        """Wait for a `sip_incoming` arriving AFTER `since` (an events-list
-        index captured BEFORE triggering the dial — the INVITE can land on
-        the wire within milliseconds), answer, and wait for `connected`.
-        When `since` is omitted the mark is taken at entry."""
-        mark = len(self.events) if since is None else since
-        if not await self.wait_event_after("sip_incoming", mark, timeout=timeout):
-            return False
+        """Answer the current or next incoming call and wait for `connected`.
+
+        Contracts by caller style (do NOT merge them):
+          * ``since=None`` (legacy, 2026-09-16 contract): answer the
+            UNANSWERED incoming call — the one that already rang (the
+            ring-then-answer callers: wait for `sip_incoming`, then answer)
+            — or, if none has arrived yet, the next one that rings (the
+            dial-then-answer callers). A naive mark-at-entry gate breaks the
+            first style (waits for a second ring that never comes and never
+            sends the answer — regression 2026-09-30) and a blind immediate
+            send breaks the second (the UA sheds an answer with nothing
+            pending). Track the last-answered position so repeated
+            answer() calls on one long-lived agent each target the NEXT
+            fresh incoming.
+          * ``since=<mark>`` (explicit dial marks): wait for a
+            `sip_incoming` appended AFTER `mark`, answer it, and wait for
+            `connected` after `mark` — rejects stale events from earlier
+            calls.
+        """
+        if since is not None:
+            if not await self.wait_event_after("sip_incoming", since, timeout=timeout):
+                return False
+            await self.cmd({"cmd": "sip_answer"})
+            ev = await self.wait_event_after(
+                "state_changed", since,
+                predicate=lambda e: e.get("name") == "connected",
+                timeout=timeout)
+            return ev is not None
+        mark = getattr(self, "_answered_mark", 0)
+        if not self.has_event_after("sip_incoming", mark):
+            if not await self.wait_event_after("sip_incoming", mark, timeout=timeout):
+                return False
         await self.cmd({"cmd": "sip_answer"})
+        self._answered_mark = len(self.events)
         ev = await self.wait_event_after(
             "state_changed", mark,
             predicate=lambda e: e.get("name") == "connected",
