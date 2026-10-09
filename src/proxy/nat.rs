@@ -226,11 +226,20 @@ impl MessageInspector for NatInspector {
         // ── Response side: fix Callee Contact in 1xx/2xx ────────────────
         if let SipMessage::Response(ref mut resp) = msg {
             let kind = resp.status_code.kind();
-            let is_target_forming = matches!(
-                kind,
-                rsipstack::sip::StatusCodeKind::Provisional
-                    | rsipstack::sip::StatusCodeKind::Successful
-            );
+            // A REGISTER response's Contacts are our own bindings echoed
+            // back by the registrar, not the peer's address; rewriting them
+            // breaks matching our binding to read its granted expiration.
+            let is_register = resp
+                .cseq_header()
+                .ok()
+                .and_then(|cseq| cseq.method().ok())
+                == Some(rsipstack::sip::Method::Register);
+            let is_target_forming = !is_register
+                && matches!(
+                    kind,
+                    rsipstack::sip::StatusCodeKind::Provisional
+                        | rsipstack::sip::StatusCodeKind::Successful
+                );
 
             if is_target_forming {
                 for header in resp.headers.iter_mut() {
@@ -303,6 +312,33 @@ mod tests {
         assert_eq!(
             contact_line, "Contact: <sip:41111112222@198.51.100.24:15060>",
             "rewritten Contact header should not duplicate the header name"
+        );
+    }
+
+    #[test]
+    fn test_nat_fix_leaves_register_response_contacts_untouched() {
+        // A REGISTER 200 OK echoes our own (private) binding; rewriting it to
+        // the registrar's address would stop us finding our granted expires.
+        let raw = concat!(
+            "SIP/2.0 200 OK\r\n",
+            "Via: SIP/2.0/UDP 10.0.0.5:15060;rport=40000;received=198.51.100.9;branch=z9hG4bK-reg\r\n",
+            "From: <sip:trunkuser@203.0.113.52>;tag=a\r\n",
+            "To: <sip:trunkuser@203.0.113.52>;tag=b\r\n",
+            "Call-ID: reg-nat-test\r\n",
+            "CSeq: 2 REGISTER\r\n",
+            "Contact: <sip:trunkuser@10.0.0.5:15060>;expires=600\r\n",
+            "Content-Length: 0\r\n",
+            "\r\n"
+        );
+        let msg = SipMessage::try_from(raw).unwrap();
+        let from: SipAddr = rsipstack::sip::HostWithPort::try_from("203.0.113.52:5060")
+            .unwrap()
+            .into();
+
+        let text = NatInspector::new().after_received(msg, Some(&from)).to_string();
+        assert!(
+            text.contains("Contact: <sip:trunkuser@10.0.0.5:15060>;expires=600"),
+            "{text}"
         );
     }
 
