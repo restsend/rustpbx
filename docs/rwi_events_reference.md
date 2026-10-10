@@ -1068,9 +1068,10 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 > 一通走技能组的呼叫，典型事件序列（含无应答重试轮次）：
 > ```
 > queue_joined
-> → skill_group_call_joined (reason=immediate|waited)   ← 全量入队信号
+> → skill_group_call_joined (reason=immediate|waited)   ← 全量入队信号（每轮排队一条）
 > → skill_group_candidates_found → skill_group_agent_assigned (attempt=1)
 > → queue_agent_offered → queue_agent_no_answer ↔ skill_group_agent_no_answer (attempt=1)
+> → skill_group_call_joined (reason=immediate)          ← 重试轮重新入队
 > → skill_group_candidates_found → skill_group_agent_assigned (attempt=2)
 > → queue_agent_offered → queue_agent_connected ↔ skill_group_agent_connected (attempt=2)
 > → queue_left{connected} ↔ skill_group_call_left{connected}
@@ -1085,7 +1086,7 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 >
 > | queue_* | skill_group_* 替代 | 说明 |
 > |---|---|---|
-> | queue_joined | skill_group_call_joined | 入队全量计数（立即分配也发；call_queued 只发"真正等待"的，会少计） |
+> | queue_joined | skill_group_call_joined | 入队全量计数（每轮排队一条，重试轮重发；立即分配也发；call_queued 只发"真正等待"的，会少计） |
 > | queue_position_changed | skill_group_position_changed | 位置变化（前者已无生产者） |
 > | queue_agent_offered | skill_group_agent_assigned + attempt | 分配轮次（振铃开始前的调度决定） |
 > | queue_agent_no_answer / rejected | skill_group_agent_no_answer / rejected | 同 attempt 同 leg 配对 |
@@ -1256,9 +1257,13 @@ ACD 调度器决定将某坐席分配给该呼叫时触发（ACD `Assign` 决策
 
 分发：broadcast
 
-**全量入队信号**：呼叫进入技能组队列即发，每 (call, 组) 恰好一次——立即分配的呼叫也发。
+**全量入队信号**：呼叫进入技能组队列即发，**每轮排队恰好一次**——首次入队与
+无应答重试后的每轮重新排队都各发一条（振铃终态 no-answer / rejected 结束当前轮，
+下一轮首个有结果的调度活动再次触发）；同轮内的重复触发（溢出的 NoAgent +
+AgentAssigned 对）仍只发一条；立即分配的呼叫也发。
 排队量/深度分析必须以此事件计数（`skill_group_call_queued` 只发"真正等待"的呼叫，
-立即接通场景会少计）。在其触发事件（首次有结果的调度活动）**之前**发出。
+立即接通场景会少计）。在其触发事件（本轮首次有结果的调度活动）**之前**发出。
+等待保留的轮询属于同一次排队停留，不会重发。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|

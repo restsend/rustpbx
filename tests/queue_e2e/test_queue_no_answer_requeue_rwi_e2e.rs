@@ -523,17 +523,37 @@ async fn test_no_answer_requeue_rwi_event_contract() -> Result<()> {
         // Join: bob is Idle from the start → the call joins AND is assigned
         // in the same round → reason "immediate" (this scenario is exactly
         // the case `skill_group_call_queued` does NOT cover).
-        assert_eq!(sg_joined.len(), 1, "one skill_group_call_joined: {types:?}");
+        // ONE JOIN PER QUEUE ROUND: the no-answer terminal re-arms the join
+        // announcement, so the round-2 requeue joins AGAIN.
+        assert_eq!(
+            sg_joined.len(),
+            2,
+            "one skill_group_call_joined per queue round (initial + requeue): {types:?}"
+        );
         assert_eq!(
             evs[sg_joined[0]]["event"]["reason"].as_str(),
             Some("immediate"),
             "idle agent → immediate join+assign: {:#}",
             evs[sg_joined[0]]
         );
+        assert_eq!(
+            evs[sg_joined[1]]["event"]["reason"].as_str(),
+            Some("immediate"),
+            "requeue round re-dispatches straight to assignment: {:#}",
+            evs[sg_joined[1]]
+        );
+        for &j in &sg_joined {
+            assert!(
+                evs[j]["event"]["queue_depth"].as_u64().is_some(),
+                "skill_group_call_joined must carry queue_depth: {:#}",
+                evs[j]
+            );
+        }
+        // Round boundaries: the round-2 join opens AFTER the round-1
+        // no-answer terminal and BEFORE the round-2 assignment.
         assert!(
-            evs[sg_joined[0]]["event"]["queue_depth"].as_u64().is_some(),
-            "skill_group_call_joined must carry queue_depth: {:#}",
-            evs[sg_joined[0]]
+            sg_no_answers[0] < sg_joined[1] && sg_joined[1] < assigned[1],
+            "round-2 join must sit between no-answer and round-2 assignment: {types:?}"
         );
 
         // No-answer round mirrors queue_agent_no_answer (attempt 1).

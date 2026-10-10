@@ -265,6 +265,9 @@ fn parity_events() -> Vec<serde_json::Value> {
         envelope("p", "t4", "queue_agent_offered", json!({"agent_id": "a1", "leg_id": "l1"})),
         envelope("p", "t5", "queue_agent_no_answer", json!({"agent_id": "a1", "attempt": 1, "leg_id": "l1"})),
         envelope("p", "t6", "skill_group_agent_no_answer", json!({"agent_id": "a1", "attempt": 1, "leg_id": "l1"})),
+        // Requeue round: the ring terminal re-arms the join announcement, so
+        // round 2 opens with its OWN skill_group_call_joined.
+        envelope("p", "t6b", "skill_group_call_joined", json!({"skill_group_id": "q", "reason": "immediate", "queue_depth": 0})),
         envelope("p", "t7", "skill_group_agent_assigned", json!({"agent_id": "a1", "attempt": 2})),
         envelope("p", "t8", "queue_agent_offered", json!({"agent_id": "a1", "leg_id": "l2"})),
         envelope("p", "t9", "queue_agent_connected", json!({"agent_id": "a1", "leg_id": "l2"})),
@@ -277,6 +280,31 @@ fn parity_events() -> Vec<serde_json::Value> {
 #[test]
 fn parity_passes_on_aligned_families() {
     RwiTimeline::from_events("p", parity_events()).assert_skill_group_parity(); // no panic
+}
+
+#[test]
+fn parity_fails_on_unexplained_rejoin_spam() {
+    let mut events = parity_events();
+    // A poll loop minting joins every re-resolve: 5 joins vs a budget of
+    // 1 queue_joined + 1 ring terminal = 2.
+    for i in 0..3 {
+        events.push(envelope(
+            "p",
+            &format!("t-spam-{i}"),
+            "skill_group_call_joined",
+            json!({"skill_group_id": "q", "reason": "waited", "queue_depth": 1}),
+        ));
+    }
+    let result = std::panic::catch_unwind(move || {
+        RwiTimeline::from_events("p", events).assert_skill_group_parity()
+    });
+    let err = result.err().expect("parity must FAIL on join spam");
+    let msg = err
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_default();
+    assert!(msg.contains("round budget"), "msg: {msg}");
 }
 
 #[test]

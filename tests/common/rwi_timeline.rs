@@ -388,7 +388,11 @@ impl RwiTimeline {
     /// Skipped (no-op) when the timeline carries no `skill_group_*` events
     /// (plain queue deployments without the CC adapter).
     ///
-    /// * `skill_group_call_joined` count == `queue_joined` count
+    /// * `skill_group_call_joined` count ≥ `queue_joined` count — every queue
+    ///   entry is announced. Requeue rounds after a ring terminal join AGAIN
+    ///   (one join per round), so the count may legitimately exceed
+    ///   `queue_joined`, but only within the round budget:
+    ///   `≤ queue_joined + ring terminals + extra skill groups`.
     /// * `skill_group_agent_assigned` count == `queue_agent_offered` count
     /// * `skill_group_agent_no_answer` count == `queue_agent_no_answer`
     ///   count, same agents, same rounds (`attempt`)
@@ -420,12 +424,39 @@ impl RwiTimeline {
                 .collect()
         };
 
-        // Join parity.
+        // Join parity. Lower bound: every queue entry announced. Upper bound:
+        // re-joins are budgeted — one per ring-terminal round (no-answer /
+        // 486 reject re-dispatch) plus one per extra skill group (overflow);
+        // anything beyond that means the join signal is spamming.
         let q_joined = count("queue_joined");
         let sg_joined = count("skill_group_call_joined");
-        if q_joined != sg_joined {
+        if sg_joined < q_joined {
             violations.push(format!(
-                "join parity: {q_joined} queue_joined vs {sg_joined} skill_group_call_joined"
+                "join parity: {sg_joined} skill_group_call_joined cover fewer \
+                 entries than {q_joined} queue_joined"
+            ));
+        }
+        let ring_terminals =
+            count("skill_group_agent_no_answer") + count("skill_group_agent_rejected");
+        let mut joined_groups: Vec<String> = self
+            .events
+            .iter()
+            .filter(|e| self.etype(e) == "skill_group_call_joined")
+            .filter_map(|e| {
+                self.payload(e)["skill_group_id"]
+                    .as_str()
+                    .map(String::from)
+            })
+            .collect();
+        joined_groups.sort();
+        joined_groups.dedup();
+        let join_budget = q_joined + ring_terminals + joined_groups.len().saturating_sub(1);
+        if sg_joined > join_budget {
+            violations.push(format!(
+                "join parity: {sg_joined} skill_group_call_joined exceed the \
+                 round budget {join_budget} ({q_joined} queue_joined + \
+                 {ring_terminals} ring terminals + {} extra groups)",
+                joined_groups.len().saturating_sub(1)
             ));
         }
 

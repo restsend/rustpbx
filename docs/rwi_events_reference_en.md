@@ -1066,9 +1066,10 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 > Typical event sequence for a skill-group-routed call (with a no-answer retry round):
 > ```
 > queue_joined
-> → skill_group_call_joined (reason=immediate|waited)     ← full-fidelity join signal
+> → skill_group_call_joined (reason=immediate|waited)     ← full-fidelity join signal (one per queue round)
 > → skill_group_candidates_found → skill_group_agent_assigned (attempt=1)
 > → queue_agent_offered → queue_agent_no_answer ↔ skill_group_agent_no_answer (attempt=1)
+> → skill_group_call_joined (reason=immediate)            ← requeue round joins again
 > → skill_group_candidates_found → skill_group_agent_assigned (attempt=2)
 > → queue_agent_offered → queue_agent_connected ↔ skill_group_agent_connected (attempt=2)
 > → queue_left{connected} ↔ skill_group_call_left{connected}
@@ -1085,7 +1086,7 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 >
 > | queue_* | skill_group_* replacement | Notes |
 > |---|---|---|
-> | queue_joined | skill_group_call_joined | Full join count (instant assigns included; `call_queued` alone undercounts) |
+> | queue_joined | skill_group_call_joined | Full join count (one per queue round, requeue rounds re-announce; instant assigns included; `call_queued` alone undercounts) |
 > | queue_position_changed | skill_group_position_changed | (the former has no producer anymore) |
 > | queue_agent_offered | skill_group_agent_assigned + attempt | Assignment round |
 > | queue_agent_no_answer / rejected | skill_group_agent_no_answer / rejected | Same attempt, same leg |
@@ -1253,10 +1254,15 @@ inline ACD policy is configured ("first agent selected by the strategy").
 Dispatch: broadcast
 
 **Full-fidelity join signal**: fires for EVERY queue entry, exactly once per
-(call, group) — instant assignments included. Queue VOLUME/DEPTH analytics must
-count this event (`skill_group_call_queued` only fires for calls that actually
-waited). Announced right BEFORE its trigger event (the first result-bearing
-scheduling activity).
+QUEUE ROUND — the initial join AND every requeue round after a ring terminal
+(no-answer / rejected ends the round; the next round's first result-bearing
+scheduling activity joins again). Duplicate triggers WITHIN one round (the
+overflow NoAgent + AgentAssigned pair) still announce exactly once; instant
+assignments included. Queue VOLUME/DEPTH analytics must count this event
+(`skill_group_call_queued` only fires for calls that actually waited).
+Announced right BEFORE its trigger event (the round's first result-bearing
+scheduling activity). Wait-retention polls are the SAME queue stay and do not
+re-announce.
 
 | Field | Type | Description |
 |-------|------|-------------|
