@@ -725,6 +725,11 @@ impl TestUa {
 
     /// Send a plaintext RTP packet on the WebRTC leg; rustrtc SRTP-protects
     /// it before it hits the wire.
+    ///
+    /// In SDES mode the SRTP session is armed asynchronously after the SDP
+    /// answer is applied (rustrtc 0.4.x `wait_for_rtp_transport_ready` only
+    /// waits for the transport to EXIST), so an immediate send can race the
+    /// `start_srtp` arm. Retry briefly on that specific not-ready error.
     #[allow(dead_code)]
     pub async fn send_webrtc_rtp(
         &self,
@@ -739,12 +744,25 @@ impl TestUa {
             .webrtc_pc
             .as_ref()
             .ok_or_else(|| anyhow!("not a webrtc UA"))?;
-        let mut header =
-            rustrtc::rtp::RtpHeader::new(payload_type, sequence_number, timestamp, ssrc);
-        header.marker = marker;
-        pc.send_raw_rtp(rustrtc::rtp::RtpPacket::new(header, payload))
-            .await
-            .map_err(|e| anyhow!("send_raw_rtp failed: {:?}", e))
+        let build = || {
+            let mut header =
+                rustrtc::rtp::RtpHeader::new(payload_type, sequence_number, timestamp, ssrc);
+            header.marker = marker;
+            rustrtc::rtp::RtpPacket::new(header, payload.clone())
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match pc.send_raw_rtp(build()).await {
+                Ok(()) => return Ok(()),
+                Err(e) if e.to_string().contains("SRTP required but session not ready") => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(anyhow!("send_raw_rtp failed: {:?}", e));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+                Err(e) => return Err(anyhow!("send_raw_rtp failed: {:?}", e)),
+            }
+        }
     }
 
     /// Set answer SDP for a dialog, used for re-INVITE responses.

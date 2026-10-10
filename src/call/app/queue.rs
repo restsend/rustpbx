@@ -2553,8 +2553,14 @@ impl CallApp for QueueApp {
                             .await;
 
                         // Emit RWI queue lifecycle events at connect time: agent
-                        // connected, then the call left the queue (dequeue). This
-                        // mirrors the ACD engine's Connected/CallDequeued emission.
+                        // connected, then the call left the queue (dequeue).
+                        // `queue_left` is TERMINAL in the Option-A contract: it
+                        // fires only on the final transition out of the queue
+                        // (connected / abandoned / timeout / overflow) — never
+                        // at assignment. Assignment is reported by the CC
+                        // adapter via `skill_group_agent_assigned`, and the
+                        // ringing window (offered → connected) must carry no
+                        // `queue_left` at all.
                         self.emit_rwi(&crate::rwi::event::QueueAgentConnected {
                             call_id: self.call_id.clone(),
                             queue_id: queue_id.clone(),

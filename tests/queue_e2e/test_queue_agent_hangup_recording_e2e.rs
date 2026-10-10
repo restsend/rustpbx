@@ -445,10 +445,11 @@ async fn test_agent_hangup_first_propagates_bye_and_stops_recording() -> Result<
         "record_stopped must be the agent segment owned by bob: {stopped}"
     );
 
-    // 3. The call end is attributed to the agent. The dynamic-leg
-    //    disconnect fires a per-leg call_hangup first (hangup_by=null,
-    //    direction=outbound); the session-level event carries the
-    //    callee attribution.
+    // 3. The call end is attributed to the agent. Since f5faac1d the
+    //    dynamic-leg disconnect fires a per-leg call_hangup that ALSO
+    //    carries attribution (hangup_by="agent", reason="UasBye", leg_id
+    //    set); the SESSION-level event (no leg_id) carries the normalized
+    //    callee attribution. Select the session event explicitly.
     let hangup_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut session_hangup: Option<serde_json::Value> = None;
     while tokio::time::Instant::now() < hangup_deadline {
@@ -460,6 +461,7 @@ async fn test_agent_hangup_first_propagates_bye_and_stops_recording() -> Result<
             .find(|v| {
                 v["event_type"].as_str() == Some("call_hangup")
                     && v["event"]["hangup_by"].as_str().is_some()
+                    && v["event"]["leg_id"].is_null()
             })
             .cloned()
         {

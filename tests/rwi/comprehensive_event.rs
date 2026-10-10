@@ -373,6 +373,7 @@ async fn test_comprehensive_core_event_structs() {
             &rustpbx::rwi::MediaPlayStarted {
                 call_id: call_id.into(),
                 leg_id: None,
+                leg_role: None,
                 track_id: "prompt-1".into(),
             },
         );
@@ -381,6 +382,7 @@ async fn test_comprehensive_core_event_structs() {
             &rustpbx::rwi::MediaPlayFinished {
                 call_id: call_id.into(),
                 leg_id: None,
+                leg_role: None,
                 track_id: "prompt-1".into(),
                 interrupted: false,
             },

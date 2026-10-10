@@ -64,6 +64,13 @@ impl RwiTimeline {
     ///   leg-level event losing attribution to the CC session-hook race;
     /// * ringings precede `queue_agent_offered`, which precedes
     ///   `queue_agent_connected`;
+    /// * **Option-A dequeue contract**: `queue_left` is TERMINAL. Any
+    ///   `queue_left{reason:"connected"}` must appear AFTER
+    ///   `queue_agent_connected`, and the ringing window (first
+    ///   `queue_agent_offered` → `queue_agent_connected`) must carry no
+    ///   `queue_left` other than a legitimate mid-ring overflow stage
+    ///   switch (`reason:"overflow"`). A `queue_left` fired at
+    ///   assignment/ring time is the regression this guards;
     /// * exactly ONE `call_answered`, session-scoped (no `leg_id`), carrying
     ///   `agent_id`;
     /// * `call_hangup` present and carrying `agent_id`;
@@ -109,6 +116,37 @@ impl RwiTimeline {
         if let (Some(o), Some(c)) = (idx("queue_agent_offered"), idx("queue_agent_connected")) {
             if o > c {
                 violations.push("queue_agent_offered arrived AFTER queue_agent_connected".into());
+            }
+        }
+
+        // ── Option-A dequeue contract: `queue_left` is terminal ────────
+        let connected_idx = idx("queue_agent_connected");
+        for (i, ev) in self.events.iter().enumerate() {
+            if self.etype(ev) != "queue_left" {
+                continue;
+            }
+            let reason = self.payload(ev)["reason"].as_str().unwrap_or("");
+            if reason == "connected" {
+                match connected_idx {
+                    None => violations.push(
+                        "queue_left{reason:\"connected\"} present but queue_agent_connected never fired"
+                            .into(),
+                    ),
+                    Some(c) if i < c => violations.push(format!(
+                        "queue_left{{reason:\"connected\"}} fired BEFORE queue_agent_connected \
+                         (index {i} < {c}) — assign/ring-time dequeue is a contract violation"
+                    )),
+                    _ => {}
+                }
+            } else if let (Some(o), Some(c)) = (idx("queue_agent_offered"), connected_idx) {
+                // Inside the ringing window only an overflow stage switch may
+                // legitimately leave (and re-join) the queue.
+                if i > o && i < c && reason != "overflow" {
+                    violations.push(format!(
+                        "queue_left{{reason:\"{reason}\"}} fired inside the ringing window \
+                         (offered → connected) — only overflow stage switches may"
+                    ));
+                }
             }
         }
 
