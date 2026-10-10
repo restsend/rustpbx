@@ -2,7 +2,7 @@ use crate::handler::middleware::clientaddr::ClientAddr;
 use axum::{
     body::Body,
     extract::State,
-    http::{Request, header::CONTENT_LENGTH},
+    http::{HeaderValue, Request, header::CONTENT_LENGTH},
     middleware::Next,
     response::Response,
 };
@@ -48,6 +48,7 @@ struct AccessLogFields {
     cost_ms: Option<f64>,
     uri: Option<String>,
     client_ip: Option<String>,
+    request_id: Option<String>,
 }
 
 impl AccessLogFields {
@@ -87,6 +88,7 @@ impl Visit for AccessLogFields {
             "body_len" => self.body_len = Some(value.to_string()),
             "uri" => self.uri = Some(value.to_string()),
             "client_ip" => self.client_ip = Some(value.to_string()),
+            "request_id" => self.request_id = Some(value.to_string()),
             _ => {}
         }
     }
@@ -98,6 +100,7 @@ impl Visit for AccessLogFields {
             "body_len" => self.body_len = Some(rendered.trim_matches('"').to_string()),
             "uri" => self.uri = Some(rendered.trim_matches('"').to_string()),
             "client_ip" => self.client_ip = Some(rendered.trim_matches('"').to_string()),
+            "request_id" => self.request_id = Some(rendered.trim_matches('"').to_string()),
             _ => {}
         }
     }
@@ -142,7 +145,7 @@ where
             write!(writer, " ")?;
             writeln!(
                 writer,
-                "{} {} | {} | {} | {} | {} | {} | {}",
+                "{} {} | {} | {} | {} | {} | {} | {} | request_id={}",
                 metadata.level(),
                 metadata.target(),
                 fields.take_client_ip(),
@@ -150,7 +153,8 @@ where
                 fields.take_status(),
                 fields.take_body_len(),
                 fields.take_cost_ms(),
-                fields.take_uri()
+                fields.take_uri(),
+                fields.request_id.as_deref().unwrap_or("-")
             )?;
             Ok(())
         } else {
@@ -216,10 +220,27 @@ fn redact_query(uri: &str) -> String {
 /// Logs basic request metadata once the downstream handler returns.
 pub async fn log_requests(
     State(skip_paths): State<Arc<Vec<String>>>,
-    req: Request<Body>,
+    mut req: Request<Body>,
     next: Next,
 ) -> Response {
     let started_at = Instant::now();
+    // Accept only bounded hexadecimal IDs; arbitrary caller headers must not reach logs.
+    let request_id = req
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| {
+            value.len() == 32
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
+    let request_header = HeaderValue::from_str(&request_id)
+        .expect("Validated hexadecimal request IDs are valid HTTP header values");
+    req.headers_mut()
+        .insert("x-request-id", request_header.clone());
     let method = req.method().clone();
     let uri = redact_query(req.uri().to_string().as_str());
     let request_path = req.uri().path().to_string();
@@ -230,7 +251,10 @@ pub async fn log_requests(
     let client_addr = ClientAddr::from_http_parts(req.uri(), req.headers(), connect_info);
     let client_ip = client_addr.ip().to_string();
 
-    let response = next.run(req).await;
+    let mut response = next.run(req).await;
+    response
+        .headers_mut()
+        .insert("x-request-id", request_header);
 
     let status = response.status();
     let body_len = response
@@ -250,8 +274,102 @@ pub async fn log_requests(
             cost_ms = cost_ms,
             uri = uri.as_str(),
             client_ip = client_ip.as_str(),
+            request_id = request_id.as_str(),
         );
     }
 
     response
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Router, http::StatusCode, middleware, routing::get};
+    use std::io::{self, Write};
+    use tower::ServiceExt;
+
+    #[derive(Clone)]
+    struct LogBuffer(Arc<parking_lot::Mutex<Vec<u8>>>);
+
+    impl Write for LogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_request_correlates_response_and_access_log_without_untrusted_headers() {
+        const REQUEST_ID: &str = "0123456789abcdef0123456789abcdef";
+        for (supplied, skip) in [
+            (Some(REQUEST_ID), false),
+            (None, false),
+            (Some("private-header-value"), false),
+            (Some("0123456789ABCDEF0123456789ABCDEF"), false),
+            (Some(REQUEST_ID), true),
+        ] {
+            let output = LogBuffer(Arc::new(parking_lot::Mutex::new(Vec::new())));
+            let writer = output.clone();
+            let interest_guard = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::new());
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .event_format(AccessLogEventFormat::<SystemTime>::default())
+                .with_writer(move || writer.clone())
+                .finish();
+            let _capture = tracing::subscriber::set_default(subscriber);
+            let app = Router::new()
+                .route("/resource", get(|| async { (StatusCode::ACCEPTED, "ok") }))
+                .layer(middleware::from_fn_with_state(
+                    Arc::new(if skip {
+                        vec!["/resource".to_string()]
+                    } else {
+                        vec![]
+                    }),
+                    log_requests,
+                ));
+            let mut request = Request::builder().uri("/resource?token=private-query-value");
+            if let Some(value) = supplied {
+                request = request.header("x-request-id", value);
+            }
+            let response = app
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let request_id = response
+                .headers()
+                .get("x-request-id")
+                .expect("Completed responses must identify their access log")
+                .to_str()
+                .unwrap();
+            assert_eq!(request_id.len(), 32);
+            assert!(
+                request_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            );
+            if supplied == Some(REQUEST_ID) {
+                assert_eq!(request_id, REQUEST_ID);
+            }
+            let text = String::from_utf8(output.0.lock().clone()).unwrap();
+            if skip {
+                assert!(text.is_empty(), "{text}");
+            } else {
+                assert_eq!(text.lines().count(), 1, "{text}");
+                assert!(text.contains(&format!("request_id={request_id}")), "{text}");
+                assert!(text.contains("| GET | 202 |"), "{text}");
+                assert!(text.contains("/resource?token=<redacted>"), "{text}");
+                assert!(
+                    !text.contains("private-header-value") && !text.contains("private-query-value"),
+                    "{text}"
+                );
+            }
+            drop(interest_guard);
+        }
+    }
 }
