@@ -1289,7 +1289,7 @@ mod tests {
         let mut gw = RwiGateway::new();
         let mut rx = setup_owned_call(&mut gw, "root-1");
         let mut data = serde_json::Map::new();
-        data.insert("crm_id".to_string(), serde_json::json!("C-1"));
+        data.insert("context_id".to_string(), serde_json::json!("root-value"));
         gw.set_user_data(&"root-1".to_string(), data).unwrap();
         let _ = rx.recv().await.unwrap(); // consume call_userdata_updated
 
@@ -1315,7 +1315,30 @@ mod tests {
             None,
         );
         let enriched = gw.enrich_flat_event(&flat);
-        assert_eq!(enriched.payload["user_data"]["crm_id"], "C-1");
+        assert_eq!(enriched.payload["user_data"]["context_id"], "root-value");
+        assert_eq!(gw.get_user_data(&"child-1".into())["context_id"], "root-value");
+
+        // A child-owned object replaces the inherited object, including empty.
+        gw.set_user_data(
+            &"child-1".into(),
+            serde_json::json!({"context_id": "child-value"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(gw.get_user_data(&"child-1".into())["context_id"], "child-value");
+        assert_eq!(
+            gw.enrich_flat_event(&flat).payload["user_data"]["context_id"],
+            "child-value"
+        );
+        gw.set_user_data(&"child-1".into(), serde_json::Map::new())
+            .unwrap();
+        assert!(gw.get_user_data(&"child-1".into()).is_empty());
+        assert_eq!(
+            gw.enrich_flat_event(&flat).payload["user_data"],
+            serde_json::json!({})
+        );
     }
 
     /// The cluster replication hook must fire on both upsert and removal so
