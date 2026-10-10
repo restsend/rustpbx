@@ -164,9 +164,15 @@ async fn start_harness(
         LocatorWebhookConfig {
             url: capture.url.clone(),
             events: vec![
+                "skill_group_call_joined".to_string(),
                 "skill_group_call_queued".to_string(),
                 "skill_group_call_abandoned".to_string(),
                 "skill_group_agent_assigned".to_string(),
+                "skill_group_position_changed".to_string(),
+                "skill_group_agent_no_answer".to_string(),
+                "skill_group_agent_rejected".to_string(),
+                "skill_group_agent_connected".to_string(),
+                "skill_group_call_left".to_string(),
             ],
             headers: None,
             timeout_ms: Some(5000),

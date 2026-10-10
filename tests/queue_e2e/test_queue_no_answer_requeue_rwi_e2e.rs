@@ -71,6 +71,8 @@ const WEBHOOK_EVENTS: &[&str] = &[
     "skill_group_agent_assigned",
     "skill_group_candidates_found",
     "skill_group_agent_no_answer",
+    "skill_group_agent_rejected",
+    "skill_group_position_changed",
     "skill_group_agent_connected",
     "skill_group_call_left",
 ];
@@ -97,6 +99,8 @@ const ALLOWED_EVENT_TYPES: &[&str] = &[
     "skill_group_agent_no_answer",
     "skill_group_agent_connected",
     "skill_group_call_left",
+    "skill_group_position_changed",
+    "skill_group_agent_rejected",
 ];
 
 fn proxy_config() -> ProxyConfig {

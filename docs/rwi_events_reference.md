@@ -657,6 +657,7 @@ CC addon 的独立呼叫生命周期事件已移除。坐席归因改由核心�
 |------|------|------|
 | `call_id` | String | 呼叫标识 |
 | `leg_id` | String | DTMF 来源 leg |
+| `leg_role` | Option\<String\> | 来源腿语义（IVR 交互腿为 `caller`；无法判定时省略） |
 | `digits` | String | `dtmf_collected` 专用：收集到的按键串 |
 | *+ctx* | | 扁平化上下文 |
 
@@ -1061,11 +1062,37 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 ### 6.6 队列 / ACD 事件
 
 > **事件来源说明**：队列相关事件分两个家族，由不同子系统产生，可同时出现：
-> - **`queue_*`（队列生命周期）**：由 Queue 应用（`src/call/app/queue.rs`，经 `gw.broadcast`）与 CC addon 的 ACD 桥（`src/addons/cc/mod.rs`，经 `broadcast_event`）产生，**无论是否启用 CC addon 都会发**。覆盖入队、振铃、接通、放弃、超时、回退等通用生命周期。两个子系统都以 broadcast 分发（唯一例外：`queue.enqueue` RWI 命令路径走 owner）。
-> - **`skill_group_*`（技能组调度决策）**：由 CC addon 的 ACD 适配器（`src/addons/cc/agent_registry_adapter.rs`）在队列向 ACD 询问坐席、ACD 产出调度结果时产生，**仅在启用 CC addon 且使用技能路由时发**。
+> - **`queue_*`（队列生命周期）**：由 Queue 应用（`src/call/app/queue.rs`，经 `gw.broadcast`）产生，**无论是否启用 CC addon 都会发**。覆盖入队、振铃、接通、放弃、超时、回退等通用生命周期。
+> - **`skill_group_*`（技能组调度决策 + 全量分析信号）**：由 CC addon 的 ACD 适配器（`src/addons/cc/agent_registry_adapter.rs`）在队列向 ACD 询问坐席、ACD 产出调度结果时产生，**仅在启用 CC addon 且使用技能路由时发**。
 >
-> 一通走技能组的呼叫，典型事件序列：
-> `queue_joined` → `skill_group_candidates_found` → `skill_group_agent_assigned` → `queue_agent_offered` → `queue_agent_connected`
+> 一通走技能组的呼叫，典型事件序列（含无应答重试轮次）：
+> ```
+> queue_joined
+> → skill_group_call_joined (reason=immediate|waited)   ← 全量入队信号
+> → skill_group_candidates_found → skill_group_agent_assigned (attempt=1)
+> → queue_agent_offered → queue_agent_no_answer ↔ skill_group_agent_no_answer (attempt=1)
+> → skill_group_candidates_found → skill_group_agent_assigned (attempt=2)
+> → queue_agent_offered → queue_agent_connected ↔ skill_group_agent_connected (attempt=2)
+> → queue_left{connected} ↔ skill_group_call_left{connected}
+> ```
+>
+> **出队语义（Option-A 契约）**：`queue_left` 是**终态事件**——只在最终离开队列时发
+> （connected / abandoned / timeout / fallback / overflow），分配和振铃阶段**不发**。
+> "分配"信号以 `skill_group_agent_assigned`（含 `attempt` 轮次）为准。
+>
+> **下游数据分析迁移**：`skill_group_*` 家族已完整覆盖 `queue_*` 的分析口径，两族事件
+> 由 e2e 契约（`RwiTimeline::assert_skill_group_parity`）保证永不漂移。映射关系：
+>
+> | queue_* | skill_group_* 替代 | 说明 |
+> |---|---|---|
+> | queue_joined | skill_group_call_joined | 入队全量计数（立即分配也发；call_queued 只发"真正等待"的，会少计） |
+> | queue_position_changed | skill_group_position_changed | 位置变化（前者已无生产者） |
+> | queue_agent_offered | skill_group_agent_assigned + attempt | 分配轮次（振铃开始前的调度决定） |
+> | queue_agent_no_answer / rejected | skill_group_agent_no_answer / rejected | 同 attempt 同 leg 配对 |
+> | queue_agent_connected | skill_group_agent_connected | 含 attempt + wait_secs（SLA 口径） |
+> | queue_left{connected} | skill_group_call_left{connected} | 含全技能组历史 + queue_depth |
+> | queue_left{abandoned} | skill_group_call_abandoned | 含 waited_secs |
+> | queue_left{timeout/fallback} | skill_group_service_unavailable | 含 fallback_action |
 
 所有队列事件携带扁平化上下文。
 
@@ -1087,7 +1114,8 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 
 #### queue_position_changed
 
-分发：broadcast（由 CC ACD 桥转发；核心 queue 应用不单独发射）
+> **已无生产者（由 `skill_group_position_changed` 取代）**：历史上由 CC ACD 桥转发
+> （该桥已移除）。排队位置分析请订阅 `skill_group_position_changed`。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -1106,6 +1134,10 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 | *+ctx* | | 扁平化上下文 |
 
 #### queue_left
+
+> **终态事件（Option-A 契约）**：只在呼叫**最终离开**队列时发（接通 / 放弃 / 超时 /
+> 回退 / 溢出换组）。分配坐席和振铃阶段**不会**发 `queue_left`——振铃窗口内出现非
+> `overflow` 原因的 `queue_left` 是契约违规（由 e2e `RwiTimeline` 契约锁定）。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -1218,6 +1250,89 @@ ACD 调度器决定将某坐席分配给该呼叫时触发（ACD `Assign` 决策
 | `skill_group_id` | Option\<String\> | 技能组 ID |
 | `agent_id` | String | 被分配的坐席 ID |
 | `dispatch_reason` | String | 派发原因：`regular` \| `forced_available`（强制就绪溢出） \| `overflow` |
+| `attempt` | u32 | **分配轮次**（1 起）：无应答重试 / 溢出换组后的再分配递增，消费端由此直接判断"第几次分配"，无需数 offered 次数 |
+
+#### skill_group_call_joined
+
+分发：broadcast
+
+**全量入队信号**：呼叫进入技能组队列即发，每 (call, 组) 恰好一次——立即分配的呼叫也发。
+排队量/深度分析必须以此事件计数（`skill_group_call_queued` 只发"真正等待"的呼叫，
+立即接通场景会少计）。在其触发事件（首次有结果的调度活动）**之前**发出。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫标识 |
+| `skill_group_id` | String | 技能组 ID |
+| `position` | Option\<u32\> | 入队时排队位置（真正等待过才有；立即分配省略） |
+| `ewt_secs` | Option\<u32\> | 入队时预估等待秒数（同上） |
+| `queue_depth` | u32 | 入队时刻该组等待数（本节点视角；集群权威值在共享队列 DB） |
+| `reason` | String | `immediate`（同轮即分配） \| `waited`（进入等待保留） |
+
+#### skill_group_position_changed
+
+分发：broadcast
+
+等待保留轮询发现**排队位置实际变化**时发（位置未变的轮询不发，避免事件刷屏）。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫标识 |
+| `skill_group_id` | String | 技能组 ID |
+| `position` | u32 | 新的 1 起排队位置 |
+| `queue_depth` | u32 | 当前该组等待数（本节点视角） |
+
+#### skill_group_agent_no_answer / skill_group_agent_rejected
+
+分发：broadcast
+
+分配的坐席腿振铃超时未接（no_answer）或 486 拒接（rejected）。与
+`queue_agent_no_answer` / `queue_agent_rejected` **同轮配对**：同 `attempt`、同 `leg_id`。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫标识 |
+| `skill_group_id` | String | 技能组 ID |
+| `agent_id` | String | 未接 / 拒接的坐席 ID |
+| `attempt` | u32 | 对应的分配轮次（与 `skill_group_agent_assigned.attempt` 对齐） |
+| `leg_id` | Option\<String\> | 坐席腿 ID（与 queue 侧事件同 leg） |
+| `leg_role` | Option\<String\> | `agent` |
+
+> 注意：486 可先于 180 到达——**拒接轮次可能没有** `queue_agent_offered`（电话未响即挂），
+> 但 `skill_group_agent_assigned` 已先行（分配先于拨号）。
+
+#### skill_group_agent_connected
+
+分发：broadcast
+
+分配的坐席**接听**——该振铃轮次的成功终态。与 `queue_agent_connected` 配对。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫标识 |
+| `skill_group_id` | String | 技能组 ID |
+| `agent_id` | String | 接听的坐席 ID |
+| `attempt` | u32 | 接通所在的分配轮次（SLA 口径：第几轮接通） |
+| `wait_secs` | u64 | 入队到接通的秒数 |
+| `leg_id` | Option\<String\> | 坐席腿 ID |
+| `leg_role` | Option\<String\> | `agent` |
+
+#### skill_group_call_left
+
+分发：broadcast
+
+**接通路径终态**：接通的呼叫离开队列。与 `queue_left{reason:"connected"}` 配对，
+携带完整技能组历史。放弃/超时/回退路径保留各自事件（`skill_group_call_abandoned` /
+`skill_group_service_unavailable`）。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `call_id` | String | 呼叫标识 |
+| `skill_group_id` | String | 技能组 ID |
+| `reason` | String | `connected`（当前唯一取值，字段保留扩展） |
+| `wait_secs` | u64 | 入队到接通的秒数 |
+| `queue_depth` | u32 | 离开时刻该组等待数（本节点视角） |
+| `skill_groups` | Option\<Vec\<String\>\> | 排过的全部技能组（主组+溢出阶段，按加入顺序） |
 
 #### skill_group_no_agent
 
@@ -1395,6 +1510,7 @@ SIP PUBLISH  presence 状态变化（每个本地 PUBLISH 触发）。
 | `conf_id` | String | 会议 ID |
 | `call_id` | String | 成员呼叫 ID |
 | `leg_id` | String | 成员 leg |
+| `leg_role` | Option\<String\> | 成员腿语义（房间拨入为 `caller`、桥接参与者为 `agent` / `consult`；无法判定时省略） |
 
 > `conference_left` 目前仅有类型定义、**无发射点**（预留）；`conference_joined` 在成员加入会议时实际发射。
 
@@ -1576,7 +1692,7 @@ SIP PUBLISH  presence 状态变化（每个本地 PUBLISH 触发）。
 | `ivr_flow_completed` | fan_out | ✅ | +ctx |
 | `ivr_step_trace` | fan_out | ✅ | — |
 | `queue_joined` | owner/broadcast | ✅ | +ctx |
-| `queue_position_changed` | broadcast | ✅ | +ctx |
+| `queue_position_changed` | —（已由 skill_group_position_changed 取代） | ✅ | +ctx |
 | `queue_agent_offered` | broadcast | ✅ | +ctx |
 | `queue_agent_connected` | broadcast | ✅ | +ctx |
 | `queue_left` | broadcast | ✅ | +ctx |
@@ -1591,6 +1707,12 @@ SIP PUBLISH  presence 状态变化（每个本地 PUBLISH 触发）。
 | `skill_group_candidates_found` | broadcast | ✅ | — |
 | `skill_group_agent_assigned` | broadcast | ✅ | — |
 | `skill_group_no_agent` | broadcast | ✅ | — |
+| `skill_group_call_joined` | broadcast | ✅ | — |
+| `skill_group_position_changed` | broadcast | ✅ | — |
+| `skill_group_agent_no_answer` | broadcast | ✅ | — |
+| `skill_group_agent_rejected` | broadcast | ✅ | — |
+| `skill_group_agent_connected` | broadcast | ✅ | — |
+| `skill_group_call_left` | broadcast | ✅ | — |
 | `skill_group_call_queued` | broadcast | ✅ | — |
 | `skill_group_call_abandoned` | broadcast | ✅ | — |
 | `skill_group_service_unavailable` | broadcast | ✅ | — |

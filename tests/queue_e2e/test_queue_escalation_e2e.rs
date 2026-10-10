@@ -197,14 +197,74 @@ mod escalation_e2e {
         }
 
         let cc_registry_reset = cc_registry.clone();
+        let (sg_tx, mut sg_rx) =
+            tokio::sync::mpsc::unbounded_channel::<
+                rustpbx::addons::cc::agent_registry_adapter::SkillGroupEvent,
+            >();
         let adapter = Arc::new(
             CcAgentRegistryAdapter::new(
                 cc_registry,
                 Arc::new(AcdEngine::new(AcdConfig::default())),
                 "localhost",
             )
-            .with_skill_group_cache(skill_group_cache),
+            .with_skill_group_cache(skill_group_cache)
+            .with_skill_group_event_tx(sg_tx),
         );
+
+        // ── RWI webhook capture (skill_group_* + queue_* contract) ────────
+        let capture = crate::common::webhook_capture::WebhookCapture::start().await;
+        let gateway: rustpbx::rwi::RwiGatewayRef = Arc::new(parking_lot::RwLock::new({
+            let mut gw = rustpbx::rwi::RwiGateway::new();
+            gw.set_webhook_tx(rustpbx::rwi::webhook::start_rwi_webhook_handler(
+                rustpbx::config::LocatorWebhookConfig {
+                    url: capture.url.clone(),
+                    events: [
+                        "call_created",
+                        "call_ringing",
+                        "call_answered",
+                        "call_hangup",
+                        "queue_joined",
+                        "queue_agent_offered",
+                        "queue_agent_no_answer",
+                        "queue_agent_rejected",
+                        "queue_agent_connected",
+                        "queue_left",
+                        "queue_overflow_joined",
+                        "skill_group_call_joined",
+                        "skill_group_call_queued",
+                        "skill_group_agent_assigned",
+                        "skill_group_candidates_found",
+                        "skill_group_no_agent",
+                        "skill_group_agent_no_answer",
+                        "skill_group_agent_rejected",
+                        "skill_group_position_changed",
+                        "skill_group_agent_connected",
+                        "skill_group_call_left",
+                    ]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+                    headers: None,
+                    timeout_ms: Some(5000),
+                    retries: None,
+                    track_queue_latency: None,
+                },
+                rustpbx::rwi::webhook::WEBHOOK_CHANNEL_SIZE,
+            ));
+            gw
+        }));
+        {
+            let gw = gateway.clone();
+            tokio::spawn(async move {
+                while let Some(event) = sg_rx.recv().await {
+                    if let Some(rwi) =
+                        rustpbx::addons::cc::translate_skill_group_event(event)
+                    {
+                        gw.read().broadcast_event(&rwi);
+                    }
+                }
+            });
+        }
 
         let connected: Arc<Mutex<Vec<CallSessionContext>>> = Arc::new(Mutex::new(Vec::new()));
         let hook: Arc<dyn CallSessionHook> = Arc::new(RecordingHook {
@@ -229,7 +289,7 @@ mod escalation_e2e {
                     .collect(),
                 session_hook: Some(hook),
                 agent_registry: Some(adapter),
-                rwi_gateway: None,
+                rwi_gateway: Some(gateway),
                 #[cfg(feature = "addon-cc")]
                 cc_policy_db: None,
             },
@@ -490,6 +550,101 @@ mod escalation_e2e {
         let _ = hangup2_tx.send(());
         let _ = tokio::time::timeout(Duration::from_secs(10), call_task2).await;
         sleep(Duration::from_millis(300)).await;
+
+        // ── RWI contract for the overflow chain (call 2: support → l2) ────
+        // The stage switch must be visible in BOTH families: the core
+        // `queue_overflow_joined` plus the full-fidelity join signal, and
+        // the terminal carries the complete picture.
+        {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let ready = {
+                    let events = capture.received.lock().unwrap();
+                    events
+                        .iter()
+                        .any(|v| v["event_type"].as_str() == Some("skill_group_call_left"))
+                        && events
+                            .iter()
+                            .any(|v| v["event_type"].as_str() == Some("queue_overflow_joined"))
+                };
+                if ready || Instant::now() > deadline {
+                    break;
+                }
+                sleep(Duration::from_millis(50)).await;
+            }
+            let events = capture.received.lock().unwrap();
+            let mut call_ids: Vec<String> = events
+                .iter()
+                .filter_map(|v| v["event_type"].as_str().map(|_| v["call_id"].as_str()))
+                .filter_map(|c| c.map(String::from))
+                .collect();
+            call_ids.dedup();
+            let overflow_call = call_ids
+                .last()
+                .cloned()
+                .expect("overflow call captured");
+            let evs: Vec<serde_json::Value> = events
+                .iter()
+                .filter(|v| v["call_id"].as_str() == Some(overflow_call.as_str()))
+                .cloned()
+                .collect();
+            let types: Vec<&str> = evs
+                .iter()
+                .filter_map(|v| v["event_type"].as_str())
+                .collect();
+            assert!(
+                types.contains(&"queue_overflow_joined"),
+                "stage switch must emit queue_overflow_joined: {types:?}"
+            );
+            assert!(
+                types.contains(&"skill_group_call_joined"),
+                "join signal present: {types:?}"
+            );
+            // The escalation round re-announces an assignment (attempt
+            // increments) and the terminal pair closes the story.
+            let assigned_count = types
+                .iter()
+                .filter(|t| **t == "skill_group_agent_assigned")
+                .count();
+            assert!(
+                assigned_count >= 1,
+                "assignment events present: {types:?}"
+            );
+            assert!(
+                types.contains(&"queue_agent_connected"),
+                "connect present: {types:?}"
+            );
+            assert!(
+                types.contains(&"skill_group_agent_connected")
+                    && types.contains(&"skill_group_call_left"),
+                "skill_group terminal pair present: {types:?}"
+            );
+            let left = evs
+                .iter()
+                .find(|v| v["event_type"].as_str() == Some("skill_group_call_left"))
+                .expect("call_left envelope");
+            assert_eq!(
+                left["event"]["reason"].as_str(),
+                Some("connected"),
+                "terminal reason: {left}"
+            );
+
+            println!("── overflow RWI timeline (call {overflow_call}) ──");
+            for (i, ev) in evs.iter().enumerate() {
+                let t = types[i];
+                if t.starts_with("queue_") || t.starts_with("skill_group_") {
+                    println!(
+                        "  {:2} {:36} agent={:?} attempt={:?} reason={:?}",
+                        i,
+                        t,
+                        ev["event"]["agent_id"].as_str(),
+                        ev["event"]["attempt"].as_u64(),
+                        ev["event"]["reason"].as_str(),
+                    );
+                }
+            }
+            println!("── end timeline ──");
+        }
 
         server.stop();
     }

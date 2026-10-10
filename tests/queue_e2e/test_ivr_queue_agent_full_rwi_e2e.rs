@@ -66,6 +66,8 @@ const WEBHOOK_EVENTS: &[&str] = &[
     "skill_group_call_queued",
     "skill_group_agent_assigned",
     "skill_group_candidates_found",
+    "skill_group_agent_rejected",
+    "skill_group_position_changed",
     "skill_group_agent_connected",
     "skill_group_call_left",
     "ivr_node_entered",
@@ -90,6 +92,8 @@ const ALLOWED_EVENT_TYPES: &[&str] = &[
     "skill_group_no_agent",
     "skill_group_agent_connected",
     "skill_group_call_left",
+    "skill_group_position_changed",
+    "skill_group_agent_rejected",
     "ivr_node_entered",
     "ivr_node_exited",
 ];
@@ -716,6 +720,8 @@ async fn test_full_chain_ivr_queue_agent_rwi_webhook_events() -> Result<()> {
         for absent in [
             "queue_agent_no_answer",
             "skill_group_agent_no_answer",
+            "queue_agent_rejected",
+            "skill_group_agent_rejected",
             "skill_group_call_abandoned",
             "skill_group_service_unavailable",
             "queue_wait_timeout",

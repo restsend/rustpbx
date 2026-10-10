@@ -676,6 +676,26 @@ impl QueueApp {
         }
     }
 
+    /// Notify the agent dispatcher that a dialled agent leg REJECTED the
+    /// call (486; the queue re-dials). CC addon translates this into
+    /// `skill_group_agent_rejected` (per-round retry analytics).
+    async fn notify_rejected(&self, agent_id: &str, attempt: u32, leg_id: &str) {
+        if !self.skill_events_enabled() {
+            return;
+        }
+        if let Some(ref registry) = self.agent_registry {
+            let _ = registry
+                .notify_agent_rejected(
+                    &self.call_id,
+                    self.skill_queue_id(),
+                    agent_id,
+                    attempt,
+                    leg_id,
+                )
+                .await;
+        }
+    }
+
     /// Notify the agent dispatcher that a queued call CONNECTED to an agent
     /// — the queue's success terminal. CC addon translates this into
     /// `skill_group_agent_connected` + `skill_group_call_left{connected}`.
@@ -2714,6 +2734,15 @@ impl CallApp for QueueApp {
                             leg_id: leg_id.clone(),
                             leg_role: Some("agent".to_string()),
                         });
+
+                        // CC adapter analytics: `skill_group_agent_rejected`
+                        // for this round (attempt aligns with the assignment).
+                        self.notify_rejected(
+                            &agent_id,
+                            self.dial_attempts,
+                            leg_id.as_deref().unwrap_or(""),
+                        )
+                        .await;
 
                         if let Some(ref registry) = self.agent_registry {
                             let _ = registry.release_call(&agent_id, &self.call_id).await;

@@ -230,15 +230,16 @@ impl RwiTimeline {
         }
 
         // Round pairing: with a CC adapter wired, every ringing round is
-        // announced by an assignment (same count, each offered preceded by
-        // an assigned).
+        // announced by an assignment. `offered` may be FEWER than assigned:
+        // a 486 can arrive before any 180, so a rejected round has an
+        // assignment but no `queue_agent_offered`.
         if !assigned_list.is_empty() {
-            if assigned_list.len() != offered_list.len() {
+            if offered_list.len() > assigned_list.len() {
                 violations.push(format!(
-                    "assignment/offering round mismatch: {} skill_group_agent_assigned vs \
-                     {} queue_agent_offered",
-                    assigned_list.len(),
-                    offered_list.len()
+                    "assignment/offering round mismatch: {} queue_agent_offered exceed \
+                     {} skill_group_agent_assigned",
+                    offered_list.len(),
+                    assigned_list.len()
                 ));
             }
             for &o in &offered_list {
@@ -280,6 +281,10 @@ impl RwiTimeline {
             .iter()
             .filter_map(|&i| self.payload(self.events.get(i).unwrap())["leg_id"].as_str().map(String::from))
             .collect();
+        // Leg linkage: a NO-ANSWER leg must have been offered first (a ring
+        // timeout implies the phone rang). Rejections are NOT checked: a 486
+        // can arrive before any 180, so a rejected leg may have no offered
+        // event.
         for &n in &no_answer_list {
             let leg = self.payload(self.events.get(n).unwrap())["leg_id"].as_str().map(String::from);
             if let Some(leg) = leg {
@@ -315,7 +320,10 @@ impl RwiTimeline {
             }
         }
 
-        // Hangup attribution.
+        // Hangup attribution: the SESSION-level hangup must name the winning
+        // agent. LEG-scoped hangups (f5faac1d) may name a failed-round agent
+        // (e.g. the leg that rejected with 486 and tore down) — multi-agent
+        // calls legitimately attribute different legs to different agents.
         let hangups: Vec<&serde_json::Value> = self
             .events
             .iter()
@@ -325,22 +333,37 @@ impl RwiTimeline {
             violations.push("call_hangup missing from the timeline".into());
         }
         for ev in &hangups {
-            if self.payload(ev)["agent_id"].as_str() != Some(expected_agent) {
+            if self.payload(ev)["agent_id"].as_str() != Some(expected_agent)
+                && self.payload(ev)["leg_id"].is_null()
+            {
                 violations.push(format!(
-                    "call_hangup missing/wrong agent_id: {}",
+                    "session-level call_hangup missing/wrong agent_id: {}",
                     self.payload(ev)["agent_id"]
                 ));
             }
         }
 
-        // Stability: any attributed event must agree with the expected agent.
+        // Stability: SUCCESS-round events must agree with the expected agent.
+        // FAILED-round events (the rejected/no-answered assignment, its
+        // offered ring and the leg-scoped teardown) legitimately name other
+        // agents — a sequential re-dial tries alice before the winner bob.
         for ev in &self.events {
+            let etype = self.etype(ev);
+            if matches!(
+                etype,
+                "queue_agent_rejected"
+                    | "skill_group_agent_rejected"
+                    | "call_hangup"
+                    | "skill_group_agent_assigned"
+                    | "queue_agent_offered"
+            ) {
+                continue; // failed-round events: multi-agent by design
+            }
             let aid = self.payload(ev)["agent_id"].as_str();
             if let Some(aid) = aid {
                 if aid != expected_agent {
                     violations.push(format!(
-                        "{} carries agent_id={aid}, expected {expected_agent} (attribution changed mid-call)",
-                        self.etype(ev)
+                        "{etype} carries agent_id={aid}, expected {expected_agent} (attribution changed mid-call)"
                     ));
                 }
             }
@@ -406,12 +429,15 @@ impl RwiTimeline {
             ));
         }
 
-        // Assignment ↔ offering parity.
+        // Assignment/offering parity: every ringing round is announced by an
+        // assignment — `offered` can never EXCEED `assigned`. (The reverse
+        // is legal: a 486 can arrive before any 180, so a rejected round
+        // has an assignment but no `queue_agent_offered`.)
         let q_offered = count("queue_agent_offered");
         let sg_assigned = count("skill_group_agent_assigned");
-        if q_offered != sg_assigned {
+        if q_offered > sg_assigned {
             violations.push(format!(
-                "assignment parity: {q_offered} queue_agent_offered vs \
+                "assignment parity: {q_offered} queue_agent_offered exceed \
                  {sg_assigned} skill_group_agent_assigned"
             ));
         }
@@ -446,6 +472,22 @@ impl RwiTimeline {
                      skill_group attempts={sg_att:?}"
                 ));
             }
+        }
+
+        // Rejection parity: count + agents (rounds align by construction —
+        // the same dial round emits both families back to back).
+        let q_rej_agents = agents_of("queue_agent_rejected");
+        let sg_rej_agents = agents_of("skill_group_agent_rejected");
+        if q_rej_agents.len() != sg_rej_agents.len() {
+            violations.push(format!(
+                "rejection parity: {} queue_agent_rejected vs {} skill_group_agent_rejected",
+                q_rej_agents.len(),
+                sg_rej_agents.len()
+            ));
+        } else if q_rej_agents != sg_rej_agents {
+            violations.push(format!(
+                "rejection agents diverge: queue={q_rej_agents:?} skill_group={sg_rej_agents:?}"
+            ));
         }
 
         // Connect parity: count + agents.

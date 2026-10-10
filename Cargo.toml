@@ -143,7 +143,7 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
 hex = { version = "0.4.3", optional = true }
 rsipstack = "=0.6.13"
-audio-codec = "0.4.7"
+audio-codec = "0.4.9"
 rustrtc = "=0.4.4"
 reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
@@ -266,6 +266,7 @@ portpicker = "0.1.1"
 tower = { version = "0.5", features = ["util"] }
 ctor = "1.0.7"
 metrics-util = "0.20.4"
+url = "2.5.8"
 sea-orm = { version = "2", features = [
     "runtime-tokio-rustls",
     "sqlx-sqlite",

@@ -60,6 +60,7 @@ impl SipSession {
                         conf_id: conf_id_str.to_string(),
                         call_id: self.context.session_id.to_string(),
                         leg_id: join_leg.0.clone(),
+                        leg_role: self.leg_role_of(leg_id.as_str()),
                     });
                 }
                 Err(e) => {

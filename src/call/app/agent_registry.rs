@@ -448,6 +448,21 @@ pub trait AgentRegistry: Send + Sync {
     ) {
     }
 
+    /// Notify the dispatcher that a dialled agent leg REJECTED the call
+    /// (486 busy; the queue re-dials the next candidate). Addon
+    /// implementations use it to emit `skill_group_agent_rejected`
+    /// (per-round retry analytics). `attempt` is the queue app's dial-round
+    /// counter.
+    async fn notify_agent_rejected(
+        &self,
+        _call_id: &str,
+        _queue_id: &str,
+        _agent_id: &str,
+        _attempt: u32,
+        _leg_id: &str,
+    ) {
+    }
+
     /// Notify the dispatcher that a queued call CONNECTED to an agent — the
     /// queue's success terminal. Addon implementations use it to emit
     /// `skill_group_agent_connected` + `skill_group_call_left{connected}`.

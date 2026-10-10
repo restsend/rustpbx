@@ -1060,11 +1060,39 @@ Step-mode IVR trace event. Emitted on each provider round-trip or action executi
 ### 6.6 Queue / ACD Events
 
 > **Event origin**: Queue-related events come in two families, produced by different subsystems and may co-occur:
-> - **`queue_*` (queue lifecycle)**: produced by the Queue app (`src/call/app/queue.rs`, via `gw.broadcast`) **and** the CC ACD engine bridge (`src/addons/cc/mod.rs`, via `broadcast_event`). Covers the generic lifecycle: join, ringing, connected, abandon, timeout, fallback. Both subsystems dispatch as broadcast (the only exception is the `queue.enqueue` RWI command path, which answers to the owner).
-> - **`skill_group_*` (skill-group scheduling decisions)**: produced **exclusively** by the CC addon's ACD adapter (`src/addons/cc/agent_registry_adapter.rs`) when the queue asks the ACD for an agent. Fires only when the CC addon is active and skill routing is used. The ACD-engine `queue_*` bridge intentionally does **not** emit `skill_group_*` (single source, no duplicates).
+> - **`queue_*` (queue lifecycle)**: produced by the Queue app (`src/call/app/queue.rs`, via `gw.broadcast`). Covers the generic lifecycle: join, ringing, connected, abandon, timeout, fallback. (The former ACD-engine `queue_*` bridge was removed — it never fired in production.)
+> - **`skill_group_*` (skill-group scheduling decisions + full analytics signals)**: produced **exclusively** by the CC addon's ACD adapter (`src/addons/cc/agent_registry_adapter.rs`) when the queue asks the ACD for an agent. Fires only when the CC addon is active and skill routing is used.
 >
-> Typical event sequence for a skill-group-routed call:
-> `queue_joined` → `skill_group_candidates_found` → `skill_group_call_queued` (only when no agent is immediately available) → `skill_group_agent_assigned` → `queue_agent_offered` → `queue_agent_connected`
+> Typical event sequence for a skill-group-routed call (with a no-answer retry round):
+> ```
+> queue_joined
+> → skill_group_call_joined (reason=immediate|waited)     ← full-fidelity join signal
+> → skill_group_candidates_found → skill_group_agent_assigned (attempt=1)
+> → queue_agent_offered → queue_agent_no_answer ↔ skill_group_agent_no_answer (attempt=1)
+> → skill_group_candidates_found → skill_group_agent_assigned (attempt=2)
+> → queue_agent_offered → queue_agent_connected ↔ skill_group_agent_connected (attempt=2)
+> → queue_left{connected} ↔ skill_group_call_left{connected}
+> ```
+>
+> **Dequeue semantics (Option-A contract)**: `queue_left` is a TERMINAL event — it fires
+> only when the call finally leaves the queue (connected / abandoned / timeout / fallback /
+> overflow), never at assignment or ring time. The assignment signal is
+> `skill_group_agent_assigned` (carrying the `attempt` round).
+>
+> **Downstream analytics migration**: the `skill_group_*` family fully covers the `queue_*`
+> analytics surface; the e2e parity contract (`RwiTimeline::assert_skill_group_parity`)
+> guarantees the two families never diverge. Mapping:
+>
+> | queue_* | skill_group_* replacement | Notes |
+> |---|---|---|
+> | queue_joined | skill_group_call_joined | Full join count (instant assigns included; `call_queued` alone undercounts) |
+> | queue_position_changed | skill_group_position_changed | (the former has no producer anymore) |
+> | queue_agent_offered | skill_group_agent_assigned + attempt | Assignment round |
+> | queue_agent_no_answer / rejected | skill_group_agent_no_answer / rejected | Same attempt, same leg |
+> | queue_agent_connected | skill_group_agent_connected | attempt + wait_secs (SLA) |
+> | queue_left{connected} | skill_group_call_left{connected} | Full group history + queue_depth |
+> | queue_left{abandoned} | skill_group_call_abandoned | waited_secs |
+> | queue_left{timeout/fallback} | skill_group_service_unavailable | fallback_action |
 >
 > `skill_group_call_abandoned` fires when the caller hangs up while still queued; `skill_group_service_unavailable` fires on queue timeout or fallback. Both are reported by the Queue app through the `AgentRegistry` lifecycle hooks (`notify_call_abandoned` / `notify_call_timeout` / `notify_call_fallback`), which the CC adapter maps to the RWI events.
 
@@ -1217,7 +1245,97 @@ inline ACD policy is configured ("first agent selected by the strategy").
 | `skill_group_id` | Option\<String\> | Skill group ID |
 | `agent_id` | String | Assigned agent ID |
 | `dispatch_reason` | String | `regular` / `forced_available` / `overflow` |
+| `attempt` | u32 | **Assignment round** (1-based): increments on re-assignments after a no-answer retry or an overflow stage switch — consumers can tell which attempt this is without counting offers |
 | *+ctx* | | Flat context fields |
+
+#### skill_group_call_joined
+
+Dispatch: broadcast
+
+**Full-fidelity join signal**: fires for EVERY queue entry, exactly once per
+(call, group) — instant assignments included. Queue VOLUME/DEPTH analytics must
+count this event (`skill_group_call_queued` only fires for calls that actually
+waited). Announced right BEFORE its trigger event (the first result-bearing
+scheduling activity).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | String | Call identifier |
+| `skill_group_id` | String | Skill group ID |
+| `position` | Option\<u32\> | Position at join (waited calls only) |
+| `ewt_secs` | Option\<u32\> | Estimated wait seconds at join (waited calls only) |
+| `queue_depth` | u32 | Calls waiting in the group at join (local view) |
+| `reason` | String | `immediate` (assigned in the same round) / `waited` |
+
+#### skill_group_position_changed
+
+Dispatch: broadcast
+
+Fires when a wait-retention re-resolve finds the position actually MOVED
+(unchanged positions do not emit).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | String | Call identifier |
+| `skill_group_id` | String | Skill group ID |
+| `position` | u32 | New 1-based position |
+| `queue_depth` | u32 | Current waiting count (local view) |
+
+#### skill_group_agent_no_answer / skill_group_agent_rejected
+
+Dispatch: broadcast
+
+The assigned agent leg timed out without answering (no_answer) or rejected the
+call with 486 (rejected). Pairs with `queue_agent_no_answer` /
+`queue_agent_rejected`: same `attempt`, same `leg_id`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | String | Call identifier |
+| `skill_group_id` | String | Skill group ID |
+| `agent_id` | String | The agent that missed / rejected |
+| `attempt` | u32 | The assignment round (aligns with `skill_group_agent_assigned.attempt`) |
+| `leg_id` | Option\<String\> | Agent leg ID (same leg as the queue-side event) |
+| `leg_role` | Option\<String\> | `agent` |
+
+> Note: a 486 can arrive before any 180 — a REJECTED round may have NO
+> `queue_agent_offered` (the phone never rang), though the assignment always
+> precedes the dial.
+
+#### skill_group_agent_connected
+
+Dispatch: broadcast
+
+The assigned agent ANSWERED — the ring round's success terminal. Pairs with
+`queue_agent_connected`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | String | Call identifier |
+| `skill_group_id` | String | Skill group ID |
+| `agent_id` | String | The answering agent |
+| `attempt` | u32 | The round that connected (SLA: which attempt answered) |
+| `wait_secs` | u64 | Seconds from join to connect |
+| `leg_id` | Option\<String\> | Agent leg ID |
+| `leg_role` | Option\<String\> | `agent` |
+
+#### skill_group_call_left
+
+Dispatch: broadcast
+
+**Connected-path terminal**: the connected call left the queue. Pairs with
+`queue_left{reason:"connected"}` and carries the full skill-group history.
+Abandoned/timeout/fallback paths keep their own events (`skill_group_call_abandoned`
+/ `skill_group_service_unavailable`).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `call_id` | String | Call identifier |
+| `skill_group_id` | String | Skill group ID |
+| `reason` | String | `connected` (the only value today) |
+| `wait_secs` | u64 | Seconds from join to connect |
+| `queue_depth` | u32 | Waiting count at leave (local view) |
+| `skill_groups` | Option\<Vec\<String\>\> | ALL groups queued in (join order) |
 
 #### skill_group_no_agent
 
@@ -1595,7 +1713,7 @@ Dispatch: broadcast
 | `ivr_flow_completed` | fan_out | yes | +ctx |
 | `ivr_step_trace` | fan_out | yes | — |
 | `queue_joined` | owner/broadcast | yes | +ctx |
-| `queue_position_changed` | broadcast | yes | +ctx |
+| `queue_position_changed` | — (superseded by skill_group_position_changed) | yes | +ctx |
 | `queue_agent_offered` | broadcast | yes | +ctx |
 | `queue_agent_connected` | broadcast | yes | +ctx |
 | `queue_left` | broadcast | yes | +ctx |
@@ -1610,6 +1728,12 @@ Dispatch: broadcast
 | `skill_group_candidates_found` | broadcast | yes | +ctx |
 | `skill_group_agent_assigned` | broadcast | yes | +ctx |
 | `skill_group_no_agent` | broadcast | yes | +ctx |
+| `skill_group_call_joined` | broadcast | yes | +ctx |
+| `skill_group_position_changed` | broadcast | yes | +ctx |
+| `skill_group_agent_no_answer` | broadcast | yes | +ctx |
+| `skill_group_agent_rejected` | broadcast | yes | +ctx |
+| `skill_group_agent_connected` | broadcast | yes | +ctx |
+| `skill_group_call_left` | broadcast | yes | +ctx |
 | `skill_group_call_queued` | broadcast | yes | +ctx |
 | `skill_group_call_abandoned` | broadcast | yes | +ctx |
 | `skill_group_service_unavailable` | broadcast | yes | +ctx |

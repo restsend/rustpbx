@@ -2357,6 +2357,11 @@ impl RwiCommandProcessor {
                                     gw.send_to_owner(&crate::rwi::DtmfCollected {
                                         call_id: call_id.clone(),
                                         leg_id: leg_id.clone(),
+                                        leg_role: if leg_id == "caller" {
+                                            Some("caller".to_string())
+                                        } else {
+                                            None
+                                        },
                                         digits: collected,
                                     });
                                 }
@@ -2372,6 +2377,11 @@ impl RwiCommandProcessor {
                             gw.send_to_owner(&crate::rwi::DtmfCollected {
                                 call_id: call_id.clone(),
                                 leg_id: leg_id.clone(),
+                                leg_role: if leg_id == "caller" {
+                                    Some("caller".to_string())
+                                } else {
+                                    None
+                                },
                                 digits: collected,
                             });
                             return;
@@ -2389,12 +2399,22 @@ impl RwiCommandProcessor {
                 gw.send_to_owner(&crate::rwi::DtmfCollected {
                     call_id: call_id.clone(),
                     leg_id: leg_id.clone(),
+                    leg_role: if leg_id == "caller" {
+                        Some("caller".to_string())
+                    } else {
+                        None
+                    },
                     digits: collected,
                 });
             } else {
                 gw.send_to_owner(&crate::rwi::DtmfCollectionTimeout {
                     call_id: call_id.clone(),
                     leg_id: leg_id.clone(),
+                    leg_role: if leg_id == "caller" {
+                        Some("caller".to_string())
+                    } else {
+                        None
+                    },
                 });
             }
         });

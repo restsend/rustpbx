@@ -5163,6 +5163,7 @@ impl SipSession {
                         conf_id: room.id.0.clone(),
                         call_id: self.context.session_id.clone(),
                         leg_id: self.participant_leg(leg).to_string(),
+                        leg_role: self.leg_role_of(leg.as_str()),
                     });
                     StatusCode::OK
                 }

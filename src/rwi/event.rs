@@ -763,6 +763,10 @@ rwi_event!(CallUnbridged, "call_unbridged");
 pub struct DtmfCollected {
     pub call_id: String,
     pub leg_id: String,
+    /// Role of the leg that delivered the digits ("caller" for IVR
+    /// interactions). `None` when the role cannot be determined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
     pub digits: String,
 }
 rwi_event!(DtmfCollected, "dtmf_collected");
@@ -771,6 +775,9 @@ rwi_event!(DtmfCollected, "dtmf_collected");
 pub struct DtmfCollectionTimeout {
     pub call_id: String,
     pub leg_id: String,
+    /// Role of the leg that was collecting (see [`DtmfCollected::leg_role`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
 }
 rwi_event!(DtmfCollectionTimeout, "dtmf_collection_timeout");
 
@@ -943,6 +950,10 @@ pub struct ConferenceJoined {
     pub conf_id: String,
     pub call_id: String,
     pub leg_id: String,
+    /// Role of the joining leg ("caller" for room dial-in, "agent" /
+    /// "consult" for bridged participants). `None` when undeterminable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
 }
 rwi_event!(ConferenceJoined, "conference_joined");
 
@@ -952,6 +963,9 @@ pub struct ConferenceLeft {
     pub conf_id: String,
     pub call_id: String,
     pub leg_id: String,
+    /// Role of the leaving leg (see [`ConferenceJoined::leg_role`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
 }
 rwi_event!(ConferenceLeft, "conference_left");
 
