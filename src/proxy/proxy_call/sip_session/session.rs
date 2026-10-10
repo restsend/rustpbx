@@ -7047,10 +7047,22 @@ impl SipSession {
             return Ok(());
         }
         let recorder_sender = self.setup_recording_capture()?;
-        let leg = crate::media::leg::LegInner::new(caller_label, &cfg, recorder_sender)?;
-        let answer = leg
-            .apply_sdp(&caller_offer, rustrtc::SdpType::Offer)
-            .await?;
+        let prepared = async {
+            let leg = crate::media::leg::LegInner::new(caller_label, &cfg, recorder_sender)?;
+            let answer = leg
+                .apply_sdp(&caller_offer, rustrtc::SdpType::Offer)
+                .await?;
+            Ok::<_, anyhow::Error>((leg, answer))
+        }
+        .await;
+        let (leg, answer) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                // No caller peer owns the capture task when media setup fails.
+                self.media.recording = Default::default();
+                return Err(error);
+            }
+        };
         self.legs.set_media_leg(&LegId::from("caller"), leg);
         self.spawn_dtmf_forwarder();
 
