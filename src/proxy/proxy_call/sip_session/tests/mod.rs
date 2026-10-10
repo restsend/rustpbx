@@ -5894,8 +5894,8 @@ async fn added_second_leg_relays_audio_and_dtmf_without_mixer() {
             if frame.frame.samples.iter().any(|s| s.abs() > 100) { break; }
         }
     }).await.expect("restored peer must still carry audio");
-    session.handle_remove_leg(another).await.unwrap();
-    session.handle_remove_leg(alice_id).await.unwrap();
+    session.handle_remove_leg(another, None).await.unwrap();
+    session.handle_remove_leg(alice_id, None).await.unwrap();
     let retry = session.handle_add_leg_inner(
         "sip:alice@127.0.0.1:5099".into(), Some(LegId::from("alice-retry")), vec![], None, None).await.unwrap();
     assert!(!Arc::ptr_eq(&first_b, &session.legs.media_leg(&retry).unwrap()));
@@ -6142,7 +6142,7 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
         if matches!(scenario, "reject" | "timeout" | "cancel_ringing") {
             session
                 .execute_command(
-                    if scenario.starts_with("cancel_") { CallCommand::LegRemove { leg_id: consult.clone() } } else { CallCommand::LegFailed {
+                    if scenario.starts_with("cancel_") { CallCommand::LegRemove { leg_id: consult.clone(), reason: None } } else { CallCommand::LegFailed {
                         leg_id: consult.clone(),
                         reason: if scenario == "reject" {
                             "Rejected with 603"
@@ -6165,7 +6165,7 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
             if !cfg!(feature = "addon-cc") || scenario.starts_with("cancel_") {
             for command in [
                 CallCommand::LeaveMixer,
-                CallCommand::LegRemove { leg_id: consult.clone() },
+                CallCommand::LegRemove { leg_id: consult.clone(), reason: None },
                 CallCommand::Bridge { leg_a: LegId::from("caller"), leg_b: LegId::from("callee"), mode: crate::call::domain::P2PMode::Audio },
                 CallCommand::Unhold { leg_id: LegId::from("caller") },
                 CallCommand::Unhold { leg_id: LegId::from("callee") },
@@ -6254,7 +6254,7 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
                 CallCommand::Bridge { leg_a: LegId::from("caller"), leg_b: consult.clone(), mode: crate::call::domain::P2PMode::Audio },
                 CallCommand::Unhold { leg_id: LegId::from("caller") },
                 CallCommand::Unhold { leg_id: consult.clone() },
-                CallCommand::LegRemove { leg_id: LegId::from("callee") },
+                CallCommand::LegRemove { leg_id: LegId::from("callee"), reason: None },
                 CallCommand::MarkTransferred,
             ] {
                 let result = session.execute_command(command, None).await;
@@ -6328,7 +6328,7 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
         if matches!(scenario, "private_hangup" | "cancel_answered") {
             session
                 .execute_command(
-                    if scenario.starts_with("cancel_") { CallCommand::LegRemove { leg_id: consult.clone() } } else { CallCommand::LegFailed {
+                    if scenario.starts_with("cancel_") { CallCommand::LegRemove { leg_id: consult.clone(), reason: None } } else { CallCommand::LegFailed {
                         leg_id: consult.clone(),
                         reason: "Remote hung up".into(),
                     } },
@@ -6346,7 +6346,7 @@ async fn consult_media_preserves_peers_across_bridge_and_explicit_mixer() {
             if !cfg!(feature = "addon-cc") || scenario.starts_with("cancel_") {
             for command in [
                 CallCommand::LeaveMixer,
-                CallCommand::LegRemove { leg_id: consult.clone() },
+                CallCommand::LegRemove { leg_id: consult.clone(), reason: None },
                 CallCommand::Bridge { leg_a: LegId::from("caller"), leg_b: LegId::from("callee"), mode: crate::call::domain::P2PMode::Audio },
                 CallCommand::Unhold { leg_id: LegId::from("caller") },
                 CallCommand::Unhold { leg_id: LegId::from("callee") },
@@ -7406,7 +7406,7 @@ async fn dynamic_hold_before_connected_command_keeps_answered_dialog_owned() {
 
         // Leg removal is queued before the real SIP 200
         // causes the dial task to append LegConnected to the same channel.
-        handle.send_command(CallCommand::LegRemove { leg_id: leg_id.clone() }).unwrap();
+        handle.send_command(CallCommand::LegRemove { leg_id: leg_id.clone(), reason: None }).unwrap();
         let mut answer = server.endpoint.inner.make_response(&invite, StatusCode::OK, Some(invite.body.clone()));
         answer.headers.retain(|header| !matches!(header, Header::To(_)));
         answer.headers.push(Header::To(format!("<sip:alice@{target_addr}>;tag=late-peer").into()));
@@ -7692,7 +7692,7 @@ async fn rwi_manual_parallel_retry_and_leg_cleanup() {
 
     // Removing an answered leg sends BYE, without ending the caller.
 
-    let result = session.execute_command(CallCommand::LegRemove { leg_id: LegId::new(&invites[3].0) }, None).await;
+    let result = session.execute_command(CallCommand::LegRemove { leg_id: LegId::new(&invites[3].0), reason: None }, None).await;
     assert!(result.success);
     let bye = timeout(Duration::from_secs(3), async {
         loop {
@@ -7749,19 +7749,24 @@ async fn rwi_manual_parallel_retry_and_leg_cleanup() {
     assert!(leg_events.iter().any(|e| e["leg_id"] == rejected.0 && e["event_type"] == "call_hangup" && e["sip_status"] == 486));
     assert!(leg_events.iter().any(|e| e["leg_id"] == "setup-failure" && e["event_type"] == "call_hangup"
         && e["reason"].as_str().unwrap().contains("No command sender")));
-    assert!(!leg_events.iter().any(|e| e["leg_id"] == invites[2].0 && e["event_type"] == "call_hangup"), "explicit removal only receives its command acknowledgement");
+    // Per-leg miss hangup: an explicit removal of a never-connected leg now
+    // emits its own hangup with the generic cancel reason (the RWI
+    // `leg_remove` API passes no reason).
+    assert!(leg_events.iter().any(|e| e["leg_id"] == invites[2].0 && e["event_type"] == "call_hangup"
+        && e["reason"].as_str() == Some("cancelled")),
+        "explicit removal of a never-connected leg emits its miss hangup");
     let mut ws_leg_events = Vec::new();
     while let Ok(event) = ws_events.try_recv() {
         if event["leg_id"].is_string() && matches!(event["event_type"].as_str(), Some("call_ringing" | "call_hangup")) { ws_leg_events.push(event); }
     }
-    // Session-level-only `call_answered` policy: leg transitions — including
-    // the winner's connect and the manual caller-leg mark above — must not
-    // emit the event with a `leg_id`; it fires once per session with
-    // `leg_id: None` from the session-level emit sites instead.
+    // Per-leg `call_answered` contract: the winning leg's connect emits its
+    // own answered with a leg identity (the session-scoped duplicate is the
+    // deprecated complement and carries none). The tap above filters to
+    // ringing/hangup, so the answered assertions live on the full stream —
+    // nothing to check here beyond the ringing/hangup shapes.
     assert!(
-        leg_events.iter().chain(ws_leg_events.iter())
-            .all(|e| e["event_type"] != "call_answered"),
-        "no leg-level call_answered may be emitted"
+        leg_events.iter().all(|e| e["event_type"] != "call_answered"),
+        "this tap only collects ringing/hangup legs"
     );
     assert_eq!(ws_leg_events.len(), leg_events.len(), "every leg event must reach its RWI owner");
     cancel.cancel();
@@ -7874,6 +7879,7 @@ async fn added_legs_require_explicit_bridge_and_allow_removed_ids() {
 
             let response = session.execute_command(CallCommand::LegRemove {
                 leg_id: LegId::from("reused"),
+                reason: None,
             }, None).await;
             assert!(response.success);
             assert!(!session.legs.contains_key(&LegId::from("reused")));
@@ -8030,7 +8036,7 @@ async fn removing_terminated_leg_does_not_schedule_bye() {
     leg.state = LegState::Ended;
     session.legs.add_leg(leg_id.clone(), leg, Some(rsipstack::dialog::dialog::Dialog::Invite(dialog.clone())));
 
-    session.handle_remove_leg(leg_id.clone()).await.unwrap();
+    session.handle_remove_leg(leg_id.clone(), None).await.unwrap();
 
     assert!(!session.legs.contains_key(&leg_id));
     assert!(!session.pending_hangup.contains(&dialog.id()));
@@ -8614,4 +8620,225 @@ fn queue_dispatch_leg_gets_purpose_and_leg_role() {
     leg.agent_id = Some("1002".into());
     // Queue-dispatched agent leg: RWI leg events carry leg_role "agent".
     assert_eq!(leg.leg_role(), "agent");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Child-leg sessions (cluster dispatch, UUI `leg=` marker)
+// ═══════════════════════════════════════════════════════════════════
+
+/// A cluster peer dispatches a queue agent / consult / transfer leg to this
+/// node: the UUI `leg=` marker becomes `meta.child_leg_role` and the root
+/// session id is still inherited — but ONLY when the INVITE arrives from a
+/// configured cluster peer. An external caller planting the header must get
+/// the regular lifecycle (the marker suppresses events, so it must not be
+/// forgeable), and unknown roles are ignored outright.
+#[tokio::test]
+async fn child_leg_role_marker_parsed_only_from_trusted_peer() {
+    use crate::call::uui::{build_uui_value, UUI_HEADER_NAME};
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::config::ProxyConfig;
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server_with_config, create_transaction,
+    };
+
+    const ROOT: &str = "0b9e6c1e1b404e8f9c212f5a8d3e7b61";
+    let (mut server, _) = create_test_server_with_config(ProxyConfig::default()).await;
+    std::sync::Arc::get_mut(&mut server)
+        .unwrap()
+        .cluster_peer_ips = vec!["192.0.2.10".parse().unwrap()];
+
+    for (i, (leg, peer, expected_role)) in [
+        (Some("agent"), Some("192.0.2.10:5060"), Some("agent")),
+        (Some("consult"), Some("192.0.2.10:5060"), Some("consult")),
+        (Some("transfer"), Some("192.0.2.10:5060"), Some("transfer")),
+        // Forged marker from a non-peer address: ignored (root linkage via
+        // the same UUI still applies — it only adds a correlation id).
+        (Some("agent"), Some("192.0.2.99:5060"), None),
+        // Unknown role: ignored even from a trusted peer.
+        (Some("whatever"), Some("192.0.2.10:5060"), None),
+        // No marker: ordinary inbound call.
+        (None, Some("192.0.2.10:5060"), None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut request =
+            create_test_request(rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None);
+        if leg.is_some() {
+            request.headers.push(rsipstack::sip::Header::Other(
+                UUI_HEADER_NAME.into(),
+                build_uui_value(ROOT, None, None, None, leg),
+            ));
+        }
+        let (tx, _) = create_transaction(request.clone()).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .expect("server dialog");
+        let mut cookie = TransactionCookie::default();
+        if let Some(peer) = peer {
+            cookie.insert_extension(crate::call::CallerPeerContext(peer.to_string()));
+        }
+        let context = CallContext {
+            session_id: format!("child-leg-{i}"),
+            dialplan: Arc::new(Dialplan::new(
+                format!("child-leg-{i}"),
+                request,
+                DialDirection::Inbound,
+            )),
+            cookie,
+            start_time: Instant::now(),
+            original_caller: "sip:alice@rustpbx.com".into(),
+            original_callee: "sip:bob@rustpbx.com".into(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+        let (session, _handle, _cmd_rx) = SipSession::new(
+            server.clone(),
+            CancellationToken::new(),
+            None,
+            context,
+            server_dialog,
+            false,
+        );
+        assert_eq!(
+            session.meta.child_leg_role.as_deref(),
+            expected_role,
+            "case {i}: leg={leg:?} peer={peer:?}"
+        );
+        if leg.is_some() {
+            // Root linkage via the UUI session id is independent of the leg
+            // marker (even a forged marker still correlates the call).
+            assert_eq!(session.meta.root_session_id.as_deref(), Some(ROOT));
+        }
+    }
+}
+
+/// A child-leg session (cluster-dispatched queue agent / consult / transfer)
+/// emits NO session-level `call_answered` — the dispatching node already
+/// emitted the logical call's answered — and its session-level ringing
+/// carries the declared role as `leg_role` so consumers can tell the agent
+/// leg's ringing apart from the customer call's.
+#[tokio::test]
+async fn child_leg_session_event_shape() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
+
+    let gateway = crate::rwi::gateway::RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let (server, _) =
+        create_test_server_with_rwi_gateway(Default::default(), Arc::new(parking_lot::RwLock::new(gateway)))
+            .await;
+    let request = create_test_request(rsipstack::sip::Method::Invite, "bob", None, "rustpbx.com", None);
+    let context = CallContext {
+        session_id: "child-sess".into(),
+        dialplan: Arc::new(Dialplan::new("child-sess".into(), request, DialDirection::Inbound)),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".into(),
+        original_callee: "sip:bob@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let (mut session, _handle, _commands) =
+        SipSession::new_uac(server, CancellationToken::new(), None, context, false);
+    session.meta.child_leg_role = Some("agent".into());
+
+    // Answered: suppressed for the child leg, latch NOT consumed…
+    session.emit_session_call_answered_once();
+    assert!(
+        events.try_recv().is_err(),
+        "child-leg session must not emit call_answered"
+    );
+
+    // …so the root session behavior is intact once the role is absent.
+    session.meta.child_leg_role = None;
+    session.emit_session_call_answered_once();
+    let answered = events.try_recv().expect("root session answered");
+    assert_eq!(answered.event.event_type, "call_answered");
+    assert!(answered.event.payload.get("leg_id").is_none());
+
+    // Session-level ringing of the child leg carries leg_role, no leg_id.
+    session.meta.child_leg_role = Some("agent".into());
+    session.emit_call_ringing(None, false, None);
+    let ringing = events.try_recv().expect("child ringing");
+    assert_eq!(ringing.event.event_type, "call_ringing");
+    assert_eq!(ringing.event.payload["leg_role"], "agent");
+    assert!(ringing.event.payload.get("leg_id").is_none());
+}
+
+/// Ring-timeout cancel: `LegRemove` on a NEVER-connected agent leg emits a
+/// leg-scoped `call_hangup{leg_role:"agent", reason}` — the queue's miss
+/// must stay visible to agent-side consumers (regression: the CANCEL path
+/// dropped the event entirely). A CONNECTED leg's removal is not a miss and
+/// stays silent (the session-scoped hangup owns that story).
+#[tokio::test]
+async fn leg_remove_of_unconnected_leg_emits_miss_hangup() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
+
+    let gateway = crate::rwi::gateway::RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let (server, _) =
+        create_test_server_with_rwi_gateway(Default::default(), Arc::new(parking_lot::RwLock::new(gateway)))
+            .await;
+    let request = create_test_request(rsipstack::sip::Method::Invite, "bob", None, "rustpbx.com", None);
+    let context = CallContext {
+        session_id: "miss-hangup-sess".into(),
+        dialplan: Arc::new(Dialplan::new("miss-hangup-sess".into(), request, DialDirection::Inbound)),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".into(),
+        original_callee: "sip:bob@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let (mut session, _handle, _commands) =
+        SipSession::new_uac(server, CancellationToken::new(), None, context, false);
+
+    // A ringing agent leg with the agent attribution pinned (queue dispatch).
+    let mut leg = crate::call::domain::Leg::new(LegId::from("agent-1"));
+    leg.state = crate::call::domain::LegState::Ringing;
+    leg.agent_id = Some("bob".into());
+    session.legs.insert(LegId::from("agent-1"), leg);
+
+    session
+        .execute_command(
+            CallCommand::LegRemove {
+                leg_id: LegId::from("agent-1"),
+                reason: Some("ring_timeout".into()),
+            },
+            None,
+        )
+        .await;
+
+    let hangup = events.try_recv().expect("miss hangup for the ringing agent leg");
+    assert_eq!(hangup.event.event_type, "call_hangup");
+    assert_eq!(hangup.event.payload["leg_id"], "agent-1");
+    assert_eq!(hangup.event.payload["leg_role"], "agent");
+    assert_eq!(hangup.event.payload["reason"], "ring_timeout");
+    // Setup failure: no initiator, no talk time.
+    assert!(hangup.event.payload["hangup_by"].is_null());
+    assert!(hangup.event.payload["duration_secs"].is_null());
+    assert!(events.try_recv().is_err(), "exactly one event for the miss");
+
+    // A CONNECTED leg's removal is not a miss — no event.
+    let mut leg = crate::call::domain::Leg::new(LegId::from("agent-2"));
+    leg.state = crate::call::domain::LegState::Connected;
+    leg.agent_id = Some("bob".into());
+    session.legs.insert(LegId::from("agent-2"), leg);
+    session
+        .execute_command(
+            CallCommand::LegRemove {
+                leg_id: LegId::from("agent-2"),
+                reason: None,
+            },
+            None,
+        )
+        .await;
+    assert!(events.try_recv().is_err(), "connected-leg removal stays silent");
 }

@@ -469,7 +469,14 @@ impl SipSession {
                 .flatten()
         });
         self.emit_typed_rwi_event(&crate::rwi::CallRinging {
-            leg_role: leg_id.as_deref().and_then(|id| self.leg_role_of(id)),
+            // Leg events carry the leg's own role; a session-level event of a
+            // child-leg session (cluster-dispatched queue agent / consult /
+            // transfer) carries the child role so consumers can tell the
+            // agent leg's ringing apart from the customer call's.
+            leg_role: leg_id
+                .as_deref()
+                .and_then(|id| self.leg_role_of(id))
+                .or_else(|| self.meta.child_leg_role.clone()),
             leg_id,
             call_id: self.context.session_id.clone(),
             early_media,
@@ -488,7 +495,21 @@ impl SipSession {
 
     /// Session-scoped `call_answered` (`leg_id: None`), emitted at most once
     /// per session via the `answered_event_emitted` latch.
+    ///
+    /// DEPRECATED duplicate of the per-leg `call_answered` events that
+    /// `update_leg_state` now emits for every leg answer — kept one version
+    /// for downstream migration, removed next version.
+    ///
+    /// Suppressed for child-leg sessions (`meta.child_leg_role`): when a
+    /// cluster peer dispatched a queue agent / consult / transfer leg to this
+    /// node, the dispatching node already emitted the call's session-level
+    /// `call_answered` — this session is one leg of that logical call, not a
+    /// new call, and a second answered would break the one-answered-per-call
+    /// contract.
     fn emit_session_call_answered_once(&self) {
+        if self.meta.child_leg_role.is_some() {
+            return;
+        }
         if !self
             .answered_event_emitted
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -1208,16 +1229,45 @@ impl SipSession {
         //      legacy channel, kept for mixed-version clusters.
         // Otherwise this session IS the root.
         // UAC (originate): this session is the root by definition.
-        let root_session_id = match mode {
+        //
+        // The same UUI may also declare the leg's dial intent (`leg=agent` /
+        // `consult` / `transfer`), with trust split by source:
+        //   - from a CLUSTER PEER → `child_leg_role`: this session is a child
+        //     leg of a call dispatched by another node — not a new call — so
+        //     it suppresses its duplicate lifecycle and stamps `leg_role`. An
+        //     external caller must not be able to plant this.
+        //   - from anyone else (the agent's own self-dialed INVITE, restsend
+        //     consult / Replaces transfer-target) → `dial_leg_role`: a stats
+        //     marker ONLY — kept in session meta, persisted nowhere today
+        //     (the `cc_calls.leg_role` column was rolled back; agent metrics
+        //     currently include all legs). It never shapes the lifecycle.
+        // Anonymous `X-*` headers are not allowed on the wire, so the device
+        // declares through the same RFC 7433 header; its data part may be
+        // junk, so the UUI fallback only seeds root linkage from UUID-like
+        // data when a leg intent is declared (legacy peer correlation without
+        // `leg=` stays raw for mixed-version clusters).
+        let (root_session_id, child_leg_role, dial_leg_role) = match mode {
             ConstructMode::Uas { server_dialog } => {
                 let request = server_dialog.initial_request();
-                crate::call::session_id::extract_inherited(&request).or_else(|| {
-                    crate::call::uui::extract_cc_uui(&request.headers).map(|uui| uui.session_id)
-                })
+                let cc_uui = crate::call::uui::extract_cc_uui(&request.headers);
+                let root = crate::call::session_id::extract_inherited(&request).or_else(|| {
+                    cc_uui.as_ref().filter(|uui| {
+                        uui.leg.is_none()
+                            || crate::call::session_id::is_uuid_like(&uui.session_id)
+                    }).map(|uui| uui.session_id.clone())
+                });
+                let declared = cc_uui
+                    .as_ref()
+                    .and_then(|uui| uui.leg.as_deref())
+                    .filter(|leg| crate::call::uui::is_known_leg_role(leg))
+                    .map(str::to_string);
+                let from_peer = Self::from_cluster_peer(&server, &context.cookie);
+                let child = if from_peer { declared.clone() } else { None };
+                let dial = if from_peer { None } else { declared };
+                (root, child, dial)
             }
-            ConstructMode::Uac => None,
+            ConstructMode::Uac => (None, None, None),
         };
-
         let call_info = CallInfo {
             session_id: session_id_str.clone(),
             caller: original_caller.clone(),
@@ -1298,6 +1348,8 @@ impl SipSession {
 
         let mut meta = crate::proxy::proxy_call::call_meta::CallMeta::default();
         meta.root_session_id = root_session_id;
+        meta.child_leg_role = child_leg_role;
+        meta.dial_leg_role = dial_leg_role;
         meta.routed_caller = context.dialplan.caller.as_ref().map(|uri| uri.to_string());
         meta.routed_callee = context
             .dialplan
@@ -1651,11 +1703,18 @@ impl SipSession {
             }
         };
         // The RWI app announces the call when it is ready, in its route context.
+        // Child-leg sessions (a cluster peer dispatched a queue agent /
+        // consult / transfer leg to this node) stay silent: the dispatching
+        // node already announced this logical call — emitting a second
+        // `call_created` would make the leg look like a new call.
         if let Some(ref gw) = server.rwi_gateway
+            && session.meta.child_leg_role.is_none()
             && !matches!(&session.context.dialplan.flow,
                 crate::call::DialplanFlow::Application { app_name, .. } if app_name == "rwi")
         {
             let ev = crate::rwi::CallCreated {
+                leg_id: Some("caller".to_string()),
+                leg_role: Some("caller".to_string()),
                 call_id: session_id.clone(),
                 context: "default".into(),
                 caller: original_caller,
@@ -3040,6 +3099,7 @@ impl SipSession {
                 &self.meta,
             ),
             transferred: self.meta.transferred,
+            leg_role: self.meta.dial_leg_role.clone(),
             direction: self.context.dialplan.direction.to_string(),
             started_at: Some(self.context.created_at.clone()),
             extensions: self.extensions.clone(),
@@ -3673,6 +3733,21 @@ impl SipSession {
             .or(self.context.dialplan.session_id.as_deref())
             .unwrap_or(&self.context.session_id);
         crate::call::session_id::normalize(candidate)
+    }
+
+    /// True when the inbound request arrived from a configured cluster peer.
+    ///
+    /// Gate for the UUI `leg=` dial-intent marker: the marker changes this
+    /// node's event lifecycle (suppresses the duplicate `call_created` /
+    /// `call_answered` of a child-leg session), so only peers may set it —
+    /// an external INVITE carrying a planted header must keep the regular
+    /// lifecycle. Mirrors the `X-CC-Recording-Delivery` trust model
+    /// (`screen_pop_context`).
+    fn from_cluster_peer(server: &SipServerRef, cookie: &crate::call::TransactionCookie) -> bool {
+        cookie
+            .get_extension::<crate::call::CallerPeerContext>()
+            .and_then(|peer| peer.0.parse::<std::net::SocketAddr>().ok())
+            .is_some_and(|peer| server.cluster_peer_ips.contains(&peer.ip()))
     }
 
     async fn build_target_invite_option(
@@ -5467,7 +5542,7 @@ impl SipSession {
                 transfer_source: pending.source,
             });
         } else {
-            self.handle_remove_leg(target_leg.clone()).await.ok();
+            self.handle_remove_leg(target_leg.clone(), None).await.ok();
         }
         self.sync_rtp_timeout_pause();
         self.update_snapshot_cache();
@@ -9715,7 +9790,11 @@ impl SipSession {
         let sip_status = self.meta.last_error.as_ref().map(|(sc, _)| sc.code());
         self.emit_typed_rwi_event(&crate::rwi::CallHangup {
             leg_id: None,
-            leg_role: None,
+            // A child-leg session (cluster-dispatched queue agent / consult /
+            // transfer) stamps the role the dispatcher declared, so consumers
+            // see the leg-level teardown of the agent leg, not a second call
+            // ending.
+            leg_role: self.meta.child_leg_role.clone(),
             call_id: self.context.session_id.clone(),
             reason: hangup_reason_str,
             hangup_by,
@@ -10961,7 +11040,7 @@ impl SipSession {
                     *id = self.resolve_transfer_leg();
                 }
             }
-            CallCommand::LegRemove { leg_id } => {
+            CallCommand::LegRemove { leg_id, .. } => {
                 // After bridging A to C, an explicit removal of the retained
                 // B leg must not resolve to the newly selected C leg.
                 if leg_id.as_str() == "callee" && !self.legs.contains_key(leg_id) {
@@ -11120,7 +11199,7 @@ impl SipSession {
                     return CommandResult::success();
                 }
                 let mut ctx = self.session_hook_ctx();
-                if let Err(error) = self.handle_remove_leg(agent).await {
+                if let Err(error) = self.handle_remove_leg(agent, None).await {
                     return CommandResult::failure(error.to_string());
                 }
                 self.mark_transferred_with(None);
@@ -11918,8 +11997,8 @@ impl SipSession {
                 }
             }
 
-            CallCommand::LegRemove { leg_id } => {
-                Self::ok_or_failure(self.handle_remove_leg(leg_id).await)
+            CallCommand::LegRemove { leg_id, reason } => {
+                Self::ok_or_failure(self.handle_remove_leg(leg_id, reason).await)
             }
 
             CallCommand::LegRinging { leg_id } => {
@@ -12262,9 +12341,10 @@ impl SipSession {
                     // CcCallSessionHook publishes the agent attribution and
                     // moves the agent Ringing → Busy. Without this the CC
                     // layer never learns the agent connected (agent stuck in
-                    // Ringing). Then emit the core `call_answered` (the
-                    // unified replacement of the addon-emitted `cc_answered`),
-                    // enriched with the agent context.
+                    // Ringing). Then emit the SESSION-SCOPED `call_answered`
+                    // (deprecated duplicate — the per-leg answered for this
+                    // agent leg emits from `update_leg_state` with
+                    // `leg_role: "agent"`), enriched with the agent context.
                     if !self.server.session_hooks.is_empty() {
                         let ctx = self.session_hook_ctx();
                         for hook in self.server.session_hooks.iter() {
@@ -12389,7 +12469,7 @@ impl SipSession {
                     self.emit_rwi_leg_hangup(&leg_id, Some(reason.clone()));
                     self.update_leg_state(&leg_id, LegState::Ended);
                     self.detach_ended_conference_leg(&leg_id).await;
-                    return Self::ok_or_failure(self.handle_remove_leg(leg_id).await);
+                    return Self::ok_or_failure(self.handle_remove_leg(leg_id, None).await);
                 }
                 if self.pending_refers.contains_key(&leg_id) {
                     self.emit_rwi_leg_hangup(&leg_id, Some(reason.clone()));
@@ -12461,7 +12541,7 @@ impl SipSession {
                         // Blind transfer in flight: release the transferor leg
                         // fully, keep the session for the pending target leg.
                         self.update_leg_state(&leg_id, LegState::Ended);
-                        if let Err(error) = self.handle_remove_leg(leg_id.clone()).await {
+                        if let Err(error) = self.handle_remove_leg(leg_id.clone(), None).await {
                             warn!(session_id = %self.id, %error, "Failed to remove ended transferor leg");
                         }
                         self.meta.connected_callee_dialog_id = None;
@@ -12584,7 +12664,7 @@ impl SipSession {
                     }
 
                     self.update_leg_state(&leg_id, LegState::Ended);
-                    if let Err(error) = self.handle_remove_leg(leg_id.clone()).await {
+                    if let Err(error) = self.handle_remove_leg(leg_id.clone(), None).await {
                         return CommandResult::failure(error.to_string());
                     }
                     // The dial leg is gone: lift the RTP-watchdog suppression
@@ -13112,10 +13192,16 @@ impl SipSession {
         CommandResult::success()
     }
 
-    /// Leg-scoped `call_hangup` — fires ONLY for a mid-session leg exit the
-    /// session survives (setup failure, remote/local BYE on a dial leg, REFER
-    /// or conference detach). Legs ended by the session teardown cascade are
-    /// covered by the session-scoped `call_hangup` and emit nothing here, so
+    /// Leg-scoped `call_hangup` — fires ONLY for a leg exit the session
+    /// survives:
+    /// * mid-session leg exit (setup failure, remote/local BYE on a dial
+    ///   leg, REFER or conference detach),
+    /// * an in-setup leg CANCELLED by the app — queue ring timeout /
+    ///   stage switch / superseded parallel dial (`handle_remove_leg`
+    ///   forwards the `LegRemove` reason; consumers read it as the miss
+    ///   signal: `ring_timeout` = the agent never picked up).
+    /// Legs ended by the session teardown cascade are covered by the
+    /// session-scoped `call_hangup` and emit nothing here, so
     /// `leg_role == "agent"` consumers never see a contradictory duplicate
     /// (no duration, no attribution) racing the authoritative session event.
     ///
@@ -13174,6 +13260,7 @@ impl SipSession {
 
     pub(crate) fn update_leg_state(&mut self, leg_id: &LegId, new_state: LegState) -> bool {
         if let Some(leg) = self.legs.get_mut(leg_id) {
+            let was_hold = leg.state == LegState::Hold;
             let changed = leg.state != new_state;
             leg.state = new_state;
             if changed {
@@ -13190,13 +13277,25 @@ impl SipSession {
                             leg_agent_id,
                         );
                     }
-                    // No leg-level `call_answered`: the event is session-scoped
-                    // (`leg_id: None`) and fires exactly once from the
-                    // session-level emit sites — accept_call (direct answer),
-                    // the queue-agent connect branch, and originate completion —
-                    // so downstream sees ONE authoritative "connected" per
-                    // call_id. Leg connect/teardown timelines remain visible
-                    // through `call_ringing` / `call_hangup` leg events.
+                    // Per-leg `call_answered` — the dual of `call_ringing`
+                    // above: EVERY leg answer carries its own leg identity
+                    // (caller pickup under a queue/IVR app, direct-answer
+                    // callee, queue-dispatched agent, consult / transfer
+                    // target). A Hold → Connected resume is NOT an answer —
+                    // `call_unheld` already describes it. The session-scoped
+                    // duplicate (`leg_id: None`) still fires exactly once
+                    // from the dedicated emit sites — accept_call (direct
+                    // answer), the queue-agent connect branch — and is
+                    // DEPRECATED for removal next version.
+                    LegState::Connected => {
+                        if !was_hold {
+                            self.emit_typed_rwi_event(&crate::rwi::CallAnswered {
+                                leg_id: Some(leg_id.to_string()),
+                                leg_role: self.leg_role_of(leg_id.as_str()),
+                                call_id: self.context.session_id.clone(),
+                            });
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -13656,7 +13755,29 @@ impl SipSession {
     }
 
     /// Remove a leg from the session.
-    pub(super) async fn handle_remove_leg(&mut self, leg_id: LegId) -> Result<()> {
+    pub(super) async fn handle_remove_leg(
+        &mut self,
+        leg_id: LegId,
+        reason: Option<String>,
+    ) -> Result<()> {
+        // Per-leg `call_hangup` for a leg that NEVER connected and is being
+        // cancelled in-setup (queue ring timeout, escalation stage switch,
+        // superseded parallel dial): the miss carries its own leg-scoped
+        // hangup, attributed via the leg's agent pin (`leg_role: "agent"`).
+        // A Hold → removal is a resume-adjacent flow, a Connected removal is
+        // an established-dialog exit with its own path — neither is a setup
+        // miss. Teardown cascades stay silent via the cancel_token check
+        // inside `emit_rwi_leg_hangup`.
+        if let Some(leg) = self.legs.get(&leg_id) {
+            let in_setup = !matches!(
+                leg.state,
+                LegState::Connected | LegState::Hold | LegState::Ending | LegState::Ended
+            );
+            if in_setup {
+                let reason = reason.unwrap_or_else(|| "cancelled".to_string());
+                self.emit_rwi_leg_hangup(&leg_id, Some(reason));
+            }
+        }
         info!(session_id = %self.id,
             %leg_id,
             "Removing leg from session"
@@ -13872,12 +13993,32 @@ impl SipSession {
             Some(crate::call::domain::LegPurpose::Agent)
                 | Some(crate::call::domain::LegPurpose::Consult)
         );
+        let mut headers = location.headers.clone().unwrap_or_default();
         let bleg_call_id = if is_agent_facing {
             let base = self
                 .session_id_for_outgoing_leg()
                 .unwrap_or_else(|| self.id.0.clone());
             let seq = self.meta.agent_leg_seq;
             self.meta.agent_leg_seq = seq.saturating_add(1);
+            // Declare the dial intent on the wire (RFC 7433 UUI `leg=`): a
+            // cluster peer that terminates this INVITE as its own session
+            // (the agent's home node) then knows it is a child leg of THIS
+            // logical call — not a new call — and suppresses the duplicate
+            // call_created / call_answered lifecycle there while stamping
+            // `leg_role` on its remaining leg events. Old peers ignore the
+            // unknown UUI param (mixed-version safe); peers only trust the
+            // marker from each other.
+            let role = match purpose {
+                Some(crate::call::domain::LegPurpose::Agent) => "agent",
+                _ => "consult",
+            };
+            headers.push(crate::call::uui::build_uui_header(
+                &base,
+                None,
+                None,
+                None,
+                Some(role),
+            ));
             Self::agent_leg_call_id(&base, seq)
         } else {
             uuid::Uuid::new_v4().to_string()
@@ -13895,7 +14036,7 @@ impl SipSession {
                 location.destination.clone()
             },
             credential: location.credential.clone(),
-            headers: location.headers.clone(),
+            headers: Some(headers),
             call_id: Some(bleg_call_id.clone()),
             // RFC 7989: queue/consult agent legs inherit the global session id.
             session_id: self.session_id_for_outgoing_leg(),

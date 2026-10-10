@@ -16,6 +16,24 @@ pub struct CallMeta {
     /// network boundary via the RFC 7433 `User-to-User` header
     /// (`purpose=call-center`, see `call::uui`).
     pub root_session_id: Option<String>,
+    /// Declared dial intent inherited from the dispatching node when this
+    /// session terminates a child-leg INVITE of another node's logical call
+    /// (`"agent"` / `"consult"` / `"transfer"` — the UUI `leg=` parameter,
+    /// trusted only from cluster peers). A child session is one leg of an
+    /// existing logical call, not a new call: its `call_created` /
+    /// `call_answered` are suppressed (the dispatching node already emitted
+    /// them) and its remaining lifecycle events are stamped with this value
+    /// as `leg_role`. `None` for ordinary inbound calls.
+    pub child_leg_role: Option<String>,
+    /// Dial intent declared by the *caller's own device* on the initial
+    /// INVITE through the RFC 7433 `User-to-User` header's `leg=` parameter
+    /// (`consult` / `transfer` — restsend-call tags its consult/求助 and
+    /// Replaces transfer-target dials; `X-*` headers are not allowed on the
+    /// wire). In-memory stats marker ONLY — persisted nowhere today
+    /// (`cc_calls.leg_role` was rolled back; agent metrics include all
+    /// legs), and it never shapes the call lifecycle. `None` for ordinary
+    /// calls.
+    pub dial_leg_role: Option<String>,
     pub connected_callee: Option<String>,
     pub connected_callee_dialog_id: Option<DialogId>,
     pub callee_call_ids: HashSet<String>,

@@ -914,6 +914,7 @@ impl RwiCommandProcessor {
             None,
             None,
             None,
+            None,
         ));
         for (k, v) in &req.extra_headers {
             headers.push(rsipstack::sip::Header::Other(k.clone(), v.clone()));
@@ -1345,6 +1346,13 @@ impl RwiCommandProcessor {
             });
 
             let (caller_state_tx, mut caller_state_rx) = tokio::sync::mpsc::unbounded_channel();
+            // Snapshot the custom SIP headers riding the outgoing INVITE
+            // (caller-supplied + trunk-injected by apply_trunk_config) BEFORE
+            // do_invite consumes the option — `call_created` carries them
+            // verbatim, same as the inbound INVITE path.
+            let originate_sip_headers = crate::call::app::sip_headers_from(
+                invite_option.headers.as_deref().unwrap_or(&[]),
+            );
             let mut invitation = dialog_layer
                 .do_invite(invite_option, caller_state_tx)
                 .boxed();
@@ -1448,12 +1456,14 @@ impl RwiCommandProcessor {
                                     Some(rsipstack::dialog::dialog::DialogState::Calling(_)) => {
                                         let gw = gateway.read();
                                         gw.send_to_owner(&crate::rwi::CallCreated {
+                                            leg_id: None,
+                                            leg_role: Some("caller".to_string()),
                                             call_id: call_id.clone(),
                                             context: "default".into(),
                                             caller: caller_display.clone(),
                                             callee: callee_display.clone(),
                                             trunk: None,
-                                            sip_headers: Default::default(),
+                                            sip_headers: originate_sip_headers.clone(),
                                             caller_name: None,
                                             callee_name: None,
                                             called_phone: None,
@@ -1854,10 +1864,14 @@ impl RwiCommandProcessor {
                             let gw = gateway.read();
                             if sip_status == Some(486) || sip_status == Some(600) {
                                 gw.send_to_owner(&crate::rwi::CallBusy {
+                                    leg_id: None,
+                                    leg_role: Some("caller".to_string()),
                                     call_id: call_id.clone(),
                                 });
                             } else if matches!(sip_status, Some(408) | Some(480) | Some(487)) {
                                 gw.send_to_owner(&crate::rwi::CallNoAnswer {
+                                    leg_id: None,
+                                    leg_role: Some("caller".to_string()),
                                     call_id: call_id.clone(),
                                 });
                             } else {
@@ -1906,6 +1920,8 @@ impl RwiCommandProcessor {
                         setup_end_reason = Some(CallRecordHangupReason::NoAnswer);
                         let gw = gateway.read();
                         gw.send_to_owner(&crate::rwi::CallNoAnswer {
+                            leg_id: None,
+                            leg_role: Some("caller".to_string()),
                             call_id: call_id.clone(),
                         });
                     }
@@ -2130,7 +2146,7 @@ impl RwiCommandProcessor {
 
     async fn leg_remove(&self, call_id: &str, leg_id: &str) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
-        handle.send_command(CallCommand::LegRemove { leg_id: LegId::new(leg_id) })
+        handle.send_command(CallCommand::LegRemove { leg_id: LegId::new(leg_id), reason: None })
             .map_err(|error| CommandError::CommandFailed(error.to_string()))?;
         Ok(CommandResult::Success)
     }

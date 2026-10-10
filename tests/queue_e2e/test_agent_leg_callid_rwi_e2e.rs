@@ -576,12 +576,14 @@ async fn test_agent_initiated_call_caller_leg_reports_agent_role() -> Result<()>
         "customer leg must stay leg_role=callee: {ringing}"
     );
 
-    // Wait for the session-level answer (200 OK → ACK confirmed) before
-    // holding — the caller dialog must be Confirmed or rsipstack refuses the
-    // re-INVITE (Ok(None) → "re-INVITE timed out").
+    // Wait for the answer (200 OK → ACK confirmed) before holding — the
+    // caller dialog must be Confirmed or rsipstack refuses the re-INVITE
+    // (Ok(None) → "re-INVITE timed out"). `call_answered` now arrives per
+    // leg (the agent caller leg + the deprecated session duplicate); the
+    // FIRST one already proves the dialog confirmed.
     wait_webhook_event(&capture, "call_answered", Duration::from_secs(10))
         .await
-        .expect("webhook must receive the session-level call_answered");
+        .expect("webhook must receive call_answered");
     sleep(Duration::from_millis(500)).await;
 
     // Hold the CALLER leg (bob = agent) via the production command path and
@@ -767,6 +769,7 @@ async fn test_consult_leg_callid_session_aligned_and_leg_role() -> Result<()> {
     handle
         .send_command(CallCommand::LegRemove {
             leg_id: LegId::from("consult-1"),
+            reason: None,
         })
         .map_err(|e| anyhow!("consult leg remove failed: {e}"))?;
     sleep(Duration::from_millis(500)).await;

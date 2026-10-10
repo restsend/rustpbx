@@ -267,12 +267,14 @@ Webhook 使用 `(call_id, timestamp)` 元组去重，环形缓冲区容量 4096 
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
+| `leg_id` | Option\<String\> | 创建的腿：入呼为主叫腿（`caller`）；API 外呼在应答前无腿注册表（省略） |
+| `leg_role` | Option\<String\> | 该腿的角色（`caller`） |
 | `call_id` | String | 呼叫唯一标识 |
 | `context` | String | 拨号计划 context |
 | `caller` | String | 主叫 SIP URI |
 | `callee` | String | 被叫 SIP URI |
 | `trunk` | Option\<String\> | SIP 中继名 |
-| `sip_headers` | Map\<String, String\> | 白名单 SIP 头 |
+| `sip_headers` | Map\<String, String\> | 创建呼叫的请求所携带的全部 SIP 头（剔除已有类型化表示的传输/对话头：Via、Call-ID、CSeq、Content-Length/Type、From、To、User-Agent、Allow、Max-Forwards；路由注入头按名字覆盖）。入呼取自初始 INVITE；外呼取自实际发出的 INVITE（含坐席自定义头与 trunk 注入头） |
 | `caller_name` | Option\<String\> | 主叫号码 |
 | `callee_name` | Option\<String\> | 被叫号码 / DNIS |
 | `called_phone` | Option\<String\> | 实际被叫号码（外呼场景） |
@@ -345,12 +347,34 @@ Webhook 使用 `(call_id, timestamp)` 元组去重，环形缓冲区容量 4096 
 
 分发：call_owner
 
+**`call_answered` 按腿发（per-leg）**：每条腿的应答各发一条，携带该腿的 `leg_id` +
+`leg_role`（`caller` = 队列/IVR 内主叫摘机；`agent` = 坐席腿接通；`callee` =
+直答被叫；外呼场景出站 INVITE 腿即会话的 `caller` 腿）。Hold → Connected 的恢复
+不算应答（由 `call_unheld` 描述）。
+
+同时保留一条 **session 级重复事件**（`leg_id` 省略，坐席接通时最多一条）——
+**已废弃**，下个版本移除；下游请迁移到按腿事件（过滤 `leg_id != null`）。
+集群子腿 session 不发 session 级重复事件，其腿级事件照发。
+
 | 字段 | 类型 | 说明 |
 |------|------|------|
+| `leg_id` | Option\<String\> | 应答的腿（session 级重复事件省略） |
+| `leg_role` | Option\<String\> | `agent` \| `consult` \| `transfer` \| `caller` \| `callee` |
 | `call_id` | String | 呼叫标识 |
 | *+ctx* | | 扁平化上下文 |
 
-> 队列/IVR 应用的呼叫：主叫腿应答时应用正在运行（不发事件），坐席腿接通（LegConnected）时发 `call_answered` —— 即坐席接听时刻。
+> 队列/IVR 应用的呼叫时间线：主叫摘机（应用接听）发 `call_answered{leg_role:"caller"}`，
+> 坐席腿接通时发 `call_answered{leg_role:"agent"}` + session 级重复事件——即坐席接听时刻。
+
+**`call_no_answer` / `call_busy`**（API 外呼的应答失败结果，408/480/487 / 486/600）：
+描述的是外呼出站 INVITE 腿——即会话的 `caller` 腿。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `leg_id` | Option\<String\> | 应答前无腿注册表，省略 |
+| `leg_role` | Option\<String\> | `caller` |
+| `call_id` | String | 呼叫标识 |
+| *+ctx* | | 扁平化上下文 |
 
 #### call_held / call_unheld
 
@@ -483,7 +507,7 @@ CC addon 的独立呼叫生命周期事件已移除。坐席归因改由核心�
 | 原事件 | 统一后的表达 | 说明 |
 |---|---|---|
 | `cc_ringing` | `call_ringing`（+ctx） | `early_media` 为核心事件自有字段；每个 provisional 响应一条 |
-| `cc_answered` | `call_answered`（+ctx） | 按流程在应答时刻发射：无应用 `accept_call`、外呼 200 OK、或队列坐席腿接通（LegConnected） |
+| `cc_answered` | `call_answered`（+ctx） | 按腿发射：每条腿应答各发一条；原单条 session 级事件（无应用 `accept_call`、外呼 200 OK、队列坐席腿接通）现为已废弃的重复事件 |
 | `cc_hangup` | `call_hangup`（+ctx、`duration_secs`） | `reason`/`hangup_by` 词汇表不变；未应答呼叫 `duration_secs` 省略（不再为 0） |
 | `cc_held` | `call_held`（+ctx） | `leg_id` 不变 |
 | `cc_unheld` | `call_unheld`（+ctx） | `leg_id` 不变 |

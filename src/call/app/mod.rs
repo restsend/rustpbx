@@ -110,7 +110,8 @@ mod queue_test;
 
 pub use app_context::{
     AppInvocationContext, AppRouteContext, ApplicationContext, CallInfo, PendingQueuePlan,
-    QueueOverflowOverrides, extract_sip_headers, merge_sip_headers,
+    QueueOverflowOverrides, extract_sip_headers, is_sip_transport_header, merge_sip_headers,
+    sip_headers_from,
 };
 pub use controller::{
     CallController, ControllerEvent, DtmfCollectConfig, HangupDuringCollection, PlaybackToken,

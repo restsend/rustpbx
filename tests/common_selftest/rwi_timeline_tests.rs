@@ -43,6 +43,10 @@ fn clean_queue_agent_timeline_passes() {
         envelope(cid, "2026-09-29T07:00:03.002Z", "queue_left", json!({
             "agent_id": "489218", "queue_id": "queue-name", "reason": "connected"
         })),
+        envelope(cid, "2026-09-29T07:00:03.003Z", "call_answered", json!({
+            "leg_id": "leg-1", "leg_role": "agent",
+            "agent_id": "489218", "queue_id": "queue-name"
+        })),
         envelope(cid, "2026-09-29T07:00:03.004Z", "call_answered", json!({
             "agent_id": "489218", "agent_name": "T-G2", "queue_id": "queue-name"
         })),
@@ -52,7 +56,7 @@ fn clean_queue_agent_timeline_passes() {
     ];
     let tl = RwiTimeline::from_events(cid, events);
     tl.assert_queue_agent_contract("489218"); // must not panic
-    assert_eq!(tl.event_count(), 9);
+    assert_eq!(tl.event_count(), 10);
 }
 
 /// The production-42 failure mode: both ringing events missing agent_id →
@@ -109,41 +113,62 @@ fn leg_ringing_missing_agent_fails_even_when_session_level_has_it() {
     assert!(!msg.contains("call_ringing (session-level)"), "msg: {msg}");
 }
 
-/// Duplicated session-level `call_answered` (an earlier incident class) must
-/// fail, as must a leg-scoped one.
+/// `call_answered` DUAL contract: one leg-scoped agent answered + exactly
+/// one session-scoped duplicate is the legal shape. Duplicating the
+/// session-scoped event (the earlier incident class), dropping the leg side,
+/// or dropping the session side must all fail.
 #[test]
-fn duplicated_or_leg_scoped_answered_fails() {
-    let cid = "dup-answered-call";
-    let base = |answer_payload: serde_json::Value| {
-        vec![
+fn answered_dual_contract() {
+    let cid = "answered-call";
+    let base = |answers: Vec<serde_json::Value>| {
+        let mut v = vec![
             envelope(cid, "t0", "call_created", json!({})),
             envelope(cid, "t1", "queue_joined", json!({})),
             envelope(cid, "t2", "call_ringing", json!({"leg_id": "leg-1", "agent_id": "489218"})),
             envelope(cid, "t3", "call_ringing", json!({"agent_id": "489218"})),
             envelope(cid, "t4", "queue_agent_offered", json!({"agent_id": "489218"})),
             envelope(cid, "t5", "queue_agent_connected", json!({"agent_id": "489218"})),
-            envelope(cid, "t6", "call_answered", answer_payload),
-            envelope(cid, "t7", "call_hangup", json!({"agent_id": "489218"})),
-        ]
+            envelope(cid, "t5b", "queue_left", json!({"agent_id": "489218", "reason": "connected"})),
+        ];
+        for (i, a) in answers.iter().enumerate() {
+            v.push(envelope(cid, &format!("t6-{i}"), "call_answered", a.clone()));
+        }
+        v.push(envelope(cid, "t7", "call_hangup", json!({"agent_id": "489218"})));
+        v
     };
-    // Exactly-one: a second answered fails.
-    let mut events = base(json!({"agent_id": "489218"}));
-    events.push(envelope(cid, "t8", "call_answered", json!({"agent_id": "489218"})));
-    let tl = RwiTimeline::from_events(cid, events);
-    let result = std::panic::catch_unwind(move || tl.assert_queue_agent_contract("489218"));
-    assert!(result.is_err(), "duplicate call_answered must fail");
+    let leg = json!({"leg_id": "leg-1", "leg_role": "agent", "agent_id": "489218"});
+    let session = json!({"agent_id": "489218"});
+    let check = |events: Vec<serde_json::Value>| {
+        std::panic::catch_unwind(move || {
+            RwiTimeline::from_events(cid, events).assert_queue_agent_contract("489218")
+        })
+    };
+    let msg_of = |result: Result<(), Box<dyn std::any::Any + Send>>| {
+        let err = result.err().expect("contract must FAIL");
+        err.downcast_ref::<String>()
+            .cloned()
+            .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default()
+    };
 
-    // Session-scoped: a leg-scoped answered fails.
-    let events = base(json!({"leg_id": "leg-1", "agent_id": "489218"}));
-    let tl = RwiTimeline::from_events(cid, events);
-    let result = std::panic::catch_unwind(move || tl.assert_queue_agent_contract("489218"));
-    let err = result.err().expect("leg-scoped call_answered must fail");
-    let msg = err
-        .downcast_ref::<String>()
-        .cloned()
-        .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
-        .unwrap_or_default();
-    assert!(msg.contains("session-scoped"), "msg: {msg}");
+    // Legal dual: leg-scoped agent answered + one session duplicate.
+    let result = check(base(vec![leg.clone(), session.clone()]));
+    assert!(result.is_ok(), "leg + session answered is the legal dual: {result:?}");
+
+    // Two session-scoped duplicates fail (the earlier incident class).
+    let msg = msg_of(check(base(vec![session.clone(), session.clone(), leg.clone()])));
+    assert!(msg.contains("exactly ONE session-scoped"), "msg: {msg}");
+
+    // Missing the leg-scoped side fails.
+    let msg = msg_of(check(base(vec![session.clone()])));
+    assert!(
+        msg.contains("leg-scoped call_answered with leg_role"),
+        "msg: {msg}"
+    );
+
+    // Missing the session-scoped side fails.
+    let msg = msg_of(check(base(vec![leg])));
+    assert!(msg.contains("exactly ONE session-scoped"), "msg: {msg}");
 }
 
 /// Ordering violations must be caught: ringing after offered.

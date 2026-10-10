@@ -590,6 +590,8 @@ mod tests {
         ));
         let created = mk(crate::rwi::event::to_legacy_event(
             &crate::rwi::CallCreated {
+                leg_id: None,
+                leg_role: None,
                 call_id: "dedup-call".into(),
                 context: "default".into(),
                 caller: "sip:1001@localhost".into(),

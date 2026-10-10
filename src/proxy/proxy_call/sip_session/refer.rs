@@ -540,12 +540,17 @@ impl SipSession {
             "70".into(),
         )];
         // Carry the root session id to the transfer target via UUI so an
-        // external network leg can re-attach on the way back in.
+        // external network leg can re-attach on the way back in, and declare
+        // the leg intent (`leg=transfer`): a cluster peer that terminates the
+        // INVITE as its own session then knows this is a child leg of the
+        // logical call, not a new call (no duplicate call_created /
+        // call_answered lifecycle there).
         headers.push(crate::call::uui::build_uui_header(
             &root_session_id,
             None,
             None,
             None,
+            Some("transfer"),
         ));
         let media = server.default_media_config();
         let external_ip = media

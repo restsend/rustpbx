@@ -116,7 +116,7 @@ async fn e2e_blind_transfer_retires_agent_dialog_and_preserves_customer() {
     let target_leg = LegId::new("transfer-target");
     for command in [
         CallCommand::LegAdd { source_leg: Some(LegId::new("caller")), target: "sip:alice".into(), leg_id: Some(target_leg.clone()), headers: vec![], purpose: None },
-        CallCommand::LegRemove { leg_id: LegId::new("callee") },
+        CallCommand::LegRemove { leg_id: LegId::new("callee"), reason: None },
         CallCommand::Bridge { leg_a: LegId::new("caller"), leg_b: target_leg, mode: rustpbx::call::domain::P2PMode::Audio },
         CallCommand::MarkTransferred,
     ] { handle.send_command(command).unwrap(); }
@@ -270,6 +270,7 @@ async fn e2e_owner_anchored_complete_removes_agent_leg_command() {
     handle
         .send_command(CallCommand::LegRemove {
             leg_id: LegId::new("callee"),
+            reason: None,
         })
         .unwrap();
     let _ = tm.complete_transfer("tx-complete-1").await;
@@ -278,7 +279,7 @@ async fn e2e_owner_anchored_complete_removes_agent_leg_command() {
     assert!(
         cmds.iter().any(|c| matches!(
             c,
-            CallCommand::LegRemove { leg_id } if leg_id.as_str() == "callee"
+            CallCommand::LegRemove { leg_id, .. } if leg_id.as_str() == "callee"
         )),
         "complete must remove agent leg, got {cmds:?}"
     );

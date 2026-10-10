@@ -1919,7 +1919,7 @@ impl QueueApp {
                 .iter()
                 .map(|(_, cid)| cid.clone())
                 .collect();
-            ctrl.remove_legs(&old_legs);
+            ctrl.remove_legs(&old_legs, "stage_switch");
             self.pending_agents.clear();
         }
         // The ring timeout armed for the OLD group's dial must die with the
@@ -2546,7 +2546,7 @@ impl CallApp for QueueApp {
                                 leg = %agent_leg,
                                 "Queue: ignoring late answer for a ring-timeout-cancelled leg"
                             );
-                            ctrl.remove_legs(&[agent_leg]);
+                            ctrl.remove_legs(&[agent_leg], "superseded");
                             return Ok(AppAction::Continue);
                         }
                         // Select the winner before prompts or cleanup can resume media.
@@ -2592,7 +2592,7 @@ impl CallApp for QueueApp {
                                     "Queue: cancelling {} non-answering parallel legs",
                                     other_legs.len()
                                 );
-                                ctrl.remove_legs(&other_legs);
+                                ctrl.remove_legs(&other_legs, "superseded");
                             }
                         }
 
@@ -2848,7 +2848,7 @@ impl CallApp for QueueApp {
                         legs = ?timed_out_legs,
                         "Queue: cancelling agent legs after ring timeout"
                     );
-                    ctrl.remove_legs(&timed_out_legs);
+                    ctrl.remove_legs(&timed_out_legs, "ring_timeout");
                 }
 
                 if let Some(ref registry) = self.agent_registry {

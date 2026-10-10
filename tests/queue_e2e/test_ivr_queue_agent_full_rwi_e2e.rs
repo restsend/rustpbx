@@ -535,16 +535,14 @@ async fn test_full_chain_ivr_queue_agent_rwi_webhook_events() -> Result<()> {
         .await
         .expect("bob answers automatically → queue_agent_connected");
 
-    // Session-level-only `call_answered`: exactly one per call, emitted at the
-    // queue-agent connect with no `leg_id`. The IVR pickup and the agent-leg
-    // connect must NOT produce their own answered events.
-    let answered = wait_webhook_event(&capture, "call_answered", Duration::from_secs(10))
+    // `call_answered` is per leg now: the caller pickup at IVR answer
+    // (`leg_role: "caller"`) opens the chain; the queue-agent connect adds
+    // the agent leg (`"agent"`) plus the session-scoped duplicate
+    // (deprecated). Full shape/ordering pinned in the timeline contract
+    // below.
+    wait_webhook_event(&capture, "call_answered", Duration::from_secs(10))
         .await
-        .expect("webhook must receive the session-level call_answered at agent connect");
-    assert!(
-        answered["event"]["leg_id"].is_null(),
-        "call_answered must be session-level (no leg_id), got: {answered}"
-    );
+        .expect("webhook must receive call_answered events");
 
     let left = wait_webhook_event(&capture, "queue_left", Duration::from_secs(10))
         .await
@@ -616,16 +614,57 @@ async fn test_full_chain_ivr_queue_agent_rwi_webhook_events() -> Result<()> {
             pos("queue_agent_connected").expect("queue_agent_connected must be present");
         let left_pos = pos("queue_left").expect("queue_left must be present");
 
-        // Exactly ONE session-level call_answered across the whole chain.
-        let answered_count = types.iter().filter(|t| **t == "call_answered").count();
+        // call_answered DUAL contract across the whole chain: caller pickup
+        // (leg_role "caller", at IVR answer) + agent leg ("agent", at
+        // queue-agent connect) + the session-scoped duplicate (no leg_id).
+        // Exactly three.
+        let answered_idx: Vec<usize> = types
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| **t == "call_answered")
+            .map(|(i, _)| i)
+            .collect();
         assert_eq!(
-            answered_count, 1,
-            "exactly one session-level call_answered expected: {types:?}"
+            answered_idx.len(),
+            3,
+            "caller + agent + session call_answered expected: {types:?}"
         );
-        let answered_pos = pos("call_answered").expect("call_answered must be present");
+        let answered_evs: Vec<&serde_json::Value> =
+            answered_idx.iter().map(|&i| &events[i]["event"]).collect();
+        assert_eq!(
+            answered_evs[0]["leg_role"].as_str(),
+            Some("caller"),
+            "first answered must be the caller pickup: {types:?}"
+        );
+        assert_eq!(
+            answered_evs[0]["leg_id"].as_str(),
+            Some("caller"),
+            "caller answered carries the caller leg_id: {:#}",
+            answered_evs[0]
+        );
+        let agent_answered = answered_evs
+            .iter()
+            .find(|e| e["leg_role"].as_str() == Some("agent"))
+            .expect("agent leg answered must be present");
         assert!(
-            joined < answered_pos,
-            "call_answered must fire at agent connect (after queue_joined), not at IVR pickup: {types:?}"
+            !agent_answered["leg_id"].is_null(),
+            "agent answered carries its leg_id: {agent_answered}"
+        );
+        assert!(
+            answered_evs
+                .iter()
+                .any(|e| e["leg_id"].is_null()),
+            "session-scoped answered duplicate present: {types:?}"
+        );
+        // Ordering: the caller pickup precedes queue_joined (IVR answer), the
+        // agent + session answered follow it (queue-agent connect).
+        assert!(
+            answered_idx[0] < joined,
+            "caller pickup answered precedes queue_joined: {types:?}"
+        );
+        assert!(
+            answered_idx[1] > joined && answered_idx[2] > joined,
+            "agent + session answered fire at agent connect: {types:?}"
         );
 
         assert!(

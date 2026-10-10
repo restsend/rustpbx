@@ -36,6 +36,8 @@ async fn test_full_session_resume_flow() {
             gw.fan_out(
                 "resume-test",
                 &rustpbx::rwi::CallCreated {
+                    leg_id: None,
+                    leg_role: None,
                     call_id: "resume-call-1".to_string(),
                     context: "resume-test".to_string(),
                     caller: "sip:alice@test.com".to_string(),

@@ -1094,7 +1094,7 @@ impl SipSession {
                         self.mark_transferred_with(Some(
                             serde_json::json!({ "target": name, "kind": "route_point" }),
                         ));
-                        self.handle_remove_leg(leg_id).await?;
+                        self.handle_remove_leg(leg_id, None).await?;
                     }
                 } else if let Err(error) = &result {
                     self.fail_suspended_ivr_handoff(
@@ -2794,7 +2794,7 @@ impl SipSession {
             self.pending_hangup.insert(dialog.id());
         }
         self.update_leg_state(&agent, LegState::Ended);
-        self.handle_remove_leg(agent).await?;
+        self.handle_remove_leg(agent, None).await?;
         self.mark_transferred_with(None);
         Ok(())
     }
@@ -2814,7 +2814,7 @@ impl SipSession {
         self.handle_leave_mixer().await?;
         // Select the original conversation before removal/unhold refreshes media.
         self.bridge = crate::call::runtime::BridgeConfig::bridge(caller.clone(), agent.clone());
-        self.handle_remove_leg(consult_leg).await?;
+        self.handle_remove_leg(consult_leg, None).await?;
         self.handle_unhold(caller.clone()).await?;
         self.handle_unhold(agent.clone()).await?;
         if !self.setup_bridge(caller, agent).await {

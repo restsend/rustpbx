@@ -36,9 +36,9 @@ TYPE_EXTRAS: dict[str, tuple[str, ...]] = {
 # Canonical ordering constraints used by assert_event_flow().
 LIFECYCLE_ORDER = ("call_created", "call_ringing", "call_answered", "call_hangup")
 
-# `call_answered` is session-scoped: exactly one per call_id, with NO `leg_id`
-# in the payload (leg transitions no longer emit their own answered events).
-# Suites must not wait for per-leg answered events.
+# `call_answered` DUAL contract: ONE per answering leg (leg_id + leg_role in
+# the payload) plus a deprecated session-scoped duplicate (no leg_id, at most
+# one — removed next version). Suites may wait for per-leg answered events.
 
 
 def event_type(ev) -> str:
@@ -159,7 +159,8 @@ def check_call_timeline(
     """Cross-event contract over one call's event stream.
 
     Returns ``(violations, warnings)``; raises nothing. Checks lifecycle
-    shape (single call_created/call_answered), queue-agent attribution on
+    shape (single call_created; dual call_answered — per leg + one deprecated
+    session duplicate), queue-agent attribution on
     ringing/offered/connected/answered/hangup, flow ordering, and
     attribution stability.
     """
@@ -179,17 +180,48 @@ def check_call_timeline(
         )
     if "call_created" in types and types.count("call_created") > 1:
         violations.append(f"call_created emitted {types.count('call_created')}x (expected 1)")
+    # `call_answered` DUAL contract: one leg-scoped event per answering leg
+    # (leg_id + leg_role present — caller pickup, direct-answer callee,
+    # queue-dispatched agent) plus exactly ONE session-scoped duplicate
+    # (no leg_id; deprecated, removed next version).
     answered = [e for e in events if str(event_type(e)) == "call_answered"]
-    if len(answered) > 1:
+    session_answered = [e for e in answered if not _has_leg(e)]
+    if len(session_answered) > 1:
         violations.append(
-            f"call_answered emitted {len(answered)}x (expected exactly 1 — "
-            "session-scoped, no per-leg answered events)"
+            f"session-scoped call_answered emitted {len(session_answered)}x "
+            "(expected exactly 1 — per-leg answered events are the "
+            "leg-scoped ones, the no-leg_id duplicate is the deprecated "
+            "session event)"
         )
     for ev in answered:
-        if _has_leg(ev):
+        if _has_leg(ev) and _field(ev, "leg_role") is None:
             violations.append(
-                f"call_answered must be session-scoped (no leg_id), got leg_id="
-                f"{_field(ev, 'leg_id')!r}"
+                f"leg-scoped call_answered must carry leg_role, got leg_id="
+                f"{_field(ev, 'leg_id')!r} without a leg_role"
+            )
+
+    # Child-leg sessions (a cluster peer dispatched a queue agent / consult /
+    # transfer leg to another node) must not announce their own SESSION-level
+    # call lifecycle: the dispatching node already emitted call_created /
+    # call_answered for the logical call. A session-scoped lifecycle event
+    # (no leg_id) whose call_id differs from the logical session_id is
+    # exactly such a duplicate (historically the cross-node queue dispatch
+    # satellite session — see `session.meta.child_leg_role`). Leg-scoped
+    # answered events are exempt: per-leg answers are the current contract,
+    # including on child-leg sessions.
+    for ev in events:
+        etype = str(event_type(ev))
+        if etype not in ("call_created", "call_answered"):
+            continue
+        if _has_leg(ev):
+            continue
+        ev_call_id = _field(ev, "call_id")
+        ev_session = _field(ev, "session_id")
+        if ev_call_id is not None and ev_session is not None and str(ev_call_id) != str(ev_session):
+            violations.append(
+                f"{etype} must not fire from a child-leg session: "
+                f"call_id={ev_call_id!r} != session_id={ev_session!r} "
+                "(dispatching node owns the call lifecycle)"
             )
 
     # ── attribution contract ───────────────────────────────────────────

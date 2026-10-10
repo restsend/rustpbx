@@ -317,6 +317,7 @@ async fn acceptance_hangup_ignores_busy_bound_to_other_call() {
         queue_name: Some("support".into()),
         skill_group_id: None,
         transferred: false,
+        leg_role: None,
         direction: "inbound".into(),
         started_at: None,
         extensions: Default::default(),

@@ -519,6 +519,90 @@ async fn test_no_answer_requeue_rwi_event_contract() -> Result<()> {
         assert_eq!(connected.len(), 1, "exactly one connect: {types:?}");
         assert_eq!(lefts.len(), 1, "exactly one queue_left: {types:?}");
 
+        // ── call_answered DUAL contract ──────────────────────────────────
+        // The caller pickup at queue accept (leg_role "caller") + the agent
+        // leg at the round-2 connect ("agent", carrying its leg_id) + the
+        // session-scoped duplicate (no leg_id). Exactly three, each at its
+        // own moment.
+        let answered_idx = pos_all("call_answered");
+        assert_eq!(
+            answered_idx.len(),
+            3,
+            "caller + agent + session call_answered expected: {types:?}"
+        );
+        let answered_evs: Vec<&serde_json::Value> =
+            answered_idx.iter().map(|&i| &evs[i]["event"]).collect();
+        assert_eq!(
+            answered_evs[0]["leg_role"].as_str(),
+            Some("caller"),
+            "first answered must be the caller pickup: {types:?}"
+        );
+        assert_eq!(
+            answered_evs[0]["leg_id"].as_str(),
+            Some("caller"),
+            "caller answered carries the caller leg_id: {:#}",
+            answered_evs[0]
+        );
+        let agent_answered = answered_evs
+            .iter()
+            .find(|e| e["leg_role"].as_str() == Some("agent"))
+            .expect("agent leg answered must be present");
+        assert!(
+            !agent_answered["leg_id"].is_null(),
+            "agent answered carries its leg_id: {agent_answered}"
+        );
+        assert!(
+            answered_evs.iter().any(|e| e["leg_id"].is_null()),
+            "session-scoped answered duplicate present: {types:?}"
+        );
+        assert!(
+            answered_idx[0] < connected[0]
+                && answered_idx[1] < connected[0]
+                && answered_idx[2] < connected[0],
+            "caller pickup first, agent + session answered at connect \
+             (all before queue_agent_connected): {types:?}"
+        );
+
+        // ── per-leg hangup for the ring-timeout cancel ───────────────────
+        // The round-1 agent leg never connected: the queue's CANCEL must
+        // emit its own `call_hangup{leg_role:"agent", reason:"ring_timeout"}`.
+        // Round 2 connects — no miss hangup there.
+        let round1_leg = evs[offered[0]]["event"]["leg_id"]
+            .as_str()
+            .expect("round-1 offered carries the agent leg_id")
+            .to_string();
+        let leg_hangups: Vec<(usize, &serde_json::Value)> = evs
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v["event_type"].as_str() == Some("call_hangup"))
+            .filter(|(_, v)| {
+                !v["event"]["leg_id"].is_null()
+                    && v["event"]["leg_role"].as_str() == Some("agent")
+            })
+            .map(|(i, v)| (i, &v["event"]))
+            .collect();
+        assert_eq!(
+            leg_hangups.len(),
+            1,
+            "exactly one leg-scoped miss hangup (round-1 agent leg): {types:?}"
+        );
+        let (hangup_idx, hangup_ev) = leg_hangups[0];
+        assert_eq!(
+            hangup_ev["leg_id"].as_str(),
+            Some(round1_leg.as_str()),
+            "the miss hangup must name the round-1 agent leg: {hangup_ev}"
+        );
+        assert_eq!(
+            hangup_ev["reason"].as_str(),
+            Some("ring_timeout"),
+            "miss hangup reason must be ring_timeout: {hangup_ev}"
+        );
+        assert!(
+            offered[0] < hangup_idx && hangup_idx < no_answers[0],
+            "miss hangup sits after the round-1 offer and before the no-answer \
+             fan-out (the session processes the CANCEL first): {types:?}"
+        );
+
         // ── skill_group_* data-analysis events (the downstream contract) ──
         // Join: bob is Idle from the start → the call joins AND is assigned
         // in the same round → reason "immediate" (this scenario is exactly

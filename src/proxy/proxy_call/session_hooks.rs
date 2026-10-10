@@ -104,6 +104,12 @@ pub struct CallSessionContext {
     /// blind transfer, consultative transfer / 3-way merge) before reaching
     /// the current leg. Post-call hooks suppress CSAT surveys on it.
     pub transferred: bool,
+    /// Dial intent the *caller's own device* declared on the initial INVITE
+    /// (RFC 7433 `User-to-User` `leg=` parameter — `consult` / `transfer`,
+    /// see `call::uui`). In-memory stats marker only — persisted nowhere
+    /// (no `cc_calls.leg_role` column; agent metrics include all legs) and
+    /// never shaping the call lifecycle.
+    pub leg_role: Option<String>,
     /// Call direction: `"inbound"` or `"outbound"`.
     pub direction: String,
     /// ISO-8601 timestamp when the session was created (before ringing).
@@ -140,6 +146,7 @@ impl Clone for CallSessionContext {
             queue_name: self.queue_name.clone(),
             skill_group_id: self.skill_group_id.clone(),
             transferred: self.transferred,
+            leg_role: self.leg_role.clone(),
             direction: self.direction.clone(),
             started_at: self.started_at.clone(),
             extensions: self.extensions.clone(),
@@ -158,6 +165,7 @@ impl fmt::Debug for CallSessionContext {
             .field("queue_name", &self.queue_name)
             .field("skill_group_id", &self.skill_group_id)
             .field("transferred", &self.transferred)
+            .field("leg_role", &self.leg_role)
             .field("direction", &self.direction)
             .field("started_at", &self.started_at)
             .field("extensions", &"<http::Extensions>")

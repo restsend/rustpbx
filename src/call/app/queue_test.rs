@@ -878,7 +878,7 @@ mod tests {
         let removed_legs: Vec<_> = cmds
             .iter()
             .filter_map(|c| match c {
-                CallCommand::LegRemove { leg_id } => Some(leg_id),
+                CallCommand::LegRemove { leg_id, .. } => Some(leg_id),
                 _ => None,
             })
             .collect();
@@ -1603,7 +1603,7 @@ mod tests {
         // Should cancel agent 2's leg via LegRemove (NOT agent 1's leg)
         let remove = stack.next_cmd(2000).await.expect("LegRemove");
         match &remove {
-            CallCommand::LegRemove { leg_id } => {
+            CallCommand::LegRemove { leg_id, .. } => {
                 assert_eq!(
                     format!("{leg_id:?}"),
                     format!("{leg_id_1:?}"),
@@ -1676,7 +1676,7 @@ mod tests {
         let mut saw_hangup = false;
         for _ in 0..20 {
             match stack.next_cmd(2000).await {
-                Some(CallCommand::LegRemove { leg_id }) => removed.push(leg_id),
+                Some(CallCommand::LegRemove { leg_id, .. }) => removed.push(leg_id),
                 Some(CallCommand::Hangup(_)) => { saw_hangup = true; break; }
                 Some(CallCommand::InjectAppEvent { .. }) => continue,
                 Some(other) => panic!("expected Hangup/LegRemove/InjectAppEvent, got {other:?}"),
@@ -3312,7 +3312,7 @@ mod tests {
         let mut hung_up = false;
         for _ in 0..10 {
             match stack.next_cmd(300).await {
-                Some(CallCommand::LegRemove { leg_id }) => removed_legs.push(leg_id),
+                Some(CallCommand::LegRemove { leg_id, .. }) => removed_legs.push(leg_id),
                 Some(CallCommand::Play { .. }) => {
                     hold_restarted = true;
                     break;
@@ -4374,7 +4374,7 @@ mod tests {
         let mut hold_restarted = false;
         for _ in 0..10 {
             match stack.next_cmd(1000).await {
-                Some(CallCommand::LegRemove { leg_id }) => removed.push(leg_id),
+                Some(CallCommand::LegRemove { leg_id, .. }) => removed.push(leg_id),
                 Some(CallCommand::Play { .. }) => {
                     hold_restarted = true;
                     break;
@@ -4486,7 +4486,7 @@ mod tests {
         let mut hold_restarted = false;
         for _ in 0..10 {
             match stack.next_cmd(1000).await {
-                Some(CallCommand::LegRemove { leg_id }) => removed.push(leg_id),
+                Some(CallCommand::LegRemove { leg_id, .. }) => removed.push(leg_id),
                 Some(CallCommand::Play { .. }) => {
                     hold_restarted = true;
                     break;

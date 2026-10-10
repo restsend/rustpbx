@@ -971,6 +971,8 @@ mod tests {
         );
 
         gw.send_to_owner(&crate::rwi::CallCreated {
+            leg_id: None,
+            leg_role: None,
             call_id: "cti-1".into(),
             context: "default".into(),
             caller: "sip:1001@rustpbx.com".into(),
@@ -1798,6 +1800,8 @@ mod tests {
 
         gw.broadcast_event(&crate::rwi::event::to_legacy_event(
             &crate::rwi::CallCreated {
+                leg_id: None,
+                leg_role: None,
                 call_id: "c1".into(),
                 context: "default".into(),
                 caller: "sip:explicit-caller@localhost".into(),

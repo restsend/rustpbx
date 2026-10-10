@@ -576,6 +576,14 @@ pub enum CallCommand {
     LegRemove {
         /// Leg ID to remove
         leg_id: LegId,
+        /// Why the leg is being removed — carried onto the per-leg
+        /// `call_hangup` emitted for a leg that never connected (e.g.
+        /// `"ring_timeout"` when the queue cancels a ringing agent leg,
+        /// `"stage_switch"` for an escalation stage switch, `"superseded"`
+        /// for a superseded parallel dial). `None` renders as
+        /// `"cancelled"`.
+        #[serde(default)]
+        reason: Option<String>,
     },
 
     /// Leg dial completed successfully (async notification)

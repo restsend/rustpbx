@@ -772,11 +772,14 @@ impl CallController {
     /// Remove (cancel) a set of call legs by their leg IDs.
     ///
     /// Each leg is sent a `LegRemove` command, which causes the SIP session
-    /// to send a BYE/CANCEL and clean up the dialog.
-    pub fn remove_legs(&self, leg_ids: &[String]) {
+    /// to send a BYE/CANCEL and clean up the dialog. `reason` rides the
+    /// per-leg `call_hangup` emitted for a leg that never connected (e.g.
+    /// `"ring_timeout"`, `"stage_switch"`, `"superseded"`).
+    pub fn remove_legs(&self, leg_ids: &[String], reason: &str) {
         for leg_id in leg_ids {
             if let Err(e) = self.session.send_command(CallCommand::LegRemove {
                 leg_id: LegId::from(leg_id.as_str()),
+                reason: Some(reason.to_string()),
             }) {
                 warn!("Failed to send LegRemove for {}: {}", leg_id, e);
             }

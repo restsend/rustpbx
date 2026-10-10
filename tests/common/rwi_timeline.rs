@@ -71,8 +71,10 @@ impl RwiTimeline {
     ///   `queue_left` other than a legitimate mid-ring overflow stage
     ///   switch (`reason:"overflow"`). A `queue_left` fired at
     ///   assignment/ring time is the regression this guards;
-    /// * exactly ONE `call_answered`, session-scoped (no `leg_id`), carrying
-    ///   `agent_id`;
+    /// * `call_answered` DUAL: exactly ONE session-scoped duplicate (no
+    ///   `leg_id`, attributed) + at least one leg-scoped answered with
+    ///   `leg_role: "agent"` and the same attribution (the caller pickup may
+    ///   add a legal leg-scoped `"caller"` answered — not required here);
     /// * `call_hangup` present and carrying `agent_id`;
     /// * attribution stability: any event carrying `agent_id` must carry the
     ///   expected value — it must never change mid-call.
@@ -161,28 +163,52 @@ impl RwiTimeline {
             }
         }
 
-        // call_answered: exactly one, session-scoped, attributed.
+        // call_answered DUAL contract: exactly one session-scoped duplicate
+        // (no leg_id, attributed) + at least one leg-scoped answered for the
+        // agent leg (leg_role "agent", same attribution). The caller pickup
+        // may add a leg-scoped answered with leg_role "caller" — legal, not
+        // required here (direct-dial flows differ).
         let answered: Vec<&serde_json::Value> = self
             .events
             .iter()
             .filter(|e| self.etype(e) == "call_answered")
             .collect();
-        if answered.len() != 1 {
+        let session_answered: Vec<&&serde_json::Value> = answered
+            .iter()
+            .filter(|ev| self.payload(ev)["leg_id"].is_null())
+            .collect();
+        if session_answered.len() != 1 {
             violations.push(format!(
-                "call_answered must fire exactly once, got {}",
-                answered.len()
+                "exactly ONE session-scoped call_answered expected, got {}",
+                session_answered.len()
             ));
         }
-        for ev in &answered {
-            if !self.payload(ev)["leg_id"].is_null() {
-                violations.push(format!(
-                    "call_answered must be session-scoped (no leg_id), got leg_id={}",
-                    self.payload(ev)["leg_id"]
-                ));
-            }
+        for ev in &session_answered {
             if self.payload(ev)["agent_id"].as_str() != Some(expected_agent) {
                 violations.push(format!(
-                    "call_answered missing/wrong agent_id: {}",
+                    "session-scoped call_answered missing/wrong agent_id: {}",
+                    self.payload(ev)["agent_id"]
+                ));
+            }
+        }
+        let agent_leg_answered: Vec<&&serde_json::Value> = answered
+            .iter()
+            .filter(|ev| {
+                self.payload(ev)["leg_role"].as_str() == Some("agent")
+                    && !self.payload(ev)["leg_id"].is_null()
+            })
+            .collect();
+        if agent_leg_answered.is_empty() {
+            violations.push(
+                "no leg-scoped call_answered with leg_role \"agent\" — the agent \
+                 leg's answer must carry its own leg identity"
+                    .into(),
+            );
+        }
+        for ev in &agent_leg_answered {
+            if self.payload(ev)["agent_id"].as_str() != Some(expected_agent) {
+                violations.push(format!(
+                    "leg-scoped call_answered (agent) missing/wrong agent_id: {}",
                     self.payload(ev)["agent_id"]
                 ));
             }

@@ -202,6 +202,8 @@ async fn test_comprehensive_core_event_structs() {
         gw.fan_out(
             "default",
             &rustpbx::rwi::CallCreated {
+                leg_id: None,
+                leg_role: None,
                 call_id: call_id.into(),
                 context: "default".into(),
                 caller: "sip:alice@test.local".into(),

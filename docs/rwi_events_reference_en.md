@@ -276,12 +276,14 @@ First event in any call flow.
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `leg_id` | Option\<String\> | The leg the call was created for: the caller leg of an inbound session (`caller`); omitted for API originates (no leg registry pre-answer) |
+| `leg_role` | Option\<String\> | The leg's role (`caller`) |
 | `call_id` | String | Unique call identifier |
 | `context` | String | Dialplan context |
 | `caller` | String | Caller SIP URI |
 | `callee` | String | Callee SIP URI |
 | `trunk` | Option\<String\> | SIP trunk name |
-| `sip_headers` | Map\<String, String\> | Whitelisted SIP headers |
+| `sip_headers` | Map\<String, String\> | Every SIP header of the creating request, minus transport/dialog headers with typed representations (Via, Call-ID, CSeq, Content-Length/Type, From, To, User-Agent, Allow, Max-Forwards); route-injected headers replace same-name entries. Inbound: the initial INVITE. Originate: the actual outgoing INVITE (agent-supplied custom headers + trunk-injected headers) |
 | `caller_name` | Option\<String\> | Calling party number |
 | `callee_name` | Option\<String\> | Dialed number / DNIS |
 | `called_phone` | Option\<String\> | Actual called number (outbound scenario) |
@@ -326,10 +328,39 @@ First event in any call flow.
 
 Dispatch: call_owner
 
+**`call_answered` is per leg**: every leg answer emits its own event with that
+leg's `leg_id` + `leg_role` (`"caller"` = caller pickup under a queue/IVR app;
+`"agent"` = queue-dispatched agent leg; `"callee"` = direct-answer callee; in
+API originates the outgoing INVITE leg IS the session's `caller` leg). A
+Hold → Connected resume is NOT an answer (`call_unheld` describes it).
+
+A **session-scoped duplicate** (`leg_id` omitted, at most one at the
+agent / remote connect moment) is still emitted — **deprecated**, removed in
+the next version; migrate to the leg-level events (filter `leg_id != null`).
+Child-leg sessions never emit the session-scoped duplicate; their leg-level
+event carries the leg.
+
 | Field | Type | Description |
 |-------|------|-------------|
+| `leg_id` | Option\<String\> | The leg that answered (omitted on the session-scoped duplicate) |
+| `leg_role` | Option\<String\> | `agent` \| `consult` \| `transfer` \| `caller` \| `callee` |
 | `call_id` | String | Call identifier |
 | `early_media` | bool | `call_ringing` only: `true` = provisional response carried SDP (183 Session Progress or 180 with SDP, i.e. early media); `false` = plain 180 Ringing. The former separate `call_early_media` event was merged into this field |
+| *+ctx* | | Flat context fields |
+
+> Queue/IVR timeline: the caller pickup (app answer) emits
+> `call_answered{leg_role:"caller"}`; the queue-agent connect emits
+> `call_answered{leg_role:"agent"}` + the session-scoped duplicate — that
+> moment is the agent connect.
+
+**`call_no_answer` / `call_busy`** (originate setup failures, 408/480/487 /
+486/600): they describe the outgoing INVITE leg — the session's `caller` leg.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `leg_id` | Option\<String\> | Omitted — no leg registry entry exists pre-answer |
+| `leg_role` | Option\<String\> | `caller` |
+| `call_id` | String | Call identifier |
 | *+ctx* | | Flat context fields |
 
 ```json
@@ -486,7 +517,7 @@ participates**:
 | Former event | Unified expression | Notes |
 |---|---|---|
 | `cc_ringing` | `call_ringing` (+ctx) | `early_media` is the core event's own flag; one event per provisional response |
-| `cc_answered` | `call_answered` (+ctx) | Fires at the answer moment per flow: no-app `accept_call`, originate 200 OK, or the queue-agent leg connect (LegConnected) |
+| `cc_answered` | `call_answered` (+ctx) | Fires per leg at every answer moment; the former single session-scoped event (no-app `accept_call`, originate 200 OK, queue-agent leg connect) is now the deprecated duplicate |
 | `cc_hangup` | `call_hangup` (+ctx, `duration_secs`) | `reason`/`hangup_by` keep the same vocabulary; `duration_secs` is omitted (not 0) for unanswered calls |
 | `cc_held` | `call_held` (+ctx) | `leg_id` unchanged |
 | `cc_unheld` | `call_unheld` (+ctx) | `leg_id` unchanged |

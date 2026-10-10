@@ -1108,22 +1108,37 @@ async fn test_originate_agent_click_to_call_emits_agent_attributed_call_events()
         .await
         .expect("bob answers");
 
-    // call_answered must arrive after the 200 OK, still attributed to 1001.
+    // call_answered is per leg now. In the UAC originate the OUTGOING
+    // INVITE leg IS the session's "caller" leg — its answer IS the customer
+    // answer. So exactly two answered events: the leg-level one (leg_id
+    // "caller") + the session-scoped duplicate (deprecated, no leg_id).
     let answered = wait_for_tap_event(&mut tap, "call_answered", std::time::Duration::from_secs(5))
         .await
         .expect("call_answered expected after 200 OK");
-    assert_eq!(
-        answered.event.payload["agent_id"].as_str(),
-        Some("1001"),
-        "call_answered must carry the agent's id"
-    );
     assert_eq!(answered.call_id, call_id);
-    // Session-level-only policy: the answered event carries no `leg_id` — the
-    // customer-leg connect must not emit its own answered event.
-    assert!(
-        answered.event.payload["leg_id"].is_null(),
-        "call_answered must be session-level (no leg_id), got: {:?}",
+    assert_eq!(
+        answered.event.payload["leg_id"].as_str(),
+        Some("caller"),
+        "the outgoing leg's answer must carry its leg_id, got: {:?}",
         answered.event.payload
+    );
+    assert_eq!(
+        answered.event.payload["leg_role"].as_str(),
+        Some("caller"),
+        "the outgoing leg answers as the caller, got: {:?}",
+        answered.event.payload
+    );
+
+    // The session-scoped duplicate (deprecated) follows from originate
+    // completion, without leg fields.
+    let session_answered =
+        wait_for_tap_event(&mut tap, "call_answered", std::time::Duration::from_secs(5))
+            .await
+            .expect("session-scoped call_answered expected after the leg event");
+    assert!(
+        session_answered.event.payload["leg_id"].is_null(),
+        "session-scoped duplicate must carry no leg_id, got: {:?}",
+        session_answered.event.payload
     );
     {
         let agent = cc_registry.get_agent("1001").await.expect("agent");

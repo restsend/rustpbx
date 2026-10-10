@@ -91,11 +91,28 @@ macro_rules! rwi_event {
 /// struct: it is injected via `EventCallContext.direction` enrichment.
 #[derive(Debug, Clone, Serialize)]
 pub struct CallCreated {
+    /// The leg the call was created for: the caller leg of an inbound session
+    /// (`"caller"`), the outgoing INVITE leg of an API originate (`leg_id`
+    /// `None`, `leg_role` `"caller"` — no leg registry entry exists
+    /// pre-answer). Child-leg sessions (a cluster peer dispatched a queue
+    /// agent / consult / transfer leg to this node) emit no `call_created`
+    /// at all — the dispatching node already announced the logical call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_id: Option<String>,
+    /// `caller` | `callee` | `agent` | `consult` | `transfer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
     pub call_id: String,
     pub context: String,
     pub caller: String,
     pub callee: String,
     pub trunk: Option<String>,
+    /// Every SIP header of the request that created the call, minus the
+    /// transport/dialog headers with typed representations (Via, Call-ID,
+    /// CSeq, Content-Length/Type, From, To, User-Agent, Allow, Max-Forwards).
+    /// Route-injected headers replace same-name entries (case-insensitive).
+    /// Populated on every production emission point (inbound INVITE, RWI app,
+    /// API originate — extracted from the actual outgoing INVITE).
     #[serde(default)]
     pub sip_headers: std::collections::HashMap<String, String>,
     #[serde(default)]
@@ -120,9 +137,10 @@ pub struct CallRinging {
     /// Present for an individual leg event; absent for a session event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leg_id: Option<String>,
-    /// `agent` | `consult` | `caller` | `callee` — present only on leg events.
-    /// `agent` identifies the CC agent leg (queue dispatch, consult to a
-    /// registered agent, agent-initiated call).
+    /// `agent` | `consult` | `transfer` — present on leg events and on the
+    /// session events of a child-leg session (a cluster peer dispatched the
+    /// leg to this node). `agent` identifies the CC agent leg (queue
+    /// dispatch, consult to a registered agent, agent-initiated call).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leg_role: Option<String>,
     pub call_id: String,
@@ -142,12 +160,25 @@ pub struct CallRinging {
 }
 rwi_event!(CallRinging, "call_ringing");
 
+/// A call leg ANSWERED. Emitted per leg — every leg answer (caller pickup,
+/// direct-answer callee, queue-dispatched agent, consult / transfer target)
+/// carries its own `leg_id` + `leg_role`.
+///
+/// A session-scoped duplicate (`leg_id: None`) is emitted at most once per
+/// call at the agent / remote connect moment. **Deprecated**: it will be
+/// removed in the next version — consume the leg-level events and drop the
+/// session-scoped one. Child-leg sessions (a cluster peer dispatched the leg
+/// to this node) never emit the session-scoped duplicate; their leg-level
+/// event carries the leg.
 #[derive(Debug, Clone, Serialize)]
 pub struct CallAnswered {
-    /// Present for an individual leg event; absent for a session event.
+    /// The leg that answered — emitted for EVERY leg answer: the caller
+    /// pickup under a queue/IVR app (`"caller"`), a direct-answer callee,
+    /// a queue-dispatched agent leg (`"agent"`), consult / transfer targets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leg_id: Option<String>,
-    /// `agent` | `consult` | `caller` | `callee` — present only on leg events.
+    /// `agent` | `consult` | `transfer` | `caller` | `callee` — the leg's own
+    /// role, same semantics as `call_ringing` / `call_hangup` leg events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leg_role: Option<String>,
     pub call_id: String,
@@ -158,13 +189,22 @@ rwi_event!(CallAnswered, "call_answered");
 pub struct CallHangup {
     /// Present for an individual leg event; absent for a session event.
     ///
-    /// Leg-scoped events fire only for a mid-session leg exit the session
-    /// survives (setup failure, BYE on a dial leg, REFER / conference
-    /// detach). Legs ended by the session teardown cascade are covered by
-    /// the session-scoped event and emit no per-leg duplicate.
+    /// Leg-scoped events fire for:
+    /// * a mid-session leg exit the session survives (setup failure, BYE on
+    ///   a dial leg, REFER / conference detach),
+    /// * an in-setup leg CANCELLED by the app — queue ring timeout
+    ///   (`reason: "ring_timeout"`), escalation stage switch
+    ///   (`"stage_switch"`), superseded parallel dial (`"superseded"`),
+    ///   other explicit removals (`"cancelled"`).
+    /// Legs ended by the session teardown cascade are covered by the
+    /// session-scoped event and emit no per-leg duplicate. Miss hangups are
+    /// what agent workbenches clear the ringing UI and analytics count
+    /// unanswered calls against.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leg_id: Option<String>,
-    /// `agent` | `consult` | `caller` | `callee` — present only on leg events.
+    /// `agent` | `consult` | `transfer` — present on leg events and on the
+    /// session events of a child-leg session (a cluster peer dispatched the
+    /// leg to this node; the role is the intent the dispatcher declared).
     /// `agent` identifies the CC agent leg (queue dispatch, consult to a
     /// registered agent, agent-initiated call).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -230,14 +270,28 @@ pub struct CallUserDataUpdated {
 }
 rwi_event!(CallUserDataUpdated, "call_userdata_updated");
 
+/// The originate target leg did not answer (ring timeout / 408 / 480 / 487)
+/// or reported busy (486 / 600). The unanswered leg is the outgoing INVITE
+/// leg — the session's `caller` leg: `leg_role` is `"caller"`, `leg_id` is
+/// `None` (no leg registry entry exists pre-answer).
 #[derive(Debug, Clone, Serialize)]
 pub struct CallNoAnswer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
     pub call_id: String,
 }
 rwi_event!(CallNoAnswer, "call_no_answer");
 
+/// The originate target leg reported busy (486 / 600). Same leg semantics as
+/// [`CallNoAnswer`].
 #[derive(Debug, Clone, Serialize)]
 pub struct CallBusy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_role: Option<String>,
     pub call_id: String,
 }
 rwi_event!(CallBusy, "call_busy");
