@@ -4897,11 +4897,15 @@ async fn test_pinned_agent_rides_leg_and_session_call_ringing() {
         Some("Alice")
     );
 
-    // ...then the dynamic leg is added and receives 180 Ringing.
+    // ...then the dynamic leg is added and receives 180 Ringing. The leg
+    // mirrors what the queue's LegAdd path builds: purpose=Agent with the
+    // pinned attribution snapshotted onto the leg at insert time — that is
+    // what drives `leg_role_of` → "agent" on the leg-level event.
     let agent_leg = LegId::from("queue-agent");
-    session
-        .legs
-        .insert(agent_leg.clone(), Leg::new(agent_leg.clone()));
+    let mut inserted = Leg::new(agent_leg.clone());
+    inserted.purpose = Some(crate::call::domain::LegPurpose::Agent);
+    inserted.agent_id = Some("1001".to_string());
+    session.legs.insert(agent_leg.clone(), inserted);
     session
         .execute_command(
             CallCommand::LegRinging {
@@ -4939,6 +4943,11 @@ async fn test_pinned_agent_rides_leg_and_session_call_ringing() {
         Some("Alice"),
         "leg-level call_ringing must carry the agent name: {leg_event}"
     );
+    assert_eq!(
+        leg_event["leg_role"].as_str(),
+        Some("agent"),
+        "leg-level call_ringing must carry leg_role agent for a queue-dispatched leg: {leg_event}"
+    );
 
     let session_event = ringings
         .iter()
@@ -4949,6 +4958,10 @@ async fn test_pinned_agent_rides_leg_and_session_call_ringing() {
         Some("1001"),
         "session-level call_ringing must be enriched with the pinned agent \
          from the call meta: {session_event}"
+    );
+    assert!(
+        session_event.get("leg_role").is_none(),
+        "session-level call_ringing must not carry leg_role (leg events only): {session_event}"
     );
 }
 

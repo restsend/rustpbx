@@ -1171,7 +1171,7 @@ Step-Mode IVR 跟踪事件。每一步 provider 往返或动作执行完成时�
 | `queue_id` | String | 队列 ID |
 | `agent_id` | String | 坐席 ID |
 | `attempt` | u32 | 尝试次数 |
-| `leg_id` | Option\<String\> | 失败的会话腿 ID（同上，no_answer 由内置 queue 应用携带；rejected 暂缺省） |
+| `leg_id` | Option\<String\> | 失败的会话腿 ID（同上，均由内置 queue 应用携带；ACD 桥路径暂缺省） |
 | *+ctx* | | 扁平化上下文 |
 
 #### queue_fallback_executed

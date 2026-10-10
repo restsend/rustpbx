@@ -433,6 +433,34 @@ pub trait AgentRegistry: Send + Sync {
     /// Addon implementations use it to emit `skill_group_service_unavailable`.
     async fn notify_call_timeout(&self, _call_id: &str, _queue_id: &str, _waited_secs: u64) {}
 
+    /// Notify the dispatcher that a dialled agent leg did not answer within
+    /// the ring timeout (the queue will retry / re-queue). Addon
+    /// implementations use it to emit `skill_group_agent_no_answer`
+    /// (per-round retry analytics). `attempt` is the queue app's dial-round
+    /// counter.
+    async fn notify_agent_no_answer(
+        &self,
+        _call_id: &str,
+        _queue_id: &str,
+        _agent_id: &str,
+        _attempt: u32,
+        _leg_id: &str,
+    ) {
+    }
+
+    /// Notify the dispatcher that a queued call CONNECTED to an agent — the
+    /// queue's success terminal. Addon implementations use it to emit
+    /// `skill_group_agent_connected` + `skill_group_call_left{connected}`.
+    async fn notify_call_connected(
+        &self,
+        _call_id: &str,
+        _queue_id: &str,
+        _agent_id: &str,
+        _leg_id: &str,
+        _wait_secs: u64,
+    ) {
+    }
+
     /// Notify the dispatcher that a queued call could not be serviced and a
     /// fallback action was executed. Addon implementations use it to emit
     /// `skill_group_service_unavailable`.
@@ -450,12 +478,11 @@ pub trait AgentRegistry: Send + Sync {
     ///
     /// Semantics (only when the agent's current state carries exactly this
     /// `call_id`):
-    /// - `Ringing{call_id}` (unanswered reservation, e.g. originate failure or
-    ///   a parallel leg cancelled by another agent's answer) → released so the
-    ///   agent becomes schedulable again. Implementations choose the exact
-    ///   target state: the default is Idle, the CC adapter uses a short Wrapup
-    ///   breathing window (abandoned-attempt cleanup, with its own auto-idle
-    ///   timer).
+    /// - `Ringing{call_id}` (unanswered reservation, e.g. caller abandoned
+    ///   while the phone rang, originate failure, or a parallel leg cancelled
+    ///   by another agent's answer) → Idle — the agent never answered and
+    ///   never talked, so there is no after-call work: they become
+    ///   schedulable again immediately (no wrapup, no cooldown).
     /// - `Busy{call_id}` (phantom busy, e.g. the agent rejected with 486 while
     ///   the call was served by another agent) → Wrapup — short unschedulable
     ///   (the backend starts its own wrapup timer when available), guaranteeing

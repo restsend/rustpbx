@@ -1167,6 +1167,7 @@ Dispatch: broadcast
 | `queue_id` | String | Queue ID |
 | `agent_id` | String | Agent ID |
 | `attempt` | u32 | Attempt number |
+| `leg_id` | Option\<String\> | Session leg of the failed dial — carried by the built-in queue app for both events; the ACD-bridge path omits it |
 | *+ctx* | | Flat context fields |
 
 #### queue_fallback_executed

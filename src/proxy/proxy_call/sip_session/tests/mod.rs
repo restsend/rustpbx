@@ -7740,7 +7740,12 @@ async fn rwi_manual_parallel_retry_and_leg_cleanup() {
     while let Ok(event) = events.try_recv() {
         if event.event.payload["leg_id"].is_string() && matches!(event.event.event_type, "call_ringing" | "call_hangup") { leg_events.push(event.event.payload); }
     }
-    assert!(leg_events.iter().any(|e| e["leg_id"] == rejected.0 && e["event_type"] == "call_ringing"));
+    assert!(
+        leg_events.iter().any(|e| e["leg_id"] == rejected.0
+            && e["event_type"] == "call_ringing"
+            && e["leg_role"] == "callee"),
+        "plain dial leg's leg-level call_ringing carries the positional leg_role fallback"
+    );
     assert!(leg_events.iter().any(|e| e["leg_id"] == rejected.0 && e["event_type"] == "call_hangup" && e["sip_status"] == 486));
     assert!(leg_events.iter().any(|e| e["leg_id"] == "setup-failure" && e["event_type"] == "call_hangup"
         && e["reason"].as_str().unwrap().contains("No command sender")));

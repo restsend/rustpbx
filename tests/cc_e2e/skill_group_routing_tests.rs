@@ -2375,15 +2375,23 @@ async fn malformed_level_expression_excludes_everyone() {
         "a malformed level expression cannot match any agent, got {uris:?}"
     );
     // The queued event must carry candidate diagnostics so operators can see
-    // total=1 / matched=0 without enabling debug logs.
-    let event = rx.try_recv().expect("NoAgent/CallQueued event expected");
-    match event {
-        rustpbx::addons::cc::agent_registry_adapter::SkillGroupEvent::NoAgent {
-            reason, ..
-        } => {
-            assert_eq!(reason, "no_candidates");
+    // total=1 / matched=0 without enabling debug logs. A join announcement
+    // (`CallJoined`, reason "waited") precedes its trigger event — drain it
+    // first.
+    loop {
+        let event = rx.try_recv().expect("NoAgent/CallQueued event expected");
+        match event {
+            rustpbx::addons::cc::agent_registry_adapter::SkillGroupEvent::CallJoined {
+                ..
+            } => continue,
+            rustpbx::addons::cc::agent_registry_adapter::SkillGroupEvent::NoAgent {
+                reason, ..
+            } => {
+                assert_eq!(reason, "no_candidates");
+                break;
+            }
+            other => panic!("expected NoAgent, got {other:?}"),
         }
-        other => panic!("expected NoAgent, got {other:?}"),
     }
 }
 

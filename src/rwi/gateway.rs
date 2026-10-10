@@ -1025,6 +1025,23 @@ mod tests {
         assert_eq!(v["leg_role"], "agent");
         assert!(v.get("leg_id").is_none(), "unset leg_id must be omitted");
 
+        let rejected = crate::rwi::QueueAgentRejected {
+            call_id: "c1".into(),
+            queue_id: "support".into(),
+            agent_id: "1003".into(),
+            attempt: 2,
+            leg_id: Some("leg-2".into()),
+            leg_role: Some("agent".into()),
+        };
+        let v = serde_json::to_value(&rejected).expect("serialize");
+        assert_eq!(
+            <crate::rwi::QueueAgentRejected as crate::rwi::RwiEventSpec>::TYPE,
+            "queue_agent_rejected"
+        );
+        assert_eq!(v["leg_role"], "agent");
+        assert_eq!(v["leg_id"], "leg-2");
+        assert_eq!(v["attempt"], 2);
+
         // Session-scoped events keep the "leg_role only on leg events"
         // contract: the field must not appear at all.
         let session_hangup = crate::rwi::CallHangup {
@@ -1040,6 +1057,22 @@ mod tests {
         assert!(
             v.get("leg_role").is_none(),
             "session-scoped events must not carry leg_role"
+        );
+
+        // `call_answered` is session-scoped BY POLICY (the winner's connect is
+        // described by leg-level `call_ringing`/`call_hangup` and
+        // `queue_agent_connected`; a leg-level answered event is forbidden —
+        // see the sip_session session-level-only test). The session event must
+        // therefore omit BOTH leg fields entirely.
+        let session_answered = crate::rwi::CallAnswered {
+            leg_id: None,
+            leg_role: None,
+            call_id: "c1".into(),
+        };
+        let v = serde_json::to_value(&session_answered).expect("serialize");
+        assert!(
+            v.get("leg_id").is_none() && v.get("leg_role").is_none(),
+            "session-scoped call_answered must not carry leg fields, got {v}"
         );
 
         // The leg-scoped `call_hangup` is the `leg_role == "agent"` filter

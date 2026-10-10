@@ -656,6 +656,47 @@ impl QueueApp {
         }
     }
 
+    /// Notify the agent dispatcher that a dialled agent leg timed out
+    /// without answering (the queue retries). CC addon translates this into
+    /// `skill_group_agent_no_answer` (per-round retry analytics).
+    async fn notify_no_answer(&self, agent_id: &str, attempt: u32, leg_id: &str) {
+        if !self.skill_events_enabled() {
+            return;
+        }
+        if let Some(ref registry) = self.agent_registry {
+            let _ = registry
+                .notify_agent_no_answer(
+                    &self.call_id,
+                    self.skill_queue_id(),
+                    agent_id,
+                    attempt,
+                    leg_id,
+                )
+                .await;
+        }
+    }
+
+    /// Notify the agent dispatcher that a queued call CONNECTED to an agent
+    /// — the queue's success terminal. CC addon translates this into
+    /// `skill_group_agent_connected` + `skill_group_call_left{connected}`.
+    async fn notify_connected(&self, agent_id: &str, leg_id: &str) {
+        if !self.skill_events_enabled() {
+            return;
+        }
+        if let Some(ref registry) = self.agent_registry {
+            let wait_secs = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+            let _ = registry
+                .notify_call_connected(
+                    &self.call_id,
+                    self.skill_queue_id(),
+                    agent_id,
+                    leg_id,
+                    wait_secs,
+                )
+                .await;
+        }
+    }
+
     /// Notify the agent dispatcher that a queued call could not be serviced
     /// and a fallback action executed. CC addon translates this into
     /// `skill_group_service_unavailable`.
@@ -2582,6 +2623,12 @@ impl CallApp for QueueApp {
                             },
                         });
 
+                        // CC adapter analytics: agent answered →
+                        // `skill_group_agent_connected` +
+                        // `skill_group_call_left{connected}` (full history).
+                        self.notify_connected(&connected_agent_id, &agent_leg)
+                            .await;
+
                         // The winner's bridge command precedes playback. Play the
                         // caller-only service prompt if configured, then exit.
                         return self.play_service_prompt_or_exit(ctrl, agent_uri).await;
@@ -2643,10 +2690,34 @@ impl CallApp for QueueApp {
                         debug!(leg, "Queue: ignoring busy for a ring-timeout-cancelled leg");
                         return Ok(AppAction::Continue);
                     }
-                    if !agent_id.is_empty()
-                        && let Some(ref registry) = self.agent_registry
-                    {
-                        let _ = registry.release_call(&agent_id, &self.call_id).await;
+                    if !agent_id.is_empty() {
+                        // Documented RWI contract that was never wired: the
+                        // 486-busy rejection broadcasts `queue_agent_rejected`
+                        // (leg_role "agent"), mirroring the ring-timeout
+                        // `queue_agent_no_answer` path (notify → broadcast →
+                        // release → unavailable handling).
+                        ctrl.notify_event(
+                            "queue.agent_rejected",
+                            serde_json::json!({
+                                "call_id": self.call_id,
+                                "agent_id": &agent_id,
+                                "queue_id": self.config.name,
+                            }),
+                        )
+                        .await?;
+
+                        self.emit_rwi(&crate::rwi::event::QueueAgentRejected {
+                            call_id: self.call_id.clone(),
+                            queue_id: self.config.name.clone(),
+                            agent_id: agent_id.clone(),
+                            attempt: self.dial_attempts,
+                            leg_id: leg_id.clone(),
+                            leg_role: Some("agent".to_string()),
+                        });
+
+                        if let Some(ref registry) = self.agent_registry {
+                            let _ = registry.release_call(&agent_id, &self.call_id).await;
+                        }
                     }
                     self.handle_agent_unavailable(ctrl, AgentUnavailableReason::Busy, leg_id.as_deref())
                         .await
@@ -2783,6 +2854,11 @@ impl CallApp for QueueApp {
                             leg_id: Some(leg_id.clone()),
                             leg_role: Some("agent".to_string()),
                         });
+
+                        // CC adapter analytics: `skill_group_agent_no_answer`
+                        // for this round (attempt aligns with the assignment).
+                        self.notify_no_answer(&agent_id, self.dial_attempts, leg_id)
+                            .await;
                     }
                 }
 

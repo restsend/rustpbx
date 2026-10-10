@@ -66,9 +66,37 @@ const WEBHOOK_EVENTS: &[&str] = &[
     "queue_agent_no_answer",
     "queue_agent_connected",
     "queue_left",
+    "skill_group_call_joined",
     "skill_group_call_queued",
     "skill_group_agent_assigned",
     "skill_group_candidates_found",
+    "skill_group_agent_no_answer",
+    "skill_group_agent_connected",
+    "skill_group_call_left",
+];
+
+/// Closed set for [`RwiTimeline::assert_only_expected`] — every event type
+/// a no-answer-retry call may legitimately produce. Anything else leaking
+/// into the stream fails the test (subscription drift / unknown events).
+const ALLOWED_EVENT_TYPES: &[&str] = &[
+    "call_created",
+    "call_ringing",
+    "call_progress",
+    "call_answered",
+    "call_hangup",
+    "queue_joined",
+    "queue_agent_offered",
+    "queue_agent_no_answer",
+    "queue_agent_connected",
+    "queue_left",
+    "skill_group_call_joined",
+    "skill_group_call_queued",
+    "skill_group_agent_assigned",
+    "skill_group_candidates_found",
+    "skill_group_no_agent",
+    "skill_group_agent_no_answer",
+    "skill_group_agent_connected",
+    "skill_group_call_left",
 ];
 
 fn proxy_config() -> ProxyConfig {
@@ -440,9 +468,13 @@ async fn test_no_answer_requeue_rwi_event_contract() -> Result<()> {
         .expect("envelope carries call_id")
         .to_string();
 
-    // Attribution + ordering + the new dequeue invariants, shared with the
+    // Attribution + ordering + the dequeue invariants, shared with the
     // full-chain e2e.
     RwiTimeline::from_capture(&capture, &call_id).assert_queue_agent_contract("bob");
+    // queue* ↔ skill_group* never diverge (downstream migration contract).
+    RwiTimeline::from_capture(&capture, &call_id).assert_skill_group_parity();
+    // Closed set: nothing unexpected leaks into the stream.
+    RwiTimeline::from_capture(&capture, &call_id).assert_only_expected(ALLOWED_EVENT_TYPES);
 
     // Exact sequence for THIS scenario (per-call envelopes, arrival order).
     {
@@ -467,17 +499,94 @@ async fn test_no_answer_requeue_rwi_event_contract() -> Result<()> {
         };
 
         let joined = pos_all("queue_joined");
+        let sg_joined = pos_all("skill_group_call_joined");
         let assigned = pos_all("skill_group_agent_assigned");
         let offered = pos_all("queue_agent_offered");
         let no_answers = pos_all("queue_agent_no_answer");
+        let sg_no_answers = pos_all("skill_group_agent_no_answer");
         let connected = pos_all("queue_agent_connected");
+        let sg_connected = pos_all("skill_group_agent_connected");
         let lefts = pos_all("queue_left");
+        let sg_lefts = pos_all("skill_group_call_left");
 
         assert!(!joined.is_empty(), "queue_joined missing: {types:?}");
         assert_eq!(offered.len(), 2, "exactly two ringing rounds: {types:?}");
         assert_eq!(no_answers.len(), 1, "exactly one no-answer: {types:?}");
         assert_eq!(connected.len(), 1, "exactly one connect: {types:?}");
         assert_eq!(lefts.len(), 1, "exactly one queue_left: {types:?}");
+
+        // ── skill_group_* data-analysis events (the downstream contract) ──
+        // Join: bob is Idle from the start → the call joins AND is assigned
+        // in the same round → reason "immediate" (this scenario is exactly
+        // the case `skill_group_call_queued` does NOT cover).
+        assert_eq!(sg_joined.len(), 1, "one skill_group_call_joined: {types:?}");
+        assert_eq!(
+            evs[sg_joined[0]]["event"]["reason"].as_str(),
+            Some("immediate"),
+            "idle agent → immediate join+assign: {:#}",
+            evs[sg_joined[0]]
+        );
+        assert!(
+            evs[sg_joined[0]]["event"]["queue_depth"].as_u64().is_some(),
+            "skill_group_call_joined must carry queue_depth: {:#}",
+            evs[sg_joined[0]]
+        );
+
+        // No-answer round mirrors queue_agent_no_answer (attempt 1).
+        assert_eq!(
+            sg_no_answers.len(),
+            1,
+            "one skill_group_agent_no_answer: {types:?}"
+        );
+        assert_eq!(
+            evs[sg_no_answers[0]]["event"]["attempt"].as_u64(),
+            Some(1),
+            "no-answer round must carry attempt=1: {:#}",
+            evs[sg_no_answers[0]]
+        );
+        assert_eq!(
+            evs[sg_no_answers[0]]["event"]["agent_id"].as_str(),
+            Some("bob"),
+            "no-answer must attribute bob: {:#}",
+            evs[sg_no_answers[0]]
+        );
+
+        // Connected on round 2: attempt aligns with the winning assignment.
+        assert_eq!(
+            sg_connected.len(),
+            1,
+            "one skill_group_agent_connected: {types:?}"
+        );
+        assert_eq!(
+            evs[sg_connected[0]]["event"]["attempt"].as_u64(),
+            Some(2),
+            "connect must be round 2: {:#}",
+            evs[sg_connected[0]]
+        );
+        assert!(
+            evs[sg_connected[0]]["event"]["wait_secs"].as_u64().is_some(),
+            "skill_group_agent_connected must carry wait_secs: {:#}",
+            evs[sg_connected[0]]
+        );
+
+        // Terminal: skill_group_call_left{connected} with the group history.
+        assert_eq!(
+            sg_lefts.len(),
+            1,
+            "one skill_group_call_left: {types:?}"
+        );
+        assert_eq!(
+            evs[sg_lefts[0]]["event"]["reason"].as_str(),
+            Some("connected"),
+            "terminal reason: {:#}",
+            evs[sg_lefts[0]]
+        );
+        assert_eq!(
+            evs[sg_lefts[0]]["event"]["skill_groups"],
+            serde_json::json!([SKILL_GROUP]),
+            "terminal carries the full group history: {:#}",
+            evs[sg_lefts[0]]
+        );
 
         // 排队 precedes every assignment.
         assert!(
@@ -521,23 +630,29 @@ async fn test_no_answer_requeue_rwi_event_contract() -> Result<()> {
             let t = types[i];
             if [
                 "queue_joined",
+                "skill_group_call_joined",
+                "skill_group_call_queued",
                 "skill_group_candidates_found",
                 "skill_group_agent_assigned",
                 "queue_agent_offered",
                 "queue_agent_no_answer",
+                "skill_group_agent_no_answer",
                 "queue_agent_connected",
+                "skill_group_agent_connected",
                 "queue_left",
+                "skill_group_call_left",
             ]
             .contains(&t)
             {
                 println!(
-                    "  {:2} {:32} agent={:?} attempt={:?} reason={:?} leg={:?}",
+                    "  {:2} {:36} agent={:?} attempt={:?} reason={:?} leg={:?} depth={:?}",
                     i,
                     t,
                     ev["event"]["agent_id"].as_str(),
                     ev["event"]["attempt"].as_u64(),
                     ev["event"]["reason"].as_str(),
                     ev["event"]["leg_id"].as_str(),
+                    ev["event"]["queue_depth"].as_u64(),
                 );
             }
         }

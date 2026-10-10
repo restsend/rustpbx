@@ -62,9 +62,34 @@ const WEBHOOK_EVENTS: &[&str] = &[
     "queue_agent_offered",
     "queue_agent_connected",
     "queue_left",
+    "skill_group_call_joined",
     "skill_group_call_queued",
     "skill_group_agent_assigned",
     "skill_group_candidates_found",
+    "skill_group_agent_connected",
+    "skill_group_call_left",
+    "ivr_node_entered",
+    "ivr_node_exited",
+];
+
+/// Closed set for [`RwiTimeline::assert_only_expected`].
+const ALLOWED_EVENT_TYPES: &[&str] = &[
+    "call_created",
+    "call_ringing",
+    "call_progress",
+    "call_answered",
+    "call_hangup",
+    "queue_joined",
+    "queue_agent_offered",
+    "queue_agent_connected",
+    "queue_left",
+    "skill_group_call_joined",
+    "skill_group_call_queued",
+    "skill_group_agent_assigned",
+    "skill_group_candidates_found",
+    "skill_group_no_agent",
+    "skill_group_agent_connected",
+    "skill_group_call_left",
     "ivr_node_entered",
     "ivr_node_exited",
 ];
@@ -645,7 +670,67 @@ async fn test_full_chain_ivr_queue_agent_rwi_webhook_events() -> Result<()> {
             connected < left_pos,
             "connected before queue_left: {types:?}"
         );
+
+        // ── skill_group_* data-analysis events (waited-call variant) ────
+        // bob starts Busy → the call actually waits: the join signal must
+        // be reason="waited" with position/ewt — the complementary case to
+        // the no-answer e2e's "immediate".
+        let sg_joined = pos("skill_group_call_joined")
+            .expect("skill_group_call_joined must be present");
+        let sg_connected = pos("skill_group_agent_connected")
+            .expect("skill_group_agent_connected must be present");
+        let sg_left =
+            pos("skill_group_call_left").expect("skill_group_call_left must be present");
+        // The join is announced right BEFORE its trigger event: in the
+        // waited variant that trigger is `skill_group_call_queued`, so the
+        // join must sit between the core `queue_joined` anchor and the
+        // queued announcement.
+        assert!(
+            joined < sg_joined && sg_joined < sg_queued,
+            "skill_group_call_joined between queue_joined and skill_group_call_queued: {types:?}"
+        );
+        let joined_ev = events
+            .iter()
+            .find(|v| v["event_type"].as_str() == Some("skill_group_call_joined"))
+            .expect("joined envelope");
+        assert_eq!(
+            joined_ev["event"]["reason"].as_str(),
+            Some("waited"),
+            "busy agent → waited join: {joined_ev}"
+        );
+        assert!(
+            joined_ev["event"]["position"].as_u64().is_some()
+                && joined_ev["event"]["ewt_secs"].as_u64().is_some(),
+            "waited join carries position/ewt: {joined_ev}"
+        );
+        assert!(
+            connected < sg_connected,
+            "queue_agent_connected before skill_group_agent_connected: {types:?}"
+        );
+        assert!(
+            sg_connected < sg_left && sg_left > left_pos,
+            "skill_group_call_left after both connects: {types:?}"
+        );
+
+        // ── Negative assertions (happy path must NOT contain these) ─────
+        for absent in [
+            "queue_agent_no_answer",
+            "skill_group_agent_no_answer",
+            "skill_group_call_abandoned",
+            "skill_group_service_unavailable",
+            "queue_wait_timeout",
+            "queue_fallback_executed",
+        ] {
+            assert!(
+                !types.contains(&absent),
+                "happy path must not emit {absent}: {types:?}"
+            );
+        }
     }
+
+    // queue* ↔ skill_group* parity + closed set (shared contract helpers).
+    RwiTimeline::from_capture(&capture, &call_id).assert_skill_group_parity();
+    RwiTimeline::from_capture(&capture, &call_id).assert_only_expected(ALLOWED_EVENT_TYPES);
 
     bob_pump.abort();
     let _ = bob.stop();

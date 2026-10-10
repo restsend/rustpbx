@@ -206,9 +206,7 @@ def check_call_timeline(
                     expected_agent = str(_field(ev, "agent_id"))
                     break
             if expected_agent:
-                break
-
-    # The authoritative agent must never CHANGE mid-call.
+                break    # The authoritative agent must never CHANGE mid-call.
     if expected_agent:
         for ev in events:
             aid = _field(ev, "agent_id")
@@ -241,6 +239,7 @@ def check_call_timeline(
         violations.extend(_attribution_lacking("call_ringing"))
         violations.extend(_attribution_lacking("call_answered"))
         violations.extend(_attribution_lacking("call_hangup"))
+        violations.extend(_attribution_lacking("queue_agent_rejected"))
         ringings = [e for e in events if str(event_type(e)) == "call_ringing"]
         if len(ringings) < 2:
             warnings.append(
@@ -254,10 +253,13 @@ def check_call_timeline(
     i_offered = _first_index("queue_agent_offered")
     i_connected = _first_index("queue_agent_connected")
     i_first_ring = _first_index("call_ringing")
+    i_rejected = _first_index("queue_agent_rejected")
     if i_offered is not None and i_connected is not None and i_offered > i_connected:
         violations.append("queue_agent_offered arrived AFTER queue_agent_connected")
     if i_first_ring is not None and i_offered is not None and i_first_ring > i_offered:
         violations.append("call_ringing arrived AFTER queue_agent_offered")
+    if i_rejected is not None and i_connected is not None and i_rejected > i_connected:
+        violations.append("queue_agent_rejected arrived AFTER queue_agent_connected")
 
     return (violations, warnings)
 

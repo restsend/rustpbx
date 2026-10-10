@@ -456,6 +456,70 @@ mod tests {
             "queue must leave the answering agent bound for the connected hook, got {}", agent.status);
     }
 
+    /// Caller cancels while the agent's phone is ringing: the queue exit must
+    /// release the ringing reservation straight to Idle — NO wrapup for a call
+    /// that was never answered (CC adapter release_call semantics; previously
+    /// this landed in a 30 s Wrapup window).
+    #[cfg(feature = "contact-center")]
+    #[tokio::test]
+    async fn test_caller_abandon_while_ringing_releases_agent_to_idle() {
+        use crate::addons::cc::agent::AgentStatus;
+        use crate::addons::cc::agent_registry_adapter::CcAgentRegistryAdapter;
+        use std::sync::Arc;
+
+        let cc = crate::addons::cc::CcAddonState::new();
+        cc.agent_registry.register("agent1".into(), vec![], 1).await.unwrap();
+        cc.agent_registry.update_status("agent1", AgentStatus::Idle).await.unwrap();
+        let registry = Arc::new(CcAgentRegistryAdapter::new(
+            cc.agent_registry.clone(), cc.acd_engine.clone(), "pbx.invalid",
+        ));
+        let mut config = build_simple_queue_config();
+        config.hold = None;
+        config.agents = vec![Location {
+            aor: "sip:agent1@pbx.invalid".parse().unwrap(),
+            ..Default::default()
+        }];
+        config.strategy = DialStrategy::Sequential(config.agents.clone());
+        let queue = QueueApp::new(config.to_plan(), config)
+            .with_agent_registry(registry.clone())
+            .with_call_id("test-session".into());
+        let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
+        stack.assert_cmd(2000, "Answer", |cmd| matches!(cmd, CallCommand::Answer { .. })).await;
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        let dial = stack.next_cmd(2000).await.expect("agent INVITE");
+        let leg_id = match dial {
+            CallCommand::LegAdd { leg_id, .. } => leg_id,
+            other => panic!("expected agent leg, got {other:?}"),
+        };
+
+        // 180 Ringing from the agent leg binds the reservation via the
+        // queue's real presence-update path (same as production). The custom
+        // event is queued — give the app loop a beat to process it.
+        stack.custom("agent_ringing", serde_json::json!({
+            "leg_id": leg_id, "agent_uri": "sip:agent1@pbx.invalid",
+            "agent_id": "agent1",
+        }));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let agent = cc.agent_registry.get_agent("agent1").await.unwrap();
+        assert!(
+            matches!(agent.status, AgentStatus::Ringing { .. }),
+            "agent must be Ringing while the leg rings, got {}", agent.status
+        );
+
+        // Caller abandons pre-answer → queue exits → phantom cleanup.
+        stack.remote_hangup();
+        stack.join().await.expect("queue exits on caller abandon");
+
+        let agent = cc.agent_registry.get_agent("agent1").await.unwrap();
+        assert!(
+            matches!(agent.status, AgentStatus::Idle),
+            "caller abandon while ringing must return the agent to Idle \
+             immediately (no wrapup), got {}",
+            agent.status
+        );
+        assert_eq!(agent.current_calls, 0, "no capacity leak");
+    }
+
     // ── 8. Queue with agent busy event - retry next agent ──
 
     #[tokio::test]
@@ -3490,6 +3554,10 @@ mod tests {
         for _ in 0..20 {
             while let Ok(v) = gws_rx.try_recv() {
                 if v.get("event_type").and_then(|e| e.as_str()) == Some("queue_agent_no_answer") {
+                    assert_eq!(
+                        v["leg_role"], "agent",
+                        "queue_agent_no_answer must describe the agent leg"
+                    );
                     saw = true;
                 }
             }
@@ -3501,6 +3569,129 @@ mod tests {
         assert!(
             saw,
             "queue_agent_no_answer event must be emitted on ring timeout"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// A 486-busy rejection must emit the documented `queue_agent_rejected`
+    /// RWI event (leg_role "agent", bound to the dialed leg). Before the fix
+    /// the event was defined and documented but never broadcast.
+    #[tokio::test]
+    async fn test_queue_agent_reject_emits_rejected_event() {
+        use crate::call::app::agent_registry::MemoryRegistry;
+        use crate::rwi::auth::RwiIdentity;
+        use std::sync::Arc;
+
+        let mut gw = crate::rwi::gateway::RwiGateway::new();
+        let sid = gw
+            .create_session(RwiIdentity {
+                token: "t".into(),
+                scopes: vec![],
+            })
+            .read()
+            .id
+            .clone();
+        let (gws_tx, mut gws_rx) = tokio::sync::mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, gws_tx);
+        let gw = Arc::new(parking_lot::RwLock::new(gw));
+
+        let registry = Arc::new(MemoryRegistry::new());
+        registry
+            .register(
+                "agent-001".to_string(),
+                "Alice".to_string(),
+                "sip:agent1@example.com".to_string(),
+                vec!["support".to_string()],
+                1,
+            )
+            .await
+            .unwrap();
+        registry
+            .update_presence(
+                "agent-001",
+                crate::call::app::agent_registry::PresenceState::Idle,
+            )
+            .await
+            .unwrap();
+
+        let mut config = build_simple_queue_config();
+        config.skill_routing_enabled = true;
+        config.skill_group = Some("support".to_string());
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.hold = None;
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(registry.clone());
+        queue = queue.with_call_id("call-001".to_string());
+
+        let mut ctx = crate::call::app::ApplicationContext::new(
+            sea_orm::DatabaseConnection::default(),
+            crate::call::app::CallInfo {
+                session_id: "test-session".into(),
+                caller: "1001".into(),
+                callee: "1002".into(),
+                direction: "inbound".into(),
+                started_at: chrono::Utc::now(),
+                sip_headers: Default::default(),
+                route_name: None,
+            },
+            Arc::new(crate::config::Config::default()),
+            reqwest::Client::new(),
+        );
+        ctx.rwi_gateway = Some(gw);
+
+        let mut stack = MockCallStack::run_with_context(Box::new(queue), ctx);
+        stack.enter().await;
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        stack
+            .assert_cmd(2000, "OriginateCall", |c| {
+                matches!(c, CallCommand::LegAdd { target, .. } if target == "sip:agent1@example.com")
+            })
+            .await;
+
+        // The agent rejects with 486 → the SIP session reports agent_busy.
+        stack.custom(
+            "agent_busy",
+            serde_json::json!({
+                "leg_id": "agent-leg-1",
+                "agent_uri": "sip:agent1@example.com",
+                "agent_id": "agent-001",
+                "reason": "Rejected with 486",
+            }),
+        );
+
+        // The rejection event is broadcast synchronously from the handler;
+        // poll briefly before the fallback tears the caller down.
+        let mut saw: Option<serde_json::Value> = None;
+        for _ in 0..20 {
+            while let Ok(v) = gws_rx.try_recv() {
+                if v.get("event_type").and_then(|e| e.as_str()) == Some("queue_agent_rejected") {
+                    saw = Some(v);
+                }
+            }
+            if saw.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let rejected = saw.expect("queue_agent_rejected event must be emitted on agent busy");
+        assert_eq!(rejected["call_id"], "call-001");
+        assert_eq!(rejected["queue_id"], "test-queue");
+        assert_eq!(rejected["agent_id"], "agent-001");
+        assert_eq!(
+            rejected["leg_id"], "agent-leg-1",
+            "rejection must bind to the dialed leg"
+        );
+        assert_eq!(
+            rejected["leg_role"], "agent",
+            "queue_agent_rejected must describe the agent leg"
         );
 
         stack.cancel();
