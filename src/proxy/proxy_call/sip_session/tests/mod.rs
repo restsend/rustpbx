@@ -3528,6 +3528,48 @@ a=fingerprint:sha-256 F3:04:99:7A:51:6A:C4:D7:30:46:B5:69:82:2A:38:D3:37:D9:66:5
     drop(session);
 }
 
+#[tokio::test]
+async fn ensure_caller_leg_recovers_after_busy_rtp_port() {
+    use crate::call::{DialDirection, Dialplan};
+    use crate::proxy::tests::common::{create_test_request, create_test_server};
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx_on;
+
+    let occupied = loop {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        if socket.local_addr().unwrap().port() % 2 == 0 {
+            break socket;
+        }
+    };
+    let port = occupied.local_addr().unwrap().port();
+    let (server, _) = create_test_server().await;
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite, "alice", None, "example.com", None,
+    );
+    let mut dialplan = Dialplan::new("busy-media-port".to_string(), request, DialDirection::Inbound);
+    dialplan.media.bind_ip = Some("127.0.0.1".to_string());
+    dialplan.media.rtp_start_port = Some(port);
+    dialplan.media.rtp_end_port = Some(port);
+    let (mut session, _handle, _cmd_rx) = build_session_with_cmd_rx_on(server, dialplan).await;
+    session.media.caller_offer = Some(concat!(
+        "v=0\r\n",
+        "o=- 1 1 IN IP4 127.0.0.1\r\n",
+        "s=-\r\n",
+        "c=IN IP4 127.0.0.1\r\n",
+        "t=0 0\r\n",
+        "m=audio 4000 RTP/AVP 0\r\n",
+        "a=rtpmap:0 PCMU/8000\r\n",
+        "a=sendrecv\r\n",
+    ).to_string());
+
+    let error = session.ensure_caller_leg().await.unwrap_err();
+    assert!(error.to_string().contains("No available even RTP ports"), "{error}");
+    drop(occupied);
+    session.ensure_caller_leg().await.expect("caller media must recover after port release");
+    let answer = session.media.answer.as_ref().expect("caller SDP answer");
+    assert!(answer.contains(&format!("m=audio {port} RTP/AVP 0")), "{answer}");
+    session.ensure_caller_leg().await.expect("existing caller media must remain reusable");
+}
+
 /// Regression test for issue #281: a Groundwire-style SDES-SRTP offer
 /// (`RTP/SAVP` + `a=crypto`) must get an Srtp caller leg and an answer with
 /// the matching `RTP/SAVP` profile and `a=crypto` — not a plain `RTP/AVP`
