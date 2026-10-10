@@ -4315,7 +4315,8 @@ async fn record_stopped_event_carries_recording_unique_id() {
     let mut events = gateway.write().subscribe_events();
     let (server, _) =
         create_test_server_with_rwi_gateway(ProxyConfig::default(), gateway.clone()).await;
-    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
+        .with_application("ivr".into(), None, true);
     let mut session = build_session_on_server(server, dialplan).await;
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -4326,24 +4327,17 @@ async fn record_stopped_event_carries_recording_unique_id() {
         .into_owned();
     session.media_profile.path = MediaPathMode::Anchored;
     setup_recording_test_media(&mut session).await;
-    let profile = session
-        .legs
-        .media_leg(&LegId::from("caller"))
-        .unwrap()
-        .negotiated()
-        .unwrap();
-    session
-        .media
-        .recording
-        .start_recording(
-            profile,
-            crate::media::recorder::RecorderOption::new(path),
-            1,
-            true,
-            None,
-        )
-        .await
-        .unwrap();
+    let reserved_id = "12345678-1234-4123-8123-123456789abc";
+    let result = session.execute_command(CallCommand::StartRecording {
+        config: crate::call::domain::RecordConfig {
+            path,
+            segment_type: Some("agent".into()),
+            label: Some("agent-example".into()),
+            unique_id: Some(reserved_id.into()),
+            ..Default::default()
+        },
+    }, None).await;
+    assert!(result.success, "{result:?}");
     assert!(session.media.bridge.is_none());
 
     session.finalize_recording_for_app_shutdown().await;
@@ -4368,6 +4362,12 @@ async fn record_stopped_event_carries_recording_unique_id() {
         !unique_id.is_empty() && unique_id.len() == 36 && unique_id.contains('-'),
         "unique_id must be a UUID v4 string, got {unique_id:?}"
     );
+    assert_eq!(unique_id, reserved_id, "recording completion must preserve the reserved popup UUID");
+    let snapshot = session.record_snapshot();
+    assert_eq!(snapshot.recording_segments.len(), 1);
+    assert_eq!(snapshot.recording_segments[0].unique_id.as_deref(), Some(reserved_id));
+    assert_eq!(snapshot.recording_segments[0].segment_type, "agent");
+    assert_eq!(snapshot.recording_segments[0].label, "agent-example");
     assert_ne!(
         unique_id, call_id,
         "unique_id must identify the recording, not duplicate the call id"
@@ -4381,6 +4381,53 @@ async fn record_stopped_event_carries_recording_unique_id() {
         "record_stopped payload shape must stay intact: {}",
         entry.event.payload
     );
+}
+
+#[tokio::test]
+async fn screenpop_supplied_recording_ids_distinguish_artifacts_across_nodes() {
+    let mut filenames = Vec::new();
+    for unique_id in [
+        None,
+        Some("12345678-1234-4123-8123-123456789abc"),
+        Some("12345678-1234-4123-8123-123456789abd"),
+    ] {
+        // Separate directories reproduce nodes that cannot see each other's files.
+        let dir = tempfile::tempdir().unwrap();
+        let (server, _) = create_test_server().await;
+        server.recording_policy.store(Arc::new(Some(crate::config::RecordingPolicy {
+            path: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        })));
+        let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
+            .with_application("ivr".into(), None, true);
+        let mut session = build_session_on_server(server, dialplan).await;
+        session.meta.root_session_id = Some("shared-recording-call".into());
+        session.media_profile.path = MediaPathMode::Anchored;
+        setup_recording_test_media(&mut session).await;
+        let result = session.execute_command(CallCommand::StartRecording {
+            config: crate::call::domain::RecordConfig {
+                segment_type: Some("agent".into()),
+                label: Some("agent-example".into()),
+                unique_id: unique_id.map(str::to_string),
+                ..Default::default()
+            },
+        }, None).await;
+        assert!(result.success, "{result:?}");
+        session.finalize_recording_for_app_shutdown().await;
+        let snapshot = session.record_snapshot();
+        assert_eq!(snapshot.recording_segments.len(), 1);
+        let segment = &snapshot.recording_segments[0];
+        assert_eq!(segment.label, "agent-example");
+        assert_eq!(segment.seq, 1);
+        if let Some(unique_id) = unique_id {
+            assert_eq!(segment.unique_id.as_deref(), Some(unique_id));
+        }
+        let path = std::path::Path::new(&segment.path);
+        assert!(std::fs::metadata(path).unwrap().len() >= 44);
+        filenames.push(path.file_name().unwrap().to_string_lossy().into_owned());
+    }
+    assert_eq!(filenames[0], "shared-recording-call_01_agent-example.wav");
+    assert_ne!(filenames[1], filenames[2], "distinct recording IDs must not deduplicate as one artifact");
 }
 
 #[tokio::test]
@@ -4760,6 +4807,37 @@ async fn test_leg_ringing_fires_on_call_ringing_hook() {
         session.legs.get(&agent_leg).map(|l| l.state),
         Some(LegState::Ringing),
         "ringing leg should be marked LegState::Ringing"
+    );
+}
+
+#[tokio::test]
+async fn screenpop_route_metadata_reaches_live_session_hooks() {
+    let mut dialplan = build_dialplan_with_mode(MediaProxyMode::Auto);
+    dialplan
+        .extensions
+        .insert(std::collections::HashMap::from([(
+            "recording_delivery".to_string(),
+            "true".to_string(),
+        )]));
+    let (mut server, _config) = create_test_server().await;
+    let (hook, ringing, _, _) = RingingRecordingHook::new();
+    Arc::get_mut(&mut server).unwrap().session_hooks = Arc::new(vec![Arc::new(hook)]);
+    let mut session = build_session_on_server(server, dialplan).await;
+    let leg_id = LegId::from("queue-agent");
+    session
+        .legs
+        .insert(leg_id.clone(), Leg::new(leg_id.clone()));
+    session
+        .execute_command(CallCommand::LegRinging { leg_id }, None)
+        .await;
+    assert_eq!(ringing.load(Ordering::SeqCst), 1);
+    let extensions = session.extensions.read();
+    assert_eq!(
+        extensions
+            .get::<std::collections::HashMap<String, String>>()
+            .and_then(|data| data.get("recording_delivery"))
+            .map(String::as_str),
+        Some("true")
     );
 }
 

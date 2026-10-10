@@ -3015,7 +3015,9 @@ impl SipSession {
         // Merge routing metadata (X-CRM-* / X-CC-*) into extensions.
         // Use entry() to avoid overwriting keys already set by addons (e.g.
         // CcCallSessionHook writes agent_id/agent_name here).
-        if let Some(ref m) = self.context.metadata {
+        for m in self.context.metadata.iter().chain(
+            self.context.dialplan.extensions.get::<std::collections::HashMap<String, String>>(),
+        ) {
             if !m.is_empty() {
                 let mut ext = self.extensions.write();
                 if let Some(existing) = ext.get_mut::<std::collections::HashMap<String, String>>() {
@@ -11321,9 +11323,16 @@ impl SipSession {
                     self.recording_seq = self.recording_seq.saturating_add(1);
                     let mut seq = self.recording_seq;
                     let path = if config.path.trim().is_empty() {
+                        let mut file_session_id = self.root_session_id_str();
+                        // Separate nodes cannot detect each other's files; supplied
+                        // recording identities must also distinguish their artifacts.
+                        if let Some(id) = config.unique_id.as_ref().filter(|id| !id.trim().is_empty()) {
+                            file_session_id.push('_');
+                            file_session_id.push_str(id);
+                        }
                         let (resolved_seq, resolved_path) = crate::callrecord::segmented_wav_path(
                             &self.recording_root_dir(),
-                            &self.root_session_id_str(),
+                            &file_session_id,
                             seq,
                             &label,
                         );
