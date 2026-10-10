@@ -4363,6 +4363,24 @@ mod tests {
         }
     }
 
+    /// `SEARCH_SLOT` is a process-global single-scan semaphore shared by
+    /// every test in this binary that reaches `search_response`: under
+    /// full-suite parallel load another test's scan can hold the slot and
+    /// a request here gets 429. Retry briefly instead of failing on
+    /// scheduling noise — production keeps the busy response.
+    async fn search_with_retry(router: &axum::Router, url: String) -> axum::response::Response {
+        use tower::ServiceExt;
+        for attempt in 0..60 {
+            let response = router.clone().oneshot(axum::http::Request::builder().uri(url.clone())
+                .body(axum::body::Body::empty()).unwrap()).await.unwrap();
+            if response.status() != StatusCode::TOO_MANY_REQUESTS || attempt == 59 {
+                return response;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        unreachable!("retry loop always returns");
+    }
+
     #[tokio::test]
     async fn historical_log_search_accepts_bare_relative_path() {
         use tower::ServiceExt;
@@ -4379,9 +4397,9 @@ mod tests {
         state.set_app_state(Some(Arc::downgrade(&app)));
         let router = api_urls().with_state(state).layer(axum::Extension(
             crate::console::middleware::ApiTokenAuth(superuser())));
-        let response = router.oneshot(axum::http::Request::builder().uri(
-            "/settings/logs/search?node=local&start=2026-10-04T10%3A00%3A00Z&end=2026-10-04T10%3A01%3A00Z&callIds=%5B%22call-abcdef%22%5D")
-            .body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        let response = search_with_retry(&router,
+            "/settings/logs/search?node=local&start=2026-10-04T10%3A00%3A00Z&end=2026-10-04T10%3A01%3A00Z&callIds=%5B%22call-abcdef%22%5D".to_string())
+            .await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let body: JsonValue = serde_json::from_slice(&body).unwrap();
@@ -4416,8 +4434,7 @@ mod tests {
         for _ in 0..6 {
             let mut url = "/settings/logs/search?node=local&start=2026-10-04T10%3A00%3A00Z&end=2026-10-04T13%3A01%3A00Z&callIds=%5B%22call-abcdef%22%5D&limit=1".to_string();
             if let Some(value) = &cursor { url.push_str(&format!("&cursor={value}")); }
-            let response = router.clone().oneshot(axum::http::Request::builder().uri(url)
-                .body(axum::body::Body::empty()).unwrap()).await.unwrap();
+            let response = search_with_retry(&router, url).await;
             assert_eq!(response.status(), StatusCode::OK, "historical search must be a public authenticated API");
             let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
             let body: JsonValue = serde_json::from_slice(&body).unwrap();
@@ -4431,18 +4448,19 @@ mod tests {
         assert!(lines[1].ends_with("second"), "timestamp disorder must not hide a matching event");
         assert!(lines[2].ends_with("third"));
         assert!(lines[3].ends_with("fourth"));
-        let request = |suffix: &str| axum::http::Request::builder().uri(format!(
-            "/settings/logs/search?node=local&start=2026-10-04T10%3A00%3A00Z&end=2026-10-04T13%3A01%3A00Z&callIds=%5B%22call-abcdef%22%5D{suffix}"))
+        let search_url = |suffix: &str| format!(
+            "/settings/logs/search?node=local&start=2026-10-04T10%3A00%3A00Z&end=2026-10-04T13%3A01%3A00Z&callIds=%5B%22call-abcdef%22%5D{suffix}");
+        let request = |url: String| axum::http::Request::builder().uri(url)
             .body(axum::body::Body::empty()).unwrap();
-        let denied = api_urls().with_state(state.clone()).oneshot(request("")).await.unwrap();
+        let denied = api_urls().with_state(state.clone()).oneshot(request(search_url(""))).await.unwrap();
         assert_eq!(denied.status(), StatusCode::SEE_OTHER, "existing authentication must protect log data");
         let mut user = superuser(); user.is_superuser = false;
         let denied = api_urls().with_state(state.clone()).layer(axum::Extension(
-            crate::console::middleware::ApiTokenAuth(user))).oneshot(request("")).await.unwrap();
+            crate::console::middleware::ApiTokenAuth(user))).oneshot(request(search_url(""))).await.unwrap();
         assert_eq!(denied.status(), StatusCode::FORBIDDEN);
-        let malformed = router.clone().oneshot(request("&limit=201")).await.unwrap();
+        let malformed = search_with_retry(&router, search_url("&limit=201")).await;
         assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
-        let first_page = router.clone().oneshot(request("&limit=1")).await.unwrap();
+        let first_page = search_with_retry(&router, search_url("&limit=1")).await;
         let body = axum::body::to_bytes(first_page.into_body(), 1024 * 1024).await.unwrap();
         let body: JsonValue = serde_json::from_slice(&body).unwrap();
         let continuation = format!("&cursor={}", body["nextCursor"].as_str().unwrap());
@@ -4450,7 +4468,7 @@ mod tests {
         std::fs::rename(&path, &rotated).unwrap();
         std::fs::write(&path,
             "2026-10-04T13:00:09+00:00 INFO call_id=call-abcdef new-file\n").unwrap();
-        let response = router.clone().oneshot(request(&continuation)).await.unwrap();
+        let response = search_with_retry(&router, search_url(&continuation)).await;
         assert_eq!(response.status(), StatusCode::CONFLICT,
             "rotation must not silently omit a new base file and claim complete");
         std::fs::remove_file(&path).unwrap();
@@ -4462,7 +4480,7 @@ mod tests {
         let mut suffix = String::new();
         let mut found_delayed = false;
         for _ in 0..4 {
-            let response = router.clone().oneshot(request(&suffix)).await.unwrap();
+            let response = search_with_retry(&router, search_url(&suffix)).await;
             let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
             let body: JsonValue = serde_json::from_slice(&body).unwrap();
             found_delayed |= body["lines"].as_array().unwrap().iter().any(|line| line.as_str().unwrap().ends_with("delayed"));
@@ -4482,7 +4500,7 @@ mod tests {
         let mut suffix = String::new();
         let mut found_last = false;
         for _ in 0..6 {
-            let response = router.clone().oneshot(request(&suffix)).await.unwrap();
+            let response = search_with_retry(&router, search_url(&suffix)).await;
             assert_eq!(response.status(), StatusCode::OK);
             let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
             let body: JsonValue = serde_json::from_slice(&body).unwrap();
@@ -4492,7 +4510,7 @@ mod tests {
             suffix = format!("&cursor={}", body["nextCursor"].as_str().unwrap());
         }
         assert!(found_last, "scan-budget continuation must reach a match beyond the first page");
-        let response = router.clone().oneshot(request("")).await.unwrap();
+        let response = search_with_retry(&router, search_url("")).await;
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let body: JsonValue = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["complete"], false, "a fresh stateless query must disclose unscanned bytes");
@@ -4502,12 +4520,12 @@ mod tests {
         for hour in [18, 19, 20] {
             std::fs::remove_file(dir.path().join(format!("runtime.log.2026-10-04-{hour}"))).unwrap();
         }
-        let response = router.clone().oneshot(request("")).await.unwrap();
+        let response = search_with_retry(&router, search_url("")).await;
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let body: JsonValue = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["complete"], false);
         let suffix = format!("&cursor={}", body["nextCursor"].as_str().unwrap());
-        let response = router.clone().oneshot(request(&suffix)).await.unwrap();
+        let response = search_with_retry(&router, search_url(&suffix)).await;
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let body: JsonValue = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["complete"], true);
@@ -4519,14 +4537,14 @@ mod tests {
                 "x".repeat(40000)).unwrap();
         }
         drop(output);
-        let response = router.clone().oneshot(request("")).await.unwrap();
+        let response = search_with_retry(&router, search_url("")).await;
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let body: JsonValue = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["files"].as_array().unwrap().len(), 1,
             "a result budget must end the page rather than rescan its unread line");
         let mut matches = body["lines"].as_array().unwrap().clone();
         let suffix = format!("&cursor={}", body["nextCursor"].as_str().unwrap());
-        let response = router.clone().oneshot(request(&suffix)).await.unwrap();
+        let response = search_with_retry(&router, search_url(&suffix)).await;
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let body: JsonValue = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["complete"], true);
@@ -4538,8 +4556,6 @@ mod tests {
         ids[2] = "call.+[literal]".into(); ids[71] = "call-final".into();
         let encoded_ids = urlencoding::encode(&serde_json::to_string(&ids).unwrap()).into_owned();
         let batch_url = format!("/settings/logs/search?node=local&start=2026-10-04T10%3A00%3A00Z&end=2026-10-04T13%3A01%3A00Z&callIds={encoded_ids}");
-        let batch_request = |suffix: &str| axum::http::Request::builder().uri(format!("{batch_url}{suffix}"))
-            .body(axum::body::Body::empty()).unwrap();
         let mut output = std::fs::File::create(&path).unwrap();
         for _ in 0..5000 { output.write_all(unrelated.as_bytes()).unwrap(); }
         output.write_all(b"2026-10-04T13:00:00Z INFO call_id=xcall-a excluded-prefix\n2026-10-04T13:00:00Z INFO call_id=other/call-a excluded-token\n2026-10-04T13:00:00Z INFO call_id=call-a-long long\n2026-10-04T13:00:00Z INFO call_id=call-a peer_id=call-a-long both\n2026-10-04T13:00:00Z INFO call_id=call.+[literal] literal\n2026-10-04T13:00:00Z INFO call_id=callXxLliteralZ excluded-regex\n2026-10-04T13:00:00Z INFO call_id=call-final final\n").unwrap();
@@ -4551,7 +4567,7 @@ mod tests {
         let mut suffix = String::new();
         let mut finished = false;
         for _ in 0..4 {
-            let response = router.clone().oneshot(batch_request(&suffix)).await.unwrap();
+            let response = search_with_retry(&router, format!("{batch_url}{suffix}")).await;
             assert_eq!(response.status(), StatusCode::OK, "batch Call-IDs must enter the same public search API");
             let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
             response_bytes += body.len();
@@ -4571,8 +4587,7 @@ mod tests {
         println!("batch history: ids=72 scannedBytes={scanned} responseBytes={response_bytes} elapsedMs={}",
             started.elapsed().as_millis());
         let encoded = urlencoding::encode(&serde_json::to_string(&vec!["too-many"; 73]).unwrap()).into_owned();
-        let response = router.clone().oneshot(axum::http::Request::builder()
-            .uri(batch_url.replace(&encoded_ids, &encoded)).body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        let response = search_with_retry(&router, batch_url.replace(&encoded_ids, &encoded)).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         // Old closed periods cannot contain newer events under the writer's normal clock ordering.
         let first_old = chrono::NaiveDate::from_ymd_opt(2026, 7, 1).unwrap().and_hms_opt(0, 0, 0).unwrap();
@@ -4588,7 +4603,7 @@ mod tests {
         let mut finished = false;
         let mut returned = 0;
         for _ in 0..4 {
-            let response = router.clone().oneshot(batch_request(&suffix)).await.unwrap();
+            let response = search_with_retry(&router, format!("{batch_url}{suffix}")).await;
             assert_eq!(response.status(), StatusCode::OK);
             let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
             let body: JsonValue = serde_json::from_slice(&body).unwrap();
@@ -4612,7 +4627,7 @@ mod tests {
         let mut found_base = false;
         let mut saw_limit = false;
         for _ in 0..16 {
-            let response = router.clone().oneshot(batch_request(&suffix)).await.unwrap();
+            let response = search_with_retry(&router, format!("{batch_url}{suffix}")).await;
             let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
             let body: JsonValue = serde_json::from_slice(&body).unwrap();
             found_base |= body["lines"].as_array().unwrap().iter().any(|line| line.as_str().unwrap().ends_with("final"));
@@ -4629,7 +4644,7 @@ mod tests {
         let mut found_base = false;
         let mut saw_directory_gap = false;
         for _ in 0..4 {
-            let response = router.clone().oneshot(batch_request(&suffix)).await.unwrap();
+            let response = search_with_retry(&router, format!("{batch_url}{suffix}")).await;
             let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
             let body: JsonValue = serde_json::from_slice(&body).unwrap();
             found_base |= body["lines"].as_array().unwrap().iter().any(|line| line.as_str().unwrap().ends_with("final"));
@@ -4670,7 +4685,7 @@ mod tests {
             });
         }).join().unwrap();
         std::os::unix::fs::symlink(&path, dir.path().join("runtime.log.2026-10-04.1")).unwrap();
-        let response = router.oneshot(request("")).await.unwrap();
+        let response = router.oneshot(request(search_url(""))).await.unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "a discovered symlink must never be followed");
     }
 
