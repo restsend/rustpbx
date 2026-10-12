@@ -90,6 +90,8 @@ pub struct CallMeta {
     /// `None` for calls without CC agent participation.
     pub agent_id: Option<String>,
     pub agent_name: Option<String>,
+    /// Preallocated agent-stage recording identity retained through terminal event dispatch.
+    pub recording_id: Option<String>,
     pub queue_id: Option<String>,
     pub root: Option<RootCallInfo>,
     /// Flow-origin snapshot captured when a transfer starts on the session
@@ -97,6 +99,8 @@ pub struct CallMeta {
     /// Consumed by transfer events only — deliberately NOT mapped into
     /// [`EventCallContext`] so ordinary call events stay unchanged.
     pub transfer_source: Option<crate::rwi::event::TransferSource>,
+    /// Departing stage identity captured before target attribution or stage cleanup.
+    pub transfer_recording_id: Option<String>,
 }
 
 impl From<CallMeta> for EventCallContext {

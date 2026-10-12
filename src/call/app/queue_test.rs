@@ -160,6 +160,27 @@ mod tests {
         }
     }
 
+    fn queue_test_context(proxy_settings: &str) -> crate::call::app::ApplicationContext {
+        let config: crate::config::Config = toml::from_str(&format!(
+            "[proxy]\naddr = \"0.0.0.0\"\n{proxy_settings}"
+        ))
+        .unwrap();
+        crate::call::app::ApplicationContext::new(
+            sea_orm::DatabaseConnection::default(),
+            crate::call::app::CallInfo {
+                session_id: "test-session".into(),
+                caller: "caller".into(),
+                callee: "1000".into(),
+                direction: "inbound".into(),
+                started_at: chrono::Utc::now(),
+                sip_headers: Default::default(),
+                route_name: None,
+            },
+            Arc::new(config),
+            reqwest::Client::new(),
+        )
+    }
+
     // ── 1. Basic queue enter with immediate answer and hold music ──
 
     #[tokio::test]
@@ -323,6 +344,179 @@ mod tests {
 
         stack.cancel();
         let _ = stack.join().await;
+    }
+
+    #[tokio::test]
+    async fn test_agent_ringing_preserves_hold_music_by_default() {
+        let config = build_sequential_queue_config();
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(config.to_plan(), config)),
+            "caller",
+            "1000",
+        );
+
+        stack
+            .assert_cmd(2000, "Answer", |cmd| matches!(cmd, CallCommand::Answer { .. }))
+            .await;
+        let hold_cmd = stack.next_cmd(2000).await.expect("queue hold music");
+        assert_eq!(play_path(&hold_cmd), "sounds/hold_music.wav");
+
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        let dial_cmd = stack.next_cmd(2000).await.expect("first agent INVITE");
+        let first_leg = match dial_cmd {
+            CallCommand::LegAdd { leg_id, .. } => leg_id,
+            other => panic!("expected agent leg, got {other:?}"),
+        };
+
+        stack.custom("agent_ringing", serde_json::json!({
+            "leg_id": first_leg,
+        }));
+        assert!(
+            stack.next_cmd(100).await.is_none(),
+            "vendor default must keep the configured queue music"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    #[tokio::test]
+    async fn test_agent_ringing_switches_hold_music_to_ringback_and_restores_on_retry() {
+        let config = build_sequential_queue_config();
+        let app = QueueApp::new(config.to_plan(), config);
+        let ctx = queue_test_context("queue_agent_ringback_enabled = true\n");
+        let mut stack = MockCallStack::run_with_context(Box::new(app), ctx);
+
+        stack
+            .assert_cmd(2000, "Answer", |cmd| matches!(cmd, CallCommand::Answer { .. }))
+            .await;
+        let hold_cmd = stack.next_cmd(2000).await.expect("queue hold music");
+        assert_eq!(play_path(&hold_cmd), "sounds/hold_music.wav");
+
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        let dial_cmd = stack.next_cmd(2000).await.expect("first agent INVITE");
+        let first_leg = match dial_cmd {
+            CallCommand::LegAdd { leg_id, .. } => leg_id,
+            other => panic!("expected agent leg, got {other:?}"),
+        };
+
+        stack.custom("agent_ringing", serde_json::json!({
+            "leg_id": first_leg,
+        }));
+        let ringback_cmd = stack.next_cmd(2000).await.expect("agent ringback");
+        assert_eq!(play_path(&ringback_cmd), crate::call::DEFAULT_QUEUE_HOLD_AUDIO);
+        assert!(
+            matches!(&ringback_cmd, CallCommand::Play { options: Some(options), .. }
+                if options.loop_playback),
+            "agent ringback must loop until answer or ring timeout instead of completing into hold music"
+        );
+
+        // Repeated 180 responses for the same leg must not restart ringback.
+        stack.custom("agent_ringing", serde_json::json!({
+            "leg_id": first_leg,
+        }));
+        assert!(
+            stack.next_cmd(100).await.is_none(),
+            "duplicate ringing must not restart playback"
+        );
+
+        stack.custom("agent_busy", serde_json::json!({
+            "leg_id": first_leg,
+        }));
+        let resumed_hold = stack.next_cmd(2000).await.expect("queue hold music resumes");
+        assert_eq!(play_path(&resumed_hold), "sounds/hold_music.wav");
+        stack
+            .assert_cmd(2000, "second agent INVITE", |cmd| {
+                matches!(cmd, CallCommand::LegAdd { .. })
+            })
+            .await;
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    #[tokio::test]
+    async fn test_agent_ringing_releases_ringback_on_answer_or_timeout() {
+        for answered in [true, false] {
+            let config = build_sequential_queue_config();
+            let app = QueueApp::new(config.to_plan(), config);
+            let ctx = queue_test_context("queue_agent_ringback_enabled = true\n");
+            let mut stack = MockCallStack::run_with_context(Box::new(app), ctx);
+
+            stack
+                .assert_cmd(2000, "Answer", |cmd| matches!(cmd, CallCommand::Answer { .. }))
+                .await;
+            let _ = stack.next_cmd(2000).await.expect("queue hold music");
+            stack.custom("dial_next_agent", serde_json::json!({}));
+            let leg_id = match stack.next_cmd(2000).await.expect("agent INVITE") {
+                CallCommand::LegAdd { leg_id, .. } => leg_id.expect("agent leg ID"),
+                other => panic!("expected agent leg, got {other:?}"),
+            };
+            stack.custom("agent_ringing", serde_json::json!({ "leg_id": leg_id }));
+            let ringback = stack.next_cmd(2000).await.expect("agent ringback");
+            assert!(matches!(&ringback, CallCommand::Play { options: Some(options), .. }
+                if options.loop_playback));
+            let ringback_track = play_track_id(&ringback);
+
+            if answered {
+                stack.custom("agent_connected", serde_json::json!({
+                    "agent_uri": "sip:agent1@example.com", "leg_id": leg_id,
+                }));
+                stack
+                    .assert_cmd(2000, "bridge replaces ringback", |cmd| {
+                        matches!(cmd, CallCommand::Bridge { .. })
+                    })
+                    .await;
+                stack.join().await.expect("connected queue exits");
+            } else {
+                stack.timeout("agent_ring_timeout");
+                stack
+                    .assert_cmd(2000, "cancel ringing agent", |cmd| {
+                        matches!(cmd, CallCommand::LegRemove { leg_id: removed, .. } if removed == &leg_id)
+                    })
+                    .await;
+                let hold = stack.next_cmd(2000).await.expect("hold replaces ringback");
+                assert_eq!(play_path(&hold), "sounds/hold_music.wav");
+                stack
+                    .assert_cmd(2000, "next agent INVITE", |cmd| {
+                        matches!(cmd, CallCommand::LegAdd { .. })
+                    })
+                    .await;
+                // Replacement playback can report the old track's completion late.
+                stack.audio_complete(ringback_track);
+                assert!(stack.next_cmd(100).await.is_none());
+                stack.cancel();
+                let _ = stack.join().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_no_answer_prompt_can_be_disabled_without_skipping_fallback() {
+        let mut config = build_simple_queue_config();
+        config.voice_prompts = Some(VoicePrompts::zh());
+        let app = QueueApp::new(config.to_plan(), config);
+        let ctx = queue_test_context(
+            "queue_transfer_prompt_enabled = false\nqueue_no_answer_prompt_enabled = false\n",
+        );
+        let mut stack = MockCallStack::run_with_context(Box::new(app), ctx);
+
+        stack
+            .assert_cmd(2000, "Answer", |cmd| matches!(cmd, CallCommand::Answer { .. }))
+            .await;
+        let _ = stack.next_cmd(2000).await.expect("queue hold music");
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        let dial_cmd = stack.next_cmd(2000).await.expect("agent INVITE");
+        let leg_id = match dial_cmd {
+            CallCommand::LegAdd { leg_id, .. } => leg_id,
+            other => panic!("expected agent leg, got {other:?}"),
+        };
+        stack.custom("agent_no_answer", serde_json::json!({ "leg_id": leg_id }));
+        stack
+            .assert_cmd(2000, "fallback hangup", |cmd| matches!(cmd, CallCommand::Hangup(_)))
+            .await;
+
+        stack.join().await.unwrap();
     }
 
     // ── 6. Remote hangup during queue ──
@@ -2247,7 +2441,8 @@ mod tests {
             .with_agent_registry(registry.clone())
             .with_call_id("call-esc-replace".to_string());
 
-        let mut stack = MockCallStack::run(Box::new(queue), "caller", "1000");
+        let ctx = queue_test_context("queue_agent_ringback_enabled = true\n");
+        let mut stack = MockCallStack::run_with_context(Box::new(queue), ctx);
 
         stack
             .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
@@ -2256,10 +2451,14 @@ mod tests {
             .assert_cmd(2000, "Hold", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.custom("dial_next_agent", serde_json::json!({}));
-        stack.assert_cmd(2000, "LegAdd-primary", |c| {
-            matches!(c, CallCommand::LegAdd { target, .. } if target.contains("agent1@example.com"))
-        })
-        .await;
+        let primary_cmd = stack.next_cmd(2000).await.expect("primary agent INVITE");
+        let primary_leg = match primary_cmd {
+            CallCommand::LegAdd { leg_id, .. } => leg_id,
+            other => panic!("expected primary agent leg, got {other:?}"),
+        };
+        stack.custom("agent_ringing", serde_json::json!({ "leg_id": primary_leg }));
+        let ringback = stack.next_cmd(2000).await.expect("agent ringback");
+        assert_eq!(play_path(&ringback), crate::call::DEFAULT_QUEUE_HOLD_AUDIO);
 
         // Replace escalation: the pending primary leg is removed first …
         stack
@@ -2267,6 +2466,8 @@ mod tests {
                 matches!(c, CallCommand::LegRemove { .. })
             })
             .await;
+        let resumed_hold = stack.next_cmd(2000).await.expect("queue hold music resumes");
+        assert_eq!(play_path(&resumed_hold), "sounds/hold_music.wav");
         // … then ONLY the widened agent is dialled (no duplicate primary).
         stack.assert_cmd(2000, "LegAdd-widened", |c| {
             matches!(c, CallCommand::LegAdd { target, .. } if target.contains("l2agent@example.com"))

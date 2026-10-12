@@ -557,6 +557,16 @@ impl Default for QueuePlan {
 }
 
 impl QueuePlan {
+    /// Replace the built-in wait audio only for synthesized plans without
+    /// explicit queue settings. Configured queues use missing-audio filling.
+    pub(crate) fn with_default_hold_music(mut self, global: Option<String>) -> Self {
+        if let Some(file) = global {
+            let hold = self.hold.take().unwrap_or_default();
+            self.hold = Some(hold.with_audio_file(file));
+        }
+        self
+    }
+
     /// Display id for queue lifecycle events (`queue_joined`, `queue_left`,
     /// ...) — the label when present, otherwise the queue name. MUST stay in
     /// sync with the `QueueConfig::name` the queue app factory builds from
@@ -979,6 +989,10 @@ impl std::fmt::Display for DialDirection {
         }
     }
 }
+
+/// Adapter-provided context to store before the first call event.
+#[derive(Clone, Debug)]
+pub(crate) struct InitialUserData(pub serde_json::Map<String, serde_json::Value>);
 
 pub struct Dialplan {
     pub direction: DialDirection,

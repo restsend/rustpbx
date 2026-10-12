@@ -2068,6 +2068,21 @@ impl SipServerInner {
         if old.queue_hold_music != new_proxy.queue_hold_music {
             parts.push("queue_hold_music".to_string());
         }
+        if old.queue_transfer_prompt_enabled != new_proxy.queue_transfer_prompt_enabled {
+            parts.push("queue_transfer_prompt_enabled".to_string());
+        }
+        if old.queue_comfort_prompt_enabled != new_proxy.queue_comfort_prompt_enabled {
+            parts.push("queue_comfort_prompt_enabled".to_string());
+        }
+        if old.queue_busy_prompt_enabled != new_proxy.queue_busy_prompt_enabled {
+            parts.push("queue_busy_prompt_enabled".to_string());
+        }
+        if old.queue_agent_ringback_enabled != new_proxy.queue_agent_ringback_enabled {
+            parts.push("queue_agent_ringback_enabled".to_string());
+        }
+        if old.queue_no_answer_prompt_enabled != new_proxy.queue_no_answer_prompt_enabled {
+            parts.push("queue_no_answer_prompt_enabled".to_string());
+        }
         if old.voicemail_greeting != new_proxy.voicemail_greeting {
             parts.push("voicemail_greeting".to_string());
         }

@@ -979,6 +979,9 @@ impl SipSession {
         let g = gw.read();
         let call_id = self.context.session_id.to_string();
         let mut meta = g.meta_store.get_sync(&call_id).unwrap_or_default();
+        // Pair the origin agent and identity before any target hooks or disconnect cleanup run.
+        meta.transfer_recording_id = source.agent_id.as_deref()
+            .and_then(|agent_id| g.recording_identity_for_agent(&call_id, agent_id, "call_transferred"));
         meta.transfer_source = Some(source);
         g.meta_store.insert(call_id, meta);
     }
@@ -1742,7 +1745,8 @@ impl SipSession {
                 }])),
                 queue_name: format!("agent:{ext}"),
                 ..Default::default()
-            };
+            }
+            .with_default_hold_music(self.server.proxy_config.load().queue_hold_music.clone());
             if let Some(spec) = &return_app {
                 apply_return_app_fallback(&mut queue_plan, spec);
             }
@@ -1777,6 +1781,9 @@ impl SipSession {
                 crate::call::QueuePlan::from_app_params(&serde_json::json!({
                     "queue": format!("skill-group:{sg_id}")
                 }))?;
+            queue_plan = queue_plan.with_default_hold_music(
+                self.server.proxy_config.load().queue_hold_music.clone(),
+            );
             if let Some(spec) = &return_app {
                 apply_return_app_fallback(&mut queue_plan, spec);
             }

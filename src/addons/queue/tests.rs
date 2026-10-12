@@ -3,14 +3,14 @@ mod tests {
     use crate::addons::queue::models as queue;
     use crate::addons::queue::services::exporter::QueueExporter;
     use crate::config::ProxyConfig;
-    use crate::proxy::routing::RouteQueueConfig;
+    use crate::proxy::routing::{RouteQueueConfig, RouteQueueHoldConfig};
     use sea_orm::{ActiveValue::Set, ConnectionTrait, Database, EntityTrait, Schema};
     use serde_json::json;
     use std::fs;
     use tempfile::tempdir;
 
     #[tokio::test]
-    async fn test_export_queues() {
+    async fn test_export_queues_hold_music_priority() {
         // Setup in-memory DB
         let db = Database::connect("sqlite::memory:").await.unwrap();
 
@@ -33,10 +33,15 @@ mod tests {
         };
         queue::Entity::insert(model1).exec(&db).await.unwrap();
 
+        let mut explicit_audio = RouteQueueConfig::default();
+        explicit_audio.hold = Some(RouteQueueHoldConfig {
+            audio_file: Some(crate::call::DEFAULT_QUEUE_HOLD_AUDIO.to_string()),
+            loop_playback: false,
+        });
         let model2 = queue::ActiveModel {
             name: Set("support".to_string()),
             description: Set(Some("Support Queue".to_string())),
-            spec: Set(json!(RouteQueueConfig::default())),
+            spec: Set(json!(explicit_audio)),
             is_active: Set(true),
             created_at: Set(chrono::Utc::now()),
             updated_at: Set(chrono::Utc::now()),
@@ -71,6 +76,33 @@ mod tests {
 
         for key in parsed.keys() {
             assert!(key.starts_with("db-"));
+        }
+        for queue in parsed.values() {
+            assert_eq!(
+                queue.hold.as_ref().unwrap().audio_file.as_deref(),
+                Some(crate::call::DEFAULT_QUEUE_HOLD_AUDIO),
+                "without global music, preserve the original queue audio"
+            );
+        }
+
+        config.queue_hold_music = Some("sounds/wait.wav".into());
+        exporter.export_all(&config).await.unwrap();
+        let parsed: std::collections::HashMap<String, RouteQueueConfig> =
+            toml::from_str(&fs::read_to_string(file_path).unwrap()).unwrap();
+        for queue in parsed.values() {
+            let hold = queue.hold.as_ref().unwrap();
+            if queue.name.as_deref() == Some("sales") {
+                assert_eq!(hold.audio_file.as_deref(), Some("sounds/wait.wav"));
+            } else {
+                assert_eq!(
+                    hold.audio_file.as_deref(),
+                    Some(crate::call::DEFAULT_QUEUE_HOLD_AUDIO)
+                );
+                assert!(
+                    !hold.loop_playback,
+                    "explicit queue options must survive export"
+                );
+            }
         }
     }
 }
