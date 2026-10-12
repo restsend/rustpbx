@@ -684,6 +684,12 @@ pub struct QueueJoined {
     /// not skill-group routed (mirrors `QueueLeft::skill_groups`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_groups: Option<Vec<String>>,
+    /// Per-call ACD queue priority (higher preempts earlier waiters). `None`
+    /// for the default priority 0 — absent and 0 are equivalent, so
+    /// default-priority flows keep the exact pre-field wire payload. Consumed
+    /// by the shared-queue event tap to persist `cc_acd_queue.priority`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u32>,
 }
 rwi_event!(QueueJoined, "queue_joined");
 
@@ -765,6 +771,12 @@ pub struct QueueOverflowJoined {
     pub queue_id: String,
     /// Overflow / escalation skill group just joined.
     pub skill_group: String,
+    /// Per-call ACD queue priority carried through the move — the shared-
+    /// queue tap re-registers the row on this event (delete + insert), so
+    /// dropping it would reset the caller to the default tier. `None` ==
+    /// default priority 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u32>,
 }
 rwi_event!(QueueOverflowJoined, "queue_overflow_joined");
 
@@ -1413,11 +1425,29 @@ mod tests {
                 call_id: "call-1".into(),
                 queue_id: "support".into(),
                 skill_group: "support_l2".into(),
+                priority: None,
             },
             None,
         );
         assert_eq!(joined["queue_id"], "support");
         assert_eq!(joined["skill_group"], "support_l2");
+        assert!(
+            joined.get("priority").is_none(),
+            "default priority must stay absent from the wire payload"
+        );
+        let joined_prio = to_flat_payload(
+            &QueueOverflowJoined {
+                call_id: "call-1".into(),
+                queue_id: "support".into(),
+                skill_group: "support_l2".into(),
+                priority: Some(7),
+            },
+            None,
+        );
+        assert_eq!(
+            joined_prio["priority"], 7,
+            "non-default priority rides along"
+        );
     }
 
     #[test]

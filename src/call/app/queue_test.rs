@@ -2059,7 +2059,9 @@ mod tests {
         timeouts: std::sync::Mutex<Vec<(String, String, u64)>>,
         fallbacks: std::sync::Mutex<Vec<(String, String, String, String)>>,
         /// strict-FIFO gate hook counters (register/begin/release call ids).
-        fifo_registers: std::sync::Mutex<Vec<(String, String)>>,
+        /// `fifo_registers` entries carry the priority the app passed so
+        /// tests can pin the config→gate priority flow.
+        fifo_registers: std::sync::Mutex<Vec<(String, String, i32)>>,
         fifo_begins: std::sync::Mutex<Vec<String>>,
         fifo_releases: std::sync::Mutex<Vec<String>>,
     }
@@ -2212,12 +2214,12 @@ mod tests {
             queue_id: &str,
             call_id: &str,
             _caller: &str,
-            _priority: i32,
+            priority: i32,
         ) {
             self.fifo_registers
                 .lock()
                 .unwrap()
-                .push((queue_id.to_string(), call_id.to_string()));
+                .push((queue_id.to_string(), call_id.to_string(), priority));
         }
 
         async fn fifo_begin_dispatch(&self, call_id: &str) {
@@ -3612,8 +3614,8 @@ mod tests {
         // at most one so far.
         let registers = registry.fifo_registers.lock().unwrap().clone();
         assert!(
-            registers.contains(&("support".to_string(), "call-fifo-1".to_string())),
-            "wait entry must fifo_register_wait, got {registers:?}"
+            registers.contains(&("support".to_string(), "call-fifo-1".to_string(), 0)),
+            "wait entry must fifo_register_wait with the default priority, got {registers:?}"
         );
         assert!(
             registry.fifo_releases.lock().unwrap().len() <= 1,
@@ -3656,6 +3658,76 @@ mod tests {
                 .unwrap()
                 .contains(&"call-fifo-1".to_string()),
             "return to wait retention must fifo_release_dispatch"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// The queue app's configured priority MUST flow into `fifo_register_wait`:
+    /// the shared-queue row written there is what the cross-node strict-FIFO
+    /// gate orders by (priority DESC, enqueued_at ASC). A revert to the
+    /// hardcoded `0` would silently demote every high-priority caller back to
+    /// the default tier — this test pins the flow.
+    #[tokio::test]
+    async fn test_fifo_gate_registers_configured_priority() {
+        use std::sync::Arc;
+        let registry = Arc::new(
+            HookRecordingRegistry::new()
+                .with_resolve_uris(vec![vec!["sip:agent-001@localhost".to_string()], vec![]]),
+        );
+        registry
+            .inner
+            .register(
+                "agent-001".to_string(),
+                "Alice".to_string(),
+                "sip:agent-001@localhost".to_string(),
+                vec!["support".to_string()],
+                1,
+            )
+            .await
+            .unwrap();
+        registry
+            .inner
+            .update_presence(
+                "agent-001",
+                crate::call::app::agent_registry::PresenceState::Idle,
+            )
+            .await
+            .unwrap();
+
+        let mut config = build_simple_queue_config();
+        config.skill_routing_enabled = false;
+        config.skill_group = Some("support".to_string());
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.hold = Some(QueueHoldConfig {
+            audio_file: Some("sounds/hold_music.wav".to_string()),
+            loop_playback: true,
+        });
+        config.retry_interval_secs = 1;
+        config.max_wait_secs = 300;
+        config.accept_immediately = true;
+        config.ring_timeout = Some(Duration::from_secs(5));
+        config.priority = 5;
+
+        let plan = config.to_plan();
+        assert_eq!(plan.priority, 5, "config→plan must carry the priority");
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(registry.clone());
+        queue = queue.with_call_id("call-prio-5".to_string());
+        queue = queue.with_skill_group("support".to_string());
+
+        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        let _hold = stack.next_cmd(2000).await.expect("hold while waiting");
+
+        let registers = registry.fifo_registers.lock().unwrap().clone();
+        assert!(
+            registers.contains(&("support".to_string(), "call-prio-5".to_string(), 5)),
+            "wait entry must register the configured priority 5, got {registers:?}"
         );
 
         stack.cancel();

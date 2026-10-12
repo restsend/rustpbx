@@ -529,6 +529,10 @@ pub struct QueuePlan {
     pub label: Option<String>,
     pub voice_prompts: Option<VoicePrompts>,
     pub queue_name: String,
+    /// Per-call ACD queue priority (higher preempts earlier waiters, 0 =
+    /// default). Carried from app params (`StartApp("queue", …)` / outbound
+    /// `on_answer: enqueue`) through `queue_joined` and the shared-queue row.
+    pub priority: u32,
 }
 
 impl Default for QueuePlan {
@@ -552,6 +556,7 @@ impl Default for QueuePlan {
             label: None,
             voice_prompts: None,
             queue_name: String::new(),
+            priority: 0,
         }
     }
 }
@@ -623,10 +628,18 @@ impl QueuePlan {
                 ..Default::default()
             }])),
             queue_name: queue.to_string(),
+            priority: priority.unwrap_or(0),
             ..Default::default()
         };
         Ok((plan, priority))
     }
+}
+
+/// Clamp a wire-level `u32` priority into the engine/DB `i32` domain without
+/// sign wrap-around: values above `i32::MAX` saturate at `i32::MAX` (a plain
+/// `as i32` cast would negate them and invert the ordering).
+pub fn clamp_priority_u32_to_i32(priority: u32) -> i32 {
+    i32::try_from(priority).unwrap_or(i32::MAX)
 }
 
 #[derive(Debug, Clone)]
@@ -1442,6 +1455,11 @@ mod tests {
         .expect("skill-group target must parse");
 
         assert_eq!(priority, Some(5));
+        // Regression guard: the parsed priority MUST land on the plan itself —
+        // the factory copies `plan.priority` into `QueueConfig`, and every
+        // FIFO-gate / shared-queue write derives from it. A revert to
+        // "return it separately but drop it" silently re-hardcodes 0.
+        assert_eq!(plan.priority, 5, "plan must carry the parsed priority");
         assert_eq!(plan.queue_name, "skill-group:42");
         let Some(DialStrategy::Sequential(agents)) = plan.dial_strategy else {
             panic!("expected sequential strategy");
@@ -1459,6 +1477,10 @@ mod tests {
         .expect("sip target must parse");
 
         assert_eq!(priority, None);
+        assert_eq!(
+            plan.priority, 0,
+            "absent priority must default the plan to 0"
+        );
         assert_eq!(plan.queue_name, "sip:1001@pbx.local");
         let Some(DialStrategy::Sequential(agents)) = plan.dial_strategy else {
             panic!("expected sequential strategy");
@@ -1527,6 +1549,21 @@ mod tests {
             garbage, None,
             "non-numeric priority must be dropped, not fatal"
         );
+    }
+
+    #[test]
+    fn clamp_priority_u32_to_i32_saturates_without_sign_flip() {
+        assert_eq!(super::clamp_priority_u32_to_i32(0), 0);
+        assert_eq!(super::clamp_priority_u32_to_i32(5), 5);
+        assert_eq!(super::clamp_priority_u32_to_i32(i32::MAX as u32), i32::MAX);
+        // A plain `as i32` cast would wrap this to a NEGATIVE priority and
+        // invert the ordering — saturation is the contract.
+        assert_eq!(
+            super::clamp_priority_u32_to_i32(u32::MAX),
+            i32::MAX,
+            "u32::MAX must saturate at i32::MAX, never wrap negative"
+        );
+        assert!(super::clamp_priority_u32_to_i32(u32::MAX) > 0);
     }
 
     #[test]

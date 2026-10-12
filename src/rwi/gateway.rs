@@ -119,6 +119,13 @@ pub struct RwiGateway {
     recording_identity_lookup: Option<RecordingIdentityLookup>,
     /// Optional cross-node user-data replication hook (cluster mode only).
     user_data_sync: Option<UserDataSyncHook>,
+    /// Optional handle to the CC addon's database holding the shared
+    /// `cc_acd_queue` table. Injected by the CC addon at init (next to the
+    /// shared-queue tracker); consumed by `queue.set_priority` so runtime
+    /// priority bumps hit the same rows the FIFO gate reads. `None` in
+    /// deployments without the CC addon — priority updates keep their
+    /// legacy no-op-success behavior.
+    shared_queue_db: Option<sea_orm::DatabaseConnection>,
 }
 
 #[derive(Debug)]
@@ -171,7 +178,20 @@ impl RwiGateway {
             client_ip_lookup: None,
             recording_identity_lookup: None,
             user_data_sync: None,
+            shared_queue_db: None,
         }
+    }
+
+    /// Inject the CC shared-queue DB handle (`cc_acd_queue`). Called once by
+    /// the CC addon at init; `None` (the default) keeps `queue.set_priority`
+    /// on its legacy in-memory-only path.
+    pub fn set_shared_queue_db(&mut self, db: Option<sea_orm::DatabaseConnection>) {
+        self.shared_queue_db = db;
+    }
+
+    /// The shared-queue DB handle, if the CC addon injected one.
+    pub fn shared_queue_db(&self) -> Option<sea_orm::DatabaseConnection> {
+        self.shared_queue_db.clone()
     }
 
     /// Set this node's cluster-internal IP (`node_ip`). Called once at startup

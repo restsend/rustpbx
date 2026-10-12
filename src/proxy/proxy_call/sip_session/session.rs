@@ -6045,6 +6045,9 @@ impl SipSession {
                 call_id: self.context.session_id.clone(),
                 queue_id: plan.display_queue_id(),
                 skill_groups: (!skill_group_ids.is_empty()).then(|| skill_group_ids.clone()),
+                // Absent == 0 so default-priority flows keep the exact same
+                // wire payload as before the field existed.
+                priority: (plan.priority != 0).then_some(plan.priority),
             });
         }
 
@@ -6052,7 +6055,9 @@ impl SipSession {
         // primary skill-group id BEFORE resolution rewrites the dial strategy —
         // the queue app factory needs it to resolve the escalation plan.
         let primary_skill_group = skill_group_ids.first().cloned();
-        let resolved_agents = self.resolve_custom_targets(agents).await;
+        let resolved_agents = self
+            .resolve_custom_targets_with_priority(agents, plan.priority)
+            .await;
 
         // Enrich via queue_location_enricher if configured
         let mut queue_enricher_setup = None;
@@ -7390,6 +7395,19 @@ impl SipSession {
         &mut self,
         locations: Vec<crate::call::Location>,
     ) -> Vec<crate::call::Location> {
+        self.resolve_custom_targets_with_priority(locations, 0)
+            .await
+    }
+
+    /// Like [`Self::resolve_custom_targets`] but carries the queue caller's
+    /// ACD priority into the registry resolution (inline-ACD enqueue + FIFO
+    /// gate ordering).
+    async fn resolve_custom_targets_with_priority(
+        &mut self,
+        locations: Vec<crate::call::Location>,
+        priority: u32,
+    ) -> Vec<crate::call::Location> {
+        let priority = crate::call::clamp_priority_u32_to_i32(priority);
         let mut expanded = Vec::new();
         let agent_registry = self.server.agent_registry.clone();
 
@@ -7409,7 +7427,7 @@ impl SipSession {
                         // Use the registry's resolve_target hook
                         // CC addon implements this to resolve skill-group: URIs
                         let agent_uris = registry
-                            .resolve_target_with_policy(&uri_str, None, &self.id.0)
+                            .resolve_target_with_priority(&uri_str, None, &self.id.0, priority)
                             .await;
 
                         if agent_uris.is_empty() {

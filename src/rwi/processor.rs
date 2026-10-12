@@ -2485,6 +2485,9 @@ impl RwiCommandProcessor {
             call_id: req.call_id.clone(),
             queue_id: req.queue_id.clone(),
             skill_groups: req.skill_groups.clone().filter(|g| !g.is_empty()),
+            // Absent == 0 so default-priority flows keep the exact same
+            // wire payload as before the field existed.
+            priority: (req.priority.unwrap_or(0) != 0).then_some(req.priority.unwrap_or(0)),
         });
 
         info!(
@@ -2568,8 +2571,45 @@ impl RwiCommandProcessor {
             return Err(CommandError::CommandFailed("Call not in queue".to_string()));
         }
 
-        info!(call_id = %call_id, priority = %priority, "Queue priority updated");
-        Ok(CommandResult::Success)
+        // Runtime priority bump: update the caller's UNCLAIMED shared-queue
+        // row — the strict-FIFO gate and monitor ordering read that row, so
+        // the new priority takes effect on the next dispatch decision.
+        let shared_db = self.gateway.read().shared_queue_db();
+        match shared_db {
+            // No CC addon / shared queue → in-memory only. Preserves the
+            // legacy success semantics for existing integrations.
+            None => {
+                info!(call_id = %call_id, priority = %priority,
+                    "Queue priority updated (no shared-queue DB — in-memory only)");
+                Ok(CommandResult::Success)
+            }
+            Some(db) => {
+                #[cfg(feature = "addon-cc")]
+                {
+                    let clamped = crate::call::clamp_priority_u32_to_i32(priority);
+                    let updated = crate::addons::cc::stats_writer::shared_update_priority(
+                        &db, call_id, clamped,
+                    )
+                    .await;
+                    if updated {
+                        info!(call_id = %call_id, priority = %clamped, "Queue priority updated");
+                        Ok(CommandResult::Success)
+                    } else {
+                        Err(CommandError::CommandFailed(format!(
+                            "No unclaimed shared-queue row for call {call_id}"
+                        )))
+                    }
+                }
+                #[cfg(not(feature = "addon-cc"))]
+                {
+                    // Shared-queue table only exists with the CC addon.
+                    let _ = db;
+                    info!(call_id = %call_id, priority = %priority,
+                        "Queue priority updated (shared queue unavailable — in-memory only)");
+                    Ok(CommandResult::Success)
+                }
+            }
+        }
     }
 
     async fn queue_assign_agent(
@@ -2604,7 +2644,7 @@ impl RwiCommandProcessor {
         &self,
         call_id: &str,
         queue_id: &str,
-        _priority: Option<u32>,
+        priority: Option<u32>,
         skill_groups: Option<Vec<String>>,
     ) -> Result<CommandResult, CommandError> {
         self.get_handle(call_id).await?;
@@ -2631,9 +2671,13 @@ impl RwiCommandProcessor {
             call_id: call_id.to_string(),
             queue_id: queue_id.to_string(),
             skill_groups: skill_groups.filter(|g| !g.is_empty()),
+            // The shared-queue tap re-registers the row from this event —
+            // carry the requested priority (or drop the field at the default
+            // tier) so a requeue never resets a caller to priority 0.
+            priority: priority.filter(|p| *p != 0),
         });
 
-        info!(call_id = %call_id, new_queue = %queue_id, "Call requeued");
+        info!(call_id = %call_id, new_queue = %queue_id, priority = ?priority, "Call requeued");
         Ok(CommandResult::Success)
     }
 

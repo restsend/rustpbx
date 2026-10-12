@@ -443,6 +443,8 @@ impl BuiltinAppFactory {
                 config.fallback = plan.fallback.clone();
                 config.voice_prompts = plan.voice_prompts.clone();
                 config.ring_timeout = plan.ring_timeout;
+                // Per-call ACD priority from app params / plan (0 = default).
+                config.priority = plan.priority;
                 // Build agent locations from resolved URIs
                 let agents: Vec<crate::call::Location> = pending
                     .agent_uris
@@ -570,6 +572,85 @@ mod tests {
     use super::*;
     use crate::call::app::testing::MockCallStack;
     use crate::call::{QueueHoldConfig, QueuePlan, VoicePrompts};
+
+    /// The queue factory MUST copy `pending.plan.priority` into the app's
+    /// `QueueConfig` — every downstream consumer (fifo gate registration,
+    /// inline-ACD enqueue, shared-queue row) derives from it, and a reverted
+    /// copy line silently re-hardcodes priority 0. Observable end-to-end via
+    /// the app's own `queue_joined` emission on entry (`joined_emitted` =
+    /// false here, so on_enter re-emits with the config's priority).
+    #[tokio::test]
+    async fn queue_factory_carries_plan_priority_into_the_app() {
+        let gateway: crate::rwi::RwiGatewayRef =
+            Arc::new(parking_lot::RwLock::new(crate::rwi::RwiGateway::new()));
+        let mut tap = gateway.read().subscribe_events();
+
+        let config: crate::config::Config = toml::from_str("[proxy]\naddr = \"0.0.0.0\"").unwrap();
+        let mut ctx = ApplicationContext::new(
+            sea_orm::DatabaseConnection::default(),
+            CallInfo {
+                session_id: "queue-prio-factory".into(),
+                caller: "1001".into(),
+                callee: "1002".into(),
+                direction: "inbound".into(),
+                started_at: chrono::Utc::now(),
+                sip_headers: Default::default(),
+                route_name: None,
+            },
+            Arc::new(config),
+            reqwest::Client::new(),
+        );
+        ctx.rwi_gateway = Some(gateway.clone());
+        *ctx.pending_queue.lock() = Some(PendingQueuePlan {
+            plan: QueuePlan {
+                queue_name: "support".into(),
+                accept_immediately: true,
+                dial_strategy: Some(DialStrategy::Sequential(vec![crate::call::Location {
+                    aor: "sip:agent@example.com".parse().unwrap(),
+                    ..Default::default()
+                }])),
+                priority: 7,
+                ..Default::default()
+            },
+            agent_uris: vec!["sip:agent@example.com".into()],
+            parallel: false,
+            skill_group_id: None,
+            overflow_overrides: None,
+            joined_emitted: false,
+            queue_enricher: None,
+        });
+
+        let app = BuiltinAppFactory::new(None, None)
+            .create_app("queue", None, &ctx)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut stack = MockCallStack::run_with_context(app, ctx);
+        stack
+            .assert_cmd(2000, "answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+
+        // The on_enter `queue_joined` must carry the plan's priority.
+        let joined = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match tap.recv().await {
+                    Ok(entry) if entry.event.event_type == "queue_joined" => break entry,
+                    Ok(_) => continue,
+                    Err(_) => panic!("event tap closed before queue_joined"),
+                }
+            }
+        })
+        .await
+        .expect("queue_joined must be emitted on entry");
+        assert_eq!(joined.event.payload["queue_id"], "support");
+        assert_eq!(
+            joined.event.payload["priority"], 7,
+            "factory must propagate plan.priority into the queue app"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
 
     #[tokio::test]
     async fn queue_audio_prompt_policies_preserve_wait_music() {

@@ -296,6 +296,10 @@ pub trait AgentRegistry: Send + Sync {
     /// `call_id` identifies the call being routed; addon implementations use it
     /// to emit scheduling webhook events. Default implementation ignores policy
     /// and calls `resolve_target`.
+    ///
+    /// NOTE: this variant carries NO per-call priority — resolution behaves as
+    /// priority 0. Queue callers must use [`Self::resolve_target_with_priority`]
+    /// so inline-ACD queues and the cross-node FIFO gate see the real priority.
     async fn resolve_target_with_policy(
         &self,
         target_uri: &str,
@@ -303,6 +307,36 @@ pub trait AgentRegistry: Send + Sync {
         _call_id: &str,
     ) -> Vec<String> {
         self.resolve_target(target_uri).await
+    }
+
+    /// Like [`Self::resolve_target_with_policy`] but also carries the caller's
+    /// ACD queue priority (higher preempts earlier waiters; 0 = default).
+    /// Default implementation ignores the priority and delegates, so
+    /// registries without ACD support keep today's behavior unchanged.
+    async fn resolve_target_with_priority(
+        &self,
+        target_uri: &str,
+        policy: Option<&str>,
+        call_id: &str,
+        _priority: i32,
+    ) -> Vec<String> {
+        self.resolve_target_with_policy(target_uri, policy, call_id)
+            .await
+    }
+
+    /// Like [`Self::select_agent_with_policy`] but also carries the caller's
+    /// ACD queue priority (see [`Self::resolve_target_with_priority`]).
+    /// Default implementation ignores the priority and delegates.
+    async fn select_agent_with_priority(
+        &self,
+        required_skills: &[String],
+        strategy: RoutingStrategy,
+        policy: Option<&str>,
+        call_id: &str,
+        _priority: i32,
+    ) -> Option<AgentRecord> {
+        self.select_agent_with_policy(required_skills, strategy, policy, call_id)
+            .await
     }
 
     /// Resolve the escalation plan for a queue target URI (e.g.
@@ -353,11 +387,14 @@ pub trait AgentRegistry: Send + Sync {
 
     /// FIFO gate. Auto-detects the caller's mode from the shared queue:
     /// the call's OWN waiting row present → peer mode (yield only to
-    /// strictly-earlier waiters); absent → newcomer mode (yield to ANY
-    /// unclaimed waiter, i.e. a brand-new call never jumps the queue).
-    /// Fails OPEN on DB errors / unregistered calls — ordering is
-    /// best-effort fairness, never a dispatch blocker.
-    async fn fifo_allows_dispatch(&self, _queue_id: &str, _call_id: &str) -> bool {
+    /// strictly-earlier waiters); absent → newcomer mode (yield only to
+    /// waiters ranking strictly before the caller in dispatch order —
+    /// same-tier joiners keep strict FIFO, higher-priority callers preempt).
+    /// `priority` is the caller's ACD queue priority (newcomers have no row
+    /// yet, so it must be supplied); ignored in peer mode (the row's own
+    /// priority wins). Fails OPEN on DB errors / unregistered calls —
+    /// ordering is best-effort fairness, never a dispatch blocker.
+    async fn fifo_allows_dispatch(&self, _queue_id: &str, _call_id: &str, _priority: i32) -> bool {
         true
     }
 

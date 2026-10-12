@@ -272,6 +272,7 @@ async fn test_comprehensive_core_event_structs() {
                 call_id: call_id.into(),
                 queue_id: "support".into(),
                 skill_groups: Some(vec!["support".into()]),
+                priority: None,
             },
         );
         gw.fan_out(
@@ -645,6 +646,7 @@ async fn test_new_cc_event_structs() {
         call_id: "c1".into(),
         queue_id: "q1".into(),
         skill_groups: Some(vec!["q1".into()]),
+        priority: None,
     });
     gw.broadcast(&rustpbx::addons::cc::cc_events::AgentRegistered {
         agent_id: "a2".into(),

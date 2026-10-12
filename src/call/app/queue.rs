@@ -119,6 +119,11 @@ pub struct QueueConfig {
     /// escalation resolves the primary group ∪ overflow groups as one
     /// candidate set through the agent registry.
     pub skill_group: Option<String>,
+    /// Per-call ACD queue priority (higher preempts earlier waiters, 0 =
+    /// default). Copied from [`crate::call::QueuePlan::priority`] at the app
+    /// factory; feeds `fifo_register_wait`, inline-ACD enqueue and the
+    /// `queue_joined` / `queue_overflow_joined` event payloads.
+    pub priority: u32,
 }
 
 /// Escalation mode for overflow/skill-group escalation.
@@ -205,6 +210,7 @@ impl Default for QueueConfig {
             escalation_mode: EscalationMode::Replace,
             escalation_timeline: Vec::new(),
             skill_group: None,
+            priority: 0,
         }
     }
 }
@@ -222,6 +228,7 @@ impl QueueConfig {
             label: Some(self.name.clone()),
             voice_prompts: self.voice_prompts.clone(),
             queue_name: self.name.clone(),
+            priority: self.priority,
         }
     }
 }
@@ -930,8 +937,16 @@ impl QueueApp {
                 .clone()
                 .or_else(|| self.config.skill_group.clone());
             if let Some(gate_group) = gate_group {
+                // Carry the per-call priority so higher-priority waiters
+                // preempt earlier default-priority ones in the gate order
+                // (priority DESC, then enqueued_at ASC).
                 registry
-                    .fifo_register_wait(&gate_group, &self.call_id, "", 0)
+                    .fifo_register_wait(
+                        &gate_group,
+                        &self.call_id,
+                        "",
+                        crate::call::clamp_priority_u32_to_i32(self.config.priority),
+                    )
                     .await;
             }
         }
@@ -992,8 +1007,9 @@ impl QueueApp {
         };
 
         let target = format!("skill-group:{}", sg);
+        let priority = crate::call::clamp_priority_u32_to_i32(self.config.priority);
         let mut uris = registry
-            .resolve_target_with_policy(&target, None, &self.call_id)
+            .resolve_target_with_priority(&target, None, &self.call_id, priority)
             .await;
         if uris.is_empty() {
             // Self-heal, then re-poll: heals this caller within one poll
@@ -1005,7 +1021,7 @@ impl QueueApp {
                     "Queue: dead agent bindings healed — re-polling candidates"
                 );
                 uris = registry
-                    .resolve_target_with_policy(&target, None, &self.call_id)
+                    .resolve_target_with_priority(&target, None, &self.call_id, priority)
                     .await;
             }
         }
@@ -1871,6 +1887,10 @@ impl QueueApp {
                     call_id: self.call_id.clone(),
                     queue_id: self.config.name.clone(),
                     skill_group: step.add_skill_group.clone(),
+                    // The tap re-registers the shared-queue row on this event
+                    // (MoveOverflow = delete + insert) — carry the priority or
+                    // the call would silently drop back to the default tier.
+                    priority: (self.config.priority != 0).then_some(self.config.priority),
                 });
 
                 if let Some(ref registry) = self.agent_registry {
@@ -2209,6 +2229,9 @@ impl CallApp for QueueApp {
                 } else {
                     Some(groups)
                 },
+                // Absent == 0 so default-priority flows keep the exact same
+                // wire payload as before the field existed.
+                priority: (self.config.priority != 0).then_some(self.config.priority),
             });
         }
 
@@ -2285,7 +2308,13 @@ impl CallApp for QueueApp {
             let strategy = self.config.routing_strategy;
 
             if let Some(agent) = registry
-                .select_agent_with_policy(skills, strategy, None, &self.call_id)
+                .select_agent_with_priority(
+                    skills,
+                    strategy,
+                    None,
+                    &self.call_id,
+                    crate::call::clamp_priority_u32_to_i32(self.config.priority),
+                )
                 .await
             {
                 info!(agent_id = %agent.agent_id, uri = %agent.uri, "Queue: auto-selecting agent");

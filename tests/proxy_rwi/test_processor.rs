@@ -3238,6 +3238,153 @@ async fn test_queue_set_priority_not_in_queue_fails() {
     assert!(result.unwrap_err().to_string().contains("not in queue"));
 }
 
+/// Legacy semantics guard: WITHOUT a shared-queue DB (no CC addon) the command
+/// must keep succeeding — pre-existing integrations rely on the old stub's
+/// success return, and the in-memory path is all there is.
+#[tokio::test]
+async fn test_queue_set_priority_without_shared_db_still_succeeds() {
+    let registry = Arc::new(ActiveProxyCallRegistry::new());
+    let gateway = Arc::new(RwLock::new(RwiGateway::new()));
+    // NOTE: no `set_shared_queue_db` — the None path.
+    let cm = Arc::new(ConferenceManager::new());
+    let processor = Arc::new(RwiCommandProcessor::new(
+        registry.clone(),
+        gateway,
+        cm.clone(),
+    ));
+
+    let _handle = create_test_call(&registry, "call-1", "1001", "2000", DialDirection::Inbound);
+    processor
+        .process_command(RwiCommandPayload::QueueEnqueue(QueueEnqueueRequest {
+            call_id: "call-1".into(),
+            queue_id: "support".into(),
+            priority: None,
+            skill_groups: None,
+        }))
+        .await
+        .unwrap();
+
+    let result = processor
+        .process_command(RwiCommandPayload::QueueSetPriority {
+            call_id: "call-1".into(),
+            priority: 10,
+        })
+        .await;
+    assert!(result.is_ok(), "no-DB path must keep the legacy success");
+}
+
+/// With the CC shared-queue DB injected, `queue.set_priority` must MUTATE the
+/// caller's unclaimed `cc_acd_queue` row — the strict-FIFO gate and the
+/// monitor order by that row. A stub regression (log-only, no write) keeps
+/// this red.
+#[cfg(feature = "addon-cc")]
+#[tokio::test]
+async fn test_queue_set_priority_updates_shared_queue_row() {
+    use sea_orm::Database;
+    use sea_orm_migration::MigratorTrait;
+
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    rustpbx::addons::cc::migration::Migrator::up(&db, None)
+        .await
+        .unwrap();
+
+    let registry = Arc::new(ActiveProxyCallRegistry::new());
+    let gateway = Arc::new(RwLock::new(RwiGateway::new()));
+    gateway.write().set_shared_queue_db(Some(db.clone()));
+    let cm = Arc::new(ConferenceManager::new());
+    let processor = Arc::new(RwiCommandProcessor::new(
+        registry.clone(),
+        gateway,
+        cm.clone(),
+    ));
+
+    let _handle = create_test_call(&registry, "call-1", "1001", "2000", DialDirection::Inbound);
+    processor
+        .process_command(RwiCommandPayload::QueueEnqueue(QueueEnqueueRequest {
+            call_id: "call-1".into(),
+            queue_id: "support".into(),
+            priority: None,
+            skill_groups: None,
+        }))
+        .await
+        .unwrap();
+
+    // The caller is parked in the shared queue (event-tap mirror / wait
+    // retention) at the default tier.
+    rustpbx::addons::cc::stats_writer::shared_enqueue(
+        &db,
+        "call-1",
+        "support",
+        "tap",
+        "1001",
+        &[],
+        0,
+    )
+    .await;
+
+    let result = processor
+        .process_command(RwiCommandPayload::QueueSetPriority {
+            call_id: "call-1".into(),
+            priority: 10,
+        })
+        .await;
+    assert!(result.is_ok());
+
+    let rows = rustpbx::addons::cc::stats_writer::unclaimed_rows_for_queue(&db, "support").await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].priority, 10,
+        "set_priority must mutate the shared row the gate orders by"
+    );
+}
+
+/// A queued call with NO shared-queue row (queue tracking disabled / tap
+/// lagging) must surface an explicit error — not a silent fake success.
+#[cfg(feature = "addon-cc")]
+#[tokio::test]
+async fn test_queue_set_priority_missing_shared_row_fails() {
+    use sea_orm::Database;
+    use sea_orm_migration::MigratorTrait;
+
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    rustpbx::addons::cc::migration::Migrator::up(&db, None)
+        .await
+        .unwrap();
+
+    let registry = Arc::new(ActiveProxyCallRegistry::new());
+    let gateway = Arc::new(RwLock::new(RwiGateway::new()));
+    gateway.write().set_shared_queue_db(Some(db));
+    let cm = Arc::new(ConferenceManager::new());
+    let processor = Arc::new(RwiCommandProcessor::new(
+        registry.clone(),
+        gateway,
+        cm.clone(),
+    ));
+
+    let _handle = create_test_call(&registry, "call-1", "1001", "2000", DialDirection::Inbound);
+    processor
+        .process_command(RwiCommandPayload::QueueEnqueue(QueueEnqueueRequest {
+            call_id: "call-1".into(),
+            queue_id: "support".into(),
+            priority: None,
+            skill_groups: None,
+        }))
+        .await
+        .unwrap();
+
+    let result = processor
+        .process_command(RwiCommandPayload::QueueSetPriority {
+            call_id: "call-1".into(),
+            priority: 10,
+        })
+        .await;
+    let err = result.expect_err("missing shared row must fail explicitly");
+    assert!(
+        err.to_string().contains("No unclaimed shared-queue row"),
+        "unexpected error: {err}"
+    );
+}
+
 #[tokio::test]
 async fn test_queue_assign_agent_success() {
     let registry = Arc::new(ActiveProxyCallRegistry::new());
@@ -3314,6 +3461,13 @@ async fn test_queue_requeue_success() {
     assert_eq!(
         joined.event.payload["skill_groups"],
         serde_json::json!(["G_Srzj_1043133_382_G"])
+    );
+    // Regression guard: the shared-queue tap re-registers the row from this
+    // event — a dropped priority field would reset the caller to the default
+    // tier on EVERY requeue.
+    assert_eq!(
+        joined.event.payload["priority"], 5,
+        "requeue must carry the requested priority on queue_joined"
     );
 }
 
