@@ -203,6 +203,12 @@ impl MediaRecorder for FileRecorder {
 pub struct SipflowRecorder {
     backend: Arc<dyn SipFlowBackend>,
     call_id: String,
+    /// Swap leg ids at capture: `true` writes the callee (egress) side as
+    /// leg 0 and the caller (ingress) side as leg 1. Exported stereo WAVs
+    /// map leg 0 → left, so this is how `stereo_mode = "external_left"` is
+    /// honoured for RTP-captured (sipflow) recordings without touching the
+    /// export path.
+    swap_legs: bool,
 }
 
 impl SipflowRecorder {
@@ -210,7 +216,14 @@ impl SipflowRecorder {
         Self {
             backend,
             call_id: call_id.into(),
+            swap_legs: false,
         }
+    }
+
+    /// Flip leg ids so the callee side lands on leg 0 (the left channel).
+    pub fn with_swapped_legs(mut self, swap: bool) -> Self {
+        self.swap_legs = swap;
+        self
     }
 }
 
@@ -224,12 +237,14 @@ impl MediaRecorder for SipflowRecorder {
         peer_addr: Option<std::net::SocketAddr>,
     ) -> Result<()> {
         let raw = packet.marshal()?;
+        let leg = direction_to_leg_id(direction);
+        let leg = if self.swap_legs { 1 - leg } else { leg };
         self.backend.record(
             Cow::Borrowed(self.call_id.as_str()),
             BackendSipFlowItem {
                 timestamp: received_at_micros,
                 seq: packet.header.sequence_number as u64,
-                leg: Some(direction_to_leg_id(direction)),
+                leg: Some(leg),
                 msg_type: SipFlowMsgType::Rtp,
                 // Media storage uses `src` as the per-direction peer key;
                 // leg 0/1 identifies ingress/egress, including relay traffic.
@@ -978,6 +993,32 @@ mod tests {
         );
         assert!(items[0].1.timestamp > 0);
         assert!(!backend.flushed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn sipflow_swapped_legs_put_egress_on_leg0() {
+        let backend = Arc::new(CountingBackend::new());
+        let initial = SipflowRecorder::new(backend.clone(), "call-1").with_swapped_legs(true);
+        let (handle, sender, _recorder_finished_rx) = RecorderHandle::new();
+        handle.set_recorder(Box::new(initial), None).await.unwrap();
+        use rustrtc::peer_connection::RtpObserver;
+        let tap = crate::ingress_tap::IngressTap::new(8, vec![0], Some(sender));
+        tap.on_ingress(&packet(0, 1, 160), "127.0.0.1:4000".parse().unwrap());
+        tap.on_egress(&packet(0, 2, 320), "127.0.0.1:5000".parse().unwrap());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while backend.recorded.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let items = backend.items.lock();
+        // Swapped: egress (callee side) becomes leg 0 — the left channel of
+        // exported WAVs — and ingress (caller) becomes leg 1.
+        assert_eq!(items[0].1.leg, Some(1), "ingress must flip to leg 1");
+        assert_eq!(items[1].1.leg, Some(0), "egress must flip to leg 0");
+        assert_eq!(items[0].1.src_addr, "127.0.0.1:4000");
+        assert_eq!(items[1].1.src_addr, "127.0.0.1:5000");
     }
 
     #[tokio::test]

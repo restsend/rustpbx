@@ -275,9 +275,17 @@ pub struct RecordingPolicy {
     /// `type = "sipflow"` for SipFlow RTP capture. Kept for config compatibility.
     #[serde(default)]
     pub force_file: Option<bool>,
-    /// Swap stereo channels in recording: callee→left, caller→right.
+    /// Deprecated: use `stereo_mode` instead. Direct stereo channel swap,
+    /// honoured only when no layer configures `stereo_mode`.
     #[serde(default)]
     pub stereo_swap: Option<bool>,
+    /// Stereo channel assignment policy: `caller_left` (default),
+    /// `callee_left` (≈ legacy `stereo_swap = true`) or `external_left`
+    /// (external party → left, internal → right; falls back to caller-left
+    /// when the sides cannot be distinguished). Configuring this at any
+    /// layer supersedes the legacy `stereo_swap`.
+    #[serde(default)]
+    pub stereo_mode: Option<crate::media::recorder::StereoChannelMode>,
     /// Local archival layout when `type = "local"`: `daily` (default) or
     /// `hourly`. Files are moved under `{path}/YYYYMMDD[/HH]/` after the call.
     #[serde(default)]
@@ -378,6 +386,7 @@ impl RecordingPolicy {
             auto_start_at: self.auto_start_at.unwrap_or_default(),
             recording_type: self.effective_recording_type(),
             stereo_swap: self.stereo_swap.unwrap_or(false),
+            stereo_mode: self.stereo_mode,
             option: None,
         }
     }

@@ -375,6 +375,18 @@ type = "extension"
 enabled = true
 auto_start = true
 auto_start_at = "media" # default; use "answer" to wait for 200
+# Stereo channel assignment for two-party stereo recordings:
+#   caller_left   (default) caller → left, callee → right
+#   callee_left             callee → left, caller → right
+#   external_left           external party → left, internal → right; when the
+#                           sides cannot be distinguished (internal-to-internal
+#                           or both external) the caller stays on the left.
+# Applies to file recordings (local/http/s3) and to sipflow RTP capture
+# (capture-time leg swap, so exports inherit it).
+# stereo_mode = "external_left"
+# Deprecated direct swap; true ≡ callee_left. Honoured only when no layer
+# configures stereo_mode.
+# stereo_swap = false
 # Routed applications exempt from auto recording (only meaningful with
 # auto_start = true). With ["ivr"], IVR-routed calls install no auto recorder;
 # the IVR flow records only via its smart-node `record start`, so the IVR

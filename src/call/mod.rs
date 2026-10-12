@@ -716,9 +716,16 @@ pub struct CallRecordingConfig {
     /// Where media is captured: `local`/`http`/`s3` → WAV file; `sipflow` →
     /// SipflowRecorder. SIP signalling always goes to `[sipflow]` when configured.
     pub recording_type: RecordingType,
-    /// Swap stereo channels: callee→left, caller→right.
+    /// Legacy direct stereo channel swap: callee→left when true.
+    /// Deprecated in favour of [`Self::stereo_mode`]; honoured only when no
+    /// layer configures a stereo mode.
     /// Default (false): caller→left, callee→right.
     pub stereo_swap: bool,
+    /// Channel assignment policy (`caller_left`/`callee_left`/`external_left`).
+    /// Supersedes the legacy `stereo_swap` when configured. `None` inherits
+    /// the per-call policy / global policy; `external_left` is resolved per
+    /// call by the session (see `SipSession::external_party_on_left`).
+    pub stereo_mode: Option<crate::media::recorder::StereoChannelMode>,
 }
 
 impl Default for CallRecordingConfig {
@@ -736,6 +743,7 @@ impl CallRecordingConfig {
             auto_start_at: RecordingAutoStartAt::default(),
             recording_type: RecordingType::Local,
             stereo_swap: false,
+            stereo_mode: None,
         }
     }
 

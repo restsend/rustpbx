@@ -1446,6 +1446,7 @@ async fn recording_enabled_manual_start_creates_idle_capture_task() {
         auto_start_at: crate::config::RecordingAutoStartAt::Media,
         recording_type: crate::config::RecordingType::Local,
         stereo_swap: false,
+        stereo_mode: None,
     };
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
         .with_application("ivr".to_string(), None, true)
@@ -1482,6 +1483,7 @@ async fn file_recording_default_starts_at_media_setup() {
         auto_start_at: crate::config::RecordingAutoStartAt::Media,
         recording_type: crate::config::RecordingType::Local,
         stereo_swap: false,
+        stereo_mode: None,
     };
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
         .with_application("ivr".to_string(), None, true)
@@ -1526,6 +1528,7 @@ async fn file_recording_answer_timing_waits_after_media_setup() {
         auto_start_at: crate::config::RecordingAutoStartAt::Answer,
         recording_type: crate::config::RecordingType::Local,
         stereo_swap: false,
+        stereo_mode: None,
     };
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
         .with_application("ivr".to_string(), None, true)
@@ -1582,6 +1585,7 @@ async fn sipflow_recording_default_starts_at_media_setup() {
         auto_start_at: crate::config::RecordingAutoStartAt::Media,
         recording_type: crate::config::RecordingType::Sipflow,
         stereo_swap: false,
+        stereo_mode: None,
     };
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
         .with_application("ivr".to_string(), None, true)
@@ -1636,6 +1640,7 @@ async fn sipflow_recording_auto_start_false_keeps_backend_idle() {
         auto_start_at: crate::config::RecordingAutoStartAt::Media,
         recording_type: crate::config::RecordingType::Sipflow,
         stereo_swap: false,
+        stereo_mode: None,
     };
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
         .with_application("ivr".to_string(), None, true)
@@ -6317,6 +6322,53 @@ async fn file_output_policy_applies_to_automatic_and_on_demand_recording() {
     }
 }
 
+/// End-to-end: a global `stereo_mode = "external_left"` policy swaps the
+/// channels on an outbound call so the callee (external party, fed as the
+/// egress stream here) lands on the left channel of the WAV.
+#[tokio::test]
+async fn file_output_external_left_swaps_outbound_call_channels() {
+    use crate::config::RecordingPolicy;
+    use rustrtc::rtp::{RtpHeader, RtpPacket};
+    use rustrtc::peer_connection::RtpObserver;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("external-left.wav");
+    let (server, _) = create_test_server().await;
+    let policy: RecordingPolicy =
+        toml::from_str("stereo_mode = \"external_left\"\nsamplerate = 16000").unwrap();
+    server.recording_policy.store(Arc::new(Some(policy)));
+    let mut dialplan = build_dialplan_with_mode(MediaProxyMode::All);
+    // Extension-dialed outbound: the external party is the callee (leg B).
+    dialplan.direction = DialDirection::Outbound;
+    dialplan.recording.option = Some(crate::media::recorder::RecorderOption::new(
+        path.to_string_lossy().into_owned(),
+    ));
+    let mut session = build_session_on_server(server, dialplan).await;
+    session.media_profile.path = MediaPathMode::Anchored;
+    setup_recording_test_media(&mut session).await;
+    session.set_auto_recorder().await.unwrap();
+    let peer = session.legs.media_leg(&LegId::from("caller")).unwrap();
+    let tap = peer.ingress_tap();
+    let mut encoder = audio_codec::create_encoder(audio_codec::CodecType::PCMU);
+    let addr = "127.0.0.1:12345".parse().unwrap();
+    for seq in 0..10u16 {
+        let ingress = RtpPacket::new(RtpHeader::new(0, seq, seq as u32 * 160, 1234),
+            encoder.encode(&vec![8000; 160]).to_vec());
+        let egress = RtpPacket::new(RtpHeader::new(0, seq, seq as u32 * 160, 5678),
+            encoder.encode(&vec![-8000; 160]).to_vec());
+        tap.on_ingress(&ingress, addr);
+        tap.on_egress(&egress, addr);
+    }
+    session.finalize_recording_for_app_shutdown().await;
+    let wav = std::fs::read(path).unwrap();
+    let samples: Vec<i16> = wav[44..].chunks_exact(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+    assert!(!samples.is_empty());
+    let middle = samples.len() / 4 * 2;
+    // External (egress, -8000) must be the LEFT channel.
+    assert!(samples[middle] < -6000, "left must carry the external party");
+    assert!(samples[middle + 1] > 6000, "right must carry the caller");
+}
+
 #[test]
 fn recording_option_preserves_legacy_json_and_output_settings() {
     use crate::media::recorder::RecorderOption;
@@ -6336,6 +6388,203 @@ fn recording_option_preserves_legacy_json_and_output_settings() {
     assert_eq!(roundtrip.samplerate, Some(16000));
     assert_eq!(roundtrip.ptime, Some(20));
     assert_eq!(roundtrip.stereo_swap, Some(false));
+}
+
+/// `stereo_mode = "external_left"` resolves the effective channel swap from
+/// the call shape: trunk/realm-derived direction, inbound trunk context,
+/// originate (UAC) topology, and the legacy `stereo_swap` override.
+#[tokio::test]
+async fn stereo_external_left_resolves_swap_per_call_shape() {
+    use crate::call::{OutboundTrunkContext, TransactionCookie, TrunkContext};
+    use crate::media::recorder::{RecorderOption, StereoChannelMode};
+
+    async fn build_uas_session(
+        direction: DialDirection,
+        cookie: TransactionCookie,
+        dialplan_extensions: Option<http::Extensions>,
+    ) -> SipSession {
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let (tx, _) = create_transaction(request).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .expect("server dialog");
+        let mut dialplan = Dialplan::new(
+            "test-session".to_string(),
+            create_test_request(
+                rsipstack::sip::Method::Invite,
+                "alice",
+                None,
+                "rustpbx.com",
+                None,
+            ),
+            direction,
+        );
+        if let Some(extensions) = dialplan_extensions {
+            dialplan.extensions = extensions;
+        }
+        let context = CallContext {
+            session_id: "test-session".to_string(),
+            dialplan: Arc::new(dialplan),
+            cookie,
+            start_time: Instant::now(),
+            original_caller: "sip:alice@rustpbx.com".to_string(),
+            original_callee: "sip:ivr@rustpbx.com".to_string(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+        let use_media_proxy =
+            SipSession::check_media_proxy(&context, &context.dialplan.media.proxy_mode);
+        let (session, _handle, _cmd_rx) = SipSession::new(
+            server,
+            CancellationToken::new(),
+            None,
+            context,
+            server_dialog,
+            use_media_proxy,
+        );
+        session
+    }
+
+    async fn build_uac_session(direction: DialDirection) -> SipSession {
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let dialplan =
+            Dialplan::new("test-session".to_string(), request, direction);
+        let context = CallContext {
+            session_id: "test-session".to_string(),
+            dialplan: Arc::new(dialplan),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:1001@rustpbx.com".to_string(),
+            original_callee: "sip:+862161952290@trunk.example".to_string(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+        let (session, _handle, _cmd_rx) =
+            SipSession::new_uac(server, CancellationToken::new(), None, context, true);
+        session
+    }
+
+    fn resolved_swap(session: &SipSession) -> bool {
+        let mut option = RecorderOption::new("a.wav".into());
+        option.stereo_mode = Some(StereoChannelMode::ExternalLeft);
+        resolved_swap_with(session, option)
+    }
+
+    fn resolved_swap_with(session: &SipSession, option: RecorderOption) -> bool {
+        let mut option = option;
+        session.resolve_stereo_assignment(&mut option, None, None);
+        option.stereo_swap.unwrap_or(false)
+    }
+
+    // Inbound (external caller → internal callee): caller leg already left.
+    let session = build_uas_session(
+        DialDirection::Inbound,
+        TransactionCookie::default(),
+        None,
+    ).await;
+    assert!(!resolved_swap(&session));
+
+    // Extension-dialed outbound (internal caller → external callee): the
+    // external party is on leg B → swap.
+    let session = build_uas_session(
+        DialDirection::Outbound,
+        TransactionCookie::default(),
+        None,
+    ).await;
+    assert!(resolved_swap(&session));
+
+    // Internal-to-internal: indistinguishable → caller stays left.
+    let session = build_uas_session(
+        DialDirection::Internal,
+        TransactionCookie::default(),
+        None,
+    ).await;
+    assert!(!resolved_swap(&session));
+
+    // Same-realm caller arriving from a trunk: the caller leg is the external
+    // party even though direction says Outbound (realm lied).
+    let mut cookie = TransactionCookie::default();
+    cookie.insert_extension(TrunkContext {
+        id: Some(1),
+        name: "inbound-trunk".to_string(),
+        did_numbers: vec![],
+    });
+    let session = build_uas_session(
+        DialDirection::Outbound,
+        cookie,
+        None,
+    ).await;
+    assert!(!resolved_swap(&session));
+
+    // Internal call forwarded out through a trunk: callee leg is external.
+    let mut extensions = http::Extensions::new();
+    extensions.insert(OutboundTrunkContext {
+        id: Some(2),
+        name: "outbound-trunk".to_string(),
+        dest: None,
+        tenant_id: None,
+    });
+    let session = build_uas_session(
+        DialDirection::Internal,
+        TransactionCookie::default(),
+        Some(extensions),
+    ).await;
+    assert!(resolved_swap(&session));
+
+    // RWI/CC originate: leg A is the dialed destination — external customer
+    // sits on the left without a swap.
+    let session = build_uac_session(DialDirection::Outbound).await;
+    assert!(!resolved_swap(&session));
+
+    // Deprecated stereo_swap is honoured only when no layer configures a
+    // stereo mode — a configured mode supersedes it (including legacy true).
+    let session = build_uas_session(
+        DialDirection::Inbound,
+        TransactionCookie::default(),
+        None,
+    ).await;
+    let mut option = RecorderOption::new("a.wav".into());
+    option.stereo_mode = Some(StereoChannelMode::ExternalLeft);
+    option.stereo_swap = Some(true);
+    assert!(!resolved_swap_with(&session, option));
+
+    // Legacy stereo_swap still applies when no mode is configured anywhere.
+    let session = build_uas_session(
+        DialDirection::Inbound,
+        TransactionCookie::default(),
+        None,
+    ).await;
+    let mut option = RecorderOption::new("a.wav".into());
+    option.stereo_swap = Some(true);
+    assert!(resolved_swap_with(&session, option));
+
+    // callee_left without any legacy swap flips the channels.
+    let session = build_uas_session(
+        DialDirection::Inbound,
+        TransactionCookie::default(),
+        None,
+    ).await;
+    let mut option = RecorderOption::new("a.wav".into());
+    option.stereo_mode = Some(StereoChannelMode::CalleeLeft);
+    assert!(resolved_swap_with(&session, option));
 }
 
 /// The trunk black-hole regression: a connected bridge whose legs receive

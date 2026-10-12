@@ -8,6 +8,7 @@ use super::util::{
 };
 use super::{live_transcription, transfer};
 use crate::call::app::queue::QueueSignal;
+use crate::call::{DialDirection, OutboundTrunkContext, TrunkContext};
 use crate::proxy::call::parse_allowed_codecs;
 use rsipstack::sip::{HeadersExt, ToTypedHeader};
 
@@ -219,6 +220,11 @@ pub struct SipSession {
     /// (`{session_id}_{seq}_{label}.wav`). Per-session; `segmented_wav_path`
     /// bumps on file collision for cross-session (transfer) segments.
     recording_seq: u32,
+
+    /// Whether this session was constructed in UAC mode (RWI/CC originate).
+    /// The caller (A) media leg is then the *dialed destination*, not an
+    /// inbound caller — required by stereo `external_left` resolution.
+    primary_leg_uac: bool,
 }
 #[derive(Clone)]
 pub struct SipSessionHandle {
@@ -712,8 +718,8 @@ impl SipSession {
     /// Fill missing file options from per-call policy, then server policy.
     /// Explicit RecorderOption values win, including stereo_swap = false.
     fn recorder_option(&self, path: String) -> crate::media::recorder::RecorderOption {
-        let global = self.server.recording_policy.load();
-        let global = global.as_ref().as_ref();
+        let policy_guard = self.server.recording_policy.load();
+        let global = policy_guard.as_ref().as_ref();
         let local = self.context.dialplan.recording_policy.as_ref();
         let mut option = self
             .context
@@ -731,12 +737,84 @@ impl SipSession {
             .ptime
             .or_else(|| local.and_then(|p| p.ptime))
             .or_else(|| global.and_then(|p| p.ptime));
-        option.stereo_swap = option
+        self.resolve_stereo_assignment(&mut option, local, global);
+        option
+    }
+
+    /// Resolve the stereo channel assignment for this call into
+    /// `option.stereo_swap`, the value every recorder backend consumes.
+    ///
+    /// `stereo_mode` (per-call option → per-call policy → dialplan → global
+    /// policy, default `caller_left`) is the authoritative setting; the
+    /// deprecated `stereo_swap` is honoured only when no layer configures a
+    /// mode, so legacy deployments keep their behaviour until they migrate.
+    /// `external_left` classifies the external party per call.
+    pub(crate) fn resolve_stereo_assignment(
+        &self,
+        option: &mut crate::media::recorder::RecorderOption,
+        local: Option<&crate::config::RecordingPolicy>,
+        global: Option<&crate::config::RecordingPolicy>,
+    ) {
+        use crate::media::recorder::StereoChannelMode;
+        let mode = option
+            .stereo_mode
+            .or_else(|| local.and_then(|p| p.stereo_mode))
+            .or(self.context.dialplan.recording.stereo_mode)
+            .or_else(|| global.and_then(|p| p.stereo_mode));
+        let legacy_swap = option
             .stereo_swap
             .or_else(|| local.and_then(|p| p.stereo_swap))
             .or_else(|| self.context.dialplan.recording.stereo_swap.then_some(true))
             .or_else(|| global.and_then(|p| p.stereo_swap));
-        option
+        option.stereo_mode = mode;
+        option.stereo_swap = Some(match mode {
+            Some(StereoChannelMode::CalleeLeft) => true,
+            Some(StereoChannelMode::ExternalLeft) => self.external_party_on_left(),
+            Some(StereoChannelMode::CallerLeft) => false,
+            // Deprecated fallback: honoured only when no mode is configured.
+            None => legacy_swap.unwrap_or(false),
+        });
+    }
+
+    /// `StereoChannelMode::ExternalLeft` resolution: `true` puts the callee
+    /// (leg B) on the left channel, `false` keeps the caller (leg A) there.
+    ///
+    /// The recording tap rides the caller leg (`Ingress → leg A`), so the
+    /// question is which side of the call is the external party:
+    ///
+    /// - UAC originate (RWI/CC): leg A **is** the dialed destination — the
+    ///   external customer when a trunk is involved — so it already sits on
+    ///   the left. Dialing an internal target leaves both sides internal;
+    ///   either way the caller leg stays left.
+    /// - Inbound from a trunk (or an external realm, which the routing layer
+    ///   folds into `DialDirection::Inbound`): the caller leg is external.
+    /// - Extension-dialed outbound: the caller leg is the local extension
+    ///   and the callee leg rides the trunk.
+    /// - Internal calls: indistinguishable → caller left (documented
+    ///   fallback), unless routing sent the call out through a trunk
+    ///   (mid-call forward), which makes the callee leg external.
+    fn external_party_on_left(&self) -> bool {
+        if self.primary_leg_uac {
+            return false;
+        }
+        if self
+            .context
+            .cookie
+            .get_extension::<TrunkContext>()
+            .is_some()
+        {
+            return false;
+        }
+        match self.context.dialplan.direction {
+            DialDirection::Inbound => false,
+            DialDirection::Outbound => true,
+            DialDirection::Internal => self
+                .context
+                .dialplan
+                .extensions
+                .get::<OutboundTrunkContext>()
+                .is_some(),
+        }
     }
 
     /// Clear the `discard` marker on the active recording segment. The
@@ -857,10 +935,21 @@ impl SipSession {
             .as_ref()
             .and_then(|flow| flow.backend())
             .ok_or_else(|| anyhow!("SipFlow recording strategy has no backend"))?;
+        // RTP capture stores leg ids per packet; resolving the stereo mode
+        // here lets the capture swap them so the external party lands on
+        // leg 0 — the left channel of every exported WAV.
+        let policy_guard = self.server.recording_policy.load();
+        let mut channel_option = crate::media::recorder::RecorderOption::default();
+        self.resolve_stereo_assignment(
+            &mut channel_option,
+            self.context.dialplan.recording_policy.as_ref(),
+            policy_guard.as_ref().as_ref(),
+        );
         let recorder = crate::media::media_recorder::SipflowRecorder::new(
             sipflow_backend,
             self.context.session_id.clone(),
-        );
+        )
+        .with_swapped_legs(channel_option.stereo_swap.unwrap_or(false));
         self.media
             .recording
             .set_recorder(Box::new(recorder), None)
@@ -1375,6 +1464,10 @@ impl SipSession {
             ),
             ConstructMode::Uac => (None, None),
         };
+        // UAC sessions (RWI/CC originate) own the dialed destination on their
+        // caller (A) media leg — the direction enum cannot describe that
+        // topology, so recording channel resolution needs this flag.
+        let primary_leg_uac = matches!(mode, ConstructMode::Uac);
 
         let session = Self {
             id: session_id.clone(),
@@ -1438,6 +1531,7 @@ impl SipSession {
             active_recording: None,
             completed_recording_segments: Vec::new(),
             recording_seq: 0,
+            primary_leg_uac,
         };
 
         (session, sip_handle, cmd_rx)

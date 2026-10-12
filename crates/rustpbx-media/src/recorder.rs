@@ -9,6 +9,27 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 use tracing::debug;
 
+/// Stereo channel assignment policy for two-party recordings.
+///
+/// The recorder taps the caller leg, so "caller" is leg A (ingress of the
+/// tapped leg) and "callee" is leg B (egress toward the tapped peer).
+/// Resolution into the effective swap happens at recording-install time in
+/// the session (see `SipSession::resolve_stereo_assignment`); the recorder
+/// itself only consumes the final `stereo_swap` bool.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StereoChannelMode {
+    /// Caller → left, callee → right (historical default).
+    #[default]
+    CallerLeft,
+    /// Callee → left, caller → right (legacy `stereo_swap = true`).
+    CalleeLeft,
+    /// External party → left, internal party → right. Falls back to
+    /// caller-left when the sides cannot be distinguished (both internal or
+    /// both external).
+    ExternalLeft,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 #[serde(default)]
@@ -22,7 +43,13 @@ pub struct RecorderOption {
     /// File flush interval in milliseconds; unset uses 500 ms.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ptime: Option<u32>,
-    /// Swap stereo channels. Optional so explicit false overrides inherited true.
+    /// Channel assignment policy (`caller_left` / `callee_left` /
+    /// `external_left`). Takes precedence over the legacy `stereo_swap`.
+    #[serde(alias = "stereo_mode", skip_serializing_if = "Option::is_none")]
+    pub stereo_mode: Option<StereoChannelMode>,
+    /// Legacy direct channel swap. Deprecated in favour of `stereo_mode`:
+    /// honoured only when no layer configures a stereo mode. `true` ≡
+    /// `stereo_mode = "callee_left"`.
     #[serde(alias = "stereo_swap", skip_serializing_if = "Option::is_none")]
     pub stereo_swap: Option<bool>,
 }
@@ -42,6 +69,7 @@ impl Default for RecorderOption {
             recorder_file: "".to_string(),
             samplerate: None,
             ptime: None,
+            stereo_mode: None,
             stereo_swap: None,
         }
     }
@@ -883,6 +911,37 @@ pub use rustpbx_record_common::DtmfGenerator;
 mod tests {
     use super::*;
     use audio_codec::{CodecType, create_decoder, create_encoder};
+
+    #[test]
+    fn stereo_mode_serializes_snake_case_and_defaults_to_caller_left() {
+        assert_eq!(
+            serde_json::to_value(StereoChannelMode::CallerLeft).unwrap(),
+            serde_json::json!("caller_left")
+        );
+        assert_eq!(
+            serde_json::to_value(StereoChannelMode::CalleeLeft).unwrap(),
+            serde_json::json!("callee_left")
+        );
+        assert_eq!(
+            serde_json::to_value(StereoChannelMode::ExternalLeft).unwrap(),
+            serde_json::json!("external_left")
+        );
+        for (text, expected) in [
+            ("caller_left", StereoChannelMode::CallerLeft),
+            ("callee_left", StereoChannelMode::CalleeLeft),
+            ("external_left", StereoChannelMode::ExternalLeft),
+        ] {
+            let option: RecorderOption =
+                serde_json::from_str(&format!("{{\"recorder_file\":\"\",\"stereo_mode\":\"{text}\"}}"))
+                    .unwrap();
+            assert_eq!(option.stereo_mode, Some(expected));
+        }
+        let legacy: RecorderOption =
+            serde_json::from_str("{\"recorder_file\":\"\",\"stereoSwap\":true}").unwrap();
+        assert_eq!(legacy.stereo_swap, Some(true));
+        assert_eq!(legacy.stereo_mode, None);
+        assert_eq!(StereoChannelMode::default(), StereoChannelMode::CallerLeft);
+    }
 
     #[tokio::test]
     async fn file_output_ptime_controls_flushing() {

@@ -1310,6 +1310,9 @@ impl CallModule {
                 if overrides.stereo_swap.is_some() {
                     merged.stereo_swap = overrides.stereo_swap;
                 }
+                if overrides.stereo_mode.is_some() {
+                    merged.stereo_mode = overrides.stereo_mode;
+                }
                 if overrides.path.is_some() {
                     merged.path = overrides.path.clone();
                 }
@@ -1430,6 +1433,7 @@ impl CallModule {
                 existing.samplerate = existing.samplerate.or(recorder_option.samplerate);
                 existing.ptime = existing.ptime.or(recorder_option.ptime);
                 existing.stereo_swap = existing.stereo_swap.or(recorder_option.stereo_swap);
+                existing.stereo_mode = existing.stereo_mode.or(recorder_option.stereo_mode);
             } else {
                 dialplan.recording.option = Some(recorder_option);
             }
@@ -1558,6 +1562,7 @@ impl CallModule {
             samplerate: policy.samplerate,
             ptime: policy.ptime,
             stereo_swap: policy.stereo_swap,
+            stereo_mode: policy.stereo_mode,
         };
         Some(option)
     }
