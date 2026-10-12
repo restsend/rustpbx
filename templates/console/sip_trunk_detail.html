@@ -249,6 +249,25 @@ default('RustPBX') }}{% endblock %}
                             placeholder="{{ "sip_trunk_detail.field_description_placeholder" | t }}"></textarea>
                     </label>
                 </section>
+                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <h2 class="text-sm font-semibold text-slate-900">{{ "sip_trunk_detail.section_retry" | t }}</h2>
+                    <p class="mt-1 text-xs text-slate-500">{{ "sip_trunk_detail.section_retry_desc" | t }}</p>
+                    <div class="mt-4 grid gap-4 md:grid-cols-2">
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            {{ "sip_trunk_detail.field_retry_codes" | t }}
+                            <input type="text" x-model.trim="form.retry_status_codes" placeholder="408, 503"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <span class="text-xs font-normal text-slate-400">{{ "sip_trunk_detail.field_retry_codes_hint" | t }}</span>
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            {{ "sip_trunk_detail.field_max_ring_time" | t }}
+                            <input type="number" min="1" step="1" x-model="form.max_ring_time"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="{{ "sip_trunk_detail.max_ring_time_default" | t }}">
+                            <span class="text-xs font-normal text-slate-400">{{ "sip_trunk_detail.field_max_ring_time_hint" | t }}</span>
+                        </label>
+                    </div>
+                </section>
             </div>
 
             <div class="space-y-6" x-show="activeTab === 'access'" x-transition.opacity x-cloak
@@ -650,6 +669,8 @@ default('RustPBX') }}{% endblock %}
                 register_extra_headers: '',
                 recording_enabled: '',
                 ice_lite: '',
+                retry_status_codes: '',
+                max_ring_time: '',
                 network_profile: '',
                 external_ip_override: '',
                 bind_ip_override: '',
@@ -735,6 +756,9 @@ default('RustPBX') }}{% endblock %}
                     const sbc = meta.sbc || {};
                     this.form.recording_enabled = typeof sbc.recording_enabled === 'boolean' ? String(sbc.recording_enabled) : '';
                     this.form.ice_lite = typeof sbc.ice_lite === 'boolean' ? String(sbc.ice_lite) : '';
+                    const retry = sbc.retry_policy || {};
+                    this.form.retry_status_codes = Array.isArray(retry.status_codes) ? retry.status_codes.join(', ') : '';
+                    this.form.max_ring_time = Number.isInteger(sbc.max_ring_time) && sbc.max_ring_time > 0 ? String(sbc.max_ring_time) : '';
                     this.form.network_profile = typeof sbc.profile === 'string' ? sbc.profile : '';
                     this.form.external_ip_override = typeof sbc.external_ip === 'string' ? sbc.external_ip : '';
                     this.form.bind_ip_override = typeof sbc.bind_ip === 'string' ? sbc.bind_ip : '';
@@ -932,6 +956,17 @@ default('RustPBX') }}{% endblock %}
             },
             buildPayload() {
                 const payload = {};
+                const td = (this.t || {}).sip_trunk_detail || {};
+                const retryCodes = this.form.retry_status_codes.split(/[\s,;]+/).filter(Boolean);
+                if (retryCodes.some(code => !/^\d{3}$/.test(code) || Number(code) < 300 || Number(code) > 699)) {
+                    throw new Error(td.error_retry_codes || 'Retry status codes must be SIP failure codes from 300 to 699.');
+                }
+                const retryPolicy = { status_codes: [...new Set(retryCodes.map(Number))] };
+                const maxRingTime = String(this.form.max_ring_time).trim();
+                if (maxRingTime !== '' && !(Number.isSafeInteger(Number(maxRingTime)) && Number(maxRingTime) > 0)) {
+                    throw new Error(td.error_max_ring_time || 'Max ring time must be positive whole seconds or blank.');
+                }
+
                 payload.name = this.form.name.trim();
                 payload.display_name = this.form.display_name.trim();
                 payload.carrier = this.form.carrier.trim();
@@ -1037,6 +1072,17 @@ default('RustPBX') }}{% endblock %}
                         meta.sbc.ringback = ringback;
                     } else {
                         delete meta.sbc.ringback;
+                    }
+                    // No codes means no retry, the same as no policy.
+                    if (retryPolicy.status_codes.length) {
+                        meta.sbc.retry_policy = retryPolicy;
+                    } else {
+                        delete meta.sbc.retry_policy;
+                    }
+                    if (maxRingTime !== '') {
+                        meta.sbc.max_ring_time = Number(maxRingTime);
+                    } else {
+                        delete meta.sbc.max_ring_time;
                     }
                     if (!Object.keys(meta.sbc).length) {
                         delete meta.sbc;

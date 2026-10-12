@@ -1078,7 +1078,7 @@ impl QueueApp {
             return agents.iter().collect();
         }
         match &self.plan.dial_strategy {
-            Some(DialStrategy::Sequential(locations)) => locations.iter().collect(),
+            Some(DialStrategy::Sequential(attempts)) => attempts.iter().map(|attempt| &attempt.location).collect(),
             Some(DialStrategy::Parallel(locations)) => locations.iter().collect(),
             None => Vec::new(),
         }
@@ -2220,7 +2220,7 @@ impl CallApp for QueueApp {
         // When the first agent answers via agent_connected event, the rest
         // are cancelled via remove_legs.
         if self.is_parallel() {
-            let mut agents: Vec<&Location> = self.get_agents();
+            let mut agents = self.get_agents();
             // Filter out agents that are no longer available (reserved by or
             // busy on another concurrent call) when a registry is attached.
             if let Some(ref registry) = self.agent_registry {

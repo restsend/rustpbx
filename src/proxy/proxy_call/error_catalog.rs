@@ -173,6 +173,20 @@ pub const DIAL_ALL_TARGETS_FAILED: CallErrInfo = CallErrInfo {
     remediation_key: None,
 };
 
+/// One target of a multi-target sequential plan failed. Traced per attempt so
+/// CDR hooks can account for every trunk that was tried; the call outcome is
+/// still reported by the final attempt.
+pub const DIAL_ATTEMPT_FAILED: CallErrInfo = CallErrInfo {
+    app: "dial",
+    code: "dial.attempt_failed",
+    message: "Dial attempt failed",
+    sip_status: None,
+    hangup_reason: CallRecordHangupReason::Failed,
+    severity: ErrSeverity::Warn,
+    locale_key: "errors.dial.attempt_failed",
+    remediation_key: None,
+};
+
 pub const DIAL_CALLER_CANCELLED: CallErrInfo = CallErrInfo {
     app: "dial",
     code: "dial.caller_cancelled",
@@ -368,6 +382,7 @@ pub const CATALOG: &[CallErrInfo] = &[
     QUEUE_ALL_AGENTS_UNAVAILABLE_DEFAULT,
     QUEUE_TRANSFER_FAILED,
     DIAL_ALL_TARGETS_FAILED,
+    DIAL_ATTEMPT_FAILED,
     DIAL_CALLER_CANCELLED,
     DIAL_FORK_FAILED,
     DIAL_FORK_JOIN_ERROR,

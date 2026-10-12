@@ -9,7 +9,7 @@ use crate::{
         ActiveModel as SipTrunkActiveModel, Column as SipTrunkColumn, Entity as SipTrunkEntity,
         SipTransport, SipTrunkDirection, SipTrunkStatus,
     },
-    proxy::routing::ConfigOrigin,
+    proxy::routing::{ConfigOrigin, RetryPolicy},
 };
 use axum::{
     Json, Router,
@@ -779,6 +779,16 @@ fn apply_form_to_active_model(
         }
         None => metadata,
     };
+    if let Some(policy) = metadata
+        .as_ref()
+        .and_then(|meta| meta.get("sbc"))
+        .and_then(|sbc| sbc.get("retry_policy"))
+        .filter(|policy| !policy.is_null())
+    {
+        let policy: RetryPolicy = serde_json::from_value(policy.clone())
+            .map_err(|err| bad_request(format!("metadata.sbc.retry_policy is invalid: {err}")))?;
+        policy.validate().map_err(|err| bad_request(err.to_string()))?;
+    }
     if !is_update || form.metadata.is_some() || form.ice_lite.is_some() {
         active.metadata = Set(metadata);
     }
@@ -1040,5 +1050,22 @@ mod tests {
             matches!(active.metadata, ActiveValue::Unchanged(_)),
             "metadata must remain unchanged when neither metadata nor ice_lite set"
         );
+    }
+
+    #[test]
+    fn retry_policy_rejects_invalid_metadata_settings() {
+        for policy in [
+            json!({"status_codes": [200]}),
+            json!({"status_codes": [700]}),
+        ] {
+            let form = SipTrunkForm {
+                metadata: Some(json!({"sbc": {"retry_policy": policy}}).to_string()),
+                ..Default::default()
+            };
+            let mut active: SipTrunkActiveModel = Default::default();
+            let response = apply_form_to_active_model(&mut active, &form, Utc::now(), true)
+                .expect_err("invalid retry policy must be rejected");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
     }
 }

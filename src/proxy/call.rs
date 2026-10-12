@@ -138,7 +138,7 @@ fn resolve_unhandled_targets(
         // A single target uses the simpler sequential dialer. When parallel
         // forking is disabled and several bindings exist, locs are sorted
         // most-recent first, so dial only the newest registration.
-        Ok(DialStrategy::Sequential(locs.into_iter().take(1).collect()))
+        Ok(DialStrategy::Sequential(locs.into_iter().take(1).map(Into::into).collect()))
     }
 }
 
@@ -927,10 +927,10 @@ impl CallModule {
         }
 
         let mut routed_headers: Option<Vec<rsipstack::sip::Header>> = None;
-        let (routed_forward, pending_queue, pending_app, dialplan_hints) =
+        let (routed_targets, pending_queue, pending_app, dialplan_hints) =
             if always_forwarding && forced_route_point.is_none() {
                 (
-                    forced_forward,
+                    forced_forward.map(|option| vec![crate::config::RouteTarget::new(option, None)]),
                     forced_pending_queue,
                     forced_pending_app,
                     None,
@@ -959,13 +959,16 @@ impl CallModule {
                     )
                 {
                     // Rejecting a non-application result must release policy slots acquired by routing.
-                    let hints = match &mut route_outcome {
+                    // Every routed target may hold slots, not only the first.
+                    let hints: Vec<_> = match &mut route_outcome {
+                        RouteResult::Forward(targets) => {
+                            targets.iter_mut().filter_map(|target| target.hints.as_mut()).collect()
+                        }
                         RouteResult::Queue { hints, .. }
-                        | RouteResult::Forward(_, hints)
-                        | RouteResult::NotHandled(_, hints) => hints.as_mut(),
-                        _ => None,
+                        | RouteResult::NotHandled(_, hints) => hints.as_mut().into_iter().collect(),
+                        _ => Vec::new(),
                     };
-                    if let Some(hints) = hints {
+                    for hints in hints {
                         if let Some(guard) = self.inner.routing_state.policy_guard.as_ref() {
                             crate::call::policy::PolicyGuard::release_concurrency_holds(
                                 &hints.concurrency_holds,
@@ -983,8 +986,22 @@ impl CallModule {
                 }
 
                 match route_outcome {
+                    RouteResult::Forward(mut targets) => {
+                        // A single target's hints apply to the whole dialplan, as a plain
+                        // forward; several targets keep their hints scoped to each attempt,
+                        // except the call-wide recording, taken from the first.
+                        let hints = match targets.as_mut_slice() {
+                            [single] => single.hints.take(),
+                            [first, ..] => first.hints.as_ref().map(|hints| crate::config::DialplanHints {
+                                recording: hints.recording.clone(),
+                                enable_recording: hints.enable_recording,
+                                ..Default::default()
+                            }),
+                            [] => None,
+                        };
+                        (Some(targets), None, None, hints)
+                    }
                     RouteResult::Queue { queue, hints, .. } => (None, Some(queue), None, hints),
-                    RouteResult::Forward(option, hints) => (Some(option), None, None, hints),
                     RouteResult::NotHandled(_, hints) => (None, None, None, hints),
                     RouteResult::Abort(code, reason) => {
                         let err =
@@ -1008,38 +1025,50 @@ impl CallModule {
         let queue_targets = pending_queue
             .as_ref()
             .and_then(|plan| plan.dial_strategy.clone());
+        let routed = routed_targets.is_some();
+        let routed_caller = routed_targets
+            .as_ref()
+            .and_then(|targets| targets.first())
+            .map(|target| target.option.caller.clone());
         let targets = if pending_app.is_some() {
             DialStrategy::Sequential(vec![])
         } else if let Some(queue_targets) = queue_targets {
             queue_targets
-        } else if let Some(option) = routed_forward.as_ref() {
-            let target = Location {
-                aor: option.callee.clone(),
-                destination: option.destination.clone(),
-                credential: option.credential.clone(),
-                headers: option.headers.clone(),
-                contact_raw: Some(option.callee.to_string()),
-                ..Default::default()
-            };
-            // A dest-less forward route that did not rewrite the callee (e.g.
-            // a per-extension route carrying only `[busy_wait]`) targets a
-            // same-realm extension. Prefer the locator's registered contacts
-            // over the bare AOR so the INVITE goes straight to the endpoint
-            // instead of looping back through the proxy.
-            let unchanged_callee = option.callee == callee_uri;
-            if option.destination.is_none()
-                && unchanged_callee
-                && callee_is_same_realm
-                && !locs.is_empty()
-            {
-                resolve_unhandled_targets(
-                    callee_is_same_realm,
-                    false,
-                    locs,
-                    self.inner.server.proxy_config.load().parallel_fork,
-                )?
+        } else if let Some(mut routed_targets) = routed_targets {
+            if routed_targets.len() == 1 {
+                let option = routed_targets.pop().expect("one routed target").option;
+                let target = Location {
+                    aor: option.callee.clone(),
+                    destination: option.destination.clone(),
+                    credential: option.credential.clone(),
+                    headers: option.headers.clone(),
+                    contact_raw: Some(option.callee.to_string()),
+                    ..Default::default()
+                };
+                // A dest-less forward route that did not rewrite the callee (e.g.
+                // a per-extension route carrying only `[busy_wait]`) targets a
+                // same-realm extension. Prefer the locator's registered contacts
+                // over the bare AOR so the INVITE goes straight to the endpoint
+                // instead of looping back through the proxy.
+                let unchanged_callee = option.callee == callee_uri;
+                if option.destination.is_none()
+                    && unchanged_callee
+                    && callee_is_same_realm
+                    && !locs.is_empty()
+                {
+                    resolve_unhandled_targets(
+                        callee_is_same_realm,
+                        false,
+                        locs,
+                        self.inner.server.proxy_config.load().parallel_fork,
+                    )?
+                } else {
+                    DialStrategy::Sequential(vec![target.into()])
+                }
             } else {
-                DialStrategy::Sequential(vec![target])
+                // Several targets are tried in order with their own caller and hints;
+                // an empty list has no destination and dials nothing.
+                DialStrategy::Sequential(routed_targets.into_iter().map(Into::into).collect())
             }
         } else {
             resolve_unhandled_targets(
@@ -1069,7 +1098,7 @@ impl CallModule {
         let session_id_enabled = !(direction == DialDirection::Internal
             && pending_app.is_none()
             && pending_queue.is_none()
-            && routed_forward.is_none());
+            && !routed);
         let session_id = if session_id_enabled {
             crate::call::session_id::normalize_or_generate(&dialog_id)
         } else {
@@ -1077,12 +1106,7 @@ impl CallModule {
         };
         let mut dialplan = Dialplan::new(session_id.clone(), original.clone(), direction)
             .with_session_id_enabled(session_id_enabled)
-            .with_caller(
-                routed_forward
-                    .as_ref()
-                    .map(|option| option.caller.clone())
-                    .unwrap_or(caller_uri),
-            )
+            .with_caller(routed_caller.unwrap_or(caller_uri))
             .with_media(media_config)
             .with_recording(recording)
             .with_route_invite(route_invite)
@@ -1097,16 +1121,14 @@ impl CallModule {
         // the session, so those legs rely on the per-target fallback in
         // `build_target_invite_option`.
         let header_passthrough = {
-            let locs: Vec<&Location> = match &targets {
-                DialStrategy::Sequential(l) | DialStrategy::Parallel(l) => l.iter().collect(),
-            };
+            let locs = targets.locations();
             let internal = callee_is_same_realm
                 || locs
                     .iter()
                     .any(|t| t.registered_aor.is_some() || t.home_proxy.is_some());
             if internal {
                 Some(crate::proxy::routing::HeaderPassthrough::all())
-            } else if let Some(target) = locs.first().copied() {
+            } else if let Some(target) = locs.first() {
                 let trunk_dest = dialplan_hints.as_ref().and_then(|h| {
                     h.extensions
                         .get::<crate::call::OutboundTrunkContext>()
@@ -1756,10 +1778,11 @@ impl CallModule {
         // with bare AoRs (e.g. from HttpCallRouter or JSON-RPC inspector) would
         // cause INVITEs to hairpin back to the PBX's own IP.
         if let DialplanFlow::Targets(ref mut strategy) = dialplan.flow {
-            let targets = match strategy {
-                DialStrategy::Parallel(t) | DialStrategy::Sequential(t) => t,
+            let targets: Vec<&mut Location> = match strategy {
+                DialStrategy::Sequential(attempts) => attempts.iter_mut().map(|attempt| &mut attempt.location).collect(),
+                DialStrategy::Parallel(locations) => locations.iter_mut().collect(),
             };
-            for target in targets.iter_mut() {
+            for target in targets {
                 if target.destination.is_none() {
                     let realm = target.aor.host().to_string();
                     if self.inner.server.is_same_realm(&realm).await {
@@ -2632,8 +2655,111 @@ mod tests {
             option.caller =
                 rsipstack::sip::Uri::try_from("sip:rewritten-caller@source.example.com")?;
             option.callee = rsipstack::sip::Uri::try_from("sip:001234@carrier.example.com:5060")?;
-            Ok(RouteResult::Forward(option, Some(Default::default())))
+            Ok(RouteResult::Forward(vec![crate::config::RouteTarget::new(option, Some(Default::default()))]))
         }
+    }
+
+    #[tokio::test]
+    async fn default_resolve_preserves_retry_invites_hints_and_policies() {
+        struct RetryRouter(u64);
+        #[async_trait]
+        impl RouteInvite for RetryRouter {
+            async fn route_invite(
+                &self, _option: InviteOption, _origin: &rsipstack::sip::Request,
+                _direction: &DialDirection, _cookie: &TransactionCookie,
+            ) -> Result<RouteResult> {
+                Ok(RouteResult::Forward((0..self.0).map(|index| crate::config::RouteTarget {
+                    option: InviteOption {
+                        caller: format!("sip:caller{index}@source.example.com").try_into().unwrap(),
+                        callee: format!("sip:target{index}@carrier.example.com").try_into().unwrap(),
+                        ..Default::default()
+                    },
+                    hints: Some(crate::config::DialplanHints {
+                        max_ring_time: Some(std::time::Duration::from_secs(12 + index)),
+                        ..Default::default()
+                    }),
+                    // The last target has no policy, which never advances.
+                    retry_policy: (index == 0).then(|| crate::proxy::routing::RetryPolicy {
+                        status_codes: vec![503, 408],
+                    }),
+                }).collect()))
+            }
+        }
+        let (server, config) = create_test_server().await;
+        let module = CallModule::new(config, server);
+        let request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite, "original-caller", None, "rustpbx.com", None,
+        );
+        let caller = SipUser { username: "original-caller".into(), realm: Some("rustpbx.com".into()), ..Default::default() };
+        let plan = module.default_resolve(&request, Box::new(RetryRouter(2)), &caller, &TransactionCookie::default()).await.unwrap();
+        let crate::call::DialplanFlow::Targets(DialStrategy::Sequential(targets)) = &plan.flow else { panic!("expected sequential plan"); };
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].location.aor.user(), Some("target0"));
+        assert_eq!(targets[1].location.aor.user(), Some("target1"));
+        let attempts = targets;
+        assert_eq!(attempts[0].caller.as_ref().unwrap().user(), Some("caller0"));
+        assert_eq!(attempts[1].caller.as_ref().unwrap().user(), Some("caller1"));
+        for (index, attempt) in attempts.iter().enumerate() {
+            assert_eq!(attempt.hints.as_ref().unwrap().max_ring_time, Some(std::time::Duration::from_secs(12 + index as u64)));
+        }
+        let policy = attempts[0].retry_policy.as_ref().unwrap();
+        assert_eq!(policy.status_codes, vec![503, 408]);
+        assert!(attempts[1].retry_policy.as_ref().unwrap().status_codes.is_empty());
+
+        let empty = module.default_resolve(
+            &request, Box::new(RetryRouter(0)), &caller, &TransactionCookie::default(),
+        ).await.unwrap();
+        assert!(empty.is_empty(), "an empty Forward must not fall back to direct dialing");
+    }
+
+    #[tokio::test]
+    async fn default_resolve_fixes_call_settings_from_the_first_of_several_targets() {
+        struct TwoTrunks;
+        #[async_trait]
+        impl RouteInvite for TwoTrunks {
+            async fn route_invite(
+                &self, option: InviteOption, _origin: &rsipstack::sip::Request,
+                _direction: &DialDirection, _cookie: &TransactionCookie,
+            ) -> Result<RouteResult> {
+                let target = |user: &str, hints: crate::config::DialplanHints| {
+                    let mut option = option.clone();
+                    option.callee = format!("sip:{user}@carrier.example.com").try_into().unwrap();
+                    crate::config::RouteTarget::new(option, Some(hints))
+                };
+                Ok(RouteResult::Forward(vec![
+                    target("a", crate::config::DialplanHints {
+                        recording: Some(RecordingPolicy {
+                            enabled: Some(true),
+                            path: Some("/tmp/rustpbx-first-target".into()),
+                            ..Default::default()
+                        }),
+                        max_ring_time: Some(std::time::Duration::from_secs(40)),
+                        ..Default::default()
+                    }),
+                    target("b", crate::config::DialplanHints {
+                        enable_recording: Some(false),
+                        ..Default::default()
+                    }),
+                ]))
+            }
+        }
+        let (server, config) = create_test_server().await;
+        let module = CallModule::new(config, server);
+        let request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None,
+        );
+        let caller = SipUser { username: "alice".into(), realm: Some("rustpbx.com".into()), ..Default::default() };
+        let plan = module
+            .default_resolve(&request, Box::new(TwoTrunks), &caller, &TransactionCookie::default())
+            .await
+            .unwrap();
+        assert!(plan.recording.enabled, "the first target's recording applies to the call");
+        assert_eq!(
+            plan.recording_policy.as_ref().and_then(|policy| policy.path.as_deref()),
+            Some("/tmp/rustpbx-first-target")
+        );
+        assert_eq!(plan.max_ring_time, None, "a trunk's ring time limits its own attempt, not the call");
+        assert!(plan.extensions.get::<crate::call::OutboundTrunkContext>().is_none(), "other hints stay per attempt");
     }
 
     struct RecordingHintsRouteInvite {
@@ -2653,7 +2779,7 @@ mod tests {
             let mut hints = crate::config::DialplanHints::default();
             hints.recording = self.recording.clone();
             hints.enable_recording = self.enable_recording;
-            Ok(RouteResult::Forward(option, Some(hints)))
+            Ok(RouteResult::Forward(vec![crate::config::RouteTarget::new(option, Some(hints))]))
         }
     }
 
@@ -2674,7 +2800,7 @@ mod tests {
         ) -> Result<RouteResult> {
             let mut hints = crate::config::DialplanHints::default();
             hints.ice_lite = self.ice_lite;
-            Ok(RouteResult::Forward(option, Some(hints)))
+            Ok(RouteResult::Forward(vec![crate::config::RouteTarget::new(option, Some(hints))]))
         }
     }
 
@@ -2989,6 +3115,42 @@ mod tests {
             }
             _ => panic!("expected Sequential strategy"),
         }
+    }
+
+    #[tokio::test]
+    async fn default_resolve_single_forward_keeps_registered_contacts_and_hints() {
+        let (server, config) = create_test_server_with_config(ProxyConfig {
+            parallel_fork: true,
+            ..Default::default()
+        }).await;
+        for port in [5071, 5072] {
+            server.locator.register("alice", Some("rustpbx.com"), Location {
+                aor: format!("sip:alice@127.0.0.1:{port}").parse().unwrap(),
+                expires: 3600,
+                ..Default::default()
+            }).await.unwrap();
+        }
+        let module = CallModule::new(config, server);
+        let mut request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite, "bp", None, "rustpbx.com", None,
+        );
+        request.uri = "sip:alice@rustpbx.com".parse().unwrap();
+        replace_to_header(&mut request, "sip:alice@rustpbx.com".parse().unwrap());
+        let caller = SipUser {
+            username: "bp".into(), realm: Some("rustpbx.com".into()), ..Default::default()
+        };
+        let plan = module.default_resolve(
+            &request, Box::new(IceLiteHintsRouteInvite { ice_lite: Some(true) }),
+            &caller, &TransactionCookie::default(),
+        ).await.unwrap();
+        let crate::call::DialplanFlow::Targets(DialStrategy::Parallel(contacts)) = &plan.flow else {
+            panic!("one logical route must still ring its registered contacts in parallel");
+        };
+        assert_eq!(contacts.len(), 2);
+        let mut uris = contacts.iter().map(|contact| contact.aor.to_string()).collect::<Vec<_>>();
+        uris.sort();
+        assert_eq!(uris, vec!["sip:alice@127.0.0.1:5071", "sip:alice@127.0.0.1:5072"]);
+        assert!(plan.media.ice_lite, "single-target route hints must still apply");
     }
 
     #[tokio::test]
@@ -3593,7 +3755,9 @@ mod tests {
             .expect("route invite should succeed");
 
         match result {
-            RouteResult::Forward(option, _) => {
+            RouteResult::Forward(mut targets) => {
+                assert_eq!(targets.len(), 1);
+                let option = targets.pop().unwrap().option;
                 assert_eq!(
                     option.destination.unwrap().addr.to_string(),
                     "10.0.0.2:5060"
@@ -3728,13 +3892,11 @@ mod tests {
             .await
             .expect("external destination should fall through to locs");
 
-        use crate::call::{DialStrategy, DialplanFlow};
+        use crate::call::DialplanFlow;
         match &dialplan.flow {
-            DialplanFlow::Targets(strategy) => match strategy {
-                DialStrategy::Sequential(locs) | DialStrategy::Parallel(locs) => {
-                    assert!(!locs.is_empty(), "external callee should be in targets");
-                }
-            },
+            DialplanFlow::Targets(strategy) => {
+                assert!(!strategy.is_empty(), "external callee should be in targets");
+            }
             _ => panic!("expected Targets flow for external callee"),
         }
     }
@@ -4126,7 +4288,8 @@ mod tests {
         // Run the same resolution logic from build_dialplan
         if let DialplanFlow::Targets(ref mut strategy) = dialplan.flow {
             let targets = match strategy {
-                DialStrategy::Parallel(t) | DialStrategy::Sequential(t) => t,
+                DialStrategy::Parallel(t) => t,
+                DialStrategy::Sequential(_) => panic!("expected parallel targets"),
             };
             for target in targets.iter_mut() {
                 if target.destination.is_none() {
@@ -4151,7 +4314,8 @@ mod tests {
         // Verify destination was resolved via locator
         let targets = match &dialplan.flow {
             DialplanFlow::Targets(strategy) => match strategy {
-                DialStrategy::Parallel(t) | DialStrategy::Sequential(t) => t,
+                DialStrategy::Parallel(t) => t,
+                DialStrategy::Sequential(_) => panic!("expected parallel targets"),
             },
             _ => panic!("Expected Targets flow"),
         };
@@ -4236,7 +4400,8 @@ mod tests {
         // Run the same resolution logic
         if let DialplanFlow::Targets(ref mut strategy) = dialplan.flow {
             let targets = match strategy {
-                DialStrategy::Parallel(t) | DialStrategy::Sequential(t) => t,
+                DialStrategy::Parallel(t) => t,
+                DialStrategy::Sequential(_) => panic!("expected parallel targets"),
             };
             for target in targets.iter_mut() {
                 if target.destination.is_none() {
@@ -4261,7 +4426,8 @@ mod tests {
         // Verify same-realm target got resolved, external target stays None
         let targets = match &dialplan.flow {
             DialplanFlow::Targets(strategy) => match strategy {
-                DialStrategy::Parallel(t) | DialStrategy::Sequential(t) => t,
+                DialStrategy::Parallel(t) => t,
+                DialStrategy::Sequential(_) => panic!("expected parallel targets"),
             },
             _ => panic!("Expected Targets flow"),
         };

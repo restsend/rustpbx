@@ -62,10 +62,15 @@ impl DialplanInspector for EmergencyInspector {
                 callee, cfg.emergency_trunk
             );
             if let Ok(trunk_uri) = rsipstack::sip::Uri::try_from(cfg.emergency_trunk.as_str()) {
-                dialplan.flow = DialplanFlow::Targets(DialStrategy::Sequential(vec![Location {
-                    aor: trunk_uri,
-                    ..Default::default()
-                }]));
+                dialplan.flow = DialplanFlow::Targets(DialStrategy::Sequential(
+                    vec![Location {
+                        aor: trunk_uri,
+                        ..Default::default()
+                    }]
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+                ));
             }
         }
 
@@ -187,7 +192,7 @@ mod tests {
                     _ => vec![],
                 };
                 assert_eq!(t.len(), 1);
-                assert_eq!(t[0].aor.to_string(), "sip:emg@pbx.com");
+                assert_eq!(t[0].location.aor.to_string(), "sip:emg@pbx.com");
             }
             _ => panic!("expected Targets"),
         }

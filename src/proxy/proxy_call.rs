@@ -113,7 +113,7 @@ impl CallSessionBuilder {
 
         let metadata = dialplan
             .first_target()
-            .and_then(|loc| loc.headers.as_ref())
+            .and_then(|loc| loc.headers)
             .and_then(|hdrs| {
                 let meta: std::collections::HashMap<String, String> = hdrs
                     .iter()

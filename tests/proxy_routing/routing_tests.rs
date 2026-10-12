@@ -6,7 +6,7 @@ use rustpbx::call::{
     cps_limiter::CpsLimiter,
 };
 use rustpbx::call::{FailureAction, QueueFallbackAction};
-use rustpbx::config::{MediaProxyMode, RecordingPolicy, RouteResult};
+use rustpbx::config::{MediaProxyMode, RecordingPolicy, RouteResult, RouteTarget};
 use rustpbx::proxy::routing::matcher::{RouteResourceLookup, match_invite};
 use rustpbx::proxy::routing::{
     DestConfig, MatchConditions, MediaMode, QueueDialMode, RejectConfig, RewriteRules, RouteAction,
@@ -43,7 +43,7 @@ async fn test_match_invite_no_routes() {
     .unwrap();
 
     match result {
-        RouteResult::Forward(_, _) | RouteResult::NotHandled(_, _) => {} // Expected
+        RouteResult::Forward(_) | RouteResult::NotHandled(_, _) => {} // Expected
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
         RouteResult::Queue { .. } => {
             panic!("Unexpected queue result")
@@ -167,7 +167,14 @@ async fn test_selected_trunk_codecs_override_source_trunk_codecs() {
     .expect("invite should match outbound route");
 
     match result {
-        RouteResult::Forward(_, Some(hints)) => {
+        RouteResult::Forward(mut targets) => {
+            assert_eq!(targets.len(), 1);
+            let RouteTarget {
+                hints: Some(hints), ..
+            } = targets.pop().unwrap()
+            else {
+                panic!("expected route hints");
+            };
             assert_eq!(hints.allow_codecs, Some(vec!["pcmu".to_string()]));
         }
         _ => panic!("expected forward with selected trunk codec hints"),
@@ -219,7 +226,9 @@ async fn test_matched_route_context_attached_on_forward() {
     .expect("invite should match outbound route");
 
     match result {
-        RouteResult::Forward(_, hints) => {
+        RouteResult::Forward(mut targets) => {
+            assert_eq!(targets.len(), 1);
+            let RouteTarget { hints, .. } = targets.pop().unwrap();
             let matched = hints
                 .and_then(|hints| {
                     hints
@@ -276,7 +285,9 @@ async fn test_matched_route_context_config_file_rule_has_no_id() {
     .expect("invite should match outbound route");
 
     match result {
-        RouteResult::Forward(_, hints) => {
+        RouteResult::Forward(mut targets) => {
+            assert_eq!(targets.len(), 1);
+            let RouteTarget { hints, .. } = targets.pop().unwrap();
             let matched = hints
                 .and_then(|hints| {
                     hints
@@ -400,7 +411,7 @@ async fn test_match_invite_inbound_respects_source_trunk() {
     .expect("invite should resolve");
 
     match result {
-        RouteResult::Forward(_, _) => {}
+        RouteResult::Forward(_) => {}
         RouteResult::NotHandled(_, _) | RouteResult::Abort(_, _) => {
             panic!("expected inbound invite to forward")
         }
@@ -458,7 +469,7 @@ async fn test_source_trunks_must_match_inbound() {
 
     match result {
         RouteResult::NotHandled(_, _) => {}
-        RouteResult::Forward(_, _) | RouteResult::Abort(_, _) => {
+        RouteResult::Forward(_) | RouteResult::Abort(_, _) => {
             panic!("expected invite to be left unhandled when source trunk is missing")
         }
         RouteResult::Queue { .. } => {
@@ -531,7 +542,9 @@ async fn test_match_invite_exact_match() {
 
     match result {
         RouteResult::NotHandled(_, _) => panic!("Expected forward, got not handled"),
-        RouteResult::Forward(option, hints) => {
+        RouteResult::Forward(mut targets) => {
+            assert_eq!(targets.len(), 1);
+            let RouteTarget { option, hints, .. } = targets.pop().unwrap();
             // Verify destination is set
             assert!(option.destination.is_some());
             let dest = option.destination.unwrap();
@@ -633,7 +646,9 @@ async fn test_match_invite_skips_disabled_route() {
     .expect("Failed to match invite");
 
     match result {
-        RouteResult::Forward(option, _) => {
+        RouteResult::Forward(mut targets) => {
+            assert_eq!(targets.len(), 1);
+            let RouteTarget { option, .. } = targets.pop().unwrap();
             let dest = option
                 .destination
                 .expect("forwarded invite should carry a destination");
@@ -703,7 +718,9 @@ async fn test_trunk_external_ip_propagates_to_hints() {
     .expect("Failed to match invite");
 
     match result {
-        RouteResult::Forward(_option, hints) => {
+        RouteResult::Forward(mut targets) => {
+            assert_eq!(targets.len(), 1);
+            let RouteTarget { hints, .. } = targets.pop().unwrap();
             let hints = hints.expect("external_ip on trunk should produce hints");
             assert_eq!(
                 hints.external_ip.as_deref(),
@@ -767,7 +784,14 @@ async fn test_route_codecs_override_selected_trunk_codecs() {
     .expect("invite should match route");
 
     match result {
-        RouteResult::Forward(_, Some(hints)) => {
+        RouteResult::Forward(mut targets) => {
+            assert_eq!(targets.len(), 1);
+            let RouteTarget {
+                hints: Some(hints), ..
+            } = targets.pop().unwrap()
+            else {
+                panic!("expected route hints");
+            };
             assert_eq!(hints.allow_codecs, Some(vec!["pcmu".to_string()]));
         }
         _ => panic!("expected forward with route codec hints"),
@@ -848,7 +872,8 @@ async fn test_match_invite_regex_match() {
         RouteResult::NotHandled(_option, _) => {
             panic!("Expected forward, got NotHandled")
         }
-        RouteResult::Forward(_option, _) => {
+        RouteResult::Forward(targets) => {
+            assert_eq!(targets.len(), 1);
             // Expected
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
@@ -948,7 +973,7 @@ async fn test_match_invite_queue_action_builds_hold_and_fallback() {
                 other => panic!("unexpected fallback action: {:?}", other),
             }
         }
-        RouteResult::Forward(_, _) => panic!("route forwarded instead of enqueuing"),
+        RouteResult::Forward(_) => panic!("route forwarded instead of enqueuing"),
         RouteResult::NotHandled(_, _) => panic!("route was not handled"),
         RouteResult::Abort(..) => panic!("queue route aborted"),
         RouteResult::Application { .. } => panic!("unexpected Application route in test"),
@@ -994,7 +1019,7 @@ async fn test_rule_without_source_trunks_matches_any_source() {
     .await
     .expect("rule should match inbound call");
     assert!(
-        matches!(&result, RouteResult::Forward(_, _)),
+        matches!(&result, RouteResult::Forward(_)),
         "expected Forward for inbound call with no source_trunks restriction"
     );
 
@@ -1012,7 +1037,7 @@ async fn test_rule_without_source_trunks_matches_any_source() {
     .await
     .expect("rule should match outbound call");
     assert!(
-        matches!(&result, RouteResult::Forward(_, _)),
+        matches!(&result, RouteResult::Forward(_)),
         "expected Forward for outbound call with no source_trunks restriction"
     );
 }
@@ -1056,7 +1081,7 @@ async fn test_source_trunks_filters_by_trunk_name() {
     .await
     .expect("rule should match call from carrier-a");
     assert!(
-        matches!(&result, RouteResult::Forward(_, _)),
+        matches!(&result, RouteResult::Forward(_)),
         "expected Forward for matching source_trunk"
     );
 
@@ -1249,10 +1274,16 @@ fn test_queue_strategy_builds_skill_group_targets() {
     match plan.dial_strategy.expect("dial strategy missing") {
         DialStrategy::Sequential(targets) => {
             assert_eq!(targets.len(), 2);
-            assert_eq!(targets[0].aor.to_string(), "sip:agent1@pbx.example");
-            assert_eq!(targets[1].aor.to_string(), "skill-group:support_l1");
             assert_eq!(
-                targets[1].contact_raw,
+                targets[0].location.aor.to_string(),
+                "sip:agent1@pbx.example"
+            );
+            assert_eq!(
+                targets[1].location.aor.to_string(),
+                "skill-group:support_l1"
+            );
+            assert_eq!(
+                targets[1].location.contact_raw,
                 Some("skill-group:support_l1".to_string())
             );
         }
@@ -1315,7 +1346,7 @@ async fn test_match_invite_reject_rule() {
             assert_eq!(code, rsipstack::sip::StatusCode::Forbidden);
             assert_eq!(reason, Some("Emergency calls not allowed".to_string()));
         }
-        RouteResult::Forward(_, _) => panic!("Expected abort, got forward"),
+        RouteResult::Forward(_) => panic!("Expected abort, got forward"),
         RouteResult::NotHandled(_, _) => panic!("Expected abort, got NotHandled"),
         RouteResult::Queue { .. } => {
             panic!("unexpected queue result")
@@ -1379,7 +1410,9 @@ async fn test_match_invite_rewrite_rules() {
     .unwrap();
 
     match result {
-        RouteResult::Forward(option, _) => {
+        RouteResult::Forward(mut targets) => {
+            assert_eq!(targets.len(), 1);
+            let RouteTarget { option, .. } = targets.pop().unwrap();
             // Verify caller was rewritten
             let caller_user = option.caller.user().unwrap_or_default();
             assert_eq!(caller_user, "013812345678");
@@ -1468,7 +1501,9 @@ async fn test_match_invite_load_balancing() {
         .unwrap();
 
         match result {
-            RouteResult::Forward(option, _) => {
+            RouteResult::Forward(mut targets) => {
+                assert_eq!(targets.len(), 1);
+                let RouteTarget { option, .. } = targets.pop().unwrap();
                 // Verify some trunk was selected
                 assert!(option.destination.is_some());
                 let dest = option.destination.unwrap();
@@ -1553,7 +1588,8 @@ async fn test_match_invite_header_matching() {
     .unwrap();
 
     match result {
-        RouteResult::Forward(_option, _) => {
+        RouteResult::Forward(targets) => {
+            assert_eq!(targets.len(), 1);
             // Expected to match VIP header
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
@@ -1616,7 +1652,9 @@ async fn test_match_invite_default_route() {
     .unwrap();
 
     match result {
-        RouteResult::Forward(option, _) => {
+        RouteResult::Forward(mut targets) => {
+            assert_eq!(targets.len(), 1);
+            let RouteTarget { option, .. } = targets.pop().unwrap();
             // Should use default trunk, but due to our simplified implementation, this just verifies there's a destination
             println!("Default route selected: {:?}", option.destination);
         }
@@ -1693,7 +1731,9 @@ async fn test_match_invite_advanced_rewrite_patterns() {
     .unwrap();
 
     match result_us {
-        RouteResult::Forward(option, _) => {
+        RouteResult::Forward(mut targets) => {
+            assert_eq!(targets.len(), 1);
+            let RouteTarget { option, .. } = targets.pop().unwrap();
             let caller_user = option.caller.user().unwrap_or_default();
             assert_eq!(caller_user, "0015551234567");
         }
@@ -1753,7 +1793,9 @@ async fn test_match_invite_advanced_rewrite_patterns() {
     .unwrap();
 
     match result_digits {
-        RouteResult::Forward(option, _) => {
+        RouteResult::Forward(mut targets) => {
+            assert_eq!(targets.len(), 1);
+            let RouteTarget { option, .. } = targets.pop().unwrap();
             let caller_user = option.caller.user().unwrap_or_default();
             assert_eq!(caller_user, "ext12345");
         }
@@ -1829,7 +1871,9 @@ async fn test_match_invite_rewrite_from_host_uses_match_capture() {
     .unwrap();
 
     match result {
-        RouteResult::Forward(option, _) => {
+        RouteResult::Forward(mut targets) => {
+            assert_eq!(targets.len(), 1);
+            let RouteTarget { option, .. } = targets.pop().unwrap();
             let caller_user = option.caller.user().unwrap_or_default();
             assert_eq!(caller_user, "0015551234567");
 
@@ -2057,7 +2101,7 @@ async fn test_match_invite_application_action() {
             assert_eq!(app_params, Some(serde_json::json!({"mailbox": "1001"})));
             assert!(auto_answer);
         }
-        RouteResult::Forward(_, _) => panic!("Expected Application, got Forward"),
+        RouteResult::Forward(_) => panic!("Expected Application, got Forward"),
         RouteResult::NotHandled(_, _) => panic!("Expected Application, got NotHandled"),
         RouteResult::Abort(_, _) => panic!("Expected Application, got Abort"),
         RouteResult::Queue { .. } => panic!("Expected Application, got Queue"),
@@ -2551,7 +2595,9 @@ async fn test_match_invite_forward_with_trunk_rewrites_callee() {
     .unwrap();
 
     match result {
-        RouteResult::Forward(option, _) => {
+        RouteResult::Forward(mut targets) => {
+            assert_eq!(targets.len(), 1);
+            let RouteTarget { option, .. } = targets.pop().unwrap();
             // Verify callee is rewritten to trunk's dest
             assert_eq!(
                 option.callee.host().to_string(),
@@ -2999,7 +3045,7 @@ async fn test_source_trunk_cps_limit_rejects() {
     assert!(
         matches!(
             result,
-            RouteResult::Forward(_, _) | RouteResult::NotHandled(_, _)
+            RouteResult::Forward(_) | RouteResult::NotHandled(_, _)
         ),
         "first call should pass"
     );
@@ -3050,7 +3096,7 @@ async fn test_source_trunk_concurrent_limit_rejects() {
     )
     .await
     .unwrap();
-    assert!(matches!(result, RouteResult::Forward(_, _)));
+    assert!(matches!(result, RouteResult::Forward(_)));
 
     // Second call without releasing should be rejected with 503.
     let result2 = match_invite(
@@ -3164,7 +3210,7 @@ async fn test_dest_trunk_concurrent_limit_rejects() {
     )
     .await
     .unwrap();
-    assert!(matches!(result, RouteResult::Forward(_, _)));
+    assert!(matches!(result, RouteResult::Forward(_)));
 
     // Second call to the same dest trunk should be rejected with 486.
     let result2 = match_invite(
@@ -3214,7 +3260,7 @@ async fn test_dest_trunk_reject_releases_source_slot() {
     )
     .await
     .unwrap();
-    assert!(matches!(r1, RouteResult::Forward(_, _)));
+    assert!(matches!(r1, RouteResult::Forward(_)));
     assert_eq!(trunk_concurrent_count(&trunks, "in"), 1);
     assert_eq!(trunk_concurrent_count(&trunks, "out"), 1);
 
@@ -3266,7 +3312,14 @@ async fn test_trunk_concurrent_call_permits_attached_to_forward_hints() {
     .unwrap();
 
     match result {
-        RouteResult::Forward(_, Some(hints)) => {
+        RouteResult::Forward(mut targets) => {
+            assert_eq!(targets.len(), 1);
+            let RouteTarget {
+                hints: Some(hints), ..
+            } = targets.pop().unwrap()
+            else {
+                panic!("expected route hints");
+            };
             assert_eq!(
                 hints.concurrent_call_lease.len(),
                 2,
@@ -3305,7 +3358,9 @@ async fn test_no_limits_means_no_holds() {
     .unwrap();
 
     match result {
-        RouteResult::Forward(_, hints) => {
+        RouteResult::Forward(mut targets) => {
+            assert_eq!(targets.len(), 1);
+            let RouteTarget { hints, .. } = targets.pop().unwrap();
             let holds = hints.map(|h| h.concurrent_call_lease).unwrap_or_default();
             assert!(holds.is_empty(), "no trunk holds when no limits configured");
         }

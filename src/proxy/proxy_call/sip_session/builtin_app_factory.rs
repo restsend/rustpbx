@@ -462,7 +462,7 @@ impl BuiltinAppFactory {
                 config.strategy = if pending.parallel {
                     crate::call::DialStrategy::Parallel(agents)
                 } else {
-                    crate::call::DialStrategy::Sequential(agents)
+                    crate::call::DialStrategy::Sequential(agents.into_iter().map(Into::into).collect())
                 };
 
                 // Skill-group queues: enable lifecycle events + wait retention.

@@ -42,7 +42,7 @@ mod tests {
                 reason: Some("All agents busy".to_string()),
             })),
             agents: vec![location.clone()],
-            strategy: DialStrategy::Sequential(vec![location]),
+            strategy: DialStrategy::Sequential(vec![location].into_iter().map(Into::into).collect()),
             ring_timeout: Some(Duration::from_secs(30)),
             ..Default::default()
         }
@@ -76,7 +76,7 @@ mod tests {
                 reason: Some("All agents busy".to_string()),
             })),
             agents: agents.clone(),
-            strategy: DialStrategy::Sequential(agents),
+            strategy: DialStrategy::Sequential(agents.into_iter().map(Into::into).collect()),
             ring_timeout: Some(Duration::from_secs(30)),
             ..Default::default()
         }

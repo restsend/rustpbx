@@ -1013,7 +1013,10 @@ impl RwiCommandProcessor {
                 )
                 .await
                 {
-                    Ok(Some(crate::config::RouteResult::Forward(routed_option, hints))) => {
+                    Ok(Some(crate::config::RouteResult::Forward(targets))) => {
+                        let crate::config::RouteTarget { option: routed_option, hints, .. } =
+                            targets.into_iter().next().ok_or_else(||
+                                CommandError::CommandFailed("routing returned no destinations".into()))?;
                         invite_option.callee = routed_option.callee.clone();
                         if let Some(dest) = routed_option.destination.clone() {
                             invite_option.destination = Some(dest);

@@ -44,6 +44,24 @@ impl ConfigOrigin {
     }
 }
 
+/// When a failed sequential target may advance to the next target. A target
+/// that rings past its trunk's `max_ring_time` fails with 408.
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
+pub struct RetryPolicy {
+    /// Final SIP failure responses that allow another target. Empty disables retry.
+    #[serde(default)]
+    pub status_codes: Vec<u16>,
+}
+
+impl RetryPolicy {
+    pub fn validate(&self) -> Result<()> {
+        if self.status_codes.iter().any(|code| !(300..=699).contains(code)) {
+            return Err(anyhow!("retry status codes must be final SIP failure codes (300–699)"));
+        }
+        Ok(())
+    }
+}
+
 /// Single trunk configuration
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TrunkConfig {
@@ -182,6 +200,10 @@ pub struct TrunkConfig {
     /// Per-trunk max ring/setup time in seconds before a no-answer rejection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_ring_time: Option<u32>,
+
+    /// Opt-in failure conditions used when a route permits sequential failover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_policy: Option<RetryPolicy>,
 }
 
 /// Controls which original-request custom headers are forwarded to the
@@ -509,6 +531,7 @@ impl Default for TrunkConfig {
             did_numbers: Vec::new(),
             ringback: None,
             max_ring_time: None,
+            retry_policy: None,
             origin: ConfigOrigin::embedded(),
         }
     }
@@ -1092,7 +1115,7 @@ impl RouteQueueConfig {
 
         let strategy = match self.strategy.mode {
             QueueDialMode::Parallel => DialStrategy::Parallel(locations),
-            QueueDialMode::Sequential => DialStrategy::Sequential(locations),
+            QueueDialMode::Sequential => DialStrategy::Sequential(locations.into_iter().map(Into::into).collect()),
         };
         Ok(Some(strategy))
     }

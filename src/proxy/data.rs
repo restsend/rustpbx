@@ -1299,6 +1299,11 @@ pub fn sbc_config_from_metadata(meta: &serde_json::Value) -> TrunkConfig {
         external_ip: from_str(sbc.and_then(|s| s.get("external_ip"))),
         bind_ip: from_str(sbc.and_then(|s| s.get("bind_ip"))),
         ice_lite: from_bool(sbc.and_then(|s| s.get("ice_lite"))),
+        retry_policy: sbc
+            .and_then(|s| s.get("retry_policy"))
+            .and_then(|v| serde_json::from_value::<super::routing::RetryPolicy>(v.clone()).ok())
+            .filter(|policy| policy.validate().is_ok()),
+        max_ring_time: from_u64(sbc.and_then(|s| s.get("max_ring_time"))),
         codec: codecs,
         recording: if recording.is_some() { recording } else { None },
         ..Default::default()
@@ -1426,6 +1431,12 @@ pub fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
             }
             if sbc.ice_lite.is_some() {
                 trunk.ice_lite = sbc.ice_lite;
+            }
+            if sbc.retry_policy.is_some() {
+                trunk.retry_policy = sbc.retry_policy;
+            }
+            if sbc.max_ring_time.is_some() {
+                trunk.max_ring_time = sbc.max_ring_time;
             }
         }
     }
@@ -2525,6 +2536,34 @@ file = "db://ivr/lf-step-ivr.generated.toml"
         let (_, trunk) = convert_trunk(model).expect("should convert");
         assert_eq!(trunk.dest, "sbc.carrier.example");
         assert_eq!(trunk.outbound_proxy, None);
+    }
+
+    #[test]
+    fn convert_trunk_merges_retry_policy_without_schema_fields() {
+        let model = sip_trunk::Model {
+            id: 3,
+            name: "carrier".to_string(),
+            sip_server: Some("sip:1.2.3.4:5060".to_string()),
+            metadata: Some(serde_json::json!({"sbc": {
+                "ice_lite": true,
+                "max_ring_time": 20,
+                "retry_policy": {"status_codes": [408, 503]}
+            }})),
+            ..Default::default()
+        };
+        let (_, trunk) = convert_trunk(model).expect("should convert");
+        let policy = trunk.retry_policy.as_ref().expect("policy should be merged");
+        assert_eq!(policy.status_codes, vec![408, 503]);
+        assert_eq!(trunk.max_ring_time, Some(20));
+        assert_eq!(trunk.ice_lite, Some(true));
+
+        let encoded = toml::to_string(&trunk).expect("serialize trunk config");
+        let decoded: TrunkConfig = toml::from_str(&encoded).expect("read trunk config");
+        assert_eq!(decoded.retry_policy, trunk.retry_policy);
+        assert!(sbc_config_from_metadata(&serde_json::json!({})).retry_policy.is_none());
+        assert!(sbc_config_from_metadata(&serde_json::json!({"sbc": {
+            "retry_policy": {"status_codes": [200]}
+        }})).retry_policy.is_none());
     }
 
     #[test]

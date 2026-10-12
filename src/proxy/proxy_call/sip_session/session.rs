@@ -381,7 +381,10 @@ impl SipSession {
         )
         .await?
         {
-            Some(crate::config::RouteResult::Forward(option, hints)) => {
+            Some(crate::config::RouteResult::Forward(targets)) => {
+                // Single-leg APIs use the first routed target.
+                let crate::config::RouteTarget { option, hints, .. } = targets.into_iter().next()
+                    .ok_or_else(|| anyhow!("routing returned no destinations"))?;
                 let mut routed = location.clone();
                 routed.aor = option.callee.clone();
                 routed.destination = option.destination.clone();
@@ -1568,7 +1571,8 @@ impl SipSession {
             .get_or_create_server_invite(tx, state_tx, None, local_contact.clone())
             .map_err(|e| anyhow!("Failed to create server dialog: {}", e))?;
 
-        let use_media_proxy = Self::check_media_proxy(&context, &context.dialplan.media.proxy_mode);
+        let initial_plan = Self::initial_plan(&server, &context);
+        let use_media_proxy = Self::check_media_proxy(&context, &initial_plan.media.proxy_mode);
 
         let (mut session, handle, cmd_rx) = SipSession::new(
             server.clone(),
@@ -2312,15 +2316,14 @@ impl SipSession {
         _dialog_guard: ServerDialogGuard,
     ) -> Result<()> {
         let _cancel_guard = self.cancel_token.clone().drop_guard();
+        let initial_plan = Self::initial_plan(&self.server, &self.context);
 
         // Start watching before 183/setup. The same receiver is reused by the
         // established-call loop below.
         // RTP timeout is handled via MediaBridge::start_rtp_timeout
         // which fires a callback → cmd_tx → process_command(CallCommand::RtpTimeout).
 
-        let ring_audio = self
-            .context
-            .dialplan
+        let ring_audio = initial_plan
             .audio_profile
             .as_ref()
             .and_then(|p| p.ring.clone());
@@ -5755,8 +5758,7 @@ impl SipSession {
         use crate::call::DialStrategy;
 
         let agents = match &plan.dial_strategy {
-            Some(DialStrategy::Sequential(l)) => l.clone(),
-            Some(DialStrategy::Parallel(l)) => l.clone(),
+            Some(strategy) => strategy.locations(),
             None => Vec::new(),
         };
 
@@ -5897,7 +5899,7 @@ impl SipSession {
         plan.dial_strategy = Some(if is_parallel {
             DialStrategy::Parallel(resolved_agents)
         } else {
-            DialStrategy::Sequential(resolved_agents)
+            DialStrategy::Sequential(resolved_agents.into_iter().map(Into::into).collect())
         });
 
         info!(session_id = %self.id,
@@ -6066,8 +6068,7 @@ impl SipSession {
                 DialplanFlow::Queue { plan, next } => {
                     // Extract agents from plan
                     let agents = match &plan.dial_strategy {
-                        Some(DialStrategy::Sequential(l)) => l.clone(),
-                        Some(DialStrategy::Parallel(l)) => l.clone(),
+                        Some(strategy) => strategy.locations(),
                         None => {
                             warn!(session_id = %self.id, "No dial strategy in queue plan");
                             return self.execute_flow(next, callee_state_rx).await;
@@ -6235,9 +6236,127 @@ impl SipSession {
         }
     }
 
+    /// The routed plan with the first sequential attempt's hints applied.
+    /// Call-level decisions made before dialing (media path, proactive
+    /// ringback) read this; it is never stored.
+    pub(crate) fn initial_plan(server: &SipServerRef, context: &CallContext) -> Arc<crate::call::Dialplan> {
+        if let crate::call::DialplanFlow::Targets(DialStrategy::Sequential(attempts)) = &context.dialplan.flow
+            && let Some(first) = attempts.first()
+        {
+            return Arc::new(Self::plan_for_attempt(server, &context.dialplan, first));
+        }
+        context.dialplan.clone()
+    }
+
+    /// Fork the routed plan and apply one attempt's caller and trunk hints.
+    /// Recording, ring time and the media path are fixed for the call and stay as routed.
+    fn plan_for_attempt(
+        server: &SipServerRef,
+        base: &crate::call::Dialplan,
+        attempt: &crate::call::DialAttempt,
+    ) -> crate::call::Dialplan {
+        let mut plan = base.fork_for_target();
+        if let Some(caller) = attempt.caller.as_ref() {
+            plan.caller = Some(caller.clone());
+        }
+        let Some(hints) = attempt.hints.as_deref() else {
+            return plan;
+        };
+        if hints.bypass_media == Some(true) {
+            plan.media.proxy_mode = MediaProxyMode::Bypass;
+        }
+        if let Some(mode) = hints.media_mode.as_ref() {
+            plan.media.proxy_mode = mode.clone();
+        }
+        if let Some(policy) = hints.video_policy.as_ref() {
+            plan.media.video_policy = Some(policy.clone());
+        }
+        if let Some(id) = hints.network_profile_id.as_deref() {
+            let profile = server.network_profile(id)
+                .unwrap_or_else(|| server.default_network_profile());
+            server.apply_network_profile_to_media(&profile, &mut plan.media);
+        }
+        if let Some(ip) = hints.external_ip.as_ref() {
+            plan.media.external_ip = Some(ip.clone());
+        }
+        if let Some(ip) = hints.bind_ip.as_ref() {
+            plan.media.bind_ip = Some(ip.clone());
+        }
+        if let Some(ice_lite) = hints.ice_lite {
+            plan.media.ice_lite = ice_lite;
+        }
+        if hints.disable_ice_servers == Some(true) {
+            plan.media.ice_servers = None;
+        }
+        if let Some(codecs) = hints.allow_codecs.as_deref() {
+            crate::proxy::call::apply_allowed_codecs(&mut plan, Some(codecs), None);
+        }
+        if let Some(ringback) = hints.ringback.as_ref() {
+            plan.audio_profile.get_or_insert_with(Default::default).merge_from(ringback.clone());
+        }
+        if let Some(duration) = hints.max_duration {
+            plan.max_call_duration = Some(duration);
+        }
+        if let Some(enabled) = hints.enable_sipflow {
+            plan.enable_sipflow = enabled;
+        }
+        if let Some(busy_wait) = hints.busy_wait.as_ref() {
+            plan.busy_wait = Some(busy_wait.to_plan());
+        }
+        plan
+    }
+
+    /// Make `plan` the active dialplan for the attempt about to be dialed and
+    /// take ownership of the attempt's per-trunk resources. The media path and
+    /// recording are fixed for the call and are not changed here.
+    async fn activate_attempt(&mut self, attempt: &crate::call::DialAttempt, mut plan: crate::call::Dialplan) {
+        let default_hints = crate::config::DialplanHints::default();
+        let hints = attempt.hints.as_deref().unwrap_or(&default_hints);
+        // Resolve passthrough against the active trunk rather than the first
+        // destination that was present during the initial routing preview.
+        if let Some(trunk) = hints.extensions.get::<crate::call::OutboundTrunkContext>() {
+            plan.header_passthrough = self.server
+                .header_passthrough_for(&attempt.location, false, &plan.original.uri, trunk.dest.as_deref())
+                .await;
+        }
+        plan.extensions.extend(hints.extensions.clone());
+        self.context.cookie.with_extensions_mut(|ext| ext.extend(hints.extensions.clone()));
+        self.extensions.write().extend(hints.extensions.clone());
+        if !hints.concurrent_call_lease.is_empty() {
+            self.transient_leases.push(hints.concurrent_call_lease.take());
+        }
+        plan.concurrency_holds.lock().extend(hints.concurrency_holds.clone());
+        self.context.dialplan = Arc::new(plan);
+        if let Some(reporter) = self.reporter.as_mut() {
+            reporter.context = self.context.clone();
+        }
+    }
+
+    /// Drop the failed attempt's callee leg and media so the next target
+    /// starts clean. The caller's negotiated peer stays alive.
+    async fn reset_callee_for_retry(&mut self) {
+        if let Some(bridge) = self.media.bridge.as_mut() {
+            let _ = bridge.unbridge().await;
+        }
+        self.legs.remove(&LegId::from("callee"));
+        self.legs.insert(LegId::from("callee"), Leg::new(LegId::from("callee")));
+        self.media.callee_offer = None;
+        self.media.callee_offer_cached_webrtc = None;
+        self.media.callee_answer_sdp = None;
+        self.media.early_media_sent = false;
+        if self.media_leg(&LegId::from("caller")).is_none() {
+            self.media.answer = None;
+        }
+    }
+
+    fn caller_gone(&self) -> bool {
+        self.cancel_token.is_cancelled()
+            || self.caller_dialog.as_ref().is_some_and(|dialog| dialog.state().is_terminated())
+    }
+
     async fn dial_sequential(
         &mut self,
-        targets: &[crate::call::Location],
+        targets: &[crate::call::DialAttempt],
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<(), CalleeError> {
         self.record_trace(
@@ -6255,18 +6374,33 @@ impl SipSession {
             ));
         }
 
+        // Every attempt is forked from the routed plan, never from the
+        // previous attempt's plan.
+        let base = self.context.dialplan.clone();
         let mut last_error = into_callee_err(
             &StatusCode::TemporarilyUnavailable,
             Some("All targets failed".to_string()),
         );
 
-        for (idx, target) in targets.iter().enumerate() {
-            info!(index = idx, target = %target.aor, "Trying sequential target");
+        for (idx, attempt) in targets.iter().enumerate() {
+            if self.caller_gone() {
+                return Err(into_callee_err(&StatusCode::RequestTerminated, Some("Caller cancelled".into())));
+            }
+            if idx > 0 {
+                self.reset_callee_for_retry().await;
+            }
+            let plan = Self::plan_for_attempt(&self.server, &base, attempt);
+            self.activate_attempt(attempt, plan).await;
+            // Each trunk's own ring time limits its attempt (408 when it runs out);
+            // the call's ring timer wraps the whole loop. A single target's ring
+            // time is the call's, so it gets no attempt timer.
+            let attempt_timeout = (targets.len() > 1)
+                .then(|| attempt.hints.as_ref().and_then(|hints| hints.max_ring_time))
+                .flatten();
+            let started_at = Instant::now();
+            info!(session_id = %self.id, index = idx, target = %attempt.location.aor, "Trying sequential target");
 
-            match self
-                .try_single_target(target, callee_state_rx, None, None, None)
-                .await
-            {
+            match self.try_single_target(&attempt.location, callee_state_rx, None, attempt_timeout, None, None).await {
                 Ok(()) => {
                     info!(session_id = %self.id, index = idx, "Sequential target succeeded");
                     return Ok(());
@@ -6274,6 +6408,14 @@ impl SipSession {
                 Err(e) => {
                     warn!(session_id = %self.id, index = idx, error = ?e, "Sequential target failed");
                     last_error = e;
+                    if targets.len() > 1 {
+                        self.record_attempt_failure(idx, attempt, &last_error, started_at.elapsed());
+                    }
+                    let retry = attempt.retry_policy.as_ref()
+                        .is_none_or(|policy| policy.status_codes.contains(&last_error.0));
+                    if self.caller_gone() || !retry {
+                        return Err(last_error);
+                    }
                 }
             }
         }
@@ -6281,6 +6423,43 @@ impl SipSession {
         self.meta.error_code =
             Some(&crate::proxy::proxy_call::error_catalog::DIAL_ALL_TARGETS_FAILED);
         Err(last_error)
+    }
+
+    /// Trace a failed target of a multi-target sequential plan, with the
+    /// attempt's trunk, so hooks see every trunk that was tried and not only
+    /// the one that ended the call.
+    fn record_attempt_failure(
+        &mut self,
+        index: usize,
+        attempt: &crate::call::DialAttempt,
+        error: &CalleeError,
+        elapsed: Duration,
+    ) {
+        let info = &crate::proxy::proxy_call::error_catalog::DIAL_ATTEMPT_FAILED;
+        let mut detail = serde_json::json!({
+            "attempt": index,
+            "target": attempt.location.aor.to_string(),
+            "status": error.0,
+            "reason": error.1,
+        });
+        if let Some(trunk) = attempt
+            .hints
+            .as_deref()
+            .and_then(|hints| hints.extensions.get::<crate::call::OutboundTrunkContext>())
+        {
+            detail["trunk_id"] = serde_json::json!(trunk.id);
+            detail["trunk"] = serde_json::json!(trunk.name);
+        }
+        self.record_trace(
+            crate::call_errors::TraceEvent::new(
+                crate::call_errors::TraceKind::Ring,
+                format!("Attempt {} failed: {} {}", index + 1, error.0, error.1),
+            )
+            .severity(info.severity)
+            .code(info.code)
+            .duration(elapsed.as_millis() as i64)
+            .detail(detail),
+        );
     }
 
     async fn dial_parallel(
@@ -6863,7 +7042,6 @@ impl SipSession {
             .dialplan
             .flow
             .find_targets()
-            .cloned()
             .unwrap_or_default();
         if targets.is_empty() {
             warn!(
@@ -6940,7 +7118,7 @@ impl SipSession {
             let mut saw_busy = false;
             for target in &targets {
                 match self
-                    .try_single_target(target, callee_state_rx, None, None, None)
+                    .try_single_target(&target, callee_state_rx, None, None, None, None)
                     .await
                 {
                     Ok(()) => return Ok(()),
@@ -7290,6 +7468,7 @@ impl SipSession {
         target: &crate::call::Location,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
         no_trying_timeout: Option<std::time::Duration>,
+        attempt_timeout: Option<std::time::Duration>,
         caller: Option<rsipstack::sip::Uri>,
         transfer_headers: Option<&HashMap<String, String>>,
     ) -> Result<(), CalleeError> {
@@ -7359,6 +7538,9 @@ impl SipSession {
         let invite_sent_at = Instant::now();
         let no_trying_deadline = no_trying_timeout.map(|d| invite_sent_at + d);
         let mut no_trying_dismissed = no_trying_timeout.is_none();
+        // The target's ring time: ending the attempt drops the INVITE, which
+        // CANCELs it, while the call itself continues.
+        let attempt_deadline = attempt_timeout.map(|d| invite_sent_at + d);
 
         // Other dialogs share this receiver. Replay their events after the
         // attempt so a transferor BYE cannot abort a successful replacement,
@@ -7394,6 +7576,15 @@ impl SipSession {
                         break Err(into_callee_err(
                             &StatusCode::RequestTimeout,
                             Some("No-trying timeout".to_string()),
+                        ));
+                    }
+                    if let Some(deadline) = attempt_deadline
+                        && Instant::now() >= deadline
+                    {
+                        info!(session_id = %self.id, %callee_uri, "Target ring time reached, cancelling callee INVITE");
+                        break Err(into_callee_err(
+                            &StatusCode::RequestTimeout,
+                            Some("Ring timeout".to_string()),
                         ));
                     }
                 }

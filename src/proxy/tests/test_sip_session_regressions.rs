@@ -1416,7 +1416,7 @@ async fn test_session_captures_rewritten_dialplan_uris_for_call_record() {
         .with_targets(DialStrategy::Sequential(vec![crate::call::Location {
             aor: callee,
             ..Default::default()
-        }]));
+        }].into_iter().map(Into::into).collect()));
 
     let session = build_session(dialplan).await;
     let snapshot = session.record_snapshot();

@@ -1454,6 +1454,7 @@ impl SipSession {
                 &location,
                 callee_state_rx,
                 None,
+                None,
                 caller,
                 Some(headers),
             )
@@ -1529,7 +1530,10 @@ impl SipSession {
         )
         .await?;
         match routed_target {
-            Some(crate::config::RouteResult::Forward(option, hints)) => {
+            Some(crate::config::RouteResult::Forward(targets)) => {
+                // Single-leg APIs use the first routed target.
+                let crate::config::RouteTarget { option, hints, .. } = targets.into_iter().next()
+                    .ok_or_else(|| anyhow!("routing returned no destinations"))?;
                 let mut routed = location.clone();
                 routed.aor = option.callee.clone();
                 routed.destination = option.destination.clone();
@@ -1739,7 +1743,8 @@ impl SipSession {
                     aor,
                     contact_raw: Some(target),
                     ..Default::default()
-                }])),
+                }
+                .into()])),
                 queue_name: format!("agent:{ext}"),
                 ..Default::default()
             };
@@ -1873,7 +1878,7 @@ impl SipSession {
                     overrides = %locations.len(),
                     "Queue transfer: overriding targets from query params"
                 );
-                queue_plan.dial_strategy = Some(DialStrategy::Sequential(locations));
+                queue_plan.dial_strategy = Some(DialStrategy::Sequential(locations.into_iter().map(Into::into).collect()));
             }
         }
 
@@ -2109,8 +2114,17 @@ impl SipSession {
                 )
                 .await
             }
-            Some(crate::config::RouteResult::Forward(_, hints))
-            | Some(crate::config::RouteResult::NotHandled(_, hints)) => {
+            Some(crate::config::RouteResult::Forward(targets)) => {
+                // A transfer uses a single routed target.
+                self.track_routed_leg_hints(targets.into_iter().next().and_then(|target| target.hints));
+                self.try_route_point_fallback_or_terminate(
+                    anyhow!("route point did not resolve to an application"),
+                    &format!("toivr:{route_point}"),
+                    &variables,
+                )
+                .await
+            }
+            Some(crate::config::RouteResult::NotHandled(_, hints)) => {
                 self.track_routed_leg_hints(hints);
                 self.try_route_point_fallback_or_terminate(
                     anyhow!("route point did not resolve to an application"),

@@ -560,7 +560,7 @@ async fn match_invite_impl(
                     &mut hints,
                     std::mem::take(&mut concurrent_call_lease),
                 );
-                return Ok(RouteResult::Forward(option, hints));
+                return Ok(RouteResult::Forward(vec![crate::config::RouteTarget::new(option, hints)]));
             }
             ActionType::Queue => {
                 let queue_ref = rule

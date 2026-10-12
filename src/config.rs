@@ -1960,9 +1960,28 @@ impl std::fmt::Debug for DialplanHints {
     }
 }
 
+/// One routed destination: the INVITE to send (callee, rewritten caller,
+/// destination, credential, headers), its dialplan hints, and when a failure
+/// on it may advance to the next target.
+pub struct RouteTarget {
+    pub option: InviteOption,
+    pub hints: Option<DialplanHints>,
+    /// None never advances to the next target.
+    pub retry_policy: Option<crate::proxy::routing::RetryPolicy>,
+}
+
+impl RouteTarget {
+    pub fn new(option: InviteOption, hints: Option<DialplanHints>) -> Self {
+        Self { option, hints, retry_policy: None }
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 pub enum RouteResult {
-    Forward(InviteOption, Option<DialplanHints>),
+    /// Ordered targets. A single target dials exactly as before; later targets
+    /// are tried only when the failed target's retry policy allows it.
+    /// An empty list has no destination and must not fall back to direct dialing.
+    Forward(Vec<RouteTarget>),
     Queue {
         option: InviteOption,
         queue: QueuePlan,

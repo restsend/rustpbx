@@ -298,7 +298,7 @@ impl CallRouter for HttpCallRouter {
 
                 let strategy = match result.strategy {
                     Some(HttpRouteStrategy::Parallel) => DialStrategy::Parallel(locs),
-                    _ => DialStrategy::Sequential(locs),
+                    _ => DialStrategy::Sequential(locs.into_iter().map(Into::into).collect()),
                 };
 
                 // Global session id (RFC 7989): HTTP-routed calls always

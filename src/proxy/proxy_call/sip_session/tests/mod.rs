@@ -3,6 +3,323 @@ use crate::proxy::proxy_call::dtmf::RtpDtmfDetector;
 use crate::proxy::proxy_call::sip_session::builtin_app_factory::BuiltinAppFactory;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// A sequential attempt for an INVITE; a `None` policy keeps the dialer's legacy advance.
+fn dial_attempt(
+    option: rsipstack::dialog::invitation::InviteOption,
+    hints: Option<crate::config::DialplanHints>,
+    retry_policy: Option<crate::proxy::routing::RetryPolicy>,
+) -> crate::call::DialAttempt {
+    let mut attempt = crate::call::DialAttempt::from(crate::config::RouteTarget { option, hints, retry_policy: None });
+    attempt.retry_policy = retry_policy;
+    attempt
+}
+
+#[tokio::test]
+async fn sequential_route_retry_uses_real_status_time_limits_and_attempt_context() {
+    use crate::call::{DialDirection, Dialplan, DialAttempt, TransactionCookie};
+    use crate::proxy::routing::RetryPolicy;
+    use crate::proxy::tests::common::{create_test_request, create_test_server, create_transaction};
+    use rsipstack::sip::{Header, Method, SipMessage, StatusCode};
+    use rsipstack::transport::{SipAddr, udp::UdpConnection};
+
+    for (case, expected_attempts) in [
+        ("matching_status", 2), ("other_status", 1), ("empty_policy", 1),
+        ("legacy", 3), ("no_policy", 3),
+        ("cancel_before", 0), ("cancel_during", 1),
+        ("accepted", 1), ("outer_timeout", 1),
+        ("early_anchor_to_bypass", 2), ("bypass_to_anchor", 2),
+        ("ring_timeout", 2),
+    ] {
+        let (server, _) = create_test_server().await;
+        let remote = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let remote_addr = remote.local_addr().unwrap();
+        server.endpoint.inner.transport_layer.del_transport(&SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Udp), addr: "127.0.0.1:5060".try_into().unwrap(),
+        });
+        let transport = UdpConnection::create_connection("127.0.0.1:0".parse().unwrap(), None, None).await.unwrap();
+        server.endpoint.inner.transport_layer.add_transport(transport.into());
+        let endpoint = server.endpoint.inner.clone();
+        let serving = tokio::spawn(async move { endpoint.serve().await.unwrap(); });
+        let mut request = create_test_request(Method::Invite, "alice", None, "rustpbx.com", None);
+        if matches!(case, "early_anchor_to_bypass" | "bypass_to_anchor") {
+            request.body = concat!(
+                "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=Talk\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n",
+                "m=audio 40000 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n",
+            ).as_bytes().to_vec();
+        }
+        let (tx, _caller_endpoint) = create_transaction(request.clone()).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let dialog = server.dialog_layer.get_or_create_server_invite(&tx, state_tx, None, None).unwrap();
+        let mut plan = Dialplan::new(case.into(), request, DialDirection::Inbound)
+            .with_caller("sip:original@rustpbx.com".try_into().unwrap());
+        plan.media.proxy_mode = MediaProxyMode::Bypass;
+        plan.media.external_ip = Some("192.0.2.1".into());
+        plan.extensions.insert("common-context".to_string());
+        // A trunk that rings past its ring time fails with 408.
+        let policy = RetryPolicy {
+            status_codes: vec![if case == "ring_timeout" { 408 } else { 503 }],
+        };
+        let attempts: Vec<DialAttempt> = (0..3).map(|index| {
+            let mut hints = crate::config::DialplanHints::default();
+            hints.extensions.insert(format!("target-{index}"));
+            if matches!(case, "early_anchor_to_bypass" | "bypass_to_anchor") {
+                hints.media_mode = Some(if (case == "early_anchor_to_bypass") == (index == 0) {
+                    MediaProxyMode::All
+                } else {
+                    MediaProxyMode::Bypass
+                });
+            }
+            hints.extensions.insert(crate::call::OutboundTrunkContext {
+                id: Some(index), name: format!("trunk-{index}"), dest: None, tenant_id: None,
+            });
+            if index == 0 { hints.external_ip = Some("192.0.2.2".into()); }
+            if case == "ring_timeout" { hints.max_ring_time = Some(Duration::from_millis(300)); }
+            dial_attempt(
+                rsipstack::dialog::invitation::InviteOption {
+                    callee: format!("sip:target{index}@{remote_addr}").try_into().unwrap(),
+                    caller: format!("sip:caller{index}@rustpbx.com").try_into().unwrap(),
+                    ..Default::default()
+                },
+                (case != "legacy").then_some(hints),
+                if matches!(case, "legacy" | "no_policy") { None }
+                    else if case == "empty_policy" || (case == "matching_status" && index == 1) { Some(Default::default()) }
+                    else { Some(policy.clone()) },
+            )
+        }).collect();
+        let targets: Vec<crate::call::DialAttempt> = if case == "legacy" {
+            attempts.iter().map(|attempt| Location {
+                aor: attempt.location.aor.clone(), ..Default::default()
+            }.into()).collect()
+        } else {
+            attempts
+        };
+        plan.flow = crate::call::DialplanFlow::Targets(crate::call::DialStrategy::Sequential(targets.clone()));
+        let context = CallContext {
+            session_id: case.into(), dialplan: Arc::new(plan), cookie: TransactionCookie::default(),
+            start_time: Instant::now(), original_caller: "sip:alice@rustpbx.com".into(),
+            original_callee: "sip:bob@rustpbx.com".into(), max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(), metadata: None,
+        };
+        // Mirror session setup: the first attempt decides the media path.
+        let initial_plan = SipSession::initial_plan(&server, &context);
+        let use_media_proxy = SipSession::check_media_proxy(&context, &initial_plan.media.proxy_mode);
+        let cancel = CancellationToken::new();
+        let (mut session, _handle, _commands) = SipSession::new(server.clone(), cancel.clone(), None, context, dialog, use_media_proxy);
+        let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
+        session.callee_event_tx = Some(callee_tx);
+        assert_eq!(session.context.dialplan.extensions.get::<String>().map(String::as_str), Some("common-context"));
+        let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let observed = seen.clone();
+        let cancels = Arc::new(AtomicUsize::new(0));
+        let cancelled = cancels.clone();
+        let responder_endpoint = server.endpoint.inner.clone();
+        let responder_cancel = cancel.clone();
+        let responder = tokio::spawn(async move {
+            let mut buffer = [0u8; 65536];
+            loop {
+                let (size, peer) = remote.recv_from(&mut buffer).await.unwrap();
+                let SipMessage::Request(invite) = SipMessage::try_from(std::str::from_utf8(&buffer[..size]).unwrap()).unwrap() else { continue; };
+                if invite.method == Method::Cancel { cancelled.fetch_add(1, Ordering::SeqCst); }
+                if invite.method != Method::Invite { continue; }
+                observed.lock().push(invite.clone());
+                if case == "ring_timeout" && observed.lock().len() == 1 {
+                    // The first carrier rings and never answers.
+                    let ringing = responder_endpoint.make_response(&invite, StatusCode::Ringing, None);
+                    remote.send_to(ringing.to_string().as_bytes(), peer).await.unwrap();
+                    continue;
+                }
+                if case == "cancel_during" { responder_cancel.cancel(); continue; }
+                if case == "outer_timeout" { continue; }
+                let code = match case {
+                    "other_status" => StatusCode::BusyHere,
+                    "accepted" => StatusCode::OK,
+                    "early_anchor_to_bypass" | "bypass_to_anchor" if observed.lock().len() > 1 => StatusCode::OK,
+                    _ => StatusCode::ServiceUnavailable,
+                };
+                let early_sdp = case == "early_anchor_to_bypass" && observed.lock().len() == 1;
+                let mut ringing = responder_endpoint.make_response(&invite,
+                    if early_sdp { StatusCode::SessionProgress } else { StatusCode::Ringing },
+                    early_sdp.then(|| invite.body.clone()));
+                if early_sdp { ringing.headers.push(Header::ContentType("application/sdp".into())); }
+                remote.send_to(ringing.to_string().as_bytes(), peer).await.unwrap();
+                if early_sdp { tokio::time::sleep(Duration::from_millis(40)).await; }
+                let answer_sdp = code == StatusCode::OK && case != "accepted";
+                let mut response = responder_endpoint.make_response(&invite, code, answer_sdp.then(|| invite.body.clone()));
+                if answer_sdp { response.headers.push(Header::ContentType("application/sdp".into())); }
+                response.headers.retain(|header| !matches!(header, Header::To(_)));
+                response.headers.push(Header::To(format!("<{}>;tag=retry-peer", invite.uri).into()));
+                response.headers.push(Header::Contact(format!("<sip:peer@{remote_addr}>").into()));
+                remote.send_to(response.to_string().as_bytes(), peer).await.unwrap();
+            }
+        });
+        if case == "cancel_before" { cancel.cancel(); }
+        let result = tokio::time::timeout(
+            if case == "outer_timeout" { Duration::from_millis(80) } else { Duration::from_secs(4) },
+            session.dial_sequential(&targets, &mut callee_rx),
+        ).await;
+        if case == "outer_timeout" {
+            assert!(result.is_err(), "{case}");
+        } else {
+            let result = result.expect(case);
+            if matches!(case, "early_anchor_to_bypass" | "bypass_to_anchor") {
+                assert!(result.is_ok(), "{case}: {result:?}");
+                // The media path chosen from the first trunk holds for every retry.
+                let expected = if case == "early_anchor_to_bypass" { MediaPathMode::Anchored } else { MediaPathMode::Bypass };
+                assert_eq!(session.media_profile.path, expected, "{case}");
+            } else if case != "accepted" {
+                assert!(result.is_err(), "{case}");
+            }
+        }
+        assert_eq!(seen.lock().len(), expected_attempts, "{case}");
+        // Every failed target of the multi-target plan is traced with its trunk.
+        let failed_attempts: Vec<(u64, i64, u64)> = session
+            .meta
+            .trace
+            .iter()
+            .filter(|event| event.code.as_deref() == Some("dial.attempt_failed"))
+            .map(|event| {
+                let detail = event.detail.as_ref().expect("attempt detail");
+                (
+                    detail["attempt"].as_u64().unwrap(),
+                    detail["trunk_id"].as_i64().unwrap_or(-1),
+                    detail["status"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        match case {
+            "matching_status" => assert_eq!(failed_attempts, vec![(0, 0, 503), (1, 1, 503)], "{case}"),
+            "accepted" => assert!(failed_attempts.is_empty(), "{case}"),
+            "early_anchor_to_bypass" | "bypass_to_anchor" => {
+                assert_eq!(failed_attempts, vec![(0, 0, 503)], "{case}")
+            }
+            // The ringing carrier hits its trunk ring time, is cancelled and fails
+            // with 408, which its policy retries; the next carrier's 503 is not
+            // listed, so the call stops there.
+            "ring_timeout" => {
+                assert_eq!(failed_attempts, vec![(0, 0, 408), (1, 1, 503)], "{case}");
+                assert!(cancels.load(Ordering::SeqCst) > 0, "the timed-out INVITE is cancelled");
+            }
+            _ => {}
+        }
+        if case == "matching_status" {
+            assert_eq!(session.context.dialplan.caller.as_ref().unwrap().to_string(), "sip:caller1@rustpbx.com");
+            assert_eq!(session.context.dialplan.media.external_ip.as_deref(), Some("192.0.2.1"));
+            assert_eq!(session.record_snapshot().extensions.get::<crate::call::OutboundTrunkContext>().unwrap().id, Some(1));
+        }
+        cancel.cancel();
+        responder.abort();
+        server.endpoint.shutdown();
+        serving.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn routed_attempts_keep_call_media_path_and_recording() {
+    use crate::call::{DialDirection, Dialplan, DialStrategy, TransactionCookie};
+    use crate::proxy::tests::common::{create_test_request, create_test_server, create_transaction};
+
+    struct Recorder(Arc<AtomicUsize>);
+    #[async_trait::async_trait]
+    impl crate::media::media_recorder::MediaRecorder for Recorder {
+        async fn write_rtp(&mut self, _: crate::media::ingress_tap::PacketDirection, _: &rustrtc::rtp::RtpPacket, _: u64) -> anyhow::Result<()> { Ok(()) }
+        async fn finalize(self: Box<Self>) -> anyhow::Result<Option<crate::media::media_recorder::RecordingResult>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+    }
+    let (server, _) = create_test_server().await;
+    let request = create_test_request(rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None);
+    let (tx, _caller_endpoint) = create_transaction(request.clone()).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let dialog = server.dialog_layer.get_or_create_server_invite(&tx, state_tx, None, None).unwrap();
+    let first = dial_attempt(
+        rsipstack::dialog::invitation::InviteOption {
+            callee: "sip:first@127.0.0.1".try_into().unwrap(),
+            caller: "sip:first-caller@rustpbx.com".try_into().unwrap(),
+            ..Default::default()
+        },
+        Some(crate::config::DialplanHints {
+            media_mode: Some(MediaProxyMode::All),
+            max_ring_time: Some(Duration::from_secs(2)),
+            ringback: Some(crate::proxy::routing::RingbackAudio { ring: Some("first.wav".into()), ..Default::default() }),
+            ..Default::default()
+        }),
+        Some(Default::default()),
+    );
+    let second = dial_attempt(
+        rsipstack::dialog::invitation::InviteOption {
+            callee: "sip:second@127.0.0.1".try_into().unwrap(),
+            caller: "sip:second-caller@rustpbx.com".try_into().unwrap(),
+            ..Default::default()
+        },
+        Some(crate::config::DialplanHints { bypass_media: Some(true), enable_recording: Some(false), ..Default::default() }),
+        Some(Default::default()),
+    );
+    let attempts: Vec<crate::call::DialAttempt> = vec![first, second];
+    let second = &attempts[1];
+    let mut plan = Dialplan::new("media-retry".into(), request, DialDirection::Inbound)
+        .with_caller("sip:original@rustpbx.com".try_into().unwrap())
+        .with_targets(DialStrategy::Sequential(attempts.clone()));
+    plan.max_ring_time = Some(Duration::from_secs(9));
+    plan.audio_profile = Some(crate::proxy::routing::RingbackAudio { ring: Some("common.wav".into()), ..Default::default() });
+    // Routing fixed recording for the call from the first target.
+    plan.recording.enabled = true;
+    let common_plan = Arc::new(plan);
+    let context = CallContext {
+        session_id: "media-retry".into(), dialplan: common_plan.clone(), cookie: TransactionCookie::default(),
+        start_time: Instant::now(), original_caller: "sip:alice@rustpbx.com".into(), original_callee: "sip:bob@rustpbx.com".into(),
+        max_forwards: 70, created_at: chrono::Utc::now().to_rfc3339(), metadata: None,
+    };
+    let initial_plan = SipSession::initial_plan(&server, &context);
+    assert_eq!(initial_plan.max_ring_time, Some(Duration::from_secs(9)), "ring time is call-wide");
+    assert_eq!(initial_plan.audio_profile.as_ref().unwrap().ring.as_deref(), Some("first.wav"));
+    assert!(initial_plan.recording.enabled);
+    let use_media_proxy = SipSession::check_media_proxy(&context, &initial_plan.media.proxy_mode);
+    assert!(use_media_proxy, "first trunk anchors media for the whole call");
+    let (mut session, _handle, _commands) = SipSession::new(server.clone(), CancellationToken::new(), None, context, dialog, use_media_proxy);
+    assert!(Arc::ptr_eq(&session.context.dialplan, &common_plan), "setup must not replace the routed plan");
+    let plan = SipSession::plan_for_attempt(&server, &common_plan, &attempts[0]);
+    session.activate_attempt(&attempts[0], plan).await;
+    session.media.caller_offer = Some(concat!(
+        "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=Talk\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n",
+        "m=audio 40000 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n",
+    ).into());
+    session.ensure_caller_leg().await.unwrap();
+    session.media.early_media_sent = true;
+    let caller = session.media_leg(&LegId::from("caller")).unwrap();
+    let finalized = Arc::new(AtomicUsize::new(0));
+    session.media.recording.set_recorder(Box::new(Recorder(finalized.clone())), None).await.unwrap();
+    assert!(session.media.recording.has_recorder().await);
+
+    let plan = SipSession::plan_for_attempt(&server, &common_plan, second);
+    session.activate_attempt(second, plan).await;
+    assert_eq!(session.context.dialplan.max_ring_time, Some(Duration::from_secs(9)));
+    assert_eq!(session.context.dialplan.audio_profile.as_ref().unwrap().ring.as_deref(), Some("common.wav"));
+    assert!(session.context.dialplan.recording.enabled, "recording is fixed for the call");
+    assert_eq!(finalized.load(Ordering::SeqCst), 0, "the next trunk keeps the call's recorder");
+    assert!(session.media.recording.has_recorder().await);
+    assert_eq!(session.context.dialplan.media.proxy_mode, MediaProxyMode::Bypass);
+    assert_eq!(session.media_profile.path, MediaPathMode::Anchored, "media path is fixed at setup");
+    assert!(Arc::ptr_eq(&caller, &session.media_leg(&LegId::from("caller")).unwrap()));
+    let sdp = session.prepare_callee_media_offer(&Location { aor: second.location.aor.clone(), ..Default::default() }).await.unwrap().unwrap();
+    assert!(!sdp.is_empty(), "retry generates a fresh callee offer against the retained caller");
+
+    let caller_only = dial_attempt(
+        rsipstack::dialog::invitation::InviteOption {
+            callee: "sip:third@127.0.0.1".try_into().unwrap(),
+            caller: "sip:third-caller@rustpbx.com".try_into().unwrap(),
+            ..Default::default()
+        },
+        None,
+        None,
+    );
+    let plan = SipSession::plan_for_attempt(&server, &common_plan, &caller_only);
+    session.activate_attempt(&caller_only, plan).await;
+    assert_eq!(session.context.dialplan.caller.as_ref().unwrap().user(), Some("third-caller"));
+    assert_eq!(session.context.dialplan.media.proxy_mode, common_plan.media.proxy_mode);
+    assert_eq!(session.context.dialplan.max_ring_time, common_plan.max_ring_time);
+}
+
 struct InvocationHeadersRuntime {
     invocation: crate::call::app::AppInvocationContext,
 }
@@ -5222,7 +5539,9 @@ async fn route_outbound_leg_applies_forward_trunk() {
 
     let result = result.expect("expected a Forward result");
     match result {
-        crate::config::RouteResult::Forward(option, _hints) => {
+        crate::config::RouteResult::Forward(mut targets) => {
+            assert_eq!(targets.len(), 1);
+            let option = targets.pop().unwrap().option;
             assert_eq!(
                 option.destination.as_ref().unwrap().addr.to_string(),
                 "gateway.rustpbx.test:5060"
@@ -8325,7 +8644,7 @@ async fn queue_agent_answer_restores_held_caller_media() {
         name: "support".into(),
         accept_immediately: true,
         agents: vec![location.clone()],
-        strategy: DialStrategy::Sequential(vec![location]),
+        strategy: DialStrategy::Sequential(vec![location.into()]),
         ..Default::default()
     };
     let plan = config.to_plan();

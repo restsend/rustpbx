@@ -733,6 +733,7 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
         did_numbers: vec![],
         ringback: None,
         max_ring_time: None,
+        retry_policy: None,
     })
 }
 
@@ -1535,7 +1536,13 @@ pub(crate) async fn evaluate_route_with_snapshots(
     };
 
     let (outcome, caller_render, callee_render, request_render, rewrites) = match result {
-        RouteResult::Forward(option, _) => {
+        // The matcher returns a single target; show the first one.
+        RouteResult::Forward(targets) if !targets.is_empty() => {
+            let option = targets
+                .into_iter()
+                .next()
+                .expect("non-empty targets")
+                .option;
             let rewrites = collect_rewrite_diff(&original_option, &option);
             (
                 RouteOutcomeView::Forward(RouteForwardOutcome {
@@ -1583,6 +1590,13 @@ pub(crate) async fn evaluate_route_with_snapshots(
                 rewrites,
             )
         }
+        RouteResult::Forward(_) => (
+            RouteOutcomeView::NotHandled,
+            original_option.caller.to_string(),
+            original_option.callee.to_string(),
+            request.uri.to_string(),
+            Default::default(),
+        ),
         RouteResult::NotHandled(option, _) => {
             let rewrites = collect_rewrite_diff(&original_option, &option);
             (

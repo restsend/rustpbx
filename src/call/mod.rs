@@ -151,6 +151,54 @@ pub struct Location {
     pub home_proxy: Option<SipAddr>,
 }
 
+/// One routed or sequential destination, including its overrides and retry policy.
+#[derive(Clone)]
+pub struct DialAttempt {
+    pub location: Location,
+    /// None inherits the shared dialplan caller.
+    pub caller: Option<rsipstack::sip::Uri>,
+    pub hints: Option<Arc<crate::config::DialplanHints>>,
+    /// None advances after failure; an empty status-code list stops retry.
+    pub retry_policy: Option<crate::proxy::routing::RetryPolicy>,
+}
+
+impl From<Location> for DialAttempt {
+    fn from(location: Location) -> Self {
+        Self { location, caller: None, hints: None, retry_policy: None }
+    }
+}
+
+/// Preserve trunk rewrites from routing in the destination used for dialing.
+impl From<crate::config::RouteTarget> for DialAttempt {
+    fn from(target: crate::config::RouteTarget) -> Self {
+        let option = target.option;
+        Self {
+            location: Location {
+                aor: option.callee,
+                destination: option.destination,
+                credential: option.credential,
+                headers: option.headers,
+                ..Default::default()
+            },
+            caller: Some(option.caller),
+            hints: target.hints.map(Arc::new),
+            // A routed target without a policy never advances.
+            retry_policy: Some(target.retry_policy.unwrap_or_default()),
+        }
+    }
+}
+
+impl std::fmt::Debug for DialAttempt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DialAttempt")
+            .field("callee", &self.location.aor)
+            .field("caller", &self.caller)
+            .field("hints", &self.hints)
+            .field("retry_policy", &self.retry_policy)
+            .finish_non_exhaustive()
+    }
+}
+
 impl std::fmt::Display for Location {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let is_webrtc = if self.supports_webrtc { ",webrtc" } else { "" };
@@ -230,7 +278,7 @@ impl Location {
 
 #[derive(Clone, Debug)]
 pub enum DialStrategy {
-    Sequential(Vec<Location>),
+    Sequential(Vec<DialAttempt>),
     Parallel(Vec<Location>),
 }
 
@@ -409,6 +457,22 @@ impl CallForwardingConfig {
     }
 }
 
+impl DialStrategy {
+    pub fn locations(&self) -> Vec<Location> {
+        match self {
+            Self::Sequential(attempts) => attempts.iter().map(|attempt| attempt.location.clone()).collect(),
+            Self::Parallel(locations) => locations.clone(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Sequential(attempts) => attempts.is_empty(),
+            Self::Parallel(locations) => locations.is_empty(),
+        }
+    }
+}
+
 impl std::fmt::Display for DialStrategy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -418,7 +482,7 @@ impl std::fmt::Display for DialStrategy {
                     "Sequential: [{}]",
                     locations
                         .iter()
-                        .map(|l| l.to_string())
+                        .map(|l| l.location.aor.to_string())
                         .collect::<Vec<_>>()
                         .join(", ")
                 )
@@ -611,7 +675,7 @@ impl QueuePlan {
                 aor,
                 contact_raw: Some(target),
                 ..Default::default()
-            }])),
+            }].into_iter().map(Into::into).collect())),
             queue_name: queue.to_string(),
             ..Default::default()
         };
@@ -648,49 +712,38 @@ impl DialplanFlow {
 
     fn is_empty(&self) -> bool {
         match self {
-            DialplanFlow::Targets(strategy) => match strategy {
-                DialStrategy::Sequential(targets) | DialStrategy::Parallel(targets) => {
-                    targets.is_empty()
-                }
-            },
-            DialplanFlow::Queue { .. } => false,
-            DialplanFlow::Application { .. } => false,
+            Self::Targets(strategy) => strategy.is_empty(),
+            Self::Queue { .. } | Self::Application { .. } => false,
         }
     }
 
     fn all_webrtc_target(&self) -> bool {
         match self {
-            DialplanFlow::Targets(strategy) => match strategy {
-                DialStrategy::Sequential(targets) | DialStrategy::Parallel(targets) => {
-                    !targets.is_empty() && targets.iter().all(|loc| loc.supports_webrtc)
-                }
-            },
-            DialplanFlow::Queue { plan, next } => {
+            Self::Targets(strategy) => {
+                let targets = strategy.locations();
+                !targets.is_empty() && targets.iter().all(|loc| loc.supports_webrtc)
+            }
+            Self::Queue { plan, next } => {
                 if let Some(strategy) = &plan.dial_strategy {
-                    let targets = match strategy {
-                        DialStrategy::Sequential(t) | DialStrategy::Parallel(t) => t,
-                    };
-                    if !targets.is_empty() {
-                        return targets.iter().all(|loc| loc.supports_webrtc);
+                    if !strategy.is_empty() {
+                        return strategy.locations().iter().all(|loc| loc.supports_webrtc);
                     }
                 }
                 next.all_webrtc_target()
             }
-            DialplanFlow::Application { .. } => false,
+            Self::Application { .. } => false,
         }
     }
 
-    pub(crate) fn find_targets(&self) -> Option<&Vec<Location>> {
+    pub(crate) fn find_targets(&self) -> Option<Vec<Location>> {
         match self {
-            DialplanFlow::Targets(strategy) => match strategy {
-                DialStrategy::Sequential(targets) | DialStrategy::Parallel(targets) => {
-                    Some(targets)
-                }
-            },
-            DialplanFlow::Queue { next, .. } => next.find_targets(),
-            DialplanFlow::Application { .. } => None,
+            Self::Targets(strategy) => Some(strategy.locations()),
+            Self::Queue { next, .. } => next.find_targets(),
+            Self::Application { .. } => None,
         }
     }
+
+
 }
 /// Recording configuration for call control
 #[derive(Debug, Clone)]
@@ -1062,6 +1115,43 @@ impl std::fmt::Debug for Dialplan {
 }
 
 impl Dialplan {
+    /// Build runtime options for a new routed attempt. The routing service has
+    /// already run; its owner and call-lifetime permits stay on the original
+    /// plan/session. Policy holds are shared for the normal teardown path.
+    pub(crate) fn fork_for_target(&self) -> Self {
+        Self {
+            direction: self.direction,
+            call_id: self.call_id.clone(),
+            session_id: self.session_id.clone(),
+            session_id_enabled: self.session_id_enabled,
+            caller_display_name: self.caller_display_name.clone(),
+            caller: self.caller.clone(),
+            flow: self.flow.clone(),
+            max_ring_time: self.max_ring_time,
+            original: self.original.clone(),
+            recording: self.recording.clone(),
+            recording_policy: self.recording_policy.clone(),
+            media: self.media.clone(),
+            max_call_duration: self.max_call_duration,
+            rtp_timeout: self.rtp_timeout,
+            failure_action: self.failure_action.clone(),
+            enable_sipflow: self.enable_sipflow,
+            call_forwarding: self.call_forwarding.clone(),
+            voicemail_enabled: self.voicemail_enabled,
+            route_invite: None,
+            header_passthrough: self.header_passthrough.clone(),
+            extensions: self.extensions.clone(),
+            allow_codecs: self.allow_codecs.clone(),
+            passthrough_failure: self.passthrough_failure,
+            route_originated_calls: self.route_originated_calls,
+            audio_profile: self.audio_profile.clone(),
+            busy_wait: self.busy_wait.clone(),
+            routed_headers: self.routed_headers.clone(),
+            concurrency_holds: self.concurrency_holds.clone(),
+            concurrent_call_lease: Default::default(),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.flow.is_empty()
     }
@@ -1185,9 +1275,10 @@ impl Dialplan {
     /// the dialplan so the session releases them on teardown. Used by paths
     /// that run `match_invite` outside the inbound `build_dialplan` flow (e.g.
     /// RWI originate).
-    pub fn with_hints(mut self, hints: crate::config::DialplanHints) -> Self {
-        *self.concurrency_holds.lock() = hints.concurrency_holds;
-        self.concurrent_call_lease = hints.concurrent_call_lease;
+    pub fn with_hints(mut self, hints: impl std::borrow::Borrow<crate::config::DialplanHints>) -> Self {
+        let hints = hints.borrow();
+        *self.concurrency_holds.lock() = hints.concurrency_holds.clone();
+        self.concurrent_call_lease = hints.concurrent_call_lease.take();
         self
     }
 
@@ -1209,12 +1300,12 @@ impl Dialplan {
     }
 
     /// Get all target locations regardless of strategy
-    pub fn get_all_targets(&self) -> Option<&Vec<Location>> {
+    pub fn get_all_targets(&self) -> Option<Vec<Location>> {
         self.flow.find_targets()
     }
 
-    pub fn first_target(&self) -> Option<&Location> {
-        self.get_all_targets().and_then(|targets| targets.first())
+    pub fn first_target(&self) -> Option<Location> {
+        self.get_all_targets().and_then(|targets| targets.into_iter().next())
     }
 
     fn set_terminal_flow(&mut self, new_terminal: DialplanFlow) {
@@ -1359,6 +1450,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sequential_attempt_preserves_registered_contact_and_transport() {
+        let location = Location {
+            aor: "sip:alice@192.0.2.10".try_into().unwrap(),
+            registered_aor: Some("sip:alice@pbx.local".try_into().unwrap()),
+            contact_raw: Some("<sip:alice@192.0.2.10>;ob".into()),
+            path: Some(vec!["sip:edge@192.0.2.1;lr".try_into().unwrap()]),
+            transport: Some(Transport::Wss),
+            supports_webrtc: true,
+            ..Default::default()
+        };
+        let mut attempt = DialAttempt::from(location.clone());
+        assert!(attempt.caller.is_none());
+        assert!(attempt.retry_policy.is_none());
+        attempt.location.aor = "sip:rewritten@192.0.2.10".try_into().unwrap();
+        let resolved = &attempt.location;
+        assert_eq!(resolved.aor.user(), Some("rewritten"));
+        assert_eq!(resolved.registered_aor, location.registered_aor);
+        assert_eq!(resolved.contact_raw, location.contact_raw);
+        assert_eq!(resolved.path, location.path);
+        assert_eq!(resolved.transport, Some(Transport::Wss));
+        assert!(resolved.supports_webrtc);
+    }
+
+    #[test]
     fn route_point_transfer_endpoint_preserves_distinct_prefix() {
         let endpoint = TransferEndpoint::parse("toivr:39230").expect("route point must parse");
 
@@ -1404,8 +1519,8 @@ mod tests {
             panic!("expected sequential strategy");
         };
         assert_eq!(agents.len(), 1);
-        assert_eq!(agents[0].aor.to_string(), "skill-group:42");
-        assert_eq!(agents[0].contact_raw.as_deref(), Some("skill-group:42"));
+        assert_eq!(agents[0].location.aor.to_string(), "skill-group:42");
+        assert_eq!(agents[0].location.contact_raw.as_deref(), Some("skill-group:42"));
     }
 
     #[test]
@@ -1420,7 +1535,7 @@ mod tests {
         let Some(DialStrategy::Sequential(agents)) = plan.dial_strategy else {
             panic!("expected sequential strategy");
         };
-        assert_eq!(agents[0].aor.to_string(), "sip:1001@pbx.local");
+        assert_eq!(agents[0].location.aor.to_string(), "sip:1001@pbx.local");
     }
 
     #[test]
@@ -1436,7 +1551,7 @@ mod tests {
         let Some(DialStrategy::Sequential(agents)) = plan.dial_strategy else {
             panic!("expected sequential strategy");
         };
-        assert_eq!(agents[0].aor.to_string(), "skill-group:sales");
+        assert_eq!(agents[0].location.aor.to_string(), "skill-group:sales");
     }
 
     #[test]
@@ -1631,7 +1746,7 @@ mod tests {
         let flow = DialplanFlow::Targets(DialStrategy::Sequential(vec![make_location(
             "sip:webrtc@example.com",
             true,
-        )]));
+        )].into_iter().map(Into::into).collect()));
         assert!(flow.all_webrtc_target());
     }
 
@@ -1640,7 +1755,7 @@ mod tests {
         let flow = DialplanFlow::Targets(DialStrategy::Sequential(vec![make_location(
             "sip:trunk@example.com",
             false,
-        )]));
+        )].into_iter().map(Into::into).collect()));
         assert!(!flow.all_webrtc_target());
     }
 
@@ -1649,7 +1764,7 @@ mod tests {
         let flow = DialplanFlow::Targets(DialStrategy::Sequential(vec![
             make_location("sip:webrtc@example.com", true),
             make_location("sip:trunk@example.com", false),
-        ]));
+        ].into_iter().map(Into::into).collect()));
         assert!(
             !flow.all_webrtc_target(),
             "mixed targets should return false"
@@ -1661,7 +1776,7 @@ mod tests {
         let flow = DialplanFlow::Targets(DialStrategy::Sequential(vec![
             make_location("sip:a@example.com", true),
             make_location("sip:b@example.com", true),
-        ]));
+        ].into_iter().map(Into::into).collect()));
         assert!(flow.all_webrtc_target());
     }
 
@@ -1695,7 +1810,7 @@ mod tests {
             dial_strategy: Some(DialStrategy::Sequential(vec![make_location(
                 "sip:webrtc@example.com",
                 true,
-            )])),
+            )].into_iter().map(Into::into).collect())),
             ..Default::default()
         };
         let flow = DialplanFlow::Queue {
@@ -1717,7 +1832,7 @@ mod tests {
             dial_strategy: Some(DialStrategy::Sequential(vec![make_location(
                 "sip:trunk@example.com",
                 false,
-            )])),
+            )].into_iter().map(Into::into).collect())),
             ..Default::default()
         };
         let flow = DialplanFlow::Queue {
@@ -1744,7 +1859,7 @@ mod tests {
             plan: queue_plan,
             next: Box::new(DialplanFlow::Targets(DialStrategy::Sequential(vec![
                 make_location("sip:webrtc@example.com", true),
-            ]))),
+            ].into_iter().map(Into::into).collect()))),
         };
         assert!(
             flow.all_webrtc_target(),
