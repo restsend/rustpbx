@@ -563,6 +563,7 @@ fn acd_with_longest_idle_policy(policy_name: &str) -> Arc<AcdEngine> {
         default_policy: policy_name.to_string(),
         strict_fifo: true,
         no_answer_cooldown_secs: 0,
+        console_managed: false,
         policies,
     }))
 }
@@ -602,6 +603,7 @@ fn acd_with_least_answered_policy(policy_name: &str) -> Arc<AcdEngine> {
         default_policy: policy_name.to_string(),
         strict_fifo: true,
         no_answer_cooldown_secs: 0,
+        console_managed: false,
         policies,
     }))
 }
@@ -1193,6 +1195,7 @@ async fn test_skill_group_policy_min_level_filters_agents() {
             default_policy: "expert".to_string(),
             strict_fifo: true,
             no_answer_cooldown_secs: 0,
+            console_managed: false,
         }))
     };
 
@@ -1240,6 +1243,7 @@ fn acd_with_round_robin_policy(name: &str) -> Arc<AcdEngine> {
         default_policy: name.to_string(),
         strict_fifo: true,
         no_answer_cooldown_secs: 0,
+        console_managed: false,
         policies,
     }))
 }
@@ -2166,6 +2170,7 @@ fn engine_with_policies(policies: Vec<AcdPolicy>, default: &str) -> Arc<AcdEngin
         default_policy: default.to_string(),
         strict_fifo: true,
         no_answer_cooldown_secs: 0,
+        console_managed: false,
     }))
 }
 
