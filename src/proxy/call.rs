@@ -833,11 +833,28 @@ impl CallModule {
                 Ok(mut results) => {
                     // A hop addressed to a registration's home node is terminal:
                     // do not fork shared contacts back to another cluster node.
+                    //
+                    // But an empty local set must NOT be treated as offline: the
+                    // callee may be homed on a peer node (client dials its own
+                    // registrar while the callee registered on a sibling). In
+                    // that case keep the peer-owned locations so the hop can be
+                    // forwarded cross-node instead of 480 "target user offline".
                     if let Some(home) = self.inner.server.cluster_self_addr.as_ref()
                         && callee_uri.host_with_port == home.addr
                     {
-                        results.retain(|location| location.home_proxy.as_ref()
-                            .is_none_or(|owner| owner.addr == home.addr));
+                        let local: Vec<_> = results
+                            .iter()
+                            .filter(|location| {
+                                location
+                                    .home_proxy
+                                    .as_ref()
+                                    .is_none_or(|owner| owner.addr == home.addr)
+                            })
+                            .cloned()
+                            .collect();
+                        if !local.is_empty() {
+                            results = local;
+                        }
                     }
                     internal_lookup_empty = results.is_empty();
                     if internal_lookup_empty {
