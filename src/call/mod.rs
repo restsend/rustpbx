@@ -990,6 +990,10 @@ impl std::fmt::Display for DialDirection {
     }
 }
 
+/// Adapter-provided context to store before the first call event.
+#[derive(Clone, Debug)]
+pub(crate) struct InitialUserData(pub serde_json::Map<String, serde_json::Value>);
+
 pub struct Dialplan {
     pub direction: DialDirection,
     pub call_id: Option<String>,

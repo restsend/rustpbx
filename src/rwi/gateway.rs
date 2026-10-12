@@ -595,6 +595,29 @@ impl RwiGateway {
         session_id: &SessionId,
         data: serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), SetUserDataError> {
+        self.write_user_data(session_id, data, true)
+    }
+
+    /// Fill missing initial context without announcing a user-data update.
+    /// Existing context, including inherited root values, takes precedence.
+    pub(crate) fn initialize_user_data(
+        &mut self,
+        session_id: &SessionId,
+        data: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), SetUserDataError> {
+        let mut merged = self.get_user_data(session_id);
+        for (key, value) in data {
+            merged.entry(key).or_insert(value);
+        }
+        self.write_user_data(session_id, merged, false)
+    }
+
+    fn write_user_data(
+        &mut self,
+        session_id: &SessionId,
+        data: serde_json::Map<String, serde_json::Value>,
+        notify: bool,
+    ) -> Result<(), SetUserDataError> {
         if !self.meta_store.contains_key(session_id) {
             return Err(SetUserDataError::SessionNotFound);
         }
@@ -605,10 +628,12 @@ impl RwiGateway {
             return Err(SetUserDataError::TooLarge { size });
         }
         self.user_data.insert(session_id.clone(), data.clone());
-        self.send_to_owner(&crate::rwi::CallUserDataUpdated {
-            call_id: session_id.clone(),
-            user_data: serde_json::Value::Object(data.clone()),
-        });
+        if notify {
+            self.send_to_owner(&crate::rwi::CallUserDataUpdated {
+                call_id: session_id.clone(),
+                user_data: serde_json::Value::Object(data.clone()),
+            });
+        }
         // Replicate to peers (cluster mode) so calls that migrate to another
         // node still enrich their events with this context.
         if let Some(hook) = &self.user_data_sync {
@@ -1271,6 +1296,47 @@ mod tests {
         gw.meta_store
             .insert(call_id.to_string(), Default::default());
         rx
+    }
+
+    #[tokio::test]
+    async fn test_initial_user_data_syncs_without_an_update_event() {
+        let mut gw = RwiGateway::new();
+        let mut rx = setup_owned_call(&mut gw, "sess-1");
+        let session_id = "sess-1".to_string();
+        let log = StdArc::new(parking_lot::Mutex::new(Vec::new()));
+        let hook_log = log.clone();
+        gw.set_user_data_sync(Some(StdArc::new(move |sid: &SessionId, data| {
+            hook_log.lock().push((sid.clone(), data));
+        })));
+        gw.apply_remote_user_data(&session_id, Some(serde_json::json!({"ticket": ""})));
+        gw.initialize_user_data(
+            &session_id,
+            serde_json::json!({
+                "ticket": "must-not-overwrite", "context": "context_test"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        )
+        .unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "initialization must not announce an update"
+        );
+        gw.send_to_owner(&crate::rwi::CallAnswered {
+            leg_id: None,
+            call_id: session_id.clone(),
+            leg_role: None,
+        });
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event["user_data"]["ticket"], "");
+        assert_eq!(event["user_data"]["context"], "context_test");
+        gw.call_finished(&session_id);
+        assert!(gw.get_user_data(&session_id).is_empty());
+        let entries = log.lock();
+        assert_eq!(entries.len(), 2, "one initialization and one removal");
+        assert_eq!(entries[0].1.as_ref().unwrap()["context"], "context_test");
+        assert!(entries[1].1.is_none());
     }
 
     #[tokio::test]

@@ -1643,6 +1643,21 @@ impl SipSession {
             use_media_proxy,
         );
 
+        let dialog_guard = ServerDialogGuard::new(server.dialog_layer.clone(), server_dialog.id());
+        if let Some(ref gateway) = server.rwi_gateway
+            && let Some(data) = session
+                .context
+                .dialplan
+                .extensions
+                .get::<crate::call::InitialUserData>()
+        {
+            let mut gateway = gateway.write();
+            if let Err(error) = gateway.initialize_user_data(&session_id, data.0.clone()) {
+                gateway.call_finished(&session_id);
+                return Err(anyhow!("Failed to initialize call user data: {error}"));
+            }
+        }
+
         session.reporter = Some(CallReporter {
             server: server.clone(),
             context: session.context.clone(),
@@ -1657,8 +1672,6 @@ impl SipSession {
             // re-INVITE SDP (Chrome rejects PBX-rewritten re-offers).
             session.media.raw_caller_offer = Some(offer_sdp);
         }
-
-        let dialog_guard = ServerDialogGuard::new(server.dialog_layer.clone(), server_dialog.id());
 
         let (callee_state_tx, callee_state_rx) = mpsc::unbounded_channel();
         session.callee_event_tx = Some(callee_state_tx);
