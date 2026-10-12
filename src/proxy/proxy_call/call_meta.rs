@@ -147,6 +147,11 @@ pub struct CallMeta {
     /// session's bridge (writes `media_health` trace entries + fires
     /// `proxy.media_stalled`).
     pub media_health_monitor_spawned: bool,
+    /// One-shot: the deferred-bridge `MediaIssue` trace event has been recorded
+    /// for this session. `setup_bridge` can defer the same pair repeatedly
+    /// (every re-entry while media is still landing); the CDR timeline needs
+    /// the state once, not per attempt.
+    pub media_bridge_defer_traced: bool,
     /// True once a supervisor takeover kicked the agent leg and moved the
     /// customer into the takeover conference. While set, B-leg termination
     /// must NOT cascade into a caller hangup (the customer keeps talking to

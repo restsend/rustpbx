@@ -4345,6 +4345,12 @@ impl SipSession {
                             && self.bridge().is_some_and(|bridge| bridge.is_bridged())
                         {
                             self.update_media_path().await;
+                        } else if affects_pair && !self.bypasses_local_media() {
+                            // Negotiation just landed for a pair whose route
+                            // never activated (`setup_bridge` deferred it while
+                            // media was pending) — this IS the usable-media
+                            // arrival the deferral keeps the pair for.
+                            self.retry_deferred_media_bridge().await;
                         }
                     }
                     if let Some(answer_sdp) = answer_sdp {
@@ -8870,6 +8876,12 @@ impl SipSession {
         if !self.app_runtime.is_running() {
             self.emit_session_call_answered_once();
         }
+
+        // This answer IS the "usable media arrives" event the deferred bridge
+        // waits for: an app that issued `CallCommand::Bridge` while the final
+        // answer's SDP was still landing left the pair deferred forever (the
+        // negotiation handler's `is_bridged()` gate blocked the retry).
+        self.retry_deferred_media_bridge().await;
 
         Ok(())
     }
@@ -14802,6 +14814,35 @@ impl SipSession {
             self.clear_bridge().await;
         }
     }
+
+    /// Activate a logical bridge pair that `setup_bridge` deferred because a
+    /// leg's media was not usable yet (answered, SDP/ICE still landing). The
+    /// deferral keeps the pair "until usable media arrives" — but the arrival
+    /// events used to never retry it: the negotiation handler was gated on
+    /// `is_bridged()` (false for a deferred pair) and the leg-state update
+    /// touches no media path, so a `CallCommand::Bridge` that raced ahead of
+    /// the SDP stranded the call permanently unbridged (both legs emitting
+    /// silence with RTP still flowing; a later hold fell into the
+    /// signaling-only branch — no MOH, no log). The media-arrival sites call
+    /// this to honor the promise. No-op unless a deferred pair exists.
+    pub(crate) async fn retry_deferred_media_bridge(&mut self) {
+        if self.bypasses_local_media() || self.bridge.legs.len() != 2 {
+            return;
+        }
+        if self.bridge().is_some() {
+            // Route bookkeeping exists — the normal media-path handling (and
+            // the playback detach/restore machinery) owns this state.
+            return;
+        }
+        let requested = self.bridge.legs.clone();
+        self.update_media_path().await;
+        if self.bridge().is_some_and(|bridge| bridge.is_bridged()) {
+            info!(session_id = %self.id,
+                leg_a = %requested[0], leg_b = %requested[1],
+                "Deferred media bridge activated after usable media arrived"
+            );
+        }
+    }
 }
 
 impl SipSession {
@@ -14866,6 +14907,26 @@ impl SipSession {
                 } else {
                     debug!(session_id = %self.id, leg_a = %leg_a, leg_b = %leg_b,
                         "Media bridge deferred until usable media arrives");
+                }
+                // 计入 call trace：延迟态此前只有一行 warn 日志，坏通话的
+                // CDR 时间线全黑（media-health 监视器只在非延迟路径挂载）。
+                // 一次性记录——重复 setup_bridge 不刷屏；恢复由成功路径的
+                // Bridged leg-event 承载，时间线可读出延迟窗口。
+                if !self.meta.media_bridge_defer_traced {
+                    self.meta.media_bridge_defer_traced = true;
+                    self.record_trace(
+                        crate::call_errors::TraceEvent::new(
+                            crate::call_errors::TraceKind::MediaIssue,
+                            "Media bridge deferred — legs answered, media not usable yet; pair kept pending",
+                        )
+                        .severity(crate::call_errors::ErrSeverity::Warn)
+                        .detail(serde_json::json!({
+                            "leg_a": leg_a.to_string(),
+                            "leg_b": leg_b.to_string(),
+                            "a_negotiated": a_neg,
+                            "b_negotiated": b_neg,
+                        })),
+                    );
                 }
                 self.sync_rtp_timeout_pause();
                 return true; // Keep the requested pair until usable media arrives.

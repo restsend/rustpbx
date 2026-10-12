@@ -6155,6 +6155,112 @@ async fn added_second_leg_relays_audio_and_dtmf_without_mixer() {
     for bridge in &mut remotes { bridge.close(); }
 }
 
+/// `setup_bridge` defers the pair when one leg is answered but its media peer
+/// has no negotiated SDP yet (`session.rs` "Media bridge deferred until usable
+/// media arrives"). The deferral must (a) be visible in the call trace — it
+/// used to exist only as a warn log, leaving the CDR timeline dark for a call
+/// that stays unbridged — and (b) actually activate once usable media arrives:
+/// the retry hooks (final-answer media setup / in-dialog negotiation) turn the
+/// raced `CallCommand::Bridge` into a live route instead of stranding the call
+/// with both legs emitting silence while RTP keeps flowing.
+#[tokio::test]
+async fn bridge_deferred_pair_is_traced_and_activates_once_media_arrives() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::media::leg::{LegConfig, LegInner};
+    use crate::proxy::tests::common::{create_test_request, create_test_server};
+
+    let (server, _) = create_test_server().await;
+    let request = create_test_request(rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None);
+    let context = CallContext {
+        session_id: "bridge-deferred".into(),
+        dialplan: Arc::new(Dialplan::new("bridge-deferred".into(), request, DialDirection::Inbound)),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".into(),
+        original_callee: "sip:bob@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let (mut session, _handle, _commands) = SipSession::new_uac(
+        server.clone(), CancellationToken::new(), None, context, true,
+    );
+    let caller = LegId::from("caller");
+    let callee = LegId::from("callee");
+    // Caller leg: answered AND media negotiated (the normal answer state).
+    {
+        let mut leg = Leg::new(caller.clone());
+        leg.state = LegState::Connected;
+        session.legs.insert(caller.clone(), leg);
+        let local = LegInner::new(caller.to_string(), &LegConfig::rtp_pcmu(), None).unwrap();
+        let phone = LegInner::new(format!("phone-{caller}"), &LegConfig::rtp_pcmu(), None).unwrap();
+        let offer = local.create_offer().await.unwrap();
+        let answer = phone.answer(&offer).await.unwrap();
+        local.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
+        local.accept();
+        session.legs.set_answer(caller.clone(), answer.clone());
+        session.legs.set_media_leg(&caller, local);
+    }
+    // Callee leg: the media peer exists (created at INVITE time) but the
+    // answer SDP has not been applied yet — the race window where a Bridge
+    // command lands first (`negotiated()` is None).
+    {
+        let mut leg = Leg::new(callee.clone());
+        leg.state = LegState::Connected;
+        session.legs.insert(callee.clone(), leg);
+        let pending = LegInner::new(callee.to_string(), &LegConfig::rtp_pcmu(), None).unwrap();
+        session.legs.set_media_leg(&callee, pending);
+    }
+    assert!(session.legs.media_leg(&callee).is_some());
+    assert!(session.legs.media_leg(&callee).unwrap().negotiated().is_none());
+
+    // Bridge races ahead of the callee SDP → deferred, pair kept.
+    assert!(session.setup_bridge(caller.clone(), callee.clone()).await);
+    assert!(
+        session.bridge().is_none(),
+        "route must stay deferred while the callee peer is unnegotiated"
+    );
+    let deferred_traces = |session: &SipSession| {
+        session
+            .meta
+            .trace
+            .iter()
+            .filter(|ev| {
+                ev.kind == crate::call_errors::TraceKind::MediaIssue
+                    && ev.message.contains("deferred")
+            })
+            .count()
+    };
+    assert!(
+        deferred_traces(&session) == 1,
+        "deferred bridge must be recorded in the call trace"
+    );
+    // Re-entering setup_bridge for the still-deferred pair must not spam the
+    // timeline — one deferred event per session.
+    assert!(session.setup_bridge(caller.clone(), callee.clone()).await);
+    assert_eq!(deferred_traces(&session), 1, "deferred trace must be one-shot");
+
+    // Usable media arrives: the callee peer negotiates (production: the
+    // final-answer media setup or an in-dialog negotiation applies the SDP).
+    let local = LegInner::new(callee.to_string(), &LegConfig::rtp_pcmu(), None).unwrap();
+    let phone = LegInner::new(format!("phone-{callee}"), &LegConfig::rtp_pcmu(), None).unwrap();
+    let offer = local.create_offer().await.unwrap();
+    let answer = phone.answer(&offer).await.unwrap();
+    local.apply_sdp(&answer, rustrtc::SdpType::Answer).await.unwrap();
+    local.accept();
+    session.legs.set_answer(callee.clone(), answer.clone());
+    session.legs.set_media_leg(&callee, local);
+
+    // The arrival retry (retry_deferred_media_bridge) must activate the pair.
+    session.retry_deferred_media_bridge().await;
+    assert!(
+        session.bridge().is_some_and(|bridge| bridge.is_bridged()),
+        "deferred pair must activate once usable media arrives"
+    );
+
+    session.bridge_mut().unwrap().close();
+}
+
 #[tokio::test]
 async fn conference_merge_resolves_queue_agent_alias_and_delivers_audio() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
