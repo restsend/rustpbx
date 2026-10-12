@@ -458,6 +458,9 @@ pub struct QueueApp {
     /// resolved agent presence and moved the call on (wait retention / next
     /// agent / fallback). Cleared per leg when the stale signal is consumed.
     timed_out_legs: HashSet<String>,
+    /// Agent legs that have returned 180 Ringing. Queue music is restored only
+    /// after every ringing leg has stopped, which matters for parallel offers.
+    ringing_agent_legs: HashSet<String>,
     // ── Comfort announcement ──
     /// Comfort prompt playback state.
     comfort_index: usize,
@@ -480,6 +483,11 @@ pub struct QueueApp {
     /// Transfer prompt already started for this queue entry (no replays on
     /// agent retries / escalation re-dials).
     transfer_prompt_played: bool,
+    transfer_prompt_enabled: bool,
+    comfort_prompt_enabled: bool,
+    busy_prompt_enabled: bool,
+    agent_ringback_enabled: bool,
+    no_answer_prompt_enabled: bool,
     /// In-flight prompt tokens; completions are matched by track id so stale
     /// events cannot advance the wrong state.
     transfer_token: Option<PlaybackToken>,
@@ -533,6 +541,7 @@ impl QueueApp {
             enqueued_at: None,
             pending_agents: Vec::new(),
             timed_out_legs: HashSet::new(),
+            ringing_agent_legs: HashSet::new(),
             comfort_index: 0,
             last_comfort_played: None,
             escalated_groups: Vec::new(),
@@ -540,6 +549,11 @@ impl QueueApp {
             stage_started_at: None,
             rwi_gateway: None,
             transfer_prompt_played: false,
+            transfer_prompt_enabled: true,
+            comfort_prompt_enabled: true,
+            busy_prompt_enabled: true,
+            agent_ringback_enabled: false,
+            no_answer_prompt_enabled: true,
             transfer_token: None,
             service_token: None,
             busy_token: None,
@@ -922,6 +936,7 @@ impl QueueApp {
             }
         }
         self.state = QueueState::WaitingForAgent;
+        self.ringing_agent_legs.clear();
         self.start_hold_music(ctrl).await?;
         if self.config.announce_position {
             self.announce_position(ctrl).await?;
@@ -1147,6 +1162,23 @@ impl QueueApp {
         Ok(())
     }
 
+    /// Replace queue music with the ringback callers expect after an agent's
+    /// leg has actually returned 180 Ringing.
+    async fn start_agent_ringback(&mut self, ctrl: &mut CallController) -> anyhow::Result<()> {
+        debug!(file = %crate::call::DEFAULT_QUEUE_HOLD_AUDIO, "Queue: starting agent ringback");
+        self.transfer_token = None;
+        self.comfort_token = None;
+        self.state = QueueState::DialingAgents {
+            attempt: self.dial_attempts,
+        };
+        // Keep ringback active until the answer or timeout path replaces it.
+        self.hold_playback = Some(
+            ctrl.play_audio_with_options(crate::call::DEFAULT_QUEUE_HOLD_AUDIO, None, true, true)
+                .await?,
+        );
+        Ok(())
+    }
+
     /// Get agent locations from dial strategy or dynamic agents.
     fn get_agents(&self) -> Vec<&Location> {
         if let Some(ref agents) = self.dynamic_agents {
@@ -1307,7 +1339,8 @@ impl QueueApp {
     /// Answer the call if not already answered and a busy prompt is configured
     /// (playing it requires a media path).
     async fn answer_if_busy_prompt(&mut self, ctrl: &mut CallController) -> anyhow::Result<()> {
-        if !self.answered
+        if self.busy_prompt_enabled
+            && !self.answered
             && self
                 .prompts()
                 .and_then(|p| p.busy_prompt.as_ref())
@@ -1365,6 +1398,15 @@ impl QueueApp {
             );
             return Ok(AppAction::Continue);
         }
+        let ringback_ended = if let Some(failed_leg_id) = failed_leg_id {
+            self.ringing_agent_legs.remove(failed_leg_id)
+        } else if !self.is_parallel() {
+            let was_ringing = !self.ringing_agent_legs.is_empty();
+            self.ringing_agent_legs.clear();
+            was_ringing
+        } else {
+            false
+        };
         if self.is_parallel() {
             if let Some(failed_leg_id) = failed_leg_id {
                 let pending_before = self.pending_agents.len();
@@ -1385,6 +1427,9 @@ impl QueueApp {
                     remaining_agents = self.pending_agents.len(),
                     "Queue: parallel agent failed; waiting for remaining agents"
                 );
+                if ringback_ended && self.ringing_agent_legs.is_empty() {
+                    self.start_hold_music(ctrl).await?;
+                }
                 return Ok(AppAction::Continue);
             }
 
@@ -1431,6 +1476,9 @@ impl QueueApp {
         }
 
         // More agents remaining — dial the next one immediately
+        if ringback_ended && self.ringing_agent_legs.is_empty() {
+            self.start_hold_music(ctrl).await?;
+        }
         self.dial_next_agent(ctrl).await
     }
 
@@ -1480,7 +1528,10 @@ impl QueueApp {
 
         let prompts = self.prompts();
         let prompt_path = match reason {
+            // Skip only the announcement; queue failure handling must still run.
+            AgentUnavailableReason::Busy if !self.busy_prompt_enabled => None,
             AgentUnavailableReason::Busy => prompts.and_then(|p| p.busy_prompt.as_ref()),
+            AgentUnavailableReason::NoAnswer if !self.no_answer_prompt_enabled => None,
             AgentUnavailableReason::NoAnswer => prompts.and_then(|p| p.no_answer_prompt.as_ref()),
         };
         // The fallback MUST run even when the prompt cannot be played (e.g.
@@ -1552,6 +1603,10 @@ impl QueueApp {
 
     /// Check and play comfort prompts between hold music loops.
     async fn maybe_play_comfort_or_ewt(&mut self, ctrl: &mut CallController) -> anyhow::Result<()> {
+        // Suppress wait announcements at both queue entry and music completion.
+        if !self.comfort_prompt_enabled {
+            return Ok(());
+        }
         let now = Instant::now();
 
         // 1. Comfort prompts
@@ -1922,6 +1977,12 @@ impl QueueApp {
             ctrl.remove_legs(&old_legs, "stage_switch");
             self.pending_agents.clear();
         }
+        if !self.ringing_agent_legs.is_empty() {
+            self.ringing_agent_legs.clear();
+            if let Err(error) = self.start_hold_music(ctrl).await {
+                warn!(error = %error, "Queue: failed to restore hold music after cancelling agent legs");
+            }
+        }
         // The ring timeout armed for the OLD group's dial must die with the
         // legs — a stale fire after the group switch drains the NEW group's
         // freshly dialed legs as bogus no-answers.
@@ -1991,7 +2052,8 @@ impl QueueApp {
         &mut self,
         ctrl: &mut CallController,
     ) -> anyhow::Result<()> {
-        if self.transfer_prompt_played {
+        // Apply the global policy before resolving queue or escalation prompts.
+        if !self.transfer_prompt_enabled || self.transfer_prompt_played {
             return Ok(());
         }
         let prompts = self.prompts();
@@ -2113,6 +2175,11 @@ impl CallApp for QueueApp {
         info!(call_id = %self.call_id, queue = %queue_id, "Queue: entering queue application");
         self.state = QueueState::Answering;
         self.enqueued_at = Some(Instant::now());
+        self.transfer_prompt_enabled = ctx.config.proxy.queue_transfer_prompt_enabled;
+        self.comfort_prompt_enabled = ctx.config.proxy.queue_comfort_prompt_enabled;
+        self.busy_prompt_enabled = ctx.config.proxy.queue_busy_prompt_enabled;
+        self.agent_ringback_enabled = ctx.config.proxy.queue_agent_ringback_enabled;
+        self.no_answer_prompt_enabled = ctx.config.proxy.queue_no_answer_prompt_enabled;
 
         // Capture the RWI gateway so that `on_exit` (which has no context) can
         // still emit abandon events later in the lifecycle.
@@ -2564,6 +2631,7 @@ impl CallApp for QueueApp {
                         // A queued stop could run after
                         // that switch and interrupt the connected media.
                         self.hold_playback = None;
+                        self.ringing_agent_legs.clear();
                         self.transfer_token = None;
                         self.comfort_token = None;
 
@@ -2664,6 +2732,12 @@ impl CallApp for QueueApp {
                     if self.timed_out_legs.contains(&leg_id) {
                         debug!(leg = %leg_id, "Queue: ignoring ringing for a ring-timeout-cancelled leg");
                         return Ok(AppAction::Continue);
+                    }
+                    if self.agent_ringback_enabled
+                        && self.ringing_agent_legs.insert(leg_id.clone())
+                        && self.ringing_agent_legs.len() == 1
+                    {
+                        self.start_agent_ringback(ctrl).await?;
                     }
                     if let Some(agent_id) = agent_id.as_deref() {
                         info!(agent = %agent_id, "Queue: agent ringing");

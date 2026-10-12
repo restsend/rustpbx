@@ -564,3 +564,169 @@ impl BuiltinAppFactory {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::call::app::testing::MockCallStack;
+    use crate::call::{QueueHoldConfig, QueuePlan, VoicePrompts};
+
+    #[tokio::test]
+    async fn queue_audio_prompt_policies_preserve_wait_music() {
+        for enabled in [false, true] {
+            let wait_policies: &[(Option<bool>, Option<bool>)] = if enabled {
+                &[(None, None)]
+            } else {
+                &[
+                    (Some(false), Some(false)),
+                    (Some(false), Some(true)),
+                    (Some(true), Some(false)),
+                    (None, None),
+                ]
+            };
+            for &(comfort, busy) in wait_policies {
+                for language in ["default", "zh", "en"] {
+                    let comfort_setting = comfort
+                        .map(|value| format!("queue_comfort_prompt_enabled = {value}\n"))
+                        .unwrap_or_default();
+                    let busy_setting = busy
+                        .map(|value| format!("queue_busy_prompt_enabled = {value}\n"))
+                        .unwrap_or_default();
+                    let config: crate::config::Config = toml::from_str(&format!(
+                        "[proxy]\naddr = \"0.0.0.0\"\nqueue_transfer_prompt_enabled = {enabled}\n{comfort_setting}{busy_setting}"
+                    ))
+                    .unwrap();
+                    let ctx = ApplicationContext::new(
+                        sea_orm::DatabaseConnection::default(),
+                        CallInfo {
+                            session_id: "queue-audio-test".into(),
+                            caller: "1001".into(),
+                            callee: "1002".into(),
+                            direction: "inbound".into(),
+                            started_at: chrono::Utc::now(),
+                            sip_headers: Default::default(),
+                            route_name: None,
+                        },
+                        Arc::new(config),
+                        reqwest::Client::new(),
+                    );
+                    *ctx.pending_queue.lock() = Some(PendingQueuePlan {
+                        plan: QueuePlan {
+                            queue_name: "support".into(),
+                            accept_immediately: true,
+                            dial_strategy: Some(DialStrategy::Parallel(vec![crate::call::Location {
+                                aor: "sip:agent@example.com".parse().unwrap(),
+                                ..Default::default()
+                            }])),
+                            hold: Some(
+                                QueueHoldConfig::default().with_audio_file("sounds/wait.wav".into()),
+                            ),
+                            voice_prompts: match language {
+                                "zh" => Some(VoicePrompts::zh()),
+                                "en" => Some(VoicePrompts::en()),
+                                _ => None,
+                            },
+                            ..Default::default()
+                        },
+                        agent_uris: vec!["sip:agent@example.com".into()],
+                        parallel: true,
+                        skill_group_id: Some("support".into()),
+                        overflow_overrides: None,
+                        joined_emitted: false,
+                        queue_enricher: None,
+                    });
+                    let app = BuiltinAppFactory::new(None, None)
+                        .create_app("queue", None, &ctx)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    let mut stack = MockCallStack::run_with_context(app, ctx);
+                    stack
+                        .assert_cmd(2000, "answer", |c| {
+                            matches!(c, CallCommand::Answer { .. })
+                        })
+                        .await;
+                    let music = stack.next_cmd(2000).await.unwrap();
+                    let track_id = match music {
+                        CallCommand::Play {
+                            source: MediaSource::File { path },
+                            options: Some(options),
+                            ..
+                        } => {
+                            assert_eq!(path, "sounds/wait.wav");
+                            options.track_id.unwrap()
+                        }
+                        other => panic!("expected wait music, got {other:?}"),
+                    };
+                    stack
+                        .assert_cmd(2000, "dial agent", |c| {
+                            matches!(c, CallCommand::LegAdd { .. })
+                        })
+                        .await;
+                    if enabled {
+                        let prompt = stack.next_cmd(2000).await.unwrap();
+                        let suffix = if language == "en" { "en" } else { "zh" };
+                        assert!(matches!(prompt, CallCommand::Play {
+                            source: MediaSource::File { path }, ..
+                        } if path == format!("sounds/queue-transfer-{suffix}.wav")));
+                    } else {
+                        assert!(
+                            stack.next_cmd(100).await.is_none(),
+                            "disabled {language} transfer prompt must not interrupt wait music"
+                        );
+                        stack.audio_complete(track_id);
+                        if comfort != Some(false) {
+                            let comfort = stack.next_cmd(2000).await.unwrap();
+                            let suffix = if language == "en" { "en" } else { "zh" };
+                            let comfort_track = match comfort {
+                                CallCommand::Play {
+                                    source: MediaSource::File { path },
+                                    options: Some(options),
+                                    ..
+                                } => {
+                                    assert_eq!(path, format!("sounds/queue-busy-{suffix}.wav"));
+                                    options.track_id.unwrap()
+                                }
+                                other => panic!("expected comfort prompt, got {other:?}"),
+                            };
+                            stack.audio_complete(comfort_track);
+                        }
+                        stack
+                            .assert_cmd(2000, "continue wait music", |c| {
+                                matches!(c, CallCommand::Play {
+                                    source: MediaSource::File { path }, ..
+                                } if path == "sounds/wait.wav")
+                            })
+                            .await;
+                        stack.custom("all_agents_busy", serde_json::json!({}));
+                        if busy != Some(false) {
+                            let busy_prompt = stack.next_cmd(2000).await.unwrap();
+                            let suffix = if language == "en" { "en" } else { "zh" };
+                            let busy_track = match busy_prompt {
+                                CallCommand::Play {
+                                    source: MediaSource::File { path },
+                                    options: Some(options),
+                                    ..
+                                } => {
+                                    assert_eq!(path, format!("sounds/queue-busy-{suffix}.wav"));
+                                    options.track_id.unwrap()
+                                }
+                                other => panic!("expected busy prompt, got {other:?}"),
+                            };
+                            stack.audio_complete(busy_track);
+                        }
+                        stack
+                            .assert_cmd(2000, "busy fallback must still hang up", |c| {
+                                matches!(c, CallCommand::Hangup(_))
+                            })
+                            .await;
+                    }
+                    if enabled {
+                        stack.remote_hangup();
+                    }
+                    stack.join().await.unwrap();
+                }
+            }
+        }
+    }
+}

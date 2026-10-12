@@ -6166,6 +6166,8 @@ impl SipSession {
             anyhow::bail!("queue app requires params with a `queue` target");
         };
         let (plan, priority) = crate::call::QueuePlan::from_app_params(params)?;
+        let plan =
+            plan.with_default_hold_music(self.server.proxy_config.load().queue_hold_music.clone());
         if let Some(priority) = priority {
             self.session_ext_set("queue_priority", priority.to_string());
         }

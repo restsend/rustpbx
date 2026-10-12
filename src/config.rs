@@ -1655,6 +1655,21 @@ pub struct ProxyConfig {
     /// `[proxy.queues.<name>.hold].audio_file`; per-queue config wins.
     #[serde(default)]
     pub queue_hold_music: Option<String>,
+    /// Allow pre-connect queue transfer prompts, including queue and escalation overrides.
+    #[serde(default = "default_true")]
+    pub queue_transfer_prompt_enabled: bool,
+    /// Allow comfort announcements while waiting; failure prompts are unaffected.
+    #[serde(default = "default_true")]
+    pub queue_comfort_prompt_enabled: bool,
+    /// Allow busy failure announcements before executing the queue fallback.
+    #[serde(default = "default_true")]
+    pub queue_busy_prompt_enabled: bool,
+    /// Play the built-in local ringback after an agent leg returns 180 Ringing.
+    #[serde(default)]
+    pub queue_agent_ringback_enabled: bool,
+    /// Allow no-answer announcements before executing the queue fallback.
+    #[serde(default = "default_true")]
+    pub queue_no_answer_prompt_enabled: bool,
     /// PBX-wide voicemail greeting (`[proxy] voicemail_greeting`). Used when
     /// the dialplan app params carry no `greeting_path` of their own;
     /// overrides the built-in `sounds/voicemail/greeting.wav`.
@@ -2265,6 +2280,11 @@ impl Default for ProxyConfig {
             jwt_auth: None,
             hold_music: None,
             queue_hold_music: None,
+            queue_transfer_prompt_enabled: true,
+            queue_comfort_prompt_enabled: true,
+            queue_busy_prompt_enabled: true,
+            queue_agent_ringback_enabled: false,
+            queue_no_answer_prompt_enabled: true,
             voicemail_greeting: None,
             sip_worker_threads: default_sip_worker_threads(),
             media_worker_threads: default_media_worker_threads(),
@@ -3016,6 +3036,11 @@ bucket = "default-recordings"
             addr = "0.0.0.0"
             hold_music = "sounds/hold.wav"
             queue_hold_music = "sounds/moh/kzmusic.wav"
+            queue_transfer_prompt_enabled = false
+            queue_comfort_prompt_enabled = false
+            queue_busy_prompt_enabled = false
+            queue_agent_ringback_enabled = true
+            queue_no_answer_prompt_enabled = false
             voicemail_greeting = "sounds/voicemail/custom.wav"
         "#;
         let config: Config = toml::from_str(toml_str).expect("config should parse");
@@ -3028,6 +3053,11 @@ bucket = "default-recordings"
             Some("sounds/voicemail/custom.wav")
         );
         assert_eq!(config.proxy.hold_music.as_deref(), Some("sounds/hold.wav"));
+        assert!(!config.proxy.queue_transfer_prompt_enabled);
+        assert!(!config.proxy.queue_comfort_prompt_enabled);
+        assert!(!config.proxy.queue_busy_prompt_enabled);
+        assert!(config.proxy.queue_agent_ringback_enabled);
+        assert!(!config.proxy.queue_no_answer_prompt_enabled);
 
         // Unset keys stay None — old configs keep working unchanged.
         let empty: Config =
@@ -3035,6 +3065,11 @@ bucket = "default-recordings"
         assert!(empty.proxy.queue_hold_music.is_none());
         assert!(empty.proxy.voicemail_greeting.is_none());
         assert!(empty.proxy.hold_music.is_none());
+        assert!(empty.proxy.queue_transfer_prompt_enabled);
+        assert!(empty.proxy.queue_comfort_prompt_enabled);
+        assert!(empty.proxy.queue_busy_prompt_enabled);
+        assert!(!empty.proxy.queue_agent_ringback_enabled);
+        assert!(empty.proxy.queue_no_answer_prompt_enabled);
     }
 
     #[test]

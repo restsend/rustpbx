@@ -1742,7 +1742,8 @@ impl SipSession {
                 }])),
                 queue_name: format!("agent:{ext}"),
                 ..Default::default()
-            };
+            }
+            .with_default_hold_music(self.server.proxy_config.load().queue_hold_music.clone());
             if let Some(spec) = &return_app {
                 apply_return_app_fallback(&mut queue_plan, spec);
             }
@@ -1777,6 +1778,9 @@ impl SipSession {
                 crate::call::QueuePlan::from_app_params(&serde_json::json!({
                     "queue": format!("skill-group:{sg_id}")
                 }))?;
+            queue_plan = queue_plan.with_default_hold_music(
+                self.server.proxy_config.load().queue_hold_music.clone(),
+            );
             if let Some(spec) = &return_app {
                 apply_return_app_fallback(&mut queue_plan, spec);
             }

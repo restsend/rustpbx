@@ -2632,6 +2632,88 @@ async fn test_start_queue_app_records_queue_entry_trace_and_app_name() {
     );
 }
 
+#[tokio::test]
+async fn queue_hold_music_real_ingress_respects_global_and_explicit_audio() {
+    for global in [None, Some("sounds/wait.wav".to_string())] {
+        for ingress in ["app", "skill-group", "agent", "named"] {
+            let mut config = ProxyConfig::default();
+            config.queue_hold_music = global.clone();
+            config.queues.insert(
+                "explicit".into(),
+                RouteQueueConfig {
+                    hold: Some(crate::proxy::routing::RouteQueueHoldConfig {
+                        audio_file: Some(crate::call::DEFAULT_QUEUE_HOLD_AUDIO.into()),
+                        loop_playback: false,
+                    }),
+                    ..Default::default()
+                },
+            );
+            let mut session = build_session_with_config(
+                build_dialplan_with_mode(MediaProxyMode::Auto),
+                config,
+            )
+            .await;
+            let ctx = Arc::new(ApplicationContext::new(
+                sea_orm::DatabaseConnection::default(),
+                CallInfo {
+                    session_id: "queue-music-test".into(),
+                    caller: "1001".into(),
+                    callee: "1002".into(),
+                    direction: "inbound".into(),
+                    started_at: chrono::Utc::now(),
+                    sip_headers: Default::default(),
+                    route_name: None,
+                },
+                Arc::new(crate::config::Config::default()),
+                reqwest::Client::new(),
+            ));
+            let mut runtime = RoutePointRuntime::new(&[]);
+            runtime.context = Some(ctx.clone());
+            session.app_runtime = Arc::new(runtime);
+            if ingress == "app" {
+                let result = session
+                    .execute_command(
+                        CallCommand::StartApp {
+                            app_name: "queue".into(),
+                            params: Some(serde_json::json!({"queue": "skill-group:support"})),
+                            auto_answer: false,
+                        },
+                        None,
+                    )
+                    .await;
+                assert!(result.success, "queue app must start: {result:?}");
+            } else {
+                let target = match ingress {
+                    "skill-group" => "skill-group:support",
+                    "agent" => "agent:1001",
+                    _ => "explicit",
+                };
+                session
+                    .handle_queue_transfer(target, None, Vec::new(), None)
+                    .await
+                    .unwrap();
+            }
+            let pending = ctx.pending_queue.lock();
+            let hold = pending.as_ref().unwrap().plan.hold.as_ref().unwrap();
+            let expected = if ingress == "named" {
+                crate::call::DEFAULT_QUEUE_HOLD_AUDIO
+            } else {
+                global
+                    .as_deref()
+                    .unwrap_or(crate::call::DEFAULT_QUEUE_HOLD_AUDIO)
+            };
+            assert_eq!(
+                hold.audio_file.as_deref(),
+                Some(expected),
+                "ingress={ingress}"
+            );
+            if ingress == "named" {
+                assert!(!hold.loop_playback);
+            }
+        }
+    }
+}
+
 /// `session_hook_ctx().queue_name` feeds cc_* RWI webhook events (`queue_id`
 /// field). It must be populated from CallMeta when the queue app starts — not
 /// deferred to QueueApp::on_enter's old ApplicationContext mirror.
