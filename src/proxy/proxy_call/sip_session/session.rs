@@ -118,6 +118,16 @@ pub struct SipSession {
     pub pending_hangup: HashSet<DialogId>,
     /// Transferors detached from media after successful REFER; await their BYE.
     pending_refers: HashMap<LegId, PendingRefer>,
+    /// Outbound agent hand-off target: when a REFER/blind transfer originates
+    /// from the **caller** leg (the agent on an agent-dialed call), the
+    /// in-session successor app (IVR / queue / route point / …) must serve the
+    /// OTHER party — the customer, which is the `callee` leg. The app layer
+    /// targets the "caller" leg by default, so this redirects the app's
+    /// caller-scoped media/leg commands to the customer leg and marks the
+    /// caller leg as a transferor whose BYE releases only itself (the app and
+    /// the customer connection continue). `None` for the classic inbound
+    /// shape (customer == caller), where the default is already correct.
+    pub(super) app_media_leg: Option<LegId>,
     /// This session contributes one leg while retaining its SIP dialog ownership.
     pub(super) conference: Option<ConferenceAttachment>,
     pub meta: crate::proxy::proxy_call::call_meta::CallMeta,
@@ -1495,6 +1505,7 @@ impl SipSession {
             },
             pending_hangup: HashSet::new(),
             pending_refers: HashMap::new(),
+            app_media_leg: None,
             conference: None,
             context,
             concurrent_call_lease,
@@ -4400,6 +4411,29 @@ impl SipSession {
                 self.handle_dialog_notify(request, tx_handle).await?;
             }
             DialogState::Terminated(dialog_id, reason) => {
+                // Outbound agent app hand-off: the caller leg is the REFER/blind
+                // transferor that already handed the call to an in-session app
+                // serving the customer (the "callee" leg). Its own BYE releases
+                // only the caller leg — the app and the customer connection
+                // continue (mirrors the callee-side "Unpaired leg terminated"
+                // branch used by the classic inbound shape). Guard on both legs
+                // being live so an app-initiated hangup (which marks the caller
+                // Ended first) still tears the session down normally.
+                if self.app_media_leg.is_some()
+                    && self
+                        .legs
+                        .get(&LegId::from("callee"))
+                        .is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::Hold))
+                    // Caller leg still live (agent's own BYE) OR already
+                    // released by the server-driven API transfer.
+                    && self
+                        .legs
+                        .get(&LegId::from("caller"))
+                        .is_none_or(|leg| matches!(leg.state, LegState::Connected | LegState::Hold))
+                {
+                    self.release_transferor_caller_leg(&dialog_id).await;
+                    return Ok(());
+                }
                 if self
                     .detach_ended_conference_leg(&LegId::from("caller"))
                     .await
@@ -4488,6 +4522,68 @@ impl SipSession {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Release the caller leg after an outbound agent hand-off, keeping the
+    /// in-session app and the customer (callee) connection alive. The caller is
+    /// the REFER/blind transferor that has already left (its BYE terminated the
+    /// dialog); only its leg/dialog bookkeeping is retired here. Mirrors the
+    /// callee-side "Unpaired leg terminated; active call continues" branch.
+    async fn release_transferor_caller_leg(&mut self, dialog_id: &rsipstack::dialog::DialogId) {
+        info!(
+            session_id = %self.id,
+            %dialog_id,
+            "Transferor caller leg released; in-session app continues on the customer leg"
+        );
+        self.update_leg_state(&LegId::from("caller"), LegState::Ended);
+        self.pending_hangup.remove(dialog_id);
+        self.server
+            .active_call_registry
+            .unregister_dialog_identity(dialog_id);
+        self.server.dialog_layer.remove_dialog(dialog_id);
+        self.legs.retain_dialogs_by_dialog_id(dialog_id);
+        self.unschedule_timer(dialog_id);
+        self.timers.remove(dialog_id);
+        self.update_refresh_disabled.remove(dialog_id);
+        // Drop the caller leg (and detach it from the media bridge) when it is
+        // still registered. The remote/queued BYE already terminated its
+        // dialog, so no BYE is queued back; a server-driven API transfer may
+        // have released the leg already (then this is dialog bookkeeping only).
+        if self.legs.contains_key(&LegId::from("caller")) {
+            if let Err(error) = self
+                .handle_remove_leg(LegId::from("caller"), Some("transferor_bye".to_string()))
+                .await
+            {
+                warn!(session_id = %self.id, %error, "Failed to remove transferor caller leg");
+            }
+        }
+        // The caller dialog is gone; `caller_dialog_id()` now falls back to the
+        // surviving customer dialog for any later teardown BYE.
+        self.caller_dialog = None;
+        self.update_media_path().await;
+        self.update_snapshot_cache();
+    }
+
+    /// Release the agent leg for a server-driven (API) customer-anchored
+    /// transfer — no transferor BYE arrives, so the leg is retired here and the
+    /// agent-disconnect hooks fire, mirroring `HangupAgentLeg`.
+    async fn release_api_transfer_agent_leg(&mut self, agent_leg: &LegId) {
+        if !self.legs.contains_key(agent_leg) {
+            return;
+        }
+        let mut ctx = self.session_hook_ctx();
+        if let Err(error) = self
+            .handle_remove_leg(agent_leg.clone(), Some("api_transfer".to_string()))
+            .await
+        {
+            warn!(session_id = %self.id, %error,
+                "Failed to release agent leg after customer-anchored transfer");
+        }
+        self.mark_transferred_with(None);
+        ctx.transferred = true;
+        for hook in self.server.session_hooks.iter() {
+            hook.on_agent_disconnected(&ctx, &*self.app_runtime).await;
+        }
     }
 
     async fn handle_dialog_info(
@@ -4870,7 +4966,7 @@ impl SipSession {
     }
 
     /// Helper to send a command to the session command channel with logging.
-    fn send_or_log_cmd(
+    pub(super) fn send_or_log_cmd(
         cmd_tx: &Option<mpsc::Sender<CallCommand>>,
         cmd: CallCommand,
         action: &str,
@@ -5442,6 +5538,14 @@ impl SipSession {
                 return Ok(());
             }
         }
+        // `target` is consumed by the hand-off below; keep copies for the
+        // transferred-leg timeline stamped on success.
+        let refer_target = target.clone();
+        let refer_kind = transfer::transfer_target_type_str(
+            &transfer::parse_transfer_target(&refer_target),
+        )
+        .unwrap_or("sip")
+        .to_string();
         let result = if let Some(ref leg_id) = transferor {
             self.handle_transfer(
                 leg_id.clone(),
@@ -5470,6 +5574,23 @@ impl SipSession {
             if self.meta.connected_callee_dialog_id.as_ref() == Some(&dialog_id) {
                 self.meta.connected_callee_dialog_id = None;
                 self.meta.connected_callee = None;
+            }
+            // A REFER hand-off to an application successor (queue / IVR /
+            // route point / …) takes the transferor out of the call, but —
+            // unlike the SIP-target path (`finish_pending_refer`) and the
+            // Sip/Bridge target branches — nothing stamped the transfer, so
+            // the transferor's later BYE was never classified as a transfer
+            // exit (`transferred_agent_context` returned None) and the CC
+            // hook never closed its agent recording segment: the segment
+            // kept rolling over the successor stage. Stamp it here,
+            // mirroring `finish_pending_refer`. The flag is sticky; the
+            // guard also avoids a duplicate leg-timeline event when a
+            // Bridge target branch has already marked.
+            if !self.meta.transferred {
+                self.mark_transferred_with(Some(serde_json::json!({
+                    "target": refer_target,
+                    "kind": refer_kind,
+                })));
             }
         }
         let status = match &result {
@@ -11240,6 +11361,42 @@ impl SipSession {
             MediaCapabilityCheck::Allowed => {}
         }
 
+        // Outbound agent app hand-off (`app_media_leg` set): the successor app
+        // addresses the self-service party as the "caller" leg, but on an
+        // agent-dialed call that party is the customer on the "callee" leg.
+        // Redirect the app's caller-scoped leg targets to the customer before
+        // the standard callee resolution below.
+        if let Some(customer_leg) = self.app_media_leg.clone() {
+            let remap = |id: &mut LegId| {
+                if id.as_str() == "caller" {
+                    *id = customer_leg.clone();
+                }
+            };
+            match &mut command {
+                CallCommand::Answer { leg_id }
+                | CallCommand::Reject { leg_id, .. }
+                | CallCommand::Ring { leg_id, .. }
+                | CallCommand::Unbridge { leg_id }
+                | CallCommand::Transfer { leg_id, .. }
+                | CallCommand::TransferWithCompletion { leg_id, .. }
+                | CallCommand::TransferAwaitResult { leg_id, .. }
+                | CallCommand::Play {
+                    leg_id: Some(leg_id), ..
+                }
+                | CallCommand::StopPlayback {
+                    leg_id: Some(leg_id),
+                }
+                | CallCommand::Hold { leg_id, .. }
+                | CallCommand::Unhold { leg_id }
+                | CallCommand::JoinMixerLeg { leg_id, .. } => remap(leg_id),
+                CallCommand::Bridge { leg_a, leg_b, .. } => {
+                    remap(leg_a);
+                    remap(leg_b);
+                }
+                _ => {}
+            }
+        }
+
         match &mut command {
             CallCommand::Bridge { leg_a, leg_b, .. } => {
                 if leg_a.as_str() == "callee" {
@@ -11995,6 +12152,117 @@ impl SipSession {
                     )
                     .await;
                 Self::ok_or_failure(result)
+            }
+
+            CallCommand::BlindTransferCustomer { target, headers } => {
+                let Some(callee_state_rx) = callee_state_rx.as_deref_mut() else {
+                    return CommandResult::failure(
+                        "No callee state receiver available for transfer".to_string(),
+                    );
+                };
+                let Some(agent_leg) = self.resolve_cc_agent_leg() else {
+                    return CommandResult::failure(
+                        "No agent leg for a customer-anchored transfer".to_string(),
+                    );
+                };
+                // Feature-code targets (`*82<ivr>` / `*81<sg>` / `*83<room>`)
+                // resolve through the quick-route resolver exactly like the
+                // SIP REFER path (`resolve_refer_app_target`), so the API and
+                // the softphone share one target vocabulary.
+                let target = {
+                    let raw = target.trim();
+                    let user = raw
+                        .split('@')
+                        .next()
+                        .unwrap_or(raw)
+                        .trim_start_matches("sip:")
+                        .trim_start_matches("tel:")
+                        .trim()
+                        .to_string();
+                    if user.is_empty() {
+                        target
+                    } else if let Some(resolver) = self.server.quick_route_resolver.as_ref() {
+                        resolver
+                            .resolve_quick_target(&user)
+                            .await
+                            .unwrap_or(target)
+                    } else {
+                        target
+                    }
+                };
+                // Application successor (IVR / queue / route point / …): hand
+                // the call over IN-SESSION. The transferor is the agent leg, so
+                // `handle_blind_transfer` redirects the successor to the
+                // customer (`app_media_leg`).
+                if !matches!(
+                    transfer::parse_transfer_target(&target),
+                    transfer::TransferTarget::Sip { .. }
+                ) {
+                    let result = self
+                        .handle_blind_transfer(
+                            agent_leg.clone(),
+                            target,
+                            transfer::TransferDisposition::Detach,
+                            callee_state_rx,
+                            headers,
+                        )
+                        .await;
+                    return match result {
+                        Ok(()) => {
+                            self.release_api_transfer_agent_leg(&agent_leg).await;
+                            CommandResult::success()
+                        }
+                        Err(e) => CommandResult::failure(e.to_string()),
+                    };
+                }
+
+                // SIP target: keep the legacy LegAdd hand-off (the B2BUA
+                // re-dial path re-INVITEs the caller, which the plain-sipbot
+                // caller rejects), but anchor it on the CUSTOMER leg.
+                let Some(customer_leg) = self.resolve_cc_customer_leg(&agent_leg) else {
+                    return CommandResult::failure(
+                        "No customer leg for a customer-anchored transfer".to_string(),
+                    );
+                };
+                let target_leg = LegId::new(format!("transfer-{}", uuid::Uuid::new_v4()));
+                if let Err(error) = self.handle_unhold(customer_leg.clone()).await {
+                    warn!(session_id = %self.id, %error, "API transfer: customer unhold failed");
+                }
+                let sip_headers: Vec<rsipstack::sip::Header> = headers
+                    .into_iter()
+                    .map(|(name, value)| rsipstack::sip::headers::make_header(&name, value))
+                    .collect();
+                let source = self.transfer_source_snapshot(&agent_leg).await;
+                self.stash_transfer_source(source.clone());
+                if let Err(error) = self
+                    .handle_add_leg(
+                        target.clone(),
+                        Some(target_leg.clone()),
+                        sip_headers,
+                        Some(customer_leg.clone()),
+                        None,
+                    )
+                    .await
+                {
+                    return CommandResult::failure(error.to_string());
+                }
+                self.release_api_transfer_agent_leg(&agent_leg).await;
+                self.setup_bridge(customer_leg, target_leg).await;
+                let target_event = {
+                    let t = target.trim();
+                    if !t.contains('@') && !t.starts_with("sip:") && !t.starts_with("sips:") {
+                        format!("sip:{t}")
+                    } else {
+                        target.clone()
+                    }
+                };
+                self.emit_typed_rwi_event(&crate::rwi::CallTransferred {
+                    call_id: self.context.session_id.to_string(),
+                    transfer_target: Some(target_event),
+                    transfer_target_type: Some("sip".to_string()),
+                    transfer_source: source,
+                });
+                CommandResult::success()
             }
 
             CallCommand::TransferComplete { consult_leg } => {
@@ -14822,7 +15090,13 @@ impl SipSession {
             _ => return Err(anyhow!("Only file/URL playback supported")),
         };
 
-        let target = leg_id.clone().unwrap_or_else(|| LegId::from("caller"));
+        // Default playback targets the self-service party: the caller leg in
+        // the classic inbound shape, or the customer (callee) leg when an
+        // outbound agent hand-off redirected the app (see `app_media_leg`).
+        let target = leg_id
+            .clone()
+            .or_else(|| self.app_media_leg.clone())
+            .unwrap_or_else(|| LegId::from("caller"));
         info!(
             session_id = %self.id,
             target = %target,

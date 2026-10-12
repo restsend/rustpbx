@@ -779,6 +779,64 @@ impl SipSession {
         }
     }
 
+    /// Resolve the CC **agent** leg for a customer-anchored transfer (the
+    /// transferor to release). Prefers the CC-served agent — `resolved_agent_id`
+    /// (queue dispatch / originate) or the hook-published `agent_id` extension
+    /// — matched to the active callee (the classic inbound shape) or to a leg
+    /// stamped with that identity. Falls back to a single agent-stamped leg
+    /// (agent-DIALED call: `stamp_caller_agent_identity` marks the caller),
+    /// then to the active callee. `None` when no agent leg can be identified.
+    pub(super) fn resolve_cc_agent_leg(&self) -> Option<LegId> {
+        let callee = LegId::from("callee");
+        let callee_live = self
+            .legs
+            .get(&callee)
+            .is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::Hold));
+        let served = self
+            .pinned_agent_id()
+            .or_else(|| self.session_ext_get("agent_id"));
+        if let Some(agent_id) = served {
+            if let Some((id, _)) = self
+                .legs
+                .iter()
+                .find(|(_, leg)| leg.agent_id.as_deref() == Some(agent_id.as_str()))
+            {
+                return Some(id.clone());
+            }
+            // The served agent IS the active callee (classic inbound / queue).
+            if callee_live {
+                return Some(callee);
+            }
+        }
+        // A single leg stamped with an agent identity (agent-DIALED call).
+        let mut agent_legs = self
+            .legs
+            .iter()
+            .filter(|(_, leg)| leg.agent_id.is_some())
+            .map(|(id, _)| id.clone());
+        let first = agent_legs.next();
+        if agent_legs.next().is_none() {
+            return first;
+        }
+        // Ambiguous — fall back to the active callee.
+        callee_live.then_some(callee)
+    }
+
+    /// The CUSTOMER leg (the party that keeps talking) for a customer-anchored
+    /// transfer: the caller/callee leg opposite the resolved agent leg.
+    pub(super) fn resolve_cc_customer_leg(&self, agent_leg: &LegId) -> Option<LegId> {
+        let caller = LegId::from("caller");
+        let callee = LegId::from("callee");
+        let customer = if agent_leg == &caller {
+            callee
+        } else if agent_leg == &callee {
+            caller
+        } else {
+            return None;
+        };
+        self.legs.contains_key(&customer).then_some(customer)
+    }
+
     async fn handle_transfer_inner(
         &mut self,
         leg_id: LegId,
@@ -999,6 +1057,28 @@ impl SipSession {
             && !matches!(target, TransferTarget::Sip { .. })
         {
             return Err(anyhow!("wait_for_result requires a SIP transfer target"));
+        }
+
+        // Outbound agent hand-off: when the transferor is the **caller** leg
+        // (the agent on an agent-dialed call) and the successor is an
+        // in-session application, the app must serve the OTHER party — the
+        // customer, which is the "callee" leg. Record the redirect so the
+        // app's caller-scoped media/leg commands reach the customer and the
+        // transferor's own BYE releases only its leg (see `execute_command`
+        // remap + `handle_dialog_state` transferor-exit branch). The classic
+        // inbound shape (customer == caller) needs no redirect.
+        if leg_id == LegId::from("caller")
+            && !matches!(target, TransferTarget::Sip { .. })
+            && self
+                .legs
+                .get(&LegId::from("callee"))
+                .is_some_and(|leg| matches!(leg.state, LegState::Connected | LegState::Hold))
+        {
+            info!(
+                session_id = %self.id,
+                "outbound agent hand-off: redirecting app target to the customer (callee) leg"
+            );
+            self.app_media_leg = Some(LegId::from("callee"));
         }
 
         // Lifecycle: arm "flow suspended" when the step-IVR executor marked
@@ -2387,8 +2467,25 @@ impl SipSession {
     pub(crate) async fn start_conference_app(&self, conf_id: &str) -> Result<()> {
         info!(session_id = %self.id, conf_id = %conf_id, "Starting conference application");
         let params = Some(serde_json::json!({"id": conf_id}));
-        self.ensure_app_running("conference", params, &format!("conference '{}'", conf_id))
-            .await
+        let result = self
+            .ensure_app_running("conference", params, &format!("conference '{}'", conf_id))
+            .await;
+        // The conference app's `on_enter` only QUEUES `Answer`; the room join
+        // must be queued BEHIND it so the leg is Connected and its media tracks
+        // exist when the join runs (same ordering the dialplan `app=conference`
+        // path uses). Without this the transfer path started the app but never
+        // joined the room (no `conference_joined`).
+        if result.is_ok() {
+            Self::send_or_log_cmd(
+                &self.cmd_tx,
+                crate::call::domain::CallCommand::JoinConference {
+                    conf_id: conf_id.to_string(),
+                },
+                "queue JoinConference",
+                &self.context.session_id.to_string(),
+            );
+        }
+        result
     }
 
     /// Start the realtime (AI voice) app with a configured `[[realtime]]`

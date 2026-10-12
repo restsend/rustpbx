@@ -2492,6 +2492,215 @@ async fn recording_identity_blind_transfer_keeps_departing_stage_after_handoff()
     assert_eq!(completed.event.payload["recording_id"], source_id);
 }
 
+/// A phone-native REFER handing the call to an application successor
+/// (`queue:` / `toivr:` …) must stamp the transfer. The transferor's later BYE
+/// is only classified as a transfer exit through `transferred_agent_context`,
+/// which is the exact gate that fires `on_agent_disconnected` — and with it
+/// the CC hook's agent recording-segment closer. Without the stamp the flag
+/// stayed false and the segment kept recording the successor stage of a
+/// transferred call.
+#[tokio::test]
+async fn inbound_refer_to_app_target_marks_transferred_and_resolves_transferor_exit() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::config::ProxyConfig;
+    use crate::proxy::routing::RouteQueueConfig;
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server_with_rwi_gateway, create_transaction,
+    };
+    use crate::rwi::gateway::RwiGateway;
+
+    let mut config = ProxyConfig::default();
+    config.queues.insert(
+        "test-queue".to_string(),
+        RouteQueueConfig {
+            name: Some("test-queue".to_string()),
+            ..Default::default()
+        },
+    );
+
+    let gateway = RwiGateway::new();
+    let (server, _) =
+        create_test_server_with_rwi_gateway(config, Arc::new(parking_lot::RwLock::new(gateway)))
+            .await;
+
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let original_request = request.clone();
+    let (tx, _) = create_transaction(request).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let server_dialog = server
+        .dialog_layer
+        .get_or_create_server_invite(&tx, state_tx, None, None)
+        .expect("failed to create server dialog");
+    let dialog_id = server_dialog.id();
+
+    let context = CallContext {
+        session_id: "refer-app-target".to_string(),
+        dialplan: Arc::new(Dialplan::new(
+            "refer-app-target".to_string(),
+            original_request,
+            DialDirection::Inbound,
+        )),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".to_string(),
+        original_callee: "sip:1002@rustpbx.com".to_string(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+
+    let (mut session, _handle, _cmd_rx) = SipSession::new(
+        server.clone(),
+        CancellationToken::new(),
+        None,
+        context,
+        server_dialog,
+        false,
+    );
+    let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
+    session.callee_event_tx = Some(callee_tx);
+
+    // Queue-served call: the REFERor is the agent leg, identity stamped the
+    // same way `handle_received_refer` stamps a referring agent leg.
+    session.update_leg_state(
+        &LegId::from("caller"),
+        crate::call::domain::LegState::Connected,
+    );
+    session
+        .legs
+        .get_mut(&LegId::from("caller"))
+        .unwrap()
+        .agent_id = Some("2002".into());
+    session.session_ext_set("resolved_agent_id", "2002");
+
+    let result = session
+        .handle_inbound_refer(
+            dialog_id,
+            "queue:test-queue".to_string(),
+            HashMap::new(),
+            &mut callee_rx,
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "in-session REFER to a queue target must succeed: {result:?}"
+    );
+
+    // (1) The hand-off stamped the transfer …
+    assert!(
+        session.meta.transferred,
+        "app-target REFER must mark the call transferred"
+    );
+    // (2) … so the transferor's later BYE resolves as a transfer exit — the
+    // gate `handle_callee_state` uses to fire `on_agent_disconnected`.
+    let ctx = session
+        .transferred_agent_context(&LegId::from("caller"))
+        .expect("transferor BYE must classify as a transfer exit");
+    assert!(ctx.transferred);
+}
+
+/// Regression guard for the fix above: ordinary in-session application
+/// hand-offs (IVR `queue:` nodes, queue overflow, no-answer fallbacks) run
+/// through `CallCommand::Transfer` → `handle_transfer` — NOT through
+/// `handle_inbound_refer` — and must keep `meta.transferred` false. The
+/// queue-abandon classifier and the CDR `transferred` marker depend on that.
+#[tokio::test]
+async fn command_transfer_to_app_target_does_not_mark_transferred() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::config::ProxyConfig;
+    use crate::proxy::routing::RouteQueueConfig;
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server_with_rwi_gateway, create_transaction,
+    };
+    use crate::rwi::gateway::RwiGateway;
+
+    let mut config = ProxyConfig::default();
+    config.queues.insert(
+        "test-queue".to_string(),
+        RouteQueueConfig {
+            name: Some("test-queue".to_string()),
+            ..Default::default()
+        },
+    );
+
+    let gateway = RwiGateway::new();
+    let (server, _) =
+        create_test_server_with_rwi_gateway(config, Arc::new(parking_lot::RwLock::new(gateway)))
+            .await;
+
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let original_request = request.clone();
+    let (tx, _) = create_transaction(request).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let server_dialog = server
+        .dialog_layer
+        .get_or_create_server_invite(&tx, state_tx, None, None)
+        .expect("failed to create server dialog");
+
+    let context = CallContext {
+        session_id: "cmd-transfer-queue".to_string(),
+        dialplan: Arc::new(Dialplan::new(
+            "cmd-transfer-queue".to_string(),
+            original_request,
+            DialDirection::Inbound,
+        )),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".to_string(),
+        original_callee: "sip:1002@rustpbx.com".to_string(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+
+    let (mut session, _handle, _cmd_rx) = SipSession::new(
+        server.clone(),
+        CancellationToken::new(),
+        None,
+        context,
+        server_dialog,
+        false,
+    );
+    let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
+    session.callee_event_tx = Some(callee_tx);
+    session.update_leg_state(
+        &LegId::from("caller"),
+        crate::call::domain::LegState::Connected,
+    );
+
+    let result = session
+        .handle_transfer(
+            LegId::from("caller"),
+            "queue:test-queue".to_string(),
+            false,
+            transfer::TransferDisposition::Detach,
+            &mut callee_rx,
+            HashMap::new(),
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "in-session command transfer to a queue target must succeed: {result:?}"
+    );
+    assert!(
+        !session.meta.transferred,
+        "CallCommand::Transfer hand-offs must not flip the transferred flag \
+         (only REFER-initiated hand-offs stamp it)"
+    );
+}
+
 /// A bare (non-IVR, non-queue) call blind-transferred by an agent attributes
 /// the transfer to that agent, carrying both the id and the hook-published
 /// display name. The `name` field stays unset on the agent branch (use

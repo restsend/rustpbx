@@ -174,6 +174,21 @@ pub enum CallCommand {
         headers: HashMap<String, String>,
     },
 
+    /// Customer-anchored blind transfer (CC `POST /cc/calls/{id}/transfer`).
+    ///
+    /// The CUSTOMER — the party that keeps talking — is preserved while the
+    /// AGENT leg is released. The target is handed the call in-session
+    /// (IVR / queue / route point / conference / voicemail / …) or dialed
+    /// (SIP). The session resolves the agent leg from the CC attribution
+    /// (`resolved_agent_id` / the hook-published `agent_id`) with a
+    /// single-stamped-leg fallback, so the API shares the SIP REFER strategy
+    /// (`handle_blind_transfer`) instead of hard-coding `caller` == customer.
+    BlindTransferCustomer {
+        target: String,
+        #[serde(default)]
+        headers: HashMap<String, String>,
+    },
+
     /// Complete an attended transfer
     TransferComplete {
         /// The consultation leg
