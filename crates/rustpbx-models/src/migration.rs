@@ -37,6 +37,7 @@ impl MigratorTrait for Migrator {
             Box::new(super::cdr_daily::Migration),
             Box::new(super::runtime_snapshot::Migration),
             Box::new(super::add_long_text_columns::Migration),
+            Box::new(super::m20261012_000001_config_entries_mediumtext::Migration),
             // The queue addon migration is registered in the addon's own migrator.
         ]
     }

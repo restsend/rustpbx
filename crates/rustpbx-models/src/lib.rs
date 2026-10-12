@@ -25,6 +25,7 @@ pub mod call_record_optimization_indices;
 pub mod call_record_session_id_column;
 pub mod cluster_session;
 pub mod m20260917_000001_cluster_session_target_session_id;
+pub mod m20261012_000001_config_entries_mediumtext;
 pub mod config_entry;
 pub mod department;
 pub mod extension;

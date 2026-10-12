@@ -11,6 +11,7 @@ pub struct Model {
     pub id: i64,
     pub category: String,
     pub entry_name: String,
+    /// Generated config document (MEDIUMTEXT since m20261012_000001).
     pub content: String,
     pub is_generated: bool,
     pub created_at: DateTimeUtc,
