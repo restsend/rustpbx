@@ -910,24 +910,44 @@ async fn await_playback_done_cancel_wins_when_both_ready() {
 fn hangup_by_agent_requires_cc_participation() {
     // CC-routed (queue) call: callee hangup stays "agent".
     assert_eq!(
-        normalize_call_hangup_by("agent", Some("support"), false),
+        normalize_call_hangup_by("agent", Some("support"), false, None),
         "agent"
     );
     // Skill-group direct routing (resolved_agent_id): stays "agent".
-    assert_eq!(normalize_call_hangup_by("agent", None, true), "agent");
+    assert_eq!(normalize_call_hangup_by("agent", None, true, None), "agent");
     // Non-CC call (no queue, no resolved agent): remapped to "callee".
-    assert_eq!(normalize_call_hangup_by("agent", None, false), "callee");
+    assert_eq!(normalize_call_hangup_by("agent", None, false, None), "callee");
+}
+
+#[test]
+fn hangup_by_outbound_customer_bye_corrected_to_callee() {
+    // Outbound click-to-dial, CUSTOMER hangs up first: the caller/A dialog's
+    // remote BYE is stamped `caller_remote` — the CC-centric "agent" must
+    // correct to "callee" even with full CC context.
+    assert_eq!(
+        normalize_call_hangup_by("agent", Some("support"), true, Some("caller_remote")),
+        "callee"
+    );
+    assert_eq!(
+        normalize_call_hangup_by("agent", None, true, Some("caller_remote")),
+        "callee"
+    );
+    // Agent-side BYE on the callee dialog keeps "agent".
+    assert_eq!(
+        normalize_call_hangup_by("agent", None, true, Some("callee_remote")),
+        "agent"
+    );
 }
 
 #[test]
 fn hangup_by_non_agent_unchanged() {
-    assert_eq!(normalize_call_hangup_by("caller", None, false), "caller");
-    assert_eq!(normalize_call_hangup_by("system", None, false), "system");
+    assert_eq!(normalize_call_hangup_by("caller", None, false, None), "caller");
+    assert_eq!(normalize_call_hangup_by("system", None, false, None), "system");
     assert_eq!(
-        normalize_call_hangup_by("transfer", None, false),
+        normalize_call_hangup_by("transfer", None, false, None),
         "transfer"
     );
-    assert_eq!(normalize_call_hangup_by("unknown", None, false), "unknown");
+    assert_eq!(normalize_call_hangup_by("unknown", None, false, None), "unknown");
 }
 
 // ---- helpers for codec / audio-content verification ----
@@ -8642,6 +8662,173 @@ fn queue_dispatch_leg_gets_purpose_and_leg_role() {
     leg.agent_id = Some("1002".into());
     // Queue-dispatched agent leg: RWI leg events carry leg_role "agent".
     assert_eq!(leg.leg_role(), "agent");
+}
+
+// ── Teardown-cascade leg hangups (restore leg_role on post-connect hangup) ──
+
+/// Harness for teardown tests: an OUTBOUND UAC session (the CTI click-to-dial
+/// shape) with the given legs pre-registered, a pinned agent, and the
+/// terminal state "customer hung up first" (ByCallee + `caller_remote` side).
+async fn teardown_session(
+    session_id: &str,
+    legs: Vec<crate::call::domain::Leg>,
+    child_leg_role: Option<&str>,
+) -> (
+    SipSession,
+    tokio::sync::broadcast::Receiver<crate::rwi::EventCacheEntry>,
+) {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
+
+    let gateway = crate::rwi::gateway::RwiGateway::new();
+    let events = gateway.subscribe_events();
+    let (server, _) = create_test_server_with_rwi_gateway(
+        Default::default(),
+        Arc::new(parking_lot::RwLock::new(gateway)),
+    )
+    .await;
+    let request = create_test_request(rsipstack::sip::Method::Invite, "agent-1", None, "rustpbx.com", None);
+    let context = CallContext {
+        session_id: session_id.into(),
+        dialplan: Arc::new(Dialplan::new(session_id.into(), request, DialDirection::Outbound)),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:agent-1@rustpbx.com".into(),
+        original_callee: "sip:13800000000@rustpbx.com".into(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+    let (mut session, _handle, _commands) =
+        SipSession::new_uac(server, CancellationToken::new(), None, context, false);
+    for leg in legs {
+        session.legs.insert(leg.id.clone(), leg);
+    }
+    // The CTI agent attribution (as the RWI originate seeds it) — makes the
+    // session CC-attributed: `has_resolved_agent = true`.
+    session.extensions.write().insert(std::collections::HashMap::from([(
+        "resolved_agent_id".to_string(),
+        "agent-1".to_string(),
+    )]));
+    // Terminal state: answered call, CUSTOMER hung up first (the caller/A
+    // dialog's remote BYE was stamped on an outbound session).
+    session.meta.answer_time = Some(Instant::now());
+    session.meta.hangup_reason = Some(CallRecordHangupReason::ByCallee);
+    session.meta.hangup_by_side = Some("caller_remote".to_string());
+    session.meta.child_leg_role = child_leg_role.map(str::to_string);
+    (session, events)
+}
+
+fn drain_call_hangups(
+    events: &mut tokio::sync::broadcast::Receiver<crate::rwi::EventCacheEntry>,
+) -> Vec<serde_json::Value> {
+    let mut hangups = Vec::new();
+    while let Ok(entry) = events.try_recv() {
+        if entry.event.event_type == "call_hangup" {
+            hangups.push(entry.event.payload);
+        }
+    }
+    hangups
+}
+
+/// The reported defect scenario — agent outbound call, connected, then the
+/// CUSTOMER hangs up first: at session teardown the still-connected agent
+/// bridge leg must emit its leg-scoped `call_hangup` (`leg_role: "agent"`)
+/// BEFORE the session-scoped event, carrying the same reason / hangup_by /
+/// duration. Plain caller/callee legs stay silent, and the outbound
+/// `hangup_by` must normalize to "callee" (the customer hung up — not the
+/// CC-centric "agent" mislabel).
+#[tokio::test]
+async fn teardown_emits_leg_scoped_hangup_for_connected_cc_legs() {
+    let mut agent_leg = crate::call::domain::Leg::new(LegId::new("agent-bridge-1"));
+    agent_leg.agent_id = Some("agent-1".into());
+    agent_leg.state = LegState::Connected;
+    let mut caller_leg = crate::call::domain::Leg::new(LegId::from("caller"));
+    caller_leg.state = LegState::Connected;
+    let (mut session, mut events) =
+        teardown_session("teardown-cc-leg", vec![agent_leg, caller_leg], None).await;
+
+    while events.try_recv().is_ok() {}
+    session.cleanup().await;
+    let hangups = drain_call_hangups(&mut events);
+
+    assert_eq!(
+        hangups.len(),
+        2,
+        "agent bridge leg teardown + session event, got: {hangups:?}"
+    );
+    // Leg-scoped agent teardown FIRST — this is what `leg_role == "agent"`
+    // consumers filter on and what was missing before the fix.
+    assert_eq!(hangups[0]["leg_id"], "agent-bridge-1");
+    assert_eq!(hangups[0]["leg_role"], "agent");
+    assert_eq!(hangups[0]["hangup_by"], "callee", "customer hung up first on an outbound call — never mislabeled as agent");
+    assert_eq!(hangups[0]["reason"], "callee");
+    assert!(hangups[0]["duration_secs"].is_u64(), "established leg carries talk time");
+    assert_eq!(hangups[0]["call_id"], "teardown-cc-leg");
+    // Session-scoped event LAST (the authority), no leg fields.
+    assert!(hangups[1].get("leg_id").is_none() && hangups[1].get("leg_role").is_none());
+    assert_eq!(hangups[1]["hangup_by"], "callee");
+    assert_eq!(hangups[1]["reason"], "callee");
+}
+
+/// A plain two-leg call with no agent/consult legs (including a plain trunk
+/// outbound): teardown adds NO leg-level events — still exactly one
+/// session-scoped `call_hangup`.
+#[tokio::test]
+async fn teardown_plain_two_leg_call_stays_single_session_hangup() {
+    let mut caller_leg = crate::call::domain::Leg::new(LegId::from("caller"));
+    caller_leg.state = LegState::Connected;
+    let mut callee_leg = crate::call::domain::Leg::new(LegId::from("callee"));
+    callee_leg.state = LegState::Connected;
+    let (mut session, mut events) =
+        teardown_session("teardown-plain", vec![caller_leg, callee_leg], None).await;
+
+    while events.try_recv().is_ok() {}
+    session.cleanup().await;
+    let hangups = drain_call_hangups(&mut events);
+
+    assert_eq!(hangups.len(), 1, "positional legs must not duplicate the session event: {hangups:?}");
+    assert!(hangups[0].get("leg_id").is_none() && hangups[0].get("leg_role").is_none());
+}
+
+/// Cluster child-leg sessions: their session event already stamps the
+/// dispatcher-declared `leg_role`, so teardown must NOT add a leg-level
+/// event (the same teardown would be double-reported).
+#[tokio::test]
+async fn teardown_child_leg_session_skips_leg_scoped_hangup() {
+    let mut agent_leg = crate::call::domain::Leg::new(LegId::new("agent-bridge-1"));
+    agent_leg.agent_id = Some("agent-1".into());
+    agent_leg.state = LegState::Connected;
+    let (mut session, mut events) =
+        teardown_session("teardown-child", vec![agent_leg], Some("agent")).await;
+
+    while events.try_recv().is_ok() {}
+    session.cleanup().await;
+    let hangups = drain_call_hangups(&mut events);
+
+    assert_eq!(hangups.len(), 1, "{hangups:?}");
+    assert!(hangups[0].get("leg_id").is_none());
+    assert_eq!(hangups[0]["leg_role"], "agent", "session event stamps the child role");
+}
+
+/// A setup-failed / never-connected CC leg does NOT participate in the
+/// teardown emission: miss semantics (`ring_timeout` / `superseded`) belong
+/// to the in-setup `handle_remove_leg` path; cleanup only covers
+/// established legs.
+#[tokio::test]
+async fn teardown_ignores_never_connected_cc_legs() {
+    let mut agent_leg = crate::call::domain::Leg::new(LegId::new("agent-bridge-1"));
+    agent_leg.agent_id = Some("agent-1".into());
+    agent_leg.state = LegState::Ringing; // never connected
+    let (mut session, mut events) =
+        teardown_session("teardown-ringing", vec![agent_leg], None).await;
+
+    while events.try_recv().is_ok() {}
+    session.cleanup().await;
+    let hangups = drain_call_hangups(&mut events);
+
+    assert_eq!(hangups.len(), 1, "{hangups:?}");
+    assert!(hangups[0].get("leg_id").is_none() && hangups[0].get("leg_role").is_none());
 }
 
 // ═══════════════════════════════════════════════════════════════════

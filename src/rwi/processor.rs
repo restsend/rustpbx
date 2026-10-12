@@ -1434,6 +1434,12 @@ impl RwiCommandProcessor {
             // `call_ringing` session hooks fire once, on the FIRST provisional
             // response — whichever of 180/183 arrives first.
             let mut ringing_hooks_fired = false;
+            // Per-leg ringing state for the A dialog: `None` until the first
+            // provisional, then the last emitted `early_media` flag. The
+            // leg-level event fires on ring-state change (ringing → early
+            // media), the same cadence `update_leg_state` uses for the
+            // queue/inbound per-leg events.
+            let mut caller_leg_ring_state: Option<bool> = None;
             // Normalized hangup reason for failed setup paths — fed to the
             // `on_call_ended` session hooks after the setup block so the CC
             // addon releases the agent (Ringing → Idle).
@@ -1497,12 +1503,39 @@ impl RwiCommandProcessor {
                                                 .await;
                                         }
 
-                                        // One `call_ringing` per provisional response.
-                                        // `early_media` marks a 183/180-with-SDP
-                                        // provisional so consumers can distinguish
-                                        // ringback from early media. Emitted after
-                                        // the hooks so it is enriched with the
-                                        // agent context.
+                                        // Per-leg ringing for the A dialog (the
+                                        // dialed customer): the outgoing INVITE
+                                        // leg IS the session's "caller" leg, and
+                                        // its provisional responses are that
+                                        // leg's ringing — leg identity on the
+                                        // wire, the same contract every other
+                                        // flow follows. Fired on ring-state
+                                        // change (ringing → early media), the
+                                        // cadence `update_leg_state` uses. The
+                                        // agent attribution rides call-meta
+                                        // enrichment: the session-pinned agent
+                                        // is the ORIGINATOR here, not a
+                                        // participant of this leg, so it is
+                                        // never pinned on the leg event.
+                                        if caller_leg_ring_state != Some(early_media) {
+                                            caller_leg_ring_state = Some(early_media);
+                                            let gw = gateway.read();
+                                            gw.send_to_owner(&crate::rwi::CallRinging {
+                                                leg_id: Some("caller".to_string()),
+                                                leg_role: Some("caller".to_string()),
+                                                call_id: call_id.clone(),
+                                                early_media,
+                                                agent_id: None,
+                                                agent_name: None,
+                                            });
+                                        }
+
+                                        // One session-level `call_ringing` per
+                                        // provisional response. `early_media`
+                                        // marks a 183/180-with-SDP provisional so
+                                        // consumers can distinguish ringback from
+                                        // early media. Emitted after the hooks so
+                                        // it is enriched with the agent context.
                                         {
                                             let gw = gateway.read();
                                             gw.send_to_owner(&crate::rwi::CallRinging {

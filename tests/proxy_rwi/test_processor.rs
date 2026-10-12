@@ -1080,20 +1080,50 @@ async fn test_originate_agent_click_to_call_emits_agent_attributed_call_events()
     }
     let bob_id = bob_dialog.expect("bob never received the originate INVITE");
 
-    // call_ringing must arrive after the 180, enriched with agent_id = 1001.
+    // call_ringing must arrive after the 180 — now the DUAL contract like
+    // every other flow: the leg-level event first (leg_id "caller", the
+    // outgoing INVITE leg = the customer), then the session-level event.
+    // Both enriched with agent_id = 1001 via call-meta.
     let ringing = wait_for_tap_event(&mut tap, "call_ringing", std::time::Duration::from_secs(5))
         .await
         .expect("call_ringing expected after 180 Ringing");
+    assert_eq!(ringing.call_id, call_id);
+    assert_eq!(
+        ringing.event.payload["leg_id"].as_str(),
+        Some("caller"),
+        "the customer leg's ringing must carry its leg_id, got: {:?}",
+        ringing.event.payload
+    );
+    assert_eq!(
+        ringing.event.payload["leg_role"].as_str(),
+        Some("caller"),
+        "the outgoing leg rings as the caller, got: {:?}",
+        ringing.event.payload
+    );
     assert_eq!(
         ringing.event.payload["agent_id"].as_str(),
         Some("1001"),
         "call_ringing must carry the originating agent's id"
     );
-    assert_eq!(ringing.call_id, call_id);
     assert_eq!(
         ringing.event.payload["early_media"].as_bool(),
         Some(false),
         "plain 180 must carry early_media=false"
+    );
+    let session_ringing =
+        wait_for_tap_event(&mut tap, "call_ringing", std::time::Duration::from_secs(5))
+            .await
+            .expect("session-level call_ringing expected after the leg event");
+    assert!(
+        session_ringing.event.payload["leg_id"].is_null()
+            && session_ringing.event.payload["leg_role"].is_null(),
+        "session-level ringing must carry no leg fields, got: {:?}",
+        session_ringing.event.payload
+    );
+    assert_eq!(
+        session_ringing.event.payload["agent_id"].as_str(),
+        Some("1001"),
+        "session-level call_ringing must carry the originating agent's id"
     );
     {
         let agent = cc_registry.get_agent("1001").await.expect("agent");
@@ -1238,12 +1268,14 @@ async fn test_originate_provisionals_emit_call_ringing_with_early_media_flag() {
     let bob_id = bob_dialog.expect("bob never received the originate INVITE");
     bob.ring_call(&bob_id).await.expect("bob rings plain 180");
 
-    // Drain the tap: first `call_ringing` must carry early_media=true (the
-    // 183), the second early_media=false (the 180). No `call_early_media`
-    // event may appear.
+    // Drain the tap: the 183 and the 180 each yield a leg-level + session-level
+    // `call_ringing` pair (leg first). The leg-level event follows the
+    // ring-state cadence: it fires for the 183 (early_media=true) and again
+    // when the plain 180 DOWNGRADES the state (early_media=false). No
+    // `call_early_media` event may appear.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut ringing_flags: Vec<bool> = Vec::new();
-    while ringing_flags.len() < 2 {
+    let mut ringing: Vec<(bool, bool)> = Vec::new(); // (has_leg_id, early_media)
+    while ringing.len() < 4 {
         let entry = match tokio::time::timeout_at(deadline, tap.recv()).await {
             Ok(Ok(entry)) => entry,
             _ => break,
@@ -1259,14 +1291,15 @@ async fn test_originate_provisionals_emit_call_ringing_with_early_media_flag() {
                 "call_ringing must carry a boolean early_media flag: {}",
                 entry.event.payload
             );
-            ringing_flags.push(flag.unwrap());
+            let has_leg = entry.event.payload["leg_id"].is_string();
+            ringing.push((has_leg, flag.unwrap()));
         }
     }
     assert_eq!(
-        ringing_flags,
-        vec![true, false],
-        "expected call_ringing(early_media=true) for the 183 then \
-         call_ringing(early_media=false) for the 180"
+        ringing,
+        vec![(true, true), (false, true), (true, false), (false, false)],
+        "expected (leg,session) call_ringing pairs for the 183 (early_media=true) \
+         then the 180 (early_media=false)"
     );
 
     bob.hangup(&bob_id).await.expect("bob hangs up");

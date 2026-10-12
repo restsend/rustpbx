@@ -135,6 +135,12 @@ rwi_event!(CallCreated, "call_created");
 #[derive(Debug, Clone, Serialize)]
 pub struct CallRinging {
     /// Present for an individual leg event; absent for a session event.
+    /// Per-leg events fire for every registered leg's ring transition
+    /// (queue-dispatched agent, consult target, …) AND for the originate
+    /// A dialog: the outgoing INVITE leg (`"caller"`) emits its own ringing
+    /// on ring-state change (first provisional, then the upgrade to early
+    /// media), so an API/CTI outbound carries the same leg-level contract as
+    /// inbound flows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leg_id: Option<String>,
     /// `agent` | `consult` | `transfer` — present on leg events and on the
@@ -196,10 +202,15 @@ pub struct CallHangup {
     ///   (`reason: "ring_timeout"`), escalation stage switch
     ///   (`"stage_switch"`), superseded parallel dial (`"superseded"`),
     ///   other explicit removals (`"cancelled"`).
-    /// Legs ended by the session teardown cascade are covered by the
-    /// session-scoped event and emit no per-leg duplicate. Miss hangups are
-    /// what agent workbenches clear the ringing UI and analytics count
-    /// unanswered calls against.
+    /// * CC-role legs (agent / consult / transfer) still CONNECTED when the
+    ///   session tears down — emitted right before the session-scoped event
+    ///   with identical `reason` / `hangup_by` / `duration_secs`, so
+    ///   `leg_role == "agent"` consumers see the agent leg's teardown even
+    ///   when the OTHER side hung up first (e.g. a CTI click-to-dial where
+    ///   the customer ends the call). Plain caller/callee legs stay covered
+    ///   by the session-scoped event alone.
+    /// Miss hangups are what agent workbenches clear the ringing UI and
+    /// analytics count unanswered calls against.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leg_id: Option<String>,
     /// `agent` | `consult` | `transfer` — present on leg events and on the
@@ -212,7 +223,8 @@ pub struct CallHangup {
     pub call_id: String,
     pub reason: Option<String>,
     /// Normalized initiator: `"agent"` | `"caller"` | `"system"` | `"transfer"`
-    /// | `"unknown"`. Consistent with the former CC-layer `cc_hangup.hangup_by`.
+    /// | `"unknown"` (plus the `"callee"` fallback for non-CC calls).
+    /// Consistent with the former CC-layer `cc_hangup.hangup_by`.
     ///
     /// Leg-scoped events attribute only established-dialog terminations: a
     /// remote BYE normalizes exactly like the session event (`"agent"` in a
@@ -220,6 +232,12 @@ pub struct CallHangup {
     /// `"system"`. Setup failures (never-connected dials) carry `None` —
     /// `queue_agent_no_answer` / `queue_agent_rejected` already describe
     /// those with `leg_role: "agent"`.
+    ///
+    /// Direction-aware correction: on an OUTBOUND call whose first terminal
+    /// BYE came from the caller/A dialog's remote party, the initiator is
+    /// the dialed CUSTOMER (`"callee"`), never `"agent"` — the CC-centric
+    /// callee→agent mapping only applies when the BYE came from a
+    /// callee/agent dialog or an inbound session.
     pub hangup_by: Option<String>,
     pub sip_status: Option<u16>,
     /// Talk time in seconds (answer → hangup). `None` when the call was never

@@ -46,6 +46,20 @@ pub struct CallMeta {
     pub ring_time: Option<Instant>,
     pub answer_time: Option<Instant>,
     pub hangup_reason: Option<CallRecordHangupReason>,
+    /// Which dialog sent the FIRST BYE of the terminal hangup — attribution
+    /// context for the RWI `call_hangup.hangup_by` normalization. `ByCallee`
+    /// means different parties in different call shapes: on an inbound CC
+    /// call the callee side IS the agent (`"agent"`), but on an outbound
+    /// (CTI click-to-dial) call the remote party of the caller/A dialog is
+    /// the CUSTOMER, so `ByCallee` must normalize to `"callee"`. Written
+    /// once, together with the FIRST `hangup_reason` assignment from a
+    /// dialog termination; later cascade BYEs must not overwrite it.
+    /// Values: `"caller_remote"` (remote BYE on the caller/A dialog —
+    /// stamped for OUTBOUND sessions only, where that remote is the
+    /// customer), `"callee_remote"` (remote BYE on a callee/agent dialog —
+    /// the agent hung up), `"local"` (we sent the BYE). `None` for
+    /// non-BYE terminal paths (cancel, autohangup, IVR/system hangup).
+    pub hangup_by_side: Option<String>,
     pub hangup_messages: Vec<SessionHangupMessage>,
     pub last_error: Option<(StatusCode, Option<String>)>,
     /// The SIP status of the INVITE transaction's final response, captured once

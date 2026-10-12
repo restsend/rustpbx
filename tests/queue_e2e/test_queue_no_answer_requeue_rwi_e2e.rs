@@ -566,7 +566,10 @@ async fn test_no_answer_requeue_rwi_event_contract() -> Result<()> {
         // ── per-leg hangup for the ring-timeout cancel ───────────────────
         // The round-1 agent leg never connected: the queue's CANCEL must
         // emit its own `call_hangup{leg_role:"agent", reason:"ring_timeout"}`.
-        // Round 2 connects — no miss hangup there.
+        // Round 2 connects — its agent leg gets a teardown-cascade hangup at
+        // session end (the customer hangup tears the connected agent leg
+        // down; the cascade leg event carries the SESSION reason, not a miss
+        // reason — see the session teardown emitter).
         let round1_leg = evs[offered[0]]["event"]["leg_id"]
             .as_str()
             .expect("round-1 offered carries the agent leg_id")
@@ -583,8 +586,9 @@ async fn test_no_answer_requeue_rwi_event_contract() -> Result<()> {
             .collect();
         assert_eq!(
             leg_hangups.len(),
-            1,
-            "exactly one leg-scoped miss hangup (round-1 agent leg): {types:?}"
+            2,
+            "exactly two leg-scoped agent hangups (round-1 CANCEL miss + \
+             round-2 teardown cascade): {types:?}"
         );
         let (hangup_idx, hangup_ev) = leg_hangups[0];
         assert_eq!(
@@ -601,6 +605,25 @@ async fn test_no_answer_requeue_rwi_event_contract() -> Result<()> {
             offered[0] < hangup_idx && hangup_idx < no_answers[0],
             "miss hangup sits after the round-1 offer and before the no-answer \
              fan-out (the session processes the CANCEL first): {types:?}"
+        );
+        // The round-2 teardown cascade: same agent leg_role, the round-2
+        // leg_id, and the session-level (customer-hangup) reason — NOT a
+        // second miss.
+        let (teardown_idx, teardown_ev) = leg_hangups[1];
+        assert_ne!(
+            teardown_ev["leg_id"].as_str(),
+            Some(round1_leg.as_str()),
+            "the cascade hangup must be the round-2 leg: {teardown_ev}"
+        );
+        assert_ne!(
+            teardown_ev["reason"].as_str(),
+            Some("ring_timeout"),
+            "the cascade hangup is a normal teardown, not a miss: {teardown_ev}"
+        );
+        assert!(
+            teardown_idx > connected[0],
+            "the round-2 cascade hangup fires at session teardown, after the \
+             agent connected: {teardown_ev}"
         );
 
         // ── skill_group_* data-analysis events (the downstream contract) ──

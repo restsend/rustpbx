@@ -33,6 +33,73 @@ pub async fn update_recording_url(
     Ok(())
 }
 
+/// Append pre-serialized trace events to the stored `metadata["trace"]` array
+/// of a call record after it has been inserted. Used by the post-call
+/// recording upload paths (synchronous HTTP upload in `on_record_completed`,
+/// the async S3 uploader and the retry worker) which all run after the saver
+/// has persisted the row, so the in-memory record mutation never reaches the
+/// database. No-op when the row does not exist (`[callrecord]` s3/http/local
+/// storages keep no database row).
+///
+/// Concurrency note: like `update_sipflow_jsonl` this is a whole-document
+/// read-modify-write; callers are the sequential hook pipeline, the
+/// single-consumer upload manager and the retry ticker, so the lost-update
+/// window is negligible in practice.
+pub async fn append_call_trace(
+    db: &DatabaseConnection,
+    call_id: &str,
+    events: Vec<serde_json::Value>,
+) -> anyhow::Result<()> {
+    use sea_orm::EntityTrait;
+    if events.is_empty() {
+        return Ok(());
+    }
+    let record = Entity::find()
+        .filter(Column::CallId.eq(call_id))
+        .one(db)
+        .await?;
+    if let Some(record) = record {
+        let mut metadata = match record.metadata {
+            Some(Json::Object(ref map)) => map.clone(),
+            _ => serde_json::Map::new(),
+        };
+        let trace = metadata
+            .entry("trace".to_string())
+            .or_insert_with(|| Json::Array(Vec::new()));
+        if let Json::Array(items) = trace {
+            items.extend(events);
+        }
+        let mut active: ActiveModel = record.into();
+        active.metadata = Set(Some(Json::Object(metadata)));
+        active.updated_at = Set(chrono::Utc::now());
+        Entity::update(active).exec(db).await?;
+    }
+    Ok(())
+}
+
+/// Overwrite only the recording URL of a call record after it has been
+/// inserted, leaving `recording_duration_secs` untouched. Used by the retry
+/// worker, which no longer knows the call's time window when a previously
+/// failed HTTP upload finally succeeds.
+pub async fn set_recording_url(
+    db: &DatabaseConnection,
+    call_id: &str,
+    recording_url: &str,
+) -> anyhow::Result<()> {
+    use sea_orm::EntityTrait;
+    let record = Entity::find()
+        .filter(Column::CallId.eq(call_id))
+        .one(db)
+        .await?;
+    if let Some(record) = record {
+        let mut active: ActiveModel = record.into();
+        active.recording_url = Set(Some(recording_url.to_string()));
+        active.updated_at = Set(chrono::Utc::now());
+        Entity::update(active).exec(db).await?;
+    }
+    Ok(())
+}
+
 /// Merge `sipflow_jsonl` into the stored metadata of a call record after it
 /// has been inserted. Used by the async upload hook when the signaling JSONL
 /// URL is only known once the upload completes (HTTP uploaders), which runs

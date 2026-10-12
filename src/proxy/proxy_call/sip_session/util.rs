@@ -6,11 +6,85 @@ pub(super) fn normalize_call_hangup_by(
     hangup_by: &str,
     queue_name: Option<&str>,
     has_resolved_agent: bool,
+    hangup_by_side: Option<&str>,
 ) -> String {
+    // Outbound correction: on a CTI click-to-dial / originate call the
+    // caller/A dialog's UAS is the dialed CUSTOMER. A UAS BYE there is the
+    // customer hanging up (stamped `caller_remote`), so the CC-centric
+    // `ByCallee → "agent"` mapping must not fire — the initiator is the
+    // customer ("callee"). A remote BYE on a callee/agent dialog
+    // (`callee_remote`) IS the agent hanging up and keeps "agent"; inbound
+    // sessions never stamp `caller_remote` (their caller-dialog UAS is the
+    // proxy, so a UasBye there is the callee-side cascade, correctly
+    // attributed through the existing mapping below).
+    if hangup_by == "agent" && hangup_by_side == Some("caller_remote") {
+        return "callee".to_string();
+    }
     if hangup_by == "agent" && queue_name.is_none() && !has_resolved_agent {
         "callee".to_string()
     } else {
         hangup_by.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_call_hangup_by;
+
+    #[test]
+    fn inbound_agent_hangup_stays_agent_with_cc_context() {
+        // Inbound CC call, agent (callee side) hangs up: ByCallee → "agent".
+        assert_eq!(
+            normalize_call_hangup_by("agent", Some("support"), true, Some("callee_remote")),
+            "agent"
+        );
+        // First-BYE side not stamped (legacy paths): CC context keeps "agent".
+        assert_eq!(
+            normalize_call_hangup_by("agent", Some("support"), true, None),
+            "agent"
+        );
+    }
+
+    #[test]
+    fn outbound_customer_hangup_normalizes_to_callee() {
+        // Outbound click-to-dial, CUSTOMER hangs up first: the caller/A
+        // dialog's remote BYE was stamped `caller_remote` — the CC-centric
+        // "agent" attribution must be corrected to "callee".
+        assert_eq!(
+            normalize_call_hangup_by("agent", None, true, Some("caller_remote")),
+            "callee"
+        );
+        // Even with a queue name present (customer hung while queued).
+        assert_eq!(
+            normalize_call_hangup_by("agent", Some("support"), true, Some("caller_remote")),
+            "callee"
+        );
+    }
+
+    #[test]
+    fn outbound_agent_hangup_stays_agent() {
+        // Outbound call, the AGENT bridge leg hangs up: remote BYE on the
+        // callee dialog (`callee_remote`) — attribution stays "agent".
+        assert_eq!(
+            normalize_call_hangup_by("agent", None, true, Some("callee_remote")),
+            "agent"
+        );
+    }
+
+    #[test]
+    fn local_bye_and_non_agent_initiators_untouched() {
+        // We tore the call down ourselves: never rewritten.
+        assert_eq!(
+            normalize_call_hangup_by("system", None, false, Some("local")),
+            "system"
+        );
+        // Plain customer/caller initiator: untouched.
+        assert_eq!(
+            normalize_call_hangup_by("caller", None, false, Some("caller_remote")),
+            "caller"
+        );
+        // No CC context at all: existing "callee" fallback keeps working.
+        assert_eq!(normalize_call_hangup_by("agent", None, false, None), "callee");
     }
 }
 

@@ -4330,12 +4330,39 @@ impl SipSession {
                     TerminatedReason::UacBye => {
                         if self.meta.hangup_reason.is_none() {
                             self.meta.hangup_reason = Some(CallRecordHangupReason::ByCaller);
+                            self.meta.hangup_by_side = Some("local".to_string());
                         }
                         info!(session_id = %self.id, "Caller initiated hangup (UacBye)");
                     }
                     TerminatedReason::UasBye => {
                         if self.meta.hangup_reason.is_none() {
                             self.meta.hangup_reason = Some(CallRecordHangupReason::ByCallee);
+                            // Remote BYE on the caller/A dialog of an OUTBOUND
+                            // call. WHO the remote is decides the attribution:
+                            //   - queue-dispatch / consult legs pin an agent
+                            //     (`pinned_agent_id`), so the remote IS the
+                            //     agent hanging up → `callee_remote` keeps the
+                            //     CC-centric "agent" normalization intact;
+                            //   - a plain CTI click-to-dial leg has no pin —
+                            //     the remote is the dialed CUSTOMER →
+                            //     `caller_remote` corrects the normalization
+                            //     to "callee" (a customer hanging up is not an
+                            //     agent-side teardown).
+                            // (Inbound caller dialogs have the proxy as UAS —
+                            // a UasBye there is the callee-side cascade,
+                            // correctly attributed by the existing mapping; no
+                            // stamp.)
+                            if self.context.dialplan.direction
+                                == crate::call::DialDirection::Outbound
+                            {
+                                if self.pinned_agent_id().is_some() {
+                                    self.meta.hangup_by_side =
+                                        Some("callee_remote".to_string());
+                                } else {
+                                    self.meta.hangup_by_side =
+                                        Some("caller_remote".to_string());
+                                }
+                            }
                         }
                         info!(session_id = %self.id, "Callee initiated hangup (UasBye) on caller dialog");
                     }
@@ -5707,12 +5734,16 @@ impl SipSession {
                     TerminatedReason::UasBye => {
                         if self.meta.hangup_reason.is_none() {
                             self.meta.hangup_reason = Some(CallRecordHangupReason::ByCallee);
+                            // Remote BYE on a callee/agent dialog: the agent
+                            // hung up — attribution context for `hangup_by`.
+                            self.meta.hangup_by_side = Some("callee_remote".to_string());
                         }
                         info!(session_id = %self.id, "Callee initiated hangup (UasBye)");
                     }
                     TerminatedReason::UacBye => {
                         if self.meta.hangup_reason.is_none() {
                             self.meta.hangup_reason = Some(CallRecordHangupReason::ByCaller);
+                            self.meta.hangup_by_side = Some("local".to_string());
                         }
                         info!(session_id = %self.id, "Caller initiated hangup (UacBye) on callee dialog");
                     }
@@ -9793,7 +9824,10 @@ impl SipSession {
         // `initiator()` maps any callee hangup to "agent" (contact-center
         // centric). When no CC agent actually participated (no queue routing
         // and no resolved_agent_id), report "callee" so non-CC calls are not
-        // mislabeled as agent-driven.
+        // mislabeled as agent-driven. On OUTBOUND calls whose FIRST terminal
+        // BYE came from the caller/A dialog's remote (the dialed customer,
+        // `hangup_by_side == "caller_remote"`), "agent" is corrected to
+        // "callee" — see `normalize_call_hangup_by`.
         let has_resolved_agent = self.pinned_agent_id().is_some();
         let queue_name = self.meta.queue_name.clone();
         let hangup_by = self
@@ -9801,8 +9835,67 @@ impl SipSession {
             .hangup_reason
             .as_ref()
             .map(|r| r.initiator().to_string())
-            .map(|h| normalize_call_hangup_by(&h, queue_name.as_deref(), has_resolved_agent));
+            .map(|h| {
+                normalize_call_hangup_by(
+                    &h,
+                    queue_name.as_deref(),
+                    has_resolved_agent,
+                    self.meta.hangup_by_side.as_deref(),
+                )
+            });
         let sip_status = self.meta.last_error.as_ref().map(|(sc, _)| sc.code());
+
+        // Teardown-cascade leg events: attribution duplicates of the session
+        // event for the CC-role legs still registered when the session ends.
+        //
+        // Mid-session leg exits already emitted their own leg-scoped hangup
+        // (`emit_rwi_leg_hangup`) and removed the leg from the registry, so
+        // what remains here are legs whose dialog died in the final cascade —
+        // notably the agent bridge leg of a CTI click-to-dial / queue call
+        // when the CUSTOMER hung up first. Without this, consumers filtering
+        // `leg_role == "agent"` never see the agent leg's teardown at all
+        // (the historical gate suppressed every cascade leg; only the session
+        // event fired — the reported gap where an agent-outbound call that
+        // ends after connect produced a single call_hangup with no leg_role).
+        // Plain caller/callee legs stay silent: the session
+        // event is their teardown record, and emitting for them would
+        // duplicate every simple two-party hangup.
+        //
+        // Cluster child-leg sessions are skipped: their session event already
+        // carries the dispatcher-declared `leg_role`, and a second leg-level
+        // event would double-report the same teardown.
+        if self.meta.child_leg_role.is_none() {
+            let cc_leg_teardowns: Vec<(String, String)> = self
+                .legs
+                .iter()
+                .filter(|(_, leg)| {
+                    matches!(leg.state, crate::call::domain::LegState::Connected | crate::call::domain::LegState::Hold)
+                        && matches!(leg.leg_role(), "agent" | "consult" | "transfer")
+                })
+                .map(|(id, leg)| (id.0.clone(), leg.leg_role().to_string()))
+                .collect();
+            for (leg_id, leg_role) in cc_leg_teardowns {
+                info!(
+                    session_id = %self.id,
+                    %leg_id,
+                    %leg_role,
+                    "Emitting leg-scoped call_hangup for established CC leg at session teardown"
+                );
+                self.emit_typed_rwi_event(&crate::rwi::CallHangup {
+                    leg_id: Some(leg_id),
+                    leg_role: Some(leg_role),
+                    call_id: self.context.session_id.clone(),
+                    // Same story as the session event below — the leg-level
+                    // event only ADDS the leg identity, so consumers never see
+                    // contradictory duplicates racing the authoritative event.
+                    reason: hangup_reason_str.clone(),
+                    hangup_by: hangup_by.clone(),
+                    sip_status,
+                    duration_secs: Some(ended_duration_secs),
+                });
+            }
+        }
+
         self.emit_typed_rwi_event(&crate::rwi::CallHangup {
             leg_id: None,
             // A child-leg session (cluster-dispatched queue agent / consult /
@@ -13215,10 +13308,15 @@ impl SipSession {
     ///   stage switch / superseded parallel dial (`handle_remove_leg`
     ///   forwards the `LegRemove` reason; consumers read it as the miss
     ///   signal: `ring_timeout` = the agent never picked up).
-    /// Legs ended by the session teardown cascade are covered by the
-    /// session-scoped `call_hangup` and emit nothing here, so
-    /// `leg_role == "agent"` consumers never see a contradictory duplicate
-    /// (no duration, no attribution) racing the authoritative session event.
+    /// Legs ended by the session teardown cascade emit nothing HERE (the
+    /// cancel gate below): established CC-role legs (agent / consult /
+    /// transfer) still registered at teardown get their leg-scoped hangup
+    /// from `cleanup()` instead — emitted right BEFORE the session-scoped
+    /// event, with the same reason / `hangup_by` / duration so consumers
+    /// filtering `leg_role == "agent"` see the agent leg's teardown without
+    /// a contradictory duplicate racing the authoritative session event.
+    /// Plain caller/callee legs keep the historical behavior: the session
+    /// event is their only teardown record.
     ///
     /// `reason` contract (see the `LegEnded`/`LegFailed` producers): the
     /// dynamic-leg dialog monitor only produces `"UasBye"`/`"UacBye"` for an
@@ -13228,7 +13326,9 @@ impl SipSession {
     /// leg down ourselves.
     fn emit_rwi_leg_hangup(&self, id: &LegId, reason: Option<String>) {
         // A teardown consequence: the session-scoped `call_hangup` (with
-        // `hangup_by` + `duration_secs`) tells the whole story.
+        // `hangup_by` + `duration_secs`) tells the whole story — and
+        // `cleanup()` additionally emits leg-scoped events for established
+        // CC-role legs before it.
         if self.cancel_token.is_cancelled() {
             return;
         }
@@ -13238,19 +13338,36 @@ impl SipSession {
             .and_then(|s| s.parse().ok());
         let queue_name = self.meta.queue_name.clone();
         let has_resolved_agent = self.pinned_agent_id().is_some();
-        // Attribution only where it is known with certainty: a remote BYE on
-        // an established dial leg normalizes exactly like the session-level
-        // event ("agent" in a CC context, "callee" otherwise); a local BYE is
-        // the system's doing. Setup failures claim NO initiator — the
+        // Attribution only where it is known with certainty, and LEG-LOCAL:
+        // on a dynamic dial leg WE are the UAC, so `UasBye` = the leg's
+        // REMOTE party hung up. Who that remote is depends on the leg's own
+        // role — a queue-dispatched / registered-agent leg (`leg_role ==
+        // "agent"`) has the AGENT on the remote end, so a remote BYE is the
+        // agent hanging up; any other dial leg (consult to an external
+        // expert, transfer target, second customer leg) has a non-agent
+        // remote, and its hangup must not be labeled "agent" just because
+        // the session carries CC context. A local BYE (`UacBye`) is the
+        // system's doing. Setup failures claim NO initiator — the
         // queue_agent_no_answer/rejected events (leg_role "agent") already
         // describe them, and labeling a never-connected dial as "agent hung
-        // up" would corrupt hangup-initiator analytics.
+        // up" would corrupt hangup-initiator analytics. (The session's
+        // first-BYE side stamp, `meta.hangup_by_side`, deliberately does NOT
+        // participate here: it describes the SESSION's first terminal BYE,
+        // which may belong to a different dialog than the leg reporting now.)
         let hangup_by = match reason.as_deref() {
-            Some("UasBye") => Some(normalize_call_hangup_by(
-                "agent",
-                queue_name.as_deref(),
-                has_resolved_agent,
-            )),
+            Some("UasBye") => {
+                let initiator = if self.leg_role_of(id.as_str()).as_deref() == Some("agent") {
+                    "agent"
+                } else {
+                    "callee"
+                };
+                Some(normalize_call_hangup_by(
+                    initiator,
+                    queue_name.as_deref(),
+                    has_resolved_agent,
+                    None,
+                ))
+            }
             Some("UacBye") => Some("system".to_string()),
             _ => None,
         };

@@ -802,6 +802,54 @@ async fn test_plain_call_leg_remote_bye_downgrades_to_callee() {
 }
 
 #[tokio::test]
+async fn test_consult_leg_remote_bye_is_not_attributed_to_agent() {
+    // A consult leg to an EXTERNAL target has a non-agent remote: when that
+    // party hangs up (UasBye on the dial leg), the initiator is the remote
+    // party ("callee") — never "agent", even though the SESSION carries full
+    // CC context (queue + resolved agent). Leg-local identity decides.
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
+        queue_name: "support".to_string(),
+        ..Default::default()
+    });
+    let (mut session, mut events) = build_rwi_session(dialplan).await;
+    let consult_leg = LegId::from("consult-1");
+    let mut consult = Leg::new(consult_leg.clone());
+    consult.state = LegState::Connected;
+    consult.purpose = Some(crate::call::domain::LegPurpose::Consult);
+    // External expert: NOT a registered agent → no agent_id → leg_role "consult".
+    session.legs.insert(consult_leg.clone(), consult);
+    session.meta.queue_name = Some("support".into());
+    session.meta.answer_time = Some(Instant::now());
+    session
+        .extensions
+        .write()
+        .insert(std::collections::HashMap::from([(
+            "resolved_agent_id".to_string(),
+            "489218".to_string(),
+        )]));
+
+    session
+        .execute_command(
+            CallCommand::LegEnded { leg_id: consult_leg, reason: "UasBye".to_string() },
+            None,
+        )
+        .await;
+
+    let hangups = leg_hangup_events(&mut events);
+    let leg_event = hangups
+        .iter()
+        .find(|e| e["leg_id"] == "consult-1")
+        .expect("consult leg remote BYE must emit the leg-scoped call_hangup");
+    assert_eq!(leg_event["leg_role"], "consult");
+    assert_eq!(
+        leg_event["hangup_by"],
+        "callee",
+        "external consult target hung up — CC context must not mislabel it as the agent, got {leg_event}"
+    );
+    assert!(leg_event["duration_secs"].is_u64());
+}
+
+#[tokio::test]
 async fn test_local_leg_bye_attributed_to_system() {
     // On a dial leg WE are the UAC: a UAC-side BYE is our own teardown, never
     // the remote party's — it must report "system", not "agent"/"callee".
@@ -880,7 +928,11 @@ async fn test_teardown_cascade_suppresses_leg_hangup_events() {
     // Legs ended by the session teardown cascade are covered by the
     // session-scoped call_hangup; a per-leg duplicate with null attribution
     // racing it is exactly the 2026-10 regression. Cancelled session → no
-    // leg-scoped hangup at all.
+    // leg-scoped hangup AT THIS COMMAND PATH (the cancel gate in
+    // `emit_rwi_leg_hangup`). Established CC-role legs still registered when
+    // the session actually tears down get their attributed leg-level event
+    // from `cleanup()` instead — see
+    // `teardown_emits_leg_scoped_hangup_for_connected_cc_legs`.
     let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_queue(QueuePlan {
         queue_name: "support".to_string(),
         ..Default::default()
