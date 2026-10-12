@@ -224,6 +224,12 @@ default('RustPBX') }}{% endblock %}
                                 placeholder="{{ "sip_trunk_detail.field_outbound_proxy_placeholder" | t }}">
                             <p class="text-xs text-sky-600">Optional intermediary proxy, e.g. proxy.carrier.com:5060</p>
                         </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            {{ "sip_trunk_detail.field_retry_codes" | t }}
+                            <input type="text" x-model.trim="form.retry_status_codes" placeholder="408, 503"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <p class="text-xs text-sky-600">{{ "sip_trunk_detail.field_retry_codes_hint" | t }}</p>
+                        </label>
                         <div class="flex flex-col gap-2">
                             <span class="text-sm font-medium text-slate-700">{{ "sip_trunk_detail.field_active" | t
                                 }}</span>
@@ -248,25 +254,6 @@ default('RustPBX') }}{% endblock %}
                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="{{ "sip_trunk_detail.field_description_placeholder" | t }}"></textarea>
                     </label>
-                </section>
-                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <h2 class="text-sm font-semibold text-slate-900">{{ "sip_trunk_detail.section_retry" | t }}</h2>
-                    <p class="mt-1 text-xs text-slate-500">{{ "sip_trunk_detail.section_retry_desc" | t }}</p>
-                    <div class="mt-4 grid gap-4 md:grid-cols-2">
-                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            {{ "sip_trunk_detail.field_retry_codes" | t }}
-                            <input type="text" x-model.trim="form.retry_status_codes" placeholder="408, 503"
-                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                            <span class="text-xs font-normal text-slate-400">{{ "sip_trunk_detail.field_retry_codes_hint" | t }}</span>
-                        </label>
-                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            {{ "sip_trunk_detail.field_max_ring_time" | t }}
-                            <input type="number" min="1" step="1" x-model="form.max_ring_time"
-                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ "sip_trunk_detail.max_ring_time_default" | t }}">
-                            <span class="text-xs font-normal text-slate-400">{{ "sip_trunk_detail.field_max_ring_time_hint" | t }}</span>
-                        </label>
-                    </div>
                 </section>
             </div>
 
@@ -324,7 +311,7 @@ default('RustPBX') }}{% endblock %}
 
                 <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <h2 class="text-sm font-semibold text-slate-900">{{ "sip_trunk_detail.section_capacity" | t }}</h2>
-                    <div class="mt-4 grid gap-4 md:grid-cols-3">
+                    <div class="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_max_cps" | t }}
                             <input type="number" min="0" step="1" x-model="form.max_cps"
@@ -345,6 +332,13 @@ default('RustPBX') }}{% endblock %}
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder="{{ "sip_trunk_detail.field_max_duration_placeholder" | t }}">
                             <p class="text-xs text-sky-600">Max call duration in seconds. 0 = unlimited</p>
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            {{ "sip_trunk_detail.field_max_ring_time" | t }}
+                            <input type="number" min="1" step="1" x-model="form.max_ring_time"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="{{ "sip_trunk_detail.max_ring_time_default" | t }}">
+                            <p class="text-xs text-sky-600">{{ "sip_trunk_detail.field_max_ring_time_hint" | t }}</p>
                         </label>
                     </div>
                 </section>

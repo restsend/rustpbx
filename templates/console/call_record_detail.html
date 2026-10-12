@@ -790,150 +790,86 @@
                         <template x-if="!sipFlowLoading && sipMessages.length > 0">
                             <div class="flex gap-4">
                                 <!-- Left: Timeline (3/5) -->
-                                <div class="flex-1 w-3/5 flex flex-col gap-4">
-                                    <!-- Timeline Header -->
-                                    <div
-                                        class="grid grid-cols-[90px_1fr_1fr_1fr] gap-2 px-4 py-2 bg-slate-50 rounded-lg border border-slate-200">
-                                        <div class="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">
-                                            Time</div>
-                                        <div class="text-[10px] font-semibold text-slate-500 uppercase tracking-wide text-center"
-                                            x-text="getParticipantLabel('caller')">Caller</div>
-                                        <div
-                                            class="text-[10px] font-semibold text-slate-500 uppercase tracking-wide text-center">
-                                            PBX</div>
-                                        <div class="text-[10px] font-semibold text-slate-500 uppercase tracking-wide text-center"
-                                            x-text="getParticipantLabel('callee')">Callee</div>
-                                    </div>
+                                <div class="flex-1 w-3/5 min-w-0 flex flex-col gap-4">
+                                    <!-- Timeline: one column per participant (caller, PBX, then each other dialog) -->
+                                    <div class="overflow-x-auto">
+                                        <div class="grid items-end px-4 py-2 bg-slate-50 rounded-lg border border-slate-200"
+                                            :style="sipGridStyle()">
+                                            <div class="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">
+                                                Time</div>
+                                            <template x-for="lane in sipLanes" :key="'lane-' + lane.id">
+                                                <div class="px-1 text-center" :title="lane.title || ''">
+                                                    <div class="truncate text-[10px] font-semibold text-slate-500 uppercase tracking-wide"
+                                                        x-text="lane.label"></div>
+                                                    <div class="truncate font-mono text-[10px] text-slate-400" x-show="lane.sub"
+                                                        x-text="lane.sub"></div>
+                                                </div>
+                                            </template>
+                                        </div>
 
-                                    <!-- Timeline Messages -->
-                                    <div class="space-y-0.5 max-h-[calc(100vh-280px)] overflow-y-auto">
-                                        <template x-for="(entry, idx) in sipMessages"
-                                            :key="'msg-' + idx + '-' + entry.timestamp">
-                                            <div class="grid grid-cols-[90px_1fr_1fr_1fr] gap-2 items-center px-4 py-1 hover:bg-sky-50/50 transition-colors cursor-pointer group relative rounded"
-                                                @click="selectedSipEntry = entry"
-                                                :class="selectedSipEntry === entry ? 'bg-sky-50' : ''">
+                                        <!-- Timeline Messages -->
+                                        <div class="space-y-0.5 max-h-[calc(100vh-280px)] overflow-y-auto">
+                                            <template x-for="(entry, idx) in sipMessages"
+                                                :key="'msg-' + idx + '-' + entry.timestamp">
+                                                <div class="grid items-center px-4 py-1 hover:bg-sky-50/50 transition-colors cursor-pointer group relative rounded"
+                                                    :style="sipGridStyle()"
+                                                    @click="selectedSipEntry = entry"
+                                                    :class="selectedSipEntry === entry ? 'bg-sky-50' : ''">
 
-                                                <!-- Time Column -->
-                                                <div class="text-[10px] font-mono text-slate-500"
-                                                    x-text="formatDateTimeWithMs(entry.timestamp)"></div>
+                                                    <!-- Time Column -->
+                                                    <div class="text-[10px] font-mono text-slate-500"
+                                                        x-text="formatDateTimeWithMs(entry.timestamp)"></div>
 
-                                                <!-- Caller Column -->
-                                                <div class="relative">
-                                                    <template x-if="entry._renderSrcRole === 'leg-a'">
-                                                        <div>
-                                                            <div class="rounded-lg border px-2 py-1 text-xs shadow-sm transition hover:shadow-md"
-                                                                :class="getMessageColorClass(entry.raw_message)">
-                                                                <div class="font-semibold whitespace-nowrap"
-                                                                    x-text="extractSipMethod(entry.raw_message)"></div>
-                                                            </div>
-                                                            <!-- Arrow Right -->
-                                                            <div
-                                                                class="absolute left-full top-1/2 -translate-y-1/2 flex items-center pointer-events-none">
-                                                                <svg class="w-6 h-2 text-sky-400" viewBox="0 0 24 8"
-                                                                    fill="none">
-                                                                    <line x1="0" y1="4" x2="18" y2="4"
-                                                                        stroke="currentColor" stroke-width="1.5" />
-                                                                    <polygon points="18,0 24,4 18,8"
-                                                                        fill="currentColor" />
-                                                                </svg>
-                                                            </div>
+                                                    <template x-for="(lane, li) in sipLanes" :key="'cell-' + idx + '-' + lane.id">
+                                                        <div class="relative flex min-h-[28px] items-center">
+                                                            <!-- Sender: message box with its line toward the receiver -->
+                                                            <template x-if="laneCellKind(entry, li) === 'src'">
+                                                                <div class="flex w-full items-center"
+                                                                    :class="laneDir(entry) === 'right' ? 'pl-1' : 'pr-1'"
+                                                                    :style="laneDir(entry) === 'right' ? '' : 'flex-direction: row-reverse'">
+                                                                    <div class="shrink-0 rounded-lg border px-2 py-1 text-xs shadow-sm transition hover:shadow-md"
+                                                                        :class="getMessageColorClass(entry.raw_message)">
+                                                                        <div class="font-semibold whitespace-nowrap"
+                                                                            x-text="extractSipMethod(entry.raw_message)"></div>
+                                                                    </div>
+                                                                    <div class="h-px flex-1 bg-slate-300"></div>
+                                                                </div>
+                                                            </template>
+                                                            <!-- Columns the message passes over -->
+                                                            <template x-if="laneCellKind(entry, li) === 'span'">
+                                                                <div class="h-px w-full bg-slate-300"></div>
+                                                            </template>
+                                                            <!-- Receiver: arrowhead -->
+                                                            <template x-if="laneCellKind(entry, li) === 'dst'">
+                                                                <div class="flex w-full items-center"
+                                                                    :style="laneDir(entry) === 'right' ? '' : 'flex-direction: row-reverse'">
+                                                                    <div class="h-px w-1/2 bg-slate-300"></div>
+                                                                    <svg class="h-2 w-2 shrink-0 text-slate-400" viewBox="0 0 6 8" fill="currentColor">
+                                                                        <polygon :points="laneDir(entry) === 'right' ? '0,0 6,4 0,8' : '6,0 0,4 6,8'" />
+                                                                    </svg>
+                                                                </div>
+                                                            </template>
+                                                            <!-- PBX internal or unresolved messages -->
+                                                            <template x-if="laneCellKind(entry, li) === 'self'">
+                                                                <div class="rounded-lg border px-2 py-1 text-xs shadow-sm transition hover:shadow-md border-dashed"
+                                                                    :class="getMessageColorClass(entry.raw_message)">
+                                                                    <div class="font-semibold whitespace-nowrap"
+                                                                        x-text="extractSipMethod(entry.raw_message)"></div>
+                                                                </div>
+                                                            </template>
+                                                            <template x-if="laneCellKind(entry, li) === 'unknown'">
+                                                                <div class="rounded-lg border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-900 shadow-sm transition hover:shadow-md">
+                                                                    <div class="font-semibold whitespace-nowrap">
+                                                                        <span class="mr-1">?</span>
+                                                                        <span x-text="extractSipMethod(entry.raw_message)"></span>
+                                                                    </div>
+                                                                </div>
+                                                            </template>
                                                         </div>
                                                     </template>
                                                 </div>
-
-                                                <!-- PBX Column -->
-                                                <div class="relative">
-                                                    <!-- PBX to Caller (PBX sends response back) -->
-                                                    <template
-                                                        x-if="entry._renderSrcRole === 'pbx' && entry._renderDstRole === 'leg-a'">
-                                                        <div>
-                                                            <!-- Arrow Left -->
-                                                            <div
-                                                                class="absolute right-full top-1/2 -translate-y-1/2 flex items-center pointer-events-none">
-                                                                <svg class="w-6 h-2 text-emerald-400" viewBox="0 0 24 8"
-                                                                    fill="none">
-                                                                    <polygon points="6,0 0,4 6,8" fill="currentColor" />
-                                                                    <line x1="6" y1="4" x2="24" y2="4"
-                                                                        stroke="currentColor" stroke-width="1.5" />
-                                                                </svg>
-                                                            </div>
-                                                            <div class="rounded-lg border px-2 py-1 text-xs shadow-sm transition hover:shadow-md"
-                                                                :class="getMessageColorClass(entry.raw_message)">
-                                                                <div class="font-semibold whitespace-nowrap"
-                                                                    x-text="extractSipMethod(entry.raw_message)"></div>
-                                                            </div>
-                                                        </div>
-                                                    </template>
-
-                                                    <!-- PBX to Callee (PBX forwards request) -->
-                                                    <template
-                                                        x-if="entry._renderSrcRole === 'pbx' && entry._renderDstRole === 'leg-b'">
-                                                        <div>
-                                                            <div class="rounded-lg border px-2 py-1 text-xs shadow-sm transition hover:shadow-md"
-                                                                :class="getMessageColorClass(entry.raw_message)">
-                                                                <div class="font-semibold whitespace-nowrap"
-                                                                    x-text="extractSipMethod(entry.raw_message)"></div>
-                                                            </div>
-                                                            <!-- Arrow Right -->
-                                                            <div
-                                                                class="absolute left-full top-1/2 -translate-y-1/2 flex items-center pointer-events-none">
-                                                                <svg class="w-6 h-2 text-indigo-400" viewBox="0 0 24 8"
-                                                                    fill="none">
-                                                                    <line x1="0" y1="4" x2="18" y2="4"
-                                                                        stroke="currentColor" stroke-width="1.5" />
-                                                                    <polygon points="18,0 24,4 18,8"
-                                                                        fill="currentColor" />
-                                                                </svg>
-                                                            </div>
-                                                        </div>
-                                                    </template>
-
-                                                    <!-- PBX internal messages -->
-                                                    <template
-                                                        x-if="entry._renderSrcRole === 'pbx' && entry._renderDstRole === 'pbx'">
-                                                        <div class="rounded-lg border px-2 py-1 text-xs shadow-sm transition hover:shadow-md border-dashed"
-                                                            :class="getMessageColorClass(entry.raw_message)">
-                                                            <div class="font-semibold whitespace-nowrap"
-                                                                x-text="extractSipMethod(entry.raw_message)"></div>
-                                                        </div>
-                                                    </template>
-
-                                                    <template
-                                                        x-if="!entry._renderSrcRole || !entry._renderDstRole">
-                                                        <div class="rounded-lg border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-900 shadow-sm transition hover:shadow-md">
-                                                            <div class="font-semibold whitespace-nowrap">
-                                                                <span class="mr-1">?</span>
-                                                                <span x-text="extractSipMethod(entry.raw_message)"></span>
-                                                            </div>
-                                                        </div>
-                                                    </template>
-                                                </div>
-
-                                                <!-- Callee Column -->
-                                                <div class="relative">
-                                                    <!-- Only show messages FROM leg-b (callee sends) -->
-                                                    <template x-if="entry._renderSrcRole === 'leg-b'">
-                                                        <div>
-                                                            <!-- Arrow Left -->
-                                                            <div
-                                                                class="absolute right-full top-1/2 -translate-y-1/2 flex items-center pointer-events-none">
-                                                                <svg class="w-6 h-2 text-purple-400" viewBox="0 0 24 8"
-                                                                    fill="none">
-                                                                    <polygon points="6,0 0,4 6,8" fill="currentColor" />
-                                                                    <line x1="6" y1="4" x2="24" y2="4"
-                                                                        stroke="currentColor" stroke-width="1.5" />
-                                                                </svg>
-                                                            </div>
-                                                            <div class="rounded-lg border px-2 py-1 text-xs shadow-sm transition hover:shadow-md"
-                                                                :class="getMessageColorClass(entry.raw_message)">
-                                                                <div class="font-semibold whitespace-nowrap"
-                                                                    x-text="extractSipMethod(entry.raw_message)"></div>
-                                                            </div>
-                                                        </div>
-                                                    </template>
-                                                </div>
-                                            </div>
-                                        </template>
+                                            </template>
+                                        </div>
                                     </div>
                                 </div>
 
@@ -1177,6 +1113,7 @@
             record: {},
             trace: [],
             sipFlowEntries: [],
+            sipLanes: [],
             sipMessages: [],
             sipFlowColumns: [],
             sipFlowLoading: false,
@@ -2963,11 +2900,110 @@
             applyEntryRoles() {
                 if (!this.sipFlowEntries || this.sipFlowEntries.length === 0) return;
 
+                const calleeLanes = this.buildSipLanes();
+                const laneOf = (role, entry) => {
+                    if (role === 'leg-a') return 0;
+                    if (role === 'pbx') return 1;
+                    if (role === 'leg-b') return calleeLanes.get(entry.call_id) ?? 2;
+                    return null;
+                };
                 this.sipFlowEntries.forEach((entry) => {
                     const resolved = this.resolveEntryRoles(entry);
                     entry._renderSrcRole = resolved.srcRole;
                     entry._renderDstRole = resolved.dstRole;
+                    entry._srcLane = laneOf(resolved.srcRole, entry);
+                    entry._dstLane = laneOf(resolved.dstRole, entry);
                 });
+            },
+
+            // Columns: caller, PBX, then one per other dialog (Call-ID) in the
+            // order it started — sequential attempts, transfer targets and
+            // other legs each get their own. Returns Call-ID → column index.
+            buildSipLanes() {
+                const callees = new Map();
+                for (const entry of this.sipMessages) {
+                    if (this.normalizeLegRole(entry?.role) !== 'callee') continue;
+                    if (!callees.has(entry.call_id)) {
+                        callees.set(entry.call_id, { callId: entry.call_id, first: entry, invite: null });
+                    }
+                    const callee = callees.get(entry.call_id);
+                    const meta = entry._sipMeta;
+                    if (!callee.invite && meta?.isRequest && meta?.method === 'INVITE') {
+                        callee.invite = entry;
+                    }
+                }
+                const lanes = [
+                    { id: 'caller', label: this.getParticipantLabel('caller'), sub: '' },
+                    { id: 'pbx', label: 'PBX', sub: '' },
+                ];
+                const index = new Map();
+                const list = Array.from(callees.values());
+                if (list.length <= 1) {
+                    lanes.push({ id: 'callee', label: this.getParticipantLabel('callee'), sub: '' });
+                    list.forEach((callee) => index.set(callee.callId, 2));
+                    this.sipLanes = lanes;
+                    return index;
+                }
+                // Sequential attempts are traced with their target; match a
+                // dialog to its attempt by the INVITE's Request-URI.
+                const attempts = new Map();
+                for (const ev of this.trace || []) {
+                    const detail = ev?.detail;
+                    if (!detail || typeof detail.attempt !== 'number' || !detail.target) continue;
+                    const known = attempts.get(detail.attempt) || {};
+                    attempts.set(detail.attempt, { ...known, ...detail });
+                }
+                const unmatched = Array.from(attempts.values());
+                list.forEach((callee) => {
+                    const uri = callee.invite ? this.sipRequestUri(callee.invite.raw_message) : '';
+                    const remote = this.normalizeAddr(callee.invite ? callee.invite.dst_addr : callee.first.src_addr);
+                    const at = unmatched.findIndex((attempt) => this.sameSipUri(attempt.target, uri));
+                    const attempt = at >= 0 ? unmatched.splice(at, 1)[0] : null;
+                    const label = attempt
+                        ? `#${attempt.attempt + 1}${attempt.trunk ? ' · ' + attempt.trunk : ''}`
+                        : (this.sipUriUserHost(uri) || remote || 'Callee');
+                    const sub = [remote, attempt && attempt.status ? String(attempt.status) : '']
+                        .filter(Boolean).join(' · ');
+                    index.set(callee.callId, lanes.length);
+                    lanes.push({ id: 'callee:' + callee.callId, label, sub, title: `${uri || remote} — ${callee.callId}` });
+                });
+                this.sipLanes = lanes;
+                return index;
+            },
+
+            sipGridStyle() {
+                const lanes = Math.max(this.sipLanes.length, 3);
+                return `grid-template-columns: 90px repeat(${lanes}, minmax(96px, 1fr));`;
+            },
+
+            laneCellKind(entry, laneIndex) {
+                const src = entry?._srcLane;
+                const dst = entry?._dstLane;
+                if (src == null || dst == null) return laneIndex === 1 ? 'unknown' : null;
+                if (src === dst) return laneIndex === src ? 'self' : null;
+                if (laneIndex === src) return 'src';
+                if (laneIndex === dst) return 'dst';
+                if (laneIndex > Math.min(src, dst) && laneIndex < Math.max(src, dst)) return 'span';
+                return null;
+            },
+
+            laneDir(entry) {
+                return entry?._dstLane > entry?._srcLane ? 'right' : 'left';
+            },
+
+            sipRequestUri(message) {
+                const firstLine = ((message || '').split(/\r?\n/)[0] || '').trim();
+                const match = firstLine.match(/^[A-Z]+\s+(\S+)\s+SIP\/\d\.\d$/i);
+                return match ? match[1] : '';
+            },
+
+            sipUriUserHost(uri) {
+                return (uri || '').replace(/^sips?:/i, '').split(/[;?>]/)[0];
+            },
+
+            sameSipUri(left, right) {
+                const a = this.sipUriUserHost(left).toLowerCase();
+                return !!a && a === this.sipUriUserHost(right).toLowerCase();
             },
 
             resolveEntryRoles(entry) {

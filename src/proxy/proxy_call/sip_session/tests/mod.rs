@@ -28,7 +28,7 @@ async fn sequential_route_retry_uses_real_status_time_limits_and_attempt_context
         ("cancel_before", 0), ("cancel_during", 1),
         ("accepted", 1), ("outer_timeout", 1),
         ("early_anchor_to_bypass", 2), ("bypass_to_anchor", 2),
-        ("ring_timeout", 2),
+        ("ring_timeout", 2), ("single_rejected", 1),
     ] {
         let (server, _) = create_test_server().await;
         let remote = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -86,7 +86,9 @@ async fn sequential_route_retry_uses_real_status_time_limits_and_attempt_context
                     else { Some(policy.clone()) },
             )
         }).collect();
-        let targets: Vec<crate::call::DialAttempt> = if case == "legacy" {
+        let targets: Vec<crate::call::DialAttempt> = if case == "single_rejected" {
+            attempts[..1].to_vec()
+        } else if case == "legacy" {
             attempts.iter().map(|attempt| Location {
                 aor: attempt.location.aor.clone(), ..Default::default()
             }.into()).collect()
@@ -186,6 +188,15 @@ async fn sequential_route_retry_uses_real_status_time_limits_and_attempt_context
                 )
             })
             .collect();
+        // Each dialed attempt is traced with its trunk and target.
+        let started: Vec<String> = session.meta.trace.iter()
+            .filter(|event| event.code.is_none() && event.message.starts_with("Attempt "))
+            .map(|event| event.message.clone())
+            .collect();
+        assert_eq!(started.len(), expected_attempts, "{case}");
+        if case == "matching_status" {
+            assert_eq!(started[0], format!("Attempt 1 → trunk-0 · sip:target0@{remote_addr}"));
+        }
         match case {
             "matching_status" => assert_eq!(failed_attempts, vec![(0, 0, 503), (1, 1, 503)], "{case}"),
             "accepted" => assert!(failed_attempts.is_empty(), "{case}"),
@@ -195,6 +206,8 @@ async fn sequential_route_retry_uses_real_status_time_limits_and_attempt_context
             // The ringing carrier hits its trunk ring time, is cancelled and fails
             // with 408, which its policy retries; the next carrier's 503 is not
             // listed, so the call stops there.
+            // A single target is traced the same way as one in a sequence.
+            "single_rejected" => assert_eq!(failed_attempts, vec![(0, 0, 503)], "{case}"),
             "ring_timeout" => {
                 assert_eq!(failed_attempts, vec![(0, 0, 408), (1, 1, 503)], "{case}");
                 assert!(cancels.load(Ordering::SeqCst) > 0, "the timed-out INVITE is cancelled");

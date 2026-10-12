@@ -6399,6 +6399,15 @@ impl SipSession {
                 .flatten();
             let started_at = Instant::now();
             info!(session_id = %self.id, index = idx, target = %attempt.location.aor, "Trying sequential target");
+            let (label, detail) = Self::attempt_trace_target(idx, attempt);
+            self.record_trace(
+                crate::call_errors::TraceEvent::new(
+                    crate::call_errors::TraceKind::Ring,
+                    format!("Attempt {} → {}", idx + 1, label),
+                )
+                .severity(crate::call_errors::ErrSeverity::Info)
+                .detail(detail),
+            );
 
             match self.try_single_target(&attempt.location, callee_state_rx, None, attempt_timeout, None, None).await {
                 Ok(()) => {
@@ -6408,9 +6417,7 @@ impl SipSession {
                 Err(e) => {
                     warn!(session_id = %self.id, index = idx, error = ?e, "Sequential target failed");
                     last_error = e;
-                    if targets.len() > 1 {
-                        self.record_attempt_failure(idx, attempt, &last_error, started_at.elapsed());
-                    }
+                    self.record_attempt_failure(idx, attempt, &last_error, started_at.elapsed());
                     let retry = attempt.retry_policy.as_ref()
                         .is_none_or(|policy| policy.status_codes.contains(&last_error.0));
                     if self.caller_gone() || !retry {
@@ -6425,9 +6432,28 @@ impl SipSession {
         Err(last_error)
     }
 
-    /// Trace a failed target of a multi-target sequential plan, with the
-    /// attempt's trunk, so hooks see every trunk that was tried and not only
-    /// the one that ended the call.
+    /// "trunk · target" for an attempt's trace nodes, and the detail naming
+    /// the attempt, its target and its trunk.
+    fn attempt_trace_target(index: usize, attempt: &crate::call::DialAttempt) -> (String, serde_json::Value) {
+        let target = attempt.location.aor.to_string();
+        let mut detail = serde_json::json!({ "attempt": index, "target": target });
+        let trunk = attempt
+            .hints
+            .as_deref()
+            .and_then(|hints| hints.extensions.get::<crate::call::OutboundTrunkContext>());
+        let label = match trunk {
+            Some(trunk) => {
+                detail["trunk_id"] = serde_json::json!(trunk.id);
+                detail["trunk"] = serde_json::json!(trunk.name);
+                format!("{} · {}", trunk.name, target)
+            }
+            None => target,
+        };
+        (label, detail)
+    }
+
+    /// Trace a failed target of a sequential plan, with the attempt's trunk,
+    /// so hooks see every trunk that was tried and what each one returned.
     fn record_attempt_failure(
         &mut self,
         index: usize,
@@ -6436,24 +6462,16 @@ impl SipSession {
         elapsed: Duration,
     ) {
         let info = &crate::proxy::proxy_call::error_catalog::DIAL_ATTEMPT_FAILED;
-        let mut detail = serde_json::json!({
-            "attempt": index,
-            "target": attempt.location.aor.to_string(),
-            "status": error.0,
-            "reason": error.1,
-        });
-        if let Some(trunk) = attempt
-            .hints
-            .as_deref()
-            .and_then(|hints| hints.extensions.get::<crate::call::OutboundTrunkContext>())
-        {
-            detail["trunk_id"] = serde_json::json!(trunk.id);
-            detail["trunk"] = serde_json::json!(trunk.name);
-        }
+        let (label, mut detail) = Self::attempt_trace_target(index, attempt);
+        detail["status"] = serde_json::json!(error.0);
+        detail["reason"] = serde_json::json!(error.1);
         self.record_trace(
             crate::call_errors::TraceEvent::new(
                 crate::call_errors::TraceKind::Ring,
-                format!("Attempt {} failed: {} {}", index + 1, error.0, error.1),
+                match error.2.as_deref() {
+                    Some(cause) => format!("Attempt {} failed → {}: {} {} ({})", index + 1, label, error.0, error.1, cause),
+                    None => format!("Attempt {} failed → {}: {} {}", index + 1, label, error.0, error.1),
+                },
             )
             .severity(info.severity)
             .code(info.code)
