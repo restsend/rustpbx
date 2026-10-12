@@ -2336,7 +2336,7 @@ async fn test_blind_transfer_queue_prefix_emits_transferred_with_source() {
 /// A queue-served call blind-transferred onward reports the serving queue
 /// (and transferring agent) as the flow source.
 #[tokio::test]
-async fn test_blind_transfer_reports_queue_flow_source() {
+async fn recording_identity_blind_transfer_keeps_departing_stage_after_handoff() {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::config::ProxyConfig;
     use crate::proxy::routing::RouteQueueConfig;
@@ -2411,6 +2411,13 @@ async fn test_blind_transfer_reports_queue_flow_source() {
     session.session_ext_set("resolved_agent_id", "2002");
     session.session_ext_set("agent_name", "Alice");
 
+    let gateway = server.rwi_gateway.as_ref().unwrap();
+    let source_id = "12345678-1234-4123-8123-123456789abc";
+    let mut meta = gateway.read().meta_store.get_sync("test-session").unwrap_or_default();
+    meta.agent_id = Some("2002".into());
+    meta.recording_id = Some(source_id.into());
+    gateway.read().meta_store.insert("test-session".into(), meta);
+
     let result = session
         .handle_blind_transfer(
             LegId::from("caller"),
@@ -2448,6 +2455,21 @@ async fn test_blind_transfer_reports_queue_flow_source() {
         entry.event.payload["transfer_source"]["agent_name"],
         "Alice"
     );
+    assert_eq!(entry.event.payload["recording_id"], source_id);
+
+    // Completion emitters can run after the target agent has replaced the live call metadata.
+    let mut meta = gateway.read().meta_store.get_sync("test-session").unwrap();
+    meta.agent_id = Some("3003".into());
+    meta.recording_id = Some("87654321-4321-4321-8321-cba987654321".into());
+    gateway.read().meta_store.insert("test-session".into(), meta);
+    gateway.read().send_to_owner(&crate::rwi::CallTransferred {
+        call_id: "test-session".into(), transfer_target: Some("sip:3003@example.test".into()),
+        transfer_target_type: Some("sip".into()), transfer_source: None,
+    });
+    let completed = std::iter::from_fn(|| events.try_recv().ok())
+        .find(|entry| entry.event.event_type == "call_transferred").unwrap();
+    assert_eq!(completed.event.payload["transfer_source"]["agent_id"], "2002");
+    assert_eq!(completed.event.payload["recording_id"], source_id);
 }
 
 /// A bare (non-IVR, non-queue) call blind-transferred by an agent attributes

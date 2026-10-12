@@ -979,6 +979,9 @@ impl SipSession {
         let g = gw.read();
         let call_id = self.context.session_id.to_string();
         let mut meta = g.meta_store.get_sync(&call_id).unwrap_or_default();
+        // Pair the origin agent and identity before any target hooks or disconnect cleanup run.
+        meta.transfer_recording_id = source.agent_id.as_deref()
+            .and_then(|agent_id| g.recording_identity_for_agent(&call_id, agent_id, "call_transferred"));
         meta.transfer_source = Some(source);
         g.meta_store.insert(call_id, meta);
     }
