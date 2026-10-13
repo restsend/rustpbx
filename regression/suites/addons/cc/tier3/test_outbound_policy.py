@@ -162,3 +162,93 @@ async def test_policy_options_return_binding_candidates(cc_api, evidence):
         "legacy routes/trunks candidates must be removed"
     )
     evidence.log_metric("options_agents", len(options["agents"]))
+
+
+async def test_apply_all_policy_reaches_unbound_agent(cc_api, evidence):
+    """`applyAll` policy: applied to every agent with no binding at all
+    (camelCase alias accepted, round-trips on the resource). Deleting it
+    releases the agents back to the global lines."""
+    agent_id = "1002"
+    # Defensive: drop any leftover blanket from a previously aborted run —
+    # the file-backed DB is shared across tests and pytest sessions.
+    await cc_api.delete(f"{API_BASE}/outbound-policies/{POLICY}-blanket")
+    created = await cc_api.post(f"{API_BASE}/outbound-policies", {
+        "name": f"{POLICY}-blanket",
+        "policy": {
+            "enabled": True,
+            "applyAll": True,
+            "lines": [{
+                "id": "blanket-mobile",
+                "label": "Blanket",
+                "prefix": "7",
+                "caller": "self",
+                "default": True,
+            }],
+        },
+        # No agents / skill_groups — apply-all needs no binding.
+    })
+    assert created.get("success") is True, f"policy create failed: {created}"
+
+    try:
+        got = await cc_api.get(f"{API_BASE}/outbound-policies/{POLICY}-blanket")
+        body = got.get("policy") or {}
+        assert body.get("apply_all") is True, (
+            f"apply_all flag not round-tripped: {str(got)[:300]}"
+        )
+
+        config = await cc_api.get(f"{API_BASE}/agents/{agent_id}/config")
+        delivered = _agent_lines(config)
+        by_id = {l.get("id"): l for l in delivered}
+        assert "blanket-mobile" in by_id, (
+            f"apply-all policy must reach an agent with no binding: {[l.get('id') for l in delivered]}"
+        )
+        evidence.log_metric("apply_all_lines", [l.get("id") for l in delivered])
+    finally:
+        # Always strip the blanket — a leftover apply-all policy would leak
+        # lines into every other test sharing this file-backed DB.
+        await cc_api.delete(f"{API_BASE}/outbound-policies/{POLICY}-blanket")
+
+    config = await cc_api.get(f"{API_BASE}/agents/{agent_id}/config")
+    ids = [l.get("id") for l in _agent_lines(config)]
+    assert "blanket-mobile" not in ids, f"deleted apply-all policy still delivered: {ids}"
+
+
+async def test_invisible_policy_delivered_flagged_never_default(cc_api, evidence):
+    """`invisible` policy: rules are STILL delivered (delivered set == enforced
+    set) but each carries `invisible: true` and none is delivered as the
+    default line — the phone UI hides them while the server keeps enforcing."""
+    agent_id = "1001"
+    created = await cc_api.post(f"{API_BASE}/outbound-policies", {
+        "name": f"{POLICY}-silent",
+        "policy": {
+            "enabled": True,
+            "invisible": True,
+            "lines": [
+                {"id": "silent-a", "label": "A", "prefix": "9", "caller": "self", "default": True},
+                {"id": "silent-b", "label": "B", "prefix": "0"},
+            ],
+        },
+        "agents": [agent_id],
+    })
+    assert created.get("success") is True, f"policy create failed: {created}"
+    try:
+        got = await cc_api.get(f"{API_BASE}/outbound-policies/{POLICY}-silent")
+        body = got.get("policy") or {}
+        assert body.get("invisible") is True, f"invisible flag not round-tripped: {str(got)[:300]}"
+
+        config = await cc_api.get(f"{API_BASE}/agents/{agent_id}/config")
+        delivered = _agent_lines(config)
+        by_id = {l.get("id"): l for l in delivered}
+        assert set(by_id) == {"silent-a", "silent-b"}, (
+            f"invisible rules must still be delivered: {[l.get('id') for l in delivered]}"
+        )
+        for line in delivered:
+            assert line.get("invisible") is True, (
+                f"delivered rule missing the invisible flag: {line}"
+            )
+            assert line.get("default") is not True, (
+                f"invisible rule must never be the default line: {line}"
+            )
+        evidence.log_metric("invisible_lines", [l.get("id") for l in delivered])
+    finally:
+        await cc_api.delete(f"{API_BASE}/outbound-policies/{POLICY}-silent")

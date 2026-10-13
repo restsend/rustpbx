@@ -533,6 +533,14 @@ pub struct OriginateRequest {
     pub timeout_secs: Option<u32>,
     #[serde(default)]
     pub extra_headers: HashMap<String, String>,
+    /// Originating agent identity (agent id or SIP extension). When set AND the
+    /// route table is consulted (see `route_originated_calls`), the routing
+    /// cookie carries this identity so per-agent outbound policies
+    /// (`CcAgentPolicyRouteInvite`) can inspect and enforce on the B-leg.
+    /// Ignored when an explicit `trunk` is named (direct-to-trunk skips the
+    /// route table entirely). The CTI REST originate always sets this.
+    #[serde(default)]
+    pub agent: Option<String>,
     /// Optional explicit carrier-trunk override. When set, the originate is routed
     /// out the named trunk directly: the trunk's next-hop destination, transport,
     /// digest credential, host rewrite, and P-Asserted-Identity header are stamped

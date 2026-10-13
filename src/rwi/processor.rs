@@ -1000,6 +1000,20 @@ impl RwiCommandProcessor {
         let routing_enabled = req
             .route_originated_calls
             .unwrap_or(server.proxy_config.load().route_originated_calls);
+        // Agent-attributed originate: carry the agent identity in the routing
+        // cookie so policy-aware RouteInvite chain nodes (CcAgentPolicyRouteInvite)
+        // can resolve and enforce the agent's outbound policy on the B-leg.
+        let routing_cookie = req.agent.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(
+            |agent| {
+                let cookie = TransactionCookie::default();
+                cookie.set_user(crate::call::SipUser {
+                    username: agent.to_string(),
+                    from: Some(caller_uri.clone()),
+                    ..Default::default()
+                });
+                cookie
+            },
+        );
         let routed_hints: Option<crate::config::DialplanHints> =
             if explicit_trunk || !routing_enabled {
                 None
@@ -1011,7 +1025,7 @@ impl RwiCommandProcessor {
                     &caller_uri,
                     &contact,
                     None,
-                    TransactionCookie::default(),
+                    routing_cookie.unwrap_or_default(),
                 )
                 .await
                 {
