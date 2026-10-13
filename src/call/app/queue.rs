@@ -532,6 +532,11 @@ pub struct QueueApp {
     /// (before agent resolution) so it stays the FIRST queue event. When set,
     /// `on_enter` must not emit a duplicate.
     joined_emitted_externally: bool,
+    /// ACD re-entry counter. 1 = first join (the on_enter / start_queue_app
+    /// emission carries no `attempt`); each re-entry after an agent miss
+    /// (no-answer / cancel / reject) that keeps the call queued increments it
+    /// and emits `queue_joined{attempt: n}`.
+    join_attempt: u32,
 }
 
 impl QueueApp {
@@ -578,6 +583,7 @@ impl QueueApp {
             max_wait_armed: false,
             max_wait_grace_used: false,
             joined_emitted_externally: false,
+            join_attempt: 1,
         }
     }
 
@@ -1438,6 +1444,30 @@ impl QueueApp {
     }
 
     /// Handle agent unavailable (busy or no answer).
+    /// The call re-enters the queue after an agent attempt failed (no-answer
+    /// / cancel / reject) and keeps queuing in the SAME queue — next
+    /// candidate or another wait-retention round. Announce the re-entry with
+    /// `queue_joined{attempt: n}` so consumers that keyed on `queue_joined`
+    /// see the call is queued again; the first join keeps the pre-field
+    /// wire payload (no `attempt`). A skill-GROUP switch is a different
+    /// contract (`queue_left` + `queue_overflow_joined`) and never lands
+    /// here.
+    fn emit_queue_rejoined(&mut self) {
+        self.join_attempt = self.join_attempt.saturating_add(1);
+        let groups = self.all_skill_groups();
+        self.emit_rwi(&crate::rwi::event::QueueJoined {
+            call_id: self.call_id.clone(),
+            queue_id: self.config.name.clone(),
+            skill_groups: if groups.is_empty() {
+                None
+            } else {
+                Some(groups)
+            },
+            priority: (self.config.priority != 0).then_some(self.config.priority),
+            attempt: (self.join_attempt > 1).then_some(self.join_attempt),
+        });
+    }
+
     /// Tries next agent if available; otherwise plays fallback prompt.
     async fn handle_agent_unavailable(
         &mut self,
@@ -1500,6 +1530,7 @@ impl QueueApp {
                 self.release_phantom_agents(None).await;
                 self.dynamic_agents = None;
                 self.current_agent_idx = 0;
+                self.emit_queue_rejoined();
                 return self.enter_waiting_for_agent(ctrl).await;
             }
 
@@ -1527,6 +1558,7 @@ impl QueueApp {
                 self.release_phantom_agents(None).await;
                 self.dynamic_agents = None;
                 self.current_agent_idx = 0;
+                self.emit_queue_rejoined();
                 return self.enter_waiting_for_agent(ctrl).await;
             }
             return self
@@ -1538,6 +1570,7 @@ impl QueueApp {
         if ringback_ended && self.ringing_agent_legs.is_empty() {
             self.start_hold_music(ctrl).await?;
         }
+        self.emit_queue_rejoined();
         self.dial_next_agent(ctrl).await
     }
 
@@ -2276,6 +2309,9 @@ impl CallApp for QueueApp {
                 // Absent == 0 so default-priority flows keep the exact same
                 // wire payload as before the field existed.
                 priority: (self.config.priority != 0).then_some(self.config.priority),
+                // First join of this entry — re-joins after an agent miss
+                // carry attempt >= 2 (see `emit_queue_rejoined`).
+                attempt: None,
             });
         }
 

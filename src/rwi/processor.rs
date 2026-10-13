@@ -2507,6 +2507,8 @@ impl RwiCommandProcessor {
             // Absent == 0 so default-priority flows keep the exact same
             // wire payload as before the field existed.
             priority: (req.priority.unwrap_or(0) != 0).then_some(req.priority.unwrap_or(0)),
+            // API join — first entry, no re-entry counter.
+            attempt: None,
         });
 
         info!(
@@ -2694,6 +2696,9 @@ impl RwiCommandProcessor {
             // carry the requested priority (or drop the field at the default
             // tier) so a requeue never resets a caller to priority 0.
             priority: priority.filter(|p| *p != 0),
+            // API requeue — the ACD re-entry counter lives in the queue app;
+            // this command path reports via queue_left/rejoined pairing.
+            attempt: None,
         });
 
         info!(call_id = %call_id, new_queue = %queue_id, priority = ?priority, "Call requeued");

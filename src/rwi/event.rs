@@ -147,6 +147,12 @@ pub struct CallRinging {
     /// session events of a child-leg session (a cluster peer dispatched the
     /// leg to this node). `agent` identifies the CC agent leg (queue
     /// dispatch, consult to a registered agent, agent-initiated call).
+    ///
+    /// Multiple `call_ringing` per call are the per-leg contract: every
+    /// agent attempt (sequential re-dial, escalation stage, parallel fork)
+    /// rings its own leg. After a blind/REFER transfer the departing agent's
+    /// attribution is cleared — the replacement target's ringing does not
+    /// inherit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leg_role: Option<String>,
     pub call_id: String,
@@ -218,6 +224,16 @@ pub struct CallHangup {
     /// leg to this node; the role is the intent the dispatcher declared).
     /// `agent` identifies the CC agent leg (queue dispatch, consult to a
     /// registered agent, agent-initiated call).
+    ///
+    /// Lifecycle contract: a leg-scoped `call_hangup` IS the leg's terminal
+    /// transition — every emission site completes it by removing the leg, so
+    /// a leg is reported exactly once. The session-scoped event of a
+    /// child-leg session carries the declared role only while that leg is
+    /// still registered (its teardown has not been reported yet); once the
+    /// leg exited through its own terminal transition, the session event
+    /// carries no role. After a blind/REFER transfer the departing agent's
+    /// attribution is cleared — the call's next stage (IVR / extension /
+    /// another agent) does not inherit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leg_role: Option<String>,
     pub call_id: String,
@@ -690,6 +706,15 @@ pub struct QueueJoined {
     /// by the shared-queue event tap to persist `cc_acd_queue.priority`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<u32>,
+    /// Re-entry counter: absent on the call's FIRST join (wire-compatible
+    /// with the pre-field payload), `2`, `3`, … on every re-entry after an
+    /// agent attempt failed (no-answer / cancel / reject) and the call keeps
+    /// queuing in the SAME queue — next candidate or another wait-retention
+    /// round. A skill-GROUP switch is a different contract: it emits
+    /// `queue_left{overflow}` + `queue_overflow_joined`, never a re-entry
+    /// `queue_joined`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
 }
 rwi_event!(QueueJoined, "queue_joined");
 

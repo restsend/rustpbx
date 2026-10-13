@@ -3287,7 +3287,20 @@ impl SipSession {
         if !self.meta.transferred || self.is_caller_peer(leg_id) {
             return None;
         }
-        let agent_id = self.legs.get(leg_id)?.agent_id.clone()?;
+        let agent_id = self
+            .legs
+            .get(leg_id)
+            .and_then(|leg| leg.agent_id.clone())
+            // A b2bua blind transfer resets the slot identity when the
+            // replacement attaches — the DEPARTING agent's identity lives on
+            // in the stashed transfer source, and the disconnect hooks
+            // (wrapup / CSAT) must still attribute to it.
+            .or_else(|| {
+                self.stashed_transfer_source()
+                    .filter(|source| source.source_type == "agent")
+                    .and_then(|source| source.agent_id)
+                    .filter(|id| !id.is_empty())
+            })?;
         let mut ctx = self.session_hook_ctx();
         // Attribute this callback to the departing leg, without overwriting the
         // live session's current agent or retaining old contexts per dialog.
@@ -3296,6 +3309,64 @@ impl SipSession {
         Self::set_pinned_agent_id(&extensions, &agent_id);
         ctx.extensions = extensions;
         Some(ctx)
+    }
+
+    /// A blind/REFER transfer handed the call to a NEW destination (IVR /
+    /// extension / another agent): the departing agent's attribution must
+    /// not ride the next stage's events. Snapshot-then-clear — the
+    /// departing identity is already captured in the RWI `transfer_source`
+    /// (stashed at transfer start, consumed by `call_transferred` and the
+    /// disconnect hooks), so this only clears the LIVE surface:
+    /// - the session-extensions pin behind `pinned_agent_id` and the
+    ///   CallMeta sync (`resolved_agent_id` / `agent_id` / `agent_name`),
+    /// - the leg-role surface (`meta.dial_leg_role` / `meta.child_leg_role`),
+    /// - the RWI CallMeta `agent_id` / `agent_name` (event enrichment stops).
+    pub(crate) fn clear_agent_attribution(&mut self) {
+        {
+            let mut ext = self.extensions.write();
+            if let Some(existing) = ext.get_mut::<std::collections::HashMap<String, String>>() {
+                existing.remove(crate::proxy::proxy_call::session_hooks::SessionExtensions::AGENT_ATTRIBUTION_KEY);
+                existing.remove("agent_id");
+                existing.remove("agent_name");
+            }
+        }
+        self.meta.dial_leg_role = None;
+        self.meta.child_leg_role = None;
+        if let Some(ref gw) = self.server.rwi_gateway {
+            let session_id = self.context.session_id.clone();
+            let gw = gw.read();
+            if let Some(mut meta) = gw.meta_store.get_sync(&session_id) {
+                meta.agent_id = None;
+                meta.agent_name = None;
+                gw.meta_store.insert(session_id, meta);
+            }
+        }
+    }
+
+    /// A blind-transfer replacement is (re)attaching into the reusable
+    /// `callee` slot: the slot's previous occupant identity (queue agent pin,
+    /// dial purpose) must not leak onto the NEW party's events. Reset it,
+    /// then re-resolve the NEW target against the agent registry — a
+    /// registered agent target keeps `leg_role: "agent"`, anything else
+    /// (IVR / extension / external number) carries no agent attribution.
+    pub(super) async fn reset_callee_slot_identity(&mut self, callee_uri: &rsipstack::sip::Uri) {
+        let target_agent = match (
+            Self::uri_user_part(&callee_uri.to_string()),
+            self.server.agent_registry.as_ref(),
+        ) {
+            (Some(user), Some(registry)) => registry
+                .get_agent(&user)
+                .await
+                .is_some()
+                .then(|| user),
+            _ => None,
+        };
+        if let Some(leg) = self.legs.get_mut(&LegId::from("callee")) {
+            leg.agent_id = target_agent.clone();
+            leg.purpose = target_agent
+                .is_some()
+                .then_some(crate::call::domain::LegPurpose::Agent);
+        }
     }
 
     /// Fire the `on_call_connected` session hooks for this session.
@@ -6257,6 +6328,9 @@ impl SipSession {
                 // Absent == 0 so default-priority flows keep the exact same
                 // wire payload as before the field existed.
                 priority: (plan.priority != 0).then_some(plan.priority),
+                // First entry into this queue app — the ACD re-entry counter
+                // lives in the queue app (attempt >= 2 on agent-miss re-joins).
+                attempt: None,
             });
         }
 
@@ -10219,9 +10293,12 @@ impl SipSession {
         //
         // Mid-session leg exits already emitted their own leg-scoped hangup
         // (`emit_rwi_leg_hangup`) and removed the leg from the registry, so
-        // what remains here are legs whose dialog died in the final cascade —
-        // notably the agent bridge leg of a CTI click-to-dial / queue call
-        // when the CUSTOMER hung up first. Without this, consumers filtering
+        // what remains here are legs whose terminal transition never produced
+        // an event — notably the agent bridge leg of a CTI click-to-dial /
+        // queue call when the CUSTOMER hung up first (dialog dies in the
+        // cascade), and the tracked-callee leg marked Ended by
+        // `handle_callee_state` without removal (its death is reported by
+        // nobody else). Without this, consumers filtering
         // `leg_role == "agent"` never see the agent leg's teardown at all
         // (the historical gate suppressed every cascade leg; only the session
         // event fired — the reported gap where an agent-outbound call that
@@ -10230,16 +10307,27 @@ impl SipSession {
         // event is their teardown record, and emitting for them would
         // duplicate every simple two-party hangup.
         //
+        // Lifecycle invariant (no latches needed): every leg-scoped emission
+        // site completes the terminal transition by REMOVING the leg, so a
+        // leg present in the registry here has NOT been reported yet — this
+        // cascade IS its terminal transition. Ended-but-registered legs are
+        // exactly the tracked-callee-slot terminations described above.
         // Cluster child-leg sessions are skipped: their session event already
-        // carries the dispatcher-declared `leg_role`, and a second leg-level
-        // event would double-report the same teardown.
+        // carries the dispatcher-declared `leg_role` (gated the same way
+        // below), and a second leg-level event would double-report the same
+        // teardown.
         if self.meta.child_leg_role.is_none() {
             let cc_leg_teardowns: Vec<(String, String)> = self
                 .legs
                 .iter()
                 .filter(|(_, leg)| {
-                    matches!(leg.state, crate::call::domain::LegState::Connected | crate::call::domain::LegState::Hold)
-                        && matches!(leg.leg_role(), "agent" | "consult" | "transfer")
+                    !matches!(
+                        leg.state,
+                        crate::call::domain::LegState::Initializing
+                            | crate::call::domain::LegState::Ringing
+                            | crate::call::domain::LegState::EarlyMedia
+                            | crate::call::domain::LegState::Ending
+                    ) && matches!(leg.leg_role(), "agent" | "consult" | "transfer")
                 })
                 .map(|(id, leg)| (id.0.clone(), leg.leg_role().to_string()))
                 .collect();
@@ -10268,10 +10356,25 @@ impl SipSession {
         self.emit_typed_rwi_event(&crate::rwi::CallHangup {
             leg_id: None,
             // A child-leg session (cluster-dispatched queue agent / consult /
-            // transfer) stamps the role the dispatcher declared, so consumers
-            // see the leg-level teardown of the agent leg, not a second call
-            // ending.
-            leg_role: self.meta.child_leg_role.clone(),
+            // transfer) stamps the role the dispatcher declared — but ONLY
+            // while that leg is still registered: an unregistered leg already
+            // went through its terminal transition, and its own leg-scoped
+            // `call_hangup` has reported the teardown. Re-claiming the role
+            // here would give consumers a second, contradictory
+            // `leg_role == "agent"` event (UasBye from the leg exit vs the
+            // session reason). In-setup legs (never connected) stay out of
+            // the report — their misses carry their own events.
+            leg_role: self.meta.child_leg_role.clone().filter(|role| {
+                self.legs.values().any(|leg| {
+                    !matches!(
+                        leg.state,
+                        crate::call::domain::LegState::Initializing
+                            | crate::call::domain::LegState::Ringing
+                            | crate::call::domain::LegState::EarlyMedia
+                            | crate::call::domain::LegState::Ending
+                    ) && leg.leg_role() == role.as_str()
+                })
+            }),
             call_id: self.context.session_id.clone(),
             reason: hangup_reason_str,
             hangup_by,

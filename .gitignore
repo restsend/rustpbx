@@ -82,6 +82,8 @@ src/addons/cc/acceptance-e2e/
 
 # Playwright platform-specific visual baselines (machine-local)
 *-snapshots/
+node_modules/
+test-results/
 regression/suites/addons/cc/report/
 /*.html
 scripts/seed_verif_session.py

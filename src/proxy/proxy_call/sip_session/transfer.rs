@@ -1548,6 +1548,10 @@ impl SipSession {
                     }
                     let result = self.start_queue_app(queue, None).await;
                     if result.is_ok() {
+                        // The call's next stage is the queue flow — the
+                        // departing agent's attribution stops here (it lives
+                        // on in the stashed transfer source).
+                        self.clear_agent_attribution();
                         self.emit_blind_transfer_app_event(uri, "queue");
                     }
                     return result;
@@ -1579,6 +1583,9 @@ impl SipSession {
                         )
                         .await;
                     if result.is_ok() {
+                        // Same as the queue exit: the app owns the call's
+                        // next stage — stop carrying the departing agent.
+                        self.clear_agent_attribution();
                         self.emit_blind_transfer_app_event(uri, target_type);
                     }
                     return result;
@@ -1598,6 +1605,20 @@ impl SipSession {
                 }
             }
         }
+        // Park the replaced slot's agent identity while the replacement dials:
+        // the NEW party's ring / answer events must not carry the previous
+        // occupant's attribution (a blind/REFER to an IVR or extension used to
+        // keep `leg_role: "agent"` alive on every later event). Restored
+        // verbatim when the dial FAILS — the replaced dialog stays alive and
+        // keeps its attribution.
+        let parked_callee_identity = self
+            .legs
+            .get(&LegId::from("callee"))
+            .map(|leg| (leg.agent_id.clone(), leg.purpose));
+        if let Some(leg) = self.legs.get_mut(&LegId::from("callee")) {
+            leg.agent_id = None;
+            leg.purpose = None;
+        }
         let result = self
             .try_single_target(
                 &location,
@@ -1611,6 +1632,14 @@ impl SipSession {
             if disposition != TransferDisposition::Refer {
                 self.retire_replaced_blind_transfer_leg(replaced_leg, replaced_dialog_id);
             }
+            // The replacement attached into the reusable `callee` slot:
+            // re-resolve the NEW target — a registered agent target keeps
+            // `leg_role: "agent"`, an IVR / extension carries none.
+            self.reset_callee_slot_identity(&location.aor).await;
+            // The departing agent's identity lives on in the stashed
+            // `transfer_source`; the live attribution surface must stop
+            // riding this call's next-stage events.
+            self.clear_agent_attribution();
             // The B2BUA blind-transfer path swaps the B leg
             // in-session (no REFER), so the REFER-based emitters
             // never fire. Emit the transfer notification here,
@@ -1621,6 +1650,13 @@ impl SipSession {
                 transfer_target_type: Some("sip".to_string()),
                 transfer_source: self.stashed_transfer_source(),
             });
+            return Ok(());
+        }
+        if let Some((agent_id, purpose)) = parked_callee_identity {
+            if let Some(leg) = self.legs.get_mut(&LegId::from("callee")) {
+                leg.agent_id = agent_id;
+                leg.purpose = purpose;
+            }
         }
         result.map_err(|(code, text, reason)| {
             if self.meta.pending_transfer_outcome.is_some() {
@@ -1705,6 +1741,10 @@ impl SipSession {
                 self.track_routed_leg_hints(hints);
                 let result = self.start_queue_app(queue, None).await;
                 if result.is_ok() {
+                    // The queue flow owns the call's next stage — the
+                    // departing agent's attribution stops here (it lives on
+                    // in the stashed transfer source).
+                    self.clear_agent_attribution();
                     self.emit_blind_transfer_app_event(target, "queue");
                     self.release_api_transfer_agent_leg(agent_leg).await;
                 }
@@ -1733,6 +1773,9 @@ impl SipSession {
                     } else {
                         app_name.as_str()
                     };
+                    // Same as the queue exit: stop carrying the departing
+                    // agent on the app-owned next stage.
+                    self.clear_agent_attribution();
                     self.emit_blind_transfer_app_event(target, target_type);
                     self.release_api_transfer_agent_leg(agent_leg).await;
                 }
@@ -1784,6 +1827,10 @@ impl SipSession {
         .await?;
         self.release_api_transfer_agent_leg(agent_leg).await;
         self.setup_bridge(customer_leg.clone(), target_leg).await;
+        // The transfer target (independent leg anchored on the customer) owns
+        // the call's next stage — the departing agent's attribution stops
+        // here; its identity lives on in the stashed `transfer_source`.
+        self.clear_agent_attribution();
         // Canonical event form: a bare extension target ("1003") is reported
         // as `sip:1003` — URI-shaped like the B2BUA dial path.
         let target_event = {
@@ -1971,7 +2018,7 @@ impl SipSession {
 
     /// Read back the flow-origin snapshot stashed on the RWI call meta at
     /// transfer start ([`Self::stash_transfer_source`]).
-    fn stashed_transfer_source(&self) -> Option<crate::rwi::TransferSource> {
+    pub(super) fn stashed_transfer_source(&self) -> Option<crate::rwi::TransferSource> {
         let gw = self.server.rwi_gateway.as_ref()?;
         let g = gw.read();
         let stashed = g

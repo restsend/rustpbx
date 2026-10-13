@@ -9738,6 +9738,168 @@ async fn child_leg_session_event_shape() {
     assert!(ringing.event.payload.get("leg_id").is_none());
 }
 
+/// REPRO (cluster child-leg double report): a cluster-dispatched agent leg
+/// (`child_leg_role = "agent"`) hangs up first — the dynamic-leg monitor
+/// emits the leg-scoped `call_hangup{leg_role:"agent", reason:"UasBye"}`
+/// and REMOVES the leg. At teardown the session-scoped event must NOT claim
+/// `leg_role` again: the leg's terminal transition already reported it.
+/// Before the fix consumers filtering `leg_role == "agent"` saw TWO events
+/// for one teardown with contradictory reasons (UasBye vs callee).
+#[tokio::test]
+async fn child_leg_agent_bye_reports_agent_role_exactly_once() {
+    let mut agent_leg = crate::call::domain::Leg::new(LegId::new("queue-agent"));
+    agent_leg.agent_id = Some("agent-1".into());
+    agent_leg.state = LegState::Connected;
+    let (mut session, mut events) =
+        teardown_session("repro-child-agent-bye", vec![agent_leg], Some("agent")).await;
+
+    // Agent hangs up mid-session (session not yet cancelling): the dynamic
+    // monitor delivers LegEnded{UasBye} → leg-scoped event + leg removal.
+    session
+        .execute_command(
+            CallCommand::LegEnded {
+                leg_id: LegId::new("queue-agent"),
+                reason: "UasBye".to_string(),
+            },
+            None,
+        )
+        .await;
+
+    // Session teardown follows (no draining in between — collect everything).
+    session.cleanup().await;
+    let hangups = drain_call_hangups(&mut events);
+
+    let agent_reports: Vec<&serde_json::Value> =
+        hangups.iter().filter(|h| h["leg_role"] == "agent").collect();
+    assert_eq!(
+        agent_reports.len(),
+        1,
+        "the agent leg teardown must be reported exactly once, got: {hangups:?}"
+    );
+    assert_eq!(agent_reports[0]["leg_id"], "queue-agent");
+    assert_eq!(agent_reports[0]["reason"], "UasBye");
+    // The session-scoped event still fires (authoritative reason/duration)
+    // but without the leg_role claim.
+    assert_eq!(
+        hangups.len(),
+        2,
+        "leg-scoped + session-scoped events, no third report: {hangups:?}"
+    );
+    let session_event = hangups
+        .iter()
+        .find(|h| h.get("leg_id").is_none())
+        .expect("session-scoped event present");
+    assert!(
+        session_event.get("leg_role").is_none(),
+        "session event must not re-claim the already-reported leg role, got {session_event:?}"
+    );
+}
+
+/// REPRO (transfer slot-reuse residue): a blind/REFER replacement attaches
+/// into the reusable `callee` slot. Resetting the slot identity at the swap
+/// strips the previous occupant's agent attribution — the NEW party's (IVR /
+/// extension) events carry no `leg_role` — while a transfer to a REGISTERED
+/// agent keeps `leg_role: "agent"`.
+#[tokio::test]
+async fn transfer_slot_reuse_strips_stale_agent_role() {
+    use crate::call::app::agent_registry::{AgentRegistry, MemoryRegistry, PresenceState};
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::proxy::tests::common::{create_test_request, create_test_server_with_rwi_gateway};
+
+    async fn session_with_agent_callee_slot(
+        session_id: &str,
+        agent_registry: Option<Arc<MemoryRegistry>>,
+    ) -> (
+        SipSession,
+        tokio::sync::broadcast::Receiver<crate::rwi::EventCacheEntry>,
+    ) {
+        let gateway = crate::rwi::gateway::RwiGateway::new();
+        let events = gateway.subscribe_events();
+        let (server, _) = create_test_server_with_rwi_gateway(
+            Default::default(),
+            Arc::new(parking_lot::RwLock::new(gateway)),
+        )
+        .await;
+        let mut server = server;
+        if let Some(registry) = agent_registry {
+            Arc::get_mut(&mut server)
+                .expect("test server uniquely held")
+                .agent_registry = Some(registry);
+        }
+        let request =
+            create_test_request(rsipstack::sip::Method::Invite, "agent-1", None, "rustpbx.com", None);
+        let context = CallContext {
+            session_id: session_id.into(),
+            dialplan: Arc::new(Dialplan::new(session_id.into(), request, DialDirection::Outbound)),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:agent-1@rustpbx.com".into(),
+            original_callee: "sip:13800000000@rustpbx.com".into(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+        let (mut session, _handle, _commands) =
+            SipSession::new_uac(server, CancellationToken::new(), None, context, false);
+        let mut callee = crate::call::domain::Leg::new(LegId::from("callee"));
+        callee.agent_id = Some("agent-1".into());
+        callee.purpose = Some(crate::call::domain::LegPurpose::Agent);
+        callee.state = LegState::Connected;
+        session.legs.insert(LegId::from("callee"), callee);
+        (session, events)
+    }
+
+    // ── Transfer to an IVR / extension: NO agent attribution survives ──
+    let (mut session, mut events) =
+        session_with_agent_callee_slot("repro-slot-ivr", None).await;
+    while events.try_recv().is_ok() {}
+
+    let ivr_target: rsipstack::sip::Uri = "sip:ivr-9001@rustpbx.com".parse().unwrap();
+    session.reset_callee_slot_identity(&ivr_target).await;
+    let leg = session.legs.get(&LegId::from("callee")).expect("slot present");
+    assert!(
+        leg.agent_id.is_none() && leg.purpose.is_none(),
+        "IVR/extension target must not inherit the agent pin, got {:?}",
+        (leg.agent_id.as_deref(), leg.purpose)
+    );
+
+    // The replacement's ring event no longer claims `agent` — the reported
+    // residue (every later event kept `leg_role: "agent"`) is gone. The
+    // positional fallback ("callee") is the documented non-CC contract.
+    session.update_leg_state(&LegId::from("callee"), LegState::Ringing);
+    let ringing = events.try_recv().expect("replacement target rings").event.payload;
+    assert_eq!(ringing["event_type"], "call_ringing");
+    assert_ne!(
+        ringing["leg_role"], "agent",
+        "transferred-to IVR/extension must not carry the agent role, got {ringing:?}"
+    );
+
+    // ── Transfer to a REGISTERED agent: the leg keeps `agent` ──
+    let registry = Arc::new(MemoryRegistry::new());
+    registry
+        .register(
+            "2002".to_string(),
+            "Bob".to_string(),
+            "sip:2002@rustpbx.com".to_string(),
+            vec!["support".to_string()],
+            1,
+        )
+        .await
+        .unwrap();
+    registry.update_presence("2002", PresenceState::Idle).await.unwrap();
+    let (mut session, _events) =
+        session_with_agent_callee_slot("repro-slot-agent", Some(registry)).await;
+    let agent_target: rsipstack::sip::Uri = "sip:2002@rustpbx.com".parse().unwrap();
+    session.reset_callee_slot_identity(&agent_target).await;
+    let leg = session.legs.get(&LegId::from("callee")).expect("slot present");
+    assert_eq!(
+        leg.agent_id.as_deref(),
+        Some("2002"),
+        "a registered agent target keeps the agent pin"
+    );
+    assert_eq!(leg.leg_role(), "agent");
+}
+
 /// Ring-timeout cancel: `LegRemove` on a NEVER-connected agent leg emits a
 /// leg-scoped `call_hangup{leg_role:"agent", reason}` — the queue's miss
 /// must stay visible to agent-side consumers (regression: the CANCEL path

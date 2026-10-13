@@ -3912,6 +3912,157 @@ mod tests {
         let _ = stack.join().await;
     }
 
+    /// Skill-group RE-ENTRY: an assigned agent misses (ring timeout → PBX
+    /// cancels) and the call keeps queuing on the NEXT candidate in the SAME
+    /// group. The re-entry must announce itself with a second `queue_joined`
+    /// carrying `attempt: 2` (first join keeps the pre-field wire payload) —
+    /// ordered AFTER the miss (`queue_agent_no_answer`) and BEFORE the next
+    /// offer. Before the fix the re-entry was invisible: only the miss event
+    /// fired, no joined.
+    #[tokio::test]
+    async fn test_agent_miss_reentry_emits_queue_joined_with_attempt() {
+        use crate::call::app::agent_registry::PresenceState;
+        use crate::rwi::auth::RwiIdentity;
+        use std::sync::Arc;
+
+        let mut gw = crate::rwi::gateway::RwiGateway::new();
+        let sid = gw
+            .create_session(RwiIdentity {
+                token: "t".into(),
+                scopes: vec![],
+            })
+            .read()
+            .id
+            .clone();
+        let (gws_tx, mut gws_rx) = tokio::sync::mpsc::unbounded_channel();
+        gw.set_session_event_sender(&sid, gws_tx);
+        let gw = Arc::new(parking_lot::RwLock::new(gw));
+
+        let registry = Arc::new(
+            HookRecordingRegistry::new().with_resolve_uris(vec![vec![
+                "sip:agent1@example.com".to_string(),
+                "sip:agent2@example.com".to_string(),
+            ]]),
+        );
+        for (id, name, uri) in [
+            ("agent-001", "Alice", "sip:agent1@example.com"),
+            ("agent-002", "Bob", "sip:agent2@example.com"),
+        ] {
+            registry
+                .inner
+                .register(id.to_string(), name.to_string(), uri.to_string(), vec!["support".to_string()], 1)
+                .await
+                .unwrap();
+            registry
+                .inner
+                .update_presence(id, PresenceState::Idle)
+                .await
+                .unwrap();
+        }
+
+        let mut config = build_simple_queue_config();
+        config.skill_routing_enabled = true;
+        config.skill_group = Some("support".to_string());
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.hold = None;
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(registry.clone());
+        queue = queue.with_call_id("call-reentry".to_string());
+
+        let mut ctx = crate::call::app::ApplicationContext::new(
+            sea_orm::DatabaseConnection::default(),
+            crate::call::app::CallInfo {
+                session_id: "test-session".into(),
+                caller: "1001".into(),
+                callee: "1002".into(),
+                direction: "inbound".into(),
+                started_at: chrono::Utc::now(),
+                sip_headers: Default::default(),
+                route_name: None,
+            },
+            Arc::new(crate::config::Config::default()),
+            reqwest::Client::new(),
+        );
+        ctx.rwi_gateway = Some(gw);
+
+        let mut stack = MockCallStack::run_with_context(Box::new(queue), ctx);
+        stack.enter().await;
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        // Kick the sequential dial of the first resolved candidate (the kick
+        // path is what registers the leg as ringing in the app), then fire
+        // the ring timeout — the PBX cancels and moves to the next candidate.
+        stack.custom("dial_next_agent", serde_json::json!({}));
+        stack
+            .assert_cmd(2000, "OriginateCall", |c| {
+                matches!(c, CallCommand::LegAdd { .. })
+            })
+            .await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        stack.timeout("agent_ring_timeout");
+
+        // Collect the queue lifecycle events in order: the first join, the
+        // miss, and (the fix) the re-entry join with attempt = 2.
+        let mut events: Vec<(String, serde_json::Value)> = Vec::new();
+        for _ in 0..40 {
+            while let Ok(v) = gws_rx.try_recv() {
+                let t = v.get("event_type").and_then(|e| e.as_str()).unwrap_or("");
+                if matches!(t, "queue_joined" | "queue_agent_no_answer") {
+                    events.push((t.to_string(), v));
+                }
+            }
+            if events.iter().any(|(t, v)| {
+                t == "queue_joined" && v.get("attempt").and_then(|a| a.as_u64()) == Some(2)
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let types: Vec<&str> = events.iter().map(|(t, _)| t.as_str()).collect();
+        let joins: Vec<&serde_json::Value> = events
+            .iter()
+            .filter(|(t, _)| t == "queue_joined")
+            .map(|(_, v)| v)
+            .collect();
+
+        assert!(
+            types.contains(&"queue_agent_no_answer"),
+            "the miss must be announced, got {types:?}"
+        );
+        assert!(
+            types.contains(&"queue_joined"),
+            "the first join must be announced, got {types:?}"
+        );
+        // Contract: exactly two joins — first without attempt, re-entry with
+        // attempt = 2 — and the re-entry AFTER the miss.
+        assert_eq!(
+            joins.len(),
+            2,
+            "re-entry must emit a second queue_joined, got {types:?}"
+        );
+        assert!(
+            joins[0].get("attempt").is_none(),
+            "first join keeps the wire-compatible payload, got {joins:?}"
+        );
+        assert_eq!(
+            joins[1]["attempt"], 2,
+            "re-entry join carries attempt = 2, got {joins:?}"
+        );
+        let miss_pos = types.iter().position(|t| *t == "queue_agent_no_answer").unwrap();
+        let rejoin_pos = types.iter().rposition(|t| *t == "queue_joined").unwrap();
+        assert!(
+            rejoin_pos > miss_pos,
+            "re-entry join must follow the miss (no_answer → joined), got {types:?}"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
     /// A 486-busy rejection must emit the documented `queue_agent_rejected`
     /// RWI event (leg_role "agent", bound to the dialed leg). Before the fix
     /// the event was defined and documented but never broadcast.
