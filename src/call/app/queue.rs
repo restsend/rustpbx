@@ -589,6 +589,10 @@ impl QueueApp {
 
     /// Set the AgentRegistry for dynamic routing.
     pub fn with_agent_registry(mut self, registry: Arc<dyn AgentRegistry>) -> Self {
+        if let Some(timeout) = registry.agent_ring_timeout() {
+            self.config.ring_timeout = Some(timeout);
+            self.plan.ring_timeout = Some(timeout);
+        }
         self.agent_registry = Some(registry);
         self
     }

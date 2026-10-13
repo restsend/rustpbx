@@ -1188,14 +1188,14 @@ impl PresenceModule {
 
         let old_state = self.manager.get_state(&identity);
 
-        self.manager
-            .update_state(&identity, current.clone(), &EventSource::Local)
-            .await;
-
-        // Notify local addon handlers (CC addon subscribes to emit webhooks).
-        // AMI cluster sync is handled internally by update_state.
+        // Addon admission precedes persistence and NOTIFY, so a rejected
+        // automatic client request cannot overwrite the authoritative mirror.
         if let Some(hub) = &self.server.cluster_event_hub {
             hub.emit_presence_change(&identity, Some(&old_state), &current)
+                .await;
+        } else {
+            self.manager
+                .update_state(&identity, current.clone(), &EventSource::Local)
                 .await;
         }
 

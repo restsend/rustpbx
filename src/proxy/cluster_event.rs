@@ -51,6 +51,12 @@ impl EventSource {
 
 #[async_trait]
 pub trait ClusterEventHandler: Send + Sync {
+    /// Admit a client PUBLISH before persistence, cluster broadcast and NOTIFY.
+    /// Addons may reserve automatic states for their call-bound state machine.
+    async fn accepts_presence_publish(&self, _identity: &str, _state: &PresenceState) -> bool {
+        true
+    }
+
     async fn on_locator_event(&self, _event: &LocatorEvent, _source: &EventSource) {}
     async fn on_presence_event(
         &self,
@@ -413,7 +419,17 @@ impl ClusterEventHub {
         old_state: Option<&PresenceState>,
         new_state: &PresenceState,
     ) {
+        let handlers: Vec<Arc<dyn ClusterEventHandler>> =
+            self.handlers.read().iter().cloned().collect();
+        for handler in handlers {
+            if !handler.accepts_presence_publish(identity, new_state).await {
+                return;
+            }
+        }
         let source = EventSource::Local;
+        self.presence_manager
+            .update_state(identity, new_state.clone(), &source)
+            .await;
         self.notify_presence_handlers(identity, old_state, new_state, &source)
             .await;
     }

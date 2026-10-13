@@ -201,6 +201,11 @@ impl RoutingStrategy {
 /// allowing the Queue and other components to work with any implementation.
 #[async_trait]
 pub trait AgentRegistry: Send + Sync {
+    /// Backend-owned ringing limit; generic registries retain the route setting.
+    fn agent_ring_timeout(&self) -> Option<Duration> {
+        None
+    }
+
     /// Register a new agent
     async fn register(
         &self,
