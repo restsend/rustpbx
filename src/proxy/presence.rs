@@ -1470,8 +1470,17 @@ pub(crate) fn build_pidf_body(identity: &str, domain: &str, state: &PresenceStat
             note: match &state.status {
                 // Away states carry the canonical status string in the note
                 // (e.g. "away:lunch") so subscribers see one consistent
-                // vocabulary regardless of what the publisher sent.
-                PresenceStatus::Away(_) => state.note.clone().or_else(|| Some("away".to_string())),
+                // vocabulary regardless of what the publisher sent. Writers
+                // that only fill `Away(detail)` without a note (CC bridge on
+                // REST status changes, cluster sync) must not degrade to bare
+                // "away" — the break detail is otherwise stripped from every
+                // NOTIFY and soft-phone reconcile flips the typed break to the
+                // generic one seconds after it is applied.
+                PresenceStatus::Away(detail) => match state.note.as_deref() {
+                    Some(n) if !n.trim().is_empty() => state.note.clone(),
+                    _ if detail.is_empty() => Some("away".to_string()),
+                    _ => Some(format!("away:{detail}")),
+                },
                 _ => state
                     .note
                     .clone()
@@ -1852,6 +1861,34 @@ mod tests {
         let body = build_pidf_body("1001", "pbx.example.com", &state);
         assert!(body.contains("<basic>open</basic>"));
         assert!(body.contains("<note>away:lunch</note>"));
+    }
+
+    /// Break detail must survive a state that carries `Away(detail)` without a
+    /// note (CC bridge / cluster-sync writers). The PIDF note is the only
+    /// field SIP subscribers parse — falling back to bare "away" strips the
+    /// break type and soft-phone reconcile flips the agent to the generic
+    /// break label 3-5s after applying a typed break.
+    #[test]
+    fn test_build_pidf_body_away_detail_without_note_stays_canonical() {
+        // Detail present + no note → canonical "away:<detail>".
+        let state = make_state(PresenceStatus::Away("1".to_string()));
+        let body = build_pidf_body("1001", "pbx.example.com", &state);
+        assert!(body.contains("<note>away:1</note>"), "body: {body}");
+        assert!(!body.contains("<note>away</note>"), "body: {body}");
+        // Blank note behaves like an absent one.
+        let mut state = make_state(PresenceStatus::Away("meeting".to_string()));
+        state.note = Some("   ".to_string());
+        let body = build_pidf_body("1001", "pbx.example.com", &state);
+        assert!(body.contains("<note>away:meeting</note>"), "body: {body}");
+        // Bare away (no detail) keeps the legacy fallback.
+        let state = make_state(PresenceStatus::Away(String::new()));
+        let body = build_pidf_body("1001", "pbx.example.com", &state);
+        assert!(body.contains("<note>away</note>"), "body: {body}");
+        // An explicit note always wins verbatim.
+        let mut state = make_state(PresenceStatus::Away("1".to_string()));
+        state.note = Some("away:2".to_string());
+        let body = build_pidf_body("1001", "pbx.example.com", &state);
+        assert!(body.contains("<note>away:2</note>"), "body: {body}");
     }
 
     #[test]
