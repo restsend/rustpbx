@@ -98,7 +98,7 @@ pub struct RwiGateway {
     /// event payload under `user_data` and persisted into the CDR
     /// `metadata["user_data"]`. Same lifecycle as `meta_store`: present from
     /// session construction until `call_finished`.
-    user_data: DashMap<SessionId, serde_json::Map<String, serde_json::Value>>,
+    user_data: DashMap<SessionId, SessionUserData>,
     /// Per-session event type filter; if set, only events whose type name is in the set are delivered.
     session_event_filters: HashMap<SessionId, HashSet<String>>,
     /// Optional broadcast sender for the RWI webhook handler.
@@ -131,6 +131,21 @@ pub struct RwiGateway {
 #[derive(Debug)]
 struct EventCacheState {
     cache: VecDeque<EventCacheEntry>,
+}
+
+struct SessionUserData {
+    data: serde_json::Map<String, serde_json::Value>,
+    /// A replicated or local cleanup must wait for remaining local consumers.
+    removal_requested: bool,
+}
+
+impl SessionUserData {
+    fn new(data: serde_json::Map<String, serde_json::Value>) -> Self {
+        Self {
+            data,
+            removal_requested: false,
+        }
+    }
 }
 
 /// Delivery target for the unified [`RwiGateway::dispatch`] primitive.
@@ -233,11 +248,12 @@ impl RwiGateway {
     ) {
         match data {
             Some(serde_json::Value::Object(map)) => {
-                self.user_data.insert(session_id.clone(), map);
+                self.user_data
+                    .insert(session_id.clone(), SessionUserData::new(map));
             }
-            // Removal, or a non-object payload (defensive): drop any local copy.
+            // Keep business context until remaining local calls finish their terminal events.
             _ => {
-                self.user_data.remove(session_id);
+                self.request_user_data_removal(session_id);
             }
         }
     }
@@ -411,9 +427,13 @@ impl RwiGateway {
             .is_some_and(|session| session.write().release_call(call_id));
 
         self.remove_call_vars(call_id);
+        self.meta_store.remove(call_id);
         self.remove_user_data(call_id);
         self.dtmf_taps.remove(call_id);
-        self.meta_store.remove(call_id);
+        // A child may be the final local consumer of a deferred root removal.
+        self.user_data.retain(|session_id, entry| {
+            !entry.removal_requested || self.meta_store.uses_user_data(session_id)
+        });
 
         owner_id.is_some() || released
     }
@@ -647,7 +667,8 @@ impl RwiGateway {
         if size > MAX_USER_DATA_BYTES {
             return Err(SetUserDataError::TooLarge { size });
         }
-        self.user_data.insert(session_id.clone(), data.clone());
+        self.user_data
+            .insert(session_id.clone(), SessionUserData::new(data.clone()));
         if notify {
             self.send_to_owner(&crate::rwi::CallUserDataUpdated {
                 call_id: session_id.clone(),
@@ -674,7 +695,7 @@ impl RwiGateway {
         session_id: &SessionId,
     ) -> serde_json::Map<String, serde_json::Value> {
         if let Some(d) = self.user_data.get(session_id) {
-            return d.clone();
+            return d.data.clone();
         }
         if let Some(root) = self
             .meta_store
@@ -683,7 +704,7 @@ impl RwiGateway {
             .filter(|root| *root != *session_id)
         {
             if let Some(d) = self.user_data.get(&root) {
-                return d.clone();
+                return d.data.clone();
             }
         }
         serde_json::Map::new()
@@ -691,12 +712,26 @@ impl RwiGateway {
 
     /// Remove all user data for the given session (call hangup cleanup,
     /// same lifecycle as the call-meta store). Also tells cluster peers to
-    /// drop their replicated copy.
+    /// request removal of their replicated copy after local consumers finish.
     pub fn remove_user_data(&mut self, session_id: &SessionId) {
-        let existed = self.user_data.remove(session_id).is_some();
+        let existed = self.request_user_data_removal(session_id);
         if existed && let Some(hook) = &self.user_data_sync {
             hook(session_id, None);
         }
+    }
+
+    fn request_user_data_removal(&mut self, session_id: &SessionId) -> bool {
+        if self.meta_store.uses_user_data(session_id) {
+            if let Some(mut entry) = self.user_data.get_mut(session_id) {
+                let first_request = !entry.removal_requested;
+                entry.removal_requested = true;
+                return first_request;
+            }
+            return false;
+        }
+        self.user_data
+            .remove(session_id)
+            .is_some_and(|(_, entry)| !entry.removal_requested)
     }
 
     /// Cache an event for later session/call resume replay.
@@ -866,18 +901,7 @@ impl RwiGateway {
         // every leg's events. Existing keys win, matching the
         // `merge_event_context` convention (the `call_userdata_updated` event
         // carries its own `user_data` field, which is never overwritten).
-        if let Some(call_id) = &flat.call_id {
-            let data = self.user_data.get(call_id).map(|d| d.clone()).or_else(|| {
-                let root = ctx_root.as_ref().filter(|root| *root != call_id)?;
-                self.user_data.get(root).map(|d| d.clone())
-            });
-            if let Some(data) = data
-                && let Some(obj) = payload.as_object_mut()
-                && !obj.contains_key("user_data")
-            {
-                obj.insert("user_data".to_string(), serde_json::Value::Object(data));
-            }
-        }
+        self.inject_user_data(&mut payload, flat.call_id.as_deref(), ctx_root.as_deref());
 
         self.inject_origin_fields(&mut payload);
 
@@ -885,6 +909,47 @@ impl RwiGateway {
             event_type: flat.event_type,
             call_id: flat.call_id.clone(),
             payload,
+        }
+    }
+
+    /// Preserve only business data before asynchronous delivery; other fields stay dispatch-time values.
+    pub(crate) fn snapshot_user_data(&self, mut event: RwiEvent) -> RwiEvent {
+        let root = event
+            .call_id
+            .as_ref()
+            .and_then(|call_id| self.meta_store.get_sync(call_id))
+            .and_then(|meta| meta.session_id);
+        self.inject_user_data(
+            &mut event.payload,
+            event.call_id.as_deref(),
+            root.as_deref(),
+        );
+        event
+    }
+
+    fn inject_user_data(
+        &self,
+        payload: &mut serde_json::Value,
+        call_id: Option<&str>,
+        root: Option<&str>,
+    ) {
+        let Some(call_id) = call_id else { return };
+        let Some(obj) = payload
+            .as_object_mut()
+            .filter(|obj| !obj.contains_key("user_data"))
+        else {
+            return;
+        };
+        let data = self
+            .user_data
+            .get(call_id)
+            .map(|entry| entry.data.clone())
+            .or_else(|| {
+                let root = root.filter(|root| *root != call_id)?;
+                self.user_data.get(root).map(|entry| entry.data.clone())
+            });
+        if let Some(data) = data {
+            obj.insert("user_data".to_string(), serde_json::Value::Object(data));
         }
     }
 
@@ -1570,8 +1635,34 @@ mod tests {
         assert!(entries[1].1.is_none(), "removal must replicate as null");
     }
 
-    /// Applying a replicated change enriches this node's later events, and a
-    /// replicated removal clears it.
+    #[test]
+    fn remote_removal_waits_for_local_children() {
+        let mut gw = RwiGateway::new();
+        let data = serde_json::json!({"context_id":"context_test"});
+        for child in ["child_one_test", "child_two_test"] {
+            gw.meta_store.insert(
+                child.into(),
+                crate::rwi::proto::CallMeta {
+                    session_id: Some("root_test".into()),
+                    ..Default::default()
+                },
+            );
+        }
+        gw.apply_remote_user_data(&"root_test".into(), Some(data.clone()));
+        gw.apply_remote_user_data(&"root_test".into(), None);
+        assert_eq!(
+            gw.get_user_data(&"child_one_test".into()),
+            data.as_object().unwrap().clone()
+        );
+        gw.call_finished(&"child_one_test".into());
+        assert_eq!(
+            gw.get_user_data(&"child_two_test".into()),
+            data.as_object().unwrap().clone()
+        );
+        gw.call_finished(&"child_two_test".into());
+        assert!(gw.get_user_data(&"root_test".into()).is_empty());
+    }
+
     #[tokio::test]
     async fn test_apply_remote_user_data_enriches_subsequent_events() {
         let mut gw = RwiGateway::new();
@@ -1596,7 +1687,9 @@ mod tests {
             leg_role: None,
             });
         let event = rx.recv().await.unwrap();
-        assert!(event.get("user_data").is_none());
+        assert_eq!(event["user_data"]["crm_id"], "C-9");
+        gw.call_finished(&"sess-1".to_string());
+        assert!(gw.get_user_data(&"sess-1".to_string()).is_empty());
     }
 
     /// Replayed (resumed) events are stored raw, so they must be re-enriched

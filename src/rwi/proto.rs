@@ -148,6 +148,15 @@ impl CallMetaStore {
         self.store.contains_key(call_id)
     }
 
+    /// Whether a local call still consumes this session's business context.
+    pub(crate) fn uses_user_data(&self, session_id: &str) -> bool {
+        self.contains_key(session_id)
+            || self
+                .store
+                .iter()
+                .any(|entry| entry.session_id.as_deref() == Some(session_id))
+    }
+
     pub fn remove(&self, call_id: &str) {
         self.store.remove(call_id);
     }
