@@ -1313,126 +1313,226 @@ async fn test_target_invite_call_ids_resolve_before_dialing() {
         create_test_request, create_test_server, create_transaction,
     };
 
-    let (server, _) = create_test_server().await;
-    let request = create_test_request(
-        rsipstack::sip::Method::Invite,
-        "charlie",
-        None,
-        "rustpbx.com",
-        None,
-    );
-    let original_request = request.clone();
-    let (tx, _) = create_transaction(request).await;
-    let (state_tx, _state_rx) = mpsc::unbounded_channel();
-    let server_dialog = server
-        .dialog_layer
-        .get_or_create_server_invite(
-            &tx, state_tx, None,
-            Some("sip:pbx@192.0.2.77:5099".try_into().unwrap()),
-        )
-        .unwrap();
-    let session_id = server_dialog.id().call_id.clone();
-    let context = CallContext {
-        session_id: session_id.clone(),
-        dialplan: Arc::new(
-            Dialplan::new(session_id.clone(), original_request, DialDirection::Inbound)
-                .with_caller("sip:charlie@rustpbx.com".try_into().unwrap()),
-        ),
-        cookie: TransactionCookie::default(),
-        start_time: Instant::now(),
-        original_caller: "sip:charlie@rustpbx.com".to_string(),
-        original_callee: "sip:2001@rustpbx.com".to_string(),
-        max_forwards: 70,
-        created_at: chrono::Utc::now().to_rfc3339(),
-        metadata: None,
-    };
-    let (mut session, handle, _cmd_rx) = SipSession::new(
-        server.clone(),
-        CancellationToken::new(),
-        None,
-        context,
-        server_dialog,
-        false,
-    );
-    let registry = &server.active_call_registry;
-    registry.register_handle(session_id.clone(), handle);
-    let target = Location {
-        aor: "sip:2001@rustpbx.com".try_into().unwrap(),
-        ..Default::default()
-    };
-    let mut call_ids = Vec::new();
-
-    // Exercise the builder used by both sequential dialing and parallel forks.
-    // No INVITE has been sent and no LegConnected notification has occurred.
-    for leg_id in [None, Some("fork-1")] {
-        let (invite, _, call_id) = session
-            .build_target_invite_option(&target, leg_id, None)
+    use sea_orm::ConnectionTrait;
+    for persistent in [false, true] {
+        let (mut server, _) = create_test_server().await;
+        let shared_registry = crate::call::runtime::MemorySessionRegistry::new(
+            "node-1",
+            Duration::from_secs(3600),
+            Duration::from_secs(3600),
+        );
+        let owner_registry: crate::call::runtime::SessionRegistryRef = if persistent {
+            let mut options = sea_orm::ConnectOptions::new("sqlite::memory:");
+            options.max_connections(1);
+            let db = sea_orm::Database::connect(options).await.unwrap();
+            // Fixed existing registry schema; no migrations or automatic column additions.
+            db.execute_raw(sea_orm::Statement::from_string(
+                sea_orm::DbBackend::Sqlite,
+                "CREATE TABLE cluster_sessions (call_id VARCHAR(200) PRIMARY KEY NOT NULL,
+             node_id VARCHAR(64) NOT NULL, caller VARCHAR(160) NOT NULL,
+             callee VARCHAR(160) NOT NULL, direction VARCHAR(16) NOT NULL,
+             target_session_id VARCHAR(200), started_at TIMESTAMP NOT NULL,
+             last_updated_at TIMESTAMP NOT NULL)"
+                    .to_string(),
+            ))
             .await
             .unwrap();
-        // The incoming server Contact must not leak into outgoing INVITEs.
-        assert_eq!(invite.contact, server.contact_uri_for_location_with_sip_contact(&target, None).unwrap());
-        assert_ne!(invite.contact, session.caller_dialog.as_ref().unwrap().snapshot().local_contact.unwrap());
-        assert_eq!(invite.call_id.as_deref(), Some(call_id.as_str()));
-        assert_ne!(call_id, session_id);
-        let resolved = registry
-            .get_handle_by_call_id(&call_id)
-            .expect("the desk's SIP Call-ID must resolve before it receives INVITE");
-        assert_eq!(resolved.session_id(), session_id);
-        call_ids.push(call_id);
-    }
-    assert_ne!(call_ids[0], call_ids[1]);
-    assert!(registry.get_handle(&session_id).is_some());
-    let transfer_headers = HashMap::from([
-        (
-            "X-Route-Metadata".to_string(),
-            "workflow=example,variant=one".to_string(),
-        ),
-        ("X-Correlation-Id".to_string(), session_id.clone()),
-    ]);
-    let (invite, _, _) = session
-        .build_target_invite_option(&target, None, Some(&transfer_headers))
-        .await
-        .unwrap();
-    let rendered_headers = invite
-        .headers
-        .expect("outbound INVITE headers must be present")
-        .into_iter()
-        .map(|header| (header.name().to_string(), header.value().to_string()))
-        .collect::<HashMap<_, _>>();
-    assert_eq!(
-        rendered_headers["X-Route-Metadata"],
-        "workflow=example,variant=one"
-    );
-    assert_eq!(rendered_headers["X-Correlation-Id"], session_id);
-
-    for invalid_headers in [
-        HashMap::from([("Via".to_string(), "SIP/2.0/UDP attacker".to_string())]),
-        HashMap::from([("Content-Length".to_string(), "0".to_string())]),
-        HashMap::from([("Session-Expires".to_string(), "1800".to_string())]),
-        HashMap::from([(
-            "X-Route-Metadata".to_string(),
-            "workflow=example\r\nVia: attacker".to_string(),
-        )]),
-        HashMap::from([("Invalid Header".to_string(), "value".to_string())]),
-        HashMap::from([
-            ("X-Duplicate".to_string(), "first".to_string()),
-            ("x-duplicate".to_string(), "second".to_string()),
-        ]),
-    ] {
-        assert!(
-            session
-                .build_target_invite_option(&target, None, Some(&invalid_headers))
-                .await
-                .is_err()
+            crate::call::runtime::DbSessionRegistry::new(
+                db,
+                Duration::from_secs(3600),
+                Duration::from_secs(3600),
+            )
+        } else {
+            shared_registry.clone()
+        };
+        Arc::get_mut(&mut server).unwrap().session_registry = owner_registry.clone();
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "charlie",
+            None,
+            "rustpbx.com",
+            None,
         );
-    }
-    for call_id in &call_ids {
-        assert!(registry.get_handle_by_call_id(call_id).is_some());
-    }
+        let original_request = request.clone();
+        let (tx, _) = create_transaction(request).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(
+                &tx,
+                state_tx,
+                None,
+                Some("sip:pbx@192.0.2.77:5099".try_into().unwrap()),
+            )
+            .unwrap();
+        let incoming_call_id = server_dialog.id().call_id.clone();
+        let session_id = "proxy-session".to_string();
+        let context = CallContext {
+            session_id: session_id.clone(),
+            dialplan: Arc::new(
+                Dialplan::new(session_id.clone(), original_request, DialDirection::Inbound)
+                    .with_caller("sip:charlie@rustpbx.com".try_into().unwrap()),
+            ),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:charlie@rustpbx.com".to_string(),
+            original_callee: "sip:2001@rustpbx.com".to_string(),
+            max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
+        };
+        let (mut session, handle, _cmd_rx) = SipSession::new(
+            server.clone(),
+            CancellationToken::new(),
+            None,
+            context,
+            server_dialog,
+            false,
+        );
+        let registry = &server.active_call_registry;
+        registry.register_handle(session_id.clone(), handle);
+        session.register_in_session_registry().await;
+        assert_eq!(
+            crate::call::runtime::resolve_owner_and_session(&owner_registry, &incoming_call_id,)
+                .await,
+            Some(("local".into(), "proxy-session".into())),
+            "a peer must also resolve the originating phone's incoming SIP Call-ID"
+        );
+        let target = Location {
+            aor: "sip:2001@rustpbx.com".try_into().unwrap(),
+            ..Default::default()
+        };
+        let mut call_ids = Vec::new();
 
-    registry.remove(&session_id);
-    for call_id in &call_ids {
-        assert!(registry.get_handle_by_call_id(call_id).is_none());
+        // Exercise the builder used by both sequential dialing and parallel forks.
+        // No INVITE has been sent and no LegConnected notification has occurred.
+        for leg_id in [None, Some("fork-1")] {
+            let (invite, _, call_id) = session
+                .build_target_invite_option(&target, leg_id, None)
+                .await
+                .unwrap();
+            // The incoming server Contact must not leak into outgoing INVITEs.
+            assert_eq!(
+                invite.contact,
+                server
+                    .contact_uri_for_location_with_sip_contact(&target, None)
+                    .unwrap()
+            );
+            assert_ne!(
+                invite.contact,
+                session
+                    .caller_dialog
+                    .as_ref()
+                    .unwrap()
+                    .snapshot()
+                    .local_contact
+                    .unwrap()
+            );
+            assert_eq!(invite.call_id.as_deref(), Some(call_id.as_str()));
+            assert_ne!(call_id, session_id);
+            let resolved = registry
+                .get_handle_by_call_id(&call_id)
+                .expect("the desk's SIP Call-ID must resolve before it receives INVITE");
+            assert_eq!(resolved.session_id(), session_id);
+            let peer_resolution =
+                crate::call::runtime::resolve_owner_and_session(&server.session_registry, &call_id)
+                    .await;
+            assert_eq!(
+                peer_resolution,
+                Some(("local".into(), session_id.clone())),
+                "a peer must resolve the desk SIP Call-ID before INVITE is sent"
+            );
+            if !persistent {
+                shared_registry
+                    .backdate_for_test(&call_id, Duration::from_secs(3601))
+                    .await;
+                owner_registry
+                    .heartbeat_node("local", &registry.live_call_ids())
+                    .await
+                    .unwrap();
+                assert!(
+                    owner_registry.lookup_owner(&call_id).await.is_some(),
+                    "a long call must keep its dialog owner mapping alive"
+                );
+            }
+            call_ids.push(call_id);
+        }
+        assert_ne!(call_ids[0], call_ids[1]);
+        assert!(registry.get_handle(&session_id).is_some());
+        let transfer_headers = HashMap::from([
+            (
+                "X-Route-Metadata".to_string(),
+                "workflow=example,variant=one".to_string(),
+            ),
+            ("X-Correlation-Id".to_string(), session_id.clone()),
+        ]);
+        let (invite, _, _) = session
+            .build_target_invite_option(&target, None, Some(&transfer_headers))
+            .await
+            .unwrap();
+        let rendered_headers = invite
+            .headers
+            .expect("outbound INVITE headers must be present")
+            .into_iter()
+            .map(|header| (header.name().to_string(), header.value().to_string()))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            rendered_headers["X-Route-Metadata"],
+            "workflow=example,variant=one"
+        );
+        assert_eq!(rendered_headers["X-Correlation-Id"], session_id);
+
+        for invalid_headers in [
+            HashMap::from([("Via".to_string(), "SIP/2.0/UDP attacker".to_string())]),
+            HashMap::from([("Content-Length".to_string(), "0".to_string())]),
+            HashMap::from([("Session-Expires".to_string(), "1800".to_string())]),
+            HashMap::from([(
+                "X-Route-Metadata".to_string(),
+                "workflow=example\r\nVia: attacker".to_string(),
+            )]),
+            HashMap::from([("Invalid Header".to_string(), "value".to_string())]),
+            HashMap::from([
+                ("X-Duplicate".to_string(), "first".to_string()),
+                ("x-duplicate".to_string(), "second".to_string()),
+            ]),
+        ] {
+            assert!(
+                session
+                    .build_target_invite_option(&target, None, Some(&invalid_headers))
+                    .await
+                    .is_err()
+            );
+        }
+        for call_id in &call_ids {
+            assert!(registry.get_handle_by_call_id(call_id).is_some());
+        }
+
+        // A transferor can leave while the customer session remains alive.
+        // Both local and peer lookup must retire that dialog, not the session.
+        let transferor = session.caller_dialog_id();
+        session.release_transferor_caller_leg(&transferor).await;
+        assert!(registry.get_handle_by_call_id(&incoming_call_id).is_none());
+        assert!(
+            owner_registry.lookup_owner(&incoming_call_id).await.is_none(),
+            "a departed transferor must not retain a cross-node control alias"
+        );
+        assert!(
+            owner_registry.lookup_owner(&session_id).await.is_some(),
+            "retiring a dialog must preserve the customer's canonical session"
+        );
+
+        session.cleanup().await;
+        call_ids.push(incoming_call_id);
+        for call_id in &call_ids {
+            assert!(
+                owner_registry.lookup_owner(call_id).await.is_none(),
+                "ended dialogs must not leave stale cross-node owner records"
+            );
+        }
+        registry.remove(&session_id);
+        for call_id in &call_ids {
+            assert!(registry.get_handle_by_call_id(call_id).is_none());
+        }
     }
 }
 
@@ -3382,6 +3482,38 @@ async fn test_customer_blind_transfer_dynamic_agent_leg_resolves_customer() {
 /// queue app never starts.
 #[tokio::test]
 async fn test_customer_blind_transfer_route_disabled_dials_as_is() {
+    for (routed, restricted, target, succeeds) in [
+        (true, true, "9000", true),
+        (false, false, "8000", true),
+        (true, true, "8000", false),
+        (true, false, "9001", false),
+    ] {
+        assert_customer_blind_transfer_route(routed, restricted, target, succeeds, false).await;
+    }
+}
+
+#[tokio::test]
+async fn test_customer_blind_transfer_preserves_full_uri_policy() {
+    for (restricted, target, succeeds) in [
+        (false, "sip:9001@blocked.example", false),
+        (true, "sip:9000@allowed.example", true),
+    ] {
+        assert_customer_blind_transfer_route(true, restricted, target, succeeds, false).await;
+    }
+}
+
+#[tokio::test]
+async fn test_customer_blind_transfer_registered_target_preserves_forward() {
+    assert_customer_blind_transfer_route(true, true, "9000", true, true).await;
+}
+
+async fn assert_customer_blind_transfer_route(
+    routed: bool,
+    restricted: bool,
+    target: &str,
+    succeeds: bool,
+    registered: bool,
+) {
     use crate::call::{DialDirection, Dialplan, TransactionCookie};
     use crate::config::ProxyConfig;
     use crate::proxy::routing::{MatchConditions, RouteAction, RouteQueueConfig, RouteRule};
@@ -3422,12 +3554,72 @@ async fn test_customer_blind_transfer_route_disabled_dials_as_is() {
         ..Default::default()
     }]);
 
+    if routed {
+        config = test_forward_route_config();
+        if target.contains("9001") {
+            let rule = &mut config.routes.as_mut().unwrap()[0];
+            rule.action.action = Some("busy".into());
+            rule.action.dest = None;
+        }
+    }
+    if target.contains('@') {
+        config.routes.as_mut().unwrap()[0]
+            .match_conditions
+            .request_uri_host = Some(target.split_once('@').unwrap().1.to_string());
+    }
+    let wire_target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    if registered {
+        config.trunks.get_mut("gw1").unwrap().dest =
+            format!("sip:{}", wire_target.local_addr().unwrap());
+        config.routes.as_mut().unwrap()[0].rewrite = Some(crate::proxy::routing::RewriteRules {
+            to_user: Some("rewritten".into()),
+            ..Default::default()
+        });
+    }
     let gateway = RwiGateway::new();
     let mut events = gateway.subscribe_events();
     let (server, _) =
         create_test_server_with_rwi_gateway(config, Arc::new(parking_lot::RwLock::new(gateway)))
             .await;
 
+    let mut serving = None;
+    if registered {
+        server
+            .locator
+            .register(
+                "9000",
+                Some("rustpbx.com"),
+                Location {
+                    aor: "sip:registered@127.0.0.1:9".try_into().unwrap(),
+                    expires: 3600,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        use rsipstack::transport::udp::UdpConnection;
+        server
+            .endpoint
+            .inner
+            .transport_layer
+            .del_transport(&SipAddr {
+                r#type: Some(rsipstack::sip::Transport::Udp),
+                addr: "127.0.0.1:5060".try_into().unwrap(),
+            });
+        let transport =
+            UdpConnection::create_connection("127.0.0.1:0".parse().unwrap(), None, None)
+                .await
+                .unwrap();
+        server
+            .endpoint
+            .inner
+            .transport_layer
+            .add_transport(transport.into());
+        let endpoint = server.endpoint.inner.clone();
+        serving = Some(tokio::spawn(async move {
+            endpoint.serve().await.unwrap();
+        }));
+    }
     let request = create_test_request(
         rsipstack::sip::Method::Invite,
         "alice",
@@ -3481,17 +3673,51 @@ async fn test_customer_blind_transfer_route_disabled_dials_as_is() {
     // the command reports success at dispatch — standard blind-transfer
     // semantics ("发起即释放"): a target that never answers cannot be taken
     // back, and the later dial failure cascades via the dialog watcher.
-    let result = tokio::time::timeout(Duration::from_secs(10), session.execute_command(
-        CallCommand::BlindTransferCustomer {
-            target: "8000".to_string(),
-            headers: Default::default(),
-            application_only: false,
-            completion: None,
-        },
-        Some(&mut callee_rx),
-    ))
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        session.execute_command(
+            CallCommand::BlindTransferCustomer {
+                target: target.to_string(),
+                headers: Default::default(),
+                application_only: restricted,
+                completion: None,
+            },
+            Some(&mut callee_rx),
+        ),
+    )
     .await
     .expect("dial dispatch must return, not hang");
+    if !succeeds {
+        assert!(
+            !result.success,
+            "an unconfigured or rejected target must be rejected: {target}, result={:?}",
+            result.message
+        );
+        if target.contains("9001") {
+            let result = session
+                .handle_customer_blind_transfer_sip(
+                    &LegId::from("callee"),
+                    &LegId::from("caller"),
+                    target,
+                    &HashMap::new(),
+                    None,
+                )
+                .await;
+            assert!(
+                result.is_err(),
+                "a rejected route must never become a direct dial"
+            );
+        }
+        assert!(
+            session.legs.get(&LegId::from("callee")).is_some(),
+            "rejection must keep the agent"
+        );
+        assert!(
+            session.legs.get(&LegId::from("caller")).is_some(),
+            "rejection must keep the customer"
+        );
+        return;
+    }
     assert!(
         result.success,
         "dial-as-is dispatch must succeed: {:?}",
@@ -3505,6 +3731,28 @@ async fn test_customer_blind_transfer_route_disabled_dials_as_is() {
         session.legs.get(&LegId::from("caller")).is_some(),
         "customer leg must survive the hand-off"
     );
+
+    if registered {
+        let mut buffer = [0u8; 65536];
+        let (size, _) =
+            tokio::time::timeout(Duration::from_secs(3), wire_target.recv_from(&mut buffer))
+                .await
+                .expect("the configured trunk must receive the transfer INVITE")
+                .unwrap();
+        let rsipstack::sip::SipMessage::Request(invite) =
+            rsipstack::sip::SipMessage::try_from(std::str::from_utf8(&buffer[..size]).unwrap())
+                .unwrap()
+        else {
+            panic!("expected INVITE");
+        };
+        assert_eq!(invite.method, rsipstack::sip::Method::Invite);
+        assert_eq!(
+            invite.uri.user().map(|user| user.to_string()).as_deref(),
+            Some("rewritten")
+        );
+        session.cancel_token.cancel();
+        serving.take().unwrap().abort();
+    }
 
     // The transfer event reports a SIP dial — the queue route was ignored.
     let entry = tokio::time::timeout(Duration::from_secs(2), async {

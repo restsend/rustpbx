@@ -212,6 +212,7 @@ pub struct SipSession {
     /// node at birth and unregisters on drop (any exit path). `None` when the
     /// registry is a no-op backend (single-node) or registration failed.
     session_registry_guard: Option<crate::call::runtime::SessionGuard>,
+    dialog_registry_guards: HashMap<String, crate::call::runtime::SessionGuard>,
 
     /// This session's own handle (used to send commands back into the session
     /// from spawned tasks, e.g. restore the media route after playback).
@@ -1560,6 +1561,7 @@ impl SipSession {
             cmd_tx: Some(cmd_tx.clone()),
             handle: sip_handle.clone(),
             session_registry_guard: None,
+            dialog_registry_guards: HashMap::new(),
             dtmf_digits: Vec::new(),
             active_plays: std::collections::HashMap::new(),
             live_transcription: None,
@@ -4215,6 +4217,7 @@ impl SipSession {
         if let Some(handle) = registry.get_handle(&self.context.session_id) {
             registry.register_call_id(callee_call_id.clone(), handle);
         }
+        self.register_dialog_owner(&callee_call_id).await;
 
         let option = rsipstack::dialog::invitation::InviteOption {
             caller_display_name: self.context.dialplan.caller_display_name.clone(),
@@ -4557,9 +4560,7 @@ impl SipSession {
                     self.timers.remove(&dialog_id);
                     self.update_refresh_disabled.remove(&dialog_id);
                     self.legs.remove(&LegId::from("caller"));
-                    self.server
-                        .active_call_registry
-                        .unregister_dialog_identity(&dialog_id);
+                    self.unregister_dialog_owner(&dialog_id).await;
                     self.server.dialog_layer.remove_dialog(&dialog_id);
                     self.update_snapshot_cache();
                     return Ok(());
@@ -4664,9 +4665,7 @@ impl SipSession {
         );
         self.update_leg_state(&LegId::from("caller"), LegState::Ended);
         self.pending_hangup.remove(dialog_id);
-        self.server
-            .active_call_registry
-            .unregister_dialog_identity(dialog_id);
+        self.unregister_dialog_owner(dialog_id).await;
         self.server.dialog_layer.remove_dialog(dialog_id);
         self.legs.retain_dialogs_by_dialog_id(dialog_id);
         self.unschedule_timer(dialog_id);
@@ -6182,9 +6181,7 @@ impl SipSession {
                 self.unschedule_timer(&terminated_dialog_id);
                 self.timers.remove(&terminated_dialog_id);
                 self.update_refresh_disabled.remove(&terminated_dialog_id);
-                self.server
-                    .active_call_registry
-                    .unregister_dialog_identity(&terminated_dialog_id);
+                self.unregister_dialog_owner(&terminated_dialog_id).await;
                 // The remote BYE already terminated this leg; remove it before dropping
                 // its guard so guard cleanup does not send a second BYE back.
                 self.server
@@ -10217,6 +10214,11 @@ impl SipSession {
 
     async fn cleanup(&mut self) {
         trace!(session_id = %self.context.session_id, "Cleaning up session");
+        for (call_id, guard) in self.dialog_registry_guards.drain() {
+            if let Err(error) = guard.release().await {
+                warn!(session_id = %self.id, %call_id, %error, "Dialog owner removal failed");
+            }
+        }
 
         // Safety net for the session-level-only `call_answered` policy: a leg
         // reached Connected but the session-level event never fired.
@@ -11667,6 +11669,58 @@ impl SipSession {
 }
 
 impl SipSession {
+    /// Publish the same dialog identity used by local CTI lookup before sending INVITE.
+    async fn register_dialog_owner(&mut self, call_id: &str) {
+        if call_id == self.id.0.as_str() || self.dialog_registry_guards.contains_key(call_id) {
+            return;
+        }
+        let node_id = self
+            .server
+            .cluster_self_addr
+            .as_ref()
+            .map(|address| address.to_string())
+            .unwrap_or_else(|| "local".into());
+        let alias =
+            crate::call::runtime::SessionInfo::dialog_alias(call_id, self.id.to_string(), node_id);
+        match crate::call::runtime::SessionGuard::register(
+            self.server.session_registry.clone(),
+            alias,
+        )
+        .await
+        {
+            Ok(guard) => {
+                self.dialog_registry_guards
+                    .insert(call_id.to_string(), guard);
+            }
+            Err(error) => {
+                crate::db_report::report_db_write_failure_with_detail(
+                    "cluster_sessions",
+                    "upsert",
+                    None,
+                    &error,
+                    Some(serde_json::json!({
+                        "stage": "dialog_alias", "dialog_call_id": call_id,
+                        "target_session_id": self.id.to_string(),
+                    })),
+                    crate::db_report::THROTTLE_COOLDOWN,
+                );
+            }
+        }
+    }
+
+    /// Retire a dialog identity locally and on peers without removing the live session.
+    async fn unregister_dialog_owner(&mut self, dialog_id: &rsipstack::dialog::DialogId) {
+        self.server
+            .active_call_registry
+            .unregister_dialog_identity(dialog_id);
+        if let Some(guard) = self.dialog_registry_guards.remove(&dialog_id.call_id) {
+            if let Err(error) = guard.release().await {
+                warn!(session_id = %self.id, call_id = %dialog_id.call_id, %error,
+                    "Dialog owner removal failed; stale alias awaits registry expiry");
+            }
+        }
+    }
+
     /// Register this session in the cluster-wide session registry (which node
     /// owns this call). Called once after the local handle registration; the
     /// RAII [`SessionGuard`] unregisters on drop. Failure is non-fatal — the
@@ -11721,7 +11775,13 @@ impl SipSession {
             }
         }
         match result {
-            Ok(guard) => self.session_registry_guard = Some(guard),
+            Ok(guard) => {
+                self.session_registry_guard = Some(guard);
+                if self.caller_dialog.is_some() {
+                    let call_id = self.caller_dialog_id().call_id;
+                    self.register_dialog_owner(&call_id).await;
+                }
+            }
             Err(e) => {
                 crate::db_report::report_db_write_failure(
                     "cluster_sessions",
@@ -12645,21 +12705,29 @@ impl SipSession {
                         target
                     }
                 };
+                info!(session_id = %self.id, target = %target, application_only,
+                    "Customer blind transfer requested");
                 let mut target = target;
                 let mut prepared_route = None;
-                if let transfer::TransferTarget::Sip { uri, .. } =
-                    transfer::parse_transfer_target(&target)
+                let route_enabled = self.route_originated_enabled();
+                if route_enabled
+                    && let transfer::TransferTarget::Sip { uri, .. } =
+                        transfer::parse_transfer_target(&target)
                 {
-                    let user = match rsipstack::sip::Uri::try_from(
+                    let target_uri = match rsipstack::sip::Uri::try_from(
                         crate::call::build_sip_uri(
                             &uri,
                             &self.server.proxy_config.load().select_realm(""),
                         )
                         .as_str(),
                     ) {
-                        Ok(uri) => uri.user().map(|user| user.to_string()).unwrap_or_default(),
+                        Ok(uri) => uri,
                         Err(error) => return CommandResult::failure(error.to_string()),
                     };
+                    let user = target_uri
+                        .user()
+                        .map(|user| user.to_string())
+                        .unwrap_or_default();
                     let caller = match self.context.dialplan.caller.as_ref() {
                         Some(caller) => caller,
                         None => return CommandResult::failure("Transfer has no caller identity"),
@@ -12674,7 +12742,9 @@ impl SipSession {
                             rsipstack::sip::Header::Other(name.clone(), value.clone())
                         })
                         .collect::<Vec<_>>();
-                    let routed = match self.resolve_route_point(&user, caller, Some(carried)).await
+                    let routed = match self
+                        .resolve_route_point(&target_uri.to_string(), caller, Some(carried))
+                        .await
                     {
                         Ok(route) => route,
                         Err(error) => return CommandResult::failure(error.to_string()),
@@ -12717,6 +12787,19 @@ impl SipSession {
                                 urlencoding::encode(&user)
                             );
                         }
+                        Some(crate::config::RouteResult::Abort(code, reason)) => {
+                            return CommandResult::failure_with_kind(
+                                format!(
+                                    "Transfer route rejected: {} {}",
+                                    code.code(),
+                                    reason.unwrap_or_default()
+                                ),
+                                CommandFailureKind::InvalidTarget,
+                            );
+                        }
+                        Some(route @ crate::config::RouteResult::Forward(..)) => {
+                            prepared_route = Some(route);
+                        }
                         _ if application_only => {
                             return CommandResult::failure_with_kind(
                                 "Unresolvable or external transfer target",
@@ -12725,6 +12808,18 @@ impl SipSession {
                         }
                         _ => {}
                     }
+                }
+                if application_only
+                    && !route_enabled
+                    && matches!(
+                        transfer::parse_transfer_target(&target),
+                        transfer::TransferTarget::Sip { .. }
+                    )
+                {
+                    return CommandResult::failure_with_kind(
+                        "Unresolvable or external transfer target",
+                        CommandFailureKind::InvalidTarget,
+                    );
                 }
                 // Application successor (IVR / queue / route point / …): hand
                 // the call over IN-SESSION. The transferor is the agent leg, so
@@ -12767,7 +12862,13 @@ impl SipSession {
                     );
                 };
                 match self
-                    .handle_customer_blind_transfer_sip(&agent_leg, &customer_leg, &target, &headers)
+                    .handle_customer_blind_transfer_sip(
+                        &agent_leg,
+                        &customer_leg,
+                        &target,
+                        &headers,
+                        prepared_route,
+                    )
                     .await
                 {
                     Ok(()) => CommandResult::success(),
@@ -13105,9 +13206,7 @@ impl SipSession {
                         {
                             let dialog_id = dialog.id();
                             self.pending_dynamic_dialogs.remove(&dialog_id);
-                            self.server
-                                .active_call_registry
-                                .unregister_dialog_identity(&dialog_id);
+                            self.unregister_dialog_owner(&dialog_id).await;
                             self.pending_hangup.insert(dialog_id.clone());
                             self.callee_guards.push(ClientDialogGuard::new(
                                 self.server.dialog_layer.clone(),
@@ -13119,39 +13218,7 @@ impl SipSession {
                 }
 
                 if let Some(call_id) = &dialog_id {
-                    // Cluster: also register dialog Call-ID → session owner so
-                    // CTI / in-dialog SIP arriving on another node can resolve.
-                    let node_id = self
-                        .server
-                        .cluster_self_addr
-                        .as_ref()
-                        .map(|a| a.to_string())
-                        .unwrap_or_else(|| "local".to_string());
-                    let alias = crate::call::runtime::SessionInfo::dialog_alias(
-                        call_id.clone(),
-                        self.id.to_string(),
-                        node_id,
-                    );
-                    let registry = self.server.session_registry.clone();
-                    crate::utils::spawn(async move {
-                        if let Err(e) = registry.register(&alias).await {
-                            // A silently-failing alias insert breaks
-                            // cross-node dialog resolution without a trace
-                            // (e.g. MySQL "Data too long" on insert).
-                            crate::db_report::report_db_write_failure_with_detail(
-                                "cluster_sessions",
-                                "upsert",
-                                None,
-                                &e,
-                                Some(serde_json::json!({
-                                    "stage": "dialog_alias",
-                                    "dialog_call_id": alias.call_id,
-                                    "target_session_id": alias.canonical_session_id(),
-                                })),
-                                crate::db_report::THROTTLE_COOLDOWN,
-                            );
-                        }
-                    });
+                    self.register_dialog_owner(call_id).await;
                 }
 
                 // In UAC mode, a leg added via `leg_add` with leg_id="callee"
@@ -14902,9 +14969,7 @@ impl SipSession {
                     .flatten()
             });
         if let Some(dialog_id) = dialog_id {
-            self.server
-                .active_call_registry
-                .unregister_dialog_identity(&dialog_id);
+            self.unregister_dialog_owner(&dialog_id).await;
             // Queue the BYE unless we can prove the dialog already
             // terminated. A dialog id resolved from meta (dynamic agent legs
             // detached on transfer) may have no live dialog object here —
@@ -15148,8 +15213,9 @@ impl SipSession {
         {
             self.server
                 .active_call_registry
-                .register_call_id(bleg_call_id, handle);
+                .register_call_id(bleg_call_id.clone(), handle);
         }
+        self.register_dialog_owner(&bleg_call_id).await;
 
         let dialog_layer = self.server.dialog_layer.clone();
         let active_call_registry = self.server.active_call_registry.clone();

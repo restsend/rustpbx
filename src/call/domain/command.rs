@@ -190,7 +190,7 @@ pub enum CallCommand {
         target: String,
         #[serde(default)]
         headers: HashMap<String, String>,
-        /// Restrict unresolved destinations to an in-session application.
+        /// Require unresolved destinations to match a configured application or forwarding route.
         #[serde(default)]
         application_only: bool,
         #[serde(skip)]

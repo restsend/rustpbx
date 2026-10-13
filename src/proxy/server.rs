@@ -1182,7 +1182,7 @@ impl SipServerBuilder {
                     // protection).  Harmless for a noop registry (no-op).
                     let live_ids_registry = active_call_registry.clone();
                     let live_call_ids: crate::call::runtime::LiveCallIdsFn =
-                        Arc::new(move || live_ids_registry.session_ids());
+                        Arc::new(move || live_ids_registry.live_call_ids());
                     let heartbeat_task = crate::call::runtime::NodeHeartbeat::spawn(
                         registry.clone(),
                         node_id,

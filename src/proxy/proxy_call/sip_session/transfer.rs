@@ -1693,6 +1693,7 @@ impl SipSession {
         customer_leg: &LegId,
         target: &str,
         headers: &HashMap<String, String>,
+        prepared_route: Option<crate::config::RouteResult>,
     ) -> Result<()> {
         let realm = self.server.proxy_config.load().select_realm("");
         let normalized = crate::call::build_sip_uri(target, &realm);
@@ -1702,36 +1703,42 @@ impl SipSession {
             aor: uri.clone(),
             ..Default::default()
         };
-        match self.server.locator.lookup(&uri).await {
-            Ok(registered_locations) => {
-                if let Some(registered_location) = registered_locations.into_iter().next() {
-                    info!(
-                        session_id = %self.id,
-                        target = %uri,
-                        registered_contact = %registered_location.aor,
-                        "Resolved customer transfer target through locator"
-                    );
-                    return self
-                        .dial_customer_transfer_leg(
-                            agent_leg,
-                            customer_leg,
-                            target,
-                            headers,
-                            registered_location,
-                        )
-                        .await;
+        if prepared_route.is_none() {
+            match self.server.locator.lookup(&uri).await {
+                Ok(registered_locations) => {
+                    if let Some(registered_location) = registered_locations.into_iter().next() {
+                        info!(
+                            session_id = %self.id,
+                            target = %uri,
+                            registered_contact = %registered_location.aor,
+                            "Resolved customer transfer target through locator"
+                        );
+                        return self
+                            .dial_customer_transfer_leg(
+                                agent_leg,
+                                customer_leg,
+                                target,
+                                headers,
+                                registered_location,
+                            )
+                            .await;
+                    }
                 }
-            }
-            Err(error) => {
-                return Err(anyhow!(
-                    "Customer transfer target locator lookup failed for {}: {}",
-                    uri,
-                    error
-                ));
+                Err(error) => {
+                    return Err(anyhow!(
+                        "Customer transfer target locator lookup failed for {}: {}",
+                        uri,
+                        error
+                    ));
+                }
             }
         }
 
-        match self.route_transfer_target_leg(&base_location).await {
+        let routed = match prepared_route {
+            Some(route) => Self::transfer_route_from_result(&base_location, Some(route)),
+            None => self.route_transfer_target_leg(&base_location).await,
+        };
+        match routed {
             Ok(BlindTransferRoute::Dial(routed, hints)) => {
                 self.track_routed_leg_hints(hints);
                 self.dial_customer_transfer_leg(agent_leg, customer_leg, target, headers, routed)
@@ -1781,16 +1788,10 @@ impl SipSession {
                 }
                 result
             }
-            Err(e) => {
-                warn!(session_id = %self.id, target = %uri, error = %e, "Route lookup failed for customer transfer target; dialing directly");
-                self.dial_customer_transfer_leg(
-                    agent_leg,
-                    customer_leg,
-                    target,
-                    headers,
-                    base_location,
-                )
-                .await
+            Err(error) => {
+                warn!(session_id = %self.id, target = %uri, %error,
+                    "Route lookup failed for customer transfer target; call preserved");
+                Err(error)
             }
         }
     }
@@ -1893,6 +1894,13 @@ impl SipSession {
             self.context.cookie.clone(),
         )
         .await?;
+        Self::transfer_route_from_result(location, routed_target)
+    }
+
+    fn transfer_route_from_result(
+        location: &crate::call::Location,
+        routed_target: Option<crate::config::RouteResult>,
+    ) -> Result<BlindTransferRoute> {
         match routed_target {
             Some(crate::config::RouteResult::Forward(option, hints)) => {
                 let mut routed = location.clone();

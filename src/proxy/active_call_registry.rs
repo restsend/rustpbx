@@ -308,6 +308,19 @@ impl ActiveProxyCallRegistry {
         self.entries.iter().map(|e| e.key().clone()).collect()
     }
 
+    /// Session and dialog identities whose owner records must remain live.
+    pub fn live_call_ids(&self) -> Vec<String> {
+        let mut ids = self.session_ids();
+        ids.extend(
+            self.handles_by_dialog
+                .iter()
+                .map(|entry| entry.key().clone()),
+        );
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
     /// Alias for count() for SessionRegistry compatibility
     pub fn len(&self) -> usize {
         self.count()
