@@ -2062,6 +2062,8 @@ mod tests {
         /// `fifo_registers` entries carry the priority the app passed so
         /// tests can pin the config→gate priority flow.
         fifo_registers: std::sync::Mutex<Vec<(String, String, i32)>>,
+        /// Callers seen by `fifo_register_wait` (same order as registers).
+        fifo_callers: std::sync::Mutex<Vec<String>>,
         fifo_begins: std::sync::Mutex<Vec<String>>,
         fifo_releases: std::sync::Mutex<Vec<String>>,
     }
@@ -2081,6 +2083,7 @@ mod tests {
                 timeouts: std::sync::Mutex::new(Vec::new()),
                 fallbacks: std::sync::Mutex::new(Vec::new()),
                 fifo_registers: std::sync::Mutex::new(Vec::new()),
+                fifo_callers: std::sync::Mutex::new(Vec::new()),
                 fifo_begins: std::sync::Mutex::new(Vec::new()),
                 fifo_releases: std::sync::Mutex::new(Vec::new()),
             }
@@ -2213,13 +2216,17 @@ mod tests {
             &self,
             queue_id: &str,
             call_id: &str,
-            _caller: &str,
+            caller: &str,
             priority: i32,
         ) {
             self.fifo_registers
                 .lock()
                 .unwrap()
                 .push((queue_id.to_string(), call_id.to_string(), priority));
+            self.fifo_callers
+                .lock()
+                .unwrap()
+                .push(caller.to_string());
         }
 
         async fn fifo_begin_dispatch(&self, call_id: &str) {
@@ -3728,6 +3735,63 @@ mod tests {
         assert!(
             registers.contains(&("support".to_string(), "call-prio-5".to_string(), 5)),
             "wait entry must register the configured priority 5, got {registers:?}"
+        );
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    /// Wait-retention row writes must carry the CALLER id: the monitor's
+    /// queued list shows `caller_number`, and a row written with an empty
+    /// caller degrades the board to raw call ids. (Row writes themselves are
+    /// unconditional — the `strict_fifo` gate no longer suppresses them; see
+    /// the adapter test `test_fifo_register_wait_writes_row_even_with_strict_fifo_off`.)
+    #[tokio::test]
+    async fn test_fifo_gate_registers_caller_id() {
+        use std::sync::Arc;
+        let registry = Arc::new(
+            HookRecordingRegistry::new()
+                .with_resolve_uris(vec![vec![], vec![]]),
+        );
+        // No agents at all: every resolution comes back empty → wait
+        // retention immediately, no dispatch episode.
+
+        let mut config = build_simple_queue_config();
+        config.skill_routing_enabled = true;
+        config.skill_group = Some("support".to_string());
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.hold = Some(QueueHoldConfig {
+            audio_file: Some("sounds/hold_music.wav".to_string()),
+            loop_playback: true,
+        });
+        config.retry_interval_secs = 1;
+        config.max_wait_secs = 300;
+        config.accept_immediately = true;
+        config.ring_timeout = Some(Duration::from_secs(5));
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(registry.clone());
+        queue = queue.with_call_id("call-caller-1".to_string());
+        queue = queue.with_skill_group("support".to_string());
+
+        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
+        stack
+            .assert_cmd(2000, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
+            .await;
+        let _hold = stack.next_cmd(2000).await.expect("hold while waiting");
+
+        let registers = registry.fifo_registers.lock().unwrap().clone();
+        assert_eq!(
+            registers,
+            vec![("support".to_string(), "call-caller-1".to_string(), 0)],
+            "wait entry must register the shared row, got {registers:?}"
+        );
+        assert_eq!(
+            registry.fifo_callers.lock().unwrap().as_slice(),
+            ["1001"],
+            "the caller id must ride the shared-queue row"
         );
 
         stack.cancel();

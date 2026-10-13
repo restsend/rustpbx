@@ -453,6 +453,10 @@ pub struct QueueApp {
     location_enricher: Option<QueueLocationEnricherSetup>,
     /// Call ID for tracking.
     call_id: String,
+    /// Caller identity (CallInfo.caller) captured at `on_enter` — written to
+    /// the shared-queue row so the monitor's queued list can show the number
+    /// instead of falling back to the call id.
+    caller: String,
     /// When the call entered the queue.
     pub(crate) enqueued_at: Option<Instant>,
     /// Queue statistics.
@@ -545,6 +549,7 @@ impl QueueApp {
             agent_registry: None,
             location_enricher: None,
             call_id: String::new(),
+            caller: String::new(),
             enqueued_at: None,
             pending_agents: Vec::new(),
             timed_out_legs: HashSet::new(),
@@ -855,7 +860,37 @@ impl QueueApp {
             return;
         }
         let name = self.resolve_agent_display_name(uri).await;
-        ctrl.pin_agent_meta(Some(agent_id.to_string()), Some(name));
+        ctrl.pin_agent_meta(Some(agent_id.to_string()), Some(name.clone()));
+        // Record the agent assignment in the CDR trace so the timeline shows
+        // WHICH agent the queue offered the call to (id + display name) and
+        // the queue / skill group it was dispatched from. Complements the
+        // RWI `queue_agent_offered` event; the terminal answer/reject traces
+        // then close the story.
+        let queue = self.config.name.clone();
+        let skill_group = self.skill_queue_id().to_string();
+        let label = if name.is_empty() {
+            agent_id.to_string()
+        } else {
+            format!("{} ({})", name, agent_id)
+        };
+        let mut detail = serde_json::json!({ "agent_id": agent_id });
+        if !name.is_empty() {
+            detail["agent_name"] = serde_json::Value::String(name);
+        }
+        if !queue.is_empty() {
+            detail["queue_name"] = serde_json::Value::String(queue.clone());
+        }
+        if !skill_group.is_empty() && skill_group != queue {
+            detail["skill_group"] = serde_json::Value::String(skill_group);
+        }
+        ctrl.record_trace(
+            crate::call_errors::TraceEvent::new(
+                crate::call_errors::TraceKind::Queue,
+                format!("Offering call to agent {}", label),
+            )
+            .severity(crate::call_errors::ErrSeverity::Info)
+            .detail(detail),
+        );
     }
 
     /// Release phantom agent states bound to THIS call (never-connected
@@ -930,25 +965,33 @@ impl QueueApp {
         // alone is lossy under backpressure. Both are idempotent: an
         // existing row keeps its original enqueued_at → queue position is
         // preserved across dial-fail round-trips.
+        //
+        // The row write is UNCONDITIONAL (see `AgentRegistry::fifo_register_wait`
+        // docs): the monitor's queued list, longest-wait alerts and 30s queue
+        // snapshots all read it, so a wait-retention call must never skip it
+        // (gating it on `strict_fifo` used to hide entire queues). Skill-group
+        // rows use the group id — what the dispatch gate queries and what the
+        // monitor joins on; `allows_wait_retention` guarantees a skill group
+        // here, the display id is only a safety net.
         if let Some(ref registry) = self.agent_registry {
             registry.fifo_release_dispatch(&self.call_id).await;
-            let gate_group = self
+            let row_group = self
                 .current_group
                 .clone()
-                .or_else(|| self.config.skill_group.clone());
-            if let Some(gate_group) = gate_group {
-                // Carry the per-call priority so higher-priority waiters
-                // preempt earlier default-priority ones in the gate order
-                // (priority DESC, then enqueued_at ASC).
-                registry
-                    .fifo_register_wait(
-                        &gate_group,
-                        &self.call_id,
-                        "",
-                        crate::call::clamp_priority_u32_to_i32(self.config.priority),
-                    )
-                    .await;
-            }
+                .or_else(|| self.config.skill_group.clone())
+                .unwrap_or_else(|| self.config.name.clone());
+            // Carry the per-call priority so higher-priority waiters
+            // preempt earlier default-priority ones in the gate order
+            // (priority DESC, then enqueued_at ASC); the caller id keeps
+            // the monitor's queued list showing the real number.
+            registry
+                .fifo_register_wait(
+                    &row_group,
+                    &self.call_id,
+                    &self.caller,
+                    crate::call::clamp_priority_u32_to_i32(self.config.priority),
+                )
+                .await;
         }
         self.state = QueueState::WaitingForAgent;
         self.ringing_agent_legs.clear();
@@ -2193,6 +2236,7 @@ impl CallApp for QueueApp {
     ) -> anyhow::Result<AppAction> {
         let queue_id = self.config.name.clone();
         info!(call_id = %self.call_id, queue = %queue_id, "Queue: entering queue application");
+        self.caller = ctx.call_info.caller.clone();
         self.state = QueueState::Answering;
         self.enqueued_at = Some(Instant::now());
         self.transfer_prompt_enabled = ctx.config.proxy.queue_transfer_prompt_enabled;

@@ -376,6 +376,12 @@ pub trait AgentRegistry: Send + Sync {
     /// group id). MUST be idempotent (upsert). Called when the call enters
     /// wait retention so the gate is visible to every node before the first
     /// poll — the async event tap alone is lossy under backpressure.
+    ///
+    /// This is a VISIBILITY write, not an ordering hook: implementations must
+    /// not gate it on dispatch-ordering knobs (`strict_fifo`), because the
+    /// monitor's queued list, longest-wait alerts and 30s snapshots all read
+    /// the row. Gating it left wait-retention calls invisible ("Talking" with
+    /// 0 queued everywhere).
     async fn fifo_register_wait(
         &self,
         _queue_id: &str,
