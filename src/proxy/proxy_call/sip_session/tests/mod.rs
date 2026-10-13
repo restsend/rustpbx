@@ -3080,6 +3080,446 @@ async fn test_blind_transfer_bare_number_routes_to_queue() {
     assert_eq!(entry.event.payload["transfer_target_type"], "queue");
 }
 
+/// CC API blind transfer (`BlindTransferCustomer`) to a bare number whose
+/// route-table entry maps to a QUEUE: the customer must hand off IN-SESSION
+/// (QueueApp starts, `call_transferred` kind=queue, agent leg released) —
+/// previously this API dumb-dialled "8000" and failed while the SIP REFER
+/// path routed correctly.
+#[tokio::test]
+async fn test_customer_blind_transfer_route_to_queue() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::config::ProxyConfig;
+    use crate::proxy::routing::{MatchConditions, RouteAction, RouteQueueConfig, RouteRule};
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server_with_rwi_gateway, create_transaction,
+    };
+    use crate::rwi::gateway::RwiGateway;
+
+    let mut config = ProxyConfig::default();
+    config.route_originated_calls = true;
+    config.queues.insert(
+        "ivr-entry-queue".to_string(),
+        RouteQueueConfig {
+            name: Some("ivr-entry-queue".to_string()),
+            strategy: crate::proxy::routing::RouteQueueStrategyConfig {
+                targets: vec![crate::proxy::routing::RouteQueueTargetConfig {
+                    uri: "sip:offline-agent@rustpbx.com".to_string(),
+                    label: None,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    config.routes = Some(vec![RouteRule {
+        name: "ivr-entry".to_string(),
+        priority: 10,
+        match_conditions: MatchConditions {
+            to_user: Some("8000".to_string()),
+            ..Default::default()
+        },
+        action: RouteAction {
+            action: Some("queue".to_string()),
+            queue: Some("ivr-entry-queue".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    }]);
+
+    let gateway = RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let (server, _) =
+        create_test_server_with_rwi_gateway(config, Arc::new(parking_lot::RwLock::new(gateway)))
+            .await;
+
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let original_request = request.clone();
+    let (tx, _) = create_transaction(request.clone()).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let server_dialog = server
+        .dialog_layer
+        .get_or_create_server_invite(&tx, state_tx, None, None)
+        .expect("failed to create server dialog");
+
+    let context = CallContext {
+        session_id: "test-session".to_string(),
+        dialplan: Arc::new(
+            Dialplan::new("test-session".to_string(), request, DialDirection::Inbound)
+                .with_caller("sip:alice@rustpbx.com".try_into().unwrap()),
+        ),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".to_string(),
+        original_callee: "sip:bob@rustpbx.com".to_string(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+
+    let (mut session, _handle, _cmd_rx) = SipSession::new(
+        server.clone(),
+        CancellationToken::new(),
+        None,
+        context,
+        server_dialog,
+        false,
+    );
+
+    // Inbound CC shape: caller = customer, callee = agent (single
+    // agent-stamped leg — `resolve_cc_agent_leg`'s stamped-leg fallback).
+    let mut customer = Leg::new(LegId::from("caller"));
+    customer.state = LegState::Connected;
+    session.legs.insert(LegId::from("caller"), customer);
+    let mut agent = Leg::new(LegId::from("callee"));
+    agent.state = LegState::Connected;
+    agent.agent_id = Some("bob".to_string());
+    session.legs.insert(LegId::from("callee"), agent);
+
+    let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
+    session.callee_event_tx = Some(callee_tx);
+
+    let result = tokio::time::timeout(Duration::from_secs(5), session.execute_command(
+        CallCommand::BlindTransferCustomer {
+            target: "8000".to_string(),
+            headers: Default::default(),
+            application_only: false,
+            completion: None,
+        },
+        Some(&mut callee_rx),
+    ))
+    .await
+    .expect("routed queue hand-off must not hang");
+    assert!(
+        result.success,
+        "customer blind transfer to a routed queue must succeed: {:?}",
+        result.message
+    );
+
+    let entry = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let entry = events.recv().await.expect("event tap must stay open");
+            if entry.event.event_type == "call_transferred" {
+                return entry;
+            }
+        }
+    })
+    .await
+    .expect("call_transferred must be emitted for the routed queue hand-off");
+    assert!(
+        entry.event.payload["transfer_target"]
+            .as_str()
+            .is_some_and(|t| t.contains("8000")),
+        "transfer_target must retain the original bare number: {}",
+        entry.event.payload["transfer_target"]
+    );
+    assert_eq!(entry.event.payload["transfer_target_type"], "queue");
+
+    assert!(
+        session.legs.get(&LegId::from("callee")).is_none(),
+        "agent leg must be released with the hand-off"
+    );
+    assert!(
+        session.legs.get(&LegId::from("caller")).is_some(),
+        "customer leg must survive the hand-off"
+    );
+}
+
+/// Same hand-off with the QUEUE-DISPATCHED agent shape: the agent dials into
+/// a DYNAMIC leg (`LegPurpose::Agent`, stamped with the agent id) bridged to
+/// the caller — previously `resolve_cc_customer_leg` only knew the
+/// caller/callee slots and the command failed with "No customer leg".
+#[tokio::test]
+async fn test_customer_blind_transfer_dynamic_agent_leg_resolves_customer() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::call::runtime::BridgeConfig;
+    use crate::config::ProxyConfig;
+    use crate::proxy::routing::{MatchConditions, RouteAction, RouteQueueConfig, RouteRule};
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server_with_rwi_gateway, create_transaction,
+    };
+    use crate::rwi::gateway::RwiGateway;
+
+    let mut config = ProxyConfig::default();
+    config.route_originated_calls = true;
+    config.queues.insert(
+        "ivr-entry-queue".to_string(),
+        RouteQueueConfig {
+            name: Some("ivr-entry-queue".to_string()),
+            strategy: crate::proxy::routing::RouteQueueStrategyConfig {
+                targets: vec![crate::proxy::routing::RouteQueueTargetConfig {
+                    uri: "sip:offline-agent@rustpbx.com".to_string(),
+                    label: None,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    config.routes = Some(vec![RouteRule {
+        name: "ivr-entry".to_string(),
+        priority: 10,
+        match_conditions: MatchConditions {
+            to_user: Some("8000".to_string()),
+            ..Default::default()
+        },
+        action: RouteAction {
+            action: Some("queue".to_string()),
+            queue: Some("ivr-entry-queue".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    }]);
+
+    let gateway = RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let (server, _) =
+        create_test_server_with_rwi_gateway(config, Arc::new(parking_lot::RwLock::new(gateway)))
+            .await;
+
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let (tx, _) = create_transaction(request.clone()).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let server_dialog = server
+        .dialog_layer
+        .get_or_create_server_invite(&tx, state_tx, None, None)
+        .expect("failed to create server dialog");
+
+    let context = CallContext {
+        session_id: "test-session".to_string(),
+        dialplan: Arc::new(
+            Dialplan::new("test-session".to_string(), request, DialDirection::Inbound)
+                .with_caller("sip:alice@rustpbx.com".try_into().unwrap()),
+        ),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".to_string(),
+        original_callee: "sip:bob@rustpbx.com".to_string(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+
+    let (mut session, _handle, _cmd_rx) = SipSession::new(
+        server.clone(),
+        CancellationToken::new(),
+        None,
+        context,
+        server_dialog,
+        false,
+    );
+
+    let mut customer = Leg::new(LegId::from("caller"));
+    customer.state = LegState::Connected;
+    session.legs.insert(LegId::from("caller"), customer);
+    let agent_leg = LegId::new("agent-leg-queue-1");
+    let mut agent = Leg::new(agent_leg.clone());
+    agent.state = LegState::Connected;
+    agent.agent_id = Some("bob".to_string());
+    agent.purpose = Some(crate::call::domain::LegPurpose::Agent);
+    session.legs.insert(agent_leg.clone(), agent);
+    session.bridge = BridgeConfig::bridge(LegId::from("caller"), agent_leg.clone());
+
+    let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
+    session.callee_event_tx = Some(callee_tx);
+
+    let result = tokio::time::timeout(Duration::from_secs(5), session.execute_command(
+        CallCommand::BlindTransferCustomer {
+            target: "8000".to_string(),
+            headers: Default::default(),
+            application_only: false,
+            completion: None,
+        },
+        Some(&mut callee_rx),
+    ))
+    .await
+    .expect("routed queue hand-off must not hang");
+    assert!(
+        result.success,
+        "dynamic agent leg must resolve the customer: {:?}",
+        result.message
+    );
+
+    let entry = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let entry = events.recv().await.expect("event tap must stay open");
+            if entry.event.event_type == "call_transferred" {
+                return entry;
+            }
+        }
+    })
+    .await
+    .expect("call_transferred must be emitted");
+    assert_eq!(entry.event.payload["transfer_target_type"], "queue");
+
+    assert!(
+        session.legs.get(&agent_leg).is_none(),
+        "dynamic agent leg must be released with the hand-off"
+    );
+    assert!(
+        session.legs.get(&LegId::from("caller")).is_some(),
+        "customer leg must survive the hand-off"
+    );
+}
+
+/// With the route table DISABLED (`route_originated_calls=false`) the same
+/// "8000" target that Case 1 routes to a queue must DIAL AS-IS instead: the
+/// route gate is respected, `call_transferred` reports kind=sip, and the
+/// queue app never starts.
+#[tokio::test]
+async fn test_customer_blind_transfer_route_disabled_dials_as_is() {
+    use crate::call::{DialDirection, Dialplan, TransactionCookie};
+    use crate::config::ProxyConfig;
+    use crate::proxy::routing::{MatchConditions, RouteAction, RouteQueueConfig, RouteRule};
+    use crate::proxy::tests::common::{
+        create_test_request, create_test_server_with_rwi_gateway, create_transaction,
+    };
+    use crate::rwi::gateway::RwiGateway;
+
+    let mut config = ProxyConfig::default();
+    // Routing OFF — the rule below must be ignored for this API transfer.
+    config.route_originated_calls = false;
+    config.queues.insert(
+        "ivr-entry-queue".to_string(),
+        RouteQueueConfig {
+            name: Some("ivr-entry-queue".to_string()),
+            strategy: crate::proxy::routing::RouteQueueStrategyConfig {
+                targets: vec![crate::proxy::routing::RouteQueueTargetConfig {
+                    uri: "sip:offline-agent@rustpbx.com".to_string(),
+                    label: None,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    config.routes = Some(vec![RouteRule {
+        name: "ivr-entry".to_string(),
+        priority: 10,
+        match_conditions: MatchConditions {
+            to_user: Some("8000".to_string()),
+            ..Default::default()
+        },
+        action: RouteAction {
+            action: Some("queue".to_string()),
+            queue: Some("ivr-entry-queue".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    }]);
+
+    let gateway = RwiGateway::new();
+    let mut events = gateway.subscribe_events();
+    let (server, _) =
+        create_test_server_with_rwi_gateway(config, Arc::new(parking_lot::RwLock::new(gateway)))
+            .await;
+
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
+    let (tx, _) = create_transaction(request.clone()).await;
+    let (state_tx, _state_rx) = mpsc::unbounded_channel();
+    let server_dialog = server
+        .dialog_layer
+        .get_or_create_server_invite(&tx, state_tx, None, None)
+        .expect("failed to create server dialog");
+
+    let context = CallContext {
+        session_id: "test-session".to_string(),
+        dialplan: Arc::new(
+            Dialplan::new("test-session".to_string(), request, DialDirection::Inbound)
+                .with_caller("sip:alice@rustpbx.com".try_into().unwrap()),
+        ),
+        cookie: TransactionCookie::default(),
+        start_time: Instant::now(),
+        original_caller: "sip:alice@rustpbx.com".to_string(),
+        original_callee: "sip:bob@rustpbx.com".to_string(),
+        max_forwards: 70,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        metadata: None,
+    };
+
+    let (mut session, _handle, _cmd_rx) = SipSession::new(
+        server.clone(),
+        CancellationToken::new(),
+        None,
+        context,
+        server_dialog,
+        false,
+    );
+
+    let mut customer = Leg::new(LegId::from("caller"));
+    customer.state = LegState::Connected;
+    session.legs.insert(LegId::from("caller"), customer);
+    let mut agent = Leg::new(LegId::from("callee"));
+    agent.state = LegState::Connected;
+    agent.agent_id = Some("bob".to_string());
+    session.legs.insert(LegId::from("callee"), agent);
+
+    let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
+    session.callee_event_tx = Some(callee_tx);
+
+    // Leg-add dispatches the INVITE in the background (fire-and-forget), so
+    // the command reports success at dispatch — standard blind-transfer
+    // semantics ("发起即释放"): a target that never answers cannot be taken
+    // back, and the later dial failure cascades via the dialog watcher.
+    let result = tokio::time::timeout(Duration::from_secs(10), session.execute_command(
+        CallCommand::BlindTransferCustomer {
+            target: "8000".to_string(),
+            headers: Default::default(),
+            application_only: false,
+            completion: None,
+        },
+        Some(&mut callee_rx),
+    ))
+    .await
+    .expect("dial dispatch must return, not hang");
+    assert!(
+        result.success,
+        "dial-as-is dispatch must succeed: {:?}",
+        result.message
+    );
+    assert!(
+        session.legs.get(&LegId::from("callee")).is_none(),
+        "agent leg must be released once the hand-off is dispatched"
+    );
+    assert!(
+        session.legs.get(&LegId::from("caller")).is_some(),
+        "customer leg must survive the hand-off"
+    );
+
+    // The transfer event reports a SIP dial — the queue route was ignored.
+    let entry = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let entry = events.recv().await.expect("event tap must stay open");
+            if entry.event.event_type == "call_transferred" {
+                return entry;
+            }
+        }
+    })
+    .await
+    .expect("call_transferred must be emitted for the dispatched dial");
+    assert_eq!(
+        entry.event.payload["transfer_target_type"], "sip",
+        "routing disabled → the target dials as SIP, no queue takeover"
+    );
+}
+
 /// `leg_id_for_dialog` resolves the caller dialog to the caller leg and
 /// reports unknown dialogs as unowned.
 #[tokio::test]

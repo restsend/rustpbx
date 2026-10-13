@@ -46,3 +46,7 @@ mod test_queue_overflow_uri_override_e2e;
 #[path = "queue_e2e/test_queue_transfer_screenpop_headers_e2e.rs"]
 #[cfg(feature = "addon-cc")]
 mod test_queue_transfer_screenpop_headers_e2e;
+
+#[path = "queue_e2e/test_blind_transfer_customer_e2e.rs"]
+#[cfg(feature = "addon-cc")]
+mod test_blind_transfer_customer_e2e;

@@ -826,17 +826,26 @@ impl SipSession {
 
     /// The CUSTOMER leg (the party that keeps talking) for a customer-anchored
     /// transfer: the caller/callee leg opposite the resolved agent leg.
+    /// Queue-dispatched agents dial into DYNAMIC legs (`LegPurpose::Agent`),
+    /// so for those the customer is the other side of the active bridge pair.
     pub(super) fn resolve_cc_customer_leg(&self, agent_leg: &LegId) -> Option<LegId> {
         let caller = LegId::from("caller");
         let callee = LegId::from("callee");
-        let customer = if agent_leg == &caller {
-            callee
-        } else if agent_leg == &callee {
-            caller
-        } else {
-            return None;
-        };
-        self.legs.contains_key(&customer).then_some(customer)
+        if agent_leg == &caller || agent_leg == &callee {
+            let customer = if agent_leg == &caller { callee } else { caller };
+            return self.legs.contains_key(&customer).then_some(customer);
+        }
+        if self.bridge.legs.len() == 2 && self.bridge.contains_leg(agent_leg) {
+            if let Some(peer) = self
+                .bridge
+                .legs
+                .iter()
+                .find(|id| id.as_str() != agent_leg.as_str() && self.legs.contains_key(id))
+            {
+                return Some(peer.clone());
+            }
+        }
+        None
     }
 
     async fn handle_transfer_inner(
@@ -1623,6 +1632,175 @@ impl SipSession {
                 message: format!("{} - {}", text, reason.unwrap_or_default()),
             }.into()
         })
+    }
+
+    /// Customer-anchored blind transfer to a plain SIP target (the CC API
+    /// `POST /cc/calls/{id}/transfer` after quick-route / app-target
+    /// dispatch). Deliberately NOT routed through
+    /// [`Self::handle_blind_transfer`] / [`Self::dial_blind_transfer_b2bua`]:
+    /// that path swaps the `callee` slot and re-INVITEs the caller, which
+    /// inverts the customer/agent roles on agent-DIALED calls and rejects
+    /// plain-sipbot callers. Here the target dials as an INDEPENDENT leg
+    /// anchored on the customer (`source_leg`), the customer's dialog is
+    /// never re-INVITEd, and the agent leg is released once the hand-off is
+    /// dispatched.
+    ///
+    /// Routing matches the SIP REFER path one-for-one: a locator hit dials
+    /// the registered contact; a miss runs the route table exactly once
+    /// through [`Self::route_transfer_target_leg`] — queue/application
+    /// results start that app in-session (this API previously dumb-dialled
+    /// them and failed), a `Dial` result dials the pre-rewritten location,
+    /// and the routing hints are consumed exactly once in every branch.
+    pub(super) async fn handle_customer_blind_transfer_sip(
+        &mut self,
+        agent_leg: &LegId,
+        customer_leg: &LegId,
+        target: &str,
+        headers: &HashMap<String, String>,
+    ) -> Result<()> {
+        let realm = self.server.proxy_config.load().select_realm("");
+        let normalized = crate::call::build_sip_uri(target, &realm);
+        let uri = rsipstack::sip::Uri::try_from(normalized.as_str())
+            .map_err(|e| anyhow!("Invalid transfer target URI: {}", e))?;
+        let base_location = crate::call::Location {
+            aor: uri.clone(),
+            ..Default::default()
+        };
+        match self.server.locator.lookup(&uri).await {
+            Ok(registered_locations) => {
+                if let Some(registered_location) = registered_locations.into_iter().next() {
+                    info!(
+                        session_id = %self.id,
+                        target = %uri,
+                        registered_contact = %registered_location.aor,
+                        "Resolved customer transfer target through locator"
+                    );
+                    return self
+                        .dial_customer_transfer_leg(
+                            agent_leg,
+                            customer_leg,
+                            target,
+                            headers,
+                            registered_location,
+                        )
+                        .await;
+                }
+            }
+            Err(error) => {
+                return Err(anyhow!(
+                    "Customer transfer target locator lookup failed for {}: {}",
+                    uri,
+                    error
+                ));
+            }
+        }
+
+        match self.route_transfer_target_leg(&base_location).await {
+            Ok(BlindTransferRoute::Dial(routed, hints)) => {
+                self.track_routed_leg_hints(hints);
+                self.dial_customer_transfer_leg(agent_leg, customer_leg, target, headers, routed)
+                    .await
+            }
+            Ok(BlindTransferRoute::Queue { queue, hints }) => {
+                self.track_routed_leg_hints(hints);
+                let result = self.start_queue_app(queue, None).await;
+                if result.is_ok() {
+                    self.emit_blind_transfer_app_event(target, "queue");
+                    self.release_api_transfer_agent_leg(agent_leg).await;
+                }
+                result
+            }
+            Ok(BlindTransferRoute::Application {
+                option,
+                app_name,
+                app_params,
+                auto_answer,
+                hints,
+            }) => {
+                self.track_routed_leg_hints(hints);
+                let result = self
+                    .start_routed_blind_transfer_app(
+                        &app_name,
+                        app_params,
+                        auto_answer,
+                        option,
+                        target,
+                    )
+                    .await;
+                if result.is_ok() {
+                    let target_type = if app_name == "ivr" {
+                        "ivr"
+                    } else {
+                        app_name.as_str()
+                    };
+                    self.emit_blind_transfer_app_event(target, target_type);
+                    self.release_api_transfer_agent_leg(agent_leg).await;
+                }
+                result
+            }
+            Err(e) => {
+                warn!(session_id = %self.id, target = %uri, error = %e, "Route lookup failed for customer transfer target; dialing directly");
+                self.dial_customer_transfer_leg(
+                    agent_leg,
+                    customer_leg,
+                    target,
+                    headers,
+                    base_location,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Dial the transfer target as an independent leg anchored on the
+    /// customer, release the agent, and bridge customer ↔ target. Shared by
+    /// every [`Self::handle_customer_blind_transfer_sip`] dial outcome.
+    async fn dial_customer_transfer_leg(
+        &mut self,
+        agent_leg: &LegId,
+        customer_leg: &LegId,
+        target: &str,
+        headers: &HashMap<String, String>,
+        location: crate::call::Location,
+    ) -> Result<()> {
+        let target_leg = LegId::new(format!("transfer-{}", uuid::Uuid::new_v4()));
+        if let Err(error) = self.handle_unhold(customer_leg.clone()).await {
+            warn!(session_id = %self.id, %error, "API transfer: customer unhold failed");
+        }
+        let source = self.transfer_source_snapshot(agent_leg).await;
+        self.stash_transfer_source(source.clone());
+        let sip_headers: Vec<rsipstack::sip::Header> = headers
+            .iter()
+            .map(|(name, value)| rsipstack::sip::headers::make_header(name.as_str(), value.clone()))
+            .collect();
+        self.handle_add_leg_routed(
+            target.to_string(),
+            Some(target_leg.clone()),
+            sip_headers,
+            Some(customer_leg.clone()),
+            None,
+            location,
+        )
+        .await?;
+        self.release_api_transfer_agent_leg(agent_leg).await;
+        self.setup_bridge(customer_leg.clone(), target_leg).await;
+        // Canonical event form: a bare extension target ("1003") is reported
+        // as `sip:1003` — URI-shaped like the B2BUA dial path.
+        let target_event = {
+            let t = target.trim();
+            if !t.contains('@') && !t.starts_with("sip:") && !t.starts_with("sips:") {
+                format!("sip:{t}")
+            } else {
+                t.to_string()
+            }
+        };
+        self.emit_typed_rwi_event(&crate::rwi::CallTransferred {
+            call_id: self.context.session_id.to_string(),
+            transfer_target: Some(target_event),
+            transfer_target_type: Some("sip".to_string()),
+            transfer_source: source,
+        });
+        Ok(())
     }
 
     /// Consult the route table for a blind-transfer B-leg target, mapping every
