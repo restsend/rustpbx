@@ -938,6 +938,10 @@ impl RwiCommandProcessor {
                     .filter_map(|codec| audio_codec::CodecType::try_from(codec.as_str()).ok())
                     .collect::<Vec<_>>()
             })
+            // An empty parse (trunk with no/unknown codec entries) must fall
+            // back too — an empty offer kills the originate at media prep
+            // ("No codecs configured for originate caller leg").
+            .filter(|codecs| !codecs.is_empty())
             .unwrap_or_else(|| crate::media::MediaNegotiator::default_rtp_codecs());
         let originate_codecs =
             crate::media::MediaNegotiator::build_local_rtp_codec_offer(&configured_audio_codecs);
