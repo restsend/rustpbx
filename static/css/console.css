@@ -21,3 +21,4 @@
 .hover\:bg-slate-50\/60:hover{background-color:color-mix(in oklab, var(--color-slate-50) 60%, transparent)}
 :where(.space-y-0\.5>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 0.5) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 0.5) * calc(1 - var(--tw-space-y-reverse)))}
 :where(.space-y-1\.5>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 1.5) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 1.5) * calc(1 - var(--tw-space-y-reverse)))}
+@media (hover:hover){.group-hover\:bg-slate-50:is(:where(.group):hover *){background-color:var(--color-slate-50)}}

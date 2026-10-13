@@ -2223,6 +2223,23 @@ async fn build_record_payload(
 
     let outbound_trunk_dest = metadata_string(record.metadata.as_ref(), OUTBOUND_TRUNK_DEST_KEY);
 
+    // CC agent assignment + queue / skill-group attribution. The agent id
+    // lives in metadata (written from session extensions by the reporter);
+    // the queue column may be empty for CC skill-group calls, in which case
+    // fall back to the metadata queue label/name.
+    let agent_name = record
+        .agent_name
+        .clone()
+        .or_else(|| metadata_string(record.metadata.as_ref(), "agent_name"));
+    let agent_id = metadata_string(record.metadata.as_ref(), "agent_id")
+        .or_else(|| metadata_string(record.metadata.as_ref(), "resolved_agent_id"));
+    let skill_group = metadata_string(record.metadata.as_ref(), "skill_group_id");
+    let queue = record
+        .queue
+        .clone()
+        .or_else(|| metadata_string(record.metadata.as_ref(), "queue_label"))
+        .or_else(|| metadata_string(record.metadata.as_ref(), "queue_name"));
+
     // The route rule matched during routing. `route_id` references
     // rustpbx_routes (None for config-file rules); the name comes from the
     // CDR metadata written by the reporter.
@@ -2258,10 +2275,12 @@ async fn build_record_payload(
         "from": record.from_number,
         "to": record.to_number,
         "caller_name": record.caller_name,
-        "agent": record.agent_name,
+        "agent": agent_name,
+        "agent_id": agent_id,
         "agent_extension": extension_number,
         "department": department_name,
-        "queue": record.queue,
+        "queue": queue,
+        "skill_group": skill_group,
         "caller_uri": caller_uri,
         "callee_uri": callee_uri,
         "sip_gateway": sip_gateway,
