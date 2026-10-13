@@ -328,6 +328,14 @@ pub enum CallCommand {
         label: String,
     },
 
+    /// Close an agent segment on the upstream peer without blocking the session loop.
+    /// The peer must confirm finalization of this recording identity.
+    #[serde(skip)]
+    StopPeerRecordingSegment {
+        label: String,
+        unique_id: String,
+    },
+
     /// Query the session-owned media bridge for its current recorder state.
     /// This is an internal request/reply command and is never serialized.
     #[serde(skip)]

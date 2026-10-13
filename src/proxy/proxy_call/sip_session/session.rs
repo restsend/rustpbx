@@ -14,6 +14,9 @@ use rsipstack::sip::{HeadersExt, ToTypedHeader};
 
 const CMD_CHANNEL_CAPACITY: usize = 256;
 const RUSTPBX_COMMAND_CT: &str = "application/vnd.rustpbx+json";
+const RECORDING_STOP_ATTEMPTS: usize = 3;
+const RECORDING_STOP_TIMEOUT: Duration = Duration::from_secs(2);
+const RECORDING_STOP_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 /// Merge routed application parameters with caller-provided Step-IVR variables.
 fn merge_ivr_exec_app_params(
@@ -5046,6 +5049,12 @@ impl SipSession {
 
         let params = parsed.get("params");
 
+        if action == "record.stop_segment" {
+            return self
+                .handle_recording_segment_stop_info(params, dialog_leg, tx_handle)
+                .await;
+        }
+
         // ── ivr.exec: bundled IVR execution (hold callee + start app) ──
         if action == "ivr.exec" {
             return self
@@ -5129,6 +5138,144 @@ impl SipSession {
                 );
             }
         }
+    }
+
+    async fn handle_recording_segment_stop_info(
+        &mut self,
+        params: Option<&serde_json::Value>,
+        dialog_leg: Option<LegId>,
+        transaction: &TransactionHandle,
+    ) -> Result<()> {
+        let text = |key| {
+            params
+                .and_then(|p| p.get(key))
+                .and_then(|v| v.as_str())
+                .filter(|value| !value.trim().is_empty())
+        };
+        let Some((label, unique_id)) = text("label").zip(text("unique_id")) else {
+            transaction
+                .respond(StatusCode::BadRequest, None, None)
+                .await?;
+            return Ok(());
+        };
+        let ours = self.active_recording.as_ref().is_some_and(|active| {
+            active.segment_type == "agent" && active.label == label && active.unique_id == unique_id
+        });
+        let completed = self.completed_recording_segments.iter().any(|segment| {
+            segment.segment_type == "agent"
+                && segment.label == label
+                && segment.unique_id.as_deref() == Some(unique_id)
+        });
+        let ack = serde_json::json!({"unique_id": unique_id, "stopped": true})
+            .to_string()
+            .into_bytes();
+        if ours {
+            // Execute in the receiving loop: queue acceptance is not recorder completion.
+            let result = self.stop_and_publish_recording().await;
+            // A failed finalize consumes the backend; a later Ok(None) is not success.
+            let finalized = matches!(&result, Ok(Some(_)))
+                && self.completed_recording_segments.iter().any(|segment| {
+                    segment.segment_type == "agent"
+                        && segment.label == label
+                        && segment.unique_id.as_deref() == Some(unique_id)
+                });
+            if !finalized {
+                let error = result.err().unwrap_or_else(|| {
+                    anyhow!("recording finalization did not publish the requested segment")
+                });
+                warn!(session_id = %self.id, %unique_id, %error, "Recording segment stop failed");
+                transaction
+                    .respond(StatusCode::ServerInternalError, None, None)
+                    .await?;
+                return Ok(());
+            }
+        } else if !completed {
+            let upstream_peer = self
+                .context
+                .cookie
+                .get_extension::<crate::call::CallerPeerContext>()
+                .and_then(|peer| peer.0.parse::<std::net::SocketAddr>().ok())
+                .is_some_and(|peer| self.server.cluster_peer_ips.contains(&peer.ip()));
+            if upstream_peer
+                && dialog_leg
+                    .as_ref()
+                    .is_some_and(|leg| leg.as_str() != "caller")
+                && let Some(dialog) = self.caller_dialog.clone()
+            {
+                let transaction = transaction.clone();
+                let label = label.to_string();
+                let unique_id = unique_id.to_string();
+                let cancel = self.cancel_token.clone();
+                // Only downstream-to-upstream requests may traverse a peer chain.
+                // The origin owns retries; intermediate nodes forward one attempt.
+                tokio::spawn(async move {
+                    let result = tokio::select! {
+                        _ = cancel.cancelled() => Err(anyhow!("session ended during recording stop")),
+                        result = Self::send_recording_segment_stop_once(&dialog, &label, &unique_id) => result,
+                    };
+                    let (status, body) = match result {
+                        Ok(()) => (StatusCode::OK, Some(ack)),
+                        Err(_) => (StatusCode::ServiceUnavailable, None),
+                    };
+                    let _ = transaction.respond(status, None, body).await;
+                });
+                return Ok(());
+            }
+            // A missing recorder is not proof that this identity was finalized.
+            transaction
+                .respond(StatusCode::NotFound, None, None)
+                .await?;
+            return Ok(());
+        }
+        transaction.respond(StatusCode::OK, None, Some(ack)).await?;
+        Ok(())
+    }
+
+    async fn send_recording_segment_stop_once(
+        dialog: &InviteDialog,
+        label: &str,
+        unique_id: &str,
+    ) -> Result<()> {
+        let body = serde_json::json!({
+            "action": "record.stop_segment",
+            "params": {"label": label, "unique_id": unique_id},
+        })
+        .to_string()
+        .into_bytes();
+        let headers = vec![rsipstack::sip::Header::ContentType(
+            RUSTPBX_COMMAND_CT.into(),
+        )];
+        let response = tokio::time::timeout(
+            RECORDING_STOP_TIMEOUT,
+            dialog.info(Some(headers), Some(body)),
+        )
+        .await??
+        .ok_or_else(|| anyhow!("upstream dialog is not confirmed"))?;
+        if response.status_code != StatusCode::OK {
+            return Err(anyhow!("recording stop rejected: {}", response.status_code));
+        }
+        let ack: serde_json::Value = serde_json::from_slice(response.body())?;
+        if ack.get("unique_id").and_then(|v| v.as_str()) != Some(unique_id)
+            || ack.get("stopped").and_then(|v| v.as_bool()) != Some(true)
+        {
+            return Err(anyhow!("peer did not confirm recording finalization"));
+        }
+        Ok(())
+    }
+
+    async fn request_recording_segment_stop(
+        dialog: &InviteDialog,
+        label: &str,
+        unique_id: &str,
+    ) -> Result<()> {
+        for attempt in 0..RECORDING_STOP_ATTEMPTS {
+            match Self::send_recording_segment_stop_once(dialog, label, unique_id).await {
+                Ok(()) => return Ok(()),
+                Err(error) if attempt + 1 == RECORDING_STOP_ATTEMPTS => return Err(error),
+                Err(_) => tokio::time::sleep(RECORDING_STOP_RETRY_DELAY).await,
+            }
+        }
+        unreachable!("recording stop attempt budget is positive")
     }
 
     async fn fail_ivr_exec_start(&mut self, reason: String) {
@@ -10339,6 +10486,7 @@ impl SipSession {
                     "Emitting leg-scoped call_hangup for established CC leg at session teardown"
                 );
                 self.emit_typed_rwi_event(&crate::rwi::CallHangup {
+                    scope: crate::rwi::CallHangupScope::Leg,
                     leg_id: Some(leg_id),
                     leg_role: Some(leg_role),
                     call_id: self.context.session_id.clone(),
@@ -10354,6 +10502,11 @@ impl SipSession {
         }
 
         self.emit_typed_rwi_event(&crate::rwi::CallHangup {
+            scope: if self.meta.child_leg_role.is_some() {
+                crate::rwi::CallHangupScope::Leg
+            } else {
+                crate::rwi::CallHangupScope::Call
+            },
             leg_id: None,
             // A child-leg session (cluster-dispatched queue agent / consult /
             // transfer) stamps the role the dispatcher declared — but ONLY
@@ -12184,6 +12337,27 @@ impl SipSession {
                     Ok(_) => CommandResult::success(),
                     Err(error) => CommandResult::failure(error.to_string()),
                 }
+            }
+
+            CallCommand::StopPeerRecordingSegment { label, unique_id } => {
+                let Some(dialog) = self.caller_dialog.clone() else {
+                    return CommandResult::failure("No upstream dialog for recording stop");
+                };
+                let cancel = self.cancel_token.clone();
+                let session_id = self.context.session_id.clone();
+                // SIP response processing needs this loop; never await the peer here.
+                tokio::spawn(async move {
+                    tokio::select! {
+                        _ = cancel.cancelled() => {}
+                        result = Self::request_recording_segment_stop(&dialog, &label, &unique_id) => {
+                            if let Err(error) = result {
+                                warn!(%session_id, %unique_id, %error,
+                                    "Upstream recording segment stop failed");
+                            }
+                        }
+                    }
+                });
+                CommandResult::success()
             }
 
             CallCommand::QueryRecorderStatus { reply } => {
@@ -14111,6 +14285,7 @@ impl SipSession {
             None
         };
         self.emit_typed_rwi_event(&crate::rwi::CallHangup {
+            scope: crate::rwi::CallHangupScope::Leg,
             call_id: self.context.session_id.clone(),
             leg_id: Some(id.to_string()),
             leg_role: self.leg_role_of(id.as_str()),

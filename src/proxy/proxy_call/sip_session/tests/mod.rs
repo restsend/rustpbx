@@ -3,6 +3,9 @@ use crate::proxy::proxy_call::dtmf::RtpDtmfDetector;
 use crate::proxy::proxy_call::sip_session::builtin_app_factory::BuiltinAppFactory;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(feature = "addon-cc")]
+mod recording_stop_tests;
+
 struct InvocationHeadersRuntime {
     invocation: crate::call::app::AppInvocationContext,
 }
@@ -9547,6 +9550,10 @@ async fn teardown_plain_two_leg_call_stays_single_session_hangup() {
     let hangups = drain_call_hangups(&mut events);
 
     assert_eq!(hangups.len(), 1, "positional legs must not duplicate the session event: {hangups:?}");
+    assert_eq!(
+        hangups[0]["scope"], "call",
+        "only the root session ends the logical call"
+    );
     assert!(hangups[0].get("leg_id").is_none() && hangups[0].get("leg_role").is_none());
 }
 
@@ -9568,6 +9575,10 @@ async fn teardown_child_leg_session_skips_leg_scoped_hangup() {
     assert_eq!(hangups.len(), 1, "{hangups:?}");
     assert!(hangups[0].get("leg_id").is_none());
     assert_eq!(hangups[0]["leg_role"], "agent", "session event stamps the child role");
+    assert_eq!(
+        hangups[0]["scope"], "leg",
+        "a child teardown does not end the root call"
+    );
 }
 
 /// A setup-failed / never-connected CC leg does NOT participate in the
@@ -9747,11 +9758,18 @@ async fn child_leg_session_event_shape() {
 /// for one teardown with contradictory reasons (UasBye vs callee).
 #[tokio::test]
 async fn child_leg_agent_bye_reports_agent_role_exactly_once() {
+    let root_id = "11111111111141118111111111111111";
+    let child_id =
+        crate::call::session_id::normalize_or_generate(&SipSession::agent_leg_call_id(root_id, 0));
+    assert_eq!(
+        child_id, root_id,
+        "the first cluster leg can share the root ID"
+    );
     let mut agent_leg = crate::call::domain::Leg::new(LegId::new("queue-agent"));
     agent_leg.agent_id = Some("agent-1".into());
     agent_leg.state = LegState::Connected;
     let (mut session, mut events) =
-        teardown_session("repro-child-agent-bye", vec![agent_leg], Some("agent")).await;
+        teardown_session(&child_id, vec![agent_leg], Some("agent")).await;
 
     // Agent hangs up mid-session (session not yet cancelling): the dynamic
     // monitor delivers LegEnded{UasBye} → leg-scoped event + leg removal.
@@ -9768,6 +9786,8 @@ async fn child_leg_agent_bye_reports_agent_role_exactly_once() {
     // Session teardown follows (no draining in between — collect everything).
     session.cleanup().await;
     let hangups = drain_call_hangups(&mut events);
+
+    assert!(hangups.iter().all(|event| event["call_id"] == root_id));
 
     let agent_reports: Vec<&serde_json::Value> =
         hangups.iter().filter(|h| h["leg_role"] == "agent").collect();
@@ -9792,6 +9812,10 @@ async fn child_leg_agent_bye_reports_agent_role_exactly_once() {
     assert!(
         session_event.get("leg_role").is_none(),
         "session event must not re-claim the already-reported leg role, got {session_event:?}"
+    );
+    assert!(
+        hangups.iter().all(|event| event["scope"] == "leg"),
+        "even the unmarked child terminal event must not end the root call: {hangups:?}"
     );
 }
 

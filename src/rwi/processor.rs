@@ -1325,6 +1325,7 @@ impl RwiCommandProcessor {
                     {
                         let gw = gateway.read();
                         gw.send_to_owner(&crate::rwi::CallHangup {
+                            scope: crate::rwi::CallHangupScope::Call,
                             leg_id: None,
                                 leg_role: None,
                             call_id: call_id.clone(),
@@ -1763,6 +1764,7 @@ impl RwiCommandProcessor {
                             {
                                 let gw = gateway.read();
                                 gw.send_to_owner(&crate::rwi::CallHangup {
+                                    scope: crate::rwi::CallHangupScope::Call,
                                     leg_id: None,
                                         leg_role: None,
                                     call_id: call_id.clone(),
@@ -1928,6 +1930,7 @@ impl RwiCommandProcessor {
                                 });
                             } else {
                                 gw.send_to_owner(&crate::rwi::CallHangup {
+                                    scope: crate::rwi::CallHangupScope::Call,
                                     leg_id: None,
                                         leg_role: None,
                                     call_id: call_id.clone(),
@@ -1943,6 +1946,7 @@ impl RwiCommandProcessor {
                         setup_end_reason = Some(CallRecordHangupReason::Failed);
                         let gw = gateway.read();
                         gw.send_to_owner(&crate::rwi::CallHangup {
+                            scope: crate::rwi::CallHangupScope::Call,
                             leg_id: None,
                                 leg_role: None,
                             call_id: call_id.clone(),
@@ -1958,6 +1962,7 @@ impl RwiCommandProcessor {
                         setup_end_reason = Some(CallRecordHangupReason::Canceled);
                         let gw = gateway.read();
                         gw.send_to_owner(&crate::rwi::CallHangup {
+                            scope: crate::rwi::CallHangupScope::Call,
                             leg_id: None,
                                 leg_role: None,
                             call_id: call_id.clone(),

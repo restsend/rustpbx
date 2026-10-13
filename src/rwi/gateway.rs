@@ -1217,6 +1217,7 @@ mod tests {
         // Session-scoped events keep the "leg_role only on leg events"
         // contract: the field must not appear at all.
         let session_hangup = crate::rwi::CallHangup {
+            scope: crate::rwi::CallHangupScope::Call,
             leg_id: None,
             leg_role: None,
             call_id: "c1".into(),
@@ -1252,6 +1253,7 @@ mod tests {
         // (leg_id + leg_role + hangup_by + duration_secs), and the
         // session-scoped variant must omit every leg-only field.
         let leg_hangup = crate::rwi::CallHangup {
+            scope: crate::rwi::CallHangupScope::Leg,
             leg_id: Some("callee".into()),
             leg_role: Some("agent".into()),
             call_id: "c1".into(),
@@ -1350,6 +1352,7 @@ mod tests {
         // The final SipSession event is routed before the finished
         // notification removes ownership.
         gw.send_to_owner(&crate::rwi::CallHangup {
+            scope: crate::rwi::CallHangupScope::Call,
             leg_id: None,
             call_id: "c1".into(),
             reason: Some("normal".into()),
@@ -1573,6 +1576,7 @@ mod tests {
 
         let flat = RwiEvent::from_spec(
             &crate::rwi::CallHangup {
+                scope: crate::rwi::CallHangupScope::Call,
                 leg_id: None,
                 call_id: "child-1".into(),
                 reason: None,

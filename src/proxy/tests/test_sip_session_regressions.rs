@@ -545,7 +545,7 @@ fn recording_test_offer() -> String {
     "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 40000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n".to_string()
 }
 
-async fn setup_recording_test_media(session: &mut SipSession) {
+pub(crate) async fn setup_recording_test_media(session: &mut SipSession) {
     session.media.caller_offer = Some(recording_test_offer());
     session
         .create_callee_track(false)

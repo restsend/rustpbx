@@ -197,8 +197,20 @@ pub struct CallAnswered {
 }
 rwi_event!(CallAnswered, "call_answered");
 
+/// The lifecycle owner whose termination a hangup reports.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallHangupScope {
+    /// The root session ends the logical call.
+    Call,
+    /// A leg or a cluster-dispatched child session ends.
+    Leg,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CallHangup {
+    /// Explicit lifecycle scope; independent of optional leg attribution.
+    pub scope: CallHangupScope,
     /// Present for an individual leg event; absent for a session event.
     ///
     /// Leg-scoped events fire for:
