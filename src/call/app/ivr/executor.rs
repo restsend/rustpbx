@@ -8698,7 +8698,7 @@ mod tests {
         _listener: std::net::TcpListener,
     }
 
-    fn start_mock_step_provider() -> MockStepProviderServer {
+    fn start_mock_step_provider(start_action: &'static [u8]) -> MockStepProviderServer {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock step provider");
         let url = format!(
             "http://{}/ivr/step",
@@ -8712,7 +8712,7 @@ mod tests {
                 let Ok(stream) = stream else { continue };
                 let connection_requests = recorded_requests.clone();
                 std::thread::spawn(move || {
-                    let _ = serve_connection(stream, connection_requests);
+                    let _ = serve_connection(stream, connection_requests, start_action);
                 });
             }
         });
@@ -8726,6 +8726,7 @@ mod tests {
     fn serve_connection(
         mut stream: std::net::TcpStream,
         requests: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
+        start_action: &[u8],
     ) -> std::io::Result<()> {
         use std::io::{BufRead, BufReader, Read, Write};
 
@@ -8762,7 +8763,7 @@ mod tests {
             if let Ok(value) = serde_json::from_slice(&body) {
                 requests.lock().unwrap().push((path.clone(), value));
             }
-            let payload = mock_step_response(&path, &body);
+            let payload = mock_step_response(&path, &body, start_action);
             let head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
                  Content-Length: {}\r\nConnection: keep-alive\r\n\r\n",
@@ -8774,7 +8775,7 @@ mod tests {
         }
     }
 
-    fn mock_step_response(path: &str, body: &[u8]) -> Vec<u8> {
+    fn mock_step_response(path: &str, body: &[u8], start_action: &[u8]) -> Vec<u8> {
         if path != "/ivr/step" {
             // /ivr/step/start and /ivr/step/end are fire-and-forget.
             return br#"{"status":"ok"}"#.to_vec();
@@ -8782,8 +8783,7 @@ mod tests {
         if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
             let event_type = value["event"]["type"].as_str().unwrap_or("");
             if event_type == "session_start" {
-                return br#"{"type":"prompt","tts_text":"IVR step announcement.","interruptible":false,"ignore_prompt_dtmf":true}"#
-                    .to_vec();
+                return start_action.to_vec();
             }
             if event_type == "dtmf" && value["event"]["digit"].as_str() == Some("2") {
                 return br#"{"type":"queue","target":"sales"}"#.to_vec();
@@ -8796,7 +8796,9 @@ mod tests {
     async fn test_step_provider_http_contract() {
         use crate::call::app::ivr::provider::StepProvider;
 
-        let provider = start_mock_step_provider();
+        let provider = start_mock_step_provider(
+            br#"{"type":"prompt","tts_text":"IVR step announcement.","interruptible":false,"ignore_prompt_dtmf":true}"#,
+        );
         let step_provider = StepProvider::new(&provider.url, reqwest::Client::new());
 
         let session = SessionContext {
@@ -8916,6 +8918,84 @@ mod tests {
             .expect("end request");
         assert_eq!(end["session_id"], "test-session");
         assert_eq!(end["app_execution_id"], 2);
+    }
+
+    #[tokio::test]
+    async fn runtime_stop_preserves_provider_hangup_notification() {
+        use crate::call::app::ivr::provider::StepProvider;
+        use crate::call::runtime::{AppFactory, AppRuntime, AppRuntimeConfig, DefaultAppRuntime};
+        use crate::proxy::proxy_call::sip_session::SipSessionHandle;
+
+        struct Factory(String);
+        #[async_trait]
+        impl AppFactory for Factory {
+            async fn create_app(
+                &self,
+                _name: &str,
+                _params: Option<serde_json::Value>,
+                _context: &ApplicationContext,
+            ) -> Result<Option<Box<dyn CallApp>>, anyhow::Error> {
+                Ok(Some(Box::new(StepIvrApp::with_provider(Box::new(
+                    StepProvider::new(&self.0, reqwest::Client::new()),
+                )))))
+            }
+        }
+
+        for reason in ["caller_hangup", "shutdown"] {
+            let server = start_mock_step_provider(
+                br#"{"type":"prompt","file":"hello.wav","interruptible":false}"#,
+            );
+            let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+            let runtime = DefaultAppRuntime::new(AppRuntimeConfig {
+                session_id: "test-session".into(),
+                handle: SipSessionHandle::new_for_test("test-session", tx),
+                context: Arc::new(make_test_context()),
+            })
+            .with_factory(Arc::new(Factory(server.url.clone())));
+            runtime.start_app("ivr", None, false).await.unwrap();
+            // The real executor's Play command proves provider start and next-action completed.
+            loop {
+                let command = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .expect("IVR must become ready")
+                    .expect("command channel must remain open");
+                if matches!(command, CallCommand::FromApplication { ref command }
+                    if matches!(command.as_ref(), CallCommand::Play { .. }))
+                {
+                    break;
+                }
+            }
+            runtime.stop_app(Some(reason.into())).await.unwrap();
+            loop {
+                let command = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .expect("IVR must exit")
+                    .expect("command channel must remain open");
+                if matches!(command, CallCommand::AppExited { .. }) {
+                    break;
+                }
+            }
+            let requests = server.requests.lock().unwrap();
+            let ends: Vec<_> = requests
+                .iter()
+                .filter(|(path, _)| path == "/ivr/step/end")
+                .collect();
+            if reason == "caller_hangup" {
+                assert_eq!(
+                    ends.len(),
+                    1,
+                    "caller BYE must finalize the provider session exactly once"
+                );
+                assert_eq!(ends[0].1["session_id"], "test-session");
+                assert_eq!(ends[0].1["app_execution_id"], 1);
+                assert_eq!(ends[0].1["reason"], "user_hangup");
+            } else {
+                assert!(
+                    ends.is_empty(),
+                    "system shutdown must retain cancellation semantics"
+                );
+            }
+        }
     }
 
     // ── DTMF delivery in step-provider mode ──────────────────────────────

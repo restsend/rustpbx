@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crate::call::app::{ApplicationContext, CallApp, CallController, ControllerEvent};
+use crate::call::app::{ApplicationContext, CallApp, CallController, ControllerEvent, ExitReason};
 use crate::call::domain::CallCommand;
 use crate::proxy::proxy_call::sip_session::SipSessionHandle;
 
@@ -20,6 +20,7 @@ use super::{AppResult, AppRuntime, AppRuntimeError};
 struct RunningApp {
     name: String,
     cancel_token: CancellationToken,
+    cancel_reason: Arc<parking_lot::Mutex<ExitReason>>,
     /// Generation claimed by the `start_app` that installed this slot.
     /// Lets the event-loop teardown clear its own registration on natural
     /// exit without ever clobbering a successor's.
@@ -161,6 +162,7 @@ impl AppRuntime for DefaultAppRuntime {
         // `set_app_event_sender(None)`, dropping the successor's channel and
         // killing the new IVR with ExitReason::Normal.
         let cancel_token = CancellationToken::new();
+        let cancel_reason = Arc::new(parking_lot::Mutex::new(ExitReason::Cancelled));
 
         // Reserve the running slot: the AlreadyRunning check and the install
         // happen under ONE write lock, so concurrent start_app calls
@@ -183,6 +185,7 @@ impl AppRuntime for DefaultAppRuntime {
             *running = Some(RunningApp {
                 name: app_name.to_string(),
                 cancel_token: cancel_token.clone(),
+                cancel_reason: cancel_reason.clone(),
                 generation,
                 invocation,
             });
@@ -262,7 +265,8 @@ impl AppRuntime for DefaultAppRuntime {
                 (*context).clone(),
                 cancel_token,
                 timer_rx,
-            );
+            )
+            .with_cancel_reason(cancel_reason);
 
             if let Err(e) = event_loop.run().await {
                 tracing::error!(
@@ -349,6 +353,10 @@ impl AppRuntime for DefaultAppRuntime {
 
         match running {
             Some(running) => {
+                // Caller BYE must finalize the provider even when it cancels an in-flight callback.
+                if reason.as_deref() == Some("caller_hangup") {
+                    *running.cancel_reason.lock() = ExitReason::RemoteHangup(None);
+                }
                 // Cancel the event loop
                 running.cancel_token.cancel();
 
