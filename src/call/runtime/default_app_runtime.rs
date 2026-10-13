@@ -202,7 +202,7 @@ impl AppRuntime for DefaultAppRuntime {
         let (event_tx, event_rx) = mpsc::unbounded_channel::<ControllerEvent>();
 
         // Create controller — it owns the timer sender, we get the receiver back.
-        let (controller, timer_rx) = CallController::new(self.handle.clone(), event_rx);
+        let (controller, timer_rx) = CallController::new(self.handle.for_application(), event_rx);
 
         // Register the event sender with the session so SipSession can forward
         // DTMF / hangup / audio-complete events to the running app.
@@ -237,7 +237,7 @@ impl AppRuntime for DefaultAppRuntime {
 
         // Auto-answer if requested
         if auto_answer {
-            if let Err(e) = self.handle.send_command(CallCommand::Answer {
+            if let Err(e) = self.handle.for_application().send_command(CallCommand::Answer {
                 leg_id: crate::call::domain::LegId::from("caller"),
             }) {
                 // The event loop below would never run against a dead

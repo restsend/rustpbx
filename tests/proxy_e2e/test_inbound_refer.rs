@@ -1139,3 +1139,654 @@ async fn test_inbound_refer_known_unregistered_user() {
         matches!(event, TestUaEvent::CallTerminated(_))));
     alice.hangup(&alice_dialog_id).await.ok();
 }
+
+struct CallerIvrHandoff {
+    server: Arc<E2eTestServer>,
+    _ivr: tempfile::NamedTempFile,
+    agent: crate::common::test_ua::TestUa,
+    customer: crate::common::test_ua::TestUa,
+    agent_dialog: rsipstack::dialog::DialogId,
+    customer_dialog: rsipstack::dialog::DialogId,
+    agent_rtp: tokio::net::UdpSocket,
+    customer_rtp: tokio::net::UdpSocket,
+    customer_endpoint: std::net::SocketAddr,
+    owner: rustpbx::proxy::proxy_call::sip_session::SipSessionHandle,
+}
+
+impl CallerIvrHandoff {
+    async fn start(greeting: bool) -> Self {
+        Self::start_case(greeting, false, false).await
+    }
+
+    async fn connected(greeting: bool, inbound: bool) -> Self {
+        use crate::common::rtp_utils::extract_media_endpoint;
+        if let Ok(filter) = std::env::var("RUST_LOG") {
+            let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+        }
+        let mut config =
+            crate::common::test_helpers::test_proxy_config(portpicker::pick_unused_port().unwrap());
+        config.media_proxy = MediaProxyMode::All;
+        config.route_originated_calls = false;
+        let ivr = tempfile::Builder::new()
+            .prefix("handoff-")
+            .suffix(".toml")
+            .tempfile()
+            .unwrap();
+        let greeting = if greeting {
+            "greeting = \"fixtures/sample.wav\""
+        } else {
+            "greeting = \"\""
+        };
+        std::fs::write(
+            ivr.path(),
+            format!(
+                r#"
+[ivr]
+name = "handoff-menu"
+ivr_mode = "tree"
+[ivr.root]
+{greeting}
+timeout_ms = 60000
+max_retries = 10
+timeout_action = {{ type = "repeat" }}
+[[ivr.root.entries]]
+key = "2"
+action = {{ type = "hangup", prompt = "fixtures/sample.wav" }}
+"#
+            ),
+        )
+        .unwrap();
+        let route = RouteRule {
+            name: "handoff-menu".to_string(),
+            match_conditions: MatchConditions {
+                to_user: Some("888".to_string()),
+                ..Default::default()
+            },
+            action: RouteAction {
+                app: Some("ivr".to_string()),
+                app_params: Some(serde_json::json!({"file": ivr.path().to_str().unwrap()})),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut missing = route.clone();
+        missing.name = "missing-menu".into();
+        missing.match_conditions.to_user = Some("889".into());
+        missing.action.app_params =
+            Some(serde_json::json!({"file": "/nonexistent/survey-menu.toml"}));
+        let mut conditional = route.clone();
+        conditional.name = "conditional-menu".into();
+        conditional.match_conditions.to_user = Some("890".into());
+        conditional
+            .match_conditions
+            .headers
+            .insert("header.X-Route-Mode".into(), "survey".into());
+        config.routes = Some(vec![route, missing, conditional]);
+        config.ivr_dir = Some(ivr.path().parent().unwrap().to_string_lossy().into_owned());
+        let mut users = crate::common::test_helpers::standard_test_users();
+        for user in &mut users {
+            user.is_support_webrtc = false;
+        }
+        let cc_registry = Arc::new(rustpbx::addons::cc::agent::AgentRegistry::new());
+        cc_registry
+            .register("alice".into(), vec![], 1)
+            .await
+            .unwrap();
+        let adapter = Arc::new(
+            rustpbx::addons::cc::agent_registry_adapter::CcAgentRegistryAdapter::new(
+                cc_registry,
+                Arc::new(rustpbx::addons::cc::acd::AcdEngine::new(
+                    rustpbx::addons::cc::acd::AcdConfig {
+                        enabled: false,
+                        ..Default::default()
+                    },
+                )),
+                "example.test",
+            ),
+        );
+        let server = Arc::new(
+            E2eTestServer::start_with_inject(
+                config,
+                E2eTestServerInject {
+                    users,
+                    agent_registry: Some(adapter),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        let agent = server.create_ua("alice").await.unwrap();
+        let customer = server.create_ua("bob").await.unwrap();
+        let agent_rtp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let customer_rtp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sdp = |port| {
+            format!(
+                "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {port} RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n"
+            )
+        };
+        let agent_sdp = sdp(agent_rtp.local_addr().unwrap().port());
+        let customer_sdp = sdp(customer_rtp.local_addr().unwrap().port());
+        let (originator, receiver, destination, offer_sdp, answer_sdp) = if inbound {
+            (
+                customer.clone(),
+                agent.clone(),
+                "alice",
+                customer_sdp.clone(),
+                agent_sdp.clone(),
+            )
+        } else {
+            (
+                agent.clone(),
+                customer.clone(),
+                "bob",
+                agent_sdp.clone(),
+                customer_sdp.clone(),
+            )
+        };
+        let call = rustpbx::utils::spawn({
+            let originator = originator.clone();
+            async move { originator.make_call(destination, Some(offer_sdp)).await }
+        });
+        let (receiver_dialog, receiver_endpoint) =
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    for event in receiver.process_dialog_events().await.unwrap() {
+                        if let TestUaEvent::IncomingCall(dialog, Some(offer)) = event {
+                            receiver
+                                .answer_call(&dialog, Some(answer_sdp.clone()))
+                                .await
+                                .unwrap();
+                            return (dialog, extract_media_endpoint(&offer).unwrap());
+                        }
+                    }
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("receiver must receive the call");
+        let originator_dialog = tokio::time::timeout(Duration::from_secs(5), call)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let (agent_dialog, customer_dialog, customer_endpoint) = if inbound {
+            let answer = customer
+                .get_negotiated_answer_sdp(&originator_dialog)
+                .await
+                .unwrap();
+            (
+                receiver_dialog,
+                originator_dialog,
+                extract_media_endpoint(&answer).unwrap(),
+            )
+        } else {
+            (originator_dialog, receiver_dialog, receiver_endpoint)
+        };
+        agent.set_answer_sdp(&agent_dialog, &agent_sdp).await;
+        customer
+            .set_answer_sdp(&customer_dialog, &customer_sdp)
+            .await;
+        server
+            .wait_for_active_call(Duration::from_secs(3))
+            .await
+            .unwrap();
+        let owner = server
+            .server_ref
+            .active_call_registry
+            .get_handle_by_dialog(&agent_dialog.call_id)
+            .unwrap();
+        // Establish the negotiated RTP source before telephone-event input;
+        // a real customer has already sent voice during the conversation.
+        for seq in 0..12 {
+            let packet = crate::common::rtp_utils::RtpPacket::new(
+                0,
+                seq,
+                u32::from(seq) * 160,
+                4567,
+                vec![0x33; 160],
+            );
+            customer_rtp
+                .send_to(&packet.encode(), customer_endpoint)
+                .await
+                .unwrap();
+            sleep(Duration::from_millis(20)).await;
+        }
+        let mut packet = [0u8; 2048];
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let (len, _) = agent_rtp.recv_from(&mut packet).await.unwrap();
+                if crate::common::rtp_utils::RtpPacket::decode(&packet[..len])
+                    .is_ok_and(|rtp| rtp.payload == vec![0x33; 160])
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("customer voice must reach the agent before transfer");
+        Self {
+            server,
+            _ivr: ivr,
+            agent,
+            customer,
+            agent_dialog,
+            customer_dialog,
+            agent_rtp,
+            customer_rtp,
+            customer_endpoint,
+            owner,
+        }
+    }
+
+    async fn http_transfer(
+        &self,
+        target: &str,
+        headers: serde_json::Value,
+    ) -> axum::http::StatusCode {
+        use rustpbx::addons::Addon;
+        use tower::ServiceExt;
+        let app = rustpbx::app::AppStateBuilder::new()
+            .with_config(rustpbx::config::Config {
+                database_url: "sqlite::memory:".into(),
+                console: Some(rustpbx::config::ConsoleConfig {
+                    api_tokens: vec![rustpbx::config::ApiTokenConfig {
+                        token: "test-token".into(),
+                        scopes: vec![],
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .with_skip_sip_bind()
+            .build()
+            .await
+            .unwrap();
+        let mut cc = rustpbx::addons::cc::CcAddonState::new()
+            .with_active_call_registry(self.server.registry.clone());
+        cc.maybe_start_registrar_bridge(self.server.server_ref.clone())
+            .await;
+        app.insert_addon_state(cc);
+        let router = rustpbx::addons::cc::CcAddon::new()
+            .router(app.clone())
+            .unwrap();
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/cc/calls/{}/transfer",
+                        self.agent_dialog.call_id
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({"target":target,"headers":headers}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        app.token().cancel();
+        status
+    }
+
+    async fn start_case(greeting: bool, inbound: bool, http: bool) -> Self {
+        let call = Self::connected(greeting, inbound).await;
+        if http {
+            assert_eq!(
+                call.http_transfer("888", serde_json::json!({"X-Context-Id":"survey-1"}))
+                    .await,
+                axum::http::StatusCode::OK
+            );
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if call
+                        .agent
+                        .process_dialog_events()
+                        .await
+                        .unwrap()
+                        .iter()
+                        .any(|event| matches!(event, TestUaEvent::CallTerminated(_)))
+                    {
+                        break;
+                    }
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("HTTP handoff must release the agent without manual hangup");
+        } else {
+            let target = format!("sip:888@{}", call.server.proxy_addr);
+            assert_eq!(
+                call.agent
+                    .send_refer(&call.agent_dialog, &target)
+                    .await
+                    .unwrap(),
+                202
+            );
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    for event in call.agent.process_dialog_events().await.unwrap() {
+                        match event {
+                            TestUaEvent::ReferNotify(_, body, state)
+                                if state.starts_with("terminated") =>
+                            {
+                                assert!(body.starts_with("SIP/2.0 200"), "{body}");
+                                return;
+                            }
+                            TestUaEvent::CallTerminated(_) => {
+                                panic!("handoff must await the agent's BYE")
+                            }
+                            _ => {}
+                        }
+                    }
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("caller REFER must complete");
+        }
+        call
+    }
+}
+
+#[tokio::test]
+async fn test_inbound_refer_caller_customer_dtmf_completes_ivr() {
+    use crate::common::rtp_utils::{RtpPacket, telephone_event_payload};
+    for (inbound, http, rtp_dtmf) in [
+        (false, false, true),
+        (false, false, false),
+        (true, false, true),
+        (true, false, false),
+        (false, true, true),
+        (false, true, false),
+        (true, true, true),
+        (true, true, false),
+    ] {
+        let call = CallerIvrHandoff::start_case(true, inbound, http).await;
+        if !http {
+            call.agent.hangup(&call.agent_dialog).await.unwrap();
+        }
+        let mut buffer = [0u8; 2048];
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let (len, _) = call.customer_rtp.recv_from(&mut buffer).await.unwrap();
+                if RtpPacket::decode(&buffer[..len]).is_ok_and(|packet| {
+                    packet.payload_type == 0
+                        && packet
+                            .payload
+                            .iter()
+                            .any(|byte| !matches!(byte, 0xff | 0x7f))
+                }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("customer must hear non-silent IVR audio after agent BYE");
+        assert!(
+            !call
+                .customer
+                .process_dialog_events()
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, TestUaEvent::CallTerminated(_))),
+            "agent BYE must preserve the customer"
+        );
+        if rtp_dtmf {
+            // Send from the negotiated customer socket, exactly one physical key.
+            for (seq, end) in [(12, false), (13, true)] {
+                let packet = RtpPacket::new(101, seq, 8000, 4567, telephone_event_payload(2, end));
+                call.customer_rtp
+                    .send_to(&packet.encode(), call.customer_endpoint)
+                    .await
+                    .unwrap();
+                if !end {
+                    sleep(Duration::from_millis(40)).await;
+                }
+            }
+        } else {
+            call.customer
+                .send_dtmf_info(&call.customer_dialog, "2")
+                .await
+                .unwrap();
+        }
+        let started = std::time::Instant::now();
+        let mut last_audio = Duration::ZERO;
+        let mut packets = 0;
+        tokio::time::timeout(Duration::from_secs(12), async {
+            let mut poll = tokio::time::interval(Duration::from_millis(10));
+            loop {
+                tokio::select! {
+                    result = call.customer_rtp.recv_from(&mut buffer) => {
+                        let (len, _) = result.unwrap();
+                        if RtpPacket::decode(&buffer[..len]).is_ok_and(|packet| packet.payload_type == 0) {
+                            packets += 1;
+                            last_audio = started.elapsed();
+                        }
+                    }
+                    _ = poll.tick() => {
+                        if call.customer.process_dialog_events().await.unwrap().iter().any(|event|
+                            matches!(event, TestUaEvent::CallTerminated(_))) { break; }
+                    }
+                }
+            }
+        }).await.expect("customer DTMF must advance the IVR to its final hangup");
+        // sample.wav lasts 7.51 seconds; the farewell must finish before BYE.
+        assert!(
+            packets > 100 && last_audio >= Duration::from_secs(7),
+            "customer must hear the complete farewell: packets={packets}, last_audio={last_audio:?}"
+        );
+        crate::common::wait::wait_until(Duration::from_secs(3), || async {
+            call.server.get_active_calls().is_empty()
+        })
+        .await
+        .expect("completed IVR must release the session");
+    }
+}
+
+#[tokio::test]
+async fn test_inbound_refer_caller_preserves_explicit_play_target() {
+    use rustpbx::call::domain::{CallCommand, LegId, MediaSource, PlayOptions};
+    let call = CallerIvrHandoff::start(false).await;
+    call.owner
+        .send_command(CallCommand::Play {
+            leg_id: Some(LegId::from("caller")),
+            source: MediaSource::File {
+                path: "fixtures/sample.wav".to_string(),
+            },
+            options: Some(PlayOptions {
+                side_only: true,
+                ..Default::default()
+            }),
+        })
+        .unwrap();
+    let mut buffer = [0u8; 2048];
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let (len, _) = call.agent_rtp.recv_from(&mut buffer).await.unwrap();
+            if crate::common::rtp_utils::RtpPacket::decode(&buffer[..len]).is_ok_and(|packet| {
+                packet.payload_type == 0
+                    && !packet.payload.iter().all(|byte| *byte == 0x33)
+                    && packet
+                        .payload
+                        .iter()
+                        .any(|byte| !matches!(byte, 0xff | 0x7f))
+            }) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("external explicit caller playback must reach the actual caller");
+    call.owner
+        .send_command(CallCommand::Hangup(
+            rustpbx::call::domain::HangupCommand::all(None, None),
+        ))
+        .unwrap();
+    crate::common::wait::wait_until(Duration::from_secs(3), || async {
+        call.server.get_active_calls().is_empty()
+    })
+    .await
+    .expect("explicit session hangup must release both peers");
+}
+
+#[tokio::test]
+async fn test_inbound_refer_caller_customer_bye_releases_session() {
+    let call = CallerIvrHandoff::start(false).await;
+    call.agent.hangup(&call.agent_dialog).await.unwrap();
+    crate::common::wait::wait_until(Duration::from_secs(3), || async {
+        call.owner
+            .snapshot()
+            .is_some_and(|snapshot| snapshot.leg_count == 1)
+    })
+    .await
+    .expect("agent must exit while the customer stays connected");
+    call.customer.hangup(&call.customer_dialog).await.unwrap();
+    crate::common::wait::wait_until(Duration::from_secs(3), || async {
+        call.server.get_active_calls().is_empty()
+    })
+    .await
+    .expect("customer BYE must stop the IVR and release the root session");
+}
+
+#[tokio::test]
+async fn test_http_application_start_failure_preserves_call() {
+    for inbound in [false, true] {
+        let call = CallerIvrHandoff::connected(false, inbound).await;
+        for (target, status) in [
+            ("8999", axum::http::StatusCode::UNPROCESSABLE_ENTITY),
+            ("+12025550123", axum::http::StatusCode::FORBIDDEN),
+            (
+                "skill-group:missing",
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+        ] {
+            assert_eq!(
+                call.http_transfer(target, serde_json::json!({})).await,
+                status
+            );
+        }
+        assert_eq!(
+            call.http_transfer("888", serde_json::json!({"Authorization":"forbidden"}))
+                .await,
+            axum::http::StatusCode::BAD_REQUEST
+        );
+        let status = call.http_transfer("889", serde_json::json!({})).await;
+        assert!(
+            status.is_server_error(),
+            "app start failure must reach HTTP caller: {status}"
+        );
+        sleep(Duration::from_millis(100)).await;
+        for ua in [&call.agent, &call.customer] {
+            assert!(
+                !ua.process_dialog_events()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|event| matches!(event, TestUaEvent::CallTerminated(_))),
+                "failed transfer must preserve both parties"
+            );
+        }
+        assert_eq!(call.owner.snapshot().unwrap().leg_count, 2);
+        let packet = crate::common::rtp_utils::RtpPacket::new(0, 99, 15840, 4567, vec![0x44; 160]);
+        call.customer_rtp
+            .send_to(&packet.encode(), call.customer_endpoint)
+            .await
+            .unwrap();
+        let mut buffer = [0; 2048];
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let (len, _) = call.agent_rtp.recv_from(&mut buffer).await.unwrap();
+                if crate::common::rtp_utils::RtpPacket::decode(&buffer[..len])
+                    .is_ok_and(|packet| packet.payload == vec![0x44; 160])
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("original bridge must still forward voice");
+        assert_eq!(
+            call.http_transfer("888", serde_json::json!({})).await,
+            axum::http::StatusCode::OK
+        );
+        call.customer.hangup(&call.customer_dialog).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_http_application_route_uses_transfer_headers() {
+    for inbound in [false, true] {
+        let call = CallerIvrHandoff::connected(true, inbound).await;
+        assert_eq!(
+            call.http_transfer("890", serde_json::json!({"X-Route-Mode":"survey"}))
+                .await,
+            axum::http::StatusCode::OK
+        );
+        let mut buffer = [0; 2048];
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let (len, _) = call.customer_rtp.recv_from(&mut buffer).await.unwrap();
+                if crate::common::rtp_utils::RtpPacket::decode(&buffer[..len]).is_ok_and(|packet| {
+                    packet
+                        .payload
+                        .iter()
+                        .any(|byte| !matches!(byte, 0xff | 0x7f))
+                }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("matched application must play customer audio");
+        call.customer.hangup(&call.customer_dialog).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_http_named_ivr_passes_headers_to_provider() {
+    for inbound in [false, true] {
+        let capture = crate::common::webhook_capture::WebhookCapture::start_with_response(
+            &["/hook", "/hook/{event}"],
+            serde_json::json!({"type":"hangup"}),
+        )
+        .await;
+        let call = CallerIvrHandoff::connected(false, inbound).await;
+        std::fs::write(call._ivr.path(), format!("[ivr]\nname = \"handoff-menu\"\nivr_mode = \"step\"\n[ivr.provider]\nurl = \"{}\"\n", capture.url)).unwrap();
+        let target = format!(
+            "ivr:{}",
+            call._ivr.path().file_stem().unwrap().to_str().unwrap()
+        );
+        assert_eq!(
+            call.http_transfer(&target, serde_json::json!({"X-Context-Id":"survey-direct"}))
+                .await,
+            axum::http::StatusCode::OK
+        );
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if !capture.received.lock().unwrap().is_empty() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("IVR provider must receive start request");
+        let requests = std::mem::take(&mut *capture.received.lock().unwrap());
+        assert!(
+            requests
+                .iter()
+                .any(|request| request["sip_headers"]
+                    .as_object()
+                    .is_some_and(|headers| headers
+                        .iter()
+                        .any(|(name, value)| name.eq_ignore_ascii_case("X-Context-Id")
+                            && value == "survey-direct"))),
+            "provider request missing transfer headers"
+        );
+    }
+}

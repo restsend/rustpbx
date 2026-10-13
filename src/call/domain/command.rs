@@ -92,6 +92,9 @@ pub type CallCommandRx = mpsc::Receiver<CallCommand>;
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CallCommand {
+    /// Internal application source; never accepted or emitted by wire adapters.
+    #[serde(skip)]
+    FromApplication { command: Box<CallCommand> },
     // ============================================================================
     // Basic Call Control
     // ============================================================================
@@ -187,6 +190,11 @@ pub enum CallCommand {
         target: String,
         #[serde(default)]
         headers: HashMap<String, String>,
+        /// Restrict unresolved destinations to an in-session application.
+        #[serde(default)]
+        application_only: bool,
+        #[serde(skip)]
+        completion: Option<oneshot::Sender<crate::call::runtime::CommandResult>>,
     },
 
     /// Complete an attended transfer

@@ -242,6 +242,7 @@ impl RwiCommandProcessor {
                             Some(Err(CommandError::CallNotFound(call_id.to_string())))
                         }
                         Some(CommandFailureKind::MediaDenied)
+                        | Some(CommandFailureKind::InvalidTarget)
                         | None => Some(Err(CommandError::CommandFailed(msg))),
                     }
                 }

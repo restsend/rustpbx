@@ -335,7 +335,7 @@ impl SipSession {
     }
 
     /// Resolve REFER feature codes and application routes without executing a transfer.
-    async fn resolve_refer_app_target(
+    pub(crate) async fn resolve_refer_app_target(
         server: &SipServerRef,
         original_session_id: &str,
         target_uri: &str,
@@ -435,7 +435,7 @@ impl SipSession {
     }
 
     /// Side-effect-free probe: is this dialled user a known cc agent extension?
-    async fn refer_target_cc_agent(server: &SipServerRef, user: &str) -> Option<String> {
+    pub(super) async fn refer_target_cc_agent(server: &SipServerRef, user: &str) -> Option<String> {
         let registry = server.agent_registry.as_ref()?;
         let target = format!("agent:{user}");
         registry
@@ -446,7 +446,7 @@ impl SipSession {
 
     /// `app_params.file` → IVR display name
     /// ("config/ivr/x.toml" → "x", "db://ivr/x.generated.toml" → "x").
-    fn ivr_display_name(file: &str) -> Option<String> {
+    pub(super) fn ivr_display_name(file: &str) -> Option<String> {
         let base = file.rsplit('/').next()?.trim();
         let base = base.strip_suffix(".toml").unwrap_or(base);
         let base = base.strip_suffix(".generated").unwrap_or(base);

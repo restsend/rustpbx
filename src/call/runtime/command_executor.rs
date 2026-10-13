@@ -34,6 +34,8 @@ pub enum CommandFailureKind {
     SessionNotFound,
     /// Media capability check denied the command (e.g. bypass mode).
     MediaDenied,
+    /// Destination is neither an allowed peer nor a resolved application.
+    InvalidTarget,
 }
 
 impl CommandResult {

@@ -491,6 +491,7 @@ fn forward_dtmf_skips_app_injection_when_no_app_is_running() {
     forward_dtmf_event(
         '2',
         "caller",
+        "caller",
         "test-session",
         &app_runtime,
         &None,
@@ -520,6 +521,7 @@ fn forward_dtmf_rejects_non_caller_leg_as_application_input() {
     let accepted = forward_dtmf_event(
         '1',
         "callee",
+        "caller",
         "test-session",
         &app_runtime,
         &None,
@@ -572,6 +574,7 @@ fn forward_dtmf_with_active_bridge_owns_digit_without_app_injection() {
 
     forward_dtmf_event(
         '1',
+        "caller",
         "caller",
         "test-session",
         &app_runtime,
@@ -684,6 +687,7 @@ fn forward_dtmf_resumable_bridge_defers_trace_to_resumed_ivr() {
 
     forward_dtmf_event(
         '8',
+        "caller",
         "caller",
         "test-session",
         &app_runtime,

@@ -326,6 +326,7 @@ pub(super) async fn trace_sip_headers(
 pub(super) fn forward_dtmf_event(
     digit: char,
     leg_id: &str,
+    application_leg: &str,
     session_id: &str,
     app_runtime: &Arc<dyn AppRuntime>,
     rwi_gateway: &Option<crate::rwi::RwiGatewayRef>,
@@ -337,10 +338,9 @@ pub(super) fn forward_dtmf_event(
     sip_headers: Option<std::collections::HashMap<String, String>>,
     leg_role: Option<String>,
 ) -> bool {
-    // Call applications are attached to the caller leg. Agent-side INFO must
-    // still be forwarded to its SIP peer, but it is never authoritative input
-    // for an IVR/menu application (the RTP path already listens to caller only).
-    if leg_id != "caller" {
+    // A transferred application serves its bound participant, which can be
+    // the callee. Input from the other leg must not drive the customer menu.
+    if leg_id != application_leg {
         return false;
     }
     let digit_str = digit.to_string();

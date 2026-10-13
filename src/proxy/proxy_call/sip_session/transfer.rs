@@ -16,6 +16,8 @@ pub(crate) enum TransferDisposition {
     Detach,
     AwaitResult,
     Refer,
+    /// API application handoffs release the agent only after successful start.
+    PreserveOnFailure,
 }
 
 fn use_b2bua(blind_transfer_use_refer: bool, disposition: TransferDisposition) -> bool {
@@ -815,10 +817,10 @@ impl SipSession {
             .filter(|(_, leg)| leg.agent_id.is_some())
             .map(|(id, _)| id.clone());
         let first = agent_legs.next();
-        if agent_legs.next().is_none() {
+        if first.is_some() && agent_legs.next().is_none() {
             return first;
         }
-        // Ambiguous — fall back to the active callee.
+        // Ambiguous or unstamped — fall back to the active callee.
         callee_live.then_some(callee)
     }
 
@@ -893,6 +895,27 @@ impl SipSession {
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
         headers: HashMap<String, String>,
     ) -> Result<()> {
+        self.handle_blind_transfer_with_route(
+            leg_id,
+            target,
+            disposition,
+            callee_state_rx,
+            headers,
+            None,
+        )
+        .await
+    }
+
+    pub(super) async fn handle_blind_transfer_with_route(
+        &mut self,
+        leg_id: LegId,
+        target: String,
+        disposition: TransferDisposition,
+        callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
+        headers: HashMap<String, String>,
+        prepared_route: Option<crate::config::RouteResult>,
+    ) -> Result<()> {
+        let previous_media_leg = self.app_media_leg.read().clone();
         self.meta.transfer_in_progress = true;
         self.sync_rtp_timeout_pause();
 
@@ -932,10 +955,18 @@ impl SipSession {
         };
 
         let result = self
-            .handle_blind_transfer_inner(leg_id, target, disposition, callee_state_rx, headers)
+            .handle_blind_transfer_inner(
+                leg_id,
+                target,
+                disposition,
+                callee_state_rx,
+                headers,
+                prepared_route,
+            )
             .await;
 
         if result.is_err() {
+            *self.app_media_leg.write() = previous_media_leg.clone();
             // Transfer failed — the existing bridge stays up, so normal
             // (non-suppressed) monitoring resumes.
             self.meta.transfer_in_progress = false;
@@ -955,6 +986,16 @@ impl SipSession {
                 transfer_target_type: target_type,
                 transfer_source,
             });
+        }
+        if result.is_ok() {
+            let customer_leg = self.app_media_leg.read().clone();
+            if customer_leg != previous_media_leg {
+                if let Some(leg) = customer_leg {
+                    if let Some(task) = self.spawn_leg_dtmf_forwarder(&leg) {
+                        self.legs.push_task(leg, task);
+                    }
+                }
+            }
         }
         result
     }
@@ -1051,6 +1092,7 @@ impl SipSession {
         disposition: TransferDisposition,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
         headers: HashMap<String, String>,
+        prepared_route: Option<crate::config::RouteResult>,
     ) -> Result<()> {
         let target = parse_transfer_target(&target);
         if disposition == TransferDisposition::AwaitResult
@@ -1078,7 +1120,8 @@ impl SipSession {
                 session_id = %self.id,
                 "outbound agent hand-off: redirecting app target to the customer (callee) leg"
             );
-            self.app_media_leg = Some(LegId::from("callee"));
+            let customer_leg = LegId::from("callee");
+            *self.app_media_leg.write() = Some(customer_leg);
         }
 
         // Lifecycle: arm "flow suspended" when the step-IVR executor marked
@@ -1149,7 +1192,12 @@ impl SipSession {
                 self.inject_transfer_origin_params(&leg_id, &mut params)
                     .await;
                 let resumed = params.get("ivr_resumed").map(|v| v == "1").unwrap_or(false);
-                let result = self.start_ivr_app(&name, params).await;
+                let context = self
+                    .transfer_app_route_context(&name, params.clone(), &headers)
+                    .await;
+                let result = self
+                    .start_ivr_app_with_context(&name, params, Some(context))
+                    .await;
                 if result.is_ok() && resumed {
                     self.meta.ivr_flow_suspended = false;
                 } else if let Err(error) = &result {
@@ -1169,11 +1217,20 @@ impl SipSession {
                 let mut params = params;
                 self.inject_transfer_origin_params(&leg_id, &mut params)
                     .await;
-                let result = self.start_route_point_app(&name, params, headers).await;
+                let result = self
+                    .start_route_point_app(
+                        &name,
+                        params,
+                        headers,
+                        prepared_route,
+                        disposition == TransferDisposition::PreserveOnFailure,
+                    )
+                    .await;
                 if result.is_ok() {
                     self.bind_suspended_ivr_exec_to_current_app().await;
                     self.meta.ivr_flow_suspended = false;
-                    if disposition != TransferDisposition::Refer && leg_id != LegId::from("caller") {
+                    if disposition == TransferDisposition::Detach && leg_id != LegId::from("caller")
+                    {
                         self.mark_transferred_with(Some(
                             serde_json::json!({ "target": name, "kind": "route_point" }),
                         ));
@@ -2105,11 +2162,39 @@ impl SipSession {
         self.start_queue_app(fallback_plan, None).await
     }
 
+    pub(super) async fn transfer_app_route_context(
+        &self,
+        target: &str,
+        variables: HashMap<String, String>,
+        headers: &HashMap<String, String>,
+    ) -> crate::call::app::AppRouteContext {
+        let invocation = self.app_runtime.current_app_invocation().await;
+        let current_headers = invocation
+            .map(|context| context.sip_headers)
+            .unwrap_or_else(|| {
+                self.app_runtime
+                    .app_context()
+                    .map(|context| context.call_info.sip_headers.clone())
+                    .unwrap_or_default()
+            });
+        let headers = headers
+            .iter()
+            .map(|(name, value)| rsipstack::sip::Header::Other(name.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        crate::call::app::AppRouteContext {
+            callee: target.to_string(),
+            sip_headers: crate::call::app::merge_sip_headers(&current_headers, &headers),
+            variables,
+        }
+    }
+
     async fn start_route_point_app(
         &mut self,
         route_point: &str,
         variables: HashMap<String, String>,
         transfer_headers: HashMap<String, String>,
+        prepared_route: Option<crate::config::RouteResult>,
+        preserve_on_failure: bool,
     ) -> Result<()> {
         let caller = self
             .context
@@ -2117,27 +2202,20 @@ impl SipSession {
             .caller
             .clone()
             .ok_or_else(|| anyhow!("route-point transfer has no caller identity"))?;
-        let current_invocation = self.app_runtime.current_app_invocation().await;
-        let current_headers = current_invocation
-            .as_ref()
-            .map(|context| context.sip_headers.clone())
-            .unwrap_or_else(|| {
-                self.app_runtime
-                    .app_context()
-                    .map(|context| context.call_info.sip_headers.clone())
-                    .unwrap_or_default()
-            });
-        let carry_headers = current_headers
-            .iter()
-            .map(|(name, value)| rsipstack::sip::Header::Other(name.clone(), value.clone()))
-            .collect::<Vec<_>>();
-        let routed = self
-            .resolve_route_point(
-            route_point,
-            &caller,
-            (!carry_headers.is_empty()).then_some(carry_headers),
-        )
-        .await?;
+        let mut route_context = self
+            .transfer_app_route_context(route_point, variables.clone(), &transfer_headers)
+            .await;
+        let routed = if let Some(route) = prepared_route {
+            Some(route)
+        } else {
+            let carry_headers = route_context
+                .sip_headers
+                .iter()
+                .map(|(name, value)| rsipstack::sip::Header::Other(name.clone(), value.clone()))
+                .collect::<Vec<_>>();
+            self.resolve_route_point(route_point, &caller, Some(carry_headers))
+                .await?
+        };
 
         match routed {
             Some(crate::config::RouteResult::Application {
@@ -2149,20 +2227,15 @@ impl SipSession {
             }) => {
                 self.track_routed_leg_hints(hints);
                 let routed_headers = crate::call::app::merge_sip_headers(
-                    &current_headers,
+                    &route_context.sip_headers,
                     option.headers.as_deref().unwrap_or_default(),
                 );
                 let transfer_headers = transfer_headers
                     .into_iter()
                     .map(|(name, value)| rsipstack::sip::Header::Other(name, value))
                     .collect::<Vec<_>>();
-                let sip_headers =
+                route_context.sip_headers =
                     crate::call::app::merge_sip_headers(&routed_headers, &transfer_headers);
-                let route_context = crate::call::app::AppRouteContext {
-                    callee: route_point.to_string(),
-                    sip_headers,
-                    variables: variables.clone(),
-                };
                 if let Err(error) = self
                     .ensure_app_running_with_route_context(
                         &app_name,
@@ -2178,6 +2251,7 @@ impl SipSession {
                             error,
                             &format!("toivr:{route_point}"),
                             &variables,
+                            preserve_on_failure,
                         )
                         .await;
                 }
@@ -2185,6 +2259,9 @@ impl SipSession {
             }
             Some(crate::config::RouteResult::Abort(code, reason)) => {
                 let status = code.code();
+                if preserve_on_failure {
+                    return Err(anyhow!("route aborted for IVR route point: {status}"));
+                }
                 self.terminate_route_point_handoff(
                     anyhow!(
                         "route aborted for IVR route point: {} {}",
@@ -2203,6 +2280,7 @@ impl SipSession {
                     anyhow!("route point did not resolve to an application"),
                     &format!("toivr:{route_point}"),
                     &variables,
+                    preserve_on_failure,
                 )
                 .await
             }
@@ -2212,6 +2290,7 @@ impl SipSession {
                     anyhow!("route point resolved to an unsupported queue"),
                     &format!("toivr:{route_point}"),
                     &variables,
+                    preserve_on_failure,
                 )
                 .await
             }
@@ -2220,6 +2299,7 @@ impl SipSession {
                     anyhow!("route point was not handled"),
                     &format!("toivr:{route_point}"),
                     &variables,
+                    preserve_on_failure,
                 )
                 .await
             }
@@ -2231,6 +2311,7 @@ impl SipSession {
         error: anyhow::Error,
         route_point: &str,
         variables: &HashMap<String, String>,
+        preserve_on_failure: bool,
     ) -> Result<()> {
         match self
             .try_ivr_fallback_after_start_failure(error, route_point, variables)
@@ -2238,6 +2319,11 @@ impl SipSession {
         {
             Ok(()) => Ok(()),
             Err(error) => {
+                // A failed API handoff leaves the original conversation intact.
+                // Terminal IVR-internal transfers retain their existing policy.
+                if preserve_on_failure {
+                    return Err(error);
+                }
                 let failure = crate::call::app::error_catalog::IVR_START_FAILED;
                 self.terminate_route_point_handoff(
                     error,
@@ -2331,6 +2417,16 @@ impl SipSession {
         ivr_name: &str,
         query_params: HashMap<String, String>,
     ) -> Result<()> {
+        self.start_ivr_app_with_context(ivr_name, query_params, None)
+            .await
+    }
+
+    async fn start_ivr_app_with_context(
+        &self,
+        ivr_name: &str,
+        query_params: HashMap<String, String>,
+        route_context: Option<crate::call::app::AppRouteContext>,
+    ) -> Result<()> {
         let ivr_file = self.server.data_context.resolve_ivr_file(ivr_name).await;
         info!(session_id = %self.id, ivr = %ivr_name, file = %ivr_file, "Starting IVR application");
         // Remember the IVR short code so a later queue dispatch can inject
@@ -2340,10 +2436,20 @@ impl SipSession {
         if !query_params.is_empty() {
             app_params["ivr_params"] = serde_json::json!(query_params);
         }
-        let result = match self
-            .ensure_app_running("ivr", Some(app_params), &format!("IVR '{}'", ivr_name))
+        let started = if let Some(context) = route_context {
+            self.ensure_app_running_with_route_context(
+                "ivr",
+                Some(app_params),
+                true,
+                &format!("IVR '{}'", ivr_name),
+                context,
+            )
             .await
-        {
+        } else {
+            self.ensure_app_running("ivr", Some(app_params), &format!("IVR '{}'", ivr_name))
+                .await
+        };
+        let result = match started {
             Ok(()) => Ok(()),
             Err(e) => {
                 self.try_ivr_fallback_after_start_failure(e, ivr_name, &query_params)
