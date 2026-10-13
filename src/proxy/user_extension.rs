@@ -51,13 +51,6 @@ impl ExtensionUserBackend {
         departments: Vec<department::Model>,
         realm: Option<&str>,
     ) -> SipUser {
-        let department_names = if departments.is_empty() {
-            None
-        } else {
-            let deps: Vec<String> = departments.iter().map(|d| d.name.clone()).collect();
-            Some(deps)
-        };
-
         SipUser {
             id: model.id as u64,
             username: model.extension,
@@ -67,7 +60,10 @@ impl ExtensionUserBackend {
             call_forwarding_mode: model.call_forwarding_mode,
             call_forwarding_destination: model.call_forwarding_destination,
             call_forwarding_timeout: model.call_forwarding_timeout,
-            departments: department_names,
+            department_ids: departments
+                .into_iter()
+                .map(|department| department.id)
+                .collect(),
             display_name: model.display_name,
             email: model.email,
             note: model.notes,
@@ -157,7 +153,7 @@ mod tests {
     async fn get_user_returns_extension() {
         let db = setup_db().await;
 
-        let _ = extension::ActiveModel {
+        let extension = extension::ActiveModel {
             extension: Set("1001".to_string()),
             sip_password: Set(Some("secret".to_string())),
             allow_guest_calls: Set(true),
@@ -167,6 +163,24 @@ mod tests {
         .await
         .expect("insert extension");
 
+        let sales = department::ActiveModel {
+            name: Set("Sales".to_string()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        let numeric_name = department::ActiveModel {
+            name: Set("999999".to_string()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        extension::Entity::replace_departments(&db, extension.id, &[numeric_name.id, sales.id])
+            .await
+            .unwrap();
+
         let backend = ExtensionUserBackend::new(db.clone(), 30);
 
         let user = backend
@@ -175,6 +189,9 @@ mod tests {
             .expect("query user")
             .expect("user exists");
 
+        let mut ids = user.department_ids.clone();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![sales.id, numeric_name.id]);
         assert_eq!(user.username, "1001");
         assert_eq!(user.password.as_deref(), Some("secret"));
         assert!(user.allow_guest_calls);

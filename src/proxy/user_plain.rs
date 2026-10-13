@@ -67,7 +67,7 @@ impl PlainTextBackend {
                 call_forwarding_mode: None,
                 call_forwarding_destination: None,
                 call_forwarding_timeout: None,
-                departments: None,
+                department_ids: Vec::new(),
                 display_name: None,
                 email: None,
                 phone: None,

@@ -598,24 +598,9 @@ fn resolve_user_info(
     cookie: &TransactionCookie,
     caller_uri: &str,
 ) -> (Option<String>, Option<String>, Option<i64>, Option<i64>) {
-    let mut from_number = extract_sip_username(caller_uri);
+    let from_number = extract_sip_username(caller_uri);
     let (from_display_name, department_id, extension_id) = if let Some(user) = cookie.get_user() {
-        let mut dept_id = None;
-        let mut is_wholesale = false;
-
-        if let Some(deps) = &user.departments {
-            for d in deps {
-                if d.starts_with("tenant:") {
-                    is_wholesale = true;
-                } else if let Ok(id) = d.parse::<i64>() {
-                    dept_id = Some(id);
-                }
-            }
-        }
-
-        if is_wholesale {
-            from_number = Some(user.username.clone());
-        }
+        let dept_id = user.department_ids.first().copied();
 
         let ext_id = if user.id > 0 {
             Some(user.id as i64)
@@ -636,12 +621,11 @@ mod tests {
     use crate::call::SipUser;
 
     #[test]
-    fn test_resolve_user_info_wholesale() {
+    fn test_resolve_user_info_without_departments() {
         let cookie = TransactionCookie::default();
         let user = SipUser {
             username: "1234".to_string(),
             display_name: Some("alice".to_string()),
-            departments: Some(vec!["tenant:100".to_string()]),
             ..Default::default()
         };
         cookie.set_user(user);
@@ -649,19 +633,19 @@ mod tests {
         let caller = "sip:mock-uuid@1.2.3.4";
         let (from, from_name, dept, ext) = resolve_user_info(&cookie, caller);
 
-        assert_eq!(from, Some("1234".to_string()));
+        assert_eq!(from, Some("mock-uuid".to_string()));
         assert_eq!(from_name, Some("alice".to_string()));
         assert_eq!(dept, None);
         assert_eq!(ext, None);
     }
 
     #[test]
-    fn test_resolve_user_info_mixed() {
+    fn test_resolve_user_info_first_department_id() {
         let cookie = TransactionCookie::default();
         let user = SipUser {
             username: "1234".to_string(),
             display_name: Some("alice".to_string()),
-            departments: Some(vec!["tenant:100".to_string(), "5".to_string()]),
+            department_ids: vec![9, 5, 12],
             id: 99,
             ..Default::default()
         };
@@ -670,9 +654,9 @@ mod tests {
         let caller = "sip:mock-uuid@1.2.3.4";
         let (from, from_name, dept, ext) = resolve_user_info(&cookie, caller);
 
-        assert_eq!(from, Some("1234".to_string()));
+        assert_eq!(from, Some("mock-uuid".to_string()));
         assert_eq!(from_name, Some("alice".to_string()));
-        assert_eq!(dept, Some(5));
+        assert_eq!(dept, Some(9));
         assert_eq!(ext, Some(99));
     }
 
@@ -682,7 +666,7 @@ mod tests {
         let user = SipUser {
             username: "1001".to_string(),
             display_name: Some("alice".to_string()),
-            departments: Some(vec!["5".to_string()]),
+            department_ids: vec![5],
             id: 99,
             ..Default::default()
         };

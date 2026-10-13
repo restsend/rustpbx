@@ -964,7 +964,11 @@
                             ? this.clampTimeout(this.form.call_forwarding_timeout)
                             : undefined,
                         'notes': this.form.notes ? this.form.notes.trim() : '',
-                        'department_ids': this.selectedDepartments.map((id) => id.trim()).filter(Boolean),
+                        'department_ids': this.selectedDepartments
+                            .map((id) => String(id).trim())
+                            .filter(Boolean)
+                            .map((id) => Number(id))
+                            .filter((id) => Number.isSafeInteger(id)),
                     }
                 },
                 async submit() {

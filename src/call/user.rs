@@ -21,7 +21,9 @@ pub struct SipUser {
     pub username: String,
     pub password: Option<String>,
     pub realm: Option<String>,
-    pub departments: Option<Vec<String>>,
+    /// Department database IDs; names are resolved separately for display.
+    #[serde(default)]
+    pub department_ids: Vec<i64>,
     pub display_name: Option<String>,
     pub email: Option<String>,
     pub phone: Option<String>,
@@ -91,7 +93,7 @@ impl Default for SipUser {
             destination: None,
             is_support_webrtc: false,
             ice_lite: false,
-            departments: None,
+            department_ids: Vec::new(),
             display_name: None,
             email: None,
             phone: None,
@@ -122,8 +124,8 @@ impl SipUser {
         if self.realm.is_none() {
             self.realm = other.realm.clone();
         }
-        if self.departments.is_none() {
-            self.departments = other.departments.clone();
+        if self.department_ids.is_empty() {
+            self.department_ids = other.department_ids.clone();
         }
         if self.display_name.is_none() {
             self.display_name = other.display_name.clone();
@@ -301,7 +303,7 @@ impl TryFrom<&Transaction> for SipUser {
             call_forwarding_mode: None,
             call_forwarding_destination: None,
             call_forwarding_timeout: None,
-            departments: None,
+            department_ids: Vec::new(),
             display_name: from_display_name,
             email: None,
             phone: None,
@@ -370,6 +372,31 @@ pub fn check_authorization_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn department_ids_json_and_merge() {
+        let user = SipUser {
+            department_ids: vec![9, 5],
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&user).unwrap();
+        assert_eq!(json["department_ids"], serde_json::json!([9, 5]));
+        assert!(json.get("departments").is_none());
+        let mut omitted = json.clone();
+        omitted.as_object_mut().unwrap().remove("department_ids");
+        let mut empty: SipUser = serde_json::from_value(omitted).unwrap();
+        assert!(empty.department_ids.is_empty());
+        empty.merge_with(&user);
+        assert_eq!(empty.department_ids, vec![9, 5]);
+        empty.merge_with(&SipUser {
+            department_ids: vec![1],
+            ..Default::default()
+        });
+        assert_eq!(empty.department_ids, vec![9, 5]);
+        let mut invalid = json;
+        invalid["department_ids"] = serde_json::json!(["Sales"]);
+        assert!(serde_json::from_value::<SipUser>(invalid).is_err());
+    }
 
     // ── SipUser::voicemail_disabled ────────────────────────────────────────────
 
