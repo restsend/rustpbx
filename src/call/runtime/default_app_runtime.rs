@@ -346,6 +346,15 @@ impl AppRuntime for DefaultAppRuntime {
     }
 
     async fn stop_app(&self, reason: Option<String>) -> AppResult<()> {
+        self.stop_app_with_exit_reason(reason, ExitReason::Cancelled)
+            .await
+    }
+
+    async fn stop_app_with_exit_reason(
+        &self,
+        reason: Option<String>,
+        exit_reason: ExitReason,
+    ) -> AppResult<()> {
         let running = {
             let running = self.running.read().await;
             running.clone()
@@ -353,10 +362,8 @@ impl AppRuntime for DefaultAppRuntime {
 
         match running {
             Some(running) => {
-                // Caller BYE must finalize the provider even when it cancels an in-flight callback.
-                if reason.as_deref() == Some("caller_hangup") {
-                    *running.cancel_reason.lock() = ExitReason::RemoteHangup(None);
-                }
+                // Store the lifecycle cause before interrupting an in-flight callback.
+                *running.cancel_reason.lock() = exit_reason;
                 // Cancel the event loop
                 running.cancel_token.cancel();
 

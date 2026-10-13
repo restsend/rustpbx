@@ -9810,3 +9810,131 @@ async fn leg_remove_of_unconnected_leg_emits_miss_hangup() {
         .await;
     assert!(events.try_recv().is_err(), "connected-leg removal stays silent");
 }
+
+#[tokio::test]
+async fn caller_termination_preserves_application_exit_cause() {
+    use crate::call::Dialplan;
+    use crate::call::app::{
+        AppAction, ApplicationContext, CallApp, CallAppType, CallController, ExitReason,
+    };
+    use crate::call::runtime::{AppFactory, AppRuntimeConfig, DefaultAppRuntime};
+    use crate::proxy::tests::common::create_test_request;
+    use crate::proxy::tests::test_sip_session_regressions::build_session_with_cmd_rx;
+
+    struct Capture(Arc<std::sync::Mutex<Vec<String>>>);
+    #[async_trait::async_trait]
+    impl CallApp for Capture {
+        fn app_type(&self) -> CallAppType {
+            CallAppType::Custom
+        }
+        fn name(&self) -> &str {
+            "exit-capture"
+        }
+        async fn on_enter(
+            &mut self,
+            ctrl: &mut CallController,
+            _context: &ApplicationContext,
+        ) -> anyhow::Result<AppAction> {
+            ctrl.answer().await?;
+            Ok(AppAction::Continue)
+        }
+        async fn on_exit(&mut self, reason: ExitReason) -> anyhow::Result<()> {
+            self.0.lock().unwrap().push(reason.to_string());
+            Ok(())
+        }
+    }
+    struct Factory(Arc<std::sync::Mutex<Vec<String>>>);
+    #[async_trait::async_trait]
+    impl AppFactory for Factory {
+        async fn create_app(
+            &self,
+            _name: &str,
+            _params: Option<serde_json::Value>,
+            _context: &ApplicationContext,
+        ) -> anyhow::Result<Option<Box<dyn CallApp>>> {
+            Ok(Some(Box::new(Capture(self.0.clone()))))
+        }
+    }
+
+    let mut failures = Vec::new();
+    for (cause, prior, expected) in [
+        (
+            TerminatedReason::UacBye,
+            None,
+            "remote_hangup(Some(ByCaller))",
+        ),
+        (
+            TerminatedReason::UasBye,
+            None,
+            "remote_hangup(Some(ByCallee))",
+        ),
+        (TerminatedReason::Timeout, None, "hangup"),
+        (
+            TerminatedReason::UacCancel,
+            None,
+            "remote_hangup(Some(Canceled))",
+        ),
+        (
+            TerminatedReason::UacBye,
+            Some(CallRecordHangupReason::BySystem),
+            "hangup",
+        ),
+        (
+            TerminatedReason::UasBye,
+            Some(CallRecordHangupReason::RtpTimeout),
+            "hangup",
+        ),
+    ] {
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "caller",
+            None,
+            "example.com",
+            None,
+        );
+        let dialplan = Dialplan::new(
+            "exit-cause".into(),
+            request,
+            crate::call::DialDirection::Inbound,
+        );
+        let (mut session, handle, mut commands) = build_session_with_cmd_rx(dialplan).await;
+        let exits = Arc::new(std::sync::Mutex::new(Vec::new()));
+        session.app_runtime = Arc::new(
+            DefaultAppRuntime::new(AppRuntimeConfig {
+                session_id: "test-session".into(),
+                handle,
+                context: session.app_runtime.app_context().unwrap().clone(),
+            })
+            .with_factory(Arc::new(Factory(exits.clone()))),
+        );
+        session.meta.hangup_reason = prior;
+        session
+            .app_runtime
+            .start_app("exit-capture", None, false)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), commands.recv())
+            .await
+            .unwrap()
+            .expect("app must enter");
+        let dialog_id = session.caller_dialog.as_ref().unwrap().id();
+        session
+            .handle_dialog_state(DialogState::Terminated(dialog_id, cause.clone()))
+            .await
+            .unwrap();
+        loop {
+            let command = tokio::time::timeout(Duration::from_secs(5), commands.recv())
+                .await
+                .unwrap()
+                .expect("app must exit");
+            if matches!(command, CallCommand::AppExited { .. }) {
+                break;
+            }
+        }
+        let actual = exits.lock().unwrap().clone();
+        if actual != [expected] {
+            failures.push(format!("{cause:?}: expected {expected}, got {actual:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

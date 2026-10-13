@@ -4554,9 +4554,21 @@ impl SipSession {
                 self.finalize_recording_for_app_shutdown().await;
                 self.cancel_token.cancel();
                 if self.app_runtime.is_running() {
+                    // A teardown BYE must not overwrite an earlier system cause.
+                    let exit_reason = match self.meta.hangup_reason.as_ref() {
+                        Some(
+                            CallRecordHangupReason::ByCaller
+                            | CallRecordHangupReason::ByCallee
+                            | CallRecordHangupReason::Canceled,
+                        ) => crate::call::app::ExitReason::RemoteHangup(self.meta.hangup_reason.clone()),
+                        None if matches!(reason, TerminatedReason::UacCancel) => {
+                            crate::call::app::ExitReason::RemoteHangup(Some(CallRecordHangupReason::Canceled))
+                        }
+                        _ => crate::call::app::ExitReason::Hangup,
+                    };
                     let _ = self
                         .app_runtime
-                        .stop_app(Some("caller_hangup".to_string()))
+                        .stop_app_with_exit_reason(Some("caller_hangup".to_string()), exit_reason)
                         .await;
                 }
             }

@@ -2790,10 +2790,13 @@ impl CallApp for StepIvrApp {
             );
         }
 
-        if !skip_provider_end {
-            let provider_session = self.provider_session_context();
+        // Cancellation can win before on_enter establishes a provider invocation.
+        // An unentered invocation has no provider lifecycle to finalize.
+        if !skip_provider_end
+            && let Some(provider_session) = self.provider_session.as_ref()
+        {
             self.provider
-                .on_session_end_context(&end_reason, &provider_session)
+                .on_session_end_context(&end_reason, provider_session)
                 .await
                 .ok();
         }
@@ -7557,6 +7560,11 @@ mod tests {
             .variables
             .insert("session_id".into(), "test-session".into());
 
+        app.provider_session = Some(SessionContext {
+            app_execution_id: 4,
+            ..app.build_session_context_from_vars()
+        });
+
         app.on_exit(crate::call::app::ExitReason::RemoteHangup(None))
             .await
             .expect("remote hangup exit should succeed");
@@ -7605,6 +7613,11 @@ mod tests {
         app.sess
             .variables
             .insert("session_id".into(), "test-session".into());
+
+        app.provider_session = Some(SessionContext {
+            app_execution_id: 1,
+            ..app.build_session_context_from_vars()
+        });
 
         app.on_exit(crate::call::app::ExitReason::RemoteHangup(None))
             .await
@@ -8941,7 +8954,15 @@ mod tests {
             }
         }
 
-        for reason in ["caller_hangup", "shutdown"] {
+        let mut failures = Vec::new();
+        let scenarios = [
+            ("caller_hangup", true),
+            ("shutdown", true),
+            ("text_hangup", true),
+        ]
+        .into_iter()
+        .chain(std::iter::repeat_n(("early_hangup", false), 16));
+        for (reason, ready) in scenarios {
             let server = start_mock_step_provider(
                 br#"{"type":"prompt","file":"hello.wav","interruptible":false}"#,
             );
@@ -8953,8 +8974,9 @@ mod tests {
             })
             .with_factory(Arc::new(Factory(server.url.clone())));
             runtime.start_app("ivr", None, false).await.unwrap();
-            // The real executor's Play command proves provider start and next-action completed.
-            loop {
+            // Immediate cancellation exercises startup before the spawned app is polled.
+            // Ready scenarios retain the real provider-start/play boundary.
+            while ready {
                 let command = tokio::time::timeout(Duration::from_secs(5), rx.recv())
                     .await
                     .expect("IVR must become ready")
@@ -8965,7 +8987,22 @@ mod tests {
                     break;
                 }
             }
-            runtime.stop_app(Some(reason.into())).await.unwrap();
+            let stop_reason = if reason == "text_hangup" || reason == "early_hangup" {
+                "caller_hangup"
+            } else {
+                reason
+            };
+            if reason == "caller_hangup" || reason == "early_hangup" {
+                runtime
+                    .stop_app_with_exit_reason(
+                        Some(stop_reason.into()),
+                        crate::call::app::ExitReason::RemoteHangup(None),
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                runtime.stop_app(Some(stop_reason.into())).await.unwrap();
+            }
             loop {
                 let command = tokio::time::timeout(Duration::from_secs(5), rx.recv())
                     .await
@@ -8980,7 +9017,19 @@ mod tests {
                 .iter()
                 .filter(|(path, _)| path == "/ivr/step/end")
                 .collect();
-            if reason == "caller_hangup" {
+            if reason == "early_hangup" {
+                for (_, end) in &ends {
+                    if end["session_id"] != "test-session" || end["app_execution_id"] != 1 {
+                        failures.push(format!(
+                            "startup cancellation sent an unidentified end: {end}"
+                        ));
+                    }
+                }
+            } else if reason == "text_hangup" {
+                if !ends.is_empty() {
+                    failures.push("public stop text must not become a user hangup".into());
+                }
+            } else if reason == "caller_hangup" {
                 assert_eq!(
                     ends.len(),
                     1,
@@ -8996,6 +9045,7 @@ mod tests {
                 );
             }
         }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     // ── DTMF delivery in step-provider mode ──────────────────────────────
