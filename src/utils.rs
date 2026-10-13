@@ -32,6 +32,21 @@ pub fn local_ips() -> std::collections::HashSet<String> {
     ips
 }
 
+/// Canonical timestamp shape for every outbound webhook/event payload:
+/// RFC 3339 in the **server's local timezone**.
+///
+/// An Asia/Shanghai host yields `2026-09-10T16:54:18.312004+08:00`; a host
+/// with `TZ` unset (e.g. most containers) is UTC and yields `+00:00`. This is
+/// intentionally environment-dependent: the payload carries the wall-clock
+/// time the operator sees. Consumers must normalize to UTC before comparing
+/// values across nodes with different timezones.
+///
+/// `DateTime<Utc>` can never render a non-UTC offset, so the value is
+/// converted with `with_timezone(&Local)` first.
+pub fn rfc3339_local(dt: chrono::DateTime<chrono::Utc>) -> String {
+    dt.with_timezone(&chrono::Local).to_rfc3339()
+}
+
 /// Strip control characters (`\r`, `\n`, `\0`, etc.) from a header value
 /// to prevent HTTP response splitting / header injection.
 pub fn sanitize_header_value(value: &str) -> String {
@@ -461,6 +476,18 @@ mod tests {
     #[test]
     fn test_self_hostname_non_empty() {
         assert!(!self_hostname().is_empty());
+    }
+
+    /// The canonical outbound timestamp is always a fully-qualified RFC 3339
+    /// string (offset present, never naive/local-ambiguous) that round-trips
+    /// back to the same instant, regardless of the host timezone.
+    #[test]
+    fn test_rfc3339_local_roundtrip() {
+        let now = chrono::Utc::now();
+        let s = rfc3339_local(now);
+        let parsed = chrono::DateTime::parse_from_rfc3339(&s)
+            .unwrap_or_else(|e| panic!("rfc3339_local produced {s:?}: {e}"));
+        assert_eq!(parsed.with_timezone(&chrono::Utc), now);
     }
 
     #[test]

@@ -8,9 +8,42 @@ silently matching.
 
 from __future__ import annotations
 
+import re
+from datetime import datetime
 from typing import Optional
 
 from .guards import require, require_non_empty, require_keys
+
+# Envelope `timestamp` contract: RFC 3339 with a mandatory timezone offset —
+# `Z` or `±HH:MM` (the RWI webhook emits the server's LOCAL timezone, e.g.
+# `+08:00`). It is never a bare Unix epoch number.
+_RFC3339_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$"
+)
+
+
+def validate_event_timestamp(ts) -> str:
+    """Assert the envelope `timestamp` is an RFC 3339 string with an offset.
+
+    Guards the local-time wire change (`src/utils.rs::rfc3339_local`): the
+    field used to be a Unix epoch number, so a regression that reverts it
+    (int) or drops the offset (naive string) must fail loudly here.
+    """
+    if not isinstance(ts, str):
+        raise AssertionError(
+            f"[event] envelope timestamp must be an RFC 3339 string, "
+            f"got {type(ts).__name__}: {ts!r}"
+        )
+    if not _RFC3339_RE.match(ts):
+        raise AssertionError(
+            f"[event] envelope timestamp is not RFC 3339 with a timezone "
+            f"offset (e.g. +08:00 / Z): {ts!r}"
+        )
+    try:
+        datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError as e:
+        raise AssertionError(f"[event] envelope timestamp {ts!r} is not parseable: {e}")
+    return ts
 
 # Events that are call-scoped: must carry a non-empty call_id.
 CALL_SCOPED = {
@@ -68,6 +101,8 @@ def validate_event(ev, *, expect_type: Optional[str] = None, expect_call_id: Opt
     require(ev, "event")
     if not isinstance(ev, dict):
         raise AssertionError(f"[event] event is not a dict: {ev!r:.200}")
+    if ev.get("timestamp") is not None:
+        validate_event_timestamp(ev["timestamp"])
     etype = event_type(ev)
     require_non_empty(etype, "event_type")
     if expect_type is not None and etype != expect_type:

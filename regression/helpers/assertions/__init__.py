@@ -33,6 +33,7 @@ from .event_schema import (  # noqa: F401
     event_call_id,
     event_type,
     validate_event,
+    validate_event_timestamp,
 )
 from .sip_assert import (  # noqa: F401
     assert_dtmf_digits,

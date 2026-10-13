@@ -303,7 +303,7 @@ async fn run_rwi_webhook_handler(
             // Idempotency key: re-sent unchanged on every retry attempt so
             // receivers can dedupe redeliveries.
             "event_id": uuid::Uuid::new_v4().to_string(),
-            "timestamp": entry.cached_at.to_rfc3339(),
+            "timestamp": crate::utils::rfc3339_local(entry.cached_at),
             "call_id": entry.call_id,
             "event_type": event_type,
             "event": event_value,
@@ -401,7 +401,7 @@ pub async fn send_test_event(
     });
     let test_payload = json!({
         "rwi": "1.0",
-        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "timestamp": crate::utils::rfc3339_local(chrono::Utc::now()),
         "call_id": "test-call-id",
         "event_type": "test",
         "event": {
@@ -502,6 +502,13 @@ mod tests {
             Some(true),
             "call_ringing must carry the early_media flag through the webhook"
         );
+        // Envelope timestamp is a fully-qualified RFC 3339 string in the
+        // server's local timezone (e.g. `+08:00`), not a Unix epoch number.
+        let ts = body["timestamp"]
+            .as_str()
+            .expect("envelope timestamp must serialize as a string");
+        chrono::DateTime::parse_from_rfc3339(ts)
+            .unwrap_or_else(|e| panic!("envelope timestamp {ts:?} is not RFC3339: {e}"));
     }
 
     /// Hot-reload regression: `restart_rwi_webhook_handler` must re-target

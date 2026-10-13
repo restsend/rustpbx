@@ -3759,7 +3759,7 @@ pub(crate) async fn test_locator_webhook(
 
     let test_event = json!({
         "event": "test",
-        "timestamp": Utc::now().timestamp(),
+        "timestamp": crate::utils::rfc3339_local(Utc::now()),
         "message": "RustPBX locator webhook test"
     });
 

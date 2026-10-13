@@ -118,7 +118,7 @@ embedded `event_type` key identifying the event:
 ```json
 {
   "rwi": "1.0",
-  "timestamp": 1716212345,
+  "timestamp": "2026-09-10T16:54:18.312004+08:00",
   "call_id": "call-abc123",
   "event_type": "call_ringing",
   "event_id": "0b8dfa2e-6f6a-4c72-9d1e-3a4d1f9e7b55",
@@ -131,7 +131,7 @@ embedded `event_type` key identifying the event:
 | Field | Type | Description |
 |-------|------|-------------|
 | `rwi` | string | Protocol version `"1.0"` |
-| `timestamp` | u64 | Unix epoch seconds |
+| `timestamp` | string | RFC 3339 timestamp in the **server's local timezone** (e.g. `+08:00`; `+00:00` when the host has no `TZ`). The same instant may carry a different offset on nodes in different timezones — normalize to UTC before comparing |
 | `call_id` | string | Call identifier (empty string for broadcast-only events) |
 | `event_type` | string | snake_case event type name |
 | `event_id` | string | UUID v4 idempotency key: stable across redelivery/retry of the same event, so receivers can dedupe |
@@ -869,7 +869,7 @@ Webhook delivery wraps the same payload in an envelope (`webhook.rs`: `rwi` /
 {
   "rwi": "1.0",
   "event_id": "6b1f0a44-2f0e-4a3e-8e5d-9c7b1d2e3f45",
-  "timestamp": "2026-09-10T08:54:18.312004+00:00",
+  "timestamp": "2026-09-10T16:54:18.312004+08:00",
   "call_id": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40",
   "event_type": "recording_metadata_available",
   "event": {

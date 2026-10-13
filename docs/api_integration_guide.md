@@ -126,7 +126,7 @@ Real-time notification when devices come online or go offline.
 ```json
 {
   "event": "registered",
-  "timestamp": 1708201234,
+  "timestamp": "2026-02-18T00:20:34+08:00",
   "location": {
     "aor": "sip:1001@1.2.3.4:12345",
     "home_proxy": "10.0.0.12:5060",
@@ -146,7 +146,7 @@ can remove multiple bindings at once.
 | Field | Meaning |
 | --- | --- |
 | `event` | `registered`, `unregistered`, or `offline` |
-| `timestamp` | UNIX timestamp in seconds when RustPBX constructs the webhook payload |
+| `timestamp` | RFC 3339 timestamp in the **server's local timezone** (e.g. `+08:00`; `+00:00` when the host has no `TZ`) when RustPBX constructs the webhook payload |
 | `aor` | Device Contact URI from the REGISTER `Contact` header; this is not necessarily the user's canonical identity |
 | `home_proxy` | Advertised SIP address of the RustPBX node that accepted and owns the registration |
 | `destination` | Device network address observed by RustPBX, including transport when available |
@@ -165,7 +165,7 @@ Example `offline` payload:
 ```json
 {
   "event": "offline",
-  "timestamp": 1708201294,
+  "timestamp": "2026-02-18T00:21:34+08:00",
   "locations": [
     {
       "aor": "sip:1001@1.2.3.4:12345",

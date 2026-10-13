@@ -732,7 +732,7 @@ impl RwiCommandProcessor {
             .into_iter()
             .map(|e| {
                 serde_json::json!({
-                    "timestamp": e.cached_at.to_rfc3339(),
+                    "timestamp": crate::utils::rfc3339_local(e.cached_at),
                     "call_id": e.call_id,
                     "event": e.event,
                 })
@@ -752,7 +752,7 @@ impl RwiCommandProcessor {
             .into_iter()
             .map(|e| {
                 serde_json::json!({
-                    "timestamp": e.cached_at.to_rfc3339(),
+                    "timestamp": crate::utils::rfc3339_local(e.cached_at),
                     "call_id": e.call_id,
                     "event": e.event,
                 })

@@ -114,7 +114,7 @@ Webhook 处理器运行在专用的 tokio 运行时上,其 HTTP 推送不会与 
 ```json
 {
   "rwi": "1.0",
-  "timestamp": 1716212345,
+  "timestamp": "2026-09-10T16:54:18.312004+08:00",
   "call_id": "call-abc123",
   "event_type": "call_ringing",
   "event_id": "0b8dfa2e-6f6a-4c72-9d1e-3a4d1f9e7b55",
@@ -127,7 +127,7 @@ Webhook 处理器运行在专用的 tokio 运行时上,其 HTTP 推送不会与 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `rwi` | string | 协议版本 `"1.0"` |
-| `timestamp` | u64 | Unix 时间戳（秒） |
+| `timestamp` | string | RFC 3339 时间戳，**服务器本地时区**（如 `+08:00`；宿主未设 `TZ` 时为 `+00:00`）。同一时刻在不同时区节点上偏移可能不同，消费方需 normalize 回 UTC 再比较 |
 | `call_id` | string | 呼叫标识（广播事件为空字符串） |
 | `event_type` | string | snake_case 事件类型名 |
 | `event_id` | string | UUID v4 幂等键：同一次事件的多次投递（重试/重发）该值不变，接收方据此去重 |
@@ -828,7 +828,7 @@ Webhook 投递使用信封（`webhook.rs`：`rwi` / `event_id` 幂等键 / `time
 {
   "rwi": "1.0",
   "event_id": "6b1f0a44-2f0e-4a3e-8e5d-9c7b1d2e3f45",
-  "timestamp": "2026-09-10T08:54:18.312004+00:00",
+  "timestamp": "2026-09-10T16:54:18.312004+08:00",
   "call_id": "0b7e6f4c-5b58-4a1e-9d2f-c3a8b19e7d40",
   "event_type": "recording_metadata_available",
   "event": {
