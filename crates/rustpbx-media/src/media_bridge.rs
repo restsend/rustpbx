@@ -1586,7 +1586,10 @@ fn spawn_bridge_stats_task(
                             })
                         }).collect();
                         match serde_json::to_string(&BridgeQualityWindow { totals: summary, legs }) {
-                            Ok(stats) => info!(bridge_id = ?session_id,
+                            // Per-window telemetry fires on the regular sampling
+                            // cadence — far too chatty for INFO in production;
+                            // keep it at DEBUG (serialize failures stay WARN).
+                            Ok(stats) => debug!(bridge_id = ?session_id,
                             scope = "transport_counters_and_fresh_remote_reports",
                             egress_a_mode = la.as_ref().map(|leg| if leg.egress_is_relay() { "direct_rtp_forwarding" } else { "pcm_pacing" }),
                             egress_b_mode = lb.as_ref().map(|leg| if leg.egress_is_relay() { "direct_rtp_forwarding" } else { "pcm_pacing" }),

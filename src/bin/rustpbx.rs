@@ -329,6 +329,12 @@ fn main() -> Result<()> {
     println!("Start at {}", Utc::now());
     println!("{}", version::get_version_info());
 
+    // Cluster instance identity must be fixed before any CC code runs — it
+    // keys presence ownership, cluster_sync dedup and the monitor merge.
+    // (Gated: `addons::cc` is feature-gated; identity is meaningless without it.)
+    #[cfg(feature = "addon-cc")]
+    rustpbx::addons::cc::stats_writer::init_instance_id_from(&config);
+
     // ---- Dual tokio runtime setup -----------------------------------------
     // SIP runtime: few threads (signalling is lightweight).
     // Media runtime: the rest of the cores — dedicated worker threads so that
