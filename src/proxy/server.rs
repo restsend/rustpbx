@@ -1084,13 +1084,14 @@ impl SipServerBuilder {
             let locator_event_lock_for_sweep = locator_event_lock.clone();
             let sweep_token = cancel_token.child_token();
             tokio::spawn(async move {
-                // Run roughly every quarter of the shortest typical registrar
+                // Run at a cadence below the shortest typical registrar
                 // expiry (the server caps Contact expiry at ~50s, see
-                // registrar.rs `max_registrar_expires`). 15s gives us <1 expiry
-                // interval of latency between the binding technically expiring
-                // and the agent being marked offline.
-                const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
-                let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
+                // registrar.rs `max_registrar_expires`); config-driven
+                // (default 15s) so e2e can shrink expiry-related waits.
+                let sweep_interval = std::time::Duration::from_secs(
+                    config.clamped_locator_sweep_secs() as u64,
+                );
+                let mut ticker = tokio::time::interval(sweep_interval);
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 // Skip the immediate first tick — there is nothing to sweep
                 // right after boot and we don't want to log a noisy "swept 0"

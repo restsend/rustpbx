@@ -900,6 +900,11 @@ class ConfigBuilder:
             'voicemail_extension = "*97"',
             'ivr_extension = "ivr"',
             'callback_retry_secs = 300',
+            # Fast offline-watchdog reconcile: the tier2 presence suites wait
+            # out a full watchdog tick for their "sticks / recovered" bounds.
+            '[presence]',
+            'offline_watchdog_interval_secs = 10',
+            "",
             "",
             "[transfer]",
             'mode = "refer"',

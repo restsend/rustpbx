@@ -37,10 +37,11 @@ pytestmark = [pytest.mark.tier2, pytest.mark.presence]
 AGENT = "1001"
 
 # Binding expiry = client expires + LOCATOR_EXPIRE_GRACE_SECS (30s), observed
-# by the 15s sweeper tick.
-EXPIRY_DEADLINE = 90.0
-# Presence TTL sweep runs on the 60s cleanup cadence.
-PUBLISH_TTL_DEADLINE = 100.0
+# by the locator sweeper (e2e workdir config: 5s cadence).
+EXPIRY_DEADLINE = 60.0
+# Presence TTL sweep cadence is config-driven in e2e (3s) — a lapsed
+# publication resolves within expires + sweep + margin.
+PUBLISH_TTL_DEADLINE = 25.0
 
 
 def _restsend_available() -> bool:
@@ -227,7 +228,7 @@ async def test_publish_ttl_lapse_keeps_registered_agent_online(
     await restsend_agent.publish_idle(expires=10, refresh=False)
     event_checker.webhook.clear()
 
-    # Outlive the publication TTL + the 60s presence-sweep cadence.
+    # Outlive the publication TTL + the (e2e: 3s) presence-sweep cadence.
     await asyncio.sleep(PUBLISH_TTL_DEADLINE)
 
     webhook = event_checker.webhook

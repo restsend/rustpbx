@@ -984,9 +984,14 @@ impl ProxyModule for PresenceModule {
         // offline: a lapsed PUBLISH with a live REGISTER is a stale soft
         // state, not a logout (restsend-call publishes once, never refreshes).
         let ttl_locator = self.server.locator.clone();
+        // Cadence is config-driven (default 60s); e2e shrinks it to bound
+        // TTL-related waits.
+        let ttl_interval = std::time::Duration::from_secs(
+            self.server.proxy_config.load().clamped_presence_sweep_secs() as u64,
+        );
         let cancel_cleanup = cancel.clone();
         crate::utils::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            let mut interval = tokio::time::interval(ttl_interval);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {

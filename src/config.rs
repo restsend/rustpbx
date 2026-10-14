@@ -1500,6 +1500,17 @@ pub struct ProxyConfig {
     pub max_concurrency: Option<usize>,
     pub registrar_expires: Option<u32>,
     pub max_registrar_expires: Option<u32>,
+    /// Presence-state TTL sweep cadence (seconds): the background task that
+    /// flips PUBLISHed states whose `Expires` lapsed back to Offline
+    /// (subject to the registration-liveness guard). Default 60s; tests
+    /// shrink it to bound waits. Clamped to 3..=600.
+    #[serde(default)]
+    pub presence_sweep_secs: Option<u32>,
+    /// Locator REGISTER-expiry sweep cadence (seconds): reclaims bindings
+    /// whose REGISTER lapsed without a goodbye and emits
+    /// `LocatorEvent::Offline(expired)`. Default 15s. Clamped to 5..=300.
+    #[serde(default)]
+    pub locator_sweep_secs: Option<u32>,
     pub ensure_user: Option<bool>,
     #[serde(default = "default_user_backends")]
     pub user_backends: Vec<UserBackendConfig>,
@@ -2080,6 +2091,19 @@ impl AmiConfig {
 }
 
 impl ProxyConfig {
+    /// Presence TTL sweep cadence, clamped to a safe range (a too-tight
+    /// loop would spin the locator liveness queries; a too-loose one makes
+    /// stale publications linger).
+    pub fn clamped_presence_sweep_secs(&self) -> u32 {
+        self.presence_sweep_secs.unwrap_or(60).clamp(3, 600)
+    }
+
+    /// Locator expiry sweep cadence, clamped (the sweep also feeds the
+    /// offline reason pipeline — sub-second loops would flood it).
+    pub fn clamped_locator_sweep_secs(&self) -> u32 {
+        self.locator_sweep_secs.unwrap_or(15).clamp(5, 300)
+    }
+
     pub fn session_timer_mode(&self) -> SessionTimerMode {
         if !self.session_timer {
             SessionTimerMode::Off
@@ -2221,6 +2245,8 @@ impl ProxyConfig {
 impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
+            presence_sweep_secs: None,
+            locator_sweep_secs: None,
             acl_rules: Some(vec!["allow all".to_string(), "deny all".to_string()]),
             ua_white_list: Some(vec![]),
             ua_black_list: Some(vec![]),

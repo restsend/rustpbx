@@ -33,9 +33,10 @@ from helpers.restsend_agent import RestsendAgent
 pytestmark = [pytest.mark.tier2, pytest.mark.presence]
 
 AGENT = "1001"
-# Outlive at least one full offline-watchdog tick (30s ACD cadence): the
-# "sticks" assertion is only meaningful past a reconcile opportunity.
-STICKS_WINDOW = 35.0
+# Outlive at least one full offline-watchdog tick (e2e workdir config: 10s
+# ACD cadence): the "sticks" assertion is only meaningful past a reconcile
+# opportunity.
+STICKS_WINDOW = 15.0
 
 
 def _restsend_available() -> bool:
