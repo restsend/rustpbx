@@ -13661,30 +13661,6 @@ impl SipSession {
                     self.emit_session_call_answered_once();
                 }
 
-                // SP-74: answer-first sessions notify bridge-aware clients of
-                // the real connect moment; fire-and-forget, others unaffected.
-                if self
-                    .legs
-                    .get(&LegId::from("caller"))
-                    .is_some_and(|l| l.state == LegState::Connected)
-                {
-                    let body = serde_json::json!({
-                        "event": "call_bridge_connected",
-                        "leg": leg_id.0,
-                    });
-                    if let Err(e) = self
-                        .handle_send_info(
-                            LegId::from("caller"),
-                            "application/vnd.rustpbx.event+json".to_string(),
-                            body.to_string().into_bytes(),
-                        )
-                        .await
-                    {
-                        warn!(session_id = %self.id, error = %e,
-                            "bridge-connected INFO to caller leg failed");
-                    }
-                }
-
                 // Owner-anchored consult leg ("C answered" signal): fire the
                 // session hooks even when the queue media bridge is gone by
                 // this point (the queue app exits at agent connect, and the
