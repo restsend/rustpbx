@@ -246,6 +246,7 @@ pub struct MwiTrigger {
 #[derive(Clone)]
 pub struct PresenceManager {
     states: Arc<RwLock<HashMap<String, PresenceState>>>,
+    publication_locks: Arc<RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     /// PRESENCE (RFC 3856) subscriptions keyed by subscribed-to identity.
     subscribers: Arc<RwLock<HashMap<String, Vec<Subscriber>>>>,
     /// MWI (RFC 3842) subscriptions keyed by mailbox extension.
@@ -261,6 +262,7 @@ impl PresenceManager {
     pub fn new(database: Option<DatabaseConnection>) -> Self {
         Self {
             states: Arc::new(RwLock::new(HashMap::new())),
+            publication_locks: Arc::new(RwLock::new(HashMap::new())),
             subscribers: Arc::new(RwLock::new(HashMap::new())),
             mwi_subscribers: Arc::new(RwLock::new(HashMap::new())),
             database,
@@ -340,6 +342,11 @@ impl PresenceManager {
         map.get(identity).cloned().unwrap_or_default()
     }
 
+    pub(crate) fn publication_lock(&self, identity: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.publication_locks.write().entry(identity.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
+    }
+
     /// Rearm an accepted publication without replacing its authoritative status.
     pub(crate) fn update_publication_expiry(&self, identity: &str, expires_at: Option<i64>) {
         if let Some(state) = self.states.write().get_mut(identity) {
@@ -357,8 +364,31 @@ impl PresenceManager {
         state: PresenceState,
         source: &EventSource,
     ) -> Option<PresenceState> {
+        self.update_state_internal(identity, state, source, false).await
+    }
+
+    /// Business-state projections must retain the latest publication lease atomically.
+    pub(crate) async fn update_projected_state(
+        &self,
+        identity: &str,
+        state: PresenceState,
+        source: &EventSource,
+    ) -> Option<PresenceState> {
+        self.update_state_internal(identity, state, source, true).await
+    }
+
+    async fn update_state_internal(
+        &self,
+        identity: &str,
+        mut state: PresenceState,
+        source: &EventSource,
+        preserve_publication: bool,
+    ) -> Option<PresenceState> {
         let old_state = {
             let mut map = self.states.write();
+            if preserve_publication && state.status != PresenceStatus::Offline {
+                state.expires_at = map.get(identity).and_then(|current| current.expires_at);
+            }
             map.insert(identity.to_string(), state.clone())
         };
 
@@ -588,7 +618,7 @@ impl PresenceManager {
             // An addon may defer logout or reject the write. Admit expiry
             // before notifying subscribers, just like a client PUBLISH.
             if let Some(hub) = hub {
-                hub.emit_presence_change(&identity, None, &state).await;
+                hub.emit_presence_change_locked(&identity, None, &state).await;
             } else {
                 self.update_state(&identity, state, &EventSource::Local).await;
             }
@@ -768,6 +798,8 @@ impl PresenceManager {
         match event {
             LocatorEvent::Registered(loc) | LocatorEvent::Refreshed(loc) => {
                 if let Some(user) = Self::get_user(&loc) {
+                    let publication_lock = self.publication_lock(&user);
+                    let _publication = publication_lock.lock().await;
                     let current = self.get_state(&user);
                     info!(
                         extension = %user,
@@ -1354,6 +1386,8 @@ impl PresenceModule {
             hub.emit_presence_change(&identity, Some(&old_state), &current)
                 .await;
         } else {
+            let publication_lock = self.manager.publication_lock(&identity);
+            let _publication = publication_lock.lock().await;
             self.manager
                 .update_state(&identity, current.clone(), &EventSource::Local)
                 .await;

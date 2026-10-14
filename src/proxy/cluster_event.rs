@@ -463,6 +463,18 @@ impl ClusterEventHub {
         old_state: Option<&PresenceState>,
         new_state: &PresenceState,
     ) {
+        let publication_lock = self.presence_manager.publication_lock(identity);
+        let _publication = publication_lock.lock().await;
+        self.emit_presence_change_locked(identity, old_state, new_state).await;
+    }
+
+    // The expiry sweeper holds the same identity lock while checking its lease.
+    pub(crate) async fn emit_presence_change_locked(
+        &self,
+        identity: &str,
+        old_state: Option<&PresenceState>,
+        new_state: &PresenceState,
+    ) {
         let handlers: Vec<Arc<dyn ClusterEventHandler>> =
             self.handlers.read().iter().cloned().collect();
         for handler in handlers {
