@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 import time
 
 import pytest
@@ -42,19 +43,24 @@ ROUTE_BASE = "7181"  # route point 71811
 AGENT_ID = "1003"
 CALLER_USER = "1004"
 
-# Port window dedicated to this suite (never overlaps the concurrent live
-# desk client on this deployment — its UAs live in 4xxxx).
-MON_UA_PORT = 26700
+# Unique, never-reused local port per UA: the locator keys a REGISTER by
+# contact, and a second REGISTER from the SAME contact while a lease is live
+# is a "refresh" — the registrar bridge skips refreshes, so a reused port
+# would leave the agent Offline until the old lease expires (10 min with the
+# harness's expires=600). Randomised (not sequential) so a previous test run
+# can never collide with this one.
+def _ua_port() -> int:
+    return random.randint(30000, 39000)
 
 
 async def spawn_ua(user: str) -> PrdRestsendAgent:
-    """Register one restsend UA on the AGENT node.
+    """Register one restsend UA on the AGENT node with a never-reused port.
 
     The session-scoped `fleet` fixture pkill(1)s restsend-cli at setup —
     that would kill the operator's LIVE desk session running on this host,
     so this suite owns its UAs explicitly instead.
     """
-    ua = PrdRestsendAgent(user, MON_UA_PORT)
+    ua = PrdRestsendAgent(user, _ua_port())
     await ua.start()
     return ua
 
@@ -199,9 +205,15 @@ async def test_monitor_queued_call_state_and_waiting_count(prd, pool, topology_f
         agents=[{"id": AGENT_ID, "groups": [GROUP_ID], "max_concurrency": 1}],
         route_base=ROUTE_BASE,
     )
-    # dnd on both nodes → nobody available → the caller must WAIT in queue
-    prd.set_agent_status(AGENT_ID, "dnd")
+    # nobody available → the caller must WAIT in queue. Drain FIRST (it
+    # coerces agents to idle/offline), then pin the agent DND so the queue
+    # cannot dispatch the waiting call.
     prd.drain([AGENT_ID])
+    prd.set_agent_status(AGENT_ID, "dnd")
+    prd.wait_for(
+        lambda: all(n.agent_status(AGENT_ID) == "dnd" for n in prd.nodes),
+        timeout=15, what="agent dnd on both nodes before queueing",
+    )
 
     for entry in ("agent", "call"):  # cross-node first, then same-node
         caller = pool.caller(
@@ -248,6 +260,14 @@ async def test_monitor_queued_call_state_and_waiting_count(prd, pool, topology_f
                 f"[{entry}] {name}: summary.waiting={waiting} with a call in queue "
                 f"(排队数量错误); queued={queued_rows}"
             )
+            assert int(snap["summary"].get("dispatching") or 0) == 0, (
+                f"[{entry}] {name}: nobody is being rung yet; dispatching must be 0; "
+                f"summary={snap['summary']}"
+            )
+            for q in queued_rows:
+                assert q.get("linked") is not False, (
+                    f"[{entry}] {name}: waiting row not linked to a skill group: {q}"
+                )
             assert len(queued_rows) == waiting, (
                 f"[{entry}] {name}: queued_calls rows={len(queued_rows)} != "
                 f"summary.waiting={waiting}"
@@ -311,19 +331,18 @@ async def test_monitor_dispatch_ringing_state(prd, pool, topology_factory):
     ring = await agent.wait_ring(timeout=30)
     assert ring is not None, "agent never rang — dispatch failed"
 
-    # During dispatch the shared row is CLAIMED (dispatching): both monitors
-    # must attribute the call to the queue (NOT 通话中) and show the ringing
-    # agent. Allow ≤5s to converge, then hold.
+    # During dispatch the shared row is CLAIMED: the call is 振铃中 — NOT
+    # 排队中 (an agent has been assigned) and NOT 通话中 (not connected yet).
+    # It must count under `dispatching`, leaving `waiting` at 0. Allow ≤5s to
+    # converge, then hold.
     deadline = time.monotonic() + 5
     last: dict[str, dict] = {}
     while time.monotonic() < deadline:
         last = monitor(prd)
         if all(
             any(r.get("agent_id") == AGENT_ID for r in (s.get("ringing_agents") or []))
-            and all(
-                r.get("state") in ("queued", "ringing")
-                for r in caller_rows(s, CALLER_USER)
-            )
+            and all(r.get("state") == "ringing" for r in caller_rows(s, CALLER_USER))
+            and int(s["summary"].get("dispatching") or 0) == 1
             for s in last.values()
         ):
             break
@@ -335,10 +354,17 @@ async def test_monitor_dispatch_ringing_state(prd, pool, topology_factory):
         rows = caller_rows(snap, CALLER_USER)
         assert rows, f"{name}: inbound row vanished while ringing"
         for r in rows:
-            assert r.get("state") in ("queued", "ringing"), (
-                f"{name}: dispatching call shows state={r.get('state')!r} (通话中) "
-                f"before the agent answered; row={r}"
+            assert r.get("state") == "ringing", (
+                f"{name}: dispatching call shows state={r.get('state')!r}, expected "
+                f"ringing (振铃中, assigned) — not 排队中/通话中; row={r}"
             )
+        assert int(snap["summary"].get("dispatching") or 0) == 1, (
+            f"{name}: summary.dispatching != 1 during ring; summary={snap['summary']}"
+        )
+        assert int(snap["summary"].get("waiting") or 0) == 0, (
+            f"{name}: a ringing (assigned) call must NOT count as 排队中; "
+            f"summary={snap['summary']}"
+        )
 
     # answer → talking is now CORRECT; the owning node must show the call as
     # active (talking), and NO node may keep labelling it queued.

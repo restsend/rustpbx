@@ -267,6 +267,13 @@ impl DbLocator {
         Self::new_with_migrate(url, true).await
     }
 
+    /// Test-only handle to the locator's own connection so tests can plant
+    /// crafted binding rows (e.g. pre-expired registrations).
+    #[cfg(test)]
+    pub fn test_connection(&self) -> &DatabaseConnection {
+        &self.db
+    }
+
     pub async fn new_with_migrate(url: String, migrate: bool) -> Result<Self> {
         let db = Database::connect(&url)
             .await
@@ -865,6 +872,48 @@ impl Locator for DbLocator {
         Ok(locations
             .into_iter()
             .any(|location| !is_location_expired(location.expires, location.last_modified, now)))
+    }
+
+    /// Realm-agnostic "is this user still registered" check for the CC
+    /// offline watchdog. Matches BOTH identity forms a row can carry —
+    /// the authenticated username key and the registered AOR user part —
+    /// across every realm, so a registration under `user@<any-domain>` or
+    /// an AOR like `sip:<ext>@<domain>` both count as alive.
+    ///
+    /// The expiry arithmetic mirrors `is_location_expired` exactly
+    /// (expired: `now - last_modified >= expires + grace`), expressed as
+    /// `last_modified + expires > now - grace` so the cutoff is computed
+    /// on the application clock (never the DB server's `NOW()`).
+    async fn has_active_binding_for_user(&self, username: &str) -> Result<bool> {
+        let user = username.trim().to_ascii_lowercase();
+        if user.is_empty() {
+            return Ok(false);
+        }
+        let now_epoch = now_epoch_secs();
+        let cutoff = now_epoch - LOCATOR_EXPIRE_GRACE_SECS;
+        // Escape LIKE metacharacters so extensions containing `_` or `%`
+        // stay literal inside the AoR prefix pattern.
+        let escaped = user
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let aor_pattern = format!("sip:{escaped}@%");
+        let active = Entity::find()
+            .filter(Column::Expires.gt(0))
+            .filter(
+                sea_orm::Condition::any()
+                    .add(Column::Username.eq(user.as_str()))
+                    .add(Column::Aor.like(aor_pattern.as_str())),
+            )
+            .filter(
+                sea_orm::sea_query::Expr::col((Entity, Column::LastModified))
+                    .add(sea_orm::sea_query::Expr::col((Entity, Column::Expires)))
+                    .gt(cutoff),
+            )
+            .count(&self.db)
+            .await
+            .map_err(|e| anyhow::anyhow!("Database error on has_active_binding_for_user: {}", e))?;
+        Ok(active > 0)
     }
 
     async fn lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>> {

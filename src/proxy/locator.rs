@@ -134,6 +134,25 @@ pub trait Locator: Send + Sync {
     async fn register(&self, username: &str, realm: Option<&str>, location: Location)
     -> Result<()>;
     async fn has_active_bindings(&self, username: &str, realm: Option<&str>) -> Result<bool>;
+    /// True when `username` still has at least one non-expired binding.
+    ///
+    /// Used by the CC offline watchdog as the authoritative "is this
+    /// extension still registered" check. Unlike [`Self::has_active_bindings`]
+    /// the match spans ALL realms and BOTH identity forms a registration can
+    /// be keyed by: the authenticated username (the locator key) and the AOR
+    /// user part (`registered_aor` / contact user). Erring toward `true`
+    /// (a false positive merely skips a logout; a false negative would log
+    /// out a live agent) is deliberate.
+    ///
+    /// The default covers the canonical local-realm identifier forms only;
+    /// backends with wider key spaces (Memory: arbitrary realm keys,
+    /// Db: SQL scan) override it.
+    async fn has_active_binding_for_user(&self, username: &str) -> Result<bool> {
+        if self.has_active_bindings(username, None).await? {
+            return Ok(true);
+        }
+        self.has_active_bindings(username, Some("localhost")).await
+    }
     async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()>;
     async fn unregister_with_address(&self, addr: &SipAddr) -> Result<Option<Vec<Location>>>;
     async fn lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>>;
@@ -259,6 +278,11 @@ pub fn is_within_unregister_grace(last_modified: i64, now_epoch: i64) -> bool {
 /// Returns `true` for WebRTC (JsSIP) `.invalid` contact hosts (RFC 7118).
 pub fn is_webrtc_invalid_host(host: &str) -> bool {
     host.ends_with(".invalid")
+}
+
+/// Case-insensitive comparison of a URI's user part against `user`.
+pub(crate) fn uri_user_matches(uri: &rsipstack::sip::Uri, user: &str) -> bool {
+    uri.user().is_some_and(|u| u.eq_ignore_ascii_case(user))
 }
 
 // ── WebRTC `.invalid` host fallback helpers ─────────────────────────────────
@@ -750,6 +774,40 @@ impl Locator for MemoryLocator {
             .locations
             .get(&identifier)
             .is_some_and(|map| map.values().any(|location| !location.is_expired_at(now))))
+    }
+
+    /// Full scan: a registration may be keyed under ANY realm
+    /// (`user`, `user@localhost`, `user@domain`) and the AOR user part can
+    /// differ from the authenticated username, so a plain identifier lookup
+    /// is not enough. See the trait docs for the false-positive bias.
+    async fn has_active_binding_for_user(&self, username: &str) -> Result<bool> {
+        let user = username.trim().to_ascii_lowercase();
+        if user.is_empty() {
+            return Ok(false);
+        }
+        let key_prefix = format!("{user}@");
+        let now = Instant::now();
+        for entry in self.locations.iter() {
+            let ident_match =
+                entry.key() == &user || entry.key().starts_with(key_prefix.as_str());
+            if ident_match && entry.value().values().any(|loc| !loc.is_expired_at(now)) {
+                return Ok(true);
+            }
+            for loc in entry.value().values() {
+                if loc.is_expired_at(now) {
+                    continue;
+                }
+                if uri_user_matches(&loc.aor, &user)
+                    || loc
+                        .registered_aor
+                        .as_ref()
+                        .is_some_and(|aor| uri_user_matches(aor, &user))
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     async fn unregister_with_address(&self, addr: &SipAddr) -> Result<Option<Vec<Location>>> {
