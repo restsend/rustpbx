@@ -2334,7 +2334,13 @@ impl CallModule {
             _ => None,
         });
 
-        info!(content_type = ?content_type, body = %body, "Received SIP MESSAGE");
+        // Admin relays carry client credentials; never include their envelope in logs.
+        let logged_body = if content_type.as_deref() == Some(crate::call::sip::ADMIN_CMD_RELAY_CT) {
+            "[redacted admin command]"
+        } else {
+            body.as_ref()
+        };
+        info!(content_type = ?content_type, body = %logged_body, "Received SIP MESSAGE");
         if content_type.as_deref() == Some(crate::call::sip::ADMIN_CMD_RELAY_CT) {
             // 节点间管理指令中继：peer 节点把 console 指令转给本坐席的
             // home 节点。信任边界与 CALL_LEG_EVENT_CT 相同（cluster peer）。
@@ -2676,6 +2682,8 @@ mod tests {
     #[tokio::test]
     async fn peer_admin_cmd_message_reaches_only_the_home_registered_phone() {
         use crate::proxy::tests::common::{create_test_request, create_transaction};
+        use std::io::{Read, Seek, SeekFrom};
+        use tracing::instrument::WithSubscriber;
         use rsipstack::sip::{Method, SipMessage};
         use rsipstack::transport::{SipAddr, channel::ChannelConnection, connection::TransportEvent};
         for (trusted, local_home) in [(true, true), (false, true), (true, false)] {
@@ -2720,7 +2728,7 @@ mod tests {
             request.uri = "sip:agent@127.0.0.1:5060".parse().unwrap();
             request.headers.push(rsipstack::sip::Header::ContentType(
                 crate::call::sip::ADMIN_CMD_RELAY_CT.into()));
-            request.body = br#"{"v":1,"cmd":"shot","trans_id":"tx-1","agent":"agent","offer":"v=0"}"#.to_vec();
+            request.body = br#"{"v":1,"cmd":"shot","trans_id":"tx-1","agent":"agent","offer":"v=0","token":"admin-secret-regression"}"#.to_vec();
             let body = request.body.clone();
             let (mut transaction, _) = create_transaction(request).await;
             let (_source_tx, source_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2729,8 +2737,25 @@ mod tests {
                 source_rx, response_tx, remote, None,
             ).await.unwrap().into());
             let module = CallModule::new(config, server);
+            let mut log_file = tempfile::tempfile().unwrap();
+            let writer = log_file.try_clone().unwrap();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .without_time()
+                .with_max_level(tracing::Level::INFO)
+                .with_writer(move || writer.try_clone().unwrap())
+                .finish();
             module.handle_message(&mut transaction, &TransactionCookie::default())
+                .with_subscriber(subscriber)
                 .await.unwrap();
+            log_file.seek(SeekFrom::Start(0)).unwrap();
+            let mut logs = String::new();
+            log_file.read_to_string(&mut logs).unwrap();
+            assert!(logs.contains("Received SIP MESSAGE"));
+            assert!(
+                !logs.contains("admin-secret-regression"),
+                "admin credentials must not be logged"
+            );
             let Some(TransportEvent::Incoming(SipMessage::Response(response), _, _)) =
                 response_rx.recv().await
             else { panic!("the peer transaction must receive a response"); };
