@@ -2698,6 +2698,12 @@
                     case 'media_health':
                         // signal (per-leg media counters snapshot)
                         return svg('M2 20h.01M7 20v-4m5 4v-8m5 4V8m5 4v8');
+                    case 'recording':
+                        // dot-in-circle (record lifecycle)
+                        return svg('M12 21a9 9 0 110-18 9 9 0 010 18zM12 15a3 3 0 110-6 3 3 0 010 6z');
+                    case 'dialplan':
+                        // adjustments-horizontal (resolved call parameters)
+                        return svg('M10.5 6h9.75M10.5 6a1.5 1.5 0 11-3 0m3 0a1.5 1.5 0 10-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-9.75 0h9.75');
                     case 'error':
                         // exclamation-triangle (call-affecting subsystem error)
                         return svg('M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z');
@@ -2730,6 +2736,8 @@
                     rtp_timeout: 'RTP timeout',
                     media_issue: 'Media issue',
                     media_health: 'Media health',
+                    recording: 'Recording',
+                    dialplan: 'Dialplan',
                     error: 'Error',
                     end: 'Call end',
                 };

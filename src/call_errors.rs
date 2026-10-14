@@ -237,6 +237,17 @@ pub enum TraceKind {
     /// step IVR, TTS, queue/CC, auth/ACL, locator, ...). Carries `severity`
     /// and a registry `code` so the CDR timeline explains degraded calls.
     Error,
+    /// Neutral / successful recording-lifecycle transition: recorder started,
+    /// segment stopped, upload queued / uploaded / retried OK. Failures that
+    /// degraded the recording stay on [`TraceKind::Error`] with a
+    /// `recording.*` code — only successes and informational transitions use
+    /// this kind.
+    Recording,
+    /// The resolved dialplan snapshot taken at session construction (ts=0):
+    /// direction/flow plus the effective media (RTP/WebRTC) and recording
+    /// parameters. The full parameter block also lands in
+    /// `metadata["dialplan"]`; this timeline entry just marks it.
+    Dialplan,
     /// The call ended (terminal event).
     End,
 }
@@ -504,6 +515,25 @@ mod tests {
                 .map(|a| a.len()),
             Some(3)
         );
+    }
+
+    #[test]
+    fn recording_and_dialplan_kinds_serialize_snake_case() {
+        let recording = serde_json::to_value(
+            TraceEvent::new(TraceKind::Recording, "Recording started").severity(ErrSeverity::Info),
+        )
+        .unwrap();
+        assert_eq!(recording["kind"], "recording");
+        let dialplan = serde_json::to_value(
+            TraceEvent::new(TraceKind::Dialplan, "Dialplan resolved")
+                .detail(serde_json::json!({ "direction": "inbound" })),
+        )
+        .unwrap();
+        assert_eq!(dialplan["kind"], "dialplan");
+        assert_eq!(dialplan["detail"]["direction"], "inbound");
+        // Round-trips through the CDR metadata format.
+        let parsed: TraceEvent = serde_json::from_value(dialplan).unwrap();
+        assert_eq!(parsed.kind, TraceKind::Dialplan);
     }
 
     #[test]

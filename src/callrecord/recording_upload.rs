@@ -23,9 +23,13 @@ use crate::{
     storage::{Storage, StorageConfig},
 };
 
-/// `metadata["trace"]` codes for the recording upload lifecycle. Carried on
-/// `TraceKind::Error` entries (successes use `severity: info`); `detail`
-/// holds the structured context (path/bucket/key/address/error/attempts).
+/// `metadata["trace"]` codes for the recording upload lifecycle. Codes that
+/// only mark neutral / successful transitions (`recording.queued`,
+/// `recording.uploaded`, `recording.retry_succeeded`) are carried on
+/// `TraceKind::Recording` entries with `severity: info`; every failure code
+/// stays on `TraceKind::Error` (severity warn/error) so degraded recordings
+/// keep the red "Error" treatment in the CDR timeline. `detail` holds the
+/// structured context (path/bucket/key/address/error/attempts).
 pub mod recording_trace_codes {
     /// `[recording]` policy absent while media artifacts exist — explains a
     /// CDR that keeps local file paths.
@@ -42,10 +46,25 @@ pub mod recording_trace_codes {
     pub const UPLOADER_STOPPED: &str = "recording.uploader_stopped";
     /// An upload attempt failed (initial HTTP/S3 attempt or retry).
     pub const UPLOAD_FAILED: &str = "recording.upload_failed";
+    /// A recording artifact was successfully queued for background upload —
+    /// evidence that the pipeline accepted it even when the process later
+    /// died / restarted before the upload ran.
+    pub const QUEUED: &str = "recording.queued";
     /// An upload attempt succeeded (initial or retry).
     pub const UPLOADED: &str = "recording.uploaded";
     /// A previously failed upload succeeded via the retry worker.
     pub const RETRY_SUCCEEDED: &str = "recording.retry_succeeded";
+    /// A recorder was installed (auto full-call or app-driven segment).
+    pub const STARTED: &str = "recording.started";
+    /// A recording segment was stopped and finalized (path + duration).
+    pub const STOPPED: &str = "recording.stopped";
+    /// The auto recorder failed to install (no media profile / output path).
+    pub const START_FAILED: &str = "recording.start_failed";
+    /// Stopping the recorder failed; the segment may not be finalized.
+    pub const STOP_FAILED: &str = "recording.stop_failed";
+    /// Auto recording was skipped for this call (e.g. routed app exempted by
+    /// `[recording].auto_start_except`).
+    pub const AUTOSTART_SKIPPED: &str = "recording.autostart_skipped";
 }
 
 /// Shared handle to the `[recording]` policy. The SIP server swaps the inner
@@ -381,6 +400,12 @@ fn build_recording_targets(policy: &RecordingPolicy) -> Result<RecordingTargets>
 /// offset from the call start when known (hook-time events); post-call async
 /// events (upload manager, retry worker) carry `ts = 0` because the call
 /// start time is no longer available there.
+///
+/// The trace kind follows the code: neutral/success codes (started/stopped,
+/// `recording.queued`, `recording.uploaded`, `recording.retry_succeeded`,
+/// `recording.autostart_skipped`) are `TraceKind::Recording`
+/// entries; every failure code stays a `TraceKind::Error` entry so the CDR
+/// timeline keeps flagging degraded recordings as errors.
 pub(crate) fn recording_trace_event(
     severity: ErrSeverity,
     code: &'static str,
@@ -388,7 +413,16 @@ pub(crate) fn recording_trace_event(
     call_start_time: Option<chrono::DateTime<chrono::Utc>>,
     detail: serde_json::Value,
 ) -> TraceEvent {
-    let mut event = TraceEvent::new(TraceKind::Error, message)
+    let kind = match code {
+        recording_trace_codes::QUEUED
+        | recording_trace_codes::UPLOADED
+        | recording_trace_codes::RETRY_SUCCEEDED
+        | recording_trace_codes::STARTED
+        | recording_trace_codes::STOPPED
+        | recording_trace_codes::AUTOSTART_SKIPPED => TraceKind::Recording,
+        _ => TraceKind::Error,
+    };
+    let mut event = TraceEvent::new(kind, message)
         .severity(severity)
         .code(code)
         .detail(detail);
@@ -1741,15 +1775,40 @@ impl CallRecordHook for RecordingUploadHook {
                             call_id: Some(record.call_id.clone()),
                             call_start_time: Some(record.start_time),
                         }) {
-                        Ok(()) => info!(
-                            call_id = %record.call_id,
-                            track_id,
-                            path,
-                            key,
-                            bucket = %spec.bucket,
-                            source = %source_tag,
-                            "recording queued for upload"
-                        ),
+                        Ok(()) => {
+                            info!(
+                                call_id = %record.call_id,
+                                track_id,
+                                path,
+                                key,
+                                bucket = %spec.bucket,
+                                source = %source_tag,
+                                "recording queued for upload"
+                            );
+                            // Evidence that the pipeline accepted the artifact:
+                            // when the process dies / restarts before the
+                            // background manager uploads it, the CDR still
+                            // shows "queued" with no matching "uploaded".
+                            trace_post_save(
+                                record,
+                                self.db.as_ref(),
+                                recording_trace_event(
+                                    ErrSeverity::Info,
+                                    recording_trace_codes::QUEUED,
+                                    "recording queued for upload",
+                                    Some(record.start_time),
+                                    serde_json::json!({
+                                        "stage": "completed",
+                                        "path": path,
+                                        "track_id": track_id,
+                                        "key": key,
+                                        "bucket": spec.bucket,
+                                        "source": source_tag,
+                                    }),
+                                ),
+                            )
+                            .await;
+                        }
                         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                             warn!(
                                 call_id = %record.call_id,
@@ -3867,6 +3926,9 @@ mod tests {
         assert_eq!(row.recording_duration_secs, Some(8));
         let trace = stored_trace(&db, "http-success-trace").await;
         let entry = trace_entry(&trace, "recording.uploaded");
+        // Successful uploads are neutral `recording` timeline entries, not
+        // error-tagged ones.
+        assert_eq!(entry["kind"], "recording");
         assert_eq!(entry["severity"], "info");
         assert_eq!(
             entry["detail"]["url"],
@@ -3932,8 +3994,77 @@ mod tests {
             missing.to_string_lossy().as_ref()
         );
         let uploaded = trace_entry(&trace, "recording.uploaded");
+        // Successes are neutral `recording` entries — not error-tagged.
+        assert_eq!(uploaded["kind"], "recording");
+        assert_eq!(uploaded["severity"], "info");
         assert_eq!(uploaded["detail"]["key"], "recordings/20260826/call.wav");
         assert!(uploaded["detail"]["url"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn s3_enqueue_records_queued_trace_event() {
+        // The queued event is the evidence chain between "recording stopped"
+        // and "recording uploaded": when the process dies / restarts before
+        // the background manager runs, the CDR still shows `recording.queued`
+        // with no matching `recording.uploaded`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("queued.wav");
+        tokio::fs::write(&path, b"wav").await.expect("write");
+        let policy = RecordingPolicy {
+            enabled: Some(true),
+            recording_type: Some(RecordingType::S3),
+            path: Some(dir.path().to_string_lossy().into_owned()),
+            root: Some("recordings".into()),
+            ..Default::default()
+        };
+        let db = trace_test_db("s3-queued-trace").await;
+        let runtime = Arc::new(RecordingUploadRuntime::for_policy(Some(policy.clone())));
+        let object_root = dir.path().join("objects");
+        let storage = Storage::new(&StorageConfig::Local {
+            path: object_root.to_string_lossy().into_owned(),
+        })
+        .expect("local object storage");
+        runtime.seed_storage(&policy, storage);
+        // Binding the manager (instead of `_`) keeps the upload channel
+        // receiver alive, so `try_send` succeeds — while never serving it
+        // means the upload itself never runs, which is exactly the scenario
+        // this event covers (queued but never uploaded).
+        let (hook, _manager, _) = RecordingUploadHook::with_runtime_and_db(runtime, Some(db.clone()))
+            .expect("hook with db");
+        let now = chrono::Utc::now();
+        let mut record = CallRecord {
+            call_id: "s3-queued-trace".to_string(),
+            start_time: now - chrono::Duration::seconds(3),
+            end_time: now,
+            recorder: vec![CallRecordMedia {
+                unique_id: None,
+                track_id: "mixed".to_string(),
+                path: path.to_string_lossy().into_owned(),
+                size: 3,
+                extra: None,
+            }],
+            details: CallDetails::default(),
+            ..Default::default()
+        };
+        // The manager is alive but never served: the upload never runs.
+        let trace = {
+            hook.on_record_completed(std::slice::from_mut(&mut record))
+                .await
+                .expect("hook");
+            stored_trace(&db, "s3-queued-trace").await
+        };
+        let queued = trace_entry(&trace, "recording.queued");
+        assert_eq!(queued["kind"], "recording");
+        assert_eq!(queued["severity"], "info");
+        assert_eq!(queued["detail"]["bucket"], "");
+        assert!(queued["detail"]["key"].as_str().is_some());
+        // ts is the ms offset from the call start.
+        assert!(queued["ts"].as_i64().is_some_and(|ts| ts >= 3_000));
+        // No uploaded event: the manager never ran.
+        assert!(
+            trace.iter().all(|entry| entry["code"] != "recording.uploaded"),
+            "no uploaded event expected without a running manager: {trace:?}"
+        );
     }
 
     #[tokio::test]

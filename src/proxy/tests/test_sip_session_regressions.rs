@@ -1557,6 +1557,22 @@ async fn file_recording_answer_timing_waits_after_media_setup() {
         std::path::Path::new(&path).exists(),
         "answer timing must install the recorder at the final answer"
     );
+    // The call trace must explain that recording actually started, and the
+    // resolved dialplan snapshot must be the first timeline entry.
+    assert!(
+        session.meta.trace.iter().any(|ev| {
+            ev.kind == crate::call_errors::TraceKind::Recording
+                && ev.code.as_deref() == Some("recording.started")
+        }),
+        "expected a recording.started trace event; trace = {:?}",
+        session.meta.trace
+    );
+    assert_eq!(
+        session.meta.trace.first().map(|ev| ev.kind),
+        Some(crate::call_errors::TraceKind::Dialplan),
+        "the first trace entry must be the dialplan snapshot: {:?}",
+        session.meta.trace.first()
+    );
     {
         let recording = &mut session.media.recording;
         recording
@@ -1564,6 +1580,76 @@ async fn file_recording_answer_timing_waits_after_media_setup() {
             .await
             .expect("stop file recorder");
     }
+}
+
+#[tokio::test]
+async fn recording_stop_leaves_stopped_trace_event_with_segment_detail() {
+    // A stopped recording segment must leave a `recording.stopped` timeline
+    // entry (path + duration + segment type) so a missing
+    // `recording.uploaded` points at the upload pipeline, not the capture.
+    use rustrtc::peer_connection::RtpObserver;
+    use rustrtc::rtp::{RtpHeader, RtpPacket};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir
+        .path()
+        .join("stopped-trace.wav")
+        .to_string_lossy()
+        .into_owned();
+    let recording = crate::call::CallRecordingConfig {
+        enabled: true,
+        option: Some(crate::media::recorder::RecorderOption::new(path.clone())),
+        auto_start: true,
+        auto_start_at: crate::config::RecordingAutoStartAt::Answer,
+        recording_type: crate::config::RecordingType::Local,
+        stereo_swap: false,
+        stereo_mode: None,
+    };
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
+        .with_application("ivr".to_string(), None, true)
+        .with_recording(recording);
+    let mut session = build_session(dialplan).await;
+
+    setup_recording_test_media(&mut session).await;
+    session
+        .set_auto_recorder()
+        .await
+        .expect("start recorder at final answer");
+
+    // Feed a few RTP packets so the segment carries real media.
+    let peer = session.legs.media_leg(&LegId::from("caller")).unwrap();
+    let tap = peer.ingress_tap();
+    let mut encoder = audio_codec::create_encoder(audio_codec::CodecType::PCMU);
+    let addr: std::net::SocketAddr = "127.0.0.1:12345".parse().unwrap();
+    for seq in 0..10u16 {
+        let packet = RtpPacket::new(
+            RtpHeader::new(0, seq, seq as u32 * 160, 1234),
+            encoder.encode(&vec![8000i16; 160]).to_vec(),
+        );
+        tap.on_ingress(&packet, addr);
+    }
+
+    session.finalize_recording_for_app_shutdown().await;
+
+    assert!(
+        std::path::Path::new(&path).exists(),
+        "the finalized segment must be on disk"
+    );
+    let stopped = session
+        .meta
+        .trace
+        .iter()
+        .find(|ev| ev.code.as_deref() == Some("recording.stopped"))
+        .expect("recording.stopped trace event after finalize");
+    assert_eq!(stopped.kind, crate::call_errors::TraceKind::Recording);
+    assert!(
+        stopped.detail.as_ref().is_some_and(|d| {
+            d.get("segment_type").and_then(|v| v.as_str()) == Some("full")
+                && d.get("path").and_then(|v| v.as_str()) == Some(path.as_str())
+        }),
+        "stopped event must carry segment_type=full and the file path: {:?}",
+        stopped.detail
+    );
 }
 
 #[tokio::test]

@@ -1125,6 +1125,143 @@ impl Dialplan {
     pub fn all_webrtc_target(&self) -> bool {
         self.flow.all_webrtc_target()
     }
+
+    /// Short flow description for trace messages: `dial 2 targets`,
+    /// `dial 3 targets (parallel)`, `queue`, `app:ivr`.
+    fn flow_summary(&self) -> String {
+        match &self.flow {
+            DialplanFlow::Targets(DialStrategy::Sequential(targets)) => {
+                format!("dial {} target(s)", targets.len())
+            }
+            DialplanFlow::Targets(DialStrategy::Parallel(targets)) => {
+                format!("dial {} target(s) (parallel)", targets.len())
+            }
+            DialplanFlow::Queue { .. } => "queue".to_string(),
+            DialplanFlow::Application { app_name, .. } => format!("app:{app_name}"),
+        }
+    }
+
+    /// One-line summary of the resolved dialplan, used as the `dialplan`
+    /// trace-event message.
+    pub fn summary_line(&self) -> String {
+        format!(
+            "Dialplan resolved: {} → {}, media proxy={:?}, recording={}",
+            self.direction,
+            self.flow_summary(),
+            format!("{:?}", self.media.proxy_mode).to_lowercase(),
+            if self.recording.enabled {
+                format!("{:?}", self.recording.recording_type).to_lowercase()
+            } else {
+                "off".to_string()
+            },
+        )
+    }
+
+    /// Structured snapshot of the effective dialplan parameters, persisted as
+    /// `metadata["dialplan"]` so CDRs explain which RTP/WebRTC/recording
+    /// configuration governed the call. `None` fields are omitted; secrets
+    /// (ICE credentials) are never included.
+    pub fn snapshot_json(&self) -> serde_json::Value {
+        let media = &self.media;
+        let recording = &self.recording;
+        let mut snapshot = serde_json::json!({
+            "direction": self.direction.to_string(),
+            "flow": self.flow_summary(),
+            "enable_sipflow": self.enable_sipflow,
+            "session_id_enabled": self.session_id_enabled,
+            "media": {
+                "proxy_mode": media.proxy_mode,
+                "enable_latching": media.enable_latching,
+                "comfort_noise": media.comfort_noise,
+                "comfort_noise_level_db": media.comfort_noise_level_db,
+                "relay_only": media.relay_only,
+                "ice_lite": media.ice_lite,
+            },
+            "recording": {
+                "enabled": recording.enabled,
+                "auto_start": recording.auto_start,
+                "auto_start_at": recording.auto_start_at,
+                "recording_type": recording.recording_type,
+                "stereo_swap": recording.stereo_swap,
+            },
+        });
+        let obj = snapshot.as_object_mut().expect("snapshot is an object");
+        // Optional scalars — omitted when unset.
+        if let Some(secs) = self.max_ring_time {
+            obj.insert(
+                "max_ring_time_secs".to_string(),
+                serde_json::json!(secs.as_secs()),
+            );
+        }
+        if let Some(secs) = self.max_call_duration {
+            obj.insert(
+                "max_call_duration_secs".to_string(),
+                serde_json::json!(secs.as_secs()),
+            );
+        }
+        if let Some(secs) = self.rtp_timeout {
+            obj.insert("rtp_timeout_secs".to_string(), serde_json::json!(secs.as_secs()));
+        }
+        if !self.allow_codecs.is_empty() {
+            obj.insert(
+                "allow_codecs".to_string(),
+                serde_json::json!(self
+                    .allow_codecs
+                    .iter()
+                    .map(|c| format!("{c:?}").to_lowercase())
+                    .collect::<Vec<_>>()),
+            );
+        }
+        // Media optional fields.
+        if let Some(media_obj) = obj.get_mut("media").and_then(|m| m.as_object_mut()) {
+            if let Some(ip) = media.external_ip.as_ref() {
+                media_obj.insert("external_ip".to_string(), serde_json::json!(ip));
+            }
+            if let Some(ip) = media.bind_ip.as_ref() {
+                media_obj.insert("bind_ip".to_string(), serde_json::json!(ip));
+            }
+            if let Some(port) = media.rtp_start_port {
+                media_obj.insert("rtp_start_port".to_string(), serde_json::json!(port));
+            }
+            if let Some(port) = media.rtp_end_port {
+                media_obj.insert("rtp_end_port".to_string(), serde_json::json!(port));
+            }
+            if let Some(port) = media.webrtc_port_start {
+                media_obj.insert("webrtc_port_start".to_string(), serde_json::json!(port));
+            }
+            if let Some(port) = media.webrtc_port_end {
+                media_obj.insert("webrtc_port_end".to_string(), serde_json::json!(port));
+            }
+            if let Some(packets) = media.probation_max_packets {
+                media_obj.insert("probation_max_packets".to_string(), serde_json::json!(packets));
+            }
+            if let Some(policy) = media.video_policy.as_ref() {
+                media_obj.insert("video_policy".to_string(), serde_json::json!(policy));
+            }
+            if let Some(secs) = media.relay_ready_timeout_secs {
+                media_obj.insert("relay_ready_timeout_secs".to_string(), serde_json::json!(secs));
+            }
+            if let Some(secs) = media.stall_detect_secs {
+                media_obj.insert("stall_detect_secs".to_string(), serde_json::json!(secs));
+            }
+            if let Some(servers) = media.ice_servers.as_ref().filter(|s| !s.is_empty()) {
+                media_obj.insert(
+                    "ice_servers".to_string(),
+                    serde_json::json!(servers
+                        .iter()
+                        .flat_map(|s| s.urls.iter())
+                        .collect::<Vec<_>>()),
+                );
+            }
+        }
+        // Recording optional fields.
+        if let Some(rec_obj) = obj.get_mut("recording").and_then(|r| r.as_object_mut()) {
+            if let Some(mode) = recording.stereo_mode.as_ref() {
+                rec_obj.insert("stereo_mode".to_string(), serde_json::json!(format!("{mode:?}")));
+            }
+        }
+        snapshot
+    }
     /// Create a new dialplan with basic configuration
     pub fn new(
         session_id: String,
