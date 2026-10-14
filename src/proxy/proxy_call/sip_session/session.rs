@@ -74,9 +74,18 @@ pub(super) enum DialogSide {
     Caller,
     Callee,
 }
+/// A transfer target leg dialing independently of the caller.
+///
+/// Despite the name it serves two transfers:
+/// - a SIP REFER from a phone: `dialog` / `transferor` are the transferor's,
+///   who gets the final NOTIFY;
+/// - an app (IVR, queue fallback, ...) handing off its caller
+///   (`hand_off_caller_to_sip_target`): both are `None` — there is no
+///   transferor to notify or release, so the outcome only decides what
+///   happens to the caller.
 struct PendingRefer {
-    dialog: InviteDialog,
-    transferor: LegId,
+    dialog: Option<InviteDialog>,
+    transferor: Option<LegId>,
     target: String,
     source: Option<crate::rwi::TransferSource>,
 }
@@ -116,6 +125,8 @@ pub struct SipSession {
     pub cancel_token: CancellationToken,
     pub pending_hangup: HashSet<DialogId>,
     /// Transferors detached from media after successful REFER; await their BYE.
+    /// Keyed by the dialing target leg; also holds app hand-offs, which have
+    /// no transferor (see [`PendingRefer`]).
     pending_refers: HashMap<LegId, PendingRefer>,
     /// This session contributes one leg while retaining its SIP dialog ownership.
     pub(super) conference: Option<ConferenceAttachment>,
@@ -5188,8 +5199,8 @@ impl SipSession {
                 self.pending_refers.insert(
                     target_leg.clone(),
                     PendingRefer {
-                        dialog,
-                        transferor: leg_id.clone(),
+                        dialog: Some(dialog),
+                        transferor: Some(leg_id.clone()),
                         target: target.clone(),
                         source,
                     },
@@ -5431,6 +5442,56 @@ impl SipSession {
             .is_some_and(|id| id == *leg_id)
     }
 
+    /// Whether the caller has nobody to fall back to while a transfer target
+    /// rings: no connected callee, conference or other pending transfer. An
+    /// app (IVR, queue fallback, ...) handing the caller off is such a case.
+    pub(super) fn caller_has_no_other_party(&self) -> bool {
+        self.meta.connected_callee_dialog_id.is_none()
+            && self.conference.is_none()
+            && self.pending_refers.is_empty()
+    }
+
+    /// The SIP REFER stage with no transferor: `target` dials as an
+    /// independent leg anchored on the caller and `finish_pending_refer`
+    /// settles it — bridged on answer, otherwise the post-disconnect handler
+    /// (return app, else hangup) takes the caller.
+    pub(super) async fn hand_off_caller_to_sip_target(&mut self, target: &str) -> Result<()> {
+        let caller = LegId::from("caller");
+        let target_leg = LegId::new(format!("transfer-{}", uuid::Uuid::new_v4()));
+        let source = self.transfer_source_snapshot(&caller).await;
+        self.stash_transfer_source(source.clone());
+        self.pending_refers.insert(
+            target_leg.clone(),
+            PendingRefer {
+                dialog: None,
+                transferor: None,
+                target: target.to_string(),
+                source,
+            },
+        );
+        info!(session_id = %self.id, %target, %target_leg, "Caller hand-off: target leg dialing");
+        self.meta.transfer_in_progress = true;
+        self.sync_rtp_timeout_pause();
+        if let Err(error) = self
+            .handle_add_leg(target.to_string(), Some(target_leg.clone()), vec![], Some(caller))
+            .await
+        {
+            let status = error
+                .downcast_ref::<transfer::BlindTransferDialError>()
+                .map(|error| error.code)
+                .unwrap_or(500);
+            self.finish_pending_refer(&target_leg, status).await;
+            return Err(error);
+        }
+        self.update_snapshot_cache();
+        Ok(())
+    }
+
+    /// Settle a pending transfer target leg with its final `status`, for a
+    /// SIP REFER and an app hand-off alike: 200 bridges the caller to the
+    /// target; a failure removes the leg, NOTIFYs a REFER's transferor, and —
+    /// when no transferor is left to take the caller back (departed, or an app
+    /// hand-off) — runs the post-disconnect handler (return app, else hangup).
     async fn finish_pending_refer(&mut self, target_leg: &LegId, status: u16) {
         let Some(pending) = self.pending_refers.remove(target_leg) else {
             return;
@@ -5458,18 +5519,27 @@ impl SipSession {
         }
         self.sync_rtp_timeout_pause();
         self.update_snapshot_cache();
-        if let Err(error) = Self::notify_refer_bounded(
-            &pending.dialog,
-            StatusCode::from(status),
-            "terminated;reason=noresource",
-        )
-        .await
-        {
-            warn!(session_id = %self.id, %error, status, "Failed to send final REFER NOTIFY");
-        } else {
-            info!(session_id = %self.id, status, "Sent final REFER NOTIFY");
+        if let Some(dialog) = &pending.dialog {
+            if let Err(error) = Self::notify_refer_bounded(
+                dialog,
+                StatusCode::from(status),
+                "terminated;reason=noresource",
+            )
+            .await
+            {
+                warn!(session_id = %self.id, %error, status, "Failed to send final REFER NOTIFY");
+            } else {
+                info!(session_id = %self.id, status, "Sent final REFER NOTIFY");
+            }
         }
-        if status != 200 && pending.dialog.state().is_terminated() {
+        // Nobody left to take the caller back: a departed transferor, or an
+        // app that handed its caller off.
+        if status != 200
+            && pending
+                .dialog
+                .as_ref()
+                .is_none_or(|dialog| dialog.state().is_terminated())
+        {
             self.handle_start_return_app().await;
         }
     }
@@ -5588,10 +5658,15 @@ impl SipSession {
                 if let Some(pending) = self
                     .pending_refers
                     .values()
-                    .find(|p| p.dialog.id() == terminated_dialog_id)
+                    .find(|p| {
+                        p.dialog
+                            .as_ref()
+                            .is_some_and(|dialog| dialog.id() == terminated_dialog_id)
+                    })
                 {
-                    let transferor = pending.transferor.clone();
-                    self.legs.remove(&transferor);
+                    if let Some(transferor) = pending.transferor.clone() {
+                        self.legs.remove(&transferor);
+                    }
                     self.meta.connected_callee_dialog_id = None;
                     self.meta.connected_callee = None;
                     self.update_snapshot_cache();
@@ -12563,7 +12638,7 @@ impl SipSession {
                     && !self
                         .pending_refers
                         .values()
-                        .any(|pending| pending.transferor == leg_id)
+                        .any(|pending| pending.transferor.as_ref() == Some(&leg_id))
                 {
                     let dialog_id = dialog_id.unwrap();
                     self.emit_rwi_leg_hangup(&leg_id, Some(reason.clone()));
@@ -12582,7 +12657,7 @@ impl SipSession {
                 if let Some(target_leg) = self
                     .pending_refers
                     .iter()
-                    .find(|(_, pending)| pending.transferor == leg_id)
+                    .find(|(_, pending)| pending.transferor.as_ref() == Some(&leg_id))
                     .map(|(target_leg, _)| target_leg.clone())
                 {
                     // Transferor hung up while its REFER is pending: keep the
@@ -12892,7 +12967,7 @@ impl SipSession {
     ///    returns `true` takes over and this method returns.
     /// 2. `meta.transfer_return_app` — start the stored return app.
     /// 3. Neither — queue a normal hangup.
-    async fn handle_start_return_app(&mut self) -> CommandResult {
+    pub(super) async fn handle_start_return_app(&mut self) -> CommandResult {
         let caller_alive = !self
             .caller_dialog
             .as_ref()

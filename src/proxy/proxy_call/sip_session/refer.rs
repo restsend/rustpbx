@@ -64,7 +64,7 @@ impl SipSession {
         // to an app runs the in-session hand-off like the blind path.
         let app_target = if !conference_target && !locator_direct {
             match Self::resolve_refer_app_target(
-                &self.server, &self.context.session_id, &target_uri, &TransactionCookie::default(),
+                &self.server, &self.context.session_id, &target_uri, None, &TransactionCookie::default(),
             ).await {
                 Ok(target) => target,
                 Err((code, reason)) if replaces_header.is_none() => {
@@ -318,7 +318,10 @@ impl SipSession {
     /// (a peer node's registration counts; `handle_add_leg` dials the full
     /// Location so cross-node home_proxy routing is preserved). Fails open
     /// on locator errors.
-    async fn refer_target_locally_registered(server: &SipServerRef, target_uri: &str) -> bool {
+    pub(super) async fn refer_target_locally_registered(
+        server: &SipServerRef,
+        target_uri: &str,
+    ) -> bool {
         let Ok(parsed) = rsipstack::sip::Uri::try_from(target_uri) else {
             return false;
         };
@@ -335,10 +338,13 @@ impl SipSession {
     }
 
     /// Resolve REFER feature codes and application routes without executing a transfer.
-    async fn resolve_refer_app_target(
+    /// Routes match on the original caller: `caller` when the session knows
+    /// it, otherwise looked up by `original_session_id`.
+    pub(super) async fn resolve_refer_app_target(
         server: &SipServerRef,
         original_session_id: &str,
         target_uri: &str,
+        caller: Option<rsipstack::sip::Uri>,
         cookie: &crate::call::cookie::TransactionCookie,
     ) -> Result<Option<String>, (u16, String)> {
         if let Some(resolver) = server.quick_route_resolver.as_ref() {
@@ -366,16 +372,21 @@ impl SipSession {
         };
         // Route matching uses the original caller. Application destinations
         // must also resolve on servers without an RWI gateway.
-        let Some(caller_str) = server.rwi_gateway.as_ref().and_then(|gw| {
-            gw.read()
-                .meta_store
-                .get_sync(original_session_id)
-                .and_then(|m| m.caller)
-        }).or_else(|| server.active_call_registry.get(original_session_id).and_then(|call| call.caller)) else {
-            return Err((500, "REFER route lookup has no original caller identity".to_string()));
+        let caller_uri = match caller {
+            Some(caller) => caller,
+            None => {
+                let Some(caller_str) = server.rwi_gateway.as_ref().and_then(|gw| {
+                    gw.read()
+                        .meta_store
+                        .get_sync(original_session_id)
+                        .and_then(|m| m.caller)
+                }).or_else(|| server.active_call_registry.get(original_session_id).and_then(|call| call.caller)) else {
+                    return Err((500, "REFER route lookup has no original caller identity".to_string()));
+                };
+                rsipstack::sip::Uri::try_from(caller_str.as_str())
+                    .map_err(|_| (500, "REFER route lookup has invalid original caller identity".to_string()))?
+            }
         };
-        let caller_uri = rsipstack::sip::Uri::try_from(caller_str.as_str())
-            .map_err(|_| (500, "REFER route lookup has invalid original caller identity".to_string()))?;
         let routed = crate::proxy::proxy_call::sip_session::route_outbound_leg(
             server,
             &parsed,

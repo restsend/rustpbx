@@ -1168,6 +1168,22 @@ impl SipSession {
                 if disposition != TransferDisposition::Refer || return_app.is_some() {
                     self.meta.transfer_return_app = return_app;
                 }
+                // An app handing off its caller leaves nobody to fall back
+                // to: follow the SIP REFER path, so a failed target is settled
+                // (return app, else hangup) instead of stranding the caller on
+                // a silent line. A `from_user` caller override still dials
+                // in-line below.
+                if disposition == TransferDisposition::Detach
+                    && leg_id.as_str() == "caller"
+                    && from_user.is_none()
+                    && self.caller_has_no_other_party()
+                {
+                    let realm = self.server.proxy_config.load().select_realm("");
+                    let target_uri = crate::call::build_sip_uri(&uri, &realm);
+                    return self
+                        .hand_off_caller(&target_uri, callee_state_rx, headers)
+                        .await;
+                }
                 self.mark_transferred_with(Some(
                     serde_json::json!({ "target": uri, "kind": "sip" }),
                 ));
@@ -1324,6 +1340,53 @@ impl SipSession {
     /// queue or application (IVR, ...) starts that flow in-session instead of
     /// dialing the number. Disabled for `AwaitResult` dispositions, which
     /// require SIP dial semantics for their outcome reporting.
+    /// Hand the caller to `target_uri` the way an inbound SIP REFER resolves
+    /// its target, with no transferor: a registered target dials directly,
+    /// feature codes and application routes hand off in-session, anything
+    /// else dials as the REFER stage.
+    async fn hand_off_caller(
+        &mut self,
+        target_uri: &str,
+        callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
+        headers: HashMap<String, String>,
+    ) -> Result<()> {
+        if !Self::refer_target_locally_registered(&self.server, target_uri).await {
+            match Self::resolve_refer_app_target(
+                &self.server,
+                &self.context.session_id,
+                target_uri,
+                self.context.dialplan.caller.clone(),
+                &crate::call::cookie::TransactionCookie::default(),
+            )
+            .await
+            {
+                Ok(Some(app_target))
+                    if !matches!(parse_transfer_target(&app_target), TransferTarget::Sip { .. }) =>
+                {
+                    info!(session_id = %self.id, target = %target_uri, %app_target, "Caller hand-off resolved to an application");
+                    return Box::pin(self.handle_blind_transfer(
+                        LegId::from("caller"),
+                        app_target,
+                        TransferDisposition::Detach,
+                        callee_state_rx,
+                        headers,
+                    ))
+                    .await;
+                }
+                Ok(Some(sip_target)) => {
+                    return self.hand_off_caller_to_sip_target(&sip_target).await;
+                }
+                Ok(None) => {}
+                Err((code, reason)) => {
+                    warn!(session_id = %self.id, target = %target_uri, code, %reason, "Caller hand-off target lookup failed");
+                    self.handle_start_return_app().await;
+                    return Err(anyhow!("Transfer target lookup failed: {} {}", code, reason));
+                }
+            }
+        }
+        self.hand_off_caller_to_sip_target(target_uri).await
+    }
+
     async fn dial_blind_transfer_b2bua(
         &mut self,
         leg_id: LegId,

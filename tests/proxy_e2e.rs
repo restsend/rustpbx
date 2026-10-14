@@ -60,3 +60,6 @@ mod test_identity_passthrough_e2e;
 
 #[path = "proxy_e2e/test_voicemail_fallback_e2e.rs"]
 mod test_voicemail_fallback_e2e;
+
+#[path = "proxy_e2e/test_ivr_transfer_handoff_e2e.rs"]
+mod test_ivr_transfer_handoff_e2e;
