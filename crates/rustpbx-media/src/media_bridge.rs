@@ -1591,10 +1591,7 @@ fn spawn_bridge_stats_task(
                             })
                         }).collect();
                         match serde_json::to_string(&BridgeQualityWindow { totals: summary, legs }) {
-                            // Per-window telemetry fires on the regular sampling
-                            // cadence — far too chatty for INFO in production;
-                            // keep it at DEBUG (serialize failures stay WARN).
-                            Ok(stats) => debug!(bridge_id = ?session_id,
+                            Ok(stats) => info!(bridge_id = ?session_id,
                             scope = "transport_counters_and_fresh_remote_reports",
                             egress_a_mode = la.as_ref().map(|leg| if leg.egress_is_relay() { "direct_rtp_forwarding" } else { "pcm_pacing" }),
                             egress_b_mode = lb.as_ref().map(|leg| if leg.egress_is_relay() { "direct_rtp_forwarding" } else { "pcm_pacing" }),
@@ -2184,8 +2181,9 @@ mod tests {
         #[derive(Clone, Default)]
         struct Logs(Arc<Mutex<Vec<(std::time::Instant, String, String)>>>);
         impl Subscriber for Logs {
-            fn enabled(&self, _: &Metadata<'_>) -> bool {
-                true
+            fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+                // Enabled quality diagnostics must remain visible at INFO.
+                *metadata.level() <= tracing::Level::INFO
             }
             fn new_span(&self, _: &Attributes<'_>) -> Id {
                 Id::from_u64(1)
